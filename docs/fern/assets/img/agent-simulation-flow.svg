@@ -1,43 +1,24 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="898" height="314" viewBox="36 8 898 314" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
-  <title id="title">Capture an agent run once, replay it many ways</title>
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="305" viewBox="22 33 860 305" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+  <title id="title">Capture once, replay live or offline</title>
   <desc id="desc">A real agent run is captured as a request trace. The trace is replayed live with AIPerf against real GPUs, or offline with DynoSim in a simulator.</desc>
-  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
-  <rect x="36" y="8" width="898" height="314" fill="#FFFFFF"/>
-  <text x="50" y="40" font-size="13.1" font-weight="700" letter-spacing="1.6" fill="#5A8F00">AGENT SIMULATION</text>
-  <text x="50" y="68" font-size="22.2" font-weight="700" fill="#1A1A1A">Capture once, replay live or offline</text>
-  <rect x="65.0" y="140.0" width="170" height="100" rx="10" fill="#F3F4F6" stroke="#9CA3AF" stroke-width="1.5"/>
-  <rect x="138.79999999999998" y="169.1" width="16.8" height="16.8" rx="3" fill="#FFFFFF" stroke="#374151" stroke-width="2"/>
-  <rect x="143.28" y="173.58" width="7.840000000000001" height="7.840000000000001" fill="#374151"/>
-  <line x1="141.6" y1="163.5" x2="141.6" y2="169.1" stroke="#374151" stroke-width="2"/><line x1="141.6" y1="185.9" x2="141.6" y2="191.5" stroke="#374151" stroke-width="2"/>
-  <line x1="133.2" y1="171.9" x2="138.79999999999998" y2="171.9" stroke="#374151" stroke-width="2"/><line x1="155.6" y1="171.9" x2="161.2" y2="171.9" stroke="#374151" stroke-width="2"/>
-  <line x1="147.2" y1="163.5" x2="147.2" y2="169.1" stroke="#374151" stroke-width="2"/><line x1="147.2" y1="185.9" x2="147.2" y2="191.5" stroke="#374151" stroke-width="2"/>
-  <line x1="133.2" y1="177.5" x2="138.79999999999998" y2="177.5" stroke="#374151" stroke-width="2"/><line x1="155.6" y1="177.5" x2="161.2" y2="177.5" stroke="#374151" stroke-width="2"/>
-  <line x1="152.79999999999998" y1="163.5" x2="152.79999999999998" y2="169.1" stroke="#374151" stroke-width="2"/><line x1="152.79999999999998" y1="185.9" x2="152.79999999999998" y2="191.5" stroke="#374151" stroke-width="2"/>
-  <line x1="133.2" y1="183.1" x2="138.79999999999998" y2="183.1" stroke="#374151" stroke-width="2"/><line x1="155.6" y1="183.1" x2="161.2" y2="183.1" stroke="#374151" stroke-width="2"/>
-  <text x="150" y="210.5" font-size="19.5" font-weight="700" fill="#374151" text-anchor="middle">Agent run</text>
-  <rect x="335.0" y="140.0" width="170" height="100" rx="10" fill="#F0F4FF" stroke="#234CDA" stroke-width="1.5"/>
-  <path d="M406.0,163.5 L421.4,163.5 L428.4,170.5 L428.4,191.5 L406.0,191.5 Z" fill="#F0F4FF" stroke="#234CDA" stroke-width="2" stroke-linejoin="round"/>
-  <line x1="410.2" y1="176.1" x2="424.2" y2="176.1" stroke="#234CDA" stroke-width="1.6"/>
-  <line x1="410.2" y1="180.86" x2="424.2" y2="180.86" stroke="#234CDA" stroke-width="1.6"/>
-  <line x1="410.2" y1="185.62" x2="424.2" y2="185.62" stroke="#234CDA" stroke-width="1.6"/>
-  <text x="420" y="210.5" font-size="19.5" font-weight="700" fill="#234CDA" text-anchor="middle">Request trace</text>
-  <line x1="238" y1="190" x2="332" y2="190" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <rect x="680.0" y="72.0" width="240" height="96" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <rect x="788.8000000000001" y="99.1" width="16.8" height="16.8" rx="3" fill="#FFFFFF" stroke="#4C7A00" stroke-width="2"/>
-  <rect x="793.2800000000001" y="103.58" width="7.840000000000001" height="7.840000000000001" fill="#4C7A00"/>
-  <line x1="791.6" y1="93.5" x2="791.6" y2="99.1" stroke="#4C7A00" stroke-width="2"/><line x1="791.6" y1="115.9" x2="791.6" y2="121.5" stroke="#4C7A00" stroke-width="2"/>
-  <line x1="783.2" y1="101.9" x2="788.8000000000001" y2="101.9" stroke="#4C7A00" stroke-width="2"/><line x1="805.6" y1="101.9" x2="811.2" y2="101.9" stroke="#4C7A00" stroke-width="2"/>
-  <line x1="797.2" y1="93.5" x2="797.2" y2="99.1" stroke="#4C7A00" stroke-width="2"/><line x1="797.2" y1="115.9" x2="797.2" y2="121.5" stroke="#4C7A00" stroke-width="2"/>
-  <line x1="783.2" y1="107.5" x2="788.8000000000001" y2="107.5" stroke="#4C7A00" stroke-width="2"/><line x1="805.6" y1="107.5" x2="811.2" y2="107.5" stroke="#4C7A00" stroke-width="2"/>
-  <line x1="802.8000000000001" y1="93.5" x2="802.8000000000001" y2="99.1" stroke="#4C7A00" stroke-width="2"/><line x1="802.8000000000001" y1="115.9" x2="802.8000000000001" y2="121.5" stroke="#4C7A00" stroke-width="2"/>
-  <line x1="783.2" y1="113.1" x2="788.8000000000001" y2="113.1" stroke="#4C7A00" stroke-width="2"/><line x1="805.6" y1="113.1" x2="811.2" y2="113.1" stroke="#4C7A00" stroke-width="2"/>
-  <text x="800" y="140.5" font-size="19.5" font-weight="700" fill="#4C7A00" text-anchor="middle">Live replay: AIPerf</text>
-  <rect x="680.0" y="212.0" width="240" height="96" rx="10" fill="#F4F9E8" stroke="#76B900" stroke-width="1.5"/>
-  <rect x="783.2" y="233.5" width="28" height="28" rx="4" fill="#F0F4FF" stroke="#4C7A00" stroke-width="2"/>
-  <rect x="787.6800000000001" y="251.35" width="5.04" height="7.35" fill="#4C7A00"/>
-  <rect x="795.24" y="246.1" width="5.04" height="12.600000000000001" fill="#4C7A00"/>
-  <rect x="802.8000000000001" y="240.85" width="5.04" height="17.85" fill="#4C7A00"/>
-  <text x="800" y="280.5" font-size="19.5" font-weight="700" fill="#4C7A00" text-anchor="middle">Offline: DynoSim</text>
-  <line x1="508" y1="175" x2="676" y2="128" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
-  <line x1="508" y1="205" x2="676" y2="252" stroke="#234CDA" stroke-width="2.5" marker-end="url(#arrow)"/>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-blue-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
+  <rect x="22" y="33" width="860" height="305" fill="#FFFFFF"/>
+  <text x="36" y="66" font-size="21.2" font-weight="700" fill="#1A1A1A">Capture once, replay live or offline</text>
+  <rect x="36" y="150" width="170" height="110" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="106.0" y="177.6" width="30" height="24" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/><polyline points="113.0,184.6 119.0,189.6 113.0,194.6" fill="none" stroke="#76B900" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><line x1="122.0" y1="195.6" x2="130.0" y2="195.6" stroke="#76B900" stroke-width="2.4" stroke-linecap="round"/>
+  <text x="121.0" y="244" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="middle">Agent run</text>
+  <line x1="208" y1="205" x2="296" y2="205" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <rect x="298" y="150" width="190" height="110" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="383.0" y="175.6" width="20" height="28" rx="3" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/><line x1="388.0" y1="183.6" x2="398.0" y2="183.6" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="388.0" y1="189.6" x2="398.0" y2="189.6" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="388.0" y1="195.6" x2="395.0" y2="195.6" stroke="#76B900" stroke-width="2" stroke-linecap="round"/>
+  <text x="393.0" y="244" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="middle">Request trace</text>
+  <line x1="490" y1="190" x2="596" y2="142" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <line x1="490" y1="222" x2="596" y2="268" stroke="#76B900" stroke-width="2.5" marker-end="url(#arrow-green)"/>
+  <rect x="598" y="96" width="270" height="100" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <path d="M720.0,140.0 a13,13 0 0 1 26,0" fill="none" stroke="#76B900" stroke-width="2.4" stroke-linecap="round"/><line x1="733.0" y1="140.0" x2="740.0" y2="128.0" stroke="#76B900" stroke-width="2.4" stroke-linecap="round"/><circle cx="733.0" cy="140.0" r="2.2" fill="#76B900" stroke="#76B900" stroke-width="1"/>
+  <text x="733.0" y="166" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="middle">AIPerf</text>
+  <text x="733.0" y="184" font-size="14" font-weight="400" fill="#5A6572" text-anchor="middle">live replay</text>
+  <rect x="598" y="224" width="270" height="100" rx="10" fill="#FFFFFF" stroke="#76B900" stroke-width="2"/>
+  <rect x="721.0" y="248.0" width="24" height="24" rx="4" fill="#FFFFFF" stroke="#76B900" stroke-width="2" stroke-dasharray="3 2.5"/><rect x="727.0" y="254.0" width="12.0" height="12.0" fill="#76B900"/><line x1="728.2" y1="243.0" x2="728.2" y2="248.0" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="728.2" y1="272.0" x2="728.2" y2="277.0" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="716.0" y1="255.2" x2="721.0" y2="255.2" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="745.0" y1="255.2" x2="750.0" y2="255.2" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="737.8" y1="243.0" x2="737.8" y2="248.0" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="737.8" y1="272.0" x2="737.8" y2="277.0" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="716.0" y1="264.8" x2="721.0" y2="264.8" stroke="#76B900" stroke-width="2" stroke-linecap="round"/><line x1="745.0" y1="264.8" x2="750.0" y2="264.8" stroke="#76B900" stroke-width="2" stroke-linecap="round"/>
+  <text x="733.0" y="294" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="middle">DynoSim</text>
+  <text x="733.0" y="312" font-size="14" font-weight="400" fill="#5A6572" text-anchor="middle">offline simulation</text>
 </svg>

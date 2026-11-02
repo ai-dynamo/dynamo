@@ -1,15 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1026" height="456" viewBox="22 9 1026 456" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="1026" height="436" viewBox="22 29 1026 436" role="img" aria-labelledby="title desc" font-family="Helvetica, Arial, sans-serif">
   <title id="title">Where time to first token goes</title>
   <desc id="desc">Stacked bars of where time to first token goes on an uncached single-image request and a video request. Media fetch, decode, and preprocessing are 30 ms of 385.7 ms for the image and 713.9 ms of 1,670.5 ms for the video.</desc>
   <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#234CDA"/></marker><marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker><marker id="arrow-gray" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9CA3AF"/></marker><marker id="arrow-green-start" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#76B900"/></marker></defs>
-  <rect x="22" y="9" width="1026" height="456" fill="#FFFFFF"/>
-  <text x="36" y="36" font-size="15.0" font-weight="700" letter-spacing="1.6" fill="#5A8F00">TTFT BREAKDOWN</text>
+  <rect x="22" y="29" width="1026" height="436" fill="#FFFFFF"/>
   <text x="36" y="66" font-size="25.3" font-weight="700" fill="#1A1A1A">Where time to first token goes on a multimodal request</text>
   <text x="36" y="92" font-size="15" font-weight="400" fill="#5A6572" text-anchor="start">Uncached requests, drawn to one millisecond scale</text>
   <text x="182" y="196" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="end">Single image</text>
   <text x="182" y="218" font-size="14" font-weight="400" fill="#5A6572" text-anchor="end">480p JPEG</text>
-  <rect x="200.0" y="172" width="9.0" height="56" fill="#7C9CF2"/>
-  <rect x="209.0" y="172" width="6.0" height="56" fill="#234CDA"/>
+  <rect x="200.0" y="172" width="9.0" height="56" fill="#CFE8A0"/>
+  <rect x="209.0" y="172" width="6.0" height="56" fill="#A5D24A"/>
   <rect x="215.0" y="172" width="17.9" height="56" fill="#9CA3AF"/>
   <rect x="232.9" y="172" width="32.2" height="56" fill="#76B900"/>
   <rect x="265.1" y="172" width="121.3" height="56" fill="#4C7A00"/>
@@ -27,10 +26,10 @@
   <text x="200" y="270" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="start">TTFT 385.7 ms</text>
   <text x="182" y="330" font-size="18" font-weight="700" fill="#1A1A1A" text-anchor="end">Video</text>
   <text x="182" y="352" font-size="14" font-weight="400" fill="#5A6572" text-anchor="end">720p, 10 s, H.264</text>
-  <rect x="200.0" y="306" width="136.8" height="56" fill="#7C9CF2"/>
+  <rect x="200.0" y="306" width="136.8" height="56" fill="#CFE8A0"/>
   <text x="268.4" y="340" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="middle">273.7</text>
-  <rect x="336.9" y="306" width="220.1" height="56" fill="#234CDA"/>
-  <text x="446.9" y="340" font-size="16" font-weight="700" fill="#FFFFFF" text-anchor="middle">440.2</text>
+  <rect x="336.9" y="306" width="220.1" height="56" fill="#A5D24A"/>
+  <text x="446.9" y="340" font-size="16" font-weight="700" fill="#1A1A1A" text-anchor="middle">440.2</text>
   <rect x="557.0" y="306" width="21.4" height="56" fill="#9CA3AF"/>
   <rect x="578.4" y="306" width="455.4" height="56" fill="#4C7A00"/>
   <text x="806.0" y="340" font-size="16" font-weight="700" fill="#FFFFFF" text-anchor="middle">910.7</text>
@@ -39,9 +38,9 @@
   <line x1="200" y1="376" x2="1033.7" y2="376" stroke="#1A1A1A" stroke-width="1.4"/>
   <line x1="200" y1="370" x2="200" y2="382" stroke="#1A1A1A" stroke-width="1.4"/><line x1="1033.7" y1="370" x2="1033.7" y2="382" stroke="#1A1A1A" stroke-width="1.4"/>
   <text x="200" y="404" font-size="17" font-weight="700" fill="#1A1A1A" text-anchor="start">TTFT 1,670.5 ms</text>
-  <rect x="36" y="434" width="16" height="16" rx="3" fill="#7C9CF2"/>
+  <rect x="36" y="434" width="16" height="16" rx="3" fill="#CFE8A0"/>
   <text x="60" y="447" font-size="15" font-weight="400" fill="#374151" text-anchor="start">Media fetch / decode</text>
-  <rect x="266.0" y="434" width="16" height="16" rx="3" fill="#234CDA"/>
+  <rect x="266.0" y="434" width="16" height="16" rx="3" fill="#A5D24A"/>
   <text x="290.0" y="447" font-size="15" font-weight="400" fill="#374151" text-anchor="start">MM preprocess</text>
   <rect x="435.8" y="434" width="16" height="16" rx="3" fill="#9CA3AF"/>
   <text x="459.8" y="447" font-size="15" font-weight="400" fill="#374151" text-anchor="start">Queue / transfer</text>
