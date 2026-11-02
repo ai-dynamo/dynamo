@@ -290,15 +290,33 @@ the Python replay API. Both use the existing offline replay
 path for every trace format, including ordinary Dynamo, Mooncake, and
 Mooncake-delta traces. No connector configuration is required.
 
-For AgentX graphs, G2 requires vLLM, one aggregated worker or one prefill plus
-one decode worker, attention DP=1 on every role, static worker pools, and no
-speculative decoding (`engine.aic_nextn` and
+For AgentX graphs, G2 requires vLLM, attention DP=1 on every role, static worker
+pools, and no speculative decoding (`engine.aic_nextn` and
 `engine.timing_model.config.speculation` unset,
-`engine.decode_speedup_ratio=1.0`). Tensor parallelism may exceed one. These AgentX limits
+`engine.decode_speedup_ratio=1.0`). Any number of aggregated, prefill, or decode
+workers is supported, and tensor parallelism may exceed one. These AgentX limits
 also apply when a Dynamo trace contains agent context but `agentic_lanes` is
 omitted. Ordinary traces retain their existing topology support; a standard
 Dynamo trace with two workers and attention DP=2 is covered by the G2 tests.
 G3 and online AgentX G2 replay are outside this support boundary.
+
+With several replicas, the KV router places AgentX requests from each worker's
+native G2 (`HostPinned`) KV events; there is no AgentX-specific residency path.
+Aggregated and prefill placement consume these events, while disaggregated decode
+placement remains load-only. A G2 block can attract a request only after its store
+event is Router-visible: events emitted at a simulation timestamp, including G2
+offload completions, are applied before requests arriving at that timestamp are
+placed, and `kv_event_lag_ms` delays every KV event batch in order. A request
+placed before a G2 store is visible falls back to ordinary load balancing and
+recomputes, or restores only what its selected worker holds. Offline replay delivers
+each native KV event exactly once in engine order. If the Router receives a G2
+store for a block its rank already holds, or a removal for a block it never
+stored, replay fails because the event was duplicated, lost, or reordered.
+
+Snapshot and profile plays use play-local token namespaces and carry a distinct
+`cache_id`, so G1 and G2 hits never cross a recycled play, even in a
+`cluster_shared` pool. In finite replay, equal source `hash_ids` in different plays
+are the corpus's own shared prefixes.
 
 Each role can omit offload or select `dp_rank_local` or `cluster_shared`.
 Shared roles must agree on layout, total capacity, and shared directional
@@ -325,7 +343,13 @@ G1/G2 state across the measurement barrier. Results retain `agentic_snapshots`,
 
 With per-request capture, inspect `first_admission_g1_reused_input_tokens`,
 `first_admission_host_reused_input_tokens`, and `admission_history` to distinguish
-G1 hits, completed G2 restores, and P/D admission. HBM-only reports may omit the
+G1 hits, completed G2 restores, and P/D admission. `routing_history` records each
+placement's worker and the overlap the Router scored from visible events; with
+`host_cache_hit_weight=1.0`, `reported_overlap_tokens` equals the engine's
+realized G1 plus G2 reuse when events are not lagged. A larger engine reuse means
+locality the Router could not yet see. A smaller one means the scored residency
+was gone by admission, for example after a lagged removal or an eviction while
+the request was queued. HBM-only reports may omit the
 host field. `g2_domains` reports shared capacity. This support is
 `functional_only`; it does not establish performance equivalence with a
 hardware offload recipe.
