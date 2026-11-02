@@ -99,6 +99,7 @@ In-tree hosts import the owner's `host` module; plugins import `plugins::prelude
 |---|---|
 | root re-exports of stage and kernel items (`WorkerSelectionPolicy`, `LocalScheduler`, `KvSchedulerError`, `SelectionConfig`, ...) | the owner's `host` module, `plugins::prelude`, or `config::` |
 | `protocols::*` | `dynamo_router_protocol`, `dynamo_kv_events` (`event`, `placement`, `residency`), `dynamo_kv_hashing::routing`, `dynamo_kv_hints`, `dynamo_scheduler::protocols` |
+| `protocols::ActiveLoad` | `dynamo_llm::kv_router::ActiveLoad`; removed now, not deprecated: this crate cannot see `lib/llm`, which publishes and reads the message |
 | `identity::*` | `dynamo_router_protocol::identity` (indexer identity specs: `dynamo_kv_indexer::identity`) |
 | `indexer::*`, `concurrent_radix_tree_compressed`, `nested_map`, `approx`, `radix_tree`, `session_prefix_index` | `dynamo_kv_indexer` (`host`, `cuckoo`, `api`) |
 | `sequences`, `multi_worker_sequence`, `sequence` | `dynamo_slot_tracker` (`host`) |

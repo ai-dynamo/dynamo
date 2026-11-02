@@ -41,7 +41,7 @@ pub use dynamo_multimodal::{
 };
 pub use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
 pub use dynamo_router_protocol::worker::{
-    ActiveLoad, DpRank, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
+    DpRank, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
 };
 pub use dynamo_slot_tracker::wire::{
     ActiveBlockEvent, ActiveBlockEventData, ActiveSequenceEvent, ActiveSequenceEventBatch,

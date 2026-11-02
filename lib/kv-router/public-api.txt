@@ -601,7 +601,6 @@ pub type dynamo_kv_router::plugins::WorkerSelectionPolicyRegistry = dynamo_kv_ro
 pub mod dynamo_kv_router::protocols
 pub use dynamo_kv_router::protocols::ActiveBlockEvent
 pub use dynamo_kv_router::protocols::ActiveBlockEventData
-pub use dynamo_kv_router::protocols::ActiveLoad
 pub use dynamo_kv_router::protocols::ActiveSequenceEvent
 pub use dynamo_kv_router::protocols::ActiveSequenceEventBatch
 pub use dynamo_kv_router::protocols::ActiveSequenceEventData

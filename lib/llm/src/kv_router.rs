@@ -56,6 +56,7 @@ pub use dynamo_kv_router::scheduling;
 pub use dynamo_scheduler::host::OverlapScoresResponse;
 pub use dynamo_scheduler::protocols;
 
+pub mod active_load;
 pub(crate) mod embedded;
 pub mod encoder_router;
 pub mod indexer;
@@ -69,6 +70,8 @@ mod routing_host;
 pub(crate) mod routing_load;
 pub mod sequence;
 pub mod shared_cache;
+
+pub use active_load::ActiveLoad;
 
 // TODO(v1.7): Remove these compatibility aliases; use kv_router::plugins instead.
 pub use encoder_router::EncoderRouter;

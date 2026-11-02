@@ -1,8 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Worker and rank identities, and the facts a worker publishes about itself: its
-//! advertised capacity and its active load.
+//! Worker and rank identities, and the capacity a worker advertises about itself.
 
 use serde::{Deserialize, Serialize};
 
@@ -51,26 +50,6 @@ impl WorkerWithDpRank {
             dp_rank: 0,
         }
     }
-}
-
-/// Active load metrics for a worker, used for overload detection.
-///
-/// Published by workers (with `kv_used_blocks`) and by the scheduler (with
-/// `active_decode_blocks` and `active_prefill_tokens`).
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-pub struct ActiveLoad {
-    pub worker_id: WorkerId,
-    #[serde(default)]
-    pub dp_rank: DpRank,
-    /// Scheduler-reported decode block load.
-    pub active_decode_blocks: Option<u64>,
-    /// Number of active prefill tokens (from scheduler's view).
-    pub active_prefill_tokens: Option<u64>,
-    /// Total KV blocks currently in use on the worker.
-    ///
-    /// This is published by workers only and is the authoritative signal for
-    /// backend KV occupancy used by overload detection.
-    pub kv_used_blocks: Option<u64>,
 }
 
 /// Prefill budget assumed for a rank that does not report `max_num_batched_tokens`. Large

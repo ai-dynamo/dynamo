@@ -31,7 +31,7 @@ pub use dynamo_kv_events::residency::{
 };
 
 pub use dynamo_router_protocol::worker::{
-    ActiveLoad, DpRank, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
+    DpRank, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
 };
 
 pub use dynamo_kv_indexer::residency::{

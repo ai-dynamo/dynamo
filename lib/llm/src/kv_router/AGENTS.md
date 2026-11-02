@@ -13,6 +13,8 @@ and the booking lifecycle these rules protect.
   from `lib/kv-router`, and runs each selection through `SelectionCore`.
 - `indexer/`: tracks which KV-cache blocks each worker holds; lookups run in `lib/kv-router`.
 - `publisher/`: receives KV-cache events and worker metrics from inference engines.
+- `active_load.rs`: `ActiveLoad`, the load message workers publish on the event plane. Written
+  by `publisher/`, read by `metrics_subscriber.rs`, `discovery/worker_monitor.rs`, and `pool_relay/`.
 - `metrics.rs`, `metrics_subscriber.rs`: router Prometheus metrics, and the subscription to
   workers' KV load metrics.
 - `sequence.rs`, `sequence/`: runtime glue for active-sequence tracking and its replica sync.

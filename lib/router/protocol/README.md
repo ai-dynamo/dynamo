@@ -31,6 +31,7 @@ Everything else belongs to the crate that produces it. When a second crate needs
 | Candidate rows and views, the policy plugin API | `dynamo-worker-selection` |
 | `QueueRejection`, `QueueLimitKind`, `WorkerPlacement`, the classifier API | `dynamo-admission` |
 | Replica events and booking descriptors (the slot-tracker replication wire) | `dynamo-slot-tracker` |
+| The active-load message workers publish on the event plane (`ActiveLoad`) | `dynamo-llm` (`kv_router::ActiveLoad`): its publisher and every reader live there |
 | Indexer service DTOs, indexer identity configuration, the transfer candidate vocabulary (`KvTransferCandidateSource`, `label_key`, `topology_keys`), the residency owner key (`ResidencyOwnerKey`) | `dynamo-kv-indexer` |
 
 ## `AttemptId` and `AttemptIdMinter`

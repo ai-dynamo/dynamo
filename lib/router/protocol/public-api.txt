@@ -159,12 +159,6 @@ pub fn dynamo_router_protocol::session::SessionContext::session_final(&self) -> 
 pub fn dynamo_router_protocol::session::SessionContext::session_id(&self) -> &str
 pub fn dynamo_router_protocol::session::SessionContext::with_agent_headers(self, alloc::sync::Arc<alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::vec::Vec<alloc::string::String>>>) -> Self
 pub mod dynamo_router_protocol::worker
-pub struct dynamo_router_protocol::worker::ActiveLoad
-pub dynamo_router_protocol::worker::ActiveLoad::active_decode_blocks: core::option::Option<u64>
-pub dynamo_router_protocol::worker::ActiveLoad::active_prefill_tokens: core::option::Option<u64>
-pub dynamo_router_protocol::worker::ActiveLoad::dp_rank: dynamo_router_protocol::worker::DpRank
-pub dynamo_router_protocol::worker::ActiveLoad::kv_used_blocks: core::option::Option<u64>
-pub dynamo_router_protocol::worker::ActiveLoad::worker_id: dynamo_router_protocol::worker::WorkerId
 pub struct dynamo_router_protocol::worker::WorkerAffinityTarget
 pub dynamo_router_protocol::worker::WorkerAffinityTarget::dp_rank: core::option::Option<dynamo_router_protocol::worker::DpRank>
 pub dynamo_router_protocol::worker::WorkerAffinityTarget::worker_id: dynamo_router_protocol::worker::WorkerId

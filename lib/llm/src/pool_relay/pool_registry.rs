@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 
 use dynamo_kv_indexer::cuckoo::{CkfBuildError, CkfConfig, DcCkfState, ProducerIdentity};
 use dynamo_router_protocol::identity::PoolId;
-use dynamo_router_protocol::worker::ActiveLoad;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::transports::event_plane::EventEnvelope;
@@ -33,6 +32,7 @@ use super::publication::{
     TerminalFailure, publication_lease,
 };
 use super::serving_load::PoolServingLoad;
+use crate::kv_router::ActiveLoad;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 
 const DEFAULT_CKF_ALLOCATION_CONCURRENCY: usize = 2;

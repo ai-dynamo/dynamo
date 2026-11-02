@@ -9,7 +9,6 @@ use tokio_util::sync::CancellationToken;
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use dynamo_router_protocol::worker::ActiveLoad;
 use dynamo_slot_tracker::host::{BusyThresholds, SchedulerLoadSnapshot};
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +16,7 @@ use crate::http::service::metrics::{
     WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE, WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE,
     WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
 };
+use crate::kv_router::ActiveLoad;
 use crate::kv_router::RouterLoadSource;
 use crate::kv_router::metrics::WORKER_LOAD_METRICS;
 use crate::kv_router::metrics_subscriber::KvMetricsSubscriber;
@@ -1267,7 +1267,7 @@ mod tests {
         WorkerLoadState, cleanup_worker_metrics, collect_overloaded_workers,
         overload_reconciliation_needed, publish_overloaded_instances_if_needed,
     };
-    use dynamo_router_protocol::worker::ActiveLoad;
+    use crate::kv_router::ActiveLoad;
     use dynamo_router_protocol::worker::WorkerWithDpRank;
     use dynamo_slot_tracker::host::SchedulerLoadSnapshot;
     use std::collections::HashSet;
