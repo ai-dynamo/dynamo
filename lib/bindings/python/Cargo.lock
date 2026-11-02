@@ -2131,6 +2131,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-generate-format-catalog"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "dynamo-llm",
+ "dynamo-sglang-generate",
+ "dynamo-vllm-generate",
+]
+
+[[package]]
 name = "dynamo-kv-hashing"
 version = "1.7.0"
 dependencies = [
@@ -2421,6 +2431,7 @@ dependencies = [
  "dashmap",
  "dynamo-backend-common",
  "dynamo-custom-policy-builtin",
+ "dynamo-generate-format-catalog",
  "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-mocker",
@@ -2569,6 +2580,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-sglang-generate"
+version = "1.7.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "dynamo-llm",
+ "dynamo-protocols",
+ "dynamo-runtime",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-sglang-sidecar"
 version = "1.7.0"
 dependencies = [
@@ -2579,6 +2604,7 @@ dependencies = [
  "dynamo-backend-common",
  "dynamo-llm",
  "dynamo-runtime",
+ "dynamo-sglang-generate",
  "dynamo-sidecar-common",
  "futures",
  "prost 0.13.5",
@@ -2697,6 +2723,22 @@ name = "dynamo-truthy"
 version = "1.7.0"
 dependencies = [
  "anyhow",
+]
+
+[[package]]
+name = "dynamo-vllm-generate"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "dynamo-kv-router",
+ "dynamo-llm",
+ "dynamo-protocols",
+ "dynamo-runtime",
+ "serde",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -9756,9 +9798,9 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "velo"
-version = "0.20.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "453d58e5ca96c625d763468579fc1088e406abbb02e616714bf12433d109651f"
+checksum = "97c3940b2cf9b4a7a9ea6afd56520ee21eb46272b5442d3105274b4298404b4b"
 dependencies = [
  "anyhow",
  "async-stream",
