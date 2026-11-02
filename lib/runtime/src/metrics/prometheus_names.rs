@@ -38,7 +38,7 @@
 //! - ❌ `_time`, `_ms` → ✅ `_seconds`, `_duration_seconds`
 //! - ❌ `_time_total`, `_total_time`, `_ms_total` → ✅ `_seconds_total`
 //! - ❌ `_total_time_seconds` → ✅ `_seconds_total`
-//! - ❌ `_average_time` → ✅ a `_seconds` histogram; its average is `rate(x_sum) / rate(x_count)`
+//! - ❌ `_average_time` → ✅ a `_seconds` histogram; its average is `rate(x_sum[5m]) / rate(x_count[5m])`
 //! - ❌ `_size` → ✅ `_bytes`, `_tokens`
 //! - ❌ `_percent` → ✅ `_ratio` (0 to 1)
 //! - ❌ `_rate`, `_per_second` → ✅ a `_total` counter, charted with `rate()`
