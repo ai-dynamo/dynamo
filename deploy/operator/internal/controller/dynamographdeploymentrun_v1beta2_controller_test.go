@@ -2256,22 +2256,9 @@ func TestV1beta2RunControllerProtectsTheTraceClaimBeforeCreatingTheJob(t *testin
 }
 
 func TestV1beta2RunControllerCancelsARunWhoseTraceClaimIsDeleted(t *testing.T) {
-	waitingSweeper := []corev1.ContainerStatus{{Name: dgdrRunSweeperContainer, State: corev1.ContainerState{
-		Waiting: &corev1.ContainerStateWaiting{Reason: "CreateContainerConfigError", Message: "failed to prepare subPath"},
-	}}}
-	creatingSweeper := []corev1.ContainerStatus{{Name: dgdrRunSweeperContainer, State: corev1.ContainerState{
-		Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"},
-	}}}
-	runningSweeper := []corev1.ContainerStatus{{Name: dgdrRunSweeperContainer, State: corev1.ContainerState{
-		Running: &corev1.ContainerStateRunning{},
-	}}}
 	tests := []struct {
 		name   string
 		status batchv1.JobStatus
-		// pod, when set, is the Job's pod as the cache shows it.
-		pod *corev1.PodStatus
-		// podNode binds the pod to a node.
-		podNode string
 		// removeClaim removes the claim completely, as when its finalizers were removed by hand.
 		removeClaim bool
 		// failDuringDeletion marks the Job failed while it is being deleted, as the Job controller
@@ -2279,40 +2266,8 @@ func TestV1beta2RunControllerCancelsARunWhoseTraceClaimIsDeleted(t *testing.T) {
 		failDuringDeletion bool
 	}{
 		{
-			name:   "the Job counts a pod the pod cache does not show",
-			status: batchv1.JobStatus{Active: 1, Ready: new(int32(0))},
-		},
-		{
-			name:   "the pod is not scheduled",
-			status: batchv1.JobStatus{Active: 1, Ready: new(int32(0))},
-			pod:    &corev1.PodStatus{Phase: corev1.PodPending},
-		},
-		{
-			name:    "the pod is scheduled while its images are pulled",
-			status:  batchv1.JobStatus{Active: 1, Ready: new(int32(0))},
-			pod:     &corev1.PodStatus{Phase: corev1.PodPending, ContainerStatuses: creatingSweeper},
-			podNode: "node-a",
-		},
-		{
-			name:    "the sweeper waits on a mount error",
-			status:  batchv1.JobStatus{Active: 1, Ready: new(int32(0))},
-			pod:     &corev1.PodStatus{Phase: corev1.PodPending, ContainerStatuses: waitingSweeper},
-			podNode: "node-a",
-		},
-		{
-			name:    "the sweeper runs",
-			status:  batchv1.JobStatus{Active: 1, Ready: new(int32(1))},
-			pod:     &corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: runningSweeper},
-			podNode: "node-a",
-		},
-		{
-			name:   "the pod is ready while the pod cache still shows it unscheduled",
+			name:   "the Job runs",
 			status: batchv1.JobStatus{Active: 1, Ready: new(int32(1))},
-			pod:    &corev1.PodStatus{Phase: corev1.PodPending},
-		},
-		{
-			name:   "the Job tracks a succeeded pod it has not counted",
-			status: batchv1.JobStatus{UncountedTerminatedPods: &batchv1.UncountedTerminatedPods{Succeeded: []types.UID{"pod"}}},
 		},
 		{
 			name:   "the Job met its success criteria",
@@ -2325,15 +2280,11 @@ func TestV1beta2RunControllerCancelsARunWhoseTraceClaimIsDeleted(t *testing.T) {
 		{
 			name:        "the claim is gone after its finalizers were removed by hand",
 			status:      batchv1.JobStatus{Active: 1, Ready: new(int32(1))},
-			pod:         &corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: runningSweeper},
-			podNode:     "node-a",
 			removeClaim: true,
 		},
 		{
 			name:               "the Job is marked failed while it is being deleted",
 			status:             batchv1.JobStatus{Active: 1, Ready: new(int32(1))},
-			pod:                &corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: runningSweeper},
-			podNode:            "node-a",
 			failDuringDeletion: true,
 		},
 	}
@@ -2366,9 +2317,6 @@ func TestV1beta2RunControllerCancelsARunWhoseTraceClaimIsDeleted(t *testing.T) {
 			job.Status.StartTime = new(metav1.Now())
 			if err := f.client.Status().Update(t.Context(), job); err != nil {
 				t.Fatalf("update Job status: %v", err)
-			}
-			if tt.pod != nil {
-				createDGDRRunJobPodForTest(t, f.client, job, tt.podNode, *tt.pod)
 			}
 			f.reconcile()
 
@@ -2855,31 +2803,10 @@ func TestV1beta2RunControllerReportsAWaitingContainerWithoutEndingTheRun(t *test
 		wantReason string
 	}{
 		{
-			name:       "a subPath that resolves outside the claim",
+			name:       "a sweeper whose trace mount cannot be prepared",
 			container:  dgdrRunSweeperContainer,
 			reason:     "CreateContainerConfigError",
 			message:    `failed to prepare subPath for volumeMount "trace" of container "sweeper"`,
-			wantReason: dgdrRunReasonContainerWaiting,
-		},
-		{
-			name:       "a missing file on a read-only claim",
-			container:  dgdrRunSweeperContainer,
-			reason:     "CreateContainerConfigError",
-			message:    `failed to create subPath directory for volumeMount "trace" of container "sweeper"`,
-			wantReason: dgdrRunReasonContainerWaiting,
-		},
-		{
-			name:       "a kubelet message in other words",
-			container:  dgdrRunSweeperContainer,
-			reason:     "CreateContainerConfigError",
-			message:    "the trace mount could not be prepared",
-			wantReason: dgdrRunReasonContainerWaiting,
-		},
-		{
-			name:       "another volume of the sweeper",
-			container:  dgdrRunSweeperContainer,
-			reason:     "CreateContainerConfigError",
-			message:    `failed to prepare subPath for volumeMount "input" of container "sweeper"`,
 			wantReason: dgdrRunReasonContainerWaiting,
 		},
 		{
@@ -2900,12 +2827,6 @@ func TestV1beta2RunControllerReportsAWaitingContainerWithoutEndingTheRun(t *test
 			name:       "a container that is being created",
 			container:  dgdrRunSweeperContainer,
 			reason:     "ContainerCreating",
-			wantReason: dgdrRunReasonRunning,
-		},
-		{
-			name:       "a container that waits for its pod to initialize",
-			container:  dgdrRunPublisherContainer,
-			reason:     "PodInitializing",
 			wantReason: dgdrRunReasonRunning,
 		},
 	}

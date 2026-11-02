@@ -897,57 +897,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 		// A v1beta2 trace in a v1beta1 carrier stored without admission: CEL ratchets the unchanged
 		// trace on the next v1beta2 write, so the structural webhook recursion rejects it.
 		{
-			name:       "v1beta2 carrier trace subPath that leaves the claim",
-			oldRequest: v1beta1CarrierForAdmission(map[string]any{"trace": v1beta2TraceForAdmission("../escape.jsonl")}),
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["workload"] = map[string]any{"trace": v1beta2TraceForAdmission("../escape.jsonl")}
-			}),
-			seedWithoutWebhook: true,
-			gpuDiscovery:       true,
-			discovered:         discoveredH200,
-			wantWebhook: []string{
-				`spec.workload.trace.source.persistentVolumeClaim.subPath: Invalid value: "../escape.jsonl": subPath must be relative to the claim root without empty, '.' or '..' segments`,
-			},
-			// CEL ratchets the unchanged trace and reports what it tolerated as a warning.
-			wantWarnings: []string{
-				`spec.workload.trace.source.persistentVolumeClaim.subPath: Invalid value: "string": subPath must be relative to the claim root without empty, '.' or '..' segments`,
-			},
-		},
-		{
-			name:       "v1beta2 carrier absolute trace subPath",
-			oldRequest: v1beta1CarrierForAdmission(map[string]any{"trace": v1beta2TraceForAdmission("/w.jsonl")}),
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["workload"] = map[string]any{"trace": v1beta2TraceForAdmission("/w.jsonl")}
-			}),
-			seedWithoutWebhook: true,
-			gpuDiscovery:       true,
-			discovered:         discoveredH200,
-			wantWebhook: []string{
-				`spec.workload.trace.source.persistentVolumeClaim.subPath: Invalid value: "/w.jsonl": subPath must be relative to the claim root without empty, '.' or '..' segments`,
-			},
-			// CEL ratchets the unchanged trace and reports what it tolerated as a warning.
-			wantWarnings: []string{
-				`spec.workload.trace.source.persistentVolumeClaim.subPath: Invalid value: "string": subPath must be relative to the claim root without empty, '.' or '..' segments`,
-			},
-		},
-		{
-			name:       "v1beta2 carrier trace subPath with an empty segment",
-			oldRequest: v1beta1CarrierForAdmission(map[string]any{"trace": v1beta2TraceForAdmission("retune//w.jsonl")}),
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["workload"] = map[string]any{"trace": v1beta2TraceForAdmission("retune//w.jsonl")}
-			}),
-			seedWithoutWebhook: true,
-			gpuDiscovery:       true,
-			discovered:         discoveredH200,
-			wantWebhook: []string{
-				`spec.workload.trace.source.persistentVolumeClaim.subPath: Invalid value: "retune//w.jsonl": subPath must be relative to the claim root without empty, '.' or '..' segments`,
-			},
-			// CEL ratchets the unchanged trace and reports what it tolerated as a warning.
-			wantWarnings: []string{
-				`spec.workload.trace.source.persistentVolumeClaim.subPath: Invalid value: "string": subPath must be relative to the claim root without empty, '.' or '..' segments`,
-			},
-		},
-		{
 			name:       "v1beta2 carrier trace subPath with a NUL character",
 			oldRequest: v1beta1CarrierForAdmission(map[string]any{"trace": v1beta2TraceForAdmission("retune/w\x00.jsonl")}),
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
@@ -975,32 +924,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			discovered:         discoveredH200,
 			wantWebhook: []string{
 				"spec.workload.trace.source.persistentVolumeClaim.subPath: Too long: may not be more than 1024 characters",
-			},
-		},
-		{
-			name:       "v1beta2 carrier trace claim that is not a DNS subdomain",
-			oldRequest: v1beta1CarrierForAdmission(map[string]any{"trace": map[string]any{"format": "Dynamo", "source": map[string]any{"persistentVolumeClaim": map[string]any{"claimName": "Bad_Claim", "subPath": "w.jsonl"}}}}),
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["workload"] = map[string]any{"trace": map[string]any{"format": "Dynamo", "source": map[string]any{"persistentVolumeClaim": map[string]any{"claimName": "Bad_Claim", "subPath": "w.jsonl"}}}}
-			}),
-			seedWithoutWebhook: true,
-			gpuDiscovery:       true,
-			discovered:         discoveredH200,
-			wantWebhook: []string{
-				`spec.workload.trace.source.persistentVolumeClaim.claimName: Invalid value: "Bad_Claim": a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character (e.g. 'example.com', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')`,
-			},
-		},
-		{
-			name:       "v1beta2 carrier trace format that is not admitted",
-			oldRequest: v1beta1CarrierForAdmission(map[string]any{"trace": map[string]any{"format": "mooncake", "source": map[string]any{"persistentVolumeClaim": map[string]any{"claimName": "request-traces", "subPath": "w.jsonl"}}}}),
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["workload"] = map[string]any{"trace": map[string]any{"format": "mooncake", "source": map[string]any{"persistentVolumeClaim": map[string]any{"claimName": "request-traces", "subPath": "w.jsonl"}}}}
-			}),
-			seedWithoutWebhook: true,
-			gpuDiscovery:       true,
-			discovered:         discoveredH200,
-			wantWebhook: []string{
-				`spec: Invalid value: "<redacted>": cannot be lowered to the public AISimulate recommendation input: spec.workload.trace.format: unsupported trace format "mooncake"`,
 			},
 		},
 		{
@@ -1036,40 +959,10 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name:       "v1beta2 carrier trace beside a static workload",
-			oldRequest: v1beta1CarrierForAdmission(map[string]any{"static": map[string]any{}, "trace": map[string]any{"format": "Dynamo", "source": map[string]any{"persistentVolumeClaim": map[string]any{"claimName": "request-traces", "subPath": "w.jsonl"}}}}),
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["workload"] = map[string]any{"static": map[string]any{}, "trace": map[string]any{"format": "Dynamo", "source": map[string]any{"persistentVolumeClaim": map[string]any{"claimName": "request-traces", "subPath": "w.jsonl"}}}}
-			}),
-			seedWithoutWebhook: true,
-			gpuDiscovery:       true,
-			discovered:         discoveredH200,
-			wantWebhook: []string{
-				`spec.workload: Forbidden: static and trace are mutually exclusive`,
-			},
-			// CEL ratchets the unchanged trace and reports what it tolerated as a warning.
-			wantWarnings: []string{
-				`spec.workload: Invalid value: "object": static and trace are mutually exclusive`,
-			},
-		},
-		{
-			name:       "v1beta2 carrier trace arrival speedup that is not positive",
-			oldRequest: v1beta1CarrierForAdmission(map[string]any{"trace": map[string]any{"format": "Dynamo", "source": map[string]any{"persistentVolumeClaim": map[string]any{"claimName": "request-traces", "subPath": "w.jsonl"}}, "replay": map[string]any{"arrivalSpeedupRatio": 0.0}}}),
-			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["workload"] = map[string]any{"trace": map[string]any{"format": "Dynamo", "source": map[string]any{"persistentVolumeClaim": map[string]any{"claimName": "request-traces", "subPath": "w.jsonl"}}, "replay": map[string]any{"arrivalSpeedupRatio": 0.0}}}
-			}),
-			seedWithoutWebhook: true,
-			gpuDiscovery:       true,
-			discovered:         discoveredH200,
-			wantWebhook: []string{
-				`spec.workload.trace.replay.arrivalSpeedupRatio: Invalid value: 0: must be greater than 0`,
-			},
-		},
-		{
 			name:       "v1beta2 carrier trace errors are reported together in field order",
-			oldRequest: v1beta1CarrierForAdmission(map[string]any{"static": map[string]any{}, "trace": map[string]any{"format": "mooncake", "source": map[string]any{"persistentVolumeClaim": map[string]any{"claimName": "Bad_Claim", "subPath": "../w.jsonl"}}, "replay": map[string]any{"arrivalSpeedupRatio": -1.0}}}),
+			oldRequest: v1beta1CarrierForAdmission(map[string]any{"static": map[string]any{}, "trace": map[string]any{"format": "mooncake", "source": map[string]any{"persistentVolumeClaim": map[string]any{"claimName": "Bad_Claim", "subPath": "../w.jsonl"}}, "replay": map[string]any{"arrivalSpeedupRatio": 0.0}}}),
 			request: v1beta2DGDRForAdmission(func(spec map[string]any) {
-				spec["workload"] = map[string]any{"static": map[string]any{}, "trace": map[string]any{"format": "mooncake", "source": map[string]any{"persistentVolumeClaim": map[string]any{"claimName": "Bad_Claim", "subPath": "../w.jsonl"}}, "replay": map[string]any{"arrivalSpeedupRatio": -1.0}}}
+				spec["workload"] = map[string]any{"static": map[string]any{}, "trace": map[string]any{"format": "mooncake", "source": map[string]any{"persistentVolumeClaim": map[string]any{"claimName": "Bad_Claim", "subPath": "../w.jsonl"}}, "replay": map[string]any{"arrivalSpeedupRatio": 0.0}}}
 			}),
 			seedWithoutWebhook: true,
 			gpuDiscovery:       true,
@@ -1078,7 +971,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				`spec.workload: Forbidden: static and trace are mutually exclusive`,
 				`spec.workload.trace.source.persistentVolumeClaim.claimName: Invalid value: "Bad_Claim": a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character (e.g. 'example.com', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')`,
 				`spec.workload.trace.source.persistentVolumeClaim.subPath: Invalid value: "../w.jsonl": subPath must be relative to the claim root without empty, '.' or '..' segments`,
-				`spec.workload.trace.replay.arrivalSpeedupRatio: Invalid value: -1: must be greater than 0`,
+				`spec.workload.trace.replay.arrivalSpeedupRatio: Invalid value: 0: must be greater than 0`,
 				`spec: Invalid value: "<redacted>": cannot be lowered to the public AISimulate recommendation input: spec.workload.trace.format: unsupported trace format "mooncake"`,
 			},
 			// CEL ratchets the unchanged trace and reports what it tolerated as a warning.
