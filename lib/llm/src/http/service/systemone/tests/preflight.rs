@@ -142,14 +142,8 @@ async fn question_names_do_not_enter_scoring_prompts() {
     assert!(ordinary[0].scoring.prompt_len > 0);
     assert_eq!(ordinary[0].scoring.label_ids.len(), 2);
     assert_eq!(
-        match &ordinary[0].wire {
-            super::super::PreparedScoringRequest::Sglang(wire) => &wire["input_ids"],
-            _ => panic!("expected SGLang request"),
-        },
-        match &instruction[0].wire {
-            super::super::PreparedScoringRequest::Sglang(wire) => &wire["input_ids"],
-            _ => panic!("expected SGLang request"),
-        }
+        ordinary[0].wire.prompt_ids(),
+        instruction[0].wire.prompt_ids()
     );
     assert_eq!(
         ordinary[0].scoring.label_ids,
@@ -180,8 +174,8 @@ async fn configured_input_limit_allows_candidate_tokenization_amplification() {
     assert_eq!(branches[0].scoring.label_ids.len(), 26);
 }
 
-#[tokio::test]
-async fn candidate_tokenization_work_bounds_prompt_size() {
+#[test]
+fn candidate_tokenization_work_bounds_prompt_size() {
     use super::super::{encoding_prompt_limit, tokenization_work_limit};
     assert_eq!(encoding_prompt_limit(120, 10), 10);
     assert_eq!(encoding_prompt_limit(11, 10), 0);

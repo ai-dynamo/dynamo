@@ -1,23 +1,94 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::super::PreparedScoringRequest;
 use super::*;
 
-#[tokio::test]
-async fn prepared_token_execution_rejects_a_mismatched_wire_before_dispatch() {
-    let engine = TestEngine::new(EngineBehavior::Success);
-    let selection = selection_for_test(engine.clone()).await;
-    let mut branch = prepared_noul_branch(0);
-    branch.wire = PreparedScoringRequest::vllm(vec![1, 2], &[13, 14], "salt").unwrap();
-    assert!(
-        super::super::execution::PreparedExecution::token(
-            selection.selection.clone(),
-            vec![branch]
+struct EmptyNonFusedEngine;
+
+#[async_trait]
+impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+    for EmptyNonFusedEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<PreprocessedRequest>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        crate::discovery::test_support::validate_fixture_dispatch(&request, 41);
+        Ok(ResponseStream::new(
+            Box::pin(stream::unfold((), |_| async {
+                None::<(Annotated<LLMEngineOutput>, ())>
+            })),
+            request.context(),
+        ))
+    }
+}
+
+async fn assert_empty_nonfused_scoring_stream(profile: Profile) {
+    for dialect in [
+        dynamo_decisions::Dialect::Jev,
+        dynamo_decisions::Dialect::OpenAi,
+    ] {
+        let base = selection_for_test(TestEngine::new(EngineBehavior::Success)).await;
+        let mut card = base.context.card.clone();
+        card.runtime_config.max_num_seqs = Some(1);
+        card.runtime_config.data_parallel_size = 1;
+        let selection = token_selection_for_test(
+            card,
+            Arc::new(EmptyNonFusedEngine),
+            token_executor(&base).preprocessor().clone(),
+            profile,
         )
-        .is_none()
+        .await;
+        let mut request = canonical_request(1);
+        Arc::make_mut(&mut request).dialect = dialect;
+        let parent = Context::new(()).context();
+        let admission = Arc::new(Semaphore::new(1));
+        let response = dispatch(
+            selection,
+            vec![prepared_noul_branch(0)],
+            "empty-nonfused".into(),
+            parent.clone(),
+            admission.clone().acquire_owned().await.unwrap(),
+            Arc::new(super::super::Metrics::new()),
+            request,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = response_body(response).await;
+        let code = body.pointer("/error/code").or_else(|| body.get("code"));
+        assert_eq!(code, Some(&json!("invalid_executor_result")));
+        assert!(body.get("answers").is_none());
+        assert!(parent.is_killed());
+        assert_eq!(admission.available_permits(), 1);
+    }
+}
+
+#[tokio::test]
+async fn sglang_empty_nonfused_scoring_stream_releases_admission() {
+    assert_empty_nonfused_scoring_stream(Profile::SglangSerialV1).await;
+}
+
+#[tokio::test]
+async fn vllm_empty_nonfused_scoring_stream_releases_admission() {
+    assert_empty_nonfused_scoring_stream(Profile::VllmCausalV1).await;
+}
+
+#[test]
+fn executor_errors_use_a_profile_neutral_message_and_distinct_origin_status() {
+    let executor = super::super::DispatchError::invalid_executor("private token frame");
+    assert_eq!(executor.status, StatusCode::BAD_GATEWAY);
+    assert_eq!(executor.code, Some("invalid_executor_result"));
+    assert_eq!(
+        executor.public_message,
+        "invalid decision executor response"
     );
-    assert!(engine.observations.lock().unwrap().is_empty());
+    let frontend = super::super::DispatchError::malformed("private construction detail");
+    assert_eq!(frontend.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(frontend.code.is_none());
+    assert_eq!(
+        frontend.public_message,
+        "decision request construction failed"
+    );
 }
 
 #[tokio::test]
@@ -54,8 +125,8 @@ async fn token_backend_validation_errors_preserve_dialect_specific_status() {
     }
 }
 
-#[tokio::test]
-async fn derives_only_a_proven_single_data_parallel_rank() {
+#[test]
+fn derives_only_a_proven_single_data_parallel_rank() {
     assert_eq!(resolve_dp_rank(None, 7, 1), Some(7));
     assert_eq!(resolve_dp_rank(None, 7, 2), None);
     assert_eq!(resolve_dp_rank(Some(9), 7, 2), Some(9));
@@ -121,6 +192,34 @@ async fn deterministic_worker_rejections_match_for_first_and_pinned_branches() {
 }
 
 #[tokio::test]
+async fn invalid_worker_accounting_never_projects_a_normal_answer() {
+    use dynamo_runtime::error::ErrorClass;
+    for in_stream in [false, true] {
+        let (response, parent, admission) = dispatch_request(
+            TestEngine::new(EngineBehavior::RejectRequest {
+                class: ErrorClass::BackendProtocol,
+                branch: 0,
+                in_stream,
+            }),
+            2,
+            "invalid-accounting",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = response_body(response).await;
+        assert_eq!(body["code"], "invalid_executor_result");
+        assert!(body.get("answers").is_none());
+        assert!(
+            !body
+                .to_string()
+                .contains("private deterministic worker detail")
+        );
+        assert!(parent.is_killed());
+        assert_eq!(admission.available_permits(), 2);
+    }
+}
+
+#[tokio::test]
 async fn unclassified_transport_stream_failure_is_unavailable() {
     let (response, parent, admission) = dispatch_request(
         TestEngine::new(EngineBehavior::TransportFailure),
@@ -140,6 +239,7 @@ async fn unclassified_transport_stream_failure_is_unavailable() {
 async fn admitted_worker_removal_during_fanout_does_not_reroute_siblings() {
     let (admissions, receiver) = tokio::sync::watch::channel(vec![41, 99]);
     let engine = Arc::new(TestEngine {
+        resume_sibling: None,
         behavior: EngineBehavior::RemoveWorkerDuringFanout,
         observations: Mutex::new(Vec::new()),
         started: Notify::new(),
@@ -147,8 +247,22 @@ async fn admitted_worker_removal_during_fanout_does_not_reroute_siblings() {
         admissions: Some(admissions),
         frame: sglang_frame,
     });
-    let mut selection = selection_for_test(engine.clone()).await;
-    selection.context.admitted_ids = Some(receiver);
+    let base = selection_for_test(engine.clone()).await;
+    let card = base.context.card.clone();
+    let workers = WorkerSet::new("removal".into(), card.mdcsum().into(), card);
+    let resources = crate::discovery::test_support::token_resources(
+        engine.clone(),
+        token_executor(&base).preprocessor().clone(),
+    );
+    let selection = crate::discovery::test_support::forced_selection_with_admissions_for_test(
+        "test-model".into(),
+        Profile::SglangSerialV1,
+        workers,
+        resources,
+        Some(receiver),
+    )
+    .await
+    .unwrap();
     let parent = Context::new(()).context();
     let admission = Arc::new(Semaphore::new(3));
     let permit = admission.clone().acquire_many_owned(3).await.unwrap();
@@ -171,8 +285,8 @@ async fn admitted_worker_removal_during_fanout_does_not_reroute_siblings() {
     assert_eq!(observations[1].routing.backend_instance_id, Some(41));
 }
 
-#[tokio::test]
-async fn canonical_backend_errors_preserve_client_error_classification() {
+#[test]
+fn canonical_backend_errors_preserve_client_error_classification() {
     use dynamo_runtime::error::{DynamoError, ErrorClass};
     for (class, expected) in [
         (ErrorClass::InvalidRequest, StatusCode::UNPROCESSABLE_ENTITY),
