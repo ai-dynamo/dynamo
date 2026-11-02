@@ -246,6 +246,8 @@ fn generate_response_matches_vllm_null_metadata_shape() {
         }],
         prompt_logprobs: None,
         kv_transfer_params: None,
+        prompt_token_ids: None,
+        mm_placeholders: None,
     };
 
     let value = serde_json::to_value(&resp).expect("serialize");
@@ -502,6 +504,30 @@ fn generate_response_accumulates_engine_deltas() {
             .expect("kv transfer params"),
         &json!({"connector": "x"})
     );
+}
+
+#[test]
+fn generate_response_surfaces_expanded_prompt() {
+    let placeholders = json!({"image": [{"offset": 1, "length": 4}]});
+    let chunks = [LLMEngineOutput {
+        token_ids: vec![100],
+        finish_reason: Some(dynamo_llm::protocols::common::FinishReason::Stop),
+        engine_data: Some(json!({
+            "prompt_token_ids": [1, 9, 9, 9, 9, 2],
+            "mm_placeholders": placeholders,
+        })),
+        ..Default::default()
+    }];
+
+    let response = aggregate(
+        chunks,
+        "req-mm".to_string(),
+        GenerateResponseOptions::default(),
+    )
+    .expect("aggregate expanded prompt");
+
+    assert_eq!(response.prompt_token_ids, Some(vec![1, 9, 9, 9, 9, 2]));
+    assert_eq!(response.mm_placeholders, Some(placeholders));
 }
 
 #[test]

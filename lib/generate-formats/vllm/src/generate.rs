@@ -362,6 +362,12 @@ pub struct GenerateResponse {
     pub prompt_logprobs: Option<PromptLogprobs>,
 
     pub kv_transfer_params: Option<serde_json::Value>,
+
+    /// Expanded prompt, set when the request asked for `return_token_ids`.
+    pub prompt_token_ids: Option<Vec<dynamo_llm::protocols::TokenIdType>>,
+
+    /// Per-modality `{offset, length}` ranges within `prompt_token_ids`.
+    pub mm_placeholders: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -540,6 +546,8 @@ pub(crate) struct GenerateAggregator {
     prompt_logprobs: Option<PromptLogprobs>,
     kv_transfer_params: Option<Value>,
     kv_transfer_params_from_engine_data: bool,
+    prompt_token_ids: Option<Vec<dynamo_llm::protocols::TokenIdType>>,
+    mm_placeholders: Option<Value>,
 }
 
 impl GenerateAggregator {
@@ -550,6 +558,8 @@ impl GenerateAggregator {
             prompt_logprobs: None,
             kv_transfer_params: None,
             kv_transfer_params_from_engine_data: false,
+            prompt_token_ids: None,
+            mm_placeholders: None,
         }
     }
 
@@ -604,6 +614,17 @@ impl GenerateAggregator {
             self.kv_transfer_params = Some(kv_transfer_params);
             self.kv_transfer_params_from_engine_data = true;
         }
+        if self.prompt_token_ids.is_none()
+            && let Some(prompt_token_ids) = engine_data.remove("prompt_token_ids")
+        {
+            self.prompt_token_ids =
+                Some(serde_json::from_value(prompt_token_ids).map_err(|error| {
+                    anyhow::anyhow!("invalid generate prompt_token_ids payload: {error}")
+                })?);
+            self.mm_placeholders = engine_data
+                .remove("mm_placeholders")
+                .filter(|v| !v.is_null());
+        }
         choice.apply(&output, options)
     }
 
@@ -614,6 +635,8 @@ impl GenerateAggregator {
             prompt_logprobs,
             kv_transfer_params,
             kv_transfer_params_from_engine_data: _,
+            prompt_token_ids,
+            mm_placeholders,
         } = self;
 
         let mut choices: Vec<GenerateResponseChoice> = choices
@@ -641,6 +664,8 @@ impl GenerateAggregator {
             choices,
             prompt_logprobs,
             kv_transfer_params,
+            prompt_token_ids,
+            mm_placeholders,
         })
     }
 }
