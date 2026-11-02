@@ -40,25 +40,6 @@ pub enum ResidencyOwner {
     CacheOwner(CacheOwnerId),
 }
 
-/// Compact mutation-path identity for an exact residency owner.
-///
-/// Lower-tier edges carry this fixed-size value instead of embedding the full
-/// [`CacheOwnerId`] in every ownership entry. The full owner remains in the
-/// reverse index once per logical owner so dumps can round-trip it exactly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ResidencyOwnerKey([u8; 16]);
-
-impl ResidencyOwnerKey {
-    /// Wrap a 16-byte digest. The router computes the digest; this crate only carries it.
-    pub const fn from_digest(digest: [u8; 16]) -> Self {
-        Self(digest)
-    }
-
-    pub const fn digest(self) -> [u8; 16] {
-        self.0
-    }
-}
-
 impl ResidencyOwner {
     pub const fn worker(worker: WorkerWithDpRank) -> Self {
         Self::Worker(worker)

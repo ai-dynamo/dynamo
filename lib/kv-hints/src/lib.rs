@@ -9,26 +9,30 @@
 //!
 //! - [`wire`]: the hint message and its versioned actions ([`KvHint`], [`KvHintAction`],
 //!   [`KvSourceLocationsPayload`]), the runtime-config keys a worker advertises the capability
-//!   under, and [`KvTransferCandidateSource`], who holds a prefix a target could fetch.
+//!   under, and, re-exported from the indexer, [`KvTransferCandidateSource`], who holds a
+//!   prefix a target could fetch.
 //! - [`transfer`]: the source choice. A worker's hashed hint identity
 //!   ([`WorkerKvTransferKeys`]), the [`KvTransferTarget`] view a selection reads, the
 //!   [`KvTransferScope`] a summary answers, and [`KvTransferSourceSummary`], which groups the
 //!   [`ResolvedTransferSource`]s so the source for any target is found in O(1).
-//! - [`keys`]: the label hashing ([`label_key`], [`topology_keys`]), the key builder over a
-//!   worker's runtime-config fields ([`WorkerKvTransferKeys::from_worker`]), the
-//!   once-per-config [`WorkerKvTransferKeysCache`], and the two plain data types a worker's
-//!   runtime config speaks ([`KvHintTransferWorkerMetadata`], [`KvTransferEnforcement`]).
+//! - [`keys`]: the key builder over a worker's runtime-config fields
+//!   ([`WorkerKvTransferKeys::from_worker`]), the once-per-config [`WorkerKvTransferKeysCache`],
+//!   the two plain data types a worker's runtime config speaks
+//!   ([`KvHintTransferWorkerMetadata`], [`KvTransferEnforcement`]), and the indexer's label
+//!   hashing ([`label_key`], [`topology_keys`]), re-exported so both sides hash alike.
 //!
-//! Deliberately elsewhere: `KvTransferCandidates` and `CacheOwnerKvTransferKeys` stay in
-//! `dynamo-kv-indexer` because they carry the indexer's residency routing snapshot (the
-//! producer owns its output; moving them here would make the indexer and this crate name
-//! each other). `resolve_transfer_sources`, which joins the indexer's candidates with worker
-//! keys under a selection scope, the `WorkerConfigLike` adapter (`WorkerKvTransferKeysExt`),
-//! and the attach point that puts the hint on the selected request stay in
-//! `dynamo-scheduler`.
+//! Deliberately elsewhere: the transfer candidate vocabulary (`KvTransferCandidateSource`,
+//! `label_key`, `topology_keys`), `KvTransferCandidates`, `CacheOwnerKvTransferKeys`, and the
+//! residency owner key are `dynamo-kv-indexer`'s, because the indexer produces them with a
+//! match (the producer owns its output); this crate depends on the indexer and re-exports the
+//! three names it has always exposed, and the indexer never names this crate.
+//! `resolve_transfer_sources`, which joins the indexer's candidates with worker keys under a
+//! selection scope, the `WorkerConfigLike` adapter (`WorkerKvTransferKeysExt`), and the attach
+//! point that puts the hint on the selected request stay in `dynamo-scheduler`.
 //!
-//! Among router crates this one depends on `dynamo-router-protocol` and, for the residency
-//! owner key, `dynamo-kv-events`; no tokio, no transport, no stage logic.
+//! Among router crates this one depends on `dynamo-router-protocol` and `dynamo-kv-indexer`;
+//! no transport, no stage logic of its own. The scheduler kernel, `dynamo-kv-router`, and the
+//! hosts consume it; no stage depends on it.
 
 pub mod keys;
 pub mod transfer;

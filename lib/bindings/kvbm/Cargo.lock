@@ -2143,7 +2143,7 @@ dependencies = [
 name = "dynamo-kv-hints"
 version = "1.7.0"
 dependencies = [
- "dynamo-kv-events",
+ "dynamo-kv-indexer",
  "dynamo-router-protocol",
  "rustc-hash 2.1.2",
  "serde",
@@ -2161,7 +2161,6 @@ dependencies = [
  "dashmap",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
- "dynamo-kv-hints",
  "dynamo-router-protocol",
  "dynamo-tokens",
  "fastrand",

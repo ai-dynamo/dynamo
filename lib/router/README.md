@@ -15,9 +15,9 @@ The Dynamo router as a set of small crates. Every arrow into a stage starts at t
 | `dynamo-kv-hashing` | The hash contract engines and router share: block hashes, sequence hashes, tracking-hash context | dynamo-tokens, xxhash-rust, blake3 |
 | `dynamo-router-protocol` | The identities and worker-facing vocabulary every crate names | serde, serde_json, thiserror |
 | `dynamo-kv-events` | Everything about KV events: types, engine codec, replay cursor, the residency vocabulary (tiers, domains, owners) | protocol, serde, rmp-serde |
-| `dynamo-kv-hints` | KV transfer hints the router hands engines: the wire, the source choice, the worker transfer keys | protocol, kv-events, serde, rustc-hash |
+| `dynamo-kv-hints` | KV transfer hints the router hands engines: the wire, the source choice, the worker transfer keys | protocol, kv-indexer, serde, rustc-hash |
 | `dynamo-zmq` | One ZMQ socket helper | zmq, tokio net |
-| `dynamo-kv-indexer` | KV events in, prefix knowledge out; owns its service DTOs and identity config | protocol, kv-events, kv-hashing, kv-hints |
+| `dynamo-kv-indexer` | KV events in, prefix knowledge out; owns its service DTOs, identity config, the transfer candidate vocabulary, and the residency owner key | protocol, kv-events, kv-hashing |
 | `dynamo-slot-tracker` | Bookings per rank in, load and fullness out; owns its replication wire | protocol, kv-hashing |
 | `dynamo-session-affinity` | Session bindings in, constraints out; owns its replication wire | protocol |
 | `dynamo-worker-selection` | Pick one rank from a candidate table under a policy; owns the rows and the plugin API | protocol, slot-tracker |

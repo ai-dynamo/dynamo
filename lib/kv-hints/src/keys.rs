@@ -1,23 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! A worker's hashed hint identity, built once from its runtime config: the label hashing,
-//! the key builder over the config's fields, the once-per-config cache, and the two plain
-//! data types a worker's runtime config speaks about hints.
-//!
-//! `label_key` hashes with `std::collections::hash_map::DefaultHasher::new()`: fixed SipHash
-//! keys, deterministic within one toolchain, not a cross-version contract. Both sides of a
-//! comparison are computed in the same process today; if keys ever cross a process boundary,
-//! replace the hasher with a pinned one.
+//! A worker's hashed hint identity, built once from its runtime config: the key builder over
+//! the config's fields, the once-per-config cache, and the two plain data types a worker's
+//! runtime config speaks about hints. The label hashing ([`label_key`], [`topology_keys`]) is
+//! the indexer's, re-exported here so worker keys and the indexer's cache-owner keys hash the
+//! same way.
 
 use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
 use crate::transfer::WorkerKvTransferKeys;
+
+pub use dynamo_kv_indexer::kv_hints::{label_key, topology_keys};
 
 /// TRANSFER hint metadata a worker config exposes for one global DP rank.
 ///
@@ -42,24 +39,6 @@ pub enum KvTransferEnforcement {
     Required,
     /// Put the generated topology taint in `RoutingConstraints.preferred_taints`.
     Preferred,
-}
-
-/// Hash a label once, when its config or snapshot is published, so matching
-/// sources to targets per request compares integers instead of strings.
-pub fn label_key(label: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    label.hash(&mut hasher);
-    hasher.finish()
-}
-
-/// Sorted, so keys built from equal labels compare equal.
-pub fn topology_keys(topology: &HashMap<String, String>) -> Vec<(u64, u64)> {
-    let mut keys: Vec<_> = topology
-        .iter()
-        .map(|(domain, value)| (label_key(domain), label_key(value)))
-        .collect();
-    keys.sort_unstable();
-    keys
 }
 
 impl WorkerKvTransferKeys {

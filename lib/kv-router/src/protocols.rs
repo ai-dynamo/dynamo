@@ -28,8 +28,8 @@ pub use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlo
 pub use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
 
 pub use dynamo_kv_events::residency::{
-    ResetScope, ResidencyDomain, ResidencyOwner, ResidencyOwnerKey, StorageTier,
-    UnsupportedResidencyDomain, WireResidencyDomain,
+    ResetScope, ResidencyDomain, ResidencyOwner, StorageTier, UnsupportedResidencyDomain,
+    WireResidencyDomain,
 };
 
 pub use dynamo_router_protocol::worker::{
@@ -37,8 +37,8 @@ pub use dynamo_router_protocol::worker::{
 };
 
 pub use dynamo_kv_indexer::residency::{
-    ResidencyOwnerKeyExt, ResidencyProjection, ResidencyProjectionError, ResidencyRoutingSnapshot,
-    ResolvedRouterHintSource,
+    ResidencyOwnerKey, ResidencyOwnerKeyExt, ResidencyProjection, ResidencyProjectionError,
+    ResidencyRoutingSnapshot, ResolvedRouterHintSource,
 };
 
 pub use crate::plugins::worker_selection::{

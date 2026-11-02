@@ -126,10 +126,6 @@ impl serde_core::ser::Serialize for dynamo_kv_events::residency::WireResidencyDo
 pub fn dynamo_kv_events::residency::WireResidencyDomain::serialize<S>(&self, S) -> core::result::Result<<S as serde_core::ser::Serializer>::Ok, <S as serde_core::ser::Serializer>::Error> where S: serde_core::ser::Serializer
 impl<'de> serde_core::de::Deserialize<'de> for dynamo_kv_events::residency::WireResidencyDomain
 pub fn dynamo_kv_events::residency::WireResidencyDomain::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
-pub struct dynamo_kv_events::residency::ResidencyOwnerKey(_)
-impl dynamo_kv_events::residency::ResidencyOwnerKey
-pub const fn dynamo_kv_events::residency::ResidencyOwnerKey::digest(self) -> [u8; 16]
-pub const fn dynamo_kv_events::residency::ResidencyOwnerKey::from_digest([u8; 16]) -> Self
 pub struct dynamo_kv_events::residency::UnsupportedResidencyDomain
 pub mod dynamo_kv_events::zmq_wire
 pub enum dynamo_kv_events::zmq_wire::BlockHashValue

@@ -21,8 +21,8 @@ pub use dynamo_kv_events::event::{
 };
 pub use dynamo_kv_events::placement::{Placement, PlacementEvent, PlacementOwner};
 pub use dynamo_kv_events::residency::{
-    ResetScope, ResidencyDomain, ResidencyOwner, ResidencyOwnerKey, StorageTier,
-    UnsupportedResidencyDomain, WireResidencyDomain,
+    ResetScope, ResidencyDomain, ResidencyOwner, StorageTier, UnsupportedResidencyDomain,
+    WireResidencyDomain,
 };
 pub use dynamo_kv_hashing::routing::{
     BlockHashOptions, MM_PAD_HASH_MASK, MM_PAD_SHIFT_VALUE, TokensWithHashes, XXH3_SEED,
@@ -33,8 +33,8 @@ pub use dynamo_kv_hashing::routing::{
 pub use dynamo_kv_hints::{KvHintTransferWorkerMetadata, KvTransferEnforcement};
 pub use dynamo_kv_indexer::overlap::OverlapScores;
 pub use dynamo_kv_indexer::residency::{
-    ResidencyOwnerKeyExt, ResidencyProjection, ResidencyProjectionError, ResidencyRoutingSnapshot,
-    ResolvedRouterHintSource,
+    ResidencyOwnerKey, ResidencyOwnerKeyExt, ResidencyProjection, ResidencyProjectionError,
+    ResidencyRoutingSnapshot, ResolvedRouterHintSource,
 };
 pub use dynamo_router_protocol::block_hash::{ExternalSequenceBlockHash, LocalBlockHash};
 pub use dynamo_router_protocol::metadata::RouterHintSourceMetadata;

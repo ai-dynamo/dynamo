@@ -11,7 +11,7 @@ keywords.workspace = true
 readme = "README.md"
 
 [dependencies]
-dynamo-kv-events = { workspace = true }
+dynamo-kv-indexer = { workspace = true }
 dynamo-router-protocol = { workspace = true }
 rustc-hash = "2.1.1"
 serde = { workspace = true }

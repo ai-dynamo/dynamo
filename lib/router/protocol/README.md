@@ -23,14 +23,14 @@ Everything else belongs to the crate that produces it. When a second crate needs
 
 | Concept | Lives in |
 |---|---|
-| KV cache events, `RouterEvent` and its builders, the engine codec, the replay cursor, placement helpers, the residency vocabulary (`StorageTier`, `ResidencyDomain`, `ResidencyOwner`, `ResidencyOwnerKey`, `ResetScope`, `WireResidencyDomain`) | `dynamo-kv-events` |
+| KV cache events, `RouterEvent` and its builders, the engine codec, the replay cursor, placement helpers, the residency vocabulary (`StorageTier`, `ResidencyDomain`, `ResidencyOwner`, `ResetScope`, `WireResidencyDomain`) | `dynamo-kv-events` |
 | Block and sequence hashing, the tracking-hash context | `dynamo-kv-hashing` |
-| KV transfer hints (`KvHint`, the `KV_HINT_TRANSFER_*` keys, `KvTransferCandidateSource`), the transfer source choice, the worker transfer keys | `dynamo-kv-hints` |
+| KV transfer hints (`KvHint`, the `KV_HINT_TRANSFER_*` keys), the transfer source choice, the worker transfer keys | `dynamo-kv-hints` |
 | The router request and response, routing constraints, config overrides, eligibility, the hook traits the kernel calls | `dynamo-scheduler` |
 | Candidate rows and views, the policy plugin API | `dynamo-worker-selection` |
 | `QueueRejection`, `QueueLimitKind`, `WorkerPlacement`, the classifier API | `dynamo-admission` |
 | Replica events and booking descriptors (the slot-tracker replication wire) | `dynamo-slot-tracker` |
-| Indexer service DTOs and indexer identity configuration | `dynamo-kv-indexer` |
+| Indexer service DTOs, indexer identity configuration, the transfer candidate vocabulary (`KvTransferCandidateSource`, `label_key`, `topology_keys`), the residency owner key (`ResidencyOwnerKey`) | `dynamo-kv-indexer` |
 
 ## `AttemptId` and `AttemptIdMinter`
 

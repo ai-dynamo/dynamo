@@ -14,8 +14,11 @@
 //! slice (`config`). `lib/kv-router` re-exports every item here at its old path and keeps the
 //! HTTP, ZMQ, peer-recovery, and Prometheus adapters.
 //!
-//! Depends only on `dynamo-router-protocol`, `dynamo-kv-events`, `dynamo-kv-hashing`, and
-//! `dynamo-kv-hints` (the hint vocabulary and label hashing its transfer candidates use).
+//! Depends only on `dynamo-router-protocol`, `dynamo-kv-events`, and `dynamo-kv-hashing`. It
+//! owns what it emits with a match: the transfer candidate vocabulary
+//! (`kv_hints::KvTransferCandidateSource`, `label_key`, `topology_keys`) and the residency
+//! owner key (`residency::ResidencyOwnerKey`); `dynamo-kv-hints` imports them from here, never
+//! the reverse.
 //! The `export` feature (Prometheus counter vectors) is transitional: the design replaces it
 //! with atomics and a `stats()` snapshot in the metrics behavior change.
 //!

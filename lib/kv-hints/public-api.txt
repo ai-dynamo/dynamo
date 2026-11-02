@@ -1,5 +1,10 @@
 pub mod dynamo_kv_hints
+pub use dynamo_kv_hints::KvTransferCandidateSource
+pub use dynamo_kv_hints::label_key
+pub use dynamo_kv_hints::topology_keys
 pub mod dynamo_kv_hints::keys
+pub use dynamo_kv_hints::keys::label_key
+pub use dynamo_kv_hints::keys::topology_keys
 pub enum dynamo_kv_hints::keys::KvTransferEnforcement
 pub dynamo_kv_hints::keys::KvTransferEnforcement::Preferred
 pub dynamo_kv_hints::keys::KvTransferEnforcement::Required
@@ -11,8 +16,6 @@ impl dynamo_kv_hints::keys::WorkerKvTransferKeysCache
 pub fn dynamo_kv_hints::keys::WorkerKvTransferKeysCache::get_or_init(&self, impl core::ops::function::FnOnce() -> dynamo_kv_hints::transfer::WorkerKvTransferKeys) -> &dynamo_kv_hints::transfer::WorkerKvTransferKeys
 impl core::cmp::PartialEq for dynamo_kv_hints::keys::WorkerKvTransferKeysCache
 pub fn dynamo_kv_hints::keys::WorkerKvTransferKeysCache::eq(&self, &Self) -> bool
-pub fn dynamo_kv_hints::keys::label_key(&str) -> u64
-pub fn dynamo_kv_hints::keys::topology_keys(&std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>) -> alloc::vec::Vec<(u64, u64)>
 pub mod dynamo_kv_hints::transfer
 pub struct dynamo_kv_hints::transfer::KvTransferScope
 impl dynamo_kv_hints::transfer::KvTransferScope
@@ -24,7 +27,7 @@ pub fn dynamo_kv_hints::transfer::KvTransferScope::needs_islands(&self) -> bool
 pub fn dynamo_kv_hints::transfer::KvTransferScope::of(impl core::iter::traits::collect::IntoIterator<Item = (dynamo_kv_hints::transfer::KvTransferTarget, usize)>) -> Self
 pub struct dynamo_kv_hints::transfer::KvTransferSourceChoice
 pub dynamo_kv_hints::transfer::KvTransferSourceChoice::prefix_blocks: usize
-pub dynamo_kv_hints::transfer::KvTransferSourceChoice::source: dynamo_kv_hints::wire::KvTransferCandidateSource
+pub dynamo_kv_hints::transfer::KvTransferSourceChoice::source: dynamo_kv_indexer::kv_hints::KvTransferCandidateSource
 pub struct dynamo_kv_hints::transfer::KvTransferSourceSummary
 impl dynamo_kv_hints::transfer::KvTransferSourceSummary
 pub fn dynamo_kv_hints::transfer::KvTransferSourceSummary::new(impl core::iter::traits::collect::IntoIterator<Item = dynamo_kv_hints::transfer::ResolvedTransferSource>, dynamo_kv_hints::transfer::KvTransferScope) -> Self
@@ -33,7 +36,7 @@ pub struct dynamo_kv_hints::transfer::KvTransferTarget
 pub struct dynamo_kv_hints::transfer::ResolvedTransferSource
 pub dynamo_kv_hints::transfer::ResolvedTransferSource::attachment: core::option::Option<dynamo_router_protocol::worker::WorkerWithDpRank>
 pub dynamo_kv_hints::transfer::ResolvedTransferSource::prefix_blocks: usize
-pub dynamo_kv_hints::transfer::ResolvedTransferSource::source: dynamo_kv_hints::wire::KvTransferCandidateSource
+pub dynamo_kv_hints::transfer::ResolvedTransferSource::source: dynamo_kv_indexer::kv_hints::KvTransferCandidateSource
 pub dynamo_kv_hints::transfer::ResolvedTransferSource::topology: alloc::vec::Vec<(u64, u64)>
 pub dynamo_kv_hints::transfer::ResolvedTransferSource::worker_type: u64
 pub struct dynamo_kv_hints::transfer::WorkerKvTransferKeys
@@ -46,11 +49,7 @@ pub fn dynamo_kv_hints::transfer::WorkerKvTransferKeys::worker_type(&self) -> co
 impl dynamo_kv_hints::transfer::WorkerKvTransferKeys
 pub fn dynamo_kv_hints::transfer::WorkerKvTransferKeys::from_worker<'a>(u32, u32, impl core::ops::function::Fn(u32) -> core::option::Option<dynamo_kv_hints::keys::KvHintTransferWorkerMetadata<'a>>, core::option::Option<&std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>, core::option::Option<&str>, core::option::Option<dynamo_kv_hints::keys::KvTransferEnforcement>) -> Self
 pub mod dynamo_kv_hints::wire
-pub enum dynamo_kv_hints::wire::KvTransferCandidateSource
-pub dynamo_kv_hints::wire::KvTransferCandidateSource::CacheOwner(dynamo_kv_events::residency::ResidencyOwnerKey)
-pub dynamo_kv_hints::wire::KvTransferCandidateSource::Worker(dynamo_router_protocol::worker::WorkerWithDpRank)
-impl core::convert::From<dynamo_router_protocol::worker::WorkerWithDpRank> for dynamo_kv_hints::wire::KvTransferCandidateSource
-pub fn dynamo_kv_hints::wire::KvTransferCandidateSource::from(dynamo_router_protocol::worker::WorkerWithDpRank) -> Self
+pub use dynamo_kv_hints::wire::KvTransferCandidateSource
 pub struct dynamo_kv_hints::wire::KvHint
 pub dynamo_kv_hints::wire::KvHint::actions: alloc::vec::Vec<dynamo_kv_hints::wire::KvHintAction>
 pub dynamo_kv_hints::wire::KvHint::message_id: alloc::string::String
@@ -71,11 +70,6 @@ pub dynamo_kv_hints::wire::KvSourceLocationsPayload::source_control_endpoint: al
 pub const dynamo_kv_hints::wire::KV_HINT_TRANSFER_CAPABILITY_KEY: &str
 pub const dynamo_kv_hints::wire::KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: &str
 pub const dynamo_kv_hints::wire::KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY: &str
-pub enum dynamo_kv_hints::KvTransferCandidateSource
-pub dynamo_kv_hints::KvTransferCandidateSource::CacheOwner(dynamo_kv_events::residency::ResidencyOwnerKey)
-pub dynamo_kv_hints::KvTransferCandidateSource::Worker(dynamo_router_protocol::worker::WorkerWithDpRank)
-impl core::convert::From<dynamo_router_protocol::worker::WorkerWithDpRank> for dynamo_kv_hints::wire::KvTransferCandidateSource
-pub fn dynamo_kv_hints::wire::KvTransferCandidateSource::from(dynamo_router_protocol::worker::WorkerWithDpRank) -> Self
 pub enum dynamo_kv_hints::KvTransferEnforcement
 pub dynamo_kv_hints::KvTransferEnforcement::Preferred
 pub dynamo_kv_hints::KvTransferEnforcement::Required
@@ -109,7 +103,7 @@ pub fn dynamo_kv_hints::transfer::KvTransferScope::needs_islands(&self) -> bool
 pub fn dynamo_kv_hints::transfer::KvTransferScope::of(impl core::iter::traits::collect::IntoIterator<Item = (dynamo_kv_hints::transfer::KvTransferTarget, usize)>) -> Self
 pub struct dynamo_kv_hints::KvTransferSourceChoice
 pub dynamo_kv_hints::KvTransferSourceChoice::prefix_blocks: usize
-pub dynamo_kv_hints::KvTransferSourceChoice::source: dynamo_kv_hints::wire::KvTransferCandidateSource
+pub dynamo_kv_hints::KvTransferSourceChoice::source: dynamo_kv_indexer::kv_hints::KvTransferCandidateSource
 pub struct dynamo_kv_hints::KvTransferSourceSummary
 impl dynamo_kv_hints::transfer::KvTransferSourceSummary
 pub fn dynamo_kv_hints::transfer::KvTransferSourceSummary::new(impl core::iter::traits::collect::IntoIterator<Item = dynamo_kv_hints::transfer::ResolvedTransferSource>, dynamo_kv_hints::transfer::KvTransferScope) -> Self
@@ -118,7 +112,7 @@ pub struct dynamo_kv_hints::KvTransferTarget
 pub struct dynamo_kv_hints::ResolvedTransferSource
 pub dynamo_kv_hints::ResolvedTransferSource::attachment: core::option::Option<dynamo_router_protocol::worker::WorkerWithDpRank>
 pub dynamo_kv_hints::ResolvedTransferSource::prefix_blocks: usize
-pub dynamo_kv_hints::ResolvedTransferSource::source: dynamo_kv_hints::wire::KvTransferCandidateSource
+pub dynamo_kv_hints::ResolvedTransferSource::source: dynamo_kv_indexer::kv_hints::KvTransferCandidateSource
 pub dynamo_kv_hints::ResolvedTransferSource::topology: alloc::vec::Vec<(u64, u64)>
 pub dynamo_kv_hints::ResolvedTransferSource::worker_type: u64
 pub struct dynamo_kv_hints::WorkerKvTransferKeys
@@ -138,5 +132,3 @@ pub fn dynamo_kv_hints::keys::WorkerKvTransferKeysCache::eq(&self, &Self) -> boo
 pub const dynamo_kv_hints::KV_HINT_TRANSFER_CAPABILITY_KEY: &str
 pub const dynamo_kv_hints::KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY: &str
 pub const dynamo_kv_hints::KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY: &str
-pub fn dynamo_kv_hints::label_key(&str) -> u64
-pub fn dynamo_kv_hints::topology_keys(&std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>) -> alloc::vec::Vec<(u64, u64)>

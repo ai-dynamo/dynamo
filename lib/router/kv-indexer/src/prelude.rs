@@ -9,8 +9,7 @@ pub(crate) use dynamo_kv_events::event::{
     KvCacheStoredBlockData, RouterEvent,
 };
 pub(crate) use dynamo_kv_events::residency::{
-    ResetScope, ResidencyDomain, ResidencyOwner, ResidencyOwnerKey, StorageTier,
-    WireResidencyDomain,
+    ResetScope, ResidencyDomain, ResidencyOwner, StorageTier, WireResidencyDomain,
 };
 pub(crate) use dynamo_kv_hashing::routing::{
     BlockHashOptions, TokensWithHashes, compute_block_hash_for_seq, compute_next_seq_hash,
@@ -21,5 +20,5 @@ pub(crate) use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRa
 
 pub(crate) use crate::overlap::OverlapScores;
 pub(crate) use crate::residency::{
-    ResidencyOwnerKeyExt, ResidencyProjection, ResidencyRoutingSnapshot,
+    ResidencyOwnerKey, ResidencyOwnerKeyExt, ResidencyProjection, ResidencyRoutingSnapshot,
 };

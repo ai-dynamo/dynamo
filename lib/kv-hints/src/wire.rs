@@ -2,15 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! KV transfer hints attached to backend requests, the runtime-config keys that advertise
-//! them, and who can be the source of a fetch.
+//! them, and, re-exported from the indexer that produces it, who can be the source of a fetch.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use dynamo_kv_events::residency::ResidencyOwnerKey;
 use dynamo_router_protocol::block_hash::ExternalSequenceBlockHash;
-use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 /// The selected worker can consume a `TRANSFER` hint with the v1 payload.
 // TODO: Rename these constants and wire values with the matching KVCC names.
@@ -110,21 +108,10 @@ impl KvHint {
     }
 }
 
-/// Who holds a KV prefix a target could fetch: a worker rank, or a cache owner known by its
-/// compact residency key. Produced by the indexer, consumed by worker selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum KvTransferCandidateSource {
-    /// A worker's data-parallel rank.
-    Worker(WorkerWithDpRank),
-    /// A cache owner, by the compact key of its residency owner.
-    CacheOwner(ResidencyOwnerKey),
-}
-
-impl From<WorkerWithDpRank> for KvTransferCandidateSource {
-    fn from(worker: WorkerWithDpRank) -> Self {
-        Self::Worker(worker)
-    }
-}
+/// Who holds a KV prefix a target could fetch: a worker rank, or a cache owner by its compact
+/// residency key. The indexer produces it with a match and owns it; this crate keeps the
+/// public path because [`crate::transfer`] names it in every source choice.
+pub use dynamo_kv_indexer::kv_hints::KvTransferCandidateSource;
 
 #[cfg(test)]
 mod tests {
