@@ -11,10 +11,58 @@ use crate::{
     worker_type::WorkerType,
 };
 
+use crate::decision_profile::VLLM_NATIVE_DECISION_QUALIFICATION_FAILURE_V1;
 use crate::decision_profile::{
     DecisionExecutionProfile, DecisionProfileKind, NativeExecutorKind, TokenBackend,
 };
 use DecisionExecutionProfile as Profile;
+use serde::Deserialize;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DecisionKinds {
+    pub(crate) token: bool,
+    pub(crate) head: bool,
+    pub(crate) read: bool,
+}
+
+impl DecisionKinds {
+    pub(crate) fn eligible(card: &ModelDeploymentCard) -> Self {
+        let text_generation =
+            card.model_type.supports_chat() || card.model_type.supports_completions();
+        Self {
+            token: card.model_input == ModelInput::Tokens && text_generation,
+            head: card.model_input == ModelInput::Text
+                && card.model_type.supports_classify()
+                && card.model_type.supports_pooling(),
+            read: matches!(card.model_input, ModelInput::Text | ModelInput::Tokens)
+                && text_generation,
+        }
+    }
+
+    pub(crate) fn supports(self, kind: DecisionProfileKind) -> bool {
+        match kind {
+            DecisionProfileKind::Token(_) => self.token,
+            DecisionProfileKind::Native(NativeExecutorKind::Head) => self.head,
+            DecisionProfileKind::Native(NativeExecutorKind::Read) => self.read,
+        }
+    }
+
+    pub(crate) fn advertised(card: &ModelDeploymentCard) -> Self {
+        let mut kinds = Self::default();
+        // Failed qualification retains structural intent, never a success capability.
+        for profile in card
+            .advertised_decision_profiles()
+            .chain(card.decision_qualification_failure())
+        {
+            match profile.kind() {
+                DecisionProfileKind::Token(_) => kinds.token = true,
+                DecisionProfileKind::Native(NativeExecutorKind::Head) => kinds.head = true,
+                DecisionProfileKind::Native(NativeExecutorKind::Read) => kinds.read = true,
+            }
+        }
+        kinds
+    }
+}
 
 fn transport_capability(backend: TokenBackend) -> &'static str {
     match backend {
@@ -32,6 +80,23 @@ fn worker_shape_eligible(card: &ModelDeploymentCard) -> bool {
             .runtime_config
             .runtime_data
             .contains_key(SPEC_DECODE_RUNTIME_KEY)
+}
+
+pub(super) fn qualification_failure(card: &ModelDeploymentCard) -> Option<Profile> {
+    #[derive(Deserialize)]
+    struct Failure {
+        profile: Profile,
+    }
+    let failure = Failure::deserialize(
+        card.runtime_config
+            .runtime_data
+            .get(VLLM_NATIVE_DECISION_QUALIFICATION_FAILURE_V1)?,
+    )
+    .ok()?;
+    (worker_shape_eligible(card)
+        && matches!(failure.profile.kind(), DecisionProfileKind::Native(_))
+        && DecisionKinds::eligible(card).supports(failure.profile.kind()))
+    .then_some(failure.profile)
 }
 
 pub(super) const ACTIVE_DECISION_PROFILES: &[Profile] =

@@ -14,7 +14,9 @@ use crate::{
     entrypoint::EngineConfig,
     http::service::metrics::Metrics,
     kv_router::indexer::{preprocessed_multimodal_cache_keys, try_build_cache_indexer},
-    kv_router::{EncoderRouter, KvRouter, PrefillRouter, RoutingHost, RoutingLoadContext},
+    kv_router::{
+        EncoderRouter, KvRouter, LlmDispatch, PrefillRouter, RoutingHost, RoutingLoadContext,
+    },
     migration::Migration,
     model_card::ModelDeploymentCard,
     namespace::NamespaceFilter,
@@ -45,6 +47,19 @@ use dynamo_runtime::{
     },
 };
 use std::sync::Arc;
+
+pub struct PreprocessedRoutingOptions {
+    pub model_manager: Arc<ModelManager>,
+    pub router_mode: RouterMode,
+    pub load_context: Arc<RoutingLoadContext>,
+    pub chooser: Option<Arc<KvRouter>>,
+    pub prefill_chooser: Option<Arc<PrefillRouter>>,
+    pub encoder_chooser: Option<Arc<EncoderRouter>>,
+    pub enable_multimodal_cache_indexer: bool,
+    pub session_affinity_ttl_secs: Option<u64>,
+    pub session_affinity_mode: SessionAffinityMode,
+    pub dispatch: Option<LlmDispatch>,
+}
 
 #[derive(Clone)]
 pub struct PreprocessedRouting {
@@ -100,7 +115,7 @@ async fn wait_for_min_initial_workers(
     }
 }
 
-fn router_client(
+pub(crate) fn routing_client(
     client: &Client,
     router_mode: RouterMode,
     chooser: Option<&Arc<KvRouter>>,
@@ -147,20 +162,11 @@ fn validate_router_mode_for_lora(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn build_preprocessed_routing(
     client: &Client,
-    model_manager: Arc<crate::discovery::ModelManager>,
-    router_mode: RouterMode,
-    load_context: Arc<RoutingLoadContext>,
-    chooser: Option<Arc<KvRouter>>,
-    prefill_chooser: Option<Arc<PrefillRouter>>,
-    encoder_chooser: Option<Arc<EncoderRouter>>,
-    enable_multimodal_cache_indexer: bool,
-    session_affinity_ttl_secs: Option<u64>,
+    options: PreprocessedRoutingOptions,
 ) -> anyhow::Result<PreprocessedRouting> {
-    build_preprocessed_routing_with_session_affinity_mode(
-        client,
+    let PreprocessedRoutingOptions {
         model_manager,
         router_mode,
         load_context,
@@ -169,24 +175,9 @@ pub async fn build_preprocessed_routing(
         encoder_chooser,
         enable_multimodal_cache_indexer,
         session_affinity_ttl_secs,
-        SessionAffinityMode::Hard,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
-    client: &Client,
-    model_manager: Arc<crate::discovery::ModelManager>,
-    router_mode: RouterMode,
-    load_context: Arc<RoutingLoadContext>,
-    chooser: Option<Arc<KvRouter>>,
-    prefill_chooser: Option<Arc<PrefillRouter>>,
-    encoder_chooser: Option<Arc<EncoderRouter>>,
-    enable_multimodal_cache_indexer: bool,
-    session_affinity_ttl_secs: Option<u64>,
-    session_affinity_mode: SessionAffinityMode,
-) -> anyhow::Result<PreprocessedRouting> {
+        session_affinity_mode,
+        dispatch,
+    } = options;
     // Fail fast on an unsupported LoRA + router-mode combination BEFORE waiting for the initial
     // worker set, so a misconfiguration surfaces immediately at startup rather than after the
     // (possibly long) DYN_ROUTER_MIN_INITIAL_WORKERS wait.
@@ -196,11 +187,10 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
         session_affinity_ttl_secs.is_some(),
     )?;
     let min_initial_workers = min_initial_workers_from_env()?;
-    let router_client = router_client(client, router_mode, chooser.as_ref())?;
+    let router_client = routing_client(client, router_mode, chooser.as_ref())?;
 
     wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
     let endpoint_id = router_client.endpoint.id();
-
     let ttl = session_affinity_ttl_secs.map(Duration::from_secs);
     let affinity = match (ttl, chooser.as_ref()) {
         (Some(ttl), Some(chooser)) => {
@@ -244,6 +234,7 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
         .flatten();
     let routing_host = Arc::new(
         RoutingHost::builder(router_client, router_mode)
+            .dispatch(dispatch)
             .kv_router(chooser)
             .load_context(load_context)
             .affinity_coordinator(affinity)

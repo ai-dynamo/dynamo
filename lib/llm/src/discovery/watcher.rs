@@ -723,19 +723,22 @@ impl ModelWatcher {
 
             let preprocessed_routing = if needs_preprocessed_routing {
                 Some(
-                    entrypoint::input::build_preprocessed_routing_with_session_affinity_mode(
+                    entrypoint::input::build_preprocessed_routing(
                         &client,
-                        self.manager.clone(),
-                        router_config.router_mode,
-                        load_context
-                            .clone()
-                            .expect("routing load context must exist"),
-                        kv_chooser.clone(),
-                        prefill_chooser.clone(),
-                        encoder_chooser.clone(),
-                        uses_multimodal_cache_routing(card),
-                        router_config.session_affinity_ttl_secs,
-                        router_config.session_affinity_mode,
+                        entrypoint::input::PreprocessedRoutingOptions {
+                            model_manager: self.manager.clone(),
+                            router_mode: router_config.router_mode,
+                            load_context: load_context
+                                .clone()
+                                .expect("routing load context must exist"),
+                            chooser: kv_chooser.clone(),
+                            prefill_chooser: prefill_chooser.clone(),
+                            encoder_chooser: encoder_chooser.clone(),
+                            enable_multimodal_cache_indexer: uses_multimodal_cache_routing(card),
+                            session_affinity_ttl_secs: router_config.session_affinity_ttl_secs,
+                            session_affinity_mode: router_config.session_affinity_mode,
+                            dispatch: None,
+                        },
                     )
                     .await
                     .context("build_preprocessed_routing")?,

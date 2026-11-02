@@ -1243,6 +1243,27 @@ impl ModelDeploymentCard {
         decision_profile::classify(self)
     }
 
+    pub(crate) fn advertised_decision_profiles(
+        &self,
+    ) -> impl Iterator<Item = DecisionExecutionProfile> + '_ {
+        decision_profile::ACTIVE_DECISION_PROFILES
+            .iter()
+            .copied()
+            .filter(|profile| {
+                self.runtime_config
+                    .supports_runtime_capability(profile.decision_capability())
+            })
+    }
+
+    pub(crate) fn decision_qualification(&self) -> Option<(DecisionExecutionProfile, usize)> {
+        let profile = self.decision_execution_profile()?;
+        Some((profile, self.decision_max_candidates(profile)?))
+    }
+
+    pub(crate) fn decision_qualification_failure(&self) -> Option<DecisionExecutionProfile> {
+        decision_profile::qualification_failure(self)
+    }
+
     pub(crate) fn decision_max_candidates(
         &self,
         profile: DecisionExecutionProfile,

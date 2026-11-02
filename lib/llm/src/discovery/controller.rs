@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::model_card::decision_profile::DecisionKinds;
+
 use std::{
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
     panic::AssertUnwindSafe,
@@ -22,7 +24,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{model_card::ModelDeploymentCard, namespace::NamespaceFilter};
 
-use super::worker_inventory::{WorkerGroupObservation, WorkerGroupState};
+use super::{
+    DecisionAvailability,
+    worker_inventory::{WorkerGroupObservation, WorkerGroupState},
+};
 
 const DEFAULT_MAX_CONCURRENT_BUILDS: usize = 8;
 const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(30);
@@ -71,7 +76,30 @@ fn cohort_video_contract(members: &[DesiredInstance]) -> Option<String> {
         .then_some(agreed)
 }
 
-/// Identifies a cohort's active video contract without changing its MDC checksum.
+/// Optional decision qualification must agree without changing ordinary identity.
+fn cohort_decision_availability(members: &[DesiredInstance]) -> DecisionAvailability {
+    if members
+        .iter()
+        .any(|member| member.card.decision_qualification_failure().is_some())
+    {
+        return DecisionAvailability::Failed;
+    }
+    let Some(agreed) = members
+        .iter()
+        .find_map(|member| member.card.decision_qualification())
+    else {
+        return DecisionAvailability::Unadvertised;
+    };
+    if members
+        .iter()
+        .all(|member| member.card.decision_qualification() == Some(agreed))
+    {
+        DecisionAvailability::qualified(agreed, admitted_ids(members))
+    } else {
+        DecisionAvailability::Pending
+    }
+}
+
 fn cohort_fingerprint(mdc_checksum: &str, video_contract: Option<&str>) -> String {
     match video_contract {
         Some(contract) => format!("{mdc_checksum}\0video_contract\0{contract}"),
@@ -203,6 +231,7 @@ struct DesiredGroup {
     cohort_order: VecDeque<String>,
     reported_rejections: HashSet<String>,
     admission_tx: watch::Sender<Vec<u64>>,
+    decision_admission_tx: watch::Sender<DecisionAvailability>,
     retained: Option<RetainedPipeline>,
     status: GroupStatus,
 }
@@ -210,15 +239,43 @@ struct DesiredGroup {
 impl DesiredGroup {
     fn new() -> Self {
         let (admission_tx, _) = watch::channel(Vec::new());
+        let (decision_admission_tx, _) = watch::channel(DecisionAvailability::Unadvertised);
         Self {
             retry_attempt: 0,
             cohorts: HashMap::new(),
             cohort_order: VecDeque::new(),
             reported_rejections: HashSet::new(),
             admission_tx,
+            decision_admission_tx,
             retained: None,
             status: GroupStatus::Idle,
         }
+    }
+
+    fn refresh_decisions(&self, members: &[DesiredInstance]) {
+        let mut next = cohort_decision_availability(members);
+        if let DecisionAvailability::Qualified(next) = &mut next {
+            let serving = self
+                .retained
+                .as_ref()
+                .map_or(&self.admission_tx, |retained| &retained.admission_tx)
+                .borrow();
+            Arc::make_mut(next).ids.retain(|id| serving.contains(id));
+        }
+        if matches!(next, DecisionAvailability::Failed)
+            && !matches!(
+                *self.decision_admission_tx.borrow(),
+                DecisionAvailability::Failed
+            )
+        {
+            let blocking = members
+                .iter()
+                .filter(|member| member.card.decision_qualification_failure().is_some())
+                .map(|member| &member.key)
+                .collect::<Vec<_>>();
+            tracing::warn!(workers = ?blocking, "Decision qualification failed; worker restart or configuration repair is required");
+        }
+        DecisionAvailability::publish(&self.decision_admission_tx, next);
     }
 
     fn insert(&mut self, instance: &DesiredInstance) {
@@ -425,17 +482,29 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
     /// Reconcile registrations without changing an existing worker incarnation.
     /// Capability-only updates still refresh the incumbent cohort.
     fn apply_added(&mut self, instance: DesiredInstance) -> bool {
+        let mut decision_only_update = false;
         if let Some(existing) = self.desired.get(&instance.key) {
-            if existing.mdc_checksum == instance.mdc_checksum
+            let same_ordinary_contract = existing.mdc_checksum == instance.mdc_checksum
                 && existing.projection_fingerprint == instance.projection_fingerprint
                 && existing.video_contract == instance.video_contract
                 && super::image_edits::advertised_limit(&existing.card)
-                    == super::image_edits::advertised_limit(&instance.card)
-            {
+                    == super::image_edits::advertised_limit(&instance.card);
+            let same_decision_contract = existing.card.decision_qualification()
+                == instance.card.decision_qualification()
+                && existing.card.decision_qualification_failure()
+                    == instance.card.decision_qualification_failure()
+                && DecisionKinds::advertised(&existing.card)
+                    == DecisionKinds::advertised(&instance.card);
+            if same_ordinary_contract && same_decision_contract {
                 // A repeated registration still confirms liveness after an older snapshot.
                 self.record_mutation(instance.key.clone());
                 return false;
             }
+            decision_only_update = same_ordinary_contract
+                && !same_decision_contract
+                && existing.materializes_worker_set()
+                && instance.materializes_worker_set()
+                && existing.group_key == instance.group_key;
             if existing.materializes_worker_set()
                 && (existing.group_key != instance.group_key
                     || existing.mdc_checksum != instance.mdc_checksum)
@@ -471,7 +540,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
 
         if materializes_worker_set {
             if affects_selected {
-                self.reconcile_group(&group_key, true);
+                self.reconcile_group(&group_key, !decision_only_update);
             } else {
                 self.publish_group_observation(&group_key);
             }
@@ -587,6 +656,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         let old_status = std::mem::replace(&mut group.status, GroupStatus::Idle);
 
         if group.cohorts.is_empty() {
+            group.refresh_decisions(&[]);
             group.admission_tx.send_replace(Vec::new());
             if let Some(retained) = group.retained.take() {
                 retained.admission_tx.send_replace(Vec::new());
@@ -604,8 +674,8 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             .to_string();
         let member_keys = group.cohorts[&mdc_checksum].clone();
         let members = self.members(&member_keys);
-        let fingerprint =
-            cohort_fingerprint(&mdc_checksum, cohort_video_contract(&members).as_deref());
+        let video_contract = cohort_video_contract(&members);
+        let fingerprint = cohort_fingerprint(&mdc_checksum, video_contract.as_deref());
         let fingerprint_changed =
             status_checksum(&old_status).is_some_and(|previous| previous != fingerprint);
         let mut retained_commit = status_committed_members(&old_status).cloned();
@@ -804,6 +874,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 }
             }
         };
+        group.refresh_decisions(&members);
         self.groups.insert(key.clone(), group);
     }
 
@@ -1071,6 +1142,12 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 };
             }
         }
+        let members = group
+            .cohorts
+            .get(&result.spec.mdc_checksum)
+            .map(|keys| self.members(keys))
+            .unwrap_or_default();
+        group.refresh_decisions(&members);
         self.groups.insert(result.spec.key, group);
     }
 
@@ -1350,27 +1427,27 @@ mod tests {
 
     use crate::local_model::runtime_config::VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY;
 
-    struct Prepared(u64);
+    pub(super) struct Prepared(u64);
 
-    struct FakeHost {
-        starts: AtomicUsize,
-        failures: AtomicUsize,
-        commit_failures: AtomicUsize,
-        replace_failures: AtomicUsize,
+    pub(super) struct FakeHost {
+        pub(super) starts: AtomicUsize,
+        pub(super) failures: AtomicUsize,
+        pub(super) commit_failures: AtomicUsize,
+        pub(super) replace_failures: AtomicUsize,
         start_tx: mpsc::UnboundedSender<GroupSpec>,
-        release: Semaphore,
+        pub(super) release: Semaphore,
         committed: Mutex<HashMap<String, BTreeSet<String>>>,
         adapters: Mutex<HashMap<String, BTreeSet<String>>>,
         adapter_projections: Mutex<HashMap<String, HashMap<String, String>>>,
-        admissions: Mutex<Vec<watch::Receiver<Vec<u64>>>>,
-        removed_groups: AtomicUsize,
+        pub(super) admissions: Mutex<Vec<watch::Receiver<Vec<u64>>>>,
+        pub(super) removed_groups: AtomicUsize,
         discarded: AtomicUsize,
-        inventory: super::super::worker_inventory::WorkerInventory,
-        prepared_replacements: AtomicUsize,
+        pub(super) inventory: super::super::worker_inventory::WorkerInventory,
+        pub(super) prepared_replacements: AtomicUsize,
     }
 
     impl FakeHost {
-        fn new() -> (Arc<Self>, mpsc::UnboundedReceiver<GroupSpec>) {
+        pub(super) fn new() -> (Arc<Self>, mpsc::UnboundedReceiver<GroupSpec>) {
             let (start_tx, start_rx) = mpsc::unbounded_channel();
             (
                 Arc::new(Self {
@@ -1393,7 +1470,7 @@ mod tests {
             )
         }
 
-        fn members(&self, key: &GroupKey) -> BTreeSet<String> {
+        pub(super) fn members(&self, key: &GroupKey) -> BTreeSet<String> {
             self.committed
                 .lock()
                 .unwrap()
@@ -1601,14 +1678,14 @@ mod tests {
         }
     }
 
-    fn group_key() -> GroupKey {
+    pub(super) fn group_key() -> GroupKey {
         GroupKey {
             model_name: "model".to_string(),
             worker_set_key: "group".to_string(),
         }
     }
 
-    fn instance(id: u64, mdc_checksum: &str) -> DesiredInstance {
+    pub(super) fn instance(id: u64, mdc_checksum: &str) -> DesiredInstance {
         build_instance(id, mdc_checksum, None)
     }
 
@@ -1686,7 +1763,7 @@ mod tests {
         }
     }
 
-    async fn finish_build(controller: &mut ModelDiscoveryController<FakeHost>) {
+    pub(super) async fn finish_build(controller: &mut ModelDiscoveryController<FakeHost>) {
         let result = controller.builds.join_next().await.unwrap().unwrap();
         controller.active_builds -= 1;
         controller.apply_build_result(result);
@@ -1746,7 +1823,7 @@ mod tests {
             upgraded_spec.fingerprint,
             cohort_fingerprint(
                 &upgraded_spec.mdc_checksum,
-                Some(&contract_digest("round_ties_even"))
+                Some(&contract_digest("round_ties_even")),
             )
         );
         host.release.add_permits(1);

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod decision;
+pub(crate) use decision::DecisionAvailability;
 pub(crate) mod image_edits;
 mod model;
 pub(crate) mod readiness;
