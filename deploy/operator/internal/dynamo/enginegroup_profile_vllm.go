@@ -276,6 +276,13 @@ func validateVLLMExternalOwnership(d vllmProfileDimensions, values map[string]st
 	}
 	if explicitRank {
 		if flags["--elastic-ep-auto-bootstrap"] && rankLiteral == engineGroupOrdinalRef {
+			// A Pod ordinal is a first-rank offset only when its allocation contains one native member.
+			if d.localDP != 1 {
+				return &UnsupportedVLLMProfileSourceError{
+					Reason: UnsupportedVLLMProfileSourceReasonProcessOwnership,
+					Detail: "packed allocation ordinals require --elastic-ep-allocation-index, not --data-parallel-rank",
+				}
+			}
 			return nil
 		}
 		return validateVLLMInitialRank(rankLiteral, d.dp)

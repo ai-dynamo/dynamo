@@ -129,6 +129,41 @@ func TestVLLMProfilePackedAllocations(t *testing.T) {
 	}
 }
 
+func TestVLLMProfileAutomaticRankIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		rank    string
+		localDP int64
+		wantErr string
+	}{
+		{name: "single-member allocation ordinal", rank: engineGroupOrdinalRef, localDP: 1},
+		{name: "packed allocation ordinal is not a first rank", rank: engineGroupOrdinalRef, localDP: 2, wantErr: "--elastic-ep-allocation-index"},
+		{name: "packed explicit first rank zero", rank: "0", localDP: 2},
+		{name: "packed explicit first rank two", rank: "2", localDP: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("declare native automatic bootstrap with an explicit local rank range")
+			source := newTestVLLMProfileGeometrySource()
+			source.MainContainerGPUs = tc.localDP
+			source.InitialReplicas = int32(8 / tc.localDP)
+			source.Args = append(withoutTestVLLMProfileOptions(source.Args,
+				"--tensor-parallel-size", "--data-parallel-size", "--data-parallel-size-local", "--data-parallel-rank", "--data-parallel-external-lb"),
+				"--tensor-parallel-size=1", "--elastic-ep-auto-bootstrap", "--elastic-ep-initial-dp-size=8",
+				"--data-parallel-rank="+tc.rank, fmt.Sprintf("--data-parallel-size-local=%d", tc.localDP))
+
+			t.Log("distinguish a native first-rank offset from a physical allocation ordinal")
+			profile, err := ResolveVLLMElasticEPProfile(source)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, int32(tc.localDP), profile.NativeMembersPerReplica)
+			assert.Equal(t, source.InitialReplicas, profile.InitialReplicas)
+		})
+	}
+}
+
 func TestVLLMProfileEffectiveOwnership(t *testing.T) {
 	t.Log("exercise EngineArgs ownership, including implicit external and hybrid-to-external modes")
 	tests := []struct {

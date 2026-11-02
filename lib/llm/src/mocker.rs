@@ -696,6 +696,7 @@ impl MockerExecutionContext {
                                 topic: String::new(),
                                 image_token_id: None,
                                 video_token_id: None,
+                                recovery: None,
                             });
                             match KvEventPublisher::new_with_local_indexer(
                                 endpoint.clone(),
