@@ -70,7 +70,8 @@ impl PolicyClassConfig {
     }
 
     /// Whether an online queue expires this class's budget: controlled delay in an EDF class,
-    /// the only order whose head always carries the class's earliest due time.
+    /// the only order in which every lane root, blocked lanes included, carries the earliest
+    /// due time of its lane.
     pub(crate) fn expires_class_budget(&self) -> bool {
         self.controlled_delay && self.queue_policy == RouterQueuePolicy::Edf
     }

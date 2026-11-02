@@ -118,14 +118,10 @@ impl PrefillRouter {
                     booking: Some(booking),
                 })
             }
+            // Typed, so the caller can tell this queue drop from a routing failure.
             crate::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
-                anyhow::bail!(
-                    "prefill router policy-class queue rejection: policy_class={}, limit_kind={}, current={}, limit={}",
-                    rejection.policy_class,
-                    rejection.limit_kind,
-                    rejection.current,
-                    rejection.limit,
-                )
+                Err(anyhow::Error::new(rejection)
+                    .context("prefill router policy-class queue rejection"))
             }
         }
     }

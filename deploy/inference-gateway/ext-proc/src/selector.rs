@@ -817,6 +817,71 @@ worker_selection:
         );
     }
 
+    /// A class queue drop reaches the pick as `QueueDropped`, which Envoy answers with the
+    /// overload status: a never-queuing class rejects a request while its only worker is busy,
+    /// and a due time that passed is the same drop.
+    #[tokio::test]
+    async fn queue_drops_fail_the_pick_as_queue_drops() {
+        use dynamo_kv_router::scheduling::KvSchedulerError;
+
+        let policy_file = tempfile::NamedTempFile::new().expect("create policy file");
+        std::fs::write(
+            policy_file.path(),
+            r#"
+policy_classes:
+  - name: dropped
+    quantum: 1
+    prefill_busy_threshold_frac: 0.0
+    request_queue_limit_per_worker: 0
+"#,
+        )
+        .expect("write policy file");
+        let selector = Selector::new_with_kv_router_config(
+            &test_config(),
+            router_config_with_policy(&policy_file),
+            WorkerSelectionPolicyRegistry::default(),
+        )
+        .await
+        .expect("selector should build");
+        // A queueing class needs the worker's prefill capacity.
+        let worker = WorkerRequest {
+            max_num_batched_tokens: Some(8192),
+            ..schedulable_registration(1)
+        };
+        register(&selector, vec![worker]).await;
+
+        selector
+            .select_and_reserve(select_request("res-active"))
+            .await
+            .expect("an idle worker admits the first request");
+        let error = selector
+            .select_and_reserve(select_request("res-dropped"))
+            .await
+            .expect_err("the busy worker leaves the never-queuing class no room");
+        let SelectionError::Scheduler(KvSchedulerError::QueueRejected(rejection)) = &error else {
+            panic!("expected a queue rejection, got {error:?}");
+        };
+        let expected = rejection.to_string();
+        assert!(matches!(
+            crate::epp_router::selection_pick_error(error),
+            crate::picker::PickError::QueueDropped(message) if message == expected
+        ));
+
+        assert!(matches!(
+            crate::epp_router::selection_pick_error(SelectionError::Scheduler(
+                KvSchedulerError::DeadlineExceeded
+            )),
+            crate::picker::PickError::QueueDropped(message) if message == "request deadline exceeded"
+        ));
+        // Other scheduler failures keep their routing-failure mapping.
+        assert!(matches!(
+            crate::epp_router::selection_pick_error(SelectionError::Scheduler(
+                KvSchedulerError::AllEligibleWorkersOverloaded
+            )),
+            crate::picker::PickError::RoutingFailed(_)
+        ));
+    }
+
     /// Parity with the integrated router: `policy_class` is passed through to
     /// the core's `PolicyProfile::resolve_class_index`. Configured class names
     /// resolve directly; any other name fails with a 400 scheduler error.

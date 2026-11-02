@@ -65,7 +65,7 @@ use crate::types::Annotated;
 // Re-use helpers from the openai module (sibling under service/)
 use super::error::{
     ClientErrorAction, SanitizedError, find_canonical_error_in_chain, http_action_for_error,
-    invalid_argument,
+    invalid_argument, overload_status_code,
 };
 use super::metadata::{attach_x_request_id, extract_metadata_from_http};
 use super::openai::{get_body_limit, get_or_create_request_id, warn_nvext_disabled};
@@ -751,17 +751,28 @@ async fn anthropic_messages(
     tracing::trace!("Issuing generate call for Anthropic messages");
 
     let engine_stream = engine.generate(request).await.map_err(|e| {
-        // Deadline is checked before overload so a chain carrying both markers
-        // keeps the deadline outcome, matching the OpenAI surface: HTTP 429
-        // (`rate_limit_error`) with a `Cancelled` metric label and no
-        // rejection accounting.
+        // A router class queue drops a request when its due time passes while it waits or a
+        // class limit refuses it. Matching the OpenAI surface, both drops are the overload
+        // response: the configured overload status (`overloaded_error`) without `Retry-After`,
+        // an `Overload` metric label, and no rejection accounting. Each keeps its own message
+        // and failure reason. The deadline is checked first so a chain carrying both markers
+        // keeps the deadline outcome.
         if let Some(error) = super::metrics::queue_deadline_error(e.as_ref()) {
             super::metrics::record_failure(error);
-            inflight_guard.mark_error(super::metrics::ErrorType::Cancelled);
+            inflight_guard.mark_error(super::metrics::ErrorType::Overload);
             return anthropic_error_unrecorded(
-                StatusCode::TOO_MANY_REQUESTS,
-                "rate_limit_error",
+                overload_status_code(),
+                "overloaded_error",
                 super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
+            );
+        }
+        if let Some(rejection) = super::metrics::queue_rejection(e.as_ref()) {
+            super::openai::record_local_failure(ErrorClass::CapacityExhausted);
+            inflight_guard.mark_error(super::metrics::ErrorType::Overload);
+            return anthropic_error_unrecorded(
+                overload_status_code(),
+                "overloaded_error",
+                &rejection.to_string(),
             );
         }
         if super::metrics::request_was_rejected(e.as_ref()) {

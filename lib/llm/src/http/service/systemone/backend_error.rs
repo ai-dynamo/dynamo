@@ -12,6 +12,18 @@ pub(super) fn classify(cause: &(dyn std::error::Error + 'static)) -> DispatchErr
     if metrics::request_was_cancelled(cause) {
         return DispatchError::cancelled();
     }
+    // A router class queue drops a branch when its due time passes while it waits or a class
+    // limit refuses it. A drop is the overload status without `Retry-After`, so it bypasses the
+    // capacity response, which promises a retry interval.
+    if metrics::request_deadline_exceeded(cause) {
+        return queue_drop(
+            metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
+            "router queue deadline exceeded".to_string(),
+        );
+    }
+    if let Some(rejection) = metrics::queue_rejection(cause) {
+        return queue_drop("router queue limit reached", rejection.to_string());
+    }
     if metrics::request_was_rejected(cause) {
         return DispatchError {
             status: error::overload_status_code(),
@@ -40,4 +52,14 @@ pub(super) fn classify(cause: &(dyn std::error::Error + 'static)) -> DispatchErr
         }
     }
     DispatchError::unavailable("native scoring engine failed")
+}
+
+fn queue_drop(public_message: &'static str, detail: String) -> DispatchError {
+    DispatchError {
+        status: error::overload_status_code(),
+        public_message,
+        detail,
+        retry_after: false,
+        is_capacity_exhausted: false,
+    }
 }

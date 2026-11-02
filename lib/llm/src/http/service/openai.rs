@@ -535,7 +535,7 @@ fn stream_error_type(error: &dynamo_runtime::error::DynamoError) -> ErrorType {
 
     if request_was_timed_out(error) {
         ErrorType::ResponseTimeout
-    } else if find_queue_rejection_in_chain(error).is_some() || request_was_rejected(error) {
+    } else if super::metrics::queue_rejection(error).is_some() || request_was_rejected(error) {
         ErrorType::Overload
     } else if request_was_unavailable(error) {
         ErrorType::Unavailable
@@ -572,21 +572,6 @@ pub(crate) fn find_invalid_argument_in_chain<'a>(
 
 pub(super) fn error_is_invalid_argument(err: &(dyn std::error::Error + 'static)) -> bool {
     find_invalid_argument_in_chain(err).is_some()
-}
-
-fn find_queue_rejection_in_chain<'a>(
-    err: &'a (dyn std::error::Error + 'static),
-) -> Option<&'a dynamo_kv_router::scheduling::QueueRejection> {
-    let mut current = Some(err);
-    while let Some(error) = current {
-        if let Some(rejection) =
-            error.downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
-        {
-            return Some(rejection);
-        }
-        current = error.source();
-    }
-    None
 }
 
 impl ErrorMessage {
@@ -950,7 +935,10 @@ impl ErrorMessage {
     /// If successful, it will return the [`HttpError`] as an [`ErrorMessage::internal_server_error`]
     /// with the details of the error.
     pub fn from_anyhow(err: anyhow::Error, alt_msg: &str) -> ErrorResponse {
-        if let Some(rejection) = find_queue_rejection_in_chain(err.as_ref()) {
+        // A router class queue drops a request when a class limit refuses it or its due time
+        // passes while it waits. Both drops are the overload response, the configured overload
+        // status without `Retry-After`, and keep distinct messages and failure reasons.
+        if let Some(rejection) = super::metrics::queue_rejection(err.as_ref()) {
             let code = overload_status_code();
             record_local_failure(ErrorClass::CapacityExhausted);
             return (
@@ -967,7 +955,7 @@ impl ErrorMessage {
 
         if let Some(error) = super::metrics::queue_deadline_error(err.as_ref()) {
             super::metrics::record_failure(error);
-            let code = StatusCode::TOO_MANY_REQUESTS;
+            let code = overload_status_code();
             return (
                 code,
                 Json(ErrorMessage {
@@ -975,7 +963,7 @@ impl ErrorMessage {
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
                     details: None,
-                    metric_error_type: Some(ErrorType::Cancelled),
+                    metric_error_type: None,
                 }),
             );
         }
@@ -8024,7 +8012,7 @@ mod tests {
     }
 
     #[test]
-    fn caller_deadline_maps_to_http_429_without_overload_accounting() {
+    fn queue_deadline_maps_to_the_overload_status_without_rejection_accounting() {
         use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
 
         let error: anyhow::Error = DynamoError::builder()
@@ -8037,10 +8025,32 @@ mod tests {
             .into();
         assert!(!super::super::metrics::request_was_rejected(error.as_ref()));
 
+        // A queue drop, like a queue-limit rejection: the configured overload status, 529 by
+        // default.
         let response = ErrorMessage::from_anyhow(error, BACKUP_ERROR_MESSAGE);
-        assert_eq!(response.0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.0, overload_status_code());
+        let configured = std::env::var("DYN_HTTP_OVERLOAD_STATUS_CODE").ok();
+        assert_eq!(
+            response.0.as_u16(),
+            dynamo_kv_router::overload_status::parse_overload_status_code(configured.as_deref())
+        );
+        assert_eq!(response.1.code, overload_status_code().as_u16());
+        assert_eq!(response.1.error_type, "Overloaded");
         assert_eq!(response.1.message, "request deadline exceeded");
-        assert_eq!(response.1.metric_error_type, Some(ErrorType::Cancelled));
+        assert_eq!(response.1.details, None);
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::Overload
+        );
+
+        // A deadline that is not the router queue's keeps its gateway timeout.
+        let caller_deadline: anyhow::Error = DynamoError::builder()
+            .error_type(DynamoErrorType::DeadlineExceeded)
+            .message("attempt deadline exceeded")
+            .build()
+            .into();
+        let response = ErrorMessage::from_anyhow(caller_deadline, BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.0, StatusCode::GATEWAY_TIMEOUT);
     }
 
     #[test]

@@ -369,11 +369,10 @@ later capacity recheck or cache refresh does not restart it.
 rejected at startup. With it, the class rejects a request that is still waiting
 for admission when its due time passes: the request's explicit deadline, which
 wins even when later, else router ingress plus `slo_ttft_ms`. The request gets
-the router's queue-deadline error (HTTP 429), spends none of its class's
-scheduling credit, and is counted in
-`dynamo_frontend_router_admission_rejected_total` with
-`reason="due_time_passed"`. A request whose client has already disconnected
-when the router checks it is dropped uncounted. Each class queue keeps its own
+the router's queue-deadline error, spends none of its class's scheduling
+credit, and is counted in `dynamo_frontend_router_admission_rejected_total`
+with `reason="due_time_passed"`. A request whose client has already
+disconnected when the router checks it is dropped uncounted. Each class queue keeps its own
 expiry timer, so a request expires on time even when no request arrives and no
 capacity frees. Without `controlled_delay`, the budget only orders the class.
 `fcfs` and `wspt` classes neither order by the budget nor expire on it. In
@@ -381,6 +380,13 @@ every class, a classifier's explicit deadline expires a waiting request,
 including one waiting behind an `edf` head whose class due time only orders
 it. The budget bounds waiting for router admission only: it does not limit an
 admitted request or predict its TTFT.
+
+A queue-limit rejection and a due time that passes while a request waits are
+both drops. For either one, the Frontend returns its overload status, HTTP 529
+unless `DYN_HTTP_OVERLOAD_STATUS_CODE` sets another, without a `Retry-After`
+header; the selection service and the endpoint picker return the same status,
+and gRPC returns `RESOURCE_EXHAUSTED`. Each drop keeps its own error message
+and rejection reason, `queue_size_exceeded` or `due_time_passed`.
 
 > [!NOTE]
 > Older frontends without `controlled_delay` support reject a policy YAML that contains the key,
@@ -714,7 +720,7 @@ Use `--router-track-output-blocks` when your workload is output-heavy and you wa
 
 This threshold delays dispatch. It does not remove workers from the candidate set; for that distinction, see [Router Filtering](worker-filtering.md).
 
-Use `DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS` when queued requests may wait long enough for worker cache state to materially change before dispatch. The default is `10` seconds; set it to `0` to disable dequeue-time overlap refresh. The refresh is best effort: when another request arrives, capacity changes, or a queue deadline passes first, the router dispatches with the original overlap scores instead of waiting.
+Use `DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS` when queued requests may wait long enough for worker cache state to materially change before dispatch. The default is `10` seconds; set it to `0` to disable dequeue-time overlap refresh. Arriving requests, capacity changes, and other requests' queue deadlines are handled while the refresh runs, and the request then dispatches with the refreshed scores. If the request's own due time passes first, the router rejects it, and if its client disconnects, the router drops it, without waiting for the refresh.
 
 **Note for the SGLang backend.** In Dynamo v1.1.0 and later, the value the SGLang worker publishes for `max_num_batched_tokens` in its Model Deployment Card depends on the server args:
 
