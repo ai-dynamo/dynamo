@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import threading
@@ -43,7 +44,8 @@ def serve(
     stop: threading.Event,
 ) -> None:
     import torch
-    from modelexpress.load_strategy.base import publish_metadata, register_tensors
+    from modelexpress.load_strategy.base import register_tensors, unpublish_metadata
+    from modelexpress.metadata.publish import publish_metadata_and_ready
 
     vmm = get_vmm()
     vmm.ensure_initialized()
@@ -71,7 +73,20 @@ def serve(
         if ctx.nixl_manager is None:
             raise RuntimeError("ModelExpress NIXL registration failed")
         resources.callback(ctx.nixl_manager.shutdown)
-        publish_metadata(ctx)
+        # Stop advertising the source before its agent and mappings go away.
+        resources.callback(unpublish_metadata, ctx)
+        # publish_metadata() only logs a failure, which would leave this
+        # process serving nothing. This raises instead.
+        publish_metadata_and_ready(
+            ctx.mx_client,
+            ctx.nixl_manager,
+            ctx.tensors,
+            ctx.worker_rank,
+            ctx.device_id,
+            ctx.identity,
+            ctx.worker_id,
+            accelerator=ctx.accelerator_backend.name,
+        )
         logger.info(
             "Serving rank %d from device %d: %d allocations, %.2f GiB",
             rank,
@@ -113,8 +128,14 @@ def main(argv: list[str] | None = None) -> None:
     if args.device is None:
         # Count GMS devices from /proc, without starting CUDA here.
         devices = list(range(len(device_identity.node_gpus())))
+        if not devices:
+            raise SystemExit("GMS V1 found no GPU that this container can open")
         run_per_device("gpu_memory_service.v1.snapshot.mx_source", argv, devices)
         return
+    # ModelExpress registers the source from a background thread, retrying
+    # while its server is unreachable. By default it gives up after 30
+    # minutes. This process exists only to serve, so keep retrying.
+    os.environ.setdefault("MX_PUBLISH_TIMEOUT_SECS", "0")
     init_vmm(VMMDeviceType.CUDA)
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())

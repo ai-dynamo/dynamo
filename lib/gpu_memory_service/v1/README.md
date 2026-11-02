@@ -334,3 +334,8 @@ lease on them until it stops. A pod running it cannot be checkpointed:
 checkpoint prepare refuses while the lease is held, and the pod keeps serving.
 Do not list the source under `checkpoint.job.gmsClientContainers`. The lease
 does not block restored engines, which attach the weights read-only.
+
+The source exits with an error if it finds no GPU or cannot start publishing.
+While the ModelExpress server is unreachable it keeps retrying the
+registration (`MX_PUBLISH_TIMEOUT_SECS` defaults to 0, no limit, here). When
+stopped, it withdraws the source before it releases the weights.

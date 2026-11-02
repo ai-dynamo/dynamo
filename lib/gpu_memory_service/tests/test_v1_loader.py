@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -141,6 +142,95 @@ def test_mx_source_serves_every_device_by_default(monkeypatch):
 
     assert launched == [
         ["--source-key", "ckpt-1", "--device", str(device)] for device in range(3)
+    ]
+
+
+def test_mx_source_fails_without_gpus(monkeypatch):
+    monkeypatch.setattr(mx_source.device_identity, "node_gpus", lambda: [])
+
+    with pytest.raises(SystemExit, match="no GPU"):
+        mx_source.main(["--source-key", "ckpt-1"])
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("modelexpress") is None or not HAS_TORCH,
+    reason="modelexpress and torch required",
+)
+@pytest.mark.parametrize("publish_error", [None, RuntimeError("port in use")])
+def test_mx_source_stops_advertising_before_releasing_its_weights(
+    monkeypatch, publish_error
+):
+    import threading
+
+    import torch
+    from modelexpress.load_strategy import base
+    from modelexpress.metadata import publish
+
+    events = []
+    ctx = SimpleNamespace(
+        mx_client=None,
+        nixl_manager=None,
+        tensors={},
+        worker_rank=0,
+        device_id=0,
+        identity=None,
+        worker_id="gms-test",
+        accelerator_backend=SimpleNamespace(name="cuda"),
+    )
+
+    def register(_model, context, reuse_discovered):
+        context.nixl_manager = SimpleNamespace(
+            shutdown=lambda: events.append("shutdown agent")
+        )
+
+    def publish_and_ready(*_args, **_kwargs):
+        events.append("publish")
+        if publish_error is not None:
+            raise publish_error
+
+    vmm = SimpleNamespace(
+        ensure_initialized=lambda: None,
+        runtime_set_device=lambda _device: None,
+        get_allocation_granularity=lambda _device: 2**21,
+    )
+    session = SimpleNamespace(close=lambda: events.append("close session"))
+    monkeypatch.setattr(torch.cuda, "set_device", lambda _device: None)
+    monkeypatch.setattr(mx_source, "get_vmm", lambda: vmm)
+    monkeypatch.setattr(mx_source, "_GMSClientSession", lambda *_args: session)
+    monkeypatch.setattr(mx_source, "_verify_session_device", lambda *_args: None)
+    monkeypatch.setattr(
+        mx_source,
+        "_list_allocations",
+        lambda _session: [SimpleNamespace(aligned_size=2**21)],
+    )
+    monkeypatch.setattr(
+        mx_source, "_map_export", lambda *_args: [SimpleNamespace(base=0x1000)]
+    )
+    monkeypatch.setattr(
+        mx_source, "_release_mapping", lambda *_args: events.append("unmap")
+    )
+    monkeypatch.setattr(mx_source, "byte_tensors", lambda *_args: {})
+    monkeypatch.setattr(mx_source, "mx_load_context", lambda *_args: ctx)
+    monkeypatch.setattr(base, "register_tensors", register)
+    monkeypatch.setattr(
+        base, "unpublish_metadata", lambda _ctx: events.append("unpublish")
+    )
+    monkeypatch.setattr(publish, "publish_metadata_and_ready", publish_and_ready)
+    stop = threading.Event()
+    stop.set()
+
+    if publish_error is None:
+        mx_source.serve("/tmp/gms.sock", 0, 0, {}, stop)
+    else:
+        with pytest.raises(RuntimeError, match="port in use"):
+            mx_source.serve("/tmp/gms.sock", 0, 0, {}, stop)
+
+    assert events == [
+        "publish",
+        "unpublish",
+        "shutdown agent",
+        "unmap",
+        "close session",
     ]
 
 
