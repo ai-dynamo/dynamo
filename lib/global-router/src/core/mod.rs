@@ -34,6 +34,7 @@
 mod catalog;
 mod directory;
 mod policies;
+pub mod replica_sync;
 
 use std::collections::HashMap;
 use std::future::Future;
