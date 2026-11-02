@@ -462,7 +462,6 @@ async fn pool_cache_follows_the_service() {
         .unwrap();
     assert_eq!(dgd_names(&pools.borrow_and_update()), ["west-1"]);
 
-    // A failing service keeps the pools and reports why.
     fake.0.lock().unwrap().pools_status = StatusCode::SERVICE_UNAVAILABLE;
     let reason = tokio::time::timeout(Duration::from_secs(5), async {
         loop {

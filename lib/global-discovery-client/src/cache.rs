@@ -672,7 +672,6 @@ mod tests {
             )
         );
 
-        // Recovery clears it, and an unchanged list publishes nothing.
         source.answer(true, &[("a", 8)]);
         tokio::time::sleep(Duration::from_secs(3)).await;
         assert_eq!(cache.freshness(), Freshness::Current);
