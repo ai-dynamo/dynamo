@@ -4,6 +4,85 @@
 use super::*;
 
 #[tokio::test]
+async fn prepared_token_requests_isolate_salts_and_use_bounded_metric_labels() {
+    let engine = TestEngine::new(EngineBehavior::Success);
+    let metrics = Arc::new(super::super::Metrics::new_with_prefix(Some(
+        "prepared_token".into(),
+    )));
+    let registry = prometheus::Registry::new();
+    metrics.register(&registry).unwrap();
+    let manager = crate::discovery::ModelManager::new();
+    let label = manager.metric_model_for("test-model");
+    assert_ne!(label, "test-model");
+    for id in ["prepared-one", "prepared-two"] {
+        let questions: serde_json::Map<String, Value> = (0..3).map(|index| (
+            format!("question-{index}"),
+            json!({"type": "choice", "instructions": "Choose a team.", "criteria": {"billing": "Payments", "technical": "Software"}}),
+        )).collect();
+        let request = Arc::new(
+            dynamo_decisions::parse_request(
+                &serde_json::to_vec(
+                    &json!({"model": "test-model", "state": "test", "questions": questions}),
+                )
+                .unwrap(),
+                dynamo_decisions::Route::SystemOne,
+            )
+            .unwrap(),
+        );
+        let fixture = super::preflight::preflight_selection(None);
+        let selected = token_selection(
+            fixture.context.card.clone(),
+            engine.clone(),
+            token_executor(&fixture).preprocessor().clone(),
+            Profile::SglangSerialV1,
+        );
+        let prepared = super::super::execution::prepare(&request, selected, 65536).unwrap();
+        super::super::execution::observe_work(label, &prepared, &metrics);
+        let response = super::super::execution::dispatch(
+            prepared,
+            id.into(),
+            Context::new(()).context(),
+            Arc::new(Semaphore::new(3))
+                .acquire_many_owned(3)
+                .await
+                .unwrap(),
+            metrics.clone(),
+            label.into(),
+            request,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let observed = engine.observations.lock().unwrap();
+    assert_eq!(observed.len(), 6);
+    let salt = &observed[0].native["cache_salt"];
+    assert!(
+        observed[..3]
+            .iter()
+            .all(|branch| &branch.native["cache_salt"] == salt)
+    );
+    let next = &observed[3].native["cache_salt"];
+    assert!(
+        observed[3..]
+            .iter()
+            .all(|branch| &branch.native["cache_salt"] == next)
+    );
+    assert_ne!(salt, next);
+    super::metrics::assert_bounded_labels(
+        &registry,
+        "prepared_token_systemone_",
+        label,
+        &[
+            "questions",
+            "input_tokens",
+            "candidate_ids",
+            "admitted_branches_total",
+            "phase_seconds",
+        ],
+    );
+}
+
+#[tokio::test]
 async fn empty_canonical_questions_are_rejected_before_admission() {
     let service = super::super::service_v2::HttpService::builder()
         .build()

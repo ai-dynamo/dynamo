@@ -2185,6 +2185,22 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn systemone_state_caps_operator_input_limit_before_requests() {
+        temp_env::with_var(
+            env_llm::DYN_SYSTEMONE_MAX_INPUT_TOKENS,
+            Some("1048577"),
+            || {
+                let service = HttpService::builder().build().unwrap();
+                assert_eq!(
+                    service.state_clone().systemone_max_input_tokens(),
+                    MAX_SYSTEMONE_INPUT_TOKENS
+                );
+            },
+        );
+    }
+
     struct MtlsTestCertificates {
         ca: NamedTempFile,
         server_cert: NamedTempFile,

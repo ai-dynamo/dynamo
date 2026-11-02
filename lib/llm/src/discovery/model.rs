@@ -1378,6 +1378,67 @@ mod tests {
     }
 
     #[test]
+    fn vllm_decision_selection_uses_its_own_profile_and_limits() {
+        use crate::local_model::runtime_config::{
+            DecisionExecutionProfile, SGLANG_GENERATE_CAPABILITY, SGLANG_SYSTEMONE_SERIAL_V1,
+            VLLM_CAUSAL_DECISION_V1,
+        };
+
+        for max_num_seqs in [1, 16] {
+            let model = Model::new("scoring-model".into());
+            let (worker_set, _workers) = systemone_worker_set("vllm", |card| {
+                card.model_input = crate::model_type::ModelInput::Tokens;
+                card.model_type = crate::model_type::ModelType::Chat;
+                card.runtime_config
+                    .runtime_data
+                    .remove(SGLANG_GENERATE_CAPABILITY);
+                card.runtime_config
+                    .runtime_data
+                    .remove(SGLANG_SYSTEMONE_SERIAL_V1);
+                card.runtime_config
+                    .runtime_data
+                    .insert(VLLM_INFERENCE_V1_GENERATE_CAPABILITY.into(), true.into());
+                card.runtime_config
+                    .runtime_data
+                    .insert(VLLM_CAUSAL_DECISION_V1.into(), true.into());
+                card.runtime_config.max_num_seqs = Some(max_num_seqs);
+                card.runtime_config.data_parallel_size = 1;
+            });
+            model.add_worker_set("vllm".into(), worker_set.clone());
+            assert!(!model.has_generate_engine());
+            if max_num_seqs != 1 {
+                assert!(matches!(
+                    model.get_systemone_execution_selection(),
+                    Err(SystemOneSelectionError::Unsupported)
+                ));
+                continue;
+            }
+            let selected = model.get_systemone_execution_selection().unwrap();
+            assert_eq!(
+                selected.context.profile(),
+                DecisionExecutionProfile::VllmCausalV1
+            );
+            assert_eq!(selected.context.decision_capabilities().max_questions, 64);
+            assert_eq!(selected.context.decision_capabilities().max_candidates, 26);
+            assert_eq!(
+                Some(selected.context.decision_capabilities().max_candidates),
+                selected
+                    .context
+                    .card
+                    .decision_max_candidates(selected.context.profile())
+            );
+            assert!(Arc::ptr_eq(
+                &token_executor(&selected).engine,
+                worker_token_executor(&worker_set).engine()
+            ));
+            assert!(Arc::ptr_eq(
+                &token_executor(&selected).preprocessor,
+                worker_token_executor(&worker_set).preprocessor()
+            ));
+        }
+    }
+
+    #[test]
     fn systemone_selection_keeps_engine_card_and_assets_atomic() {
         let model = Model::new("scoring-model".to_string());
         let (worker_set_a, workers_a) = systemone_worker_set("ns-a", |card| {
