@@ -42,11 +42,12 @@ mod admission;
 mod cancellation;
 mod conditional_bypass;
 mod handoff;
-mod query;
+#[cfg(test)]
+mod schedule_tests;
 mod stage;
 use activation::ActivationSnapshot;
 use handoff::PrefillTask;
-pub use query::PrefillReservation;
+pub use stage::PrefillPlan;
 use stage::{
     PrefillPreview, ensure_tracker, is_query_only, log_prefill_failure, prefill_request,
     require_direct_prefill_worker, session_affinity, strip_client_bypass_marker,
@@ -300,7 +301,9 @@ pub struct PrefillRouter {
     activation_task_state: Arc<()>,
 }
 
-pub(crate) struct PrefillBinding {
+/// The prefill worker set a `PrefillRouter` currently routes to. Opaque
+/// outside this module.
+pub struct PrefillBinding {
     target_id: WorkerSetTargetId,
     endpoint_id: EndpointId,
     router: Arc<RoutingHost>,

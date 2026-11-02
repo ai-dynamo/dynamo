@@ -78,7 +78,7 @@ pub(crate) use routing_host::hosted_request;
 pub(crate) mod routing_load;
 pub mod sequence;
 pub mod shared_cache;
-pub(crate) mod stage_router;
+pub mod stage_router;
 
 pub use active_load::ActiveLoad;
 

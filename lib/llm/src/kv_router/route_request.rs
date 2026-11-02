@@ -5,7 +5,8 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_hashing::multimodal::BlockExtraInfo;
+/// Re-exported for `RouteRequest` implementors outside this crate.
+pub use dynamo_kv_hashing::multimodal::BlockExtraInfo;
 use dynamo_runtime::pipeline::{AsyncEngineContext, AsyncEngineContextProvider, Error, SingleIn};
 use dynamo_scheduler::host::RouterConfigOverride;
 
