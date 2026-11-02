@@ -160,6 +160,8 @@ func (v *sharedValidation) warnf(format string, args ...any) {
 
 type dynamoComponentDeploymentSharedSpecValidationOptions struct {
 	backendFramework                  string
+	parentEnv                         []corev1.EnvVar
+	hasRootOverride                   bool
 	grovePathway                      bool
 	validateInferencePoolAvailability bool
 	providerOverridesSupported        bool
@@ -195,6 +197,11 @@ func (v *sharedValidation) validateComponentEngineGroupSpec(
 	// Resolving geometry requires a positive explicit creation seed, not the runtime's infer-size convention.
 	if spec.InitialSize < 1 {
 		allErrs = append(allErrs, field.Invalid(fldPath.Child("initialSize"), spec.InitialSize, "must be positive"))
+	}
+
+	// Native launch validation requires an implemented DGD workload pathway.
+	if !options.grovePathway {
+		return allErrs
 	}
 
 	// Backend-owned resolvers prove the effective geometry; neither runtime is a fallback for the other.
@@ -262,6 +269,15 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	}
 	if spec.LPX != nil {
 		allErrs = append(allErrs, v.validateLPXConfig(spec.LPX, fldPath.Child("lpx"))...)
+	}
+
+	// Validate the creation contract from the shared component owner.
+	if spec.EngineGroup != nil {
+		allErrs = append(allErrs, v.validateComponentEngineGroupSpec(spec.EngineGroup, fldPath.Child("engineGroup"), componentEngineGroupSpecValidationOptions{
+			component: spec, backendFramework: options.backendFramework, parentEnv: options.parentEnv,
+			hasRootOverride: options.hasRootOverride,
+			grovePathway:    options.grovePathway,
+		})...)
 	}
 
 	// Only the DGD's Grove program owns independently scalable world creation.
@@ -403,7 +419,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		}
 	}
 
-	allErrs = append(allErrs, dynamo.ValidateComponentSidecarConfiguration(spec, fldPath, options.backendFramework)...)
+	allErrs = append(allErrs, dynamo.ValidateComponentSidecarConfiguration(spec, fldPath)...)
 
 	allErrs = append(allErrs, v.validateSharedExperimentalSpec(spec, fldPath, options.grovePathway)...)
 
@@ -1299,7 +1315,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
 		} else if !v.toleratesMissingRuntimeVersionOverride(string(newComponent.ComponentType)) &&
 			runtimeVersionOverrideRequired(newImage, newComponent.RuntimeVersionOverride) &&
-			(newImage != oldImage || overrideChanged) {
+			(newImage != oldImage || overrideChanged || newComponent.ComponentType != oldComponent.ComponentType) {
 			allErrs = append(allErrs, field.Required(
 				fldPath.Child("runtimeVersionOverride"),
 				runtimeVersionOverrideRequiredMessage,
@@ -1335,7 +1351,8 @@ func (v *sharedValidation) validateRolePodTemplateRuntimeVersionUpdate(
 		role := &newComponent.Roles[i]
 		newImage := rolePodTemplateRuntimeImage(role, dynamo.GetComponentDynamoSidecar(newComponent) != nil)
 		if newImage != "" && runtimeVersionOverrideRequired(newImage, newComponent.RuntimeVersionOverride) &&
-			(newImage != oldImages[role.Name] || newComponent.RuntimeVersionOverride != oldComponent.RuntimeVersionOverride) {
+			(newImage != oldImages[role.Name] || newComponent.RuntimeVersionOverride != oldComponent.RuntimeVersionOverride ||
+				newComponent.ComponentType != oldComponent.ComponentType) {
 			return field.ErrorList{field.Required(
 				fldPath.Child("runtimeVersionOverride"),
 				runtimeVersionOverrideRequiredMessage,

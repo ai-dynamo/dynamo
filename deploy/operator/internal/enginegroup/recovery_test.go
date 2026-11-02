@@ -13,6 +13,74 @@ import (
 	"testing"
 )
 
+func TestDurableRetirementCommitSurvivesTopologyObservationDrift(t *testing.T) {
+	for _, outcome := range []TransitionOutcome{TransitionOutcomeCompleted, TransitionOutcomeBlocked} {
+		t.Run(string(outcome), func(t *testing.T) {
+			t.Log("commit selected retirement and retain its exact capacity-release authority")
+			base := engineTopology(1, 2)
+			scenario := newCoordinatorScenario(t, base)
+			plan := retirePlan("retire-with-history", "replica-1", TrafficRequirementQuiesceGroup, VerificationRequirementRequired)
+			scenario.desired = &plan
+			if outcome == TransitionOutcomeBlocked {
+				scenario.verifier.failure = &Failure{Classification: FailureClassificationTerminal, Reason: "ServingUnavailable"}
+			}
+			scenario.runUntil("submit retirement", func(s *coordinatorScenario) bool { return s.membership.applyCalls == 1 })
+			committed := engineTopology(2, 1)
+			scenario.membership.commit(scenario.status.Membership.Desired.TransitionID, committed)
+			scenario.runUntil("settle retirement", func(s *coordinatorScenario) bool { return s.status.Transition.Outcome == outcome })
+			if len(scenario.status.Capacity.Desired.ReleaseFences) != 1 {
+				t.Fatal("retirement did not retain its exact release fence")
+			}
+			if err := ValidateGroupStatus(scenario.status); err != nil {
+				t.Fatalf("settled retirement is invalid: %v", err)
+			}
+
+			t.Log("observe a different authoritative generation without changing the immutable transition result")
+			unexpected := cloneTopology(committed)
+			unexpected.Generation++
+			scenario.membership.topology = unexpected
+			capacityCalls, trafficCalls := scenario.capacity.applyCalls, scenario.traffic.applyCalls
+			err := scenario.reconcile("observe topology drift")
+			if outcome == TransitionOutcomeCompleted && err == nil {
+				t.Fatal("completed retirement did not fail closed on an unexpected current topology")
+			}
+			if !sameTopology(scenario.status.Membership.Observed.CommittedTopology, unexpected) {
+				t.Fatal("the fresh observation was not returned for persistence")
+			}
+			if scenario.capacity.applyCalls != capacityCalls || scenario.traffic.applyCalls != trafficCalls {
+				t.Fatal("topology drift caused a new physical or traffic effect")
+			}
+			if err := ValidateGroupStatus(scenario.status); err != nil {
+				t.Fatalf("a fresh observation invalidated durable commit evidence: %v", err)
+			}
+
+			t.Log("reload the returned checkpoint and recover when the engine reports its committed result again")
+			raw, err := json.Marshal(scenario.status)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var restored GroupStatus
+			if err := json.Unmarshal(raw, &restored); err != nil {
+				t.Fatal(err)
+			}
+			scenario.status = restored
+			scenario.rebuildCoordinator()
+			scenario.membership.topology = committed
+			scenario.mustReconcile("resume from current engine truth")
+			if !sameTopology(scenario.status.Membership.Observed.CommittedTopology, committed) || scenario.status.Transition.Outcome != outcome {
+				t.Fatal("restart lost the committed topology or rewrote the terminal outcome")
+			}
+
+			t.Log("reject release authority if the recorded result is absent from durable topology history")
+			corrupt := cloneStatus(scenario.status)
+			corrupt.Topologies = TopologyHistory{CurrentGeneration: base.Generation, Snapshots: []MembershipTopology{base}}
+			if err := ValidateGroupStatus(corrupt); err == nil {
+				t.Fatal("retirement remained authoritative without its recorded commit")
+			}
+		})
+	}
+}
+
 func TestInvocationRecoveryFaultResumesFromCurrentAuthority(t *testing.T) {
 	for _, authority := range []ObservationAuthority{ObservationAuthorityCapacity, ObservationAuthorityTraffic, ObservationAuthorityMembership} {
 		t.Run(string(authority), func(t *testing.T) {
