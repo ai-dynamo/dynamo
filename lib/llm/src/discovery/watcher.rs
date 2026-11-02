@@ -570,7 +570,7 @@ impl ModelWatcher {
                 card.model_type.supports_chat() && self.chat_engine_factory.is_none();
             let needs_local_completions_pipeline = card.model_type.supports_completions();
             let needs_systemone_preprocessor =
-                self.systemone_enabled && card.is_systemone_serial_eligible();
+                self.systemone_enabled && card.decision_execution_profile() == Some(crate::local_model::runtime_config::DecisionExecutionProfile::SglangSerialV1);
             let needs_local_tokenizer =
                 needs_local_chat_pipeline || needs_local_completions_pipeline;
             let tokenizer = if needs_local_tokenizer && card.has_tokenizer() {

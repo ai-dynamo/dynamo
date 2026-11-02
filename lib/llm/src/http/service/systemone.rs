@@ -63,7 +63,8 @@ pub(super) const DEFAULT_PATH: &str = "/v1/systemone";
 pub(super) const DECISIONS_PATH: &str = "/v1/decisions";
 
 // The configured input ceiling and deployment candidate ceiling bound amplification.
-const MAX_TOKENIZATION_WORK: usize = 1_048_576 * (255 + 2);
+const MAX_TOKENIZATION_WORK: usize =
+    crate::protocols::systemone::MAX_DECISION_INPUT_TOKENS * (255 + 2);
 const MAX_TOKENIZATION_TEXT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CONCURRENT_SIBLINGS: usize = 4;
 

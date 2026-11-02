@@ -814,7 +814,7 @@ impl Model {
                 .worker_sets
                 .load()
                 .values()
-                .any(|worker_set| worker_set.card().is_systemone_serial_eligible())
+                .any(|worker_set| worker_set.card().decision_execution_profile() == Some(crate::local_model::runtime_config::DecisionExecutionProfile::SglangSerialV1))
             {
                 SystemOneSelectionError::Unavailable
             } else {
@@ -828,7 +828,9 @@ impl Model {
         worker_set: &WorkerSet,
     ) -> Option<SystemOneExecutionSelection> {
         let card = worker_set.card();
-        if !card.is_systemone_serial_eligible() {
+        if card.decision_execution_profile()
+            != Some(crate::local_model::runtime_config::DecisionExecutionProfile::SglangSerialV1)
+        {
             return None;
         }
         Some(SystemOneExecutionSelection {

@@ -192,6 +192,20 @@ pub const SGLANG_SYSTEMONE_SERIAL_V1: &str = "sglang_systemone_serial_v1";
 /// Absence is conservative and leaves remote prefill cancellation disabled.
 pub const DISAGG_PREFILL_CANCEL_ANYTIME_V1: &str = "disagg_prefill_cancel_anytime_v1";
 
+/// Worker-confirmed raw requested-ID scoring through the Python vLLM worker.
+pub const VLLM_CAUSAL_DECISION_V1: &str = "vllm_causal_decision_v1";
+pub const VLLM_D3_DECISION_V1: &str = "vllm_d3_decision_v1";
+pub const VLLM_CLEF_FLASH_DECISION_V1: &str = "vllm_clef_flash_joint_decision_v1";
+pub const VLLM_CLEF_OMNI_DECISION_V1: &str = "vllm_clef_omni_joint_decision_v1";
+pub const VLLM_LIQUID_DECISION_V1: &str = "vllm_liquid_decision_v1";
+pub const VLLM_DIFFUSION_DECISION_V1: &str = "vllm_diffusion_canvas_decision_v1";
+
+pub(crate) use crate::model_card::decision_profile::{
+    DecisionExecutionProfile, DecisionProfileKind,
+};
+
+pub(crate) const VLLM_NATIVE_DECISION_MAX_CANDIDATES: &str = "vllm_native_decision_max_candidates";
+
 /// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

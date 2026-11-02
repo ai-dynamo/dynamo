@@ -16,11 +16,14 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
+#[path = "model_card/decision_profile.rs"]
+pub(crate) mod decision_profile;
+
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
 use crate::local_model::runtime_config::{
-    ModelRuntimeConfig, SGLANG_GENERATE_CAPABILITY, SGLANG_SYSTEMONE_SERIAL_V1,
-    SPEC_DECODE_RUNTIME_KEY, TokenizerBackend, VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+    DecisionExecutionProfile, ModelRuntimeConfig, TokenizerBackend,
+    VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
 };
 use crate::model_type::{ModelInput, ModelType};
 use crate::protocols::tensor::TensorModelConfig;
@@ -1236,21 +1239,22 @@ impl ModelDeploymentCard {
         mdc_local_path(&self.slug, self.mdcsum())
     }
 
-    pub(crate) fn is_systemone_serial_eligible(&self) -> bool {
-        self.runtime_config
-            .supports_runtime_capability(SGLANG_GENERATE_CAPABILITY)
-            && self
-                .runtime_config
-                .supports_runtime_capability(SGLANG_SYSTEMONE_SERIAL_V1)
-            && self.runtime_config.max_num_seqs == Some(1)
-            && self.runtime_config.data_parallel_size == 1
-            && self.worker_type == Some(crate::worker_type::WorkerType::Aggregated)
-            && self.needs.is_empty()
-            && self.lora.is_none()
-            && !self
-                .runtime_config
-                .runtime_data
-                .contains_key(SPEC_DECODE_RUNTIME_KEY)
+    pub(crate) fn decision_execution_profile(&self) -> Option<DecisionExecutionProfile> {
+        decision_profile::classify(self)
+    }
+
+    pub(crate) fn decision_max_candidates(
+        &self,
+        profile: DecisionExecutionProfile,
+    ) -> Option<usize> {
+        match profile.kind() {
+            crate::local_model::runtime_config::DecisionProfileKind::Token(_) => {
+                Some(profile.limits().1)
+            }
+            crate::local_model::runtime_config::DecisionProfileKind::Native(_) => {
+                decision_profile::native_max_candidates(self, profile)
+            }
+        }
     }
 
     pub fn mdcsum(&self) -> &str {
@@ -1386,9 +1390,10 @@ impl ModelDeploymentCard {
                         .extend_from_slice(b"\0vllm_inference_v1_generate\0true");
                 }
 
-                // Preserve legacy checksums when serial scoring is unavailable.
-                if self.is_systemone_serial_eligible() {
-                    bytes_to_hash.extend_from_slice(b"\0sglang_systemone_serial_v1\0true");
+                if let Some(profile) = self.decision_execution_profile()
+                    && let Some(max_candidates) = self.decision_max_candidates(profile)
+                {
+                    decision_profile::append_checksum(&mut bytes_to_hash, profile, max_candidates);
                 }
 
                 // The Qwen video contract is resolved per cohort, not per card.
@@ -3678,6 +3683,101 @@ mod ownership_tests {
     }
 
     #[test]
+    fn native_profiles_are_inert_before_optional_activation() {
+        let baseline = ModelDeploymentCard::with_name_only("native-model");
+        for profile in [
+            DecisionExecutionProfile::VllmD3V1,
+            DecisionExecutionProfile::VllmClefFlashV1,
+            DecisionExecutionProfile::VllmClefOmniV1,
+            DecisionExecutionProfile::VllmLiquidV1,
+            DecisionExecutionProfile::VllmDiffusionV1,
+        ] {
+            let mut card = ModelDeploymentCard::with_name_only("native-model");
+            card.runtime_config
+                .runtime_data
+                .insert(profile.decision_capability().into(), true.into());
+            assert_eq!(card.decision_execution_profile(), None);
+            assert_eq!(card.mdcsum(), baseline.mdcsum());
+        }
+    }
+
+    #[test]
+    fn vllm_decision_contract_requires_eligible_aggregated_workers() {
+        fn card(configure: impl FnOnce(&mut ModelDeploymentCard)) -> ModelDeploymentCard {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.model_input = ModelInput::Tokens;
+            card.model_type = ModelType::Chat;
+            card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+            card.runtime_config.max_num_seqs = Some(1);
+            card.runtime_config
+                .runtime_data
+                .insert("vllm_inference_v1_generate".into(), true.into());
+            card.runtime_config
+                .runtime_data
+                .insert("vllm_causal_decision_v1".into(), true.into());
+            configure(&mut card);
+            card
+        }
+
+        let enabled = card(|_| {});
+        assert_eq!(
+            enabled.decision_execution_profile(),
+            Some(crate::local_model::runtime_config::DecisionExecutionProfile::VllmCausalV1),
+        );
+        let disabled = card(|card| {
+            card.runtime_config
+                .runtime_data
+                .remove("vllm_causal_decision_v1");
+        });
+        let explicit_false = card(|card| {
+            card.runtime_config
+                .runtime_data
+                .insert("vllm_causal_decision_v1".into(), false.into());
+        });
+        assert_eq!(disabled.mdcsum(), explicit_false.mdcsum());
+        assert_ne!(enabled.mdcsum(), disabled.mdcsum());
+
+        assert!(
+            card(|card| card.migration_limit = 1)
+                .decision_execution_profile()
+                .is_some()
+        );
+
+        for model_type in [
+            ModelType::Completions,
+            ModelType::Completions | ModelType::Embedding,
+        ] {
+            assert!(
+                card(|card| card.model_type = model_type)
+                    .decision_execution_profile()
+                    .is_some()
+            );
+        }
+        let unsupported: [fn(&mut ModelDeploymentCard); 9] = [
+            |card| card.model_type = ModelType::Embedding,
+            |card| card.model_type = ModelType::Classify | ModelType::Pooling,
+            |card| card.runtime_config.max_num_seqs = None,
+            |card| card.runtime_config.max_num_seqs = Some(16),
+            |card| card.runtime_config.data_parallel_size = 2,
+            |card| {
+                card.runtime_config
+                    .runtime_data
+                    .remove("vllm_inference_v1_generate");
+            },
+            |card| card.worker_type = Some(crate::worker_type::WorkerType::Decode),
+            |card| card.needs = vec![vec![crate::worker_type::WorkerType::Prefill]],
+            |card| {
+                card.runtime_config
+                    .runtime_data
+                    .insert("spec_decode".into(), serde_json::json!({}));
+            },
+        ];
+        for configure in unsupported {
+            assert_eq!(card(configure).decision_execution_profile(), None);
+        }
+    }
+
+    #[test]
     fn systemone_serial_contract_isolates_worker_sets() {
         use crate::local_model::runtime_config::{
             SGLANG_GENERATE_CAPABILITY, SGLANG_SYSTEMONE_SERIAL_V1,
@@ -3698,8 +3798,14 @@ mod ownership_tests {
         }
 
         let enabled = card(|_| {});
-        assert!(enabled.is_systemone_serial_eligible());
-        assert!(card(|card| card.migration_limit = 1).is_systemone_serial_eligible());
+        assert_eq!(
+            enabled.decision_execution_profile(),
+            Some(DecisionExecutionProfile::SglangSerialV1)
+        );
+        assert_eq!(
+            card(|card| card.migration_limit = 1).decision_execution_profile(),
+            Some(DecisionExecutionProfile::SglangSerialV1)
+        );
         let unsupported: [fn(&mut ModelDeploymentCard); 10] = [
             |card| {
                 card.runtime_config
@@ -3731,7 +3837,10 @@ mod ownership_tests {
         ];
         for configure in unsupported {
             let unsupported = card(configure);
-            assert!(!unsupported.is_systemone_serial_eligible());
+            assert_ne!(
+                unsupported.decision_execution_profile(),
+                Some(DecisionExecutionProfile::SglangSerialV1)
+            );
             assert_ne!(enabled.mdcsum(), unsupported.mdcsum());
             let feature_off = card(|card| {
                 configure(card);
