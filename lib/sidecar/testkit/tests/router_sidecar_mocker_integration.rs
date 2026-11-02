@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use dynamo_backend_common::{BackendError, DisaggregationMode, FinishReason, LLMEngine};
 use dynamo_llm::discovery::{LoadThresholdHandle, ModelManager};
-use dynamo_llm::kv_router::PrefillRouter;
+use dynamo_llm::kv_router::{PrefillRouter, RouteRequest, stage_router::StageRouter};
 use dynamo_llm::model_card::TokenizerKind;
 use dynamo_llm::session_affinity::SessionAffinityMode;
 use dynamo_llm::worker_type::WorkerType;
@@ -724,25 +724,46 @@ async fn load_loss_withdraws_worker_and_fails_the_process() {
     peer.shutdown().await;
 }
 
+/// A route request made only of an id and prompt tokens.
+struct TokenRouteRequest {
+    context: Arc<dyn dynamo_runtime::pipeline::AsyncEngineContext>,
+    token_ids: Vec<u32>,
+}
+
+impl TokenRouteRequest {
+    fn new(id: &str, token_ids: &[u32]) -> Self {
+        Self {
+            context: Arc::new(dynamo_runtime::pipeline::context::Controller::new(
+                id.to_string(),
+            )),
+            token_ids: token_ids.to_vec(),
+        }
+    }
+}
+
+impl RouteRequest for TokenRouteRequest {
+    fn engine_context(&self) -> Arc<dyn dynamo_runtime::pipeline::AsyncEngineContext> {
+        Arc::clone(&self.context)
+    }
+
+    fn routing_tokens(
+        &self,
+    ) -> (
+        &[u32],
+        Option<&[Option<dynamo_llm::kv_router::protocols::BlockExtraInfo>]>,
+    ) {
+        (&self.token_ids, None)
+    }
+}
+
 async fn ready(router: &PrefillRouter) {
+    let request = TokenRouteRequest::new("ready", &[11, 22, 33, 44]);
     bounded("real PrefillRouter availability", async {
         loop {
-            if let Ok(reservation) = router
-                .reserve_prefill_worker(
-                    "ready",
-                    &[11, 22, 33, 44],
-                    None,
-                    None,
-                    None,
-                    0.0,
-                    0,
-                    None,
-                    None,
-                    Default::default(),
-                )
-                .await
+            if let Ok(plan) = router.schedule(&request).await
+                && let Some(route) = plan.into_route()
             {
-                reservation.release().await.unwrap();
+                route.abort(None).await;
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;

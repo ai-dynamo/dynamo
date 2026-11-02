@@ -47,7 +47,7 @@ use super::handoff::PrefillTask;
 /// Where the prefill stage runs for one request.
 // Built once per request and moved straight into its next step.
 #[allow(clippy::large_enum_variant)]
-pub(crate) enum PrefillPlan {
+pub enum PrefillPlan {
     /// No prefill target: the request goes to decode without a prefill hop.
     Untargeted,
     /// A selected prefill worker and what holds it: a KV booking, or a
@@ -58,10 +58,22 @@ pub(crate) enum PrefillPlan {
     },
 }
 
+impl PrefillPlan {
+    /// The booked prefill route, for a caller that keeps it without
+    /// dispatching. `None` when there is no prefill target, so the request
+    /// runs aggregated on decode.
+    pub fn into_route(self) -> Option<RoutePlan> {
+        match self {
+            Self::Untargeted => None,
+            Self::Booked { route, .. } => Some(route),
+        }
+    }
+}
+
 /// What the decode stage looks like for one request.
 // Built once per request and moved straight into its next step.
 #[allow(clippy::large_enum_variant)]
-pub(crate) enum PrefillPreview {
+pub enum PrefillPreview {
     /// Run prefill on a prefill worker, the ordinary disaggregated route.
     RemotePrefill,
     /// Conditional disaggregation keeps the request on this admitted decode
@@ -70,7 +82,7 @@ pub(crate) enum PrefillPreview {
 }
 
 /// A dispatched prefill leg: where it went and its response stream.
-pub(crate) struct PrefillDispatched {
+pub struct PrefillDispatched {
     pub(super) prepared: PreparedPrefill,
     pub(super) stream: ManyOut<Annotated<LLMEngineOutput>>,
     /// Frees the KV booking early, so a migration retry can release it while

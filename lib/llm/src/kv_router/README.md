@@ -147,19 +147,19 @@ Selection reads a request through the `RouteRequest` trait (`route_request.rs`).
 through the same path. Dispatch still takes a `PreprocessedRequest`. Every method has a default
 meaning "not supplied".
 
-| Input | `RouteRequest` method | Frontend source (`SingleIn<PreprocessedRequest>`) |
-|---|---|---|
-| Request id, cancellation | `engine_context` | the `Context` around the request |
-| Tokens, multimodal block info | `routing_tokens` | `PreprocessedRequest::block_mm_routing_info` |
-| Pins, DP ranks, priority, LoRA, cache namespace, constraints, allowed workers | `routing_hints` | `PreprocessedRequest::routing` (`RoutingHints`), from `nvext` and `x-dynamo-*` headers |
-| Scoring and accounting overrides | `router_config_override` | `PreprocessedRequest::router_config_override` |
-| Policy class | `policy_class` | context metadata key `policy-class` (header `x-dynamo-meta-policy-class`) |
-| Agent session context | `agent_context` | `PreprocessedRequest::agent_context` |
-| Session-affinity id | `session_affinity_id` | the `Context`, set by the HTTP layer |
-| Excluded workers, parked classifier lifecycle | `migration_state` | `PreprocessedRequest::migration_state` |
-| Staged KV that only this decode can release | `staged_kv_cleanup` | `PreprocessedRequest::staged_kv_cleanup` |
-| Query-only selection | `is_query_only` | annotation `query_instance_id` in `PreprocessedRequest::annotations` |
-| Multimodal cache keys (device-aware mode only) | `preprocessed` | the whole `PreprocessedRequest`; device-aware routing fails without it |
+| Input | `RouteRequest` method | Frontend source (`SingleIn<PreprocessedRequest>`) | Runtime EPP (`EppRouteRequest`) |
+|---|---|---|---|
+| Request id, cancellation | `engine_context` | the `Context` around the request | The booking id: `epp-prefill/<reservation id>` for prefill, the reservation id for decode. Never cancelled; dropping the pick retracts a queued selection |
+| Tokens, multimodal block info | `routing_tokens` | `PreprocessedRequest::block_mm_routing_info` | Tokens from the EPP's own tokenizer; no multimodal info |
+| Pins, DP ranks, priority, LoRA, cache namespace, constraints, allowed workers | `routing_hints` | `PreprocessedRequest::routing` (`RoutingHints`), from `nvext` and `x-dynamo-*` headers | Cache namespace, priority jump, strict priority, routing constraints, and the gateway's subset as allowed workers. No pins or LoRA |
+| Scoring and accounting overrides | `router_config_override` | `PreprocessedRequest::router_config_override` | Decode only: `decode_router_config_override` in `epp.rs` |
+| Policy class | `policy_class` | context metadata key `policy-class` (header `x-dynamo-meta-policy-class`) | The same header |
+| Agent session context | `agent_context` | `PreprocessedRequest::agent_context` | Not supplied |
+| Session-affinity id | `session_affinity_id` | the `Context`, set by the HTTP layer | Not supplied |
+| Excluded workers, parked classifier lifecycle | `migration_state` | `PreprocessedRequest::migration_state` | Not supplied (frontend-only) |
+| Staged KV that only this decode can release | `staged_kv_cleanup` | `PreprocessedRequest::staged_kv_cleanup` | Not supplied (frontend-only) |
+| Query-only selection | `is_query_only` | annotation `query_instance_id` in `PreprocessedRequest::annotations` | Not supplied |
+| Multimodal cache keys (device-aware mode only) | `preprocessed` | the whole `PreprocessedRequest`; device-aware routing fails without it | Not supplied |
 
 ## Admission modes
 

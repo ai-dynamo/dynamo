@@ -35,7 +35,9 @@ parent [`AGENTS.md`](../AGENTS.md) guardrails apply here too.
   the normal path.
 - **Validate request-supplied worker pins at selection only.** A worker that disappears later
   is a service failure.
-- **A preview never books.** `preview_kv_route` and `peek_next_worker` hold nothing.
+- **A preview never books.** `preview_kv_route` holds nothing. The built-in plane has no
+  preview: its plan selects, which advances a round-robin cursor even if the plan is never
+  sent.
 - **Only Decode and Aggregated KV routes start the classifier lifecycle.** A prefill route
   must leave a parked decode lifecycle alone.
 

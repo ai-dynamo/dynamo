@@ -54,11 +54,11 @@ do not fit the mode.
 | `generate` | The pipeline's terminal engine: select, book, send. | The response stream releases the booking when it ends. |
 | `generate` with `query_instance_id` | An advisory lookup. | Nothing: it selects with `Query` admission and returns the selection as `routing_data` without sending. |
 | `plan_route`, then `dispatch_route` | A stage router that books before it sends, such as the prefill hop. | The `RoutePlan` owns the booking until `dispatch_route` moves it into the request guard, or until `abort`. |
-| `plan_route`, then `RoutePlan::into_booking` | A host that books but never sends, and releases the booking itself. | The `RouteBooking` owns the booking until `release` or a drop. The classifier lifecycle is aborted, and the affinity hold is dropped without binding the session. |
-| `plan_route`, then `RoutePlan::detach_booking` | A host that books but never sends, and releases by request id. | The request lease manager keeps the booking under the plan's request id until `KvRouter::free` with that id, or until the lease expires. The classifier lifecycle and affinity hold are handled as for `into_booking`. |
+| `plan_route`, then `RoutePlan::into_booking` | A host that books but never sends, and releases the booking itself, such as the Runtime EPP's prefill booking (through `PrefillRouter::schedule`). | The `RouteBooking` owns the booking until `release` or a drop. The classifier lifecycle is aborted, and the affinity hold is dropped without binding the session. |
+| `plan_route`, then `RoutePlan::detach_booking` | A host that books but never sends, and releases by request id, such as the Runtime EPP's decode booking. | The request lease manager keeps the booking under the plan's request id until `KvRouter::free` with that id, or until the lease expires. The classifier lifecycle and affinity hold are handled as for `into_booking`. |
 | `preview_kv_route`, then `plan_kv_route_from_preview`, then `dispatch_kv_plan` | Conditional disaggregation: decide from a decode preview before booking anything. | A `RoutePreview` holds nothing. The plan made from it books the previewed worker. |
 | `prefill_worker_busy` | The conditional-disaggregation prefill-load probe. | Nothing. |
-| `kv_router()` | Direct `KvRouter` queries, such as the EPP's prefill reservation. | Whatever the caller books there. |
+| `kv_router()` | Direct `KvRouter` calls, such as `free` and `mark_prefill_completed` on a booking detached under its request id. | Whatever the caller books there. |
 
 How a KV route runs:
 
@@ -82,7 +82,6 @@ How a KV route runs:
 | `generate` with `query_instance_id` | Nothing different: the built-in plane has no query path. The request is selected and **sent**. The session-affinity lookup does not acquire a hold, so the session is not bound. | As above. |
 | `plan_route`, then `dispatch_route` | A stage router that selects before it sends, such as the prefill hop. | The `RoutePlan` owns the occupancy reservation, LoRA load, and affinity hold until `dispatch_route` moves them into the request guard, or until `abort` or a drop. |
 | `plan_route`, then `into_booking` or `detach_booking` | A host that selects but never sends. | Nothing is kept: occupancy and LoRA load are not keyed by request, so both release them at once. A round-robin cursor stays advanced. |
-| `peek_next_worker` | An advisory pick, such as the EPP's built-in prefill reservation. | Nothing: it does not advance the round-robin cursor or reserve occupancy. |
 
 How a built-in route runs:
 
@@ -143,7 +142,7 @@ How a built-in route runs:
 | Send | Exactly to the booked worker | May move to another instance; `prepare` sees the final worker |
 | `RoutePlan::target()` | The worker the request will reach | The planned worker, which the send may change |
 | `query_instance_id` | Returns the selection without booking or sending | No effect on sending |
-| Non-booking preview | `preview_kv_route` | None. `peek_next_worker` is the advisory pick |
+| Non-booking preview | `preview_kv_route` | None |
 | Classifier lifecycle | Started for Decode and Aggregated requests | None |
 | Early release for Migration | `attempt_release()` | None |
 | `abort` compared with drop | `abort` waits for the scheduler to acknowledge the release and passes the cause to the classifier. Drop queues the release | Same release either way |

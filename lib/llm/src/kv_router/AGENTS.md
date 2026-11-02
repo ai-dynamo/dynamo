@@ -38,10 +38,12 @@ and the booking lifecycle these rules protect.
   - `admission.rs`: consumes the prefill stream, in the foreground or as a background task.
   - `handoff.rs`: keeps prefill running while decode runs and reports prefill failures.
   - `conditional_bypass.rs`: conditional disaggregation's decision to skip remote prefill.
-  - `query.rs`: `reserve_prefill_worker`, the prefill-only booking used by the Runtime EPP.
-  - `stage.rs`: `PrefillRouter` as a `StageRouter`, and the helpers `generate` is composed from.
+  - `stage.rs`: `PrefillRouter` as a `StageRouter`, `PrefillPlan`, and the helpers `generate`
+    is composed from.
+  - `schedule_tests.rs`: `schedule` as the Runtime EPP uses it, and binding availability.
 - `stage_router.rs`: `StageRouter`, the `schedule` / `preview` / `dispatch` interface shared by
-  single-stage routers. `PrefillRouter` implements it so far.
+  single-stage routers. `PrefillRouter` implements it so far. The frontend calls all three; the
+  Runtime EPP calls only `schedule`.
 - `encoder_router.rs`: `EncoderRouter`, the optional encode hop for multimodal inputs.
 - `plugins.rs`: installs the linked router plugin registry.
 - `shared_cache.rs`: the HiCache shared KV cache client (SGLang + Mooncake).
@@ -66,6 +68,11 @@ and the booking lifecycle these rules protect.
   method to it, implement it for `SingleIn<PreprocessedRequest>`, add it to the inputs table in
   `README.md`, and decide whether the Runtime EPP
   (`deploy/inference-gateway/ext-proc/src/epp.rs`) must supply it too.
+- The Runtime EPP selects only through the planning interface: `PrefillRouter::schedule` for
+  prefill and `RoutingHost::plan_route` on its decode host for decode. It never dispatches, so
+  it keeps each booking with `RoutePlan::into_booking` (prefill) or `detach_booking` (decode,
+  freed by reservation id from the response callbacks). Do not add an EPP-only selection path
+  into `KvRouter`.
 - The Runtime EPP builds its own decode scoring override (`decode_router_config_override` in
   `epp.rs`). Change it together with `build_decode_router_override` in
   `prefill_router/mod.rs`, or the two hosts score decode differently.

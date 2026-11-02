@@ -65,18 +65,6 @@ impl HostedOccupancy {
         };
         Ok(result)
     }
-
-    pub(crate) fn peek(
-        &self,
-        router: &PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        selector: &BuiltinWorkerSelector,
-    ) -> Option<u64> {
-        let candidates = router.selectable_worker_ids().ok()?;
-        let occupancy = |worker_id| self.state.load(worker_id);
-        selector
-            .peek_worker(WorkerSelectionInput::hosted(&candidates, Some(&occupancy)))
-            .ok()
-    }
 }
 
 pub(crate) struct HostedOccupancySelection {

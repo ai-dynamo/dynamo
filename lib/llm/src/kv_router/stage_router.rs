@@ -21,10 +21,14 @@ use crate::{kv_router::RouteRequest, protocols::common::llm_backend::Preprocesse
 /// - [`dispatch`](Self::dispatch): send the request as the plan says.
 ///
 /// The frontend operator calls all three in sequence. A host that does not
-/// send requests itself, such as the inference-gateway EPP, can call
-/// `schedule` and `preview` and hand the result to the frontend.
+/// send requests itself, such as the inference-gateway EPP, calls `schedule`
+/// (and `preview`, if it decides whether a stage runs), keeps the plan's
+/// booking, and hands the chosen worker to the frontend, which sends.
+///
+/// Selection reads the request through [`RouteRequest`], so such a host need
+/// not build a [`PreprocessedRequest`]. Only `dispatch` takes one.
 #[async_trait]
-pub(crate) trait StageRouter: Send + Sync {
+pub trait StageRouter: Send + Sync {
     /// Where the stage runs for one request.
     type Plan: Send;
     /// What the next stage looks like for one request.
@@ -34,10 +38,7 @@ pub(crate) trait StageRouter: Send + Sync {
     type Dispatched: Send;
 
     /// Choose and book where this stage runs. A caller that does not dispatch
-    /// the plan must give its booking back through the plan type.
-    // No caller yet: `PrefillRouter::generate` runs schedule's steps one by
-    // one to keep its error logging. The EPP is the intended first caller.
-    #[allow(dead_code)]
+    /// the plan keeps or gives back its booking through the plan type.
     async fn schedule(&self, request: &dyn RouteRequest) -> Result<Self::Plan>;
 
     /// Look at the next stage for this request without dispatching anything.

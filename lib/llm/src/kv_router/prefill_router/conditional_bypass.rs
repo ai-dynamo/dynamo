@@ -13,10 +13,10 @@ use crate::protocols::common::timing::RequestPhase;
 
 /// An admitted decode route selected by `RoutingHost` together with the
 /// conditional-disagg policy's diagnostic signals.
-pub(crate) struct ConditionalDisaggDecodeDecision {
-    pub plan: KvRoutePlan,
-    pub overlap_tokens: usize,
-    pub net_new_tokens: usize,
+pub struct ConditionalDisaggDecodeDecision {
+    pub(crate) plan: KvRoutePlan,
+    pub(crate) overlap_tokens: usize,
+    pub(crate) net_new_tokens: usize,
 }
 
 fn decode_gate_allows_bypass(

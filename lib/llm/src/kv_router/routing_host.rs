@@ -531,26 +531,6 @@ impl RoutingHost {
         }
     }
 
-    pub(crate) fn peek_next_worker(&self) -> Option<u64> {
-        match &self.policy {
-            RoutingPolicy::Builtin(selector) => match &self.hosted_occupancy {
-                Some(occupancy) => occupancy.peek(&self.inner, selector),
-                None => self
-                    .inner
-                    .with_selectable_worker_ids(|ids| {
-                        selector.peek_worker(
-                            dynamo_kv_router::selector::WorkerSelectionInput::hosted(ids, None),
-                        )
-                    })
-                    .ok()
-                    .and_then(Result::ok),
-            },
-            RoutingPolicy::DeviceAwareWeighted => self.inner.peek_next_worker(),
-            RoutingPolicy::Direct => None,
-            RoutingPolicy::Kv(_) => None,
-        }
-    }
-
     /// The group key for a subagent: a request that carries a parent session id binds under the
     /// parent's group for decode, while prefill uses the parent's own binding to reuse its cache.
     /// An explicit per-request target stays on the request's own session so
@@ -786,7 +766,11 @@ impl RoutingHost {
     /// Select a worker for `request` in `phase` without sending to it. KV
     /// routing admits and books the worker in the scheduler. Built-in modes
     /// pick it and take their occupancy reservation and affinity hold.
-    pub(crate) async fn plan_route(
+    ///
+    /// Send the plan with [`Self::dispatch_route`], give it up with
+    /// [`RoutePlan::abort`], or, in a host that never sends, keep its booking
+    /// with [`RoutePlan::into_booking`] or [`RoutePlan::detach_booking`].
+    pub async fn plan_route(
         &self,
         request: &dyn RouteRequest,
         phase: RequestPhase,

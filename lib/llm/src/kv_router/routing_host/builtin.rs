@@ -28,18 +28,6 @@ impl BuiltinWorkerSelector {
         Some(Self { mode, picker })
     }
 
-    pub(super) fn peek_worker(
-        &self,
-        input: WorkerSelectionInput<'_, ModelRuntimeConfig>,
-    ) -> Result<u64, KvSchedulerError> {
-        let (worker_ids, occupancy) = self.hosted_inputs(input)?;
-        self.picker
-            .peek_worker(worker_ids, |worker_id| {
-                occupancy.map_or(0, |occupancy| occupancy(worker_id))
-            })
-            .ok_or(KvSchedulerError::NoEndpoints)
-    }
-
     fn hosted_inputs<'a>(
         &self,
         input: WorkerSelectionInput<'a, ModelRuntimeConfig>,
