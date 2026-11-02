@@ -42,6 +42,7 @@ recipes:
 - solar-open2-250b
 - muse-spark-open-816b-a42b
 - minimax-m3
+- mistral-large-4
 - motif-3
 - beam-1-0-501b
 deferred_recipes:
