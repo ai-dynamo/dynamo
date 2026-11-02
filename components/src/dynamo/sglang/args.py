@@ -176,6 +176,50 @@ def _diffusion_generator_kwargs(server_args: Any) -> dict[str, Any]:
 CUDA_COREDUMP_WAIT_ENV = "SGLANG_CUDA_COREDUMP_BEFORE_CRASH_WAIT_SECS"
 
 
+# Same fields as SGLang's ModelConfig.get_default_sampling_params().
+_GENERATION_CONFIG_SAMPLING_FIELDS = (
+    "repetition_penalty",
+    "temperature",
+    "top_k",
+    "top_p",
+    "min_p",
+)
+
+
+def _default_preferred_sampling_params(parsed_args: Namespace) -> None:
+    """Apply the model's generation_config sampling defaults, as launch_server does.
+
+    SGLang applies generation_config.json defaults (--sampling-defaults model) only
+    in its OpenAI HTTP layer, which Dynamo bypasses. The engine-level equivalent is
+    --preferred-sampling-params, which SGLang merges under each request's own fields.
+    """
+    if getattr(parsed_args, "preferred_sampling_params", None) is not None:
+        return
+    if getattr(parsed_args, "sampling_defaults", "model") != "model":
+        return
+    from sglang.srt.utils.hf_transformers import get_generation_config
+
+    generation_config = get_generation_config(
+        parsed_args.model_path,
+        trust_remote_code=parsed_args.trust_remote_code,
+        revision=parsed_args.revision,
+    )
+    if generation_config is None:
+        return
+    config = generation_config.to_dict()
+    defaults = {
+        k: config[k]
+        for k in _GENERATION_CONFIG_SAMPLING_FIELDS
+        if config.get(k) is not None
+    }
+    if defaults:
+        parsed_args.preferred_sampling_params = defaults
+        logging.info(
+            "Using default sampling params from model generation config: %s",
+            defaults,
+        )
+
+
 def _default_cuda_coredump_wait(server_args: Any) -> None:
     """Skip SGLang's pre-crash coredump wait when no coredump can be triggered.
 
@@ -906,6 +950,7 @@ async def parse_args(args: list[str]) -> Config:
         parsed_args.kv_events_config = kv_events_config_with_dynamo_format(
             parsed_args.kv_events_config
         )
+        _default_preferred_sampling_params(parsed_args)
         server_args = ServerArgs.from_cli_args(parsed_args)
         _default_cuda_coredump_wait(server_args)
 

@@ -5,6 +5,7 @@
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import re
@@ -41,6 +42,7 @@ from dynamo.sglang._compat import (
 from dynamo.sglang.args import (
     CUDA_COREDUMP_WAIT_ENV,
     _default_cuda_coredump_wait,
+    _default_preferred_sampling_params,
     _diffusion_generator_kwargs,
     _forward_pass_metrics_source,
     _normalize_multimodal_disaggregation_args,
@@ -193,6 +195,60 @@ def test_cuda_coredump_wait_kept_with_crash_dump_folder(clean_coredump_env, tmp_
     _default_cuda_coredump_wait(SimpleNamespace(crash_dump_folder=str(tmp_path)))
 
     assert CUDA_COREDUMP_WAIT_ENV not in os.environ
+
+
+def _sampling_args(tmp_path, generation_config=None, **overrides):
+    if generation_config is not None:
+        (tmp_path / "generation_config.json").write_text(json.dumps(generation_config))
+    values = {
+        "model_path": str(tmp_path),
+        "trust_remote_code": False,
+        "revision": None,
+        "sampling_defaults": "model",
+        "preferred_sampling_params": None,
+    }
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+def test_preferred_sampling_params_default_to_generation_config(tmp_path):
+    args = _sampling_args(
+        tmp_path, {"temperature": 0.6, "top_k": 20, "top_p": 0.95, "do_sample": True}
+    )
+
+    _default_preferred_sampling_params(args)
+
+    assert args.preferred_sampling_params == {
+        "temperature": 0.6,
+        "top_k": 20,
+        "top_p": 0.95,
+    }
+
+
+def test_preferred_sampling_params_keeps_explicit_value(tmp_path):
+    args = _sampling_args(
+        tmp_path, {"temperature": 0.6}, preferred_sampling_params={"top_k": 5}
+    )
+
+    _default_preferred_sampling_params(args)
+
+    assert args.preferred_sampling_params == {"top_k": 5}
+
+
+def test_preferred_sampling_params_untouched_with_openai_defaults(tmp_path):
+    args = _sampling_args(tmp_path, {"temperature": 0.6}, sampling_defaults="openai")
+
+    _default_preferred_sampling_params(args)
+
+    assert args.preferred_sampling_params is None
+
+
+def test_preferred_sampling_params_untouched_without_generation_config(tmp_path):
+    args = _sampling_args(tmp_path)
+
+    _default_preferred_sampling_params(args)
+
+    assert args.preferred_sampling_params is None
 
 
 def test_diffusion_generator_kwargs_maps_nccl_port_to_master_port():
