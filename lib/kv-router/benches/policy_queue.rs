@@ -3,6 +3,10 @@
 
 //! Policy queue lane-scaling benchmarks.
 //!
+//! The original groups use an explicit FCFS class, so they measure the same workload as
+//! before policy-class YAML defaulted to EDF. The `edf_*` groups repeat the shared, exact-lane
+//! and blocked-lane drains on an EDF class with class due times.
+//!
 //! Run with: `cargo bench -p dynamo-kv-router --bench policy_queue`
 
 use std::sync::OnceLock;
@@ -14,29 +18,102 @@ use criterion::{
 use dynamo_kv_router::RouterQueuePolicy;
 use dynamo_kv_router::protocols::WorkerWithDpRank;
 use dynamo_kv_router::scheduling::{
-    PolicyProfile, PolicyQueue, QueueSnapshot, RouterPolicyConfig, WorkerPlacement,
+    PolicyProfile, PolicyQueue, QueueMetadata, QueueSnapshot, RouterPolicyConfig, WorkerPlacement,
 };
+use tokio::time::Instant;
 
 #[derive(Debug, Clone, Copy)]
 struct BenchRequest {
     dispatchable: bool,
 }
 
+fn resolve_profile(yaml: &str, queue_policy: RouterQueuePolicy) -> PolicyProfile {
+    let profile = RouterPolicyConfig::from_yaml(yaml)
+        .unwrap()
+        .resolve_profile(None, None, RouterQueuePolicy::Fcfs);
+    assert_eq!(profile.default_class().queue_policy, queue_policy);
+    profile
+}
+
 fn profile() -> PolicyProfile {
     static PROFILE: OnceLock<PolicyProfile> = OnceLock::new();
     PROFILE
         .get_or_init(|| {
-            RouterPolicyConfig::from_yaml(
+            resolve_profile(
                 r#"
 policy_classes:
   - name: bench
+    queue_policy: fcfs
     quantum: 1000000
 "#,
+                RouterQueuePolicy::Fcfs,
             )
-            .unwrap()
-            .resolve_profile(None, None, RouterQueuePolicy::Fcfs)
         })
         .clone()
+}
+
+fn edf_profile() -> PolicyProfile {
+    static PROFILE: OnceLock<PolicyProfile> = OnceLock::new();
+    PROFILE
+        .get_or_init(|| {
+            resolve_profile(
+                r#"
+policy_classes:
+  - name: bench
+    queue_policy: edf
+    quantum: 1000000
+    slo_ttft_ms: 1000
+"#,
+                RouterQueuePolicy::Edf,
+            )
+        })
+        .clone()
+}
+
+/// An EDF queue of `requests` entries, one per lane in turn (`None` for the shared heap). As a
+/// router would, each entry's due time is its ingress plus the class budget.
+fn edf_queue(
+    lanes: Option<usize>,
+    requests: usize,
+    is_dispatchable: impl Fn(usize) -> bool,
+) -> PolicyQueue<BenchRequest> {
+    let profile = edf_profile();
+    let mut queue = PolicyQueue::new(&profile);
+    let class = profile.default_class();
+    let ingress_origin = Instant::now();
+    for request_index in 0..requests {
+        let (lane, placement) = match lanes {
+            Some(lanes) => {
+                let lane = request_index % lanes;
+                (
+                    lane,
+                    WorkerPlacement::Exact(WorkerWithDpRank::new(lane as u64, 0)),
+                )
+            }
+            None => (0, WorkerPlacement::Any),
+        };
+        let class_due_at =
+            class.slo_ttft_due_at(ingress_origin + Duration::from_micros(request_index as u64));
+        queue
+            .enqueue_with_due_at(
+                QueueMetadata {
+                    class_index: 0,
+                    snapshot: QueueSnapshot::new(1, 0),
+                    due_at: None,
+                    class_due_at,
+                    arrival_offset_secs: request_index as f64,
+                },
+                lanes.unwrap_or(1),
+                0.0,
+                0,
+                placement,
+                BenchRequest {
+                    dispatchable: is_dispatchable(lane),
+                },
+            )
+            .unwrap();
+    }
+    queue
 }
 
 fn exact_queue(
@@ -212,6 +289,65 @@ fn bench_drain_shared(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_edf_drain_shared(c: &mut Criterion) {
+    let mut group = c.benchmark_group("policy_queue/edf_drain_shared");
+    for requests in [128, 1024, 4096] {
+        group.throughput(Throughput::Elements(requests as u64));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(requests),
+            &requests,
+            |b, &requests| {
+                b.iter_batched(
+                    || edf_queue(None, requests, all),
+                    |queue| assert_eq!(black_box(drain(queue)), requests),
+                    BatchSize::LargeInput,
+                );
+            },
+        );
+    }
+    group.finish();
+}
+
+fn bench_edf_drain_fixed_requests(c: &mut Criterion) {
+    const REQUESTS: usize = 4096;
+    let mut group = c.benchmark_group("policy_queue/edf_drain_4096_exact");
+    group.throughput(Throughput::Elements(REQUESTS as u64));
+    for lanes in [1, 8, 32, 128, 512] {
+        group.bench_with_input(BenchmarkId::from_parameter(lanes), &lanes, |b, &lanes| {
+            b.iter_batched(
+                || edf_queue(Some(lanes), REQUESTS, all),
+                |queue| assert_eq!(black_box(drain(queue)), REQUESTS),
+                BatchSize::LargeInput,
+            );
+        });
+    }
+    group.finish();
+}
+
+fn bench_edf_blocked_fraction(c: &mut Criterion) {
+    const LANES: usize = 10_000;
+    let mut group = c.benchmark_group("policy_queue/edf_drain_10000_exact_blocked");
+    for (blocked, predicate, expected) in [
+        ("0_percent", all as fn(usize) -> bool, LANES),
+        ("50_percent", odd as fn(usize) -> bool, LANES / 2),
+        ("90_percent", every_tenth as fn(usize) -> bool, LANES / 10),
+        ("100_percent", none as fn(usize) -> bool, 0),
+    ] {
+        group.bench_with_input(
+            BenchmarkId::new(blocked, LANES),
+            &predicate,
+            |b, &predicate| {
+                b.iter_batched(
+                    || edf_queue(Some(LANES), LANES, predicate),
+                    |queue| assert_eq!(black_box(drain(queue)), expected),
+                    BatchSize::LargeInput,
+                );
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default()
@@ -219,6 +355,6 @@ criterion_group! {
         .warm_up_time(Duration::from_secs(1))
         .measurement_time(Duration::from_secs(3))
         .noise_threshold(0.03);
-    targets = bench_pop_once, bench_drain_fixed_requests, bench_drain_one_per_lane, bench_build_exact_lanes, bench_blocked_fraction, bench_drain_shared
+    targets = bench_pop_once, bench_drain_fixed_requests, bench_drain_one_per_lane, bench_build_exact_lanes, bench_blocked_fraction, bench_drain_shared, bench_edf_drain_shared, bench_edf_drain_fixed_requests, bench_edf_blocked_fraction
 }
 criterion_main!(benches);
