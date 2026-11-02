@@ -60,12 +60,19 @@ def main() -> int:
 
     repo = Path(__file__).resolve().parents[2]
     tests = repo / "components/src/dynamo/frontend/tests/test_sglang_deepseek_recipe.py"
+    processor_tests = tests.with_name("test_sglang_processor_unit.py")
     sys.path.insert(0, str(repo / "components/src"))
     with tempfile.TemporaryDirectory(prefix="sglang-recipe-") as adapter_dir:
         adapter = Path(adapter_dir) / "deepseek_recipe_renderer.py"
         adapter.write_bytes(source)
         return pytest.main(
-            ["-q", "--durations=5", f"--confcutdir={tests.parent}", str(tests)],
+            [
+                "-q",
+                "--durations=5",
+                f"--confcutdir={tests.parent}",
+                str(tests),
+                f"{processor_tests}::test_recipe_image_order_reaches_worker_payload",
+            ],
             plugins=[RequireRecipeCases(adapter, args.revision)],
         )
 

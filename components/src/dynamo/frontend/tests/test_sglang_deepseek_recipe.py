@@ -11,6 +11,8 @@ import pytest
 pytest.importorskip("sglang.srt.parser")
 from dynamo.frontend import sglang_deepseek  # noqa: E402 -- optional SGLang guard
 
+pytest_plugins = ["_deepseek_recipe_fixtures"]
+
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
@@ -21,30 +23,8 @@ pytestmark = [
 
 
 @pytest.fixture
-def tokenizer():
-    if sglang_deepseek.recipe_renderer is None:
-        pytest.skip("SGLang predates the recipe renderer")
-    recipe = pytest.importorskip("deepseek_recipe")
-    tokenizers = pytest.importorskip("tokenizers")
-    alphabet = sorted(tokenizers.pre_tokenizers.ByteLevel.alphabet())
-    backend = tokenizers.Tokenizer(
-        tokenizers.models.BPE(vocab={c: i for i, c in enumerate(alphabet)}, merges=[])
-    )
-    backend.pre_tokenizer = tokenizers.pre_tokenizers.ByteLevel(add_prefix_space=False)
-    backend.decoder = tokenizers.decoders.ByteLevel()
-    backend.add_special_tokens(
-        [
-            getattr(recipe.SpecialToken, name).default_str()
-            for name in dir(recipe.SpecialToken)
-            if name[0].isupper()
-        ]
-        + ["<｜deepseek_image｜>"]
-    )
-
-    class ServedTokenizer:
-        backend_tokenizer = backend
-
-    return ServedTokenizer()
+def tokenizer(recipe_tokenizer):
+    return recipe_tokenizer
 
 
 def render(request, tokenizer, *, spec="dsv4", images=None):
@@ -55,7 +35,7 @@ def render(request, tokenizer, *, spec="dsv4", images=None):
         tools=request.get("tools"),
         spec=spec,
         image_urls=images or [],
-    )
+    ).token_ids
 
 
 @pytest.mark.parametrize("spec,effort", [("dsv4", "max"), ("dsv41", 37)])
@@ -108,8 +88,17 @@ def test_v41_image_slots_match_worker_order(tokenizer):
     ids = render(request, tokenizer, spec="dsv41", images=images)
     image_id = tokenizer.backend_tokenizer.token_to_id("<｜deepseek_image｜>")
     assert ids.count(image_id) == 2
-    with pytest.raises(sglang_deepseek.RecipeRequestError, match="image order"):
-        render(request, tokenizer, spec="dsv41", images=list(reversed(images)))
+    rendered = sglang_deepseek.render_recipe_prompt(
+        request,
+        messages=request["messages"],
+        tokenizer=tokenizer,
+        tools=None,
+        spec="dsv41",
+        image_urls=list(reversed(images)),
+    )
+    assert rendered.image_urls == images
+    with pytest.raises(sglang_deepseek.RecipeRequestError, match="images differ"):
+        render(request, tokenizer, spec="dsv41", images=[images[0], images[0]])
 
 
 def test_recipe_request_errors_do_not_hide_tokenizer_configuration_errors(tokenizer):
@@ -191,4 +180,27 @@ def test_recipe_normalizes_reasoning_history_without_mutating_request(tokenizer)
     expected = copy.deepcopy(request)
     expected["messages"][1]["reasoning_content"] = "Check the weather\nUse the tool"
     assert ids == render(expected, tokenizer, spec="dsv41")
+    assert request == original
+
+
+def test_recipe_returns_tool_images_in_prompt_order(tokenizer, tool_image_request):
+    request, expected = tool_image_request
+    original = copy.deepcopy(request)
+    wire_images = [
+        part["image_url"]["url"]
+        for message in request["messages"]
+        if message["role"] == "tool"
+        for part in message["content"]
+    ]
+    rendered = sglang_deepseek.render_recipe_prompt(
+        request,
+        messages=request["messages"],
+        tokenizer=tokenizer,
+        tools=None,
+        spec="dsv41",
+        image_urls=wire_images,
+    )
+    assert rendered.image_urls == expected
+    image_id = tokenizer.backend_tokenizer.token_to_id("<｜deepseek_image｜>")
+    assert rendered.token_ids.count(image_id) == len(expected)
     assert request == original

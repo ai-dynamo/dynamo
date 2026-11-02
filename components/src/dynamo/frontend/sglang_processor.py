@@ -418,6 +418,7 @@ def _preprocess_worker(
             request, pre.force_reasoning, _w_reasoning_parser_name, pre.guided_decoding
         ),
         force_reasoning=pre.force_reasoning,
+        rendered_image_urls=pre.rendered_image_urls,
     )
 
     effective_reasoning_parser_name = (
@@ -444,6 +445,7 @@ def _build_dynamo_preproc(
     reasoning_parser: ReasoningParser | None = None,
     require_reasoning: bool = False,
     force_reasoning: bool = False,
+    rendered_image_urls: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build the Dynamo preprocessed request dict from request fields."""
     thinking_token_budget = resolve_thinking_token_budget(request)
@@ -543,6 +545,8 @@ def _build_dynamo_preproc(
     except ValueError as exc:
         raise PreprocessError(str(exc)) from exc
     if mm_data:
+        if rendered_image_urls is not None:
+            mm_data["image_url"] = [{"Url": url} for url in rendered_image_urls]
         preproc["multi_modal_data"] = mm_data
 
     nvext_passthrough = {
@@ -736,6 +740,7 @@ class SglangProcessor:
                     pre.guided_decoding,
                 ),
                 force_reasoning=pre.force_reasoning,
+                rendered_image_urls=pre.rendered_image_urls,
             )
         except PreprocessError as exc:
             raise InvalidArgument(str(exc)) from exc

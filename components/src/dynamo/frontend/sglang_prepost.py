@@ -34,7 +34,12 @@ from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
 from .responses_history import responses_history_recipients, responses_tools_request
-from .sglang_deepseek import RecipeRequestError, recipe_renderer, render_recipe_prompt
+from .sglang_deepseek import (
+    RecipeRequestError,
+    RenderedDeepSeekPrompt,
+    recipe_renderer,
+    render_recipe_prompt,
+)
 from .structural_tag_policy import (
     ToolChoiceKind,
     effective_tool_strict,
@@ -68,6 +73,7 @@ class SglangPreprocessResult:
     request: dict[str, Any]
     force_reasoning: bool = False
     named_zero_arg_tool: str | None = None
+    rendered_image_urls: list[str] | None = None
 
 
 # --- force_reasoning detection (mirrors sglang's template_manager) -------
@@ -522,14 +528,14 @@ def _with_thinking_template_kwargs(
     return request
 
 
-def _render_deepseek_v4_prompt_token_ids(
+def _render_deepseek_prompt(
     request: dict[str, Any],
     *,
     messages: list[dict[str, Any]],
     tokenizer,
     template_tools: list[dict[str, Any]] | None,
     spec: str = "dsv4",
-) -> list[int]:
+) -> RenderedDeepSeekPrompt:
     """Use SGLang's recipe adapter or its legacy V4 checkpoint encoder."""
     if recipe_renderer is not None:
         try:
@@ -611,7 +617,7 @@ def _render_deepseek_v4_prompt_token_ids(
         thinking_mode=thinking_mode,
         reasoning_effort=reasoning_effort,
     )
-    return _normalize_prompt_token_ids(tokenizer.encode(prompt))
+    return RenderedDeepSeekPrompt(_normalize_prompt_token_ids(tokenizer.encode(prompt)))
 
 
 @lru_cache(maxsize=64)
@@ -992,6 +998,7 @@ def preprocess_chat_request(
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
     )
 
+    rendered_image_urls = None
     if (
         deepseek_spec is not None
         and (
@@ -1004,13 +1011,15 @@ def preprocess_chat_request(
         tool_call_parser_name=tool_call_parser_name,
         reasoning_parser_name=reasoning_parser_name,
     ):
-        prompt_token_ids = _render_deepseek_v4_prompt_token_ids(
+        rendered = _render_deepseek_prompt(
             request,
             messages=messages,
             tokenizer=tokenizer,
             template_tools=template_tools,
             spec=deepseek_spec or "dsv4",
         )
+        prompt_token_ids = rendered.token_ids
+        rendered_image_urls = rendered.image_urls
     else:
         # Build template kwargs -- single call for rendering + tokenization
         template_kwargs: dict[str, Any] = {
@@ -1118,6 +1127,7 @@ def preprocess_chat_request(
         reasoning_parser=reasoning_parser,
         guided_decoding=guided_decoding,
         request=request,
+        rendered_image_urls=rendered_image_urls,
         force_reasoning=force_reasoning,
         named_zero_arg_tool=(
             named_closed_zero_arg_tool(request)

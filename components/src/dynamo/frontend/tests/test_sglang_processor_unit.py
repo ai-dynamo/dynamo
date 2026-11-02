@@ -85,6 +85,8 @@ from dynamo.llm.exceptions import InvalidArgument, Unknown, WorkerUnavailable
 from dynamo.sglang.thinking_budget import apply_thinking_budget
 
 # Needs sglang packages (gpu_1 container), but does not allocate GPU VRAM.
+pytest_plugins = ["_deepseek_recipe_fixtures"]
+
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
@@ -3790,7 +3792,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
 
         def render(request, **kwargs):
             captured.update(kwargs)
-            return [1, 2, 3]
+            return sglang_prepost_module.RenderedDeepSeekPrompt([1, 2, 3])
 
         class CheckpointTokenizer:
             def __init__(self):
@@ -3800,9 +3802,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
                 raise AssertionError("checkpoint recipe must take precedence")
 
         monkeypatch.setattr(sglang_prepost_module, "recipe_renderer", object())
-        monkeypatch.setattr(
-            sglang_prepost_module, "_render_deepseek_v4_prompt_token_ids", render
-        )
+        monkeypatch.setattr(sglang_prepost_module, "_render_deepseek_prompt", render)
         result = preprocess_chat_request(
             {
                 "model": "deepseek-v4-prod",
@@ -3820,7 +3820,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
     def test_deepseek_v41_rejects_legacy_v4_encoder(self, monkeypatch):
         monkeypatch.setattr(sglang_prepost_module, "recipe_renderer", None)
         with pytest.raises(ValueError, match="DeepSeek-V4.1 preprocessing requires"):
-            sglang_prepost_module._render_deepseek_v4_prompt_token_ids(
+            sglang_prepost_module._render_deepseek_prompt(
                 {}, messages=[], tokenizer=object(), template_tools=None, spec="dsv41"
             )
 
@@ -4526,6 +4526,47 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert dynamo_preproc["multi_modal_data"] == {
             "image_url": [{"Url": "https://example.com/k3.png"}]
         }
+
+
+@pytest.mark.multimodal
+@pytest.mark.parametrize("mode", ["inline", "worker"])
+def test_recipe_image_order_reaches_worker_payload(
+    recipe_tokenizer, tool_image_request, monkeypatch, mode
+):
+    request, expected = tool_image_request
+    original = copy.deepcopy(request)
+    if mode == "worker":
+        for key, value in {
+            "_w_tokenizer": recipe_tokenizer,
+            "_w_tool_call_parser_name": None,
+            "_w_reasoning_parser_name": None,
+            "_w_deepseek_spec": "dsv41",
+            "_w_template_force_reasoning": False,
+            "_w_default_thinking_mode": None,
+            "_w_structural_tag_mode": "off",
+        }.items():
+            monkeypatch.setattr(sglang_processor_module, key, value)
+        result = _preprocess_worker(request, request["model"], None).dynamo_preproc
+    else:
+        engine = FakeRoutedEngine(items=[])
+        processor = SglangProcessor(
+            tokenizer=recipe_tokenizer,
+            routed_engine=engine,
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            eos_token_ids=None,
+            deepseek_spec="dsv41",
+        )
+
+        async def collect():
+            return [item async for item in processor.generator(request)]
+
+        asyncio.run(collect())
+        result = engine.requests[0]
+    assert result["multi_modal_data"]["image_url"] == [{"Url": url} for url in expected]
+    image_id = recipe_tokenizer.backend_tokenizer.token_to_id("<｜deepseek_image｜>")
+    assert result["token_ids"].count(image_id) == len(expected)
+    assert request == original
 
 
 # ---------------------------------------------------------------------------

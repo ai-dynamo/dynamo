@@ -4,6 +4,8 @@
 """Compatibility with SGLang's recipe-based DeepSeek prompt encoder."""
 
 import json
+from collections import Counter
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -35,6 +37,12 @@ class RecipeRequestError(ValueError):
     """A client request rejected by the recipe encoder."""
 
 
+@dataclass
+class RenderedDeepSeekPrompt:
+    token_ids: list[int]
+    image_urls: list[str] | None = None
+
+
 @lru_cache(maxsize=8)
 def _encoder(tokenizer: Any, spec: str):
     return recipe_renderer.DeepSeekRecipe.from_hf_tokenizer(spec, tokenizer)
@@ -48,7 +56,7 @@ def render_recipe_prompt(
     tools: list[dict[str, Any]] | None,
     spec: str,
     image_urls: list[str],
-) -> list[int]:
+) -> RenderedDeepSeekPrompt:
     """Encode a prompt on SGLang builds that provide the recipe adapter."""
     kwargs = (
         request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
@@ -85,10 +93,12 @@ def render_recipe_prompt(
             body["reasoning_effort"] = effort
         rendered_images: list[str] | None = [] if image_urls else None
         tokens = encoder.encode(body, effort_budget=budget, image_urls=rendered_images)
-        if rendered_images is not None and rendered_images != image_urls:
-            raise ValueError(
-                "DeepSeek recipe image order differs from worker media order"
-            )
+        if (
+            rendered_images is not None
+            and rendered_images != image_urls
+            and Counter(rendered_images) != Counter(image_urls)
+        ):
+            raise ValueError("DeepSeek recipe images differ from request media")
     except ValueError as exc:
         raise RecipeRequestError(str(exc)) from exc
-    return tokens
+    return RenderedDeepSeekPrompt(tokens, rendered_images)
