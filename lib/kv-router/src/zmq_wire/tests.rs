@@ -1272,6 +1272,60 @@ fn partial_tail_filter_is_tracked_per_worker() {
     );
 }
 
+/// A full-size block from a group the router filters out (here a Mamba state
+/// group) must not count as proof of the worker's block size: a later undersized
+/// main-attention block still has to reach conversion and warn.
+#[test]
+fn filtered_group_does_not_prove_block_size_for_partial_tail_filter() {
+    let mut normalizer = ZmqEventNormalizer::new(4);
+    let worker = WorkerWithDpRank::new(7, 0);
+
+    let mut full_non_main = gpu_block_stored(&[1], &[10, 11, 12, 13], 4);
+    if let RawKvEvent::BlockStored {
+        kv_cache_spec_kind,
+        group_idx,
+        ..
+    } = &mut full_non_main
+    {
+        *kv_cache_spec_kind = Some(KvCacheSpecKind::Mamba);
+        *group_idx = Some(1);
+    }
+    assert_eq!(
+        normalizer
+            .preprocess_with_reason(full_non_main, worker)
+            .err(),
+        Some(ZmqEventFilterReason::NonMainAttentionKind)
+    );
+
+    let undersized = gpu_block_stored(&[2], &[14, 15], 2);
+    assert!(
+        normalizer
+            .preprocess_with_reason(undersized, worker)
+            .is_ok()
+    );
+}
+
+/// `AllBlocksCleared` resets the worker's full-block history, so an engine
+/// that comes back with a different block size is not silently filtered.
+#[test]
+fn all_blocks_cleared_resets_partial_tail_filter_history() {
+    let mut normalizer = ZmqEventNormalizer::new(4);
+    let worker = WorkerWithDpRank::new(7, 0);
+
+    let full = gpu_block_stored(&[1], &[10, 11, 12, 13], 4);
+    assert!(normalizer.preprocess_with_reason(full, worker).is_ok());
+
+    let cleared = RawKvEvent::AllBlocksCleared { ownership: None };
+    assert!(normalizer.preprocess_with_reason(cleared, worker).is_ok());
+
+    let undersized = gpu_block_stored(&[2], &[14, 15], 2);
+    assert!(
+        normalizer
+            .preprocess_with_reason(undersized, worker)
+            .is_ok()
+    );
+}
+
 // ---- locality decode + storage-tier gating (this PR) ----
 
 /// LOCAL/REMOTE decode to their variants, any other string folds into

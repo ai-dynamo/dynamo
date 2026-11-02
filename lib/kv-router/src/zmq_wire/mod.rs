@@ -210,12 +210,6 @@ impl ZmqEventNormalizer {
             }
         }
 
-        if let RawKvEvent::BlockStored { block_size, .. } = &raw
-            && let Some(reason) = self.filter_partial_block(*block_size, worker)
-        {
-            return Err(reason);
-        }
-
         let metadata = raw.metadata();
         if matches!(raw, RawKvEvent::BlockStored { .. }) {
             self.learn_metadata(metadata, worker.dp_rank);
@@ -230,6 +224,22 @@ impl ZmqEventNormalizer {
                     && matches!(raw, RawKvEvent::BlockRemoved { .. }) => {}
             Some(reason) => return Err(reason),
             None => {}
+        }
+        // Only blocks that survived group filtering count toward a worker's
+        // full-block history, so a filtered (non-main-attention) group cannot
+        // suppress a size-mismatch warning for the routed group. A clear resets
+        // the history: the engine behind this worker may come back with a
+        // different block size.
+        match &raw {
+            RawKvEvent::BlockStored { block_size, .. } => {
+                if let Some(reason) = self.filter_partial_block(*block_size, worker) {
+                    return Err(reason);
+                }
+            }
+            RawKvEvent::AllBlocksCleared { .. } => {
+                self.full_block_workers.remove(&worker);
+            }
+            _ => {}
         }
         if !is_lower_tier {
             self.propagate_cache_namespace(&mut raw, worker)?;
