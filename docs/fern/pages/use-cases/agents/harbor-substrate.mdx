@@ -813,25 +813,15 @@ kubectl -n ate-env wait --for=condition=Complete "job/$PI_JOB" --timeout=30s
 If the Job fails, inspect its `dataset` and `runner` logs before deleting it.
 Use a new Harbor `job_name` when retrying so existing results are preserved.
 
-### Compare trial latency
+</Step>
 
-Measure trial wall time from environment setup through cleanup, including Pi
-execution and verification. Record image build and push time separately. The
-first pull and unpack are cold-start costs; the oracle warms the image cache
-on its execution node before the Pi trial. Runner startup and the init
-container's dataset download happen before Harbor's trial timings.
+<Step title="View and understand the trial" id="view-the-trial">
 
-Keep the task, model settings, and cache state consistent when comparing runs.
-Use Harbor's trial timestamps for the complete trial and
-`substrate-timing.jsonl` for the environment phases. Those phase timings alone
-do not include the complete agent and verifier execution. The
-[golden snapshot extension](#optionally-restore-from-a-golden-snapshot) compares another startup
-path for the same prepared task.
-
-### Save and inspect the results
+### Export the results
 
 After the Job completes, delete it and mount the PVC in the inspection Pod.
-Copy the selected results to your workstation:
+Copy the results to your workstation so you can inspect them after the Job
+has been deleted:
 
 ```bash title="Workstation"
 kubectl -n ate-env delete job "$PI_JOB" --wait=true
@@ -845,38 +835,15 @@ kubectl -n ate-env cp \
 kubectl -n ate-env delete pod harbor-results --wait=true
 ```
 
-The copy remains available locally, and the original stays on the PVC. Delete
-the inspection Pod before starting another Job; a `ReadWriteOnce` volume may
-not mount on two nodes at once. For the optional runs below, `PI_JOB` records
-the latest Kubernetes Job name.
+The original results remain on the PVC. Delete the inspection Pod before
+starting another Job; a `ReadWriteOnce` volume may not mount on two nodes at
+once. For later runs, `PI_JOB` records the latest Kubernetes Job name.
 
-Retain the edited job YAML, templates, policies, dataset revision, and result
-files together. Each trial directory contains:
+### Convert the trajectory and open Harbor
 
-| Artifact | What to check |
-| --- | --- |
-| `result.json` | Trial outcome and `exception_info`; investigate setup or execution exceptions. |
-| `substrate.json` | Actor identity for matching this trial to Substrate activity. |
-| `substrate-timing.jsonl` | Time spent in environment preparation phases. |
-| `agent/pi.txt` | Raw Pi events: a tool call, its result, and a subsequent model request; inspect assistant errors. |
-| `verifier/` | Verifier logs and reward; distinguish a failed solution from an execution failure. |
-
-Before continuing, confirm that:
-
-- `result.json` contains no setup or execution exception.
-- `agent/pi.txt` shows a tool call, its result, and a subsequent model request,
-  without assistant errors.
-- The `verifier/` directory contains the verifier output and reward.
-
-A reward of `0` can mean Pi did not fix the bug even though the integration
-worked. A single task result does not establish full-dataset accuracy. Repeat
-this check after changing an endpoint, dependency, image, or cluster configuration.
-
-<Accordion title="Inspect the job in Harbor (optional)">
-
-In a separate workstation terminal, run these commands from
-`examples/agents/harbor-substrate`. Use a separate viewer environment to convert
-the copied Pi logs to Harbor's ATIF trajectory format, then start the viewer:
+From `examples/agents/harbor-substrate`, create a separate viewer environment,
+convert the copied Pi logs to Harbor's ATIF trajectory format, and start the
+viewer:
 
 ```bash title="Workstation"
 python3 -m venv .venv/viewer
@@ -885,30 +852,69 @@ python3 -m venv .venv/viewer
 .venv/viewer/bin/harbor view results --host 127.0.0.1 --port 8080
 ```
 
-The converter finds each `agent/pi.txt` and writes `agent/trajectory.json`
-beside it. It leaves raw logs, verifier output, and scores unchanged. Runs
-without Pi logs, including oracle runs, are ignored when scanning `results`.
-Existing trajectories and logs with no complete messages are skipped.
+The converter writes `agent/trajectory.json` beside each `agent/pi.txt`.
+It preserves the raw logs and scores. Existing trajectories, logs with no
+complete messages, and runs without Pi logs are skipped.
 
-To convert only one run, pass its directory instead. A trial directory or an
-individual `agent/pi.txt` path also works. Add `--overwrite` to regenerate an
-existing trajectory:
+To convert one run, replace `results` with `results/swe-one`. A trial directory
+or an individual `agent/pi.txt` also works. Add `--overwrite` to regenerate an
+existing trajectory.
 
-```bash title="Workstation"
-.venv/viewer/bin/python pi_trajectory.py results/swe-one --overwrite
-```
-
-Keep the viewer running and open `http://localhost:8080`. Select a trial under
-**Rollouts** to inspect its trajectory. If an Overview link opens an empty
+Keep the viewer running and open `http://localhost:8080`. Open **swe-one**,
+select **Rollouts**, then select the trial. If an Overview link opens an empty
 Rollouts list, select **Clear all** to remove the agent filter.
 
-The trajectory includes recorded messages, tool calls, and tool results.
-Interrupted recordings retain complete messages and flag unfinished calls;
-the converter does not reconstruct missing prompts or events. Read the raw
-`agent/pi.txt` and verifier files alongside the trajectory. Differences between
-event timestamps are not isolated inference durations.
+### Read the trial summary
 
-</Accordion>
+Check the reward and timing at the top of the trial page. The example below
+completed in about 3 minutes 18 seconds with a reward of 0. Your result and
+timings may differ.
+
+![Harbor trial summary showing reward 0, 9,242 tokens, and the four timing phases.](../../../assets/img/harbor-substrate/trial-summary.png)
+
+Read the timing bar as four phases:
+
+| Phase | What happens in this tutorial | Example duration |
+| --- | --- | --- |
+| **Env Setup** | Harbor creates the Substrate actor from the task template, applies its egress policy, waits for guest commands to work, and transfers configured inputs. | 1.9 s |
+| **Agent Setup** | Harbor prepares Pi to run. The adapter checks the prepared image's Pi version and reuses its baked runtime. | 0.6 s |
+| **Agent Execution** | Pi reads the task, calls the model, and executes tools inside the sandbox. This includes model requests, tool execution, and orchestration overhead. | 68.5 s |
+| **Verifier** | The verifier installs the modified Astropy package using the prepared dependencies, runs the task tests, and records the reward and test output. | 122.4 s |
+
+These are recorded phase durations. The viewer labels setup segments
+**scaled**, so their widths are not proportional to elapsed time. Trial wall
+time also includes work between phases and cleanup. Kubernetes scheduling,
+runner startup, and the init container's dataset download happen before the
+trial timings.
+
+### Follow a tool call
+
+In **Trajectory**, read the task prompt and expand a tool call to inspect its
+arguments and returned output. In this example, Pi uses `bash` to locate
+`separable.py`. The **OBSERVATIONS** entry shows the path returned by the
+sandbox:
+
+![An expanded Pi bash tool call showing the find command and the returned separable.py path.](../../../assets/img/harbor-substrate/tool-call.png)
+
+Continue through the following steps to see how Pi uses that output. The
+trajectory contains recorded messages and tool results. Interrupted recordings
+retain complete messages and flag unfinished calls. Differences between event
+timestamps are not isolated inference or tool durations.
+
+### Check the verifier outcome
+
+Open **Verifier** to inspect the test output and reward. A reward of `1` means
+the task passed verification. A reward of `0` with no execution exception means
+the run completed but the solution did not pass verification. This example
+has 13 passing tests and 2 failing tests. Select `report.json` to see which
+tests failed:
+
+![Harbor verifier report showing two failed FAIL_TO_PASS tests and the passing PASS_TO_PASS tests.](../../../assets/img/harbor-substrate/verifier-report.png)
+
+If Harbor reports an execution error, open **Exception** before interpreting
+the reward. A failed solution and a failed sandbox or model request require
+different fixes. Keep the copied results with the job configuration, templates,
+policies, and dataset revision so you can reproduce the run.
 
 </Step>
 
@@ -958,7 +964,7 @@ kubectl -n ate-env logs -f "job/$PI_JOB" -c runner
 kubectl -n ate-env wait --for=condition=Complete "job/$PI_JOB" --timeout=30s
 ```
 
-Repeat [Save and inspect the results](#save-and-inspect-the-results) with
+Repeat [View and understand the trial](#view-the-trial) with
 `JOB_NAME=swe-observed`. Then inspect the views you configured:
 
 #### Inspect measured spans in Perfetto
@@ -1048,8 +1054,21 @@ not contain an initialized Pi conversation. Verify restore events and storage
 fidelity before attributing startup behavior to snapshots. Keep prepared-image
 and golden-snapshot runs in separate output directories.
 
-Repeat [Save and inspect the results](#save-and-inspect-the-results) with
+Repeat [View and understand the trial](#view-the-trial) with
 `JOB_NAME=swe-golden` before comparing the runs.
+
+#### Compare trial latency
+
+Keep the task, model settings, and cache state consistent when comparing the
+prepared-image and golden-snapshot runs. Compare Harbor's complete trial wall
+time, including execution, verification, and cleanup. Record image build and
+push time separately. The first image pull and unpack are cold-start costs;
+the oracle warms the image cache only on its execution node.
+
+Use `substrate-timing.jsonl` to break down environment preparation. Those
+measurements do not include the complete agent and verifier execution.
+Runner startup and the dataset init container happen before Harbor's trial
+timings.
 
 ### Increase concurrency
 
@@ -1097,7 +1116,7 @@ Worker capacity limits resident actors, while the inference service has its own
 request limit. This example keeps actors resident through each trial. It does
 not automatically suspend Pi between model calls.
 
-Repeat [Save and inspect the results](#save-and-inspect-the-results) with
+Repeat [View and understand the trial](#view-the-trial) with
 `JOB_NAME=swe-batch`. Inspect each trial before adding more tasks or workers.
 
 ### Run the full dataset
