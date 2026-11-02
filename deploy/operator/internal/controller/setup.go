@@ -42,6 +42,15 @@ type DynamoGraphDeploymentRequestSetupOptions struct {
 	OperatorImagePullPolicy corev1.PullPolicy
 }
 
+type DynamoGraphDeploymentRunSetupOptions struct {
+	SetupOptions
+	DockerSecretRetriever   DockerSecretRetriever
+	PlannerImage            string
+	DynamoVersion           string
+	OperatorImage           string
+	OperatorImagePullPolicy corev1.PullPolicy
+}
+
 type DynamoModelSetupOptions struct {
 	SetupOptions
 	ModelEndpointClient *modelendpoint.Client
@@ -125,6 +134,41 @@ func SetupDynamoGraphDeploymentRequest(mgr ctrl.Manager, opts DynamoGraphDeploym
 		OperatorImagePullPolicy: opts.OperatorImagePullPolicy,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoGraphDeploymentRequest controller: %w", err)
+	}
+	return nil
+}
+
+// SetupDynamoGraphDeploymentRequestV1beta2 registers the controller that turns native v1beta2 Requests
+// into Runs. It fails at startup, with a clear message, when the cluster does not serve the v1beta2 APIs.
+func SetupDynamoGraphDeploymentRequestV1beta2(mgr ctrl.Manager, opts SetupOptions) error {
+	if err := requireDGDRV1beta2API(mgr); err != nil {
+		return err
+	}
+	if err := (&DynamoGraphDeploymentRequestV1beta2Reconciler{
+		Client:        mgr.GetClient(),
+		APIReader:     mgr.GetAPIReader(),
+		Config:        opts.Config,
+		RuntimeConfig: opts.RuntimeConfig,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create DynamoGraphDeploymentRequest v1beta2 controller: %w", err)
+	}
+	return nil
+}
+
+// SetupDynamoGraphDeploymentRunV1beta2 registers the controller that executes immutable
+// v1beta2 Runs as AISimulate Jobs and observes their lifecycle.
+func SetupDynamoGraphDeploymentRunV1beta2(mgr ctrl.Manager, opts DynamoGraphDeploymentRunSetupOptions) error {
+	if err := (&DynamoGraphDeploymentRunV1beta2Reconciler{
+		Client:                  mgr.GetClient(),
+		Config:                  opts.Config,
+		RuntimeConfig:           opts.RuntimeConfig,
+		DockerSecretRetriever:   opts.DockerSecretRetriever,
+		PlannerImage:            opts.PlannerImage,
+		DynamoVersion:           opts.DynamoVersion,
+		OperatorImage:           opts.OperatorImage,
+		OperatorImagePullPolicy: opts.OperatorImagePullPolicy,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create DynamoGraphDeploymentRun v1beta2 controller: %w", err)
 	}
 	return nil
 }

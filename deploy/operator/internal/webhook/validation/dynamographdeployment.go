@@ -458,20 +458,13 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		allErrs = append(allErrs, lpxComponentGateErrors(
 			v.ctx, component, opts.oldComponents[component.ComponentName], componentPath, v.runtimeVersionSource,
 		)...)
-		// Engine Group admission proves the supported layout before any Grove resources exist.
-		if component.EngineGroup != nil {
-			allErrs = append(allErrs, v.validateComponentEngineGroupSpec(component.EngineGroup, componentPath.Child("engineGroup"), componentEngineGroupSpecValidationOptions{
-				component: component, backendFramework: spec.BackendFramework, parentEnv: spec.Env,
-				hasRootOverride: spec.ProviderOverride != nil,
-				grovePathway:    opts.grovePathway,
-			})...)
-		}
-
 		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 			component,
 			componentPath,
 			dynamoComponentDeploymentSharedSpecValidationOptions{
 				backendFramework:                  spec.BackendFramework,
+				parentEnv:                         spec.Env,
+				hasRootOverride:                   spec.ProviderOverride != nil,
 				grovePathway:                      opts.grovePathway,
 				validateInferencePoolAvailability: validateInferencePoolAvailability,
 				providerOverridesSupported:        true,
