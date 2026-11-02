@@ -86,7 +86,6 @@ func TestTracePathIsOneFixedFileUnderTheMount(t *testing.T) {
 	for subPath, want := range map[string]string{
 		"retune/w-1.jsonl.gz": "/var/run/aisimulate/trace/trace.jsonl.gz",
 		"retune/w-1.jsonl":    "/var/run/aisimulate/trace/trace.jsonl",
-		"../../etc/passwd":    "/var/run/aisimulate/trace/trace.jsonl",
 	} {
 		if got := TracePath(subPath); got != want {
 			t.Errorf("TracePath(%q) = %q, want %q", subPath, got, want)

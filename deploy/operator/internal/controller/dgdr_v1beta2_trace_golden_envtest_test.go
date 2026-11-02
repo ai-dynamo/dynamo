@@ -10,20 +10,13 @@ package controller
 import (
 	"bytes"
 	"encoding/json"
-	"flag"
 	"os"
-	"path/filepath"
 	"testing"
 
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
+	"github.com/pmezard/go-difflib/difflib"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
-
-// updateTraceRequestLoweringGolden rewrites the golden file instead of comparing with it:
-//
-//	go test ./internal/controller -run '^TestDGDRV1beta2TraceRequestLoweringGolden$' -update
-var updateTraceRequestLoweringGolden = flag.Bool("update", false,
-	"rewrite internal/aisimulate/testdata/trace_request_lowering.golden.json")
 
 // traceRequestLoweringGoldenPath is read by the live-retune planner's tests, which check that the
 // planner builds request_spec and accepts run_input as the effective input of its Run.
@@ -32,7 +25,7 @@ const traceRequestLoweringGoldenPath = "../aisimulate/testdata/trace_request_low
 // liveRetuneShardRequestSpec is the spec of one grid shard the live-retune planner submits: its
 // build_request for an aggregated vLLM deployment with 3 replicas of tensor parallelism 2, the window
 // ending at 1793000000000 ms, and a 2x2x2 router grid. It omits workload.trace.format, which the
-// CRD schema defaults. Change it together with the planner and rerun with -update.
+// CRD schema defaults. Change it together with the planner and regenerate the golden file.
 const liveRetuneShardRequestSpec = `{
   "model": {"name": "Qwen/Qwen3-32B"},
   "backends": ["vllm"],
@@ -92,7 +85,12 @@ const liveRetuneShardRequestSpec = `{
 
 // The live-retune planner submits a trace Request and checks the input its Run executes. Both
 // sides share one golden file, so a change to the trace API, admission or lowering that the planner
-// does not follow fails here or in the planner's tests.
+// does not follow fails here or in the planner's tests. A mismatch writes the result next to the
+// golden file as .new; to regenerate the golden file, run the test and move the .new file over it:
+//
+//	go test ./internal/controller -run '^TestDGDRV1beta2TraceRequestLoweringGolden$'
+//	mv internal/aisimulate/testdata/trace_request_lowering.golden.json.new \
+//	  internal/aisimulate/testdata/trace_request_lowering.golden.json
 func TestDGDRV1beta2TraceRequestLoweringGolden(t *testing.T) {
 	env := sharedEnv.ForTest(t)
 	c := env.Client()
@@ -142,21 +140,21 @@ func TestDGDRV1beta2TraceRequestLoweringGolden(t *testing.T) {
 	}
 	got = append(got, '\n')
 
-	t.Log("Compare with the golden file, or rewrite it with -update")
-	if *updateTraceRequestLoweringGolden {
-		if err := os.MkdirAll(filepath.Dir(traceRequestLoweringGoldenPath), 0o755); err != nil {
-			t.Fatalf("create the golden directory: %v", err)
-		}
-		if err := os.WriteFile(traceRequestLoweringGoldenPath, got, 0o644); err != nil {
-			t.Fatalf("write the golden file: %v", err)
-		}
-	}
+	t.Log("Compare with the golden file; a mismatch writes the result next to it as .new")
 	want, err := os.ReadFile(traceRequestLoweringGoldenPath)
 	if err != nil {
 		t.Fatalf("read the golden file: %v", err)
 	}
 	if !bytes.Equal(got, want) {
-		t.Fatalf("%s is stale; rerun with -update and update the planner if needed\n got: %s\nwant: %s",
-			traceRequestLoweringGoldenPath, got, want)
+		newPath := traceRequestLoweringGoldenPath + ".new"
+		if err := os.WriteFile(newPath, got, 0o644); err != nil {
+			t.Fatalf("write %s: %v", newPath, err)
+		}
+		diff, _ := difflib.GetUnifiedDiffString(difflib.UnifiedDiff{
+			A: difflib.SplitLines(string(want)), B: difflib.SplitLines(string(got)),
+			FromFile: traceRequestLoweringGoldenPath, ToFile: newPath, Context: 3,
+		})
+		t.Fatalf("%s is stale; review %s, move it over the golden file and update the planner if needed:\n%s",
+			traceRequestLoweringGoldenPath, newPath, diff)
 	}
 }
