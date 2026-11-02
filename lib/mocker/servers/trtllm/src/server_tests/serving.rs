@@ -175,6 +175,59 @@ async fn every_streamed_token_carries_a_logprob_when_requested() {
     }
 }
 
+/// The real servicer sends no `TokenOutput.text` when `extra.detokenize` is
+/// false, and decodes `TokenInfo.token` only on the logprobs path.
+#[tokio::test]
+async fn token_strings_follow_detokenize_and_logprobs() {
+    let service = service();
+    let token_only = |request_id: &str, logprobs: bool| {
+        let mut request = request(request_id, 4);
+        request.extra = Some(prost_types::Struct {
+            fields: [(
+                "detokenize".to_string(),
+                Value {
+                    kind: Some(Kind::BoolValue(false)),
+                },
+            )]
+            .into(),
+        });
+        request.response = Some(pb::ResponseOptions {
+            return_output_logprobs: Some(logprobs),
+            ..Default::default()
+        });
+        request
+    };
+    let tokens = |responses: &[pb::GenerateResponse]| -> Vec<pb::TokenOutput> {
+        events(responses)
+            .into_iter()
+            .filter_map(|event| match event {
+                pb::generate_response::Event::Token(token) => Some(token.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+
+    let responses = drain(&service, token_only("req-ids", false)).await.unwrap();
+    let streamed = tokens(&responses);
+    assert_eq!(streamed.len(), 4);
+    for token in &streamed {
+        assert!(token.text.is_empty());
+        assert!(token.tokens.iter().all(|info| info.token.is_empty()));
+    }
+
+    let responses = drain(&service, token_only("req-lp", true)).await.unwrap();
+    for token in &tokens(&responses) {
+        assert!(token.text.is_empty());
+        assert!(token.tokens.iter().all(|info| !info.token.is_empty()));
+    }
+
+    let responses = drain(&service, request("req-text", 4)).await.unwrap();
+    for token in &tokens(&responses) {
+        assert!(!token.text.is_empty());
+        assert!(token.tokens.iter().all(|info| info.token.is_empty()));
+    }
+}
+
 /// Pins the terminal shape the sidecar requires: exactly one `finished`, never
 /// `UNSPECIFIED`, `output_index` always set, no prompt event, usage only at the
 /// end. A clean end without a terminal fails the request outright.

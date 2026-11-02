@@ -19,6 +19,8 @@ use super::{BoxedStatusResult, MockerServerConfig, ServerMode};
 /// whole integration suite and fail against a real engine.
 const REQUEST_TYPE_KEY: &str = "request_type";
 const CONTEXT_ONLY: &str = "context_only";
+/// TensorRT-LLM's token-only switch, spelled out for the same reason.
+const DETOKENIZE_KEY: &str = "detokenize";
 
 pub(super) const DEFAULT_MAX_NEW_TOKENS: u32 = 20;
 // Bound the synthetic token plan and full-response delivery buffer.
@@ -47,6 +49,9 @@ pub(super) struct PreparedRequest {
     min_output_tokens: usize,
     return_output_logprobs: bool,
     return_prompt_logprobs: bool,
+    /// Whether to stream `TokenOutput.text`. The real servicer leaves it empty
+    /// when the request sets `extra.detokenize` to false, as the sidecar does.
+    detokenize: bool,
     output_candidates: Option<pb::CandidateTokenSelection>,
     prompt_candidates: Option<pb::CandidateTokenSelection>,
 }
@@ -145,6 +150,7 @@ impl PreparedRequest {
             min_output_tokens: stopping.min_tokens.unwrap_or(0) as usize,
             return_output_logprobs: response.return_output_logprobs == Some(true),
             return_prompt_logprobs: response.return_prompt_logprobs == Some(true),
+            detokenize: detokenize(request.extra.as_ref()),
             output_candidates: response.output_candidates,
             prompt_candidates: response.prompt_candidates,
         })
@@ -216,7 +222,13 @@ impl PreparedRequest {
     ) -> pb::TokenInfo {
         pb::TokenInfo {
             token_id,
-            token: token_text(token_id),
+            // The real servicer decodes the token string only on the logprobs
+            // path.
+            token: if with_logprobs {
+                token_text(token_id)
+            } else {
+                String::new()
+            },
             logprob: with_logprobs.then(|| selected_logprob(token_id)),
             rank: with_logprobs.then_some(1),
             candidates: if with_logprobs {
@@ -238,6 +250,7 @@ impl PreparedRequest {
             && self.return_output_logprobs
             && let Some(logprobs) = &self.replayed_first_logprobs
         {
+            info.token = token_text(token_id);
             if let Some(selected) = logprobs.iter().find(|entry| entry.token_id == token_id) {
                 info.logprob = Some(selected.logprob);
                 info.rank = selected.rank;
@@ -270,7 +283,11 @@ impl PreparedRequest {
         }
         pb::TokenOutput {
             output_index: Some(0),
-            text: info.token.clone(),
+            text: if self.detokenize {
+                token_text(token_id)
+            } else {
+                String::new()
+            },
             tokens: vec![info],
         }
     }
@@ -426,6 +443,13 @@ fn is_context_only(extra: Option<&Struct>) -> bool {
         .and_then(|extra| extra.fields.get(REQUEST_TYPE_KEY))
         .and_then(|value| value.kind.as_ref())
         .is_some_and(|kind| matches!(kind, Kind::StringValue(value) if value == CONTEXT_ONLY))
+}
+
+fn detokenize(extra: Option<&Struct>) -> bool {
+    !extra
+        .and_then(|extra| extra.fields.get(DETOKENIZE_KEY))
+        .and_then(|value| value.kind.as_ref())
+        .is_some_and(|kind| matches!(kind, Kind::BoolValue(false)))
 }
 
 /// A request's disaggregation role has to agree with the role this process was
