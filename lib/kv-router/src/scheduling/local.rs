@@ -22,7 +22,7 @@ use super::queue::{
     SchedulerQueue,
 };
 use super::request_classifier::{RequestClassifierRuntime, RequestLifecycle};
-use super::selector::{WorkerInputs, WorkerSelector};
+use super::selector::{WorkerInputs, WorkerSelector, log_selection};
 use super::types::{
     AdmissionAttempt, AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId,
     KvSchedulerError, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PotentialLoad,
@@ -386,6 +386,7 @@ where
         let (attempt_tx, attempt_rx) = tokio::sync::oneshot::channel();
         let (mut request, block_hashes) = self.make_scheduling_request(request, Some(resp_tx));
         let tracked = request.mode.is_tracked();
+        let request_id = request.mode.request_id().map(str::to_owned);
         let classified_request = self.classify_request(&mut request, ingress_at).await?;
         let lifecycle_lease = self
             .queue
@@ -406,6 +407,7 @@ where
         let response = resp_rx
             .await
             .map_err(|_| KvSchedulerError::SubscriberShutdown)??;
+        log_selection(request_id.as_deref(), &response);
         let attempt = if tracked {
             AdmissionAttempt::Tracked(
                 attempt_rx
@@ -500,7 +502,10 @@ where
         request: ScheduleRequest,
     ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
         let (request, _block_hashes) = self.make_scheduling_request(request, None);
-        self.queue.select_without_admission(request).await
+        let request_id = request.mode.request_id().map(str::to_owned);
+        let advisory = self.queue.select_without_admission(request).await?;
+        log_selection(request_id.as_deref(), &advisory.response);
+        Ok(advisory)
     }
 
     /// Install the observer for admitted selections that sacrifice KV overlap.
@@ -1697,6 +1702,8 @@ mod tests {
             0,
             SimpleWorkerConfig {
                 max_num_batched_tokens: Some(64),
+                // vLLM's unreported placeholder; the log line reports it as is.
+                total_kv_blocks: Some(0),
                 ..Default::default()
             },
         );
@@ -1708,7 +1715,11 @@ mod tests {
                 Some("req-1".to_string()),
                 64,
                 Some(vec![1, 2, 3, 4]),
-                TierOverlapBlocks::default(),
+                TierOverlapBlocks {
+                    host_pinned: FxHashMap::from_iter([(worker, 2)]),
+                    disk: FxHashMap::from_iter([(worker, 1)]),
+                    ..Default::default()
+                },
                 FxHashMap::from_iter([(worker, 0.75)]),
                 FxHashMap::from_iter([(worker, 48)]),
                 None,
@@ -1728,6 +1739,21 @@ mod tests {
         assert_eq!(response.best_worker, worker);
         assert_eq!(response.cached_tokens, 48);
         assert_eq!(response.effective_overlap_blocks, 0.75);
+        // The routing task logs the selection from these after the scheduler replies.
+        let log_fields = response
+            .log_fields
+            .expect("builtin selection carries log fields");
+        assert_eq!(log_fields.worker_type, "test");
+        assert!(!log_fields.pinned);
+        // Host and disk credit (0.75 * 2 + 0.25 * 1 blocks) covers the one-block prompt,
+        // so the selected worker's cost is its four decode blocks.
+        assert_eq!(log_fields.logit, 4.0);
+        // The selected rank's own tier counts, not the cumulative tier snapshot.
+        assert_eq!(
+            (log_fields.host_pinned_blocks, log_fields.disk_blocks),
+            (2, 1)
+        );
+        assert_eq!(log_fields.total_kv_blocks, Some(0));
         assert_eq!(
             slots.active_tokens(Instant::now()).get(&worker).copied(),
             Some(16),
