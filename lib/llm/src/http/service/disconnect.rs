@@ -357,8 +357,6 @@ async fn connection_monitor(
     }
 }
 
-type StreamErrorFormatter = fn(&(dyn std::error::Error + 'static)) -> (ErrorType, String);
-
 struct StreamMonitorOptions {
     activity_rx: Option<mpsc::UnboundedReceiver<()>>,
     error_signal: Option<StreamErrorSignal>,
@@ -467,7 +465,7 @@ pub(crate) fn monitor_for_disconnects_with_error(
     context: Arc<dyn AsyncEngineContext>,
     inflight_guard: InflightGuard,
     stream_handle: ConnectionHandle,
-    error_formatter: StreamErrorFormatter,
+    error_formatter: impl Fn(&(dyn std::error::Error + 'static)) -> (ErrorType, String),
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     monitor_for_disconnects_with_timeout_error_and_keep_alive(
         stream,
@@ -594,7 +592,7 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
     mut inflight_guard: InflightGuard,
     mut stream_handle: ConnectionHandle,
     inactivity_timeout: Option<Duration>,
-    error_formatter: StreamErrorFormatter,
+    error_formatter: impl Fn(&(dyn std::error::Error + 'static)) -> (ErrorType, String),
     options: StreamMonitorOptions,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     stream_handle.arm();

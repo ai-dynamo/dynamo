@@ -23,5 +23,8 @@ for fixture in fixtures["vllm"]:
     )
     config = EngineArgs.from_cli_args(parsed).create_engine_config().parallel_config
     observed = {key: getattr(config, key) for key in fixture["native"]}
-    assert observed == fixture["native"], (fixture["name"], observed, fixture["native"])
+    if observed != fixture["native"]:
+        raise SystemExit(
+            f"{fixture['name']}: native geometry {observed!r} != expected {fixture['native']!r}"
+        )
     print(json.dumps({"name": fixture["name"], "native": observed}), flush=True)
