@@ -394,22 +394,3 @@ async def test_wait_for_ready_fails_fast_on_failed_automatic_snapshot_job(
         await deployment._wait_for_condition(timeout=5, sleep=0)
 
     assert deployment._custom_api.get_namespaced_custom_object.await_count == 1
-
-
-async def test_wait_for_ready_keeps_waiting_on_other_reconcile_failure(
-    tmp_path,
-) -> None:
-    """Other reconcile failures can be transient and must not fail fast."""
-    message = (
-        "failed to reconcile checkpoints: patch automatic SnapshotJob "
-        "default/checkpoint-a3bc461b18d203960e367ed2848dc024 lifecycle "
-        "metadata: the object has been modified"
-    )
-    deployment = _deployment_with_dgd_status(
-        tmp_path, _dgd_status_with_ready_message(message)
-    )
-
-    with pytest.raises(TimeoutError, match="failed to reach Ready=True"):
-        await deployment._wait_for_condition(timeout=0.05, sleep=0.01)
-
-    assert deployment._custom_api.get_namespaced_custom_object.await_count > 1

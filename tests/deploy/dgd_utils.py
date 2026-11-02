@@ -1097,8 +1097,15 @@ class ManagedDeployment:
                             )
                         ):
                             raise DeploymentStartupError(detail.format())
+                # Check both conditions:
+                # 1. Ready condition is True
+                # 2. State is successful
+                status_obj = status.get("status", {})  # type: ignore[attr-defined]
+                conditions = status_obj.get("conditions", [])  # type: ignore[attr-defined]
+                current_state = status_obj.get("state", "unknown")  # type: ignore[attr-defined]
+
                 if desired_ready_condition_val:
-                    for condition in status.get("status", {}).get("conditions", []):  # type: ignore[attr-defined]
+                    for condition in conditions:
                         if condition.get("type") != "Ready":
                             continue
                         message = condition.get("message") or ""
@@ -1107,12 +1114,6 @@ class ManagedDeployment:
                                 f"Deployment {self._deployment_name} automatic "
                                 f"checkpoint failed: {message}"
                             )
-                # Check both conditions:
-                # 1. Ready condition is True
-                # 2. State is successful
-                status_obj = status.get("status", {})  # type: ignore[attr-defined]
-                conditions = status_obj.get("conditions", [])  # type: ignore[attr-defined]
-                current_state = status_obj.get("state", "unknown")  # type: ignore[attr-defined]
 
                 observed_ready_condition_val = ""
                 for condition in conditions:
