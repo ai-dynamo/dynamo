@@ -1,0 +1,1296 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  annotations:
+    nvidia.com/current-worker-hash-v2: $var:worker-hash
+    nvidia.com/dynamo-operator-origin-version: $var:operator-version
+    nvidia.com/enable-grove: 'false'
+    nvidia.com/workload-provider: component
+  creationTimestamp: $ignore
+  finalizers:
+  - nvidia.com/finalizer
+  generation: $ignore
+  name: workers
+  namespace: upgrade-latest-vllm-disaggregated-multi-component
+  resourceVersion: $ignore
+  uid: $ignore
+spec:
+  backendFramework: vllm
+  components:
+  - name: frontend
+    podTemplate:
+      spec:
+        containers:
+        - command:
+          - python3
+          - -m
+          - dynamo.frontend
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.6.0
+          name: main
+    replicas: 1
+    type: frontend
+  - multinode:
+      nodeCount: 2
+    name: prefill
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --disaggregation-mode
+          - prefill
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: '1'
+    replicas: 2
+    type: prefill
+  - multinode:
+      nodeCount: 2
+    name: decode
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --disaggregation-mode
+          - decode
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: '1'
+    replicas: 2
+    type: decode
+status:
+  components:
+    decode:
+      $strict: false
+      componentKind: LeaderWorkerSet
+      componentNames:
+      - $var:worker-string:workers-decode-{{worker-hash}}-0
+      runtimeNamespace: $var:worker-string:upgrade-latest-vllm-disaggregated-multi-component-workers-{{worker-hash}}
+      servedModelName: Qwen/Qwen3-0.6B
+    frontend:
+      $strict: false
+      componentKind: Deployment
+      componentNames:
+      - workers-frontend
+      runtimeNamespace: upgrade-latest-vllm-disaggregated-multi-component-workers
+    prefill:
+      $strict: false
+      componentKind: LeaderWorkerSet
+      componentNames:
+      - $var:worker-string:workers-prefill-{{worker-hash}}-0
+      runtimeNamespace: $var:worker-string:upgrade-latest-vllm-disaggregated-multi-component-workers-{{worker-hash}}
+      servedModelName: Qwen/Qwen3-0.6B
+  conditions:
+  - lastTransitionTime: $ignore
+    message: '$var:worker-string:Resources not ready: workers-decode-{{worker-hash}}:
+      Component deployment not ready - Available condition not true; workers-frontend:
+      Component deployment not ready - Available condition not true; workers-prefill-{{worker-hash}}:
+      Component deployment not ready - Available condition not true'
+    observedGeneration: 1
+    reason: some_resources_are_not_ready
+    status: 'False'
+    type: Ready
+  observedGeneration: 1
+  state: pending
+---
+apiVersion: v1
+data:
+  wait-for-leader.py: "import socket, time, json, ssl, urllib.request, os\n\nSA =\
+    \ \"/var/run/secrets/kubernetes.io/serviceaccount\"\nhost = os.environ[\"LEADER_HOST\"\
+    ]\nport = int(os.environ[\"LEADER_PORT\"])\n\ndef _k8s_ctx():\n    return ssl.create_default_context(cafile=f\"\
+    {SA}/ca.crt\")\n\ndef _k8s_headers():\n    token = open(f\"{SA}/token\").read()\n\
+    \    return {\"Authorization\": f\"Bearer {token}\"}\n\ndef _k8s_api():\n    ns\
+    \ = open(f\"{SA}/namespace\").read()\n    return f\"https://kubernetes.default.svc/api/v1/namespaces/{ns}/pods\"\
+    \n\ndef resolve_leader_ip():\n    # gethostbyname is IPv4-only; fall back to IPv6\
+    \ for IPv6-only clusters.\n    try:\n        return socket.gethostbyname(host)\n\
+    \    except socket.gaierror:\n        return socket.getaddrinfo(host, None, socket.AF_INET6,\
+    \ socket.SOCK_STREAM)[0][4][0]\n\ndef leader_pod_is_healthy():\n    try:\n   \
+    \     ip = resolve_leader_ip()\n    except socket.gaierror:\n        return False,\
+    \ \"DNS resolution failed\", None, None\n    try:\n        req = urllib.request.Request(\n\
+    \            f\"{_k8s_api()}?fieldSelector=status.podIP={ip}\",\n            headers=_k8s_headers(),\n\
+    \        )\n        resp = json.loads(urllib.request.urlopen(req, context=_k8s_ctx(),\
+    \ timeout=5).read())\n        pods = resp.get(\"items\", [])\n        if not pods:\n\
+    \            return False, f\"no pod found with IP {ip}\", None, ip\n        pod\
+    \ = pods[0]\n        name = pod[\"metadata\"].get(\"name\", \"unknown\")\n   \
+    \     uid = pod[\"metadata\"].get(\"uid\", \"unknown\")\n        phase = pod.get(\"\
+    status\", {}).get(\"phase\")\n        deletion_ts = pod[\"metadata\"].get(\"deletionTimestamp\"\
+    )\n        info = f\"ip={ip} pod={name} uid={uid} phase={phase} deletionTimestamp={deletion_ts}\"\
+    \n        if deletion_ts:\n            return False, f\"pod {name} is terminating\"\
+    , info, ip\n        if phase != \"Running\":\n            return False, f\"pod\
+    \ {name} phase is {phase}\", info, ip\n        return True, \"\", info, ip\n \
+    \   except Exception as e:\n        # Fall back to TCP-only when the API is unavailable\
+    \ (e.g. 403 no RBAC)\n        return True, f\"K8s API unavailable ({e}), falling\
+    \ back to TCP\", f\"ip={ip}\", ip\n\nprint(f\"Waiting for leader master port at\
+    \ {host}:{port}...\", flush=True)\ntime.sleep(5)\nstart = time.monotonic()\nlast_status\
+    \ = start\nlast_err = \"\"\nwhile True:\n    healthy, reason, pod_info, leader_ip\
+    \ = leader_pod_is_healthy()\n    if healthy:\n        try:\n            s = socket.create_connection((leader_ip,\
+    \ port), timeout=2)\n            s.close()\n            elapsed = time.monotonic()\
+    \ - start\n            print(f\"Leader master port ready (waited {elapsed:.1f}s)\
+    \ [{pod_info}]\", flush=True)\n            break\n        except Exception as\
+    \ e:\n            last_err = f\"tcp: {type(e).__name__}: {e} [{pod_info}]\"\n\
+    \    else:\n        last_err = f\"{reason} [{pod_info}]\" if pod_info else reason\n\
+    \    now = time.monotonic()\n    if now - last_status >= 30:\n        print(f\"\
+    Still waiting for {host}:{port}... ({now - start:.0f}s elapsed, last: {last_err})\"\
+    , flush=True)\n        last_status = now\n    time.sleep(5)\n"
+kind: ConfigMap
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: a615bfc016f57bef619ea5c67d88da24755349bb07efff9da0b2c79f18d6d076
+  creationTimestamp: $ignore
+  labels:
+    nvidia.com/dynamo-graph-deployment-name: workers
+  name: workers-wait-leader-script
+  namespace: upgrade-latest-vllm-disaggregated-multi-component
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoGraphDeployment
+    name: workers
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: $ignore
+  creationTimestamp: $ignore
+  labels:
+    nvidia.com/dynamo-component: decode
+    nvidia.com/dynamo-discovery-backend: kubernetes
+    nvidia.com/dynamo-discovery-enabled: 'true'
+    nvidia.com/dynamo-graph-deployment-name: workers
+    nvidia.com/dynamo-namespace: upgrade-latest-vllm-disaggregated-multi-component-workers
+    nvidia.com/dynamo-sub-component-type: decode
+    nvidia.com/dynamo-worker-hash: $var:worker-hash
+  name: $var:worker-string:workers-decode-{{worker-hash}}
+  namespace: upgrade-latest-vllm-disaggregated-multi-component
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoComponentDeployment
+    name: $var:worker-string:workers-decode-{{worker-hash}}
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
+spec:
+  clusterIP: $ignore
+  clusterIPs:
+  - $ignore
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - name: system
+    port: 9090
+    protocol: TCP
+    targetPort: system
+  selector:
+    nvidia.com/dynamo-component: decode
+    nvidia.com/dynamo-component-type: decode
+    nvidia.com/dynamo-namespace: upgrade-latest-vllm-disaggregated-multi-component-workers
+    role: leader
+  sessionAffinity: None
+  type: ClusterIP
+status:
+  loadBalancer: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: $ignore
+  creationTimestamp: $ignore
+  labels:
+    nvidia.com/dynamo-component: frontend
+    nvidia.com/dynamo-discovery-backend: kubernetes
+    nvidia.com/dynamo-discovery-enabled: 'true'
+    nvidia.com/dynamo-graph-deployment-name: workers
+    nvidia.com/dynamo-namespace: upgrade-latest-vllm-disaggregated-multi-component-workers
+  name: workers-frontend
+  namespace: upgrade-latest-vllm-disaggregated-multi-component
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoComponentDeployment
+    name: workers-frontend
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
+spec:
+  clusterIP: $ignore
+  clusterIPs:
+  - $ignore
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - name: http
+    port: 8000
+    protocol: TCP
+    targetPort: http
+  selector:
+    nvidia.com/dynamo-component: frontend
+    nvidia.com/dynamo-component-type: frontend
+    nvidia.com/dynamo-namespace: upgrade-latest-vllm-disaggregated-multi-component-workers
+  sessionAffinity: None
+  type: ClusterIP
+status:
+  loadBalancer: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: $ignore
+  creationTimestamp: $ignore
+  labels:
+    nvidia.com/dynamo-component: prefill
+    nvidia.com/dynamo-discovery-backend: kubernetes
+    nvidia.com/dynamo-discovery-enabled: 'true'
+    nvidia.com/dynamo-graph-deployment-name: workers
+    nvidia.com/dynamo-namespace: upgrade-latest-vllm-disaggregated-multi-component-workers
+    nvidia.com/dynamo-sub-component-type: prefill
+    nvidia.com/dynamo-worker-hash: $var:worker-hash
+  name: $var:worker-string:workers-prefill-{{worker-hash}}
+  namespace: upgrade-latest-vllm-disaggregated-multi-component
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoComponentDeployment
+    name: $var:worker-string:workers-prefill-{{worker-hash}}
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
+spec:
+  clusterIP: $ignore
+  clusterIPs:
+  - $ignore
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - name: system
+    port: 9090
+    protocol: TCP
+    targetPort: system
+  selector:
+    nvidia.com/dynamo-component: prefill
+    nvidia.com/dynamo-component-type: prefill
+    nvidia.com/dynamo-namespace: upgrade-latest-vllm-disaggregated-multi-component-workers
+    role: leader
+  sessionAffinity: None
+  type: ClusterIP
+status:
+  loadBalancer: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a
+  creationTimestamp: $ignore
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/managed-by: dynamo-operator
+    app.kubernetes.io/name: workers-k8s-service-discovery
+  name: workers-k8s-service-discovery
+  namespace: upgrade-latest-vllm-disaggregated-multi-component
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoGraphDeployment
+    name: workers
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: $ignore
+  creationTimestamp: $ignore
+  generation: $ignore
+  labels:
+    nvidia.com/dynamo-component: frontend
+    nvidia.com/dynamo-graph-deployment-name: workers
+    nvidia.com/dynamo-namespace: upgrade-latest-vllm-disaggregated-multi-component-workers
+  name: workers-frontend
+  namespace: upgrade-latest-vllm-disaggregated-multi-component
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoComponentDeployment
+    name: workers-frontend
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      nvidia.com/selector: workers-frontend
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        nvidia.com/dynamo-component: frontend
+        nvidia.com/dynamo-component-type: frontend
+        nvidia.com/dynamo-discovery-backend: kubernetes
+        nvidia.com/dynamo-discovery-enabled: 'true'
+        nvidia.com/dynamo-graph-deployment-name: workers
+        nvidia.com/dynamo-namespace: upgrade-latest-vllm-disaggregated-multi-component-workers
+        nvidia.com/metrics-enabled: 'true'
+        nvidia.com/selector: workers-frontend
+    spec:
+      containers:
+      - command:
+        - python3
+        - -m
+        - dynamo.frontend
+        env:
+        - name: DYNAMO_PORT
+          value: '8000'
+        - name: DYN_COMPONENT
+          value: frontend
+        - name: DYN_DISCOVERY_BACKEND
+          value: kubernetes
+        - name: DYN_HTTP_PORT
+          value: '8000'
+        - name: DYN_NAMESPACE
+          value: upgrade-latest-vllm-disaggregated-multi-component-workers
+        - name: DYN_NAMESPACE_PREFIX
+          value: upgrade-latest-vllm-disaggregated-multi-component-workers
+        - name: DYN_NAMESPACE_PREFIX_STRICT
+          value: 'true'
+        - name: DYN_PARENT_DGD_K8S_NAME
+          value: workers
+        - name: DYN_PARENT_DGD_K8S_NAMESPACE
+          value: upgrade-latest-vllm-disaggregated-multi-component
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
+        - name: POD_UID
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.uid
+        image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.6.0
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /live
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+        name: main
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /health
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 3
+        resources: {}
+        startupProbe:
+          failureThreshold: 30
+          httpGet:
+            path: /live
+            port: http
+            scheme: HTTP
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /dev/shm
+          name: shared-memory
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext:
+        fsGroup: 1000
+      serviceAccount: workers-k8s-service-discovery
+      serviceAccountName: workers-k8s-service-discovery
+      terminationGracePeriodSeconds: 60
+      volumes:
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 8Gi
+        name: shared-memory
+status:
+  $ignore: true
+---
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: $ignore
+  creationTimestamp: $ignore
+  generation: $ignore
+  labels:
+    nvidia.com/dynamo-component: decode
+    nvidia.com/dynamo-graph-deployment-name: workers
+    nvidia.com/dynamo-namespace: upgrade-latest-vllm-disaggregated-multi-component-workers
+    nvidia.com/dynamo-sub-component-type: decode
+    nvidia.com/dynamo-worker-hash: $var:worker-hash
+  name: $var:worker-string:workers-decode-{{worker-hash}}-0
+  namespace: upgrade-latest-vllm-disaggregated-multi-component
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoComponentDeployment
+    name: $var:worker-string:workers-decode-{{worker-hash}}
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
+spec:
+  leaderWorkerTemplate:
+    leaderTemplate:
+      metadata:
+        labels:
+          nvidia.com/dynamo-component: decode
+          nvidia.com/dynamo-component-type: decode
+          nvidia.com/dynamo-discovery-backend: kubernetes
+          nvidia.com/dynamo-discovery-enabled: 'true'
+          nvidia.com/dynamo-graph-deployment-name: workers
+          nvidia.com/dynamo-namespace: upgrade-latest-vllm-disaggregated-multi-component-workers
+          nvidia.com/dynamo-sub-component-type: decode
+          nvidia.com/dynamo-worker-hash: $var:worker-hash
+          nvidia.com/metrics-enabled: 'true'
+          role: leader
+      spec:
+        containers:
+        - args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --disaggregation-mode
+          - decode
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          env:
+          - name: DYNAMO_LEADER_ADDRESS
+            value: $(LWS_LEADER_ADDRESS)
+          - name: DYNAMO_RANK
+            value: $(LWS_WORKER_INDEX)
+          - name: DYN_COMPONENT
+            value: decode
+          - name: DYN_DISCOVERY_BACKEND
+            value: kubernetes
+          - name: DYN_FORWARDPASS_METRIC_PORT
+            value: '20380'
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: 'true'
+          - name: DYN_NAMESPACE
+            value: upgrade-latest-vllm-disaggregated-multi-component-workers
+          - name: DYN_NAMESPACE_WORKER_SUFFIX
+            value: $var:worker-hash
+          - name: DYN_PARENT_DGD_K8S_NAME
+            value: workers
+          - name: DYN_PARENT_DGD_K8S_NAMESPACE
+            value: upgrade-latest-vllm-disaggregated-multi-component
+          - name: DYN_SYSTEM_ENABLED
+            value: 'true'
+          - name: DYN_SYSTEM_PORT
+            value: '9090'
+          - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+            value: '["generate"]'
+          - name: NIXL_TELEMETRY_ENABLE
+            value: n
+          - name: NIXL_TELEMETRY_EXPORTER
+            value: prometheus
+          - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+            value: '19090'
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
+          - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /live
+              port: system
+            periodSeconds: 5
+            timeoutSeconds: 4
+          name: main
+          ports:
+          - containerPort: 9090
+            name: system
+            protocol: TCP
+          - containerPort: 19090
+            name: nixl
+            protocol: TCP
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /health
+              port: system
+            periodSeconds: 10
+            timeoutSeconds: 4
+          resources:
+            limits:
+              nvidia.com/gpu: '1'
+          startupProbe:
+            failureThreshold: 720
+            httpGet:
+              path: /live
+              port: system
+            periodSeconds: 10
+            timeoutSeconds: 5
+          volumeMounts:
+          - mountPath: /dev/shm
+            name: shared-memory
+        restartPolicy: Always
+        securityContext:
+          fsGroup: 1000
+        serviceAccountName: workers-k8s-service-discovery
+        terminationGracePeriodSeconds: 60
+        volumes:
+        - emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+          name: shared-memory
+    restartPolicy: RecreateGroupOnPodRestart
+    size: 2
+    workerTemplate:
+      metadata:
+        labels:
+          nvidia.com/dynamo-component: decode
+          nvidia.com/dynamo-component-type: decode
+          nvidia.com/dynamo-discovery-backend: kubernetes
+          nvidia.com/dynamo-discovery-enabled: 'true'
+          nvidia.com/dynamo-graph-deployment-name: workers
+          nvidia.com/dynamo-namespace: upgrade-latest-vllm-disaggregated-multi-component-workers
+          nvidia.com/dynamo-sub-component-type: decode
+          nvidia.com/dynamo-worker-hash: $var:worker-hash
+          nvidia.com/metrics-enabled: 'true'
+          role: worker
+      spec:
+        containers:
+        - args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --disaggregation-mode
+          - decode
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          env:
+          - name: DYNAMO_LEADER_ADDRESS
+            value: $(LWS_LEADER_ADDRESS)
+          - name: DYNAMO_RANK
+            value: $(LWS_WORKER_INDEX)
+          - name: DYN_COMPONENT
+            value: decode
+          - name: DYN_DISCOVERY_BACKEND
+            value: kubernetes
+          - name: DYN_FORWARDPASS_METRIC_PORT
+            value: '20380'
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: 'true'
+          - name: DYN_NAMESPACE
+            value: upgrade-latest-vllm-disaggregated-multi-component-workers
+          - name: DYN_NAMESPACE_WORKER_SUFFIX
+            value: $var:worker-hash
+          - name: DYN_PARENT_DGD_K8S_NAME
+            value: workers
+          - name: DYN_PARENT_DGD_K8S_NAMESPACE
+            value: upgrade-latest-vllm-disaggregated-multi-component
+          - name: DYN_SYSTEM_ENABLED
+            value: 'true'
+          - name: DYN_SYSTEM_PORT
+            value: '9090'
+          - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+            value: '["generate"]'
+          - name: NIXL_TELEMETRY_ENABLE
+            value: n
+          - name: NIXL_TELEMETRY_EXPORTER
+            value: prometheus
+          - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+            value: '19090'
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
+          - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+          name: main
+          ports:
+          - containerPort: 9090
+            name: system
+            protocol: TCP
+          - containerPort: 19090
+            name: nixl
+            protocol: TCP
+          resources:
+            limits:
+              nvidia.com/gpu: '1'
+          volumeMounts:
+          - mountPath: /dev/shm
+            name: shared-memory
+        restartPolicy: Always
+        securityContext:
+          fsGroup: 1000
+        serviceAccountName: workers-k8s-service-discovery
+        terminationGracePeriodSeconds: 60
+        volumes:
+        - emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+          name: shared-memory
+  networkConfig:
+    subdomainPolicy: Shared
+  replicas: 2
+  rolloutStrategy:
+    rollingUpdateConfiguration:
+      maxSurge: 0
+      maxUnavailable: 1
+      partition: 0
+    type: RollingUpdate
+  startupPolicy: LeaderCreated
+---
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: $ignore
+  creationTimestamp: $ignore
+  generation: $ignore
+  labels:
+    nvidia.com/dynamo-component: prefill
+    nvidia.com/dynamo-graph-deployment-name: workers
+    nvidia.com/dynamo-namespace: upgrade-latest-vllm-disaggregated-multi-component-workers
+    nvidia.com/dynamo-sub-component-type: prefill
+    nvidia.com/dynamo-worker-hash: $var:worker-hash
+  name: $var:worker-string:workers-prefill-{{worker-hash}}-0
+  namespace: upgrade-latest-vllm-disaggregated-multi-component
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoComponentDeployment
+    name: $var:worker-string:workers-prefill-{{worker-hash}}
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
+spec:
+  leaderWorkerTemplate:
+    leaderTemplate:
+      metadata:
+        labels:
+          nvidia.com/dynamo-component: prefill
+          nvidia.com/dynamo-component-type: prefill
+          nvidia.com/dynamo-discovery-backend: kubernetes
+          nvidia.com/dynamo-discovery-enabled: 'true'
+          nvidia.com/dynamo-graph-deployment-name: workers
+          nvidia.com/dynamo-namespace: upgrade-latest-vllm-disaggregated-multi-component-workers
+          nvidia.com/dynamo-sub-component-type: prefill
+          nvidia.com/dynamo-worker-hash: $var:worker-hash
+          nvidia.com/metrics-enabled: 'true'
+          role: leader
+      spec:
+        containers:
+        - args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --disaggregation-mode
+          - prefill
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          env:
+          - name: DYNAMO_LEADER_ADDRESS
+            value: $(LWS_LEADER_ADDRESS)
+          - name: DYNAMO_RANK
+            value: $(LWS_WORKER_INDEX)
+          - name: DYN_COMPONENT
+            value: prefill
+          - name: DYN_DISCOVERY_BACKEND
+            value: kubernetes
+          - name: DYN_FORWARDPASS_METRIC_PORT
+            value: '20380'
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: 'true'
+          - name: DYN_NAMESPACE
+            value: upgrade-latest-vllm-disaggregated-multi-component-workers
+          - name: DYN_NAMESPACE_WORKER_SUFFIX
+            value: $var:worker-hash
+          - name: DYN_PARENT_DGD_K8S_NAME
+            value: workers
+          - name: DYN_PARENT_DGD_K8S_NAMESPACE
+            value: upgrade-latest-vllm-disaggregated-multi-component
+          - name: DYN_SYSTEM_ENABLED
+            value: 'true'
+          - name: DYN_SYSTEM_PORT
+            value: '9090'
+          - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+            value: '["generate"]'
+          - name: NIXL_TELEMETRY_ENABLE
+            value: n
+          - name: NIXL_TELEMETRY_EXPORTER
+            value: prometheus
+          - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+            value: '19090'
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
+          - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /live
+              port: system
+            periodSeconds: 5
+            timeoutSeconds: 4
+          name: main
+          ports:
+          - containerPort: 9090
+            name: system
+            protocol: TCP
+          - containerPort: 19090
+            name: nixl
+            protocol: TCP
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /health
+              port: system
+            periodSeconds: 10
+            timeoutSeconds: 4
+          resources:
+            limits:
+              nvidia.com/gpu: '1'
+          startupProbe:
+            failureThreshold: 720
+            httpGet:
+              path: /live
+              port: system
+            periodSeconds: 10
+            timeoutSeconds: 5
+          volumeMounts:
+          - mountPath: /dev/shm
+            name: shared-memory
+        restartPolicy: Always
+        securityContext:
+          fsGroup: 1000
+        serviceAccountName: workers-k8s-service-discovery
+        terminationGracePeriodSeconds: 60
+        volumes:
+        - emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+          name: shared-memory
+    restartPolicy: RecreateGroupOnPodRestart
+    size: 2
+    workerTemplate:
+      metadata:
+        labels:
+          nvidia.com/dynamo-component: prefill
+          nvidia.com/dynamo-component-type: prefill
+          nvidia.com/dynamo-discovery-backend: kubernetes
+          nvidia.com/dynamo-discovery-enabled: 'true'
+          nvidia.com/dynamo-graph-deployment-name: workers
+          nvidia.com/dynamo-namespace: upgrade-latest-vllm-disaggregated-multi-component-workers
+          nvidia.com/dynamo-sub-component-type: prefill
+          nvidia.com/dynamo-worker-hash: $var:worker-hash
+          nvidia.com/metrics-enabled: 'true'
+          role: worker
+      spec:
+        containers:
+        - args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --disaggregation-mode
+          - prefill
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          env:
+          - name: DYNAMO_LEADER_ADDRESS
+            value: $(LWS_LEADER_ADDRESS)
+          - name: DYNAMO_RANK
+            value: $(LWS_WORKER_INDEX)
+          - name: DYN_COMPONENT
+            value: prefill
+          - name: DYN_DISCOVERY_BACKEND
+            value: kubernetes
+          - name: DYN_FORWARDPASS_METRIC_PORT
+            value: '20380'
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: 'true'
+          - name: DYN_NAMESPACE
+            value: upgrade-latest-vllm-disaggregated-multi-component-workers
+          - name: DYN_NAMESPACE_WORKER_SUFFIX
+            value: $var:worker-hash
+          - name: DYN_PARENT_DGD_K8S_NAME
+            value: workers
+          - name: DYN_PARENT_DGD_K8S_NAMESPACE
+            value: upgrade-latest-vllm-disaggregated-multi-component
+          - name: DYN_SYSTEM_ENABLED
+            value: 'true'
+          - name: DYN_SYSTEM_PORT
+            value: '9090'
+          - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+            value: '["generate"]'
+          - name: NIXL_TELEMETRY_ENABLE
+            value: n
+          - name: NIXL_TELEMETRY_EXPORTER
+            value: prometheus
+          - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+            value: '19090'
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
+          - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+          name: main
+          ports:
+          - containerPort: 9090
+            name: system
+            protocol: TCP
+          - containerPort: 19090
+            name: nixl
+            protocol: TCP
+          resources:
+            limits:
+              nvidia.com/gpu: '1'
+          volumeMounts:
+          - mountPath: /dev/shm
+            name: shared-memory
+        restartPolicy: Always
+        securityContext:
+          fsGroup: 1000
+        serviceAccountName: workers-k8s-service-discovery
+        terminationGracePeriodSeconds: 60
+        volumes:
+        - emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+          name: shared-memory
+  networkConfig:
+    subdomainPolicy: Shared
+  replicas: 2
+  rolloutStrategy:
+    rollingUpdateConfiguration:
+      maxSurge: 0
+      maxUnavailable: 1
+      partition: 0
+    type: RollingUpdate
+  startupPolicy: LeaderCreated
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoComponentDeployment
+metadata:
+  annotations:
+    nvidia.com/dcd-spec: '{"version":1,"spec":{"resources":{"limits":{"gpu":"1"}},"extraPodSpec":{"mainContainer":{"name":"","resources":{}}}},"rawJSON":[{"path":"serviceName","nil":true}]}'
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: $ignore
+  creationTimestamp: $ignore
+  finalizers:
+  - nvidia.com/finalizer
+  generation: $ignore
+  labels:
+    nvidia.com/dynamo-component: decode
+    nvidia.com/dynamo-graph-deployment-name: workers
+    nvidia.com/dynamo-namespace: upgrade-latest-vllm-disaggregated-multi-component-workers
+    nvidia.com/dynamo-worker-hash: $var:worker-hash
+  name: $var:worker-string:workers-decode-{{worker-hash}}
+  namespace: upgrade-latest-vllm-disaggregated-multi-component
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoGraphDeployment
+    name: workers
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
+spec:
+  backendFramework: vllm
+  multinode:
+    nodeCount: 2
+  name: decode
+  podTemplate:
+    metadata:
+      annotations:
+        nvidia.com/dynamo-operator-origin-version: $var:operator-version
+      labels:
+        nvidia.com/dynamo-worker-hash: $var:worker-hash
+    spec:
+      containers:
+      - args:
+        - --model-path
+        - Qwen/Qwen3-0.6B
+        - --disaggregation-mode
+        - decode
+        command:
+        - python3
+        - -m
+        - dynamo.vllm
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+        name: main
+        resources:
+          limits:
+            nvidia.com/gpu: '1'
+  replicas: 2
+  type: decode
+status:
+  component:
+    $strict: false
+    componentKind: LeaderWorkerSet
+    componentNames:
+    - $var:worker-string:workers-decode-{{worker-hash}}-0
+    runtimeNamespace: $var:worker-string:upgrade-latest-vllm-disaggregated-multi-component-workers-{{worker-hash}}
+    servedModelName: Qwen/Qwen3-0.6B
+  conditions:
+  - lastTransitionTime: $ignore
+    message: $ignore
+    reason: $ignore
+    status: 'False'
+    type: Available
+  - lastTransitionTime: $ignore
+    message: DynamoComponent is not ready
+    reason: ComponentNotReady
+    status: 'False'
+    type: DynamoComponentReady
+  observedGeneration: 1
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoComponentDeployment
+metadata:
+  annotations:
+    nvidia.com/dcd-spec: '{"version":1,"spec":{},"rawJSON":[{"path":"serviceName","nil":true}]}'
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: $ignore
+  creationTimestamp: $ignore
+  finalizers:
+  - nvidia.com/finalizer
+  generation: $ignore
+  labels:
+    nvidia.com/dynamo-component: frontend
+    nvidia.com/dynamo-graph-deployment-name: workers
+    nvidia.com/dynamo-namespace: upgrade-latest-vllm-disaggregated-multi-component-workers
+  name: workers-frontend
+  namespace: upgrade-latest-vllm-disaggregated-multi-component
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoGraphDeployment
+    name: workers
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
+spec:
+  backendFramework: vllm
+  name: frontend
+  podTemplate:
+    metadata:
+      annotations:
+        nvidia.com/dynamo-operator-origin-version: $var:operator-version
+    spec:
+      containers:
+      - command:
+        - python3
+        - -m
+        - dynamo.frontend
+        image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.6.0
+        name: main
+  replicas: 1
+  type: frontend
+status:
+  component:
+    $strict: false
+    componentKind: Deployment
+    componentNames:
+    - workers-frontend
+    runtimeNamespace: upgrade-latest-vllm-disaggregated-multi-component-workers
+  conditions:
+  - lastTransitionTime: $ignore
+    message: $ignore
+    reason: $ignore
+    status: 'False'
+    type: Available
+  - lastTransitionTime: $ignore
+    message: DynamoComponent is not ready
+    reason: ComponentNotReady
+    status: 'False'
+    type: DynamoComponentReady
+  observedGeneration: 1
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoComponentDeployment
+metadata:
+  annotations:
+    nvidia.com/dcd-spec: '{"version":1,"spec":{"resources":{"limits":{"gpu":"1"}},"extraPodSpec":{"mainContainer":{"name":"","resources":{}}}},"rawJSON":[{"path":"serviceName","nil":true}]}'
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: $ignore
+  creationTimestamp: $ignore
+  finalizers:
+  - nvidia.com/finalizer
+  generation: $ignore
+  labels:
+    nvidia.com/dynamo-component: prefill
+    nvidia.com/dynamo-graph-deployment-name: workers
+    nvidia.com/dynamo-namespace: upgrade-latest-vllm-disaggregated-multi-component-workers
+    nvidia.com/dynamo-worker-hash: $var:worker-hash
+  name: $var:worker-string:workers-prefill-{{worker-hash}}
+  namespace: upgrade-latest-vllm-disaggregated-multi-component
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoGraphDeployment
+    name: workers
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
+spec:
+  backendFramework: vllm
+  multinode:
+    nodeCount: 2
+  name: prefill
+  podTemplate:
+    metadata:
+      annotations:
+        nvidia.com/dynamo-operator-origin-version: $var:operator-version
+      labels:
+        nvidia.com/dynamo-worker-hash: $var:worker-hash
+    spec:
+      containers:
+      - args:
+        - --model-path
+        - Qwen/Qwen3-0.6B
+        - --disaggregation-mode
+        - prefill
+        command:
+        - python3
+        - -m
+        - dynamo.vllm
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0
+        name: main
+        resources:
+          limits:
+            nvidia.com/gpu: '1'
+  replicas: 2
+  type: prefill
+status:
+  component:
+    $strict: false
+    componentKind: LeaderWorkerSet
+    componentNames:
+    - $var:worker-string:workers-prefill-{{worker-hash}}-0
+    runtimeNamespace: $var:worker-string:upgrade-latest-vllm-disaggregated-multi-component-workers-{{worker-hash}}
+    servedModelName: Qwen/Qwen3-0.6B
+  conditions:
+  - lastTransitionTime: $ignore
+    message: $ignore
+    reason: $ignore
+    status: 'False'
+    type: Available
+  - lastTransitionTime: $ignore
+    message: DynamoComponent is not ready
+    reason: ComponentNotReady
+    status: 'False'
+    type: DynamoComponentReady
+  observedGeneration: 1
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: 0d454cc8266ac38ed6453ee2ef3cf6d9dd237faebc63af22f67ca911e106796c
+  creationTimestamp: $ignore
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/managed-by: dynamo-operator
+    app.kubernetes.io/name: workers-k8s-service-discovery
+  name: workers-k8s-service-discovery-role
+  namespace: upgrade-latest-vllm-disaggregated-multi-component
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoGraphDeployment
+    name: workers
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - endpoints
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamoworkermetadatas
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+  - update
+  - patch
+  - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  annotations:
+    nvidia.com/last-applied-generation: '1'
+    nvidia.com/last-applied-hash: a46fb1f8419f755fd12a60a20fb9dfde23e7b811eff3a73e674062a582bfd5eb
+  creationTimestamp: $ignore
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/managed-by: dynamo-operator
+    app.kubernetes.io/name: workers-k8s-service-discovery
+  name: workers-k8s-service-discovery-binding
+  namespace: upgrade-latest-vllm-disaggregated-multi-component
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    blockOwnerDeletion: true
+    controller: true
+    kind: DynamoGraphDeployment
+    name: workers
+    uid: $ignore
+  resourceVersion: $ignore
+  uid: $ignore
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: workers-k8s-service-discovery-role
+subjects:
+- kind: ServiceAccount
+  name: workers-k8s-service-discovery
+  namespace: upgrade-latest-vllm-disaggregated-multi-component

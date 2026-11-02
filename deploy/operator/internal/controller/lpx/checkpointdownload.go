@@ -7,8 +7,6 @@ package lpx
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"maps"
 	"slices"
 	"strings"
@@ -97,7 +95,8 @@ func (r *graphReconciler) reconcileCheckpointDownloads(
 
 // ensureCheckpointsDownloaded checks the checkpoints whose keys are not in
 // existing within one shared budget. It returns the downloaded keys and the
-// keys still in progress, both sorted.
+// keys still in progress, both sorted. registry may be nil when checkpoints is
+// empty.
 func ensureCheckpointsDownloaded(
 	ctx context.Context,
 	checkpoints []*lpx.Checkpoint,
@@ -108,42 +107,7 @@ func ensureCheckpointsDownloaded(
 		return nil, nil, nil
 	}
 
-	var (
-		downloaded     = make([]string, 0, len(checkpoints))
-		pending        []string
-		downloadErrors []error
-	)
-
-	ctx, cancel := context.WithTimeout(ctx, modelDownloadCheckTimeout)
-	defer cancel()
-
-	perCheckpointTimeout := modelDownloadCheckTimeout / time.Duration(len(checkpoints))
-
-	for _, checkpoint := range checkpoints {
-		key := lpx.CheckpointKey(checkpoint)
-
-		if slices.Contains(existing, key) {
-			downloaded = append(downloaded, key)
-			continue
-		}
-
-		ctx, cancel := context.WithTimeout(ctx, perCheckpointTimeout)
-		checkpointDownloaded, err := registry.EnsureCheckpointDownloaded(ctx, checkpoint)
-		cancel()
-
-		if err != nil {
-			downloadErrors = append(downloadErrors, fmt.Errorf("ensure checkpoint %q is downloaded: %w", key, err))
-			continue
-		}
-		if !checkpointDownloaded {
-			pending = append(pending, key)
-			continue
-		}
-
-		downloaded = append(downloaded, key)
-	}
-
-	return downloaded, pending, errors.Join(downloadErrors...)
+	return ensureDownloaded(ctx, checkpoints, existing, "checkpoint", lpx.CheckpointKey, registry.EnsureCheckpointDownloaded)
 }
 
 // workloadCheckpoints returns the distinct checkpoints of the resolved

@@ -84,14 +84,12 @@ func resolvePipelineRequests(
 			digest := pipelineRequestIdentityDigest(deployment.Namespace, deployment.Name, deployment.UID, groupName, projection.Model(), replica)
 
 			request := &lpxv1alpha1.LPUPipelineRequest{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: pipelineRequestName(deployment.Name, digest), Namespace: deployment.Namespace,
-					Annotations: map[string]string{
-						lpx.DeploymentNameAnnotation:                 deployment.Name,
-						pipelineRequestModelAnnotation:               projection.Model(),
-						lpx.WorkloadDigestAnnotation:                 projection.Digest().String(),
-						lpxv1alpha1.CompilerSnapshotDigestAnnotation: projection.CompilerSnapshotDigest(),
-					},
+				Name: pipelineRequestName(deployment.Name, digest), Namespace: deployment.Namespace,
+				Annotations: map[string]string{
+					lpx.DeploymentNameAnnotation:                 deployment.Name,
+					pipelineRequestModelAnnotation:               projection.Model(),
+					lpx.WorkloadDigestAnnotation:                 projection.Digest().String(),
+					lpxv1alpha1.CompilerSnapshotDigestAnnotation: projection.CompilerSnapshotDigest(),
 				},
 				Spec: projection.RequestSpec(replicaPlan, replicaPlan.Agents[index].CliqueName),
 			}

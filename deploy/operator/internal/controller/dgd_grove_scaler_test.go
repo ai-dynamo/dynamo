@@ -34,7 +34,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -42,16 +41,16 @@ import (
 
 func TestGroveScaler_ReconcileTargetsExpectedGroveChildren(t *testing.T) {
 	dgd := betaDGD(t, &nvidiacomv1alpha1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+		Name: "graph", Namespace: "default",
 		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 			Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"frontend": {
 					ComponentType: consts.ComponentTypeFrontend,
-					Replicas:      ptr.To(int32(2)),
+					Replicas:      new(int32(2)),
 				},
 				"worker": {
 					ComponentType: consts.ComponentTypeWorker,
-					Replicas:      ptr.To(int32(3)),
+					Replicas:      new(int32(3)),
 					Multinode:     &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2},
 				},
 				"gated": {
@@ -63,9 +62,9 @@ func TestGroveScaler_ReconcileTargetsExpectedGroveChildren(t *testing.T) {
 			},
 		},
 	})
-	frontend := &grovev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Name: "graph-0-frontend", Namespace: "default"}, Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}}
-	worker := &grovev1alpha1.PodCliqueScalingGroup{ObjectMeta: metav1.ObjectMeta{Name: "graph-0-worker", Namespace: "default"}, Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 1}}
-	gated := &grovev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Name: "graph-0-gated", Namespace: "default"}, Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}}
+	frontend := &grovev1alpha1.PodClique{Name: "graph-0-frontend", Namespace: "default", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}}
+	worker := &grovev1alpha1.PodCliqueScalingGroup{Name: "graph-0-worker", Namespace: "default", Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 1}}
+	gated := &grovev1alpha1.PodClique{Name: "graph-0-gated", Namespace: "default", Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}}
 	kubeClient := fake.NewClientBuilder().
 		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
 		WithRESTMapper(groveScaleRESTMapper()).
@@ -159,12 +158,12 @@ func groveScaleInterceptor(funcs interceptor.Funcs, onUpdate func()) interceptor
 
 func TestGroveScaler_ReconcileHandlesScaleReadErrors(t *testing.T) {
 	dgd := betaDGD(t, &nvidiacomv1alpha1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+		Name: "graph", Namespace: "default",
 		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 			Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {
 					ComponentType: consts.ComponentTypeWorker,
-					Replicas:      ptr.To(int32(2)),
+					Replicas:      new(int32(2)),
 				},
 			},
 		},
@@ -228,7 +227,7 @@ func TestGroveScaler_DeferredScaling(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Observe live capacity and the gate selected by workload synchronization")
-			dgd := betaDGD(t, &nvidiacomv1alpha1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"}, Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{"worker": {ComponentType: consts.ComponentTypeWorker, Replicas: ptr.To(test.requested)}}}})
+			dgd := betaDGD(t, &nvidiacomv1alpha1.DynamoGraphDeployment{Name: "graph", Namespace: "default", Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{"worker": {ComponentType: consts.ComponentTypeWorker, Replicas: new(test.requested)}}}})
 			var child client.Object
 			live := int32(1)
 			if test.atDesired {
@@ -236,9 +235,9 @@ func TestGroveScaler_DeferredScaling(t *testing.T) {
 			}
 			if test.multinode {
 				dgd.Spec.Components[0].Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
-				child = &grovev1alpha1.PodCliqueScalingGroup{ObjectMeta: metav1.ObjectMeta{Name: "graph-0-worker", Namespace: "default"}, Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: live}}
+				child = &grovev1alpha1.PodCliqueScalingGroup{Name: "graph-0-worker", Namespace: "default", Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: live}}
 			} else {
-				child = &grovev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Name: "graph-0-worker", Namespace: "default"}, Spec: grovev1alpha1.PodCliqueSpec{Replicas: live}}
+				child = &grovev1alpha1.PodClique{Name: "graph-0-worker", Namespace: "default", Spec: grovev1alpha1.PodCliqueSpec{Replicas: live}}
 			}
 			writes := 0
 			funcs := groveScaleInterceptor(interceptor.Funcs{}, func() { writes++ })
