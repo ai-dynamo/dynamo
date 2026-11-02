@@ -458,22 +458,15 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		allErrs = append(allErrs, lpxComponentGateErrors(
 			v.ctx, component, opts.oldComponents[component.ComponentName], componentPath, v.runtimeVersionSource,
 		)...)
-		// Validate the creation contract independently of workload-provider support.
-		if component.EngineGroup != nil {
-			allErrs = append(allErrs, v.validateComponentEngineGroupSpec(
-				component.EngineGroup, componentPath.Child("engineGroup"), spec.ProviderOverride != nil,
-			)...)
-		}
-
 		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 			component,
 			componentPath,
 			dynamoComponentDeploymentSharedSpecValidationOptions{
-				backendFramework:                  spec.BackendFramework,
 				grovePathway:                      opts.grovePathway,
 				validateInferencePoolAvailability: validateInferencePoolAvailability,
 				providerOverridesSupported:        true,
 				workloadProvider:                  opts.workloadProvider,
+				hasRootOverride:                   spec.ProviderOverride != nil,
 				oldComponent:                      opts.oldComponents[component.ComponentName],
 				groveUpdateStrategy:               opts.groveUpdateStrategy,
 				groveStrategyChanged:              opts.oldGroveUpdateStrategy != opts.groveUpdateStrategy,

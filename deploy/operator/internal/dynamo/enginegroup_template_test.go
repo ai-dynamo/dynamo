@@ -37,14 +37,18 @@ func TestEngineGroupIncarnationRequiresDownwardIdentity(t *testing.T) {
 		value     string
 		field     string
 		version   string
+		before    []corev1.EnvVar
+		after     []corev1.EnvVar
 		wantError bool
 	}{
-		{"implicit API version", "", "metadata.uid", "", false},
-		{"explicit API version", "", "metadata.uid", "v1", false},
-		{"caller supplied incarnation", "stale", "metadata.uid", "", true},
-		{"name is not lifetime identity", "", "metadata.name", "", true},
-		{"wrong API version", "", "metadata.uid", "v2", true},
-		{"missing field", "", "", "", true},
+		{name: "implicit API version", field: "metadata.uid"},
+		{name: "explicit API version", field: "metadata.uid", version: "v1"},
+		{name: "caller supplied incarnation", value: "stale", field: "metadata.uid", wantError: true},
+		{name: "name is not lifetime identity", field: "metadata.name", wantError: true},
+		{name: "wrong API version", field: "metadata.uid", version: "v2", wantError: true},
+		{name: "missing field", wantError: true},
+		{name: "later literal replaces valid identity", field: "metadata.uid", after: []corev1.EnvVar{{Name: "PROCESS_UID", Value: "stale"}}, wantError: true},
+		{name: "later identity replaces stale literal", field: "metadata.uid", before: []corev1.EnvVar{{Name: "PROCESS_UID", Value: "stale"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("declare native process identity through Kubernetes metadata")
@@ -52,6 +56,7 @@ func TestEngineGroupIncarnationRequiresDownwardIdentity(t *testing.T) {
 				Name: "PROCESS_UID", Value: tc.value,
 				ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{APIVersion: tc.version, FieldPath: tc.field}},
 			}}}
+			main.Env = append(append(tc.before, main.Env...), tc.after...)
 			before := main.DeepCopy()
 
 			t.Log("accept only the exact Downward API identity without modifying the launch")

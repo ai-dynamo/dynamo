@@ -7,6 +7,7 @@ package dynamo
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
@@ -32,7 +33,8 @@ func validateEngineGroupPodTemplate(template *corev1.PodTemplateSpec) error {
 // requireEngineGroupFieldEnv binds an identity to Kubernetes metadata, never to a caller-supplied incarnation.
 // main must not be nil.
 func requireEngineGroupFieldEnv(main *corev1.Container, name, field string) error {
-	for _, variable := range main.Env {
+	// Kubernetes resolves duplicate environment entries from last to first.
+	for _, variable := range slices.Backward(main.Env) {
 		if variable.Name == name {
 			if variable.Value != "" || variable.ValueFrom == nil || variable.ValueFrom.FieldRef == nil ||
 				variable.ValueFrom.FieldRef.FieldPath != field ||

@@ -26,12 +26,6 @@ repos:
   hooks:
   - id: black
     types_or: [python, cython]
-- repo: https://github.com/PyCQA/flake8
-  rev: 7.3.0  # 5.0.4 crashes on Python 3.12+ (ast.Str removed)
-  hooks:
-  - id: flake8
-    args: [--max-line-length=88, --select=C,E,F,W,B,B950, --extend-ignore = E203,E501]
-    types_or: [python, cython]
 - repo: https://github.com/pre-commit/mirrors-clang-format
   rev: v16.0.5
   hooks:
@@ -71,9 +65,9 @@ repos:
 
 # Fast linting
 - repo: https://github.com/astral-sh/ruff-pre-commit
-  rev: v0.5.2
+  rev: v0.17.3
   hooks:
-  - id: ruff
+  - id: ruff-check
     args: [--fix, --exit-non-zero-on-fix]
 
 # NOTE: pyright may be able to find other classes of errors not covered above,
