@@ -365,7 +365,7 @@ Keep these limits in mind when reading the results:
 | `DYNAMO_VERSION` | `1.5.1` | tag of the default images |
 | `FRONTEND_IMAGE` | `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:$DYNAMO_VERSION` | Frontend, EPP and sidecar; 1.5 images lack the latency fixes |
 | `WORKER_IMAGE` | `nvcr.io/nvidia/ai-dynamo/dynamo-planner:$DYNAMO_VERSION` | mocker workers |
-| `EPP_REPLICAS` | `1` | arm B's EPPs. Above 1 the harness sets `DYN_ROUTER_REPLICA_SYNC=true` on them, so they share their load bookkeeping and each still sees every routed request |
+| `EPP_REPLICAS` | `1` | arm B's EPPs. Above 1 the harness sets `DYN_ROUTER_REPLICA_SYNC=true` on them, so they share their load bookkeeping and each still sees every routed request. Needs operator 1.6.0 or later: earlier webhooks reject an EPP with more than one replica |
 | `EPP_IMAGE` | empty, meaning `FRONTEND_IMAGE` | arm B's EPP only, for comparing EPP builds: a frontend image or a `dynamo-epp` image. The sidecars and arm A keep `FRONTEND_IMAGE`, and aiperf runs from `FRONTEND_IMAGE` unless `AIPERF_IMAGE` is set |
 | `EPP_ENV` | none | extra environment for arm B's EPP, as comma-separated `NAME=value` pairs, such as the EPP's stall diagnostics: `DYN_EPP_TASK_METRICS=1,DYN_EPP_STREAM_SUMMARY=all` |
 | `SIDECAR_ENV` | none | extra environment for arm B's Frontend sidecars, in the same form. Images without #17237 need `DYN_ZMQ_BROKER_ENABLED=true` from about 1,000 workers (see "Running 2048 workers") |
