@@ -66,7 +66,7 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 	if spec.AISimulate == nil {
 		return allErrs
 	}
-	return append(allErrs, validateAISimulateSpec(spec.AISimulate, spec.Workload, fldPath.Child("aisimulate"))...)
+	return append(allErrs, validateAISimulateSpec(spec.AISimulate, fldPath.Child("aisimulate"))...)
 }
 
 // validateHardwareSpecV1beta2 validates hardware. spec and fldPath must not be nil.

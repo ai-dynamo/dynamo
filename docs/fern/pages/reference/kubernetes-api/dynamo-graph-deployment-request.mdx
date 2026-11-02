@@ -1136,11 +1136,11 @@ spec:
     name: Qwen/Qwen3-0.6B
   workload:
     trace:
-      format: dynamo                          # required; no default
+      # format defaults to Dynamo
       source:
-        pvc:
+        persistentVolumeClaim:
           claimName: request-traces           # PersistentVolumeClaim in this namespace
-          path: windows/2026-10-27T10-00.jsonl.gz
+          subPath: windows/2026-10-27T10-00.jsonl.gz
       replay:
         arrivalSpeedupRatio: 1.0              # optional; 2.0 replays arrivals twice as fast
 ```
@@ -1152,7 +1152,7 @@ Before you create the request:
   With `ReadWriteOnce`, a Job scheduled to another node than the writer waits in
   `ContainerCreating`, and with `ReadWriteOncePod`, a Job waits in `Pending` until the writer's pod
   is gone. The Run reports `Running` while its Job waits.
-- Finish writing the file. `path` names one file relative to the claim root; directories and globs
+- Finish writing the file. `subPath` names one file relative to the claim root; directories and globs
   are not expanded. Every Run of the request reads the file when its Job starts, so do not rewrite
   it afterwards. To replay several rolled `jsonl_gz` segments, concatenate them into one `.jsonl.gz`
   file. A relative symlink to another file in the claim works. An absolute symlink does not,
@@ -1164,25 +1164,38 @@ Before you create the request:
 
 The operator mounts only this file, read-only and only into the AISimulate container, through a
 `subPath` of the claim at `/var/run/aisimulate/trace/trace.jsonl.gz`, or at
-`/var/run/aisimulate/trace/trace.jsonl` when `path` does not end in `.gz`. The kubelet resolves
-`path` inside the claim and refuses to mount a file outside it. If the file does not exist when
+`/var/run/aisimulate/trace/trace.jsonl` when `subPath` does not end in `.gz`. The kubelet resolves
+`subPath` inside the claim and refuses to mount a file outside it. If the file does not exist when
 the Job starts, the kubelet cannot mount it either, and the AISimulate container waits; see
 [Trace claim lifecycle](#trace-claim-lifecycle). On a volume type whose node directory the kubelet
-can write, such as `hostPath`, the kubelet instead creates an empty directory at `path` on the
+can write, such as `hostPath`, the kubelet instead creates an empty directory at `subPath` on the
 claim, and the Run fails when AISimulate cannot read it.
 
-`format: dynamo` is the only admitted format. It reads the Dynamo request trace
+`format` defaults to `Dynamo`, the only supported format. It reads the Dynamo request trace
 (`dynamo.request.trace.v1`) written by the frontend, as JSON Lines or as gzip-compressed JSON Lines
 when the file name ends in `.gz`. See the [Request Trace Reference](../observability/request-traces.mdx).
 
-The operator lowers the trace to the AISimulate input `traffic.source` (`type: trace`, `format`, and
-`paths` with the mounted file) and `traffic.load.type: trace_timestamps`, with
-`traffic.load.speedup` when `arrivalSpeedupRatio` is set. It adds no `traffic.stop.requests`. When
-`trace` is set, `spec.aisimulate.inputOverrides` cannot set `traffic.source.type`,
-`traffic.source.format`, or `traffic.source.paths`, or replace `traffic` or `traffic.source` with a
-non-object value. Admission rejects these overrides, and the Run controller restores the typed
-values. Other `traffic` overrides, such as `traffic.load` and `traffic.stop`, go to AISimulate,
-which validates the complete input when the Run's Job starts; an input it rejects fails the Run.
+The operator lowers the trace to the AISimulate input `traffic.source` (`type: trace`,
+`format: dynamo`, and `paths` with the mounted file) and `traffic.load.type: trace_timestamps`,
+with `traffic.load.speedup` when `arrivalSpeedupRatio` is set. It adds no `traffic.stop.requests`.
+These values are an underlay, like every value lowered from a typed field:
+`spec.aisimulate.inputOverrides` is applied last as a JSON Merge Patch and can replace any of them,
+including `traffic.source.type`, `traffic.source.format`, and `traffic.source.paths`. A `null`
+override deletes the named field or parent object, and the operator does not restore it. For
+example, this override deletes the lowered source:
+
+```yaml
+spec:
+  aisimulate:
+    inputOverrides:
+      traffic:
+        source: null
+```
+
+The typed `persistentVolumeClaim` source alone decides which claim the Run's Job mounts and which
+claim the Run protects. Overriding `traffic.source.paths` adds no volume mount. AISimulate validates
+the resulting input when the Run's Job starts, and an input it rejects fails the Run; admission does
+not validate it against the AISimulate schema yet.
 
 ### Trace claim lifecycle
 
@@ -1195,7 +1208,9 @@ request's `spec`. It copies container status messages into the Run but never int
   Run that reads the claim adds its own finalizer, so Runs of several requests can share a claim. The
   operator removes a Run's finalizer once the Run is complete and none of its Jobs is still running,
   or once the Run and its Jobs are deleted, for example when the request retires old Runs or is
-  deleted.
+  deleted. Kubernetes garbage collection deletes the Job of a deleted Run before the Job's pod has
+  stopped, so the finalizer of a Run deleted before it completed can be removed while that pod still
+  mounts the file; `kubernetes.io/pvc-protection` keeps the claim until the pod is gone.
 - **Deleting the claim cancels its Runs.** When the claim has a `deletionTimestamp`, the operator
   stops the Job of every Run that reads it through foreground deletion, whether or not the Job's pod
   has started. Once the Job and its pod are gone, the Run fails with reason `TraceSourceDeleted`, and

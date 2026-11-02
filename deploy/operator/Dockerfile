@@ -35,6 +35,11 @@ RUN go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
 # Run linting
 RUN golangci-lint run --timeout=5m
 
+# Check the v1beta2 API types against Kubernetes API conventions. Keep the version in sync with
+# KUBE_API_LINTER_VERSION in the Makefile.
+RUN go install sigs.k8s.io/kube-api-linter/cmd/golangci-lint-kube-api-linter@v0.0.0-20261012124120-79b557aa8c8d && \
+    golangci-lint-kube-api-linter run --timeout=5m -c .golangci-kal.yml ./api/v1beta2/...
+
 # Test stage
 FROM base AS tester
 

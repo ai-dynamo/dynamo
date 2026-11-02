@@ -368,12 +368,11 @@ func TestDynamoGraphDeploymentRequestV1beta2DefaultingAdmission(t *testing.T) {
 			check:      expectV1beta2ExplicitValues,
 		},
 		{
-			name: "v1beta2 trace workload receives no static default",
+			name: "v1beta2 trace workload receives the format default and no static default",
 			request: v1beta2DefaultingRequest(func(spec *nvidiacomv1beta2.DynamoGraphDeploymentRequestSpec) {
 				spec.Workload = &nvidiacomv1beta2.WorkloadSpec{Trace: &nvidiacomv1beta2.TraceWorkloadSpec{
-					Format: nvidiacomv1beta2.TraceFormatDynamo,
-					Source: nvidiacomv1beta2.TraceSourceSpec{PVC: &nvidiacomv1beta2.TracePVCSource{
-						ClaimName: "request-traces", Path: "retune/w-1.jsonl.gz",
+					Source: nvidiacomv1beta2.TraceSourceSpec{PersistentVolumeClaim: &nvidiacomv1beta2.TracePVCSource{
+						ClaimName: "request-traces", SubPath: "retune/w-1.jsonl.gz",
 					}},
 				}}
 			}),
@@ -588,8 +587,8 @@ func expectV1beta2TraceWithoutStaticDefault(t *testing.T, request *nvidiacomv1be
 	t.Helper()
 	want := &nvidiacomv1beta2.WorkloadSpec{Trace: &nvidiacomv1beta2.TraceWorkloadSpec{
 		Format: nvidiacomv1beta2.TraceFormatDynamo,
-		Source: nvidiacomv1beta2.TraceSourceSpec{PVC: &nvidiacomv1beta2.TracePVCSource{
-			ClaimName: "request-traces", Path: "retune/w-1.jsonl.gz",
+		Source: nvidiacomv1beta2.TraceSourceSpec{PersistentVolumeClaim: &nvidiacomv1beta2.TracePVCSource{
+			ClaimName: "request-traces", SubPath: "retune/w-1.jsonl.gz",
 		}},
 	}}
 	if !reflect.DeepEqual(request.Spec.Workload, want) {
