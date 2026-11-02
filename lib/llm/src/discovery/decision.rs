@@ -15,6 +15,60 @@ use crate::{
 };
 use std::sync::Arc;
 
+pub(crate) type DecisionQualification = (DecisionExecutionProfile, usize);
+
+#[derive(Clone, Debug)]
+pub(crate) struct DecisionAdmission {
+    pub(crate) qualification: DecisionQualification,
+    pub(crate) ids: Vec<u64>,
+    epoch: Arc<()>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum DecisionAvailability {
+    Unadvertised,
+    Pending,
+    Failed,
+    Qualified(Arc<DecisionAdmission>),
+}
+
+impl DecisionAvailability {
+    pub(crate) fn qualified(qualification: DecisionQualification, mut ids: Vec<u64>) -> Self {
+        ids.sort_unstable();
+        ids.dedup();
+        Self::Qualified(Arc::new(DecisionAdmission {
+            qualification,
+            ids,
+            epoch: Arc::new(()),
+        }))
+    }
+
+    pub(crate) fn publish(sender: &tokio::sync::watch::Sender<Self>, mut next: Self) {
+        sender.send_if_modified(|current| {
+            if match (&*current, &next) {
+                (Self::Qualified(previous), Self::Qualified(next)) => {
+                    previous.qualification == next.qualification && previous.ids == next.ids
+                }
+                (Self::Unadvertised, Self::Unadvertised)
+                | (Self::Pending, Self::Pending)
+                | (Self::Failed, Self::Failed) => true,
+                _ => false,
+            } {
+                return false;
+            }
+            if let (Self::Qualified(previous), Self::Qualified(next)) = (&*current, &mut next)
+                && previous.qualification == next.qualification
+                && !previous.ids.is_empty()
+                && !next.ids.is_empty()
+            {
+                Arc::make_mut(next).epoch = previous.epoch.clone();
+            }
+            *current = next;
+            true
+        });
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct TokenExecutor {
     pub(super) engine: GenerateStreamingEngine,

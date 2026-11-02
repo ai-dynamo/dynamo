@@ -15,6 +15,8 @@ pub const VLLM_LIQUID_DECISION_V1: &str = "vllm_liquid_decision_v1";
 pub const VLLM_DIFFUSION_DECISION_V1: &str = "vllm_diffusion_canvas_decision_v1";
 
 pub(crate) const VLLM_NATIVE_DECISION_MAX_CANDIDATES: &str = "vllm_native_decision_max_candidates";
+pub(crate) const VLLM_NATIVE_DECISION_QUALIFICATION_FAILURE_V1: &str =
+    "vllm_native_decision_qualification_failure_v1";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TokenBackend {
