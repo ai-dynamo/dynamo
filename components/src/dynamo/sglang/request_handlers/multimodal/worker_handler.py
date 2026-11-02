@@ -228,7 +228,9 @@ class StreamProcessor:
 
     @staticmethod
     async def process_native_generate_stream(
-        stream_source, prompt_token_ids: list[int]
+        stream_source,
+        prompt_token_ids: list[int],
+        return_prompt_token_ids: bool = False,
     ) -> AsyncIterator[str]:
         """Forward SGLang chunks opaquely for the frontend's /generate fold.
 
@@ -245,7 +247,8 @@ class StreamProcessor:
             }
             if isinstance(finish_reason, dict):
                 # Final chunk only; the frontend fold keeps the last value.
-                response["prompt_token_ids"] = prompt_token_ids
+                if return_prompt_token_ids:
+                    response["prompt_token_ids"] = prompt_token_ids
                 output["finish_reason"] = normalize_finish_reason(
                     finish_reason.get("type", "stop")
                 )
@@ -392,7 +395,9 @@ def _native_engine_kwargs(
 def _output_stream(request: SglangMultimodalRequest, stream) -> AsyncIterator[str]:
     if request.native_generate is not None:
         return StreamProcessor.process_native_generate_stream(
-            stream, request.request.token_ids
+            stream,
+            request.request.token_ids,
+            bool(request.native_generate.get("return_prompt_token_ids")),
         )
     return StreamProcessor.process_sglang_stream(stream)
 
@@ -664,12 +669,10 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
             raise ValueError("input_ids is required")
 
         request_data = request.request.model_dump()
-        validate_disagg_parallel_sampling(
-            {"sampling_params": {"n": request.request.sampling_options.n}}
-        )
         sampling_params = SglangUtils.build_sampling_params(
             request, self.config.server_args, self.engine
         )
+        validate_disagg_parallel_sampling({"sampling_params": sampling_params})
 
         # Request bootstrap info from prefill worker
         bootstrap_info = await self._get_bootstrap_from_prefill(
@@ -682,23 +685,24 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
 
         # Decode still needs the image/video grids to reconstruct M-RoPE positions.
         # Only prefill receives the encoded features through NIXL.
-        decode_stream = await self.engine.async_generate(
-            input_ids=input_ids,
-            sampling_params=sampling_params,
-            stream=True,
+        gen_params: dict[str, Any] = {
+            "input_ids": input_ids,
+            "sampling_params": sampling_params,
+            "stream": True,
             **require_reasoning_kwargs(
                 self.engine,
                 request_data,
                 thinking_budget_requested=thinking_budget_requested(request_data),
             ),
-            bootstrap_host=bootstrap_info["bootstrap_host"],
-            bootstrap_port=bootstrap_info["bootstrap_port"],
-            bootstrap_room=bootstrap_info["bootstrap_room"],
+            "bootstrap_host": bootstrap_info["bootstrap_host"],
+            "bootstrap_port": bootstrap_info["bootstrap_port"],
+            "bootstrap_room": bootstrap_info["bootstrap_room"],
             **_build_decode_mm_items(request, bootstrap_info["bootstrap_room"]),
-            external_trace_header=trace_header,
-            rid=context.trace_id if context else None,
-            **_native_engine_kwargs(request, self.engine),
-        )
+            "external_trace_header": trace_header,
+            "rid": context.trace_id if context else None,
+        }
+        gen_params.update(_native_engine_kwargs(request, self.engine))
+        decode_stream = await self.engine.async_generate(**gen_params)
 
         rng_first = _nvtx.start_range("mm:dec:first_token", color="purple")
         first_token = True
@@ -1084,6 +1088,7 @@ class MultimodalPrefillWorkerHandler(
                     gen_params["image_data"] = image_mm_items
                 if video_data:
                     gen_params["video_data"] = video_data
+                gen_params.update(_native_engine_kwargs(request, self.engine))
 
                 results = await self.engine.async_generate(**gen_params)
         except BaseException:

@@ -151,7 +151,14 @@ def _native_generate_options(request: Dict[str, Any]) -> Optional[Dict[str, Any]
     payload = native_generate_payload(request)
     if payload is None:
         return None
-    return {k: v for k, v in payload.items() if k not in _NATIVE_PIPELINE_KEYS}
+    options = {k: v for k, v in payload.items() if k not in _NATIVE_PIPELINE_KEYS}
+    # The frontend moves top-level `priority` into routing.priority.
+    priority = (request.get("routing") or {}).get("priority")
+    if priority is None:
+        options.pop("priority", None)
+    else:
+        options["priority"] = priority
+    return options
 
 
 def _software_video_decoder_imports() -> bool:
