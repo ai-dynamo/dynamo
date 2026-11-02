@@ -54,6 +54,8 @@ fn event_time_unix_ms_from_request(request: &RequestTraceMetrics) -> u64 {
 
 pub(crate) fn emit_request_end(
     request_id: String,
+    x_request_id: Option<String>,
+    model: String,
     tracker: &RequestTracker,
     replay: RequestReplayMetrics,
 ) {
@@ -74,8 +76,8 @@ pub(crate) fn emit_request_end(
 
     let mut request = RequestTraceMetrics {
         request_id,
-        x_request_id: None,
-        model: None,
+        x_request_id,
+        model: Some(model),
         input_tokens: tracker.isl_tokens().map(|v| v as u64),
         output_tokens: Some(tracker.osl_tokens()),
         cached_tokens: tracker.cached_tokens().map(|v| v as u64),
@@ -242,6 +244,8 @@ mod tests {
 
         emit_request_end(
             "req-1".to_string(),
+            Some("client-1".to_string()),
+            "test-model".to_string(),
             &tracker,
             RequestReplayMetrics {
                 trace_block_size: 2,
