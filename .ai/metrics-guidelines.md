@@ -73,7 +73,8 @@ number at a stated scale. Both are per process.
 - **Label combinations:** multiply the largest number of values that each label you declare
   can reach. Name what drives each number: a fixed set (`status` has 3 values) or the
   deployment's configuration (served models, LoRA adapters). Labels that the runtime adds
-  have one value per process; do not count them. Count every value a process can see over its
+  have one value per registration, so multiply by the number of endpoints or components that
+  register the metric in one process. Count every value a process can see over its
   life: a series stays exported until code removes it, so models or adapters that come and go
   accumulate.
 - **Series:** label combinations times the series per combination: 1 for a counter or gauge,
@@ -204,11 +205,12 @@ that exist today.
 Renaming or reshaping a metric breaks dashboards and alerts, often silently: a panel just
 shows no data. So every metric has one of two stability levels.
 
-- **Experimental:** marked as experimental in the Metrics Catalog. It can change or
+- **Experimental:** marked as experimental in the Metrics Catalog (**D1**). It can change or
   disappear in any release, with a release note.
-- **Stable:** documented in the Metrics Catalog without an experimental mark. A metric
-  becomes stable after at least one release as experimental, once a maintainer has
-  reviewed its name, unit, type, and labels, and a test checks that the code updates it.
+- **Stable:** documented in the Metrics Catalog without an experimental mark, that is, with
+  the Status `Current` in a table. A metric becomes stable after at least one release as
+  experimental, once a maintainer has reviewed its name, unit, type, and labels, and a test
+  checks that the code updates it.
 
 A new metric therefore starts as experimental. A catalog entry with no experimental mark is
 stable, including an entry whose name breaks these rules.
@@ -239,15 +241,17 @@ gauges, and metrics that are not in the Metrics Catalog.
 
 **D1.** The [Metrics Catalog](../docs/fern/pages/reference/observability/metrics-catalog.mdx)
 is the source of truth for metric documentation, and a metric that is not in it is
-unsupported. In the same pull request, add or update the metric's entry: its type, unit,
-labels and their expected values, and stability level. Operator metrics go in
-[Operator Metrics](../docs/fern/pages/reference/observability/operator-metrics.mdx) instead.
-If no section fits the metric's family, add one. If the Metrics Inventory page
-(`metrics-inventory.md` in the same directory) exists, add or update the metric's row there
-as well.
+unsupported. Operator metrics are documented in
+[Operator Metrics](../docs/fern/pages/reference/observability/operator-metrics.mdx) instead,
+and every rule here about the catalog applies to that page too. In the same pull request,
+add or update the metric's entry: its type, unit, labels and their expected values, and
+stability level. If no section fits the metric's family, add one.
 
-- Mark a new metric experimental: start its description with `**Experimental.**`.
-- Mark a deprecated metric with `deprecated={true}` on its `ParamField`, and name the
+- In a table, set the **Status** column to `Experimental` for a new metric, or to
+  `Deprecated` for a deprecated one, and name the replacement and the removal release in its
+  description.
+- In a detailed `ParamField` entry, start a new metric's description with
+  `**Experimental.**`, or mark a deprecated metric with `deprecated={true}` and name the
   replacement and the removal release in its description.
 
 **D2.** Update the `AGENTS.md` nearest to the code that owns the metric to say what the
