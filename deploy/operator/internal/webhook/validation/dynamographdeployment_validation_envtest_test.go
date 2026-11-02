@@ -126,14 +126,14 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{name: "snapshot failover rejects conflicting backend selection", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 			enableBetaContainerDiscovery(dgd)
 			enableBetaSnapshotFailover(dgd.GetComponentByName("worker"), sglangBackendFramework)
-		}), wantWebhookErrs: []string{"spec.components[1].experimental.failover: Forbidden: Snapshot-backed intra-pod failover requires a consistent vLLM or SGLang backend", `spec.components[1].backendFramework: Invalid value: "vllm": backend framework mismatch: detected "sglang" from command but explicitly configured as "vllm"`}},
+		}), wantWebhookErrs: []string{"spec.components[1].experimental.failover: Forbidden: Snapshot-backed intra-pod failover requires a consistent vLLM or SGLang backend", `spec.backendFramework: Invalid value: "vllm": component "worker": backend framework mismatch: detected "sglang" from command but explicitly configured as "vllm"`}},
 		// Backend framework resolution: admission runs the same resolution as
 		// rendering, so a spec the renderer would reject fails here instead of
 		// surfacing later as a failed deployment status (issue #17543).
 		{name: "explicit backendFramework conflicting with the detected worker backend is rejected", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 			dgd.Spec.BackendFramework = sglangBackendFramework
 			dgd.GetComponentByName("worker").PodTemplate.Spec.Containers[0].Command = []string{"python", "-m", "dynamo.vllm"}
-		}), wantWebhookErrs: []string{`spec.components[1].backendFramework: Invalid value: "sglang": backend framework mismatch: detected "vllm" from command but explicitly configured as "sglang"`}},
+		}), wantWebhookErrs: []string{`spec.backendFramework: Invalid value: "sglang": component "worker": backend framework mismatch: detected "vllm" from command but explicitly configured as "sglang"`}},
 		{name: "explicit backendFramework matching the detected worker backend is admitted", deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 			dgd.GetComponentByName("worker").PodTemplate.Spec.Containers[0].Command = []string{"python", "-m", "dynamo.vllm"}
 		})},
