@@ -29,5 +29,7 @@ kv_cache_config:
   free_gpu_memory_fraction: 0.30
   enable_block_reuse: false
 
-cache_transceiver_config:
-  backend: DEFAULT
+# No cache_transceiver_config: the aggregated worker (agg_multimodal.sh) and the
+# E/PD pd worker (disagg_e_pd.sh) transfer no KV cache, and with one TensorRT-LLM
+# requires the CPP transceiver for the KV cache manager v1 that multimodal KV
+# events (agg_multimodal.sh --publish-kv-events) use.
