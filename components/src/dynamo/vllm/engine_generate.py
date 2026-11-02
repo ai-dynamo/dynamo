@@ -330,7 +330,11 @@ async def render_content_parts(
     content_parts: list[dict[str, Any]],
 ) -> Any:
     """Expand raw media into ``prompt`` as vLLM's own Generate API does."""
+    import aiohttp
     from vllm.renderers.chat_utils import AsyncMultiModalItemTracker
+
+    from dynamo.common.http import HttpStatusError
+    from dynamo.common.http.url_validator import describe_media_source
 
     tracker = AsyncMultiModalItemTracker(model_config)
     parser = tracker.create_parser()
@@ -341,7 +345,16 @@ async def render_content_parts(
                 f"TITO content_parts type {part.get('type')!r} is not supported"
             )
         getattr(parser, method)(part.get("url"), part.get("uuid"))
-    mm_data, mm_uuids = await tracker.resolve_items()
+    try:
+        mm_data, mm_uuids = await tracker.resolve_items()
+    except aiohttp.ClientConnectionError as e:
+        # An unreachable user-supplied URL is a client error, not a worker fault.
+        sources = ", ".join(
+            describe_media_source(str(part.get("url"))) for part in content_parts
+        )
+        raise HttpStatusError(
+            400, f"Connection error loading media: '{sources}': {e}", sources
+        ) from e
     prompt = dict(prompt)
     if mm_data:
         prompt["multi_modal_data"] = mm_data

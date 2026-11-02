@@ -450,6 +450,7 @@ fn generate_response_accumulates_engine_deltas() {
         GenerateResponseOptions {
             include_logprobs: true,
             include_prompt_logprobs: true,
+            ..Default::default()
         },
     )
     .expect("aggregate engine deltas");
@@ -519,10 +520,21 @@ fn generate_response_surfaces_expanded_prompt() {
         ..Default::default()
     }];
 
+    let unrequested = aggregate(
+        chunks.clone(),
+        "req-mm".to_string(),
+        GenerateResponseOptions::default(),
+    )
+    .expect("aggregate without return_token_ids");
+    assert_eq!(unrequested.prompt_token_ids, None);
+
     let response = aggregate(
         chunks,
         "req-mm".to_string(),
-        GenerateResponseOptions::default(),
+        GenerateResponseOptions {
+            include_prompt_token_ids: true,
+            ..Default::default()
+        },
     )
     .expect("aggregate expanded prompt");
 
@@ -955,6 +967,7 @@ fn generate_response_clamps_logprobs_to_vllm_floor() {
         GenerateResponseOptions {
             include_logprobs: true,
             include_prompt_logprobs: true,
+            ..Default::default()
         },
     )
     .expect("aggregate clamped logprobs");

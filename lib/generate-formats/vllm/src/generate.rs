@@ -72,10 +72,16 @@ pub struct GenerateRequest {
 }
 
 impl GenerateRequest {
+    /// Response fields the request opted into (logprobs, prompt logprobs, prompt token IDs).
     pub(crate) fn response_options(&self) -> GenerateResponseOptions {
         GenerateResponseOptions {
             include_logprobs: self.sampling_params.logprobs().is_some(),
             include_prompt_logprobs: self.sampling_params.prompt_logprobs().is_some(),
+            include_prompt_token_ids: self
+                .passthrough
+                .get("return_token_ids")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         }
     }
 
@@ -374,6 +380,7 @@ pub struct GenerateResponse {
 pub(crate) struct GenerateResponseOptions {
     include_logprobs: bool,
     include_prompt_logprobs: bool,
+    include_prompt_token_ids: bool,
 }
 
 /// Per-index accumulation state while folding a stream of
@@ -563,6 +570,7 @@ impl GenerateAggregator {
         }
     }
 
+    /// Fold one engine delta into the aggregate, moving opted-in `engine_data` fields out.
     pub(crate) fn apply_output(
         &mut self,
         mut output: LLMEngineOutput,
@@ -614,7 +622,8 @@ impl GenerateAggregator {
             self.kv_transfer_params = Some(kv_transfer_params);
             self.kv_transfer_params_from_engine_data = true;
         }
-        if self.prompt_token_ids.is_none()
+        if options.include_prompt_token_ids
+            && self.prompt_token_ids.is_none()
             && let Some(prompt_token_ids) = engine_data.remove("prompt_token_ids")
         {
             self.prompt_token_ids =
@@ -628,6 +637,7 @@ impl GenerateAggregator {
         choice.apply(&output, options)
     }
 
+    /// Build the final response, ordering choices by index.
     pub(crate) fn finish(self, options: GenerateResponseOptions) -> Result<GenerateResponse> {
         let GenerateAggregator {
             request_id,
