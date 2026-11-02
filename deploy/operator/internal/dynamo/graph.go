@@ -3518,6 +3518,27 @@ func ValidateBackendFrameworkResolution(
 	return nil
 }
 
+// ValidateGraphBackendFrameworkConsistency resolves the single backend
+// framework DCD generation derives for the whole graph and reports a failure
+// as a field error on the graph's backendFramework. Admission calls it so a
+// graph whose worker components resolve to different frameworks is refused
+// at create or update time instead of failing later in reconciliation.
+// Callers invoke it only when no explicit framework is set: with one set,
+// generation performs no detection and there is nothing to check. spec and
+// fldPath must not be nil; fldPath is the path of the graph spec.
+func ValidateGraphBackendFrameworkConsistency(
+	spec *v1beta1.DynamoGraphDeploymentSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	// Generation resolves one framework per graph from the spec alone, so
+	// run its own resolution over a spec-only view of the deployment.
+	dgd := &v1beta1.DynamoGraphDeployment{Spec: *spec}
+	if _, err := backendFrameworkForGeneratedDCDs(dgd); err != nil {
+		return field.ErrorList{field.Invalid(fldPath.Child("backendFramework"), spec.BackendFramework, err.Error())}
+	}
+	return nil
+}
+
 type GenerateBasePodSpecForControllerOptions struct {
 	// WorkloadComponentType overrides the component type used for pod workload
 	// defaults and env vars. Empty means use dynComponent.Spec.ComponentType.

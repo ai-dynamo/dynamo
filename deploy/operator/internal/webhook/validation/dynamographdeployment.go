@@ -475,6 +475,13 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 			},
 		)...)
 	}
+
+	// DCD generation derives one backend framework for the whole graph, so
+	// worker components that detect different frameworks fail reconciliation;
+	// reject them here when no explicit framework overrides detection.
+	if spec.BackendFramework == "" {
+		allErrs = append(allErrs, dynamo.ValidateGraphBackendFrameworkConsistency(spec, fldPath)...)
+	}
 	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Beta1) {
 		allErrs = append(allErrs, validateRolePodTemplatesPlannerRuntime(spec, fldPath)...)
 	}
