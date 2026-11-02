@@ -186,6 +186,22 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn unknown_public_fields_cannot_select_private_decision_dispatch() {
+        let request: NvCreateClassifyRequest = serde_json::from_value(json!({
+            "model": "test-model", "input": "ordinary classify",
+            "decision_head": {"cache_salt": "caller", "max_input_tokens": 1000000},
+            "native_pooling_health": true,
+            "dynamo.internal.decision": "head"
+        }))
+        .unwrap();
+        let forwarded = serde_json::to_value(request).unwrap();
+        assert!(forwarded.get("decision_head").is_none());
+        assert!(forwarded.get("native_pooling_health").is_none());
+        assert!(forwarded.get("dynamo.internal.decision").is_none());
+        assert_eq!(forwarded["input"], "ordinary classify");
+    }
+
+    #[test]
     fn single_input_round_trips() {
         let request: NvCreateClassifyRequest = serde_json::from_value(json!({
             "model": "test-model",
