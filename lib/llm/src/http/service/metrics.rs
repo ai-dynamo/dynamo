@@ -1848,13 +1848,17 @@ impl Metrics {
         &self,
         model: &str,
         questions: usize,
-        candidate_ids: usize,
+        candidate_ids: Option<usize>,
     ) {
-        for (histogram, count) in [
-            (&self.systemone.questions, questions),
-            (&self.systemone.candidate_ids, candidate_ids),
-        ] {
-            histogram.with_label_values(&[model]).observe(count as f64);
+        self.systemone
+            .questions
+            .with_label_values(&[model])
+            .observe(questions as f64);
+        if let Some(count) = candidate_ids {
+            self.systemone
+                .candidate_ids
+                .with_label_values(&[model])
+                .observe(count as f64);
         }
         self.systemone
             .admitted_branches
@@ -6324,7 +6328,7 @@ mod tests {
         let metrics = Metrics::new_with_prefix(Some("native_work".to_string()));
         let registry = Registry::new();
         metrics.register(&registry).unwrap();
-        metrics.observe_systemone_work("native-model", 2, 4);
+        metrics.observe_systemone_work("native-model", 2, None);
         let families = registry.gather();
         assert!(
             !families
@@ -6348,7 +6352,7 @@ mod tests {
         let metrics = Metrics::new_with_prefix(Some("custom_frontend".to_string()));
         let registry = Registry::new();
         metrics.register(&registry).unwrap();
-        metrics.observe_systemone_work("served-model", 3, 7);
+        metrics.observe_systemone_work("served-model", 3, Some(7));
         metrics.observe_systemone_input_work("served-model", 120);
         metrics.observe_systemone_branch("served-model", 80);
         for phase in [

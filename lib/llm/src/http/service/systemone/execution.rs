@@ -88,18 +88,15 @@ fn prepare_native<R: super::native::NativeRequest + serde::Serialize>(
     max_input_tokens: usize,
     cache_salt: &str,
 ) -> Result<R, (StatusCode, String)> {
-    if request.temperature != 1.0 {
+    if request.questions.iter().any(|question| {
+        question.kind == dynamo_decisions::QuestionKind::Score && question.candidates.len() < 2
+    }) {
         return Err((
             StatusCode::UNPROCESSABLE_ENTITY,
-            "native decision profiles require temperature one".into(),
+            "native decision profiles require at least two score levels".into(),
         ));
     }
-    if !request.chat_template_kwargs.is_empty() {
-        return Err((
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "native decision profiles do not support chat template overrides".into(),
-        ));
-    }
+    // The core admits only false-valued thinking controls; native profiles already force them off.
     debug_assert!(max_input_tokens <= MAX_DECISION_INPUT_TOKENS);
     let max_tokenization_work = tokenization_work_limit(
         max_input_tokens,
@@ -111,7 +108,7 @@ fn prepare_native<R: super::native::NativeRequest + serde::Serialize>(
             "invalid tokenization budget".into(),
         )
     })?
-    .min(MAX_DECISION_INPUT_TOKENS);
+    .min(crate::protocols::decision_native::MAX_DECISION_TOKENIZATION_WORK);
     let wire = R::wrap(
         crate::protocols::decision_native::NativeDecisionRequestV1::new(
             request,
@@ -120,7 +117,13 @@ fn prepare_native<R: super::native::NativeRequest + serde::Serialize>(
             cache_salt.to_owned(),
             max_input_tokens,
             max_tokenization_work,
-        ),
+        )
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid native decision input".into(),
+            )
+        })?,
     );
     let encoded = serde_json::to_vec(&wire).map_err(|_| {
         (
@@ -144,7 +147,7 @@ pub(super) fn observe_work(model: &str, prepared: &PreparedExecution, metrics: &
             metrics.observe_systemone_work(
                 model,
                 branches.len(),
-                branches.iter().map(|b| b.scoring.label_ids.len()).sum(),
+                Some(branches.iter().map(|b| b.scoring.label_ids.len()).sum()),
             );
             metrics.observe_systemone_input_work(
                 model,
@@ -155,11 +158,7 @@ pub(super) fn observe_work(model: &str, prepared: &PreparedExecution, metrics: &
         PreparedPayload::Head(prepared) => &prepared.wire.decision_head,
         PreparedPayload::Read(prepared) => &prepared.wire.decision_read,
     };
-    metrics.observe_systemone_work(
-        model,
-        body.questions.len(),
-        body.questions.iter().map(|q| q.candidates.len()).sum(),
-    );
+    metrics.observe_systemone_work(model, body.questions.len(), None);
 }
 
 pub(super) async fn dispatch(

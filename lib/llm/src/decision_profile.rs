@@ -57,17 +57,6 @@ pub(crate) enum DecisionExecutionProfile {
 }
 
 impl DecisionExecutionProfile {
-    pub(crate) fn max_native_output_tokens(self, questions: usize) -> u64 {
-        match self {
-            Self::VllmLiquidV1 => questions as u64 + 1,
-            Self::VllmDiffusionV1 => questions as u64 * 2 + 1,
-            Self::SglangSerialV1
-            | Self::VllmCausalV1
-            | Self::VllmD3V1
-            | Self::VllmClefFlashV1
-            | Self::VllmClefOmniV1 => 0,
-        }
-    }
     pub(crate) fn decision_capability(self) -> &'static str {
         match self {
             Self::SglangSerialV1 => SGLANG_SYSTEMONE_SERIAL_V1,

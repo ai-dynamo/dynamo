@@ -48,7 +48,7 @@ impl NativeOutcome for HeadOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local_model::runtime_config::DecisionExecutionProfile;
+    use crate::decision_profile::DecisionExecutionProfile;
     use dynamo_decisions::{CanonicalRequest, QuestionOutcome, Route, parse_request};
     use serde_json::json;
 
@@ -72,7 +72,8 @@ mod tests {
                 "salt".into(),
                 100,
                 400,
-            ),
+            )
+            .unwrap(),
         };
         let value = serde_json::to_value(wire).unwrap();
         assert_eq!(value["decision_head"]["protocol_version"], 1);
@@ -90,7 +91,7 @@ mod tests {
     #[test]
     fn decision_head_result_rejects_reordered_or_malformed_results() {
         let request = request();
-        let value = json!({"protocol_version":1,"profile":"vllm_d3_decision_v1", "outcomes":[
+        let value = json!({"protocol_version":1,"profile":"vllm_d3_decision_v1", "finish_reason":"stop", "outcomes":[
             {"ordinal":0,"probabilities":[0.2,0.8]}, {"ordinal":1,"probabilities":[0.6,0.4]}
         ], "usage":{"input_tokens":25,"output_tokens":0,"cached_tokens":3}});
         let response: DecisionHeadResponse = serde_json::from_value(value.clone()).unwrap();
