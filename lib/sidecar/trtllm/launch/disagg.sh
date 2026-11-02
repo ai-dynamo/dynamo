@@ -4,10 +4,8 @@
 #
 # Disaggregated serving through two TensorRT-LLM OpenEngine gRPC servers (2 workers).
 #
-# Run this where `TRTLLM_PYTHON` has TensorRT-LLM installed --
-# `nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc27.dev202609170000` or newer, the
-# first releases carrying the OpenEngine servicer. The bindings it needs are not
-# in that image; the pip step below adds them.
+# Run with `TRTLLM_PYTHON` from `nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610290007`.
+# The bindings it needs are installed by the helper below.
 #
 # KV cache moves prefill -> decode engine-to-engine over the cache transceiver,
 # not through the sidecars. Dynamo carries only the handoff: the prefill worker
@@ -55,8 +53,8 @@ while [[ $# -gt 0 ]]; do
             echo "  DYN_HTTP_PORT             Dynamo frontend port (default: 8000)"
             echo "  DYN_SYSTEM_PORT1          Prefill sidecar system port (default: 8081)"
             echo "  DYN_SYSTEM_PORT2          Decode sidecar system port (default: 8082)"
-            echo "  TRTLLM_PREFILL_GRPC_PORT  Prefill TensorRT-LLM gRPC port (default: 50051)"
-            echo "  TRTLLM_DECODE_GRPC_PORT   Decode TensorRT-LLM gRPC port (default: 50052)"
+            echo "  TRTLLM_PREFILL_GRPC_PORT  Prefill TensorRT-LLM gRPC port (default: 30001)"
+            echo "  TRTLLM_DECODE_GRPC_PORT   Decode TensorRT-LLM gRPC port (default: 30011)"
             echo "  TRTLLM_CACHE_TRANSCEIVER_BACKEND  KV transfer backend (default: NIXL)"
             echo "  TRTLLM_CONTEXT_LENGTH     Model context length, applied to both engines and both"
             echo "                            sidecars (default: 4096; unset when --max_seq_len is given)"
@@ -84,8 +82,9 @@ trap trtllm_exit_trap EXIT
 
 TRTLLM_PYTHON="${TRTLLM_PYTHON:-python3}"
 TRTLLM_HOST="127.0.0.1"
-TRTLLM_PREFILL_GRPC_PORT="${TRTLLM_PREFILL_GRPC_PORT:-50051}"
-TRTLLM_DECODE_GRPC_PORT="${TRTLLM_DECODE_GRPC_PORT:-50052}"
+# Managed ports are indexed like DYN_SYSTEM_PORT{N}: worker 1 is prefill, 2 is decode.
+TRTLLM_PREFILL_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${TRTLLM_PREFILL_GRPC_PORT:-30001}")
+TRTLLM_DECODE_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 2 "${TRTLLM_DECODE_GRPC_PORT:-30011}")
 TRTLLM_PREFILL_GPU="${TRTLLM_PREFILL_GPU:-0}"
 TRTLLM_DECODE_GPU="${TRTLLM_DECODE_GPU:-1}"
 TRTLLM_CACHE_TRANSCEIVER_BACKEND="${TRTLLM_CACHE_TRANSCEIVER_BACKEND:-NIXL}"

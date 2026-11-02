@@ -137,7 +137,7 @@ class TestInstallableWheels:
         assert gen.ledger_version_published(wheel(NIGHTS[0]), published)
 
     def test_optional_package_is_never_required(self):
-        # kvbm is deprecated with removal targeted for v1.6.0: its wheel missing
+        # kvbm is deprecated with removal targeted for v1.7.0: its wheel missing
         # (or its index gone) must not cost the ledger a row.
         published = ledger_index([NIGHTS[0]], kvbm=[])
 

@@ -2,19 +2,26 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+import zmq
 
+import dynamo.sglang._compat as sglang_compat
 import dynamo.sglang._disagg as disagg_mod
 import dynamo.sglang.publisher as publisher_mod
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
+from dynamo.sglang.nixl_telemetry import _share_scheduler_metrics_ipc_name
 from dynamo.sglang.publisher import (
     DynamoSglangPublisher,
     _resolve_multinode_leader_worker_ids,
+    cancel_metrics_task,
+    finish_worker_teardown,
     get_local_dp_rank_range,
     handle_non_leader_node,
+    run_to_completion,
     set_forward_pass_metrics_worker_id,
     setup_sgl_metrics,
 )
@@ -609,7 +616,7 @@ def test_init_kv_event_publish_subscribes_to_every_pure_dp_replica(monkeypatch):
     )
     publisher = DynamoSglangPublisher(
         engine=SimpleNamespace(
-            port_args=SimpleNamespace(metrics_ipc_name="ipc://metrics")
+            port_args=SimpleNamespace(metrics_ipc_name="ipc://metrics", instance_id="")
         ),
         config=config,
         generate_endpoint=SimpleNamespace(),
@@ -659,7 +666,7 @@ def test_init_fpm_relay_follows_local_dp_rank_bounds(
         setattr(server_args, key, value)
     publisher = DynamoSglangPublisher(
         engine=SimpleNamespace(
-            port_args=SimpleNamespace(metrics_ipc_name="ipc://metrics")
+            port_args=SimpleNamespace(metrics_ipc_name="ipc://metrics", instance_id="")
         ),
         config=SimpleNamespace(
             server_args=server_args,
@@ -746,7 +753,7 @@ def test_init_kv_event_publish_allows_zero_worker_id_override(monkeypatch):
     )
     publisher = DynamoSglangPublisher(
         engine=SimpleNamespace(
-            port_args=SimpleNamespace(metrics_ipc_name="ipc://metrics")
+            port_args=SimpleNamespace(metrics_ipc_name="ipc://metrics", instance_id="")
         ),
         config=config,
         generate_endpoint=SimpleNamespace(),
@@ -758,6 +765,61 @@ def test_init_kv_event_publish_allows_zero_worker_id_override(monkeypatch):
 
     assert calls[0]["worker_id"] == 0
     publisher.cleanup()
+
+
+def _scheduler_entry(server_args, port_args, gpu_id, tp_rank, pp_rank, dp_rank):
+    """Stands in for SGLang's ``run_scheduler_process`` signature."""
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_every_pure_dp_scheduler_reaches_the_metrics_socket(
+    monkeypatch, tmp_path
+):
+    """SGLang gives each pure-DP scheduler a fresh ``metrics_ipc_name`` and keeps
+    only ``instance_id``; the scheduler wrapper must make every rank's metrics
+    reach the PULL socket the publisher binds from the parent ``port_args``."""
+    monkeypatch.setattr(sglang_compat, "sglang_resolved_view", None)
+    instance_id = uuid.uuid4().hex[:12]
+    server_args = SimpleNamespace(
+        dp_size=2, enable_dp_attention=False, nnodes=1, node_rank=0, page_size=16
+    )
+    parent = SimpleNamespace(
+        metrics_ipc_name=f"ipc://{tmp_path}/parent", instance_id=instance_id
+    )
+    publisher = DynamoSglangPublisher(
+        engine=SimpleNamespace(port_args=parent),
+        config=SimpleNamespace(server_args=server_args, dynamo_args=SimpleNamespace()),
+        generate_endpoint=SimpleNamespace(),
+        component_gauges=SimpleNamespace(),
+    )
+    ctx = zmq.Context()
+    pushes = []
+    try:
+        for dp_rank in (0, 1):
+            port_args = SimpleNamespace(
+                metrics_ipc_name=f"ipc://{tmp_path}/rank-{dp_rank}",
+                instance_id=instance_id,
+            )
+            _share_scheduler_metrics_ipc_name(
+                _scheduler_entry, (server_args, port_args, 0, 0, 0, dp_rank), {}
+            )
+            push = ctx.socket(zmq.PUSH)
+            push.setsockopt(zmq.LINGER, 0)
+            push.connect(port_args.metrics_ipc_name)
+            push.send_pyobj(SimpleNamespace(data_parallel_rank=dp_rank))
+            pushes.append(push)
+
+        received = [
+            await asyncio.wait_for(publisher._sock.recv_pyobj(), timeout=2)
+            for _ in range(2)
+        ]
+        assert sorted(m.data_parallel_rank for m in received) == [0, 1]
+    finally:
+        for push in pushes:
+            push.close()
+        ctx.term()
+        publisher.cleanup()
 
 
 # ---- per-worker metric gating (embedding vs chat) ----
@@ -1004,3 +1066,187 @@ async def test_metrics_fanout_reaches_sibling_gateways(tmp_path, monkeypatch):
             if s is not None:
                 s.close(linger=0)
         ctx.term()
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_cancel_metrics_task_waits_for_a_real_shaped_task():
+    """The real metrics tasks (publisher.run, _idle) park on a single await and
+    unwind with no further awaits after cancel(). Cancelling one must leave it
+    done and cancelled, and must not raise at the caller."""
+
+    started = asyncio.Event()
+
+    async def metrics_loop():
+        started.set()
+        await asyncio.Event().wait()
+
+    metrics_task = asyncio.create_task(metrics_loop())
+    await started.wait()
+
+    await cancel_metrics_task(metrics_task)
+
+    assert metrics_task.done()
+    assert metrics_task.cancelled()
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_cancel_metrics_task_propagates_a_real_failure():
+    """A non-cancellation failure inside the metrics task still surfaces."""
+
+    started = asyncio.Event()
+
+    async def metrics_loop():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise RuntimeError("zmq close blew up") from None
+
+    metrics_task = asyncio.create_task(metrics_loop())
+    await started.wait()
+
+    with pytest.raises(RuntimeError, match="zmq close blew up"):
+        await cancel_metrics_task(metrics_task)
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_cancel_metrics_task_propagates_a_caller_cancellation():
+    """A cancellation aimed at the caller while it is suspended inside
+    cancel_metrics_task must reach the caller."""
+
+    started = asyncio.Event()
+    unwinding = asyncio.Event()
+    release_unwind = asyncio.Event()
+
+    async def metrics_loop():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            unwinding.set()
+            await release_unwind.wait()
+            raise
+
+    metrics_task = asyncio.create_task(metrics_loop())
+    await started.wait()
+
+    outer = asyncio.create_task(cancel_metrics_task(metrics_task))
+    await unwinding.wait()
+    outer.cancel()
+    release_unwind.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await outer
+
+    with pytest.raises(asyncio.CancelledError):
+        await metrics_task
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_run_to_completion_finishes_the_body_when_the_caller_is_cancelled():
+    """The whole point: a cancellation aimed at the caller must not truncate
+    the teardown body, and must be reported rather than raised."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+    steps = []
+
+    async def body():
+        steps.append("first")
+        started.set()
+        await release.wait()
+        steps.append("second")
+
+    result = {}
+
+    async def caller():
+        result["cancelled"] = await run_to_completion(body())
+        steps.append("caller.observed")
+
+    outer = asyncio.create_task(caller())
+    await started.wait()
+    outer.cancel()
+    release.set()
+
+    await outer
+
+    assert result["cancelled"] is True
+    assert steps == ["first", "second", "caller.observed"]
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_run_to_completion_propagates_a_body_failure():
+    """A teardown step blowing up is a real error and must not be swallowed."""
+
+    async def body():
+        raise RuntimeError("cleanup blew up")
+
+    with pytest.raises(RuntimeError, match="cleanup blew up"):
+        await run_to_completion(body())
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_run_to_completion_warns_under_repeated_cancellation(monkeypatch, caplog):
+    """A caller cancelling faster than the warn interval must still get the
+    "teardown is taking a while" warning."""
+    release = asyncio.Event()
+    ticked = asyncio.Event()
+    now = [0.0]
+
+    def fake_monotonic():
+        ticked.set()
+        return now[0]
+
+    monkeypatch.setattr(publisher_mod, "_TEARDOWN_WARN_INTERVAL_S", 10.0)
+    monkeypatch.setattr(publisher_mod, "monotonic", fake_monotonic)
+
+    outer = asyncio.create_task(run_to_completion(release.wait()))
+    # Each cancel lands under the 10s interval; only the elapsed total crosses it.
+    for t in (6.0, 12.0):
+        await ticked.wait()
+        ticked.clear()
+        now[0] = t
+        outer.cancel()
+    await ticked.wait()
+    release.set()
+
+    assert await outer is True
+    assert "Worker teardown still running" in caplog.text
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_finish_worker_teardown_continues_after_metrics_task_failure():
+    """A metrics task that fails (not just cancels) during teardown -- e.g. a
+    real ZMQ error -- must not skip cleanup() and run_deferred_handlers(), and
+    must still surface once they have run."""
+
+    started = asyncio.Event()
+
+    async def failing_metrics_loop():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise RuntimeError("zmq close blew up") from None
+
+    metrics_task = asyncio.create_task(failing_metrics_loop())
+    await started.wait()
+
+    steps = []
+
+    def cleanup():
+        steps.append("cleanup")
+
+    async def run_deferred_handlers():
+        steps.append("run_deferred_handlers")
+
+    with pytest.raises(RuntimeError, match="zmq close blew up"):
+        await finish_worker_teardown(metrics_task, cleanup, run_deferred_handlers)
+
+    assert steps == ["cleanup", "run_deferred_handlers"]

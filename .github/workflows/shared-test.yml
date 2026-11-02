@@ -6,6 +6,11 @@ name: Shared Local GPU and CPU Test
 on:
   workflow_call:
     inputs:
+      amd_runner_labels:
+        description: 'Optional JSON array of GPU tier, architecture, generation, and region labels for AMD64'
+        required: false
+        type: string
+        default: ''
       test_suite_name:
         description: 'Test suite name (vllm, sglang, trtllm)'
         required: true
@@ -51,6 +56,11 @@ on:
         default: 'false'
       run_sanity_check:
         description: 'Whether to run sanity check on the runtime image before executing tests'
+        required: false
+        type: boolean
+        default: true
+      minio_service:
+        description: 'Whether the amd64 runner pool starts the `minio` service (its k8s hook template supplies the `minio server` args). The CPU pool prod-tester-amd-v2 does not.'
         required: false
         type: boolean
         default: true
@@ -101,6 +111,11 @@ on:
         required: false
         type: number
         default: 30
+      job_timeout_minutes:
+        description: 'Timeout in minutes for the entire test job, including setup and all test stages'
+        required: false
+        type: number
+        default: 360
       run_gpu_parallel_tests:
         description: 'Whether to run the GPU-parallel stage (VRAM-aware concurrent subprocesses) before the sequential stage. Tests carrying @pytest.mark.profiled_vram_gib(N) within gpu_test_markers run here; the sequential stage runs the rest.'
         required: false
@@ -168,15 +183,19 @@ on:
 
 jobs:
   test:
+    timeout-minutes: ${{ inputs.job_timeout_minutes }}
     strategy:
       fail-fast: false
       matrix:
         platform: ${{ fromJson(inputs.platform) }}
         cuda_version: ${{ fromJson(inputs.cuda_version) }}
     name: ${{ inputs.test_type }} ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
-    runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'prod-tester-arm-v2' }}
+    runs-on: ${{ matrix.platform == 'amd64' && (inputs.amd_runner_labels != '' && fromJson(inputs.amd_runner_labels) || inputs.amd_runner) || 'prod-tester-arm-v2' }}
     container:
-      image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ (matrix.cuda_version != '' && !startsWith(matrix.cuda_version, '13.')) && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || matrix.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
+      # Match the AMD64 runner region. ARM and callers without regional labels
+      # keep ECR_REGISTRY (west). The build publishes test tags to both regions.
+      # Regional registries are configured in GitHub Actions repository variables.
+      image: ${{ matrix.platform == 'amd64' && contains(fromJson(inputs.amd_runner_labels || '[]'), 'us-east-1') && vars.ECR_REGISTRY_EAST || vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ (matrix.cuda_version != '' && !startsWith(matrix.cuda_version, '13.')) && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || matrix.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
       env:
         # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
         # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
@@ -185,9 +204,14 @@ jobs:
         #   * torch._inductor calling getpass.getuser() -> pwd.getpwuid(1001) -> KeyError
         HOME: /__w/dynamo/dynamo
         USER: dynamo
+        DYN_ARTIFACT_MINIO_ENDPOINT: ${{ inputs.framework == 'vllm' && inputs.minio_service && matrix.platform == 'amd64' && 'http://localhost:9000' || '' }}
+        DYN_ARTIFACT_MINIO_ACCESS_KEY: ${{ inputs.framework == 'vllm' && inputs.minio_service && matrix.platform == 'amd64' && 'minioadmin' || '' }}
+        DYN_ARTIFACT_MINIO_SECRET_KEY: ${{ inputs.framework == 'vllm' && inputs.minio_service && matrix.platform == 'amd64' && 'minioadmin' || '' }}
         # Datadog Test Optimization scoping (settings are per service+env).
         DD_SERVICE: ai-dynamo
         DD_ENV: ${{ inputs.dd_env }}
+        # Replaced per-lane by the tagging step below; this is the
+        # fallback if that step does not run.
         DD_TAGS: 'team:dynamo'
         DD_CIVISIBILITY_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
         DD_CIVISIBILITY_FLAKY_RETRY_COUNT: '2'
@@ -203,6 +227,8 @@ jobs:
         DD_CIVISIBILITY_ENABLED: 'true'
         DD_CIVISIBILITY_AGENTLESS_ENABLED: 'true'
         DD_CIVISIBILITY_AUTO_INSTRUMENTATION_PROVIDER: github
+        # ddtrace reads the attempt-to-fix DD_<key> from this; no git metadata in the container.
+        DD_GIT_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         PYTEST_ADDOPTS: >
           --ddtrace
           ${{ inputs.framework == 'triton' && '--ignore=tests/fault_tolerance/test_canary_rank_pause.py' || '' }}
@@ -265,6 +291,37 @@ jobs:
           KVBM_MLA_BACKEND: ${{ inputs.kvbm_mla_backend }}
         run: |
           echo "KVBM_MLA_BACKEND=${KVBM_MLA_BACKEND}" >> "$GITHUB_ENV"
+      # Datadog takes ci.job.name from $GITHUB_JOB, which in a reusable workflow
+      # is the inner job id — "test" for every caller — so every test session
+      # lands under one job name and cannot be attributed to a CI lane.
+      # Measured: 105,505 Nightly test events on main over 14 days all under
+      # ci.job.name:test, against 69 distinct lane names on the pipeline side.
+      #
+      # Composed in a step rather than inline in DD_TAGS because DD_TAGS is
+      # comma-separated while lane names contain commas and spaces
+      # ("Test cuda13.0, amd64"), and GitHub expressions have no replace().
+      - name: Tag Datadog test sessions with the CI lane
+        shell: bash
+        env:
+          LANE_SUITE: ${{ inputs.test_suite_name }}
+          LANE_TYPE: ${{ inputs.test_type }}
+          LANE_CUDA: ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}
+          LANE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -uo pipefail
+          slug() {
+            local s
+            s="$(printf '%s' "$1" \
+              | tr '[:upper:]' '[:lower:]' \
+              | tr -c 'a-z0-9._-' '-' \
+              | tr -s '-')" || return
+            s="${s#-}"
+            printf '%s' "${s%-}"
+          }
+          lane="$(slug "${LANE_SUITE}-${LANE_TYPE}-${LANE_CUDA}-${LANE_PLATFORM}")"
+          echo "DD_TAGS=team:dynamo,lane:${lane},test_suite:$(slug "${LANE_SUITE}")" >> "$GITHUB_ENV"
+          echo "Datadog lane tag: ${lane}"
+
       - name: Run Sanity Check on Runtime Image
         if: ${{ inputs.run_sanity_check }}
         shell: bash
@@ -282,89 +339,200 @@ jobs:
             echo "✅ Sanity check passed"
           fi
 
+      - name: Wait for MinIO before vLLM artifact tests
+        if: ${{ inputs.framework == 'vllm' && inputs.minio_service && inputs.run_cpu_only_tests && matrix.platform == 'amd64' }}
+        shell: bash
+        run: |
+          for ((attempt = 0; attempt < 30; attempt++)); do
+            if curl -fsS http://localhost:9000/minio/health/live >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::MinIO was not ready before vLLM CPU tests"
+          exit 1
+
+      # Test stages. Each runs .github/scripts/pytest-local.sh from the checkout.
+      # It is a script rather than a composite action because loading an action
+      # from this repository makes the k8s-novolume runner download the whole
+      # repository, which the hook then copies into the job pod file by file.
+      # Each stage uploads coverage and Allure results under the per-stage
+      # artifact names an external CI-metrics pipeline consumes (upload-artifact
+      # rejects a duplicate name with a non-retryable 409).
       - name: Run CPU-only tests (parallelized)
         id: cpu-only-tests
         if: ${{ inputs.run_cpu_only_tests }}
         timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
-        uses: $/.github/actions/pytest-local
+        shell: bash
+        env:
+          PYTEST_MARKS: ${{ inputs.cpu_only_test_markers }}
+          CONTAINER_WORKSPACE: ${{ inputs.container_workspace }}
+          TEST_SUITE_NAME: ${{ inputs.test_suite_name }}
+          TEST_TYPE: pre_merge_cpu
+          PLATFORM_ARCH: ${{ matrix.platform }}
+          DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
+          ENABLE_COVERAGE: ${{ inputs.enable_coverage }}
+          PARALLEL_MODE: ${{ inputs.cpu_parallel_mode }}
+          GPU_TESTS: 'false'
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
+        run: bash .github/scripts/pytest-local.sh
+      - name: Upload Coverage Data (CPU-only)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: ${{ always() && steps.cpu-only-tests.outcome != 'skipped' && inputs.enable_coverage == 'true' }}
         with:
-          container_workspace: ${{ inputs.container_workspace }}
-          pytest_marks: ${{ inputs.cpu_only_test_markers }}
-          test_suite_name: ${{ inputs.test_suite_name }}
-          framework: ${{ inputs.framework }}
-          test_type: "pre_merge_cpu"
-          platform_arch: ${{ matrix.platform }}
-          hf_token: ${{ secrets.HF_TOKEN }}
-          parallel_mode: ${{ inputs.cpu_parallel_mode }}
-          enable_coverage: ${{ inputs.enable_coverage }}
-          gpu_tests: 'false'
+          name: coverage-python-${{ inputs.framework }}-pre_merge_cpu-${{ matrix.platform }}-${{ github.run_id }}-${{ job.check_run_id }}
+          path: test-results/
+          include-hidden-files: true
+          retention-days: 7
+      - name: Upload Allure Results (CPU-only)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: ${{ always() && steps.cpu-only-tests.outcome != 'skipped' }}
+        with:
+          name: allure-results-${{ inputs.framework }}-pre_merge_cpu-${{ matrix.platform }}-${{ github.run_id }}-${{ job.check_run_id }}
+          path: test-results/allure-results/
+          retention-days: 7
+          if-no-files-found: ignore
       - name: Run CPU end-to-end tests (isolated)
         id: cpu-e2e-tests
         # Long-lived deployment tests should not compete with the xdist unit
         # pool or retry until the parent step kills the runner container.
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && inputs.run_cpu_e2e_tests }}
         timeout-minutes: ${{ inputs.cpu_e2e_test_timeout_minutes }}
-        uses: $/.github/actions/pytest-local
+        shell: bash
+        env:
+          PYTEST_MARKS: ${{ inputs.cpu_e2e_test_markers }}
+          CONTAINER_WORKSPACE: ${{ inputs.container_workspace }}
+          TEST_SUITE_NAME: ${{ inputs.test_suite_name }}
+          TEST_TYPE: pre_merge_cpu_e2e
+          PLATFORM_ARCH: ${{ matrix.platform }}
+          DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
+          ENABLE_COVERAGE: ${{ inputs.enable_coverage }}
+          PARALLEL_MODE: 'none'
+          GPU_TESTS: 'false'
+          PYTEST_DD_FLAKY_RETRY_ENABLED: 'false'
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
+        run: bash .github/scripts/pytest-local.sh
+      - name: Upload Coverage Data (CPU end-to-end)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: ${{ always() && steps.cpu-e2e-tests.outcome != 'skipped' && inputs.enable_coverage == 'true' }}
         with:
-          container_workspace: ${{ inputs.container_workspace }}
-          pytest_marks: ${{ inputs.cpu_e2e_test_markers }}
-          test_suite_name: ${{ inputs.test_suite_name }}
-          framework: ${{ inputs.framework }}
-          test_type: "pre_merge_cpu_e2e"
-          platform_arch: ${{ matrix.platform }}
-          hf_token: ${{ secrets.HF_TOKEN }}
-          parallel_mode: 'none'
-          enable_coverage: ${{ inputs.enable_coverage }}
-          gpu_tests: 'false'
-          dd_flaky_retry_enabled: 'false'
+          name: coverage-python-${{ inputs.framework }}-pre_merge_cpu_e2e-${{ matrix.platform }}-${{ github.run_id }}-${{ job.check_run_id }}
+          path: test-results/
+          include-hidden-files: true
+          retention-days: 7
+      - name: Upload Allure Results (CPU end-to-end)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: ${{ always() && steps.cpu-e2e-tests.outcome != 'skipped' }}
+        with:
+          name: allure-results-${{ inputs.framework }}-pre_merge_cpu_e2e-${{ matrix.platform }}-${{ github.run_id }}-${{ job.check_run_id }}
+          path: test-results/allure-results/
+          retention-days: 7
+          if-no-files-found: ignore
       - name: Run GPU tests (parallel)
         id: gpu-parallel-tests
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
         if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests && inputs.run_gpu_parallel_tests }}
-        uses: $/.github/actions/pytest-local
-        with:
-          container_workspace: ${{ inputs.container_workspace }}
-          pytest_marks: ${{ inputs.gpu_test_markers }}
-          test_suite_name: ${{ inputs.test_suite_name }}
-          framework: ${{ inputs.framework }}
-          test_type: "pre_merge_gpu_parallel"
-          platform_arch: ${{ matrix.platform }}
-          hf_token: ${{ secrets.HF_TOKEN }}
-          # parallel_mode=auto + max_vram_gib hands off to the VRAM-aware
+        shell: bash
+        env:
+          PYTEST_MARKS: ${{ inputs.gpu_test_markers }}
+          CONTAINER_WORKSPACE: ${{ inputs.container_workspace }}
+          TEST_SUITE_NAME: ${{ inputs.test_suite_name }}
+          TEST_TYPE: pre_merge_gpu_parallel
+          PLATFORM_ARCH: ${{ matrix.platform }}
+          DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
+          ENABLE_COVERAGE: ${{ inputs.enable_coverage }}
+          # PARALLEL_MODE=auto + MAX_VRAM_GIB hands off to the VRAM-aware
           # orchestrator (tests/utils/pytest_parallel_gpu.py via tests/conftest.py)
-          parallel_mode: 'auto'
-          max_vram_gib: ${{ inputs.gpu_parallel_max_vram_gib }}
-          enable_coverage: ${{ inputs.enable_coverage }}
-          gpu_tests: 'true'
-          verify_gpu: ${{ inputs.verify_gpu }}
+          PARALLEL_MODE: 'auto'
+          MAX_VRAM_GIB: ${{ inputs.gpu_parallel_max_vram_gib }}
+          GPU_TESTS: 'true'
+          VERIFY_GPU: ${{ inputs.verify_gpu }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
+        run: bash .github/scripts/pytest-local.sh
+      - name: Upload Coverage Data (GPU parallel)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: ${{ always() && steps.gpu-parallel-tests.outcome != 'skipped' && inputs.enable_coverage == 'true' }}
+        with:
+          name: coverage-python-${{ inputs.framework }}-pre_merge_gpu_parallel-${{ matrix.platform }}-${{ github.run_id }}-${{ job.check_run_id }}
+          path: test-results/
+          include-hidden-files: true
+          retention-days: 7
+      - name: Upload Allure Results (GPU parallel)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: ${{ always() && steps.gpu-parallel-tests.outcome != 'skipped' }}
+        with:
+          name: allure-results-${{ inputs.framework }}-pre_merge_gpu_parallel-${{ matrix.platform }}-${{ github.run_id }}-${{ job.check_run_id }}
+          path: test-results/allure-results/
+          retention-days: 7
+          if-no-files-found: ignore
       - name: Run GPU tests (sequential)
         id: gpu-sequential-tests
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
         # !cancelled() so a parallel-stage failure doesn't hide sequential results,
         # but require checkout to have succeeded so an infra/prereq failure (e.g. the
         # container/pod never coming online) skips this step cleanly instead of trying
-        # to run the local pytest-local action against an un-checked-out workspace.
+        # to run pytest-local against an un-checked-out workspace.
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && matrix.platform == 'amd64' && inputs.run_gpu_tests }}
-        uses: $/.github/actions/pytest-local
-        with:
-          container_workspace: ${{ inputs.container_workspace }}
+        shell: bash
+        env:
           # When the parallel stage runs, exclude profiled tests here so they don't run twice.
-          pytest_marks: ${{ inputs.run_gpu_parallel_tests && format('({0}) and not profiled_vram_gib', inputs.gpu_test_markers) || inputs.gpu_test_markers }}
-          test_suite_name: ${{ inputs.test_suite_name }}
-          framework: ${{ inputs.framework }}
-          test_type: "pre_merge_gpu"
-          platform_arch: ${{ matrix.platform }}
-          hf_token: ${{ secrets.HF_TOKEN }}
-          triton_artifactory_user: ${{ secrets.TRITON_ARTIFACTORY_USER }}
-          triton_artifactory_token: ${{ secrets.TRITON_ARTIFACTORY_TOKEN }}
-          parallel_mode: 'none'
-          enable_coverage: ${{ inputs.enable_coverage }}
-          gpu_tests: 'true'
-          verify_gpu: ${{ inputs.verify_gpu }}
+          PYTEST_MARKS: ${{ inputs.run_gpu_parallel_tests && format('({0}) and not profiled_vram_gib', inputs.gpu_test_markers) || inputs.gpu_test_markers }}
+          CONTAINER_WORKSPACE: ${{ inputs.container_workspace }}
+          TEST_SUITE_NAME: ${{ inputs.test_suite_name }}
+          TEST_TYPE: pre_merge_gpu
+          PLATFORM_ARCH: ${{ matrix.platform }}
+          DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
+          ENABLE_COVERAGE: ${{ inputs.enable_coverage }}
+          PARALLEL_MODE: 'none'
+          GPU_TESTS: 'true'
+          VERIFY_GPU: ${{ inputs.verify_gpu }}
+          TRITON_ARTIFACTORY_USER: ${{ secrets.TRITON_ARTIFACTORY_USER }}
+          TRITON_ARTIFACTORY_TOKEN: ${{ secrets.TRITON_ARTIFACTORY_TOKEN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
+        run: bash .github/scripts/pytest-local.sh
+      - name: Upload Coverage Data (GPU sequential)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: ${{ always() && steps.gpu-sequential-tests.outcome != 'skipped' && inputs.enable_coverage == 'true' }}
+        with:
+          name: coverage-python-${{ inputs.framework }}-pre_merge_gpu-${{ matrix.platform }}-${{ github.run_id }}-${{ job.check_run_id }}
+          path: test-results/
+          include-hidden-files: true
+          retention-days: 7
+      - name: Upload Allure Results (GPU sequential)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: ${{ always() && steps.gpu-sequential-tests.outcome != 'skipped' }}
+        with:
+          name: allure-results-${{ inputs.framework }}-pre_merge_gpu-${{ matrix.platform }}-${{ github.run_id }}-${{ job.check_run_id }}
+          path: test-results/allure-results/
+          retention-days: 7
+          if-no-files-found: ignore
+      # conftest.py's autouse `logger` fixture writes each test's full log to
+      # /tmp/dynamo_tests. Upload it once per job when any step failed.
+      - name: Collect per-test log files
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p test-results/dynamo-tests-logs
+          if [ -d /tmp/dynamo_tests ]; then
+            cp -r /tmp/dynamo_tests/. test-results/dynamo-tests-logs/
+          fi
+      - name: Upload per-test log files
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: failure()
+        with:
+          name: dynamo-tests-logs-${{ inputs.test_suite_name }}-${{ matrix.platform }}-${{ github.run_id }}-${{ job.check_run_id }}
+          path: test-results/dynamo-tests-logs/
+          retention-days: 7
+          if-no-files-found: ignore
 
       # One JUnit upload per job (one XML per stage inside). The name must keep
       # the test-results-* prefix consumed by the report workflows. Allure and
-      # coverage are uploaded per stage by the pytest-local action.
+      # coverage are uploaded per stage, after each test stage above.
       - name: Upload Test Results
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
@@ -376,9 +544,10 @@ jobs:
 
       # A stage cut off mid-run is still reported as a successful step, so real
       # test failures go green. Take the verdict only from the status file
-      # pytest-local writes last, never from the step outcome. Placed after the
-      # upload so results survive a failure here, and once per job rather than
-      # per stage to avoid three more container-hook round trips.
+      # .github/scripts/pytest-local.sh writes last, never from the step
+      # outcome. Placed after the upload so results survive a failure here, and
+      # once per job rather than per stage to avoid three more container-hook
+      # round trips.
       - name: Verify test stages completed
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         shell: bash

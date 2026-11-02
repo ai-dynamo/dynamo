@@ -58,6 +58,7 @@ pub(crate) fn invalid_argument_error(message: impl Into<String>) -> anyhow::Erro
 pub mod extensions;
 pub mod input_trigger;
 pub mod llm_backend;
+pub mod metadata_upload;
 pub mod metrics;
 pub mod postprocessor;
 pub mod preprocessor;
@@ -458,6 +459,8 @@ pub struct SamplingOptions {
     /// Whether to include the stop string in the output.
     pub include_stop_str_in_output: Option<bool>,
 
+    pub logit_bias: Option<std::collections::HashMap<u32, f32>>,
+
     /// Guided Decoding Options
     pub guided_decoding: Option<GuidedDecodingOptions>,
 }
@@ -663,6 +666,13 @@ pub struct OutputOptions {
     /// Omitted by older frontends; stop-token visibility is frontend-owned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_stop_trim: Option<bool>,
+
+    /// Keep the text of the model's own end-of-turn stop tokens (the hidden system/EOS
+    /// ids) in the decoded output while user stop strings and user stop token ids are
+    /// still trimmed. The frontend sets it for grammars whose parser must see the turn
+    /// terminator (Beam's `<|call|>` / `<|return|>`); it is not a request field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retain_model_stop_token_text: Option<bool>,
 
     /// Number of log probabilities to return per output token.
     /// Note that the implementation follows the OpenAI API: The return

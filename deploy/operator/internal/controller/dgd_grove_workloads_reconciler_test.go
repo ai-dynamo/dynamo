@@ -47,7 +47,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -97,14 +96,14 @@ func TestGroveProgram_CoherentScalingWaitsForCurrentGeneration(t *testing.T) {
 			ctx := t.Context()
 			t.Log("Observe a Coherent PCS and two serving replicas at generation 8")
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default", UID: "dgd-uid", Generation: 1, Annotations: map[string]string{consts.KubeAnnotationGroveUpdateStrategy: string(grovev1alpha1.CoherentStrategy)}},
+				Name: "graph", Namespace: "default", UID: "dgd-uid", Generation: 1, Annotations: map[string]string{consts.KubeAnnotationGroveUpdateStrategy: string(grovev1alpha1.CoherentStrategy)},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
-					ComponentName: "frontend", ComponentType: nvidiacomv1beta1.ComponentTypeFrontend, Replicas: ptr.To(int32(2)),
+					ComponentName: "frontend", ComponentType: nvidiacomv1beta1.ComponentTypeFrontend, Replicas: new(int32(2)),
 					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "runtime:old"}}}},
 				}}},
 			}
 			if test.scalingGroup {
-				dgd.Spec.Components[0].Experimental = &nvidiacomv1beta1.ExperimentalSpec{Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: ptr.To(true)}}
+				dgd.Spec.Components[0].Experimental = &nvidiacomv1beta1.ExperimentalSpec{Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: new(true)}}
 			}
 			config := &configv1alpha1.OperatorConfiguration{Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"}}
 			runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true}}
@@ -113,17 +112,17 @@ func TestGroveProgram_CoherentScalingWaitsForCurrentGeneration(t *testing.T) {
 			require.NoError(t, err)
 			pcs.Generation = 8
 			pcs.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment"))}
-			pcs.Status.ObservedGeneration = ptr.To(pcs.Generation)
+			pcs.Status.ObservedGeneration = new(pcs.Generation)
 			if test.completedProgress {
-				pcs.Status.UpdateProgress = &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateStartedAt: metav1.Now(), UpdateEndedAt: ptr.To(metav1.Now())}
+				pcs.Status.UpdateProgress = &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateStartedAt: metav1.Now(), UpdateEndedAt: new(metav1.Now())}
 			}
 			hash, err := commoncontroller.GetSpecHash(pcs)
 			require.NoError(t, err)
 			pcs.Annotations = map[string]string{commoncontroller.NvidiaAnnotationHashKey: hash, commoncontroller.NvidiaAnnotationGenerationKey: "8"}
 			metadata := metav1.ObjectMeta{Name: "graph-0-frontend", Namespace: "default", Generation: 1}
-			var child client.Object = &grovev1alpha1.PodClique{ObjectMeta: metadata, Spec: grovev1alpha1.PodCliqueSpec{Replicas: 2}, Status: grovev1alpha1.PodCliqueStatus{Replicas: 2, ReadyReplicas: 2, UpdatedReplicas: 2, ScheduledReplicas: 2, ObservedGeneration: ptr.To(int64(1))}}
+			var child client.Object = &grovev1alpha1.PodClique{ObjectMeta: metadata, Spec: grovev1alpha1.PodCliqueSpec{Replicas: 2}, Status: grovev1alpha1.PodCliqueStatus{Replicas: 2, ReadyReplicas: 2, UpdatedReplicas: 2, ScheduledReplicas: 2, ObservedGeneration: new(int64(1))}}
 			if test.scalingGroup {
-				child = &grovev1alpha1.PodCliqueScalingGroup{ObjectMeta: metadata, Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 2}, Status: grovev1alpha1.PodCliqueScalingGroupStatus{Replicas: 2, AvailableReplicas: 2, UpdatedReplicas: 2, ScheduledReplicas: 2, ObservedGeneration: ptr.To(int64(1))}}
+				child = &grovev1alpha1.PodCliqueScalingGroup{ObjectMeta: metadata, Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 2}, Status: grovev1alpha1.PodCliqueScalingGroupStatus{Replicas: 2, AvailableReplicas: 2, UpdatedReplicas: 2, ScheduledReplicas: 2, ObservedGeneration: new(int64(1))}}
 			}
 			writes := 0
 			funcs := groveScaleInterceptor(interceptor.Funcs{
@@ -145,7 +144,7 @@ func TestGroveProgram_CoherentScalingWaitsForCurrentGeneration(t *testing.T) {
 
 			t.Log("Request an image rollout and capacity change in the same DGD edit")
 			dgd.Spec.Components[0].PodTemplate.Spec.Containers[0].Image = "runtime:new"
-			dgd.Spec.Components[0].Replicas = ptr.To(test.replicas)
+			dgd.Spec.Components[0].Replicas = new(test.replicas)
 			result, err := reconciler.newGroveProgram().Reconcile(ctx, workloadProgramRequest{DGD: dgd})
 			require.NoError(t, err)
 			require.Zero(t, writes)
@@ -167,7 +166,7 @@ func TestGroveProgram_CoherentScalingWaitsForCurrentGeneration(t *testing.T) {
 			}
 
 			t.Log("Acknowledged active progress still blocks both scaling directions")
-			pcs.Status.ObservedGeneration = ptr.To(pcs.Generation)
+			pcs.Status.ObservedGeneration = new(pcs.Generation)
 			pcs.Status.UpdateProgress = &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateStartedAt: metav1.Now()}
 			require.NoError(t, providerClient.Status().Update(ctx, pcs))
 			result, err = reconciler.newGroveProgram().Reconcile(ctx, workloadProgramRequest{DGD: dgd})
@@ -178,7 +177,7 @@ func TestGroveProgram_CoherentScalingWaitsForCurrentGeneration(t *testing.T) {
 
 			t.Log("Only completion of the acknowledged generation releases scaling")
 			require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
-			pcs.Status.UpdateProgress.UpdateEndedAt = ptr.To(metav1.Now())
+			pcs.Status.UpdateProgress.UpdateEndedAt = new(metav1.Now())
 			require.NoError(t, providerClient.Status().Update(ctx, pcs))
 			result, err = reconciler.newGroveProgram().Reconcile(ctx, workloadProgramRequest{DGD: dgd})
 			require.NoError(t, err)
@@ -198,13 +197,13 @@ func TestGroveProgram_CoherentScalingWaitsForCurrentGeneration(t *testing.T) {
 func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
 	t.Log("Build a ready frontend alongside an independently owned LPX component")
 	dgd := betaDGD(t, &nvidiacomv1alpha1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+		Name: "graph", Namespace: "default",
 		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",
 			Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"frontend": {
 					ComponentType: consts.ComponentTypeFrontend,
-					Replicas:      ptr.To(int32(1)),
+					Replicas:      new(int32(1)),
 				},
 			},
 		},
@@ -213,18 +212,16 @@ func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
 	dgd.Spec.Components = append(dgd.Spec.Components, lpxSource.Spec.Components[0])
 	wantSpec := dgd.Spec.DeepCopy()
 	podClique := &grovev1alpha1.PodClique{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       "graph-0-frontend",
-			Namespace:  "default",
-			Generation: 1,
-		},
-		Spec: grovev1alpha1.PodCliqueSpec{Replicas: 0},
+		Name:       "graph-0-frontend",
+		Namespace:  "default",
+		Generation: 1,
+		Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 0},
 		Status: grovev1alpha1.PodCliqueStatus{
 			Replicas:           1,
 			ReadyReplicas:      1,
 			UpdatedReplicas:    1,
 			ScheduledReplicas:  1,
-			ObservedGeneration: ptr.To(int64(1)),
+			ObservedGeneration: new(int64(1)),
 		},
 	}
 
@@ -364,12 +361,10 @@ func TestGroveWorkloadsReconciler_DoesNotCommitWorkerHashWhenPodCliqueSetSyncFai
 			var existingPCS *grovev1alpha1.PodCliqueSet
 			if tt.existingPCS {
 				existingPCS = &grovev1alpha1.PodCliqueSet{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      dynamo.PCSNameForDGD(dgd, nil),
-						Namespace: dgd.Namespace,
-						OwnerReferences: []metav1.OwnerReference{
-							*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
-						},
+					Name:      dynamo.PCSNameForDGD(dgd, nil),
+					Namespace: dgd.Namespace,
+					OwnerReferences: []metav1.OwnerReference{
+						*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
 					},
 					Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
 						Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{
@@ -466,12 +461,10 @@ func TestGroveWorkloadsReconciler_RecoversWorkerHashCommitAfterPodCliqueSetSync(
 	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	require.NoError(t, err)
 	legacyPCS := &grovev1alpha1.PodCliqueSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      dynamo.PCSNameForDGD(dgd, nil),
-			Namespace: dgd.Namespace,
-			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
-			},
+		Name:      dynamo.PCSNameForDGD(dgd, nil),
+		Namespace: dgd.Namespace,
+		OwnerReferences: []metav1.OwnerReference{
+			*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
 		},
 		Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
 			Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{
@@ -573,15 +566,13 @@ func TestGroveWorkloadsReconciler_RecoversWorkerHashCommitAfterPodCliqueSetSync(
 func TestGroveWorkloadsReconciler_ReconcilePodCliqueSetRejectsStaleObservation(t *testing.T) {
 	t.Log("Build a DGD and the exact PCS observation used for rendering")
 	dgd := betaDGD(t, &nvidiacomv1alpha1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+		Name: "graph", Namespace: "default",
 	})
 	existing := &grovev1alpha1.PodCliqueSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "graph",
-			Namespace: "default",
-			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
-			},
+		Name:      "graph",
+		Namespace: "default",
+		OwnerReferences: []metav1.OwnerReference{
+			*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
 		},
 		Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
 			Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{Name: "old"}},
@@ -630,10 +621,10 @@ func TestGroveWorkloadsReconciler_ReconcilePodCliqueSetRejectsStaleObservation(t
 func TestGroveWorkloadsReconciler_ReconcilePodCliqueSetReturnsCreateConflict(t *testing.T) {
 	t.Log("Build a DGD and desired PCS with no observed PCS")
 	dgd := betaDGD(t, &nvidiacomv1alpha1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default", UID: "dgd-uid"},
+		Name: "graph", Namespace: "default", UID: "dgd-uid",
 	})
 	desired := &grovev1alpha1.PodCliqueSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+		Name: "graph", Namespace: "default",
 	}
 	t.Log("Inject a concurrent PCS creation")
 	kubeClient := fake.NewClientBuilder().
@@ -666,11 +657,11 @@ func TestGroveProviderOverridesUseObservedPCSReconciliation(t *testing.T) {
 	t.Log("Build one Grove reconciler with an injectable ordinary update failure")
 	ctx := context.Background()
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default", UID: types.UID("graph-uid")},
+		Name: "graph", Namespace: "default", UID: types.UID("graph-uid"),
 	}
 	desired := &grovev1alpha1.PodCliqueSet{
-		TypeMeta:   metav1.TypeMeta{APIVersion: provideroverride.GroveAPIVersion, Kind: provideroverride.TargetPodCliqueSet},
-		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+		APIVersion: provideroverride.GroveAPIVersion, Kind: provideroverride.TargetPodCliqueSet,
+		Name: "graph", Namespace: "default",
 		Spec: grovev1alpha1.PodCliqueSetSpec{
 			Template: grovev1alpha1.PodCliqueSetTemplateSpec{},
 		},
@@ -805,12 +796,10 @@ func TestGroveWorkloadsReconciler_SkipsHashObservationWhenHashIsCurrent(t *testi
 
 	t.Log("Seed a PCS carrying the current hash so the sync is a no-op")
 	existingPCS := &grovev1alpha1.PodCliqueSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      dynamo.PCSNameForDGD(dgd, nil),
-			Namespace: dgd.Namespace,
-			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
-			},
+		Name:      dynamo.PCSNameForDGD(dgd, nil),
+		Namespace: dgd.Namespace,
+		OwnerReferences: []metav1.OwnerReference{
+			*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
 		},
 		Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
 			Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{
@@ -875,12 +864,10 @@ func TestGroveWorkloadsReconciler_DefersHashCommitUntilPCSWriteObserved(t *testi
 		{
 			name: "legacy unsuffixed PCS — bookkeeping write defers commit, second reconcile commits",
 			existingPCS: &grovev1alpha1.PodCliqueSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      dynamo.PCSNameForDGD(dgd, nil),
-					Namespace: dgd.Namespace,
-					OwnerReferences: []metav1.OwnerReference{
-						*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
-					},
+				Name:      dynamo.PCSNameForDGD(dgd, nil),
+				Namespace: dgd.Namespace,
+				OwnerReferences: []metav1.OwnerReference{
+					*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
 				},
 				Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
 					Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{
@@ -967,7 +954,7 @@ func assertLiveRootTopologyValue(
 	t *testing.T,
 	kubeClient client.Client,
 	field string,
-	want interface{},
+	want any,
 ) {
 	t.Helper()
 	live := newUnstructuredGrovePodCliqueSet()
@@ -993,7 +980,7 @@ func newUnstructuredGrovePodCliqueSet() *unstructured.Unstructured {
 
 func TestGroveServiceDoesNotPreserveDisaggregatedSetSelector(t *testing.T) {
 	dgd := betaDGD(t, &nvidiacomv1alpha1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default", UID: "graph-uid"},
+		Name: "graph", Namespace: "default", UID: "graph-uid",
 		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",
 			Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -1002,10 +989,9 @@ func TestGroveServiceDoesNotPreserveDisaggregatedSetSelector(t *testing.T) {
 		},
 	})
 	component := &dgd.Spec.Components[0]
-	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+	service := &corev1.Service{
 		Name:      dynamo.GetDCDResourceName(dgd, component.ComponentName, ""),
-		Namespace: dgd.Namespace,
-	}}
+		Namespace: dgd.Namespace}
 	setDGDControllerOwnerReference(dgd, service)
 	setDisaggregatedSetServiceSelector(service, "graph", "frontend", "old12345", true)
 	kubeClient := fake.NewClientBuilder().
@@ -1027,13 +1013,13 @@ func TestGroveServiceDoesNotPreserveDisaggregatedSetSelector(t *testing.T) {
 func TestGroveServiceRenderingCharacterization(t *testing.T) {
 	t.Log("Arrange a frontend component for the Grove stable-resource reconciler")
 	dgd := betaDGD(t, &nvidiacomv1alpha1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default", UID: "graph-uid"},
+		Name: "graph", Namespace: "default", UID: "graph-uid",
 		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",
 			Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"frontend": {
 					ComponentType:   consts.ComponentTypeFrontend,
-					DynamoNamespace: ptr.To("dynamo-graph"),
+					DynamoNamespace: new("dynamo-graph"),
 				},
 			},
 		},
@@ -1091,14 +1077,14 @@ func TestGroveProgram_ScalingDuringUpdatesPreservesStatus(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Observe a PCS serving one frontend replica while the DGD requests a different capacity")
-			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default", UID: "dgd-uid", Generation: 1, Annotations: map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}}, Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "frontend", ComponentType: consts.ComponentTypeFrontend, Replicas: ptr.To(int32(2))}}}}
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{Name: "graph", Namespace: "default", UID: "dgd-uid", Generation: 1, Annotations: map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "Coherent"}, Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "frontend", ComponentType: consts.ComponentTypeFrontend, Replicas: new(int32(2))}}}}
 			if test.strategy == "" {
 				delete(dgd.Annotations, consts.KubeAnnotationGroveUpdateStrategy)
 			} else {
 				dgd.Annotations[consts.KubeAnnotationGroveUpdateStrategy] = test.strategy
 			}
 			if test.scaleDown {
-				dgd.Spec.Components[0].Replicas = ptr.To(int32(0))
+				dgd.Spec.Components[0].Replicas = new(int32(0))
 			}
 			if test.mixedLPX {
 				dgd.Spec.Components = append(dgd.Spec.Components, newLPXHandoffSource(t, "single_v2").Spec.Components[0])
@@ -1113,9 +1099,9 @@ func TestGroveProgram_ScalingDuringUpdatesPreservesStatus(t *testing.T) {
 			pcs.Spec.Template.Cliques[0].Spec.Replicas = 1
 			pcs.Status.UpdateProgress = &grovev1alpha1.PodCliqueSetUpdateProgress{UpdateStartedAt: metav1.Now()}
 			if !test.active {
-				pcs.Status.UpdateProgress.UpdateEndedAt = ptr.To(metav1.Now())
+				pcs.Status.UpdateProgress.UpdateEndedAt = new(metav1.Now())
 			}
-			pcs.Status.ObservedGeneration = ptr.To(int64(1))
+			pcs.Status.ObservedGeneration = new(int64(1))
 			if test.unobserved {
 				pcs.Generation = 2
 			}
@@ -1129,7 +1115,7 @@ func TestGroveProgram_ScalingDuringUpdatesPreservesStatus(t *testing.T) {
 			hash, err := commoncontroller.GetSpecHash(pcs)
 			require.NoError(t, err)
 			pcs.Annotations = map[string]string{commoncontroller.NvidiaAnnotationHashKey: hash, commoncontroller.NvidiaAnnotationGenerationKey: fmt.Sprint(pcs.Generation)}
-			pclq := &grovev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Name: "graph-0-frontend", Namespace: "default", Generation: 1}, Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}, Status: grovev1alpha1.PodCliqueStatus{Replicas: 1, ReadyReplicas: 1, UpdatedReplicas: 1, ScheduledReplicas: 1, ObservedGeneration: ptr.To(int64(1))}}
+			pclq := &grovev1alpha1.PodClique{Name: "graph-0-frontend", Namespace: "default", Generation: 1, Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}, Status: grovev1alpha1.PodCliqueStatus{Replicas: 1, ReadyReplicas: 1, UpdatedReplicas: 1, ScheduledReplicas: 1, ObservedGeneration: new(int64(1))}}
 			writes := 0
 			guardActive := test.guard
 			funcs := groveScaleInterceptor(interceptor.Funcs{}, func() { writes++ })
@@ -1152,7 +1138,7 @@ func TestGroveProgram_ScalingDuringUpdatesPreservesStatus(t *testing.T) {
 				require.NoError(t, err)
 				lpxChild.Status.ObservedGeneration = lpxChild.Generation
 				lpxChild.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: lpxChild.Generation}}
-				lpxChild.Status.Components = map[string]nvidiacomv1alpha1.LPXComponentStatus{"lpx": {ComponentReplicaStatus: nvidiacomv1beta1.ComponentReplicaStatus{Replicas: 1, ReadyReplicas: ptr.To(int32(1))}}}
+				lpxChild.Status.Components = map[string]nvidiacomv1alpha1.LPXComponentStatus{"lpx": {ComponentReplicaStatus: nvidiacomv1beta1.ComponentReplicaStatus{Replicas: 1, ReadyReplicas: new(int32(1))}}}
 				require.NoError(t, kubeClient.Status().Update(t.Context(), lpxChild))
 				dgd.Status.Components = map[string]nvidiacomv1beta1.ComponentReplicaStatus{"lpx": lpxChild.Status.Components["lpx"].ComponentReplicaStatus}
 			}
@@ -1197,9 +1183,9 @@ func TestGroveProgram_ScalingDuringUpdatesPreservesStatus(t *testing.T) {
 			guardActive = false
 			if !test.guard && !test.allowScaling {
 				require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
-				pcs.Status.ObservedGeneration = ptr.To(pcs.Generation)
+				pcs.Status.ObservedGeneration = new(pcs.Generation)
 				if pcs.Status.UpdateProgress != nil {
-					pcs.Status.UpdateProgress.UpdateEndedAt = ptr.To(metav1.Now())
+					pcs.Status.UpdateProgress.UpdateEndedAt = new(metav1.Now())
 				}
 				require.NoError(t, kubeClient.Update(t.Context(), pcs))
 			}
@@ -1221,12 +1207,10 @@ func TestGroveProgram_CoherentAPIRejectionIsReported(t *testing.T) {
 		t.Run("origin="+origin, func(t *testing.T) {
 			t.Log("Request Coherent explicitly against an API that rejects the strategy")
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "graph", Namespace: "default", UID: "dgd-uid",
-					Annotations: map[string]string{
-						consts.KubeAnnotationDynamoOperatorOriginVersion: origin,
-						consts.KubeAnnotationGroveUpdateStrategy:         "Coherent",
-					},
+				Name: "graph", Namespace: "default", UID: "dgd-uid",
+				Annotations: map[string]string{
+					consts.KubeAnnotationDynamoOperatorOriginVersion: origin,
+					consts.KubeAnnotationGroveUpdateStrategy:         "Coherent",
 				},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",

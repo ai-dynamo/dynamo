@@ -94,6 +94,23 @@ class BasePredictor(ABC):
         """Predict the next value"""
         pass
 
+    def prepare(self) -> None:
+        """Require enough history and a successful forecast before activation."""
+        self._check_warmup_history()
+        self._check_warmup_forecast(self.predict_next())
+
+    def _check_warmup_history(self) -> None:
+        if len(self.data_buffer) < self.minimum_data_points:
+            raise ValueError(
+                f"{type(self).__name__} needs {self.minimum_data_points} effective warmup points; "
+                f"received {len(self.data_buffer)}"
+            )
+
+    @staticmethod
+    def _check_warmup_forecast(forecast: float) -> None:
+        if not math.isfinite(forecast) or forecast < 0:
+            raise ValueError("warmup forecast must be finite and nonnegative")
+
 
 class ConstantPredictor(BasePredictor):
     """
@@ -147,6 +164,13 @@ class ARIMAPredictor(BasePredictor):
                 self.data_buffer[-1] = math.log1p(raw)
 
     def predict_next(self) -> float:
+        return self._predict_next()
+
+    def prepare(self) -> None:
+        self._check_warmup_history()
+        self._check_warmup_forecast(self._predict_next(strict=True))
+
+    def _predict_next(self, *, strict: bool = False) -> float:
         """Predict the next value(s)"""
         if len(self._raw_buffer) < self.minimum_data_points:
             return self.get_last_value()
@@ -241,6 +265,8 @@ class ARIMAPredictor(BasePredictor):
                 return max(0.0, math.expm1(forecast))
             return max(0.0, forecast)
         except Exception as e:
+            if strict:
+                raise
             # Log the specific error for debugging
             logger.warning(f"ARIMA prediction failed: {e}, using last value")
             self._pending_raw_updates = []

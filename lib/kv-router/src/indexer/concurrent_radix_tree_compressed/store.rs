@@ -372,7 +372,11 @@ impl ConcurrentRadixTreeCompressed {
             }
         }
 
-        let new_node = Arc::new(Node::from_blocks_for_worker(remaining, worker));
+        let new_node = Arc::new(Node::from_blocks_for_worker(
+            remaining,
+            worker,
+            cursor.last_ext_hash,
+        ));
         if let Some(parent_hash) = cursor.last_ext_hash
             && !cursor.parent_is_anchor
         {
@@ -459,7 +463,11 @@ impl ConcurrentRadixTreeCompressed {
                 let tail = &remaining[scan.match_len..];
                 debug_assert!(!tail.is_empty());
 
-                let tail_candidate = Arc::new(Node::from_blocks_for_worker(tail, worker));
+                let tail_candidate = Arc::new(Node::from_blocks_for_worker(
+                    tail,
+                    worker,
+                    Some(remaining[scan.match_len - 1].block_hash),
+                ));
                 let SplitStoreOutcome::Done { split, tail_node } = child.split_for_store_tail(
                     worker,
                     scan.match_len,

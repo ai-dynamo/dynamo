@@ -55,6 +55,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Snapshot checkpoint backend to test.",
     )
     parser.addoption(
+        "--checkpoint-tp",
+        type=int,
+        default=1,
+        help="Tensor-parallel size of the checkpointed worker; it uses one GPU "
+        "per rank.",
+    )
+    parser.addoption(
         "--model-cache-pvc",
         type=str,
         default="",

@@ -26,6 +26,7 @@ export const RESEARCH_TAGS = [
   "Memory & CXL",
   "Autoscaling",
   "Fault tolerance & startup",
+  "Guardrails",
   "Energy & power",
   "MoE & parallelism",
   "Configuration & simulation",
@@ -55,6 +56,15 @@ export interface ResearchPaper {
  * Dynamo's design at length.
  */
 export const RESEARCH_PAPERS: ResearchPaper[] = [
+  {
+    title: "Persona Guardrail: A Production-Grade Defense Framework for Agentic Systems",
+    url: "https://arxiv.org/abs/2610.03434",
+    org: "Uber",
+    venue: "arXiv",
+    date: "Oct 2, 2026",
+    iso: "2026-10-02",
+    tags: ["Agentic", "Guardrails"],
+  },
   {
     title: "EAServe: Encode-Aware Disaggregated Serving for Multimodal Large Language Models",
     url: "https://arxiv.org/abs/2609.31551",

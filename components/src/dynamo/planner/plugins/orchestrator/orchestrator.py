@@ -67,16 +67,18 @@ class LocalPlannerOrchestrator:
         scheduler: PluginScheduler,
         circuit_breaker: CircuitBreaker,
         clock: Clock,
-        tick_max_duration_seconds: float = 30.0,
+        tick_max_duration_seconds: Optional[float] = 30.0,
         capabilities: Optional[WorkerCapabilities] = None,
         metrics: Optional[PluginFrameworkMetrics] = None,
     ) -> None:
-        if tick_max_duration_seconds <= 0:
+        if tick_max_duration_seconds is not None and tick_max_duration_seconds <= 0:
             raise ValueError("tick_max_duration_seconds must be > 0")
         self._registry = registry
         self._scheduler = scheduler
         self._circuit_breaker = circuit_breaker
         self._clock = clock
+        # Wall-clock deadline of one pipeline run; ``None`` runs every tick
+        # to completion (replay, see ``run_pipeline``).
         self._tick_max_duration_seconds = tick_max_duration_seconds
         # Optional plugin-framework metrics. ``None`` = emission off
         # (test path, replay without scraping endpoint); every production
@@ -142,6 +144,9 @@ class LocalPlannerOrchestrator:
 
     def get_throughput_lower_bound(self, component: str) -> int:
         return self._throughput_lower_bound.get(component, 1)
+
+    def invalidate_runtime_configuration(self) -> None:
+        self._scheduler.invalidate_cache(reason="config_reload")
 
     # ------------------------------------------------------------------
     # Plugin lifecycle (delegates)

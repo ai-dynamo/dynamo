@@ -77,7 +77,7 @@ MAX_TAGS = 120
 # be advertised.
 NIGHTLY_LEDGER_REQUIRED_PACKAGES = ["ai-dynamo", "ai-dynamo-runtime"]
 # Packages the ledger advertises when that night published them. Not required:
-# kvbm is deprecated with removal targeted for v1.6.0, and a package that stops
+# kvbm is deprecated with removal targeted for v1.7.0, and a package that stops
 # publishing must drop out of the Packages column rather than freeze the ledger.
 NIGHTLY_LEDGER_OPTIONAL_PACKAGES = ["kvbm"]
 # Every package the ledger can advertise, the required ones first.
@@ -243,7 +243,7 @@ def published_nightly_packages() -> dict[str, set[str]] | None:
 
     A required package missing from the index would leave every ledger row
     unverifiable, so that fails the run. An optional package drops out of the
-    Packages column instead: kvbm's removal is targeted for v1.6.0, and its index
+    Packages column instead: kvbm's removal is targeted for v1.7.0, and its index
     going away must not stop every docs publish.
     """
     published: dict[str, set[str]] = {}

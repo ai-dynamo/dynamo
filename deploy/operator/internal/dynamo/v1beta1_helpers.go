@@ -15,6 +15,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 // ComponentPodTemplates returns every authored complete PodTemplate source.
@@ -49,6 +50,31 @@ func HasRolePodTemplates(component *v1beta1.DynamoComponentDeploymentSharedSpec)
 		}
 	}
 	return false
+}
+
+// HasCompleteMultinodeRolePodTemplates reports whether both leader and worker
+// roles declare a PodTemplate. A nil component has no role templates. Template
+// contents and duplicate role names are checked by the shared role validation.
+func HasCompleteMultinodeRolePodTemplates(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	if component == nil {
+		return false
+	}
+
+	// Check each required role independently of the authored role order.
+	var leader, worker bool
+	for i := range component.Roles {
+		role := &component.Roles[i]
+		if role.PodTemplate == nil {
+			continue
+		}
+		switch role.Name {
+		case v1beta1.ComponentRoleLeader:
+			leader = true
+		case v1beta1.ComponentRoleWorker:
+			worker = true
+		}
+	}
+	return leader && worker
 }
 
 // EffectiveComponentForRole returns an independently owned component whose
@@ -146,9 +172,17 @@ func GetMainContainer(component *v1beta1.DynamoComponentDeploymentSharedSpec) *c
 	if component == nil || component.PodTemplate == nil {
 		return nil
 	}
-	for i := range component.PodTemplate.Spec.Containers {
-		if component.PodTemplate.Spec.Containers[i].Name == commonconsts.MainContainerName {
-			return &component.PodTemplate.Spec.Containers[i]
+	return GetMainContainerFromPodSpec(&component.PodTemplate.Spec)
+}
+
+// GetMainContainerFromPodSpec returns main, or nil for an absent PodSpec or container.
+func GetMainContainerFromPodSpec(podSpec *corev1.PodSpec) *corev1.Container {
+	if podSpec == nil {
+		return nil
+	}
+	for i := range podSpec.Containers {
+		if podSpec.Containers[i].Name == commonconsts.MainContainerName {
+			return &podSpec.Containers[i]
 		}
 	}
 	return nil
@@ -161,9 +195,22 @@ func GetDynamoSidecar(component *v1beta1.DynamoComponentDeploymentSharedSpec) *c
 	if component == nil || component.PodTemplate == nil {
 		return nil
 	}
-	for i := range component.PodTemplate.Spec.InitContainers {
-		if component.PodTemplate.Spec.InitContainers[i].Name == commonconsts.RuntimeContainerName {
-			return &component.PodTemplate.Spec.InitContainers[i]
+	return findRuntimeInitContainer(&component.PodTemplate.Spec)
+}
+
+// GetComponentDynamoSidecar returns the component's runtime declaration, including
+// the leader in role-template mode. It does not imply a sidecar runs in every Pod.
+// A nil component has no sidecar.
+func GetComponentDynamoSidecar(component *v1beta1.DynamoComponentDeploymentSharedSpec) *corev1.Container {
+	if runtime := GetDynamoSidecar(component); runtime != nil {
+		return runtime
+	}
+	if component != nil {
+		for i := range component.Roles {
+			role := &component.Roles[i]
+			if role.Name == v1beta1.ComponentRoleLeader && role.PodTemplate != nil {
+				return findRuntimeInitContainer(&role.PodTemplate.Spec)
+			}
 		}
 	}
 	return nil
@@ -529,4 +576,26 @@ func mergeLowPriorityMetadata(dst, src map[string]string) map[string]string {
 		}
 	}
 	return dst
+}
+
+// lowerComponentForRole validates sidecar declarations before selecting a role.
+// It preserves component-wide mode for native workers that have no runtime container.
+// component must not be nil. The returned component is an independent copy.
+func lowerComponentForRole(component *v1beta1.DynamoComponentDeploymentSharedSpec, role Role) (*v1beta1.DynamoComponentDeploymentSharedSpec, roleLaunchOwnership, bool, error) {
+	// Validate the authored component while both role declarations are available.
+	if errs := ValidateComponentSidecarConfiguration(component, field.NewPath("spec")); len(errs) > 0 {
+		return nil, roleLaunchOwnedByOperator, false, errs.ToAggregate()
+	}
+
+	// Select launch ownership and sidecar mode before removing the other role.
+	ownership := roleLaunchOwnedByOperator
+	if HasRolePodTemplates(component) {
+		ownership = roleLaunchOwnedByPodTemplate
+	}
+	nativeSidecar := GetComponentDynamoSidecar(component) != nil
+	effective, err := EffectiveComponentForRole(component, role)
+	if err != nil {
+		return nil, ownership, nativeSidecar, fmt.Errorf("failed to resolve component role %q: %w", role, err)
+	}
+	return effective, ownership, nativeSidecar, nil
 }

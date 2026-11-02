@@ -74,31 +74,13 @@ data:
     part-14
     part-15
     part-16
-  topologies: |-
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
 immutable: true
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: dgd-single-v2
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: dgd-single-v2-3a98-lpu-311b847b1644357f
+  name: dgd-single-v2-3a98-lpu-343835eab3097dc0
   namespace: inference-engine
 ---
 metadata:
@@ -116,9 +98,9 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: dgd-single-v2
-        nvidia.com/extra-resources-hash: 311b847b1644357fea6ed0384ea3528deeca74095a979f274d411413483825f1
-        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:39d4f72928befc4c2a5d7850ec46dfec8effa25026accb0fa0aab780c9b4c5a3
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:7222bd67b82f73f27b0180bff5f136a282f08398c31508bba0c7e6f0b4151d17
+        nvidia.com/extra-resources-hash: 343835eab3097dc01883d5b3bc8ae14d7ac5d716bb79d83604c10e35d3eaa151
+        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:3a7c446413c1bbe88ab04670c79251b253f98ab2000e4f446e000116bd9824b6
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:10dbe27c9e53b73621ee50c7e4d9633352c32c6fb854c448d0e2a53cbdec774a
         scheduling.lpu.nvidia.com/model: default
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v2LpuOnly
@@ -139,6 +121,8 @@ spec:
             command:
             - /bin/quasar-entrypoint
             env:
+            - name: LPX_MODEL_PATH
+              value: /nfs/llama3_2-1b-lpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
             - name: DYN_COMPONENT
               value: lpx
             - name: DYN_DISCOVERY_BACKEND
@@ -176,7 +160,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.uid
             image: example.invalid/lpu-runtime:test
-            name: agent
+            name: main
             readinessProbe:
               failureThreshold: 3
               initialDelaySeconds: 10
@@ -247,14 +231,14 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: dgd-single-v2-3a98-lpu-311b847b1644357f
+              name: dgd-single-v2-3a98-lpu-343835eab3097dc0
             name: config
         replicas: 17
         roleName: agt
     - annotations:
         lpx.nvidia.com/deployment-name: dgd-single-v2
-        nvidia.com/extra-resources-hash: 311b847b1644357fea6ed0384ea3528deeca74095a979f274d411413483825f1
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:7222bd67b82f73f27b0180bff5f136a282f08398c31508bba0c7e6f0b4151d17
+        nvidia.com/extra-resources-hash: 343835eab3097dc01883d5b3bc8ae14d7ac5d716bb79d83604c10e35d3eaa151
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:10dbe27c9e53b73621ee50c7e4d9633352c32c6fb854c448d0e2a53cbdec774a
         scheduling.lpu.nvidia.com/role: conductor
       labels:
         lpx.nvidia.com/serving: "true"
@@ -376,7 +360,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.uid
             image: example.invalid/lpu-runtime:test
-            name: conductor
+            name: main
             readinessProbe:
               failureThreshold: 3
               httpGet:
@@ -405,6 +389,9 @@ spec:
             - /tmp/dynamo-lpu-ssh/private.key
             command:
             - /bin/install
+            env:
+            - name: LPX_MODEL_PATH
+              value: /nfs/llama3_2-1b-lpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
             image: example.invalid/lpu-runtime:test
             name: prepare-ssh-key
             resources: {}
@@ -435,7 +422,7 @@ spec:
               defaultMode: 384
               secretName: ssh-secret
           - configMap:
-              name: dgd-single-v2-3a98-lpu-311b847b1644357f
+              name: dgd-single-v2-3a98-lpu-343835eab3097dc0
             name: config
         replicas: 1
         roleName: cond
@@ -446,7 +433,7 @@ spec:
     podCliqueScalingGroups:
     - annotations:
         lpx.nvidia.com/deployment-name: dgd-single-v2
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:7222bd67b82f73f27b0180bff5f136a282f08398c31508bba0c7e6f0b4151d17
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:10dbe27c9e53b73621ee50c7e4d9633352c32c6fb854c448d0e2a53cbdec774a
       cliqueNames:
       - cond
       - agt

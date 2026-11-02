@@ -9,17 +9,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	dynamov1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 )
 
 const (
@@ -37,21 +36,16 @@ var ErrUnsupportedRuntime = errors.New("unsupported LPX runtime")
 // immutable build snapshot from its backing store.
 var ErrBuildSnapshotAcquisition = errors.New("acquiring immutable LPX build snapshot")
 
-// BuildSnapshotSource acquires immutable build inputs by build reference.
-type BuildSnapshotSource interface {
-	// AcquireBuildSnapshot returns a complete snapshot for id or an error.
-	AcquireBuildSnapshot(context.Context, string) (*BuildSnapshot, error)
-}
-
 // ResolveWorkload projects one admitted component group against immutable builds.
-// dgd and source must be non-nil. componentNames must contain exactly the members
+// reader, dgd and registry must be non-nil. componentNames must contain exactly the members
 // of one ComponentGroups entry from the admitted dgd, in any order.
-// Inputs are read without mutation; the full dgd supplies validation field paths.
+// Inputs are read without mutation.
 func ResolveWorkload(
 	ctx context.Context,
+	reader client.Reader,
 	dgd *dynamov1beta1.DynamoGraphDeployment,
 	componentNames []string,
-	source BuildSnapshotSource,
+	registry ModelRegistry,
 ) (*Workload, error) {
 	// Resolve only this group's native components from the unchanged graph.
 	components := make([]*dynamov1beta1.DynamoComponentDeploymentSharedSpec, 0, len(componentNames))
@@ -66,7 +60,7 @@ func ResolveWorkload(
 
 	// Acquire each build and expand its models in canonical runtime order.
 	var (
-		snapshot NormalizedBuildSnapshot
+		snapshot *Build
 		pipeline Pipeline
 
 		projections = make([]*ModelProjection, 0, len(components))
@@ -78,8 +72,13 @@ func ResolveWorkload(
 
 		// An admitted group has at most two components, so only its preceding component can share a build.
 		if len(projections) == 0 || projections[len(projections)-1].runtimeBuildRef != model.BuildID {
-			rawSnapshot, acquireErr := source.AcquireBuildSnapshot(ctx, model.BuildID)
+			acquired, acquireErr := registry.AcquireBuild(ctx, model.BuildID)
 			if acquireErr != nil {
+				// Keep compiler validation failures distinct from retryable acquisition failures.
+				if errors.Is(acquireErr, errInvalidBuildManifest) {
+					return nil, fmt.Errorf("invalid LPX build for model %q build %q: %w", configuredModel, model.BuildID, acquireErr)
+				}
+
 				return nil, fmt.Errorf(
 					"%w for model %q build %q: %w",
 					ErrBuildSnapshotAcquisition,
@@ -88,16 +87,7 @@ func ResolveWorkload(
 					acquireErr,
 				)
 			}
-			normalizedSnapshot, normalizeErr := normalizeBuildSnapshot(rawSnapshot)
-			if normalizeErr != nil {
-				return nil, fmt.Errorf(
-					"normalizing immutable LPX build snapshot for model %q build %q: %w",
-					configuredModel,
-					model.BuildID,
-					normalizeErr,
-				)
-			}
-			snapshot = normalizedSnapshot
+			snapshot = acquired
 		}
 
 		// Validated model cardinality fixes one runtime shape for the selected workload.
@@ -105,12 +95,12 @@ func ResolveWorkload(
 			pipeline = PipelineSingle
 			if len(components) == 2 {
 				pipeline = PipelineSpecDecode
-			} else if snapshot.build.CompilationMode == BuildCompilationModeHybrid {
-				pipeline = PipelineLPX
+			} else if snapshot.hasCUDAPartitions {
+				pipeline = PipelineHybrid
 			}
 		}
 
-		if err := validateWorkloadConductor(dgd, stage, pipeline, snapshot.build.CompilationMode); err != nil {
+		if err := validateWorkloadConductor(ctx, reader, dgd.Namespace, stage, pipeline, snapshot.hasCUDAPartitions); err != nil {
 			return nil, err
 		}
 
@@ -121,7 +111,7 @@ func ResolveWorkload(
 			Pipeline:        pipeline,
 			Models:          modelNames,
 			RuntimeBuildRef: model.BuildID,
-			BuildSnapshot:   snapshot,
+			Build:           snapshot,
 			LocalPartitions: model.LocalPartitions(),
 		}
 		projected, err := appendModelProjections(projections, intent)
@@ -159,88 +149,61 @@ func ResolveWorkload(
 }
 
 // validateWorkloadConductor checks role requirements that depend on the immutable build.
+// reader and component must be non-nil.
 func validateWorkloadConductor(
-	dgd *dynamov1beta1.DynamoGraphDeployment,
+	ctx context.Context,
+	reader client.Reader,
+	namespace string,
 	component *dynamov1beta1.DynamoComponentDeploymentSharedSpec,
 	pipeline Pipeline,
-	compilationMode BuildCompilationMode,
+	requiresGPU bool,
 ) error {
+	// Only an LPU-only single model's engine runs in the Agent Pods with its runtime sidecar.
+	if agentRuntimeSidecar(component) != nil && pipeline != PipelineSingle {
+		return fmt.Errorf(
+			"%w: component %q agent %q sidecar requires an LPU-only single-model build; declare the conductor role instead",
+			ErrUnsupportedRuntime, component.ComponentName, commonconsts.RuntimeContainerName,
+		)
+	}
+
 	conductor := component.ComponentRole(dynamov1beta1.ComponentRoleLPXConductor)
-	// Hybrid execution is selected by immutable build metadata, not template presence.
-	if compilationMode == BuildCompilationModeHybrid {
+	// A shared draft and target pair's conductor serves the pair itself, whatever the build.
+	if pipeline == PipelineSpecDecode && conductor != nil &&
+		common.FindContainerByName(conductor.PodTemplate.Spec.InitContainers, commonconsts.RuntimeContainerName) != nil {
+		return fmt.Errorf(
+			"%w: component %q is the target of a shared draft and target pair, whose conductor takes no Dynamo sidecar; remove the %q init container",
+			ErrUnsupportedRuntime, component.ComponentName, commonconsts.RuntimeContainerName,
+		)
+	}
+
+	// Validate the selected hybrid runtime's GPU resources and claim bindings.
+	if requiresGPU {
 		if pipeline == PipelineSpecDecode {
 			return fmt.Errorf("%w: the shared speculative runtime requires LPU-only builds", ErrUnsupportedRuntime)
 		}
 		template := conductor.PodTemplate
 		container := common.FindContainerByName(template.Spec.Containers, commonconsts.MainContainerName)
-		count, err := EffectiveCyborgGPUCount(container.Resources)
+		count, err := dra.ResolveGPUCount(ctx, reader, namespace, &template.Spec, container.Resources)
 		if err != nil {
 			return fmt.Errorf("component %q conductor resources: %w", component.ComponentName, err)
 		}
 		if count > 0 {
 			return nil
 		}
-
-		// A Pod claim supplies devices only to containers that reference its local name.
-		for _, claim := range container.Resources.Claims {
-			for _, podClaim := range template.Spec.ResourceClaims {
-				if claim.Name == podClaim.Name {
-					return nil
-				}
-			}
-		}
-		return fmt.Errorf("component %q conductor main container requires a declared resourceClaim or a positive %s request", component.ComponentName, commonconsts.KubeResourceGPUNvidia)
+		return fmt.Errorf("component %q conductor main container requires a positive GPU count from scalar resources or resourceClaims", component.ComponentName)
 	}
 
-	// Only the LPU-only serving template materializes a renamed conductor container.
-	if conductor == nil {
-		return nil
-	}
-
-	// Preserve authored indices when reporting conductor name collisions.
-	componentIndex := slices.IndexFunc(dgd.Spec.Components, func(candidate dynamov1beta1.DynamoComponentDeploymentSharedSpec) bool {
-		return candidate.ComponentName == component.ComponentName
-	})
-	roleIndex := slices.IndexFunc(component.Roles, func(candidate dynamov1beta1.ComponentRoleSpec) bool {
-		return candidate.Name == conductor.Name
-	})
-	podSpecPath := field.NewPath("spec", "components").Index(componentIndex).Child("roles").Index(roleIndex).Child("podTemplate", "spec")
-
-	// Check both container lists before a selected workload can be published.
-	if err := validateRolePodSpecContainerNames(&conductor.PodTemplate.Spec, podSpecPath, dynamov1beta1.ComponentRoleLPXConductor).ToAggregate(); err != nil {
-		return err
+	// A Dynamo sidecar fronts the hybrid GPU engine; the LPU-only conductor is not a Dynamo worker.
+	if conductor != nil && common.FindContainerByName(conductor.PodTemplate.Spec.InitContainers, commonconsts.RuntimeContainerName) != nil {
+		return fmt.Errorf("%w: component %q conductor Dynamo sidecar mode requires a hybrid build whose conductor runs the GPU engine", ErrUnsupportedRuntime, component.ComponentName)
 	}
 
 	// An LPU-only conductor is a singleton even when the workload replica count is larger.
-	if ptr.Deref(conductor.Replicas, 1) != 1 {
+	if conductor != nil && ptr.Deref(conductor.Replicas, 1) != 1 {
 		return fmt.Errorf("%w: component %q conductor replicas must be one for LPU-only execution", ErrUnsupportedRuntime, component.ComponentName)
 	}
 
 	return nil
-}
-
-// validateRolePodSpecContainerNames checks both lists that share the Pod's name space.
-// spec and fldPath must be non-nil.
-func validateRolePodSpecContainerNames(spec *corev1.PodSpec, fldPath *field.Path, reservedName string) field.ErrorList {
-	// Both lists must avoid the materialized role container name.
-	allErrs := field.ErrorList{}
-	for _, group := range []struct {
-		name       string
-		containers []corev1.Container
-	}{
-		{"containers", spec.Containers},
-		{"initContainers", spec.InitContainers},
-	} {
-		for containerIndex, container := range group.containers {
-			if container.Name == reservedName {
-				allErrs = append(allErrs, field.Forbidden(
-					fldPath.Child(group.name).Index(containerIndex).Child("name"),
-					fmt.Sprintf("LPX reserves %q for the materialized role container", container.Name),
-				))
-			}
-		}
-	}
-	return allErrs
 }
 
 func expandedModelNames(componentCount int, hasConductor bool, draftCount int) []string {

@@ -354,6 +354,24 @@ impl DynamicZmqSubSocket {
         Ok(())
     }
 
+    /// Add a topic prefix filter, for consumers that route by raw topic frame.
+    pub fn subscribe(&mut self, topic: &[u8]) -> Result<()> {
+        self.socket.subscribe(topic)?;
+        Ok(())
+    }
+
+    /// Remove a topic prefix filter added by [`Self::subscribe`].
+    pub fn unsubscribe(&mut self, topic: &[u8]) -> Result<()> {
+        self.socket.unsubscribe(topic)?;
+        Ok(())
+    }
+
+    /// Receive the next multipart message undecoded, for raw publishers that do
+    /// not use the event-plane frame layout.
+    pub async fn next_frames(&mut self) -> Option<Result<Multipart>> {
+        Some(self.socket.next().await?.map_err(Into::into))
+    }
+
     /// Receive and decode the next multipart message.
     pub async fn next(&mut self) -> Option<Result<ZmqWireMessage>> {
         loop {
