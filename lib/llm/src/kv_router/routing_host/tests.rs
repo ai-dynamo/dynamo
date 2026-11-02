@@ -276,10 +276,12 @@ async fn builtin_route_plan_holds_its_reservation_until_aborted() {
 
     let request = Context::new(request());
     let plan = host
-        .plan_builtin_route(&request, RequestPhase::Aggregated)
+        .plan_route(&request, RequestPhase::Aggregated)
         .await
         .unwrap();
-    let worker_id = plan.worker_id();
+    assert!(matches!(plan, RoutePlan::Builtin(_)));
+    assert!(plan.attempt_release().is_none());
+    let worker_id = plan.target().worker_id;
     assert_eq!(
         host.inner.occupancy_for_test(worker_id),
         1,
@@ -341,16 +343,16 @@ async fn builtin_route_plan_prepares_for_the_worker_it_is_sent_to() {
 
     let request = Context::new(request());
     let plan = host
-        .plan_builtin_route(&request, RequestPhase::Aggregated)
+        .plan_route(&request, RequestPhase::Aggregated)
         .await
         .unwrap();
-    assert_eq!(plan.worker_id(), 101);
+    assert_eq!(plan.target().worker_id, 101);
 
     // The selection view still contains 101, but dispatch can only reach 202.
     source_tx.send(instances[1..].to_vec()).unwrap();
     assert!(!client.is_instance_live(101));
     let (prepared_for, mut stream) = host
-        .dispatch_builtin_plan(request, plan, |_, target| Ok(target.worker_id))
+        .dispatch_route(request, plan, |_, target| Ok(target.worker_id))
         .await
         .unwrap();
     while stream.next().await.is_some() {}
@@ -2809,7 +2811,7 @@ fn active_requests_for(
 async fn plan_decode_route(
     router: &RoutingHost,
     request: &Context<PreprocessedRequest>,
-) -> RoutePlan {
+) -> KvRoutePlan {
     let preview = router
         .preview_kv_route(request, RequestPhase::Decode)
         .await
@@ -4606,7 +4608,7 @@ async fn unknown_explicit_workers_are_rejected_before_builtin_dispatch() {
         let mut content = request();
         content.routing =
             Some(serde_json::from_value(serde_json::json!({field: worker_id})).unwrap());
-        let Err(error) = host.plan_builtin_route(&Context::new(content), phase).await else {
+        let Err(error) = host.plan_route(&Context::new(content), phase).await else {
             panic!("an unknown {field} must be rejected at selection");
         };
         assert!(match_error_chain(
@@ -5032,13 +5034,19 @@ async fn hard_parent_group_recovers_when_the_bound_worker_leaves() {
 async fn prefill_prepare_failure_releases_the_booking_before_the_request_counts() {
     let (router, runtime) = router(None).await;
     let started_before = router.request_metrics.requests_started_total.get();
-    let error = router
-        .select_and_dispatch_prefill(Context::new(request()), |_, _| -> Result<(), Error> {
+    let request = Context::new(request());
+    let plan = router
+        .plan_route(&request, RequestPhase::Prefill)
+        .await
+        .unwrap();
+    let result = router
+        .dispatch_route(request, plan, |_, _| -> Result<(), Error> {
             Err(anyhow::anyhow!("prepare failed"))
         })
-        .await
-        .err()
-        .expect("a failed prepare must fail the request");
+        .await;
+    let Err(error) = result else {
+        panic!("a failed prepare must fail the request");
+    };
     assert!(format!("{error:#}").contains("prepare failed"));
     assert_eq!(
         router.request_metrics.requests_started_total.get(),

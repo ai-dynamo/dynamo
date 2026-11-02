@@ -5,7 +5,9 @@ This module is the router's host layer. It embeds the selection core from `lib/k
 affinity, booking ownership, dispatch, cancellation, and the optional encode and prefill hops.
 For which processes embed it and where their boundaries are, see
 [`components/src/dynamo/router/AGENTS.md`](../../../../components/src/dynamo/router/AGENTS.md).
-The module map and the rules for changing this code are in [`AGENTS.md`](AGENTS.md).
+The module map and the rules for changing this code are in [`AGENTS.md`](AGENTS.md). How a
+caller drives a `RoutingHost` on the KV and built-in planes is in
+[`routing_host/README.md`](routing_host/README.md).
 
 ## Layer map
 
@@ -178,7 +180,7 @@ releasing it.
 1. **Admit.** A `Lease` admission returns a `BookingHandle` for one scheduler attempt.
 2. **Own.** `KvRequestCleanup` commits the handle and registers a local `RequestAttemptLease`
    with the `RequestLeaseManager`, plus an approximate-LRU lease when the approximate indexer is
-   on. A `RoutePlan` (preview or plan path) holds this cleanup until dispatch.
+   on. A `KvRoutePlan` (preview or plan path) holds this cleanup until dispatch.
 3. **Track.** At dispatch, `RequestGuard` takes ownership. The first output tokens mark prefill
    complete on the booking, and output progress keeps the lease alive.
 4. **Release.** Stream end, error, or drop releases the lease, which enqueues the scheduler

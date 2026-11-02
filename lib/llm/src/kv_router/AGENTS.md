@@ -24,7 +24,10 @@ and the booking lifecycle these rules protect.
   - `routing_host/kv.rs`: the KV path: preview, plan, select, track, dispatch.
   - `routing_host/kv_selection.rs`: turns a request's routing inputs into a `KvRouter` call.
   - `routing_host/builtin.rs`, `routing_host/occupancy.rs`: non-KV modes (random, round-robin,
-    load-based) and Direct mode.
+    load-based) and Direct mode. Like a KV route, a built-in route is planned (`RoutePlan`),
+    then dispatched.
+  - `routing_host/README.md`: how to drive the KV and built-in planes, and what they share.
+    Read it before adding a `RoutingHost` entry point or routing mode.
   - `routing_host/request_guard.rs`: tracks a dispatched request's progress and releases its
     booking.
   - `routing_host/cancellation.rs`: what a client disconnect cancels, and the cleanup budget.
@@ -34,6 +37,9 @@ and the booking lifecycle these rules protect.
   - `handoff.rs`: keeps prefill running while decode runs and reports prefill failures.
   - `conditional_bypass.rs`: conditional disaggregation's decision to skip remote prefill.
   - `query.rs`: `reserve_prefill_worker`, the prefill-only booking used by the Runtime EPP.
+  - `stage.rs`: `PrefillRouter` as a `StageRouter`, and the helpers `generate` is composed from.
+- `stage_router.rs`: `StageRouter`, the `schedule` / `preview` / `dispatch` interface shared by
+  single-stage routers. `PrefillRouter` implements it so far.
 - `encoder_router.rs`: `EncoderRouter`, the optional encode hop for multimodal inputs.
 - `plugins.rs`: installs the linked router plugin registry.
 - `shared_cache.rs`: the HiCache shared KV cache client (SGLang + Mooncake).
