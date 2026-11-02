@@ -135,8 +135,9 @@ opt-out and lets `run.rs` stay non-generic.
   operator pause is in effect. In-flight requests are
   never cancelled, and a `recover()` error stops the worker. Discovery
   writes for pause, resume, taints, engine state and shutdown go through
-  one lock and are never cancelled mid-write; endpoint writes are skipped
-  when discovery already matches.
+  one lock. A write dropped with its HTTP request leaves its state unknown
+  until the next sync. Endpoint writes are skipped when discovery already
+  matches, and the serve loop retries its own failed writes.
 
 ## Contract for `generate`
 

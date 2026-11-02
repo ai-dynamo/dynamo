@@ -60,6 +60,8 @@ const DRAIN_HEARTBEAT_INTERVAL_S: f64 = 5.0;
 /// Budget reserved for `cleanup()` so the drain loop can't consume the whole
 /// graceful-shutdown deadline and trip the hard-exit that skips cleanup.
 const CLEANUP_RESERVE_S: f64 = 5.0;
+/// Delay before the serve loop retries a failed endpoint sync.
+const SYNC_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Operator override for the health-check canary, mirrors the Python helper
 /// in `lib/bindings/python/src/dynamo/health_check.py`.
@@ -299,8 +301,8 @@ enum EngineRouteLifecycle {
 
 /// The worker's discovery registration, shared by serving, operator pause and
 /// engine recovery. The lock is held across discovery writes but never across
-/// engine calls, and those writes are not cancelled, so the recorded state
-/// matches discovery.
+/// engine calls. A write can be dropped with its HTTP request, so each write
+/// records its state as unknown until it returns.
 struct Registration {
     /// Whether the endpoint instance is in discovery; `None` after a failed write.
     endpoint: Option<bool>,
@@ -1389,15 +1391,13 @@ impl Worker {
         // publishes readiness through the very signal it suppresses.
         drop(readiness_hold);
         // A pause control may already have withdrawn the endpoint.
-        if let Err(error) = self
-            .registration
-            .lock()
-            .await
-            .sync_endpoint(&endpoint)
-            .await
-        {
-            tracing::warn!(%error, "failed to sync endpoint registration");
-        }
+        let mut resync = sync_failed(
+            self.registration
+                .lock()
+                .await
+                .sync_endpoint(&endpoint)
+                .await,
+        );
 
         let serve_fut = primary_endpoint.wait();
         tokio::pin!(serve_fut);
@@ -1419,9 +1419,7 @@ impl Worker {
                     if state != EngineAvailability::Lost {
                         let mut registration = self.registration.lock().await;
                         registration.engine = state;
-                        if let Err(error) = registration.sync_endpoint(&endpoint).await {
-                            tracing::warn!(%error, ?state, "failed to sync endpoint registration");
-                        }
+                        resync = sync_failed(registration.sync_endpoint(&endpoint).await);
                         continue;
                     }
                     self.withdraw_lost_engine(&endpoint).await;
@@ -1453,6 +1451,15 @@ impl Worker {
                     if let Some(receiver) = availability.as_mut() {
                         receiver.mark_changed();
                     }
+                }
+                _ = tokio::time::sleep(SYNC_RETRY_INTERVAL), if resync => {
+                    resync = sync_failed(
+                        self.registration
+                            .lock()
+                            .await
+                            .sync_endpoint(&endpoint)
+                            .await,
+                    );
                 }
             }
         };
@@ -1585,7 +1592,8 @@ impl Worker {
     /// expires. Budget = `DYN_PREFILL_DRAIN_TIMEOUT_S` capped at
     /// `graceful_shutdown_timeout - CLEANUP_RESERVE_S`.
     async fn drain_until_idle_or_deadline(&self) {
-        // A lost engine has no KV transfers left to finish.
+        // A lost engine can't report quiescence, and its KV memory lives in its
+        // own process, which this worker's cleanup doesn't free.
         if !self.config.disaggregation_mode.is_prefill()
             || self.registration.lock().await.engine == EngineAvailability::Lost
         {
@@ -1657,6 +1665,14 @@ fn endpoint_exit(result: anyhow::Result<()>) -> Result<(), DynamoError> {
             format!("serve: {e}"),
         )),
     }
+}
+
+/// Log a failed serve-loop endpoint sync; true when it needs a retry.
+fn sync_failed(result: anyhow::Result<()>) -> bool {
+    if let Err(error) = &result {
+        tracing::warn!(%error, "failed to sync endpoint registration; retrying");
+    }
+    result.is_err()
 }
 
 /// The engine's next availability change; pending forever without one.
