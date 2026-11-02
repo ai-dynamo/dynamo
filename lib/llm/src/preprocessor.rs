@@ -2847,7 +2847,22 @@ impl OpenAIPreprocessor {
         let tokenizer = mdc.tokenizer()?;
         let PromptFormatter::OAI(formatter) = embedding_prompt_formatter(&mdc)?;
         let embedding_tokenizers = EmbeddingTokenizerState::new(&mdc)?;
-        Self::new_with_parts_inner(mdc, formatter, tokenizer, Some(embedding_tokenizers), None)
+        Self::new_with_parts_inner(
+            mdc,
+            formatter,
+            tokenizer,
+            Some(embedding_tokenizers),
+            None,
+            false,
+        )
+    }
+
+    pub(crate) fn new_for_completions(
+        mdc: ModelDeploymentCard,
+        tokenizer: crate::tokenizers::Tokenizer,
+    ) -> Result<Arc<Self>> {
+        let PromptFormatter::OAI(formatter) = PromptFormatter::no_op();
+        Self::new_with_parts_inner(mdc, formatter, tokenizer, None, None, false)
     }
 
     pub fn new_with_parts(
@@ -2865,7 +2880,14 @@ impl OpenAIPreprocessor {
         tokenizer: crate::tokenizers::Tokenizer,
         speculative_prefill_cancel: Option<CancellationToken>,
     ) -> Result<Arc<Self>> {
-        Self::new_with_parts_inner(mdc, formatter, tokenizer, None, speculative_prefill_cancel)
+        Self::new_with_parts_inner(
+            mdc,
+            formatter,
+            tokenizer,
+            None,
+            speculative_prefill_cancel,
+            true,
+        )
     }
 
     fn new_with_parts_inner(
@@ -2874,7 +2896,9 @@ impl OpenAIPreprocessor {
         tokenizer: crate::tokenizers::Tokenizer,
         embedding_tokenizers: Option<EmbeddingTokenizerState>,
         speculative_prefill_cancel: Option<CancellationToken>,
+        enable_chat_parsers: bool,
     ) -> Result<Arc<Self>> {
+        let enable_chat_parsers = enable_chat_parsers && mdc.model_type.supports_chat();
         let mdcsum = mdc.mdcsum().to_string();
         let tokenizer: Arc<dyn Tokenizer> = (*tokenizer).clone();
         let lora_name = mdc.lora.as_ref().map(|l| l.name.clone());
@@ -2894,7 +2918,7 @@ impl OpenAIPreprocessor {
         });
         let token_id_bound = token_id_bound(model_info.vocab_size(), tokenizer_id_bound);
         let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
-        if mdc.model_type.supports_chat() {
+        if enable_chat_parsers {
             crate::protocols::openai::chat_completions::tool_parser_v2::validate_parser_version(
                 tool_call_parser.as_deref(),
                 mdc.runtime_config.reasoning_parser.as_deref(),
@@ -2911,7 +2935,7 @@ impl OpenAIPreprocessor {
                 "Selected model parser route"
             );
         }
-        let parser_requires_special_tokens = mdc.model_type.supports_chat()
+        let parser_requires_special_tokens = enable_chat_parsers
             && Self::parser_requires_special_tokens(
                 tool_call_parser.as_deref(),
                 mdc.runtime_config.reasoning_parser.as_deref(),
@@ -2919,7 +2943,7 @@ impl OpenAIPreprocessor {
         let normalize_tool_call_args = mdc.runtime_config.tool_call_arguments_format
             == crate::local_model::runtime_config::ToolCallArgumentsFormat::JsonObject
             || mdc.runtime_config.tool_call_parser.as_deref() == Some("glm47");
-        let beam_route = mdc.model_type.supports_chat()
+        let beam_route = enable_chat_parsers
             && crate::protocols::openai::chat_completions::unified_parser::selected_family(
                 tool_call_parser.as_deref(),
                 mdc.runtime_config.reasoning_parser.as_deref(),
@@ -9094,6 +9118,48 @@ mod token_data_tests {
                 context.context(),
             ))
         }
+    }
+
+    #[test]
+    fn completions_ignore_chat_selectors_without_changing_model_identity() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::completions_ignore_chat_selectors_without_changing_model_identity"
+            ),
+            &[("DYN_PARSER_VERSION", "auto")],
+        ) {
+            return;
+        }
+        let mut card = ModelDeploymentCard::load_from_disk(LLAMA_DIR, None).unwrap();
+        card.model_type =
+            crate::model_type::ModelType::Chat | crate::model_type::ModelType::Completions;
+        card.runtime_config.tool_call_parser = Some("engine_native_tool".to_string());
+        card.runtime_config.reasoning_parser = Some("openai_gptoss".to_string());
+        let tokenizer = card.tokenizer().unwrap();
+        for model_type in [crate::model_type::ModelType::empty(), card.model_type] {
+            let mut completion_card = card.clone();
+            completion_card.model_type = model_type;
+            let checksum = completion_card.mdcsum().to_string();
+            let preprocessor =
+                OpenAIPreprocessor::new_for_completions(completion_card, tokenizer.clone())
+                    .unwrap();
+            assert_eq!(preprocessor.mdcsum, checksum);
+        }
+        let checksum = card.mdcsum().to_string();
+        let preprocessor =
+            OpenAIPreprocessor::new_for_completions(card.clone(), tokenizer.clone()).unwrap();
+        assert_eq!(preprocessor.mdcsum, checksum);
+        assert_eq!(
+            preprocessor.runtime_config.tool_call_parser,
+            card.runtime_config.tool_call_parser
+        );
+        assert_eq!(
+            preprocessor.runtime_config.reasoning_parser,
+            card.runtime_config.reasoning_parser
+        );
+        let PromptFormatter::OAI(formatter) = PromptFormatter::no_op();
+        assert!(OpenAIPreprocessor::new_with_parts(card, formatter, tokenizer).is_err());
     }
 
     #[tokio::test]

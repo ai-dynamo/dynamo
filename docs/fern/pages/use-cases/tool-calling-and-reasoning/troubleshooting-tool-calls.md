@@ -119,11 +119,13 @@ Set `DYN_PARSER_VERSION` on the frontend running the `dynamo` processor and on w
 
 | `DYN_PARSER_VERSION` | Compatible Unified configuration | Unavailable or incompatible configuration |
 | --- | --- | --- |
-| Unset or `auto` | V2, except reasoning-only Qwen/Nemotron below | V1 if each configured name exists in its V1 registry; otherwise reject |
+| Unset or `auto` | V2, except reasoning-only Qwen/Nemotron and MiniMax M3 below | V1 if each configured name exists in its V1 registry; otherwise reject |
 | `1` | V1 if each configured name exists in its V1 registry | Reject names unavailable in V1 |
 | `2` | V2 | Reject; no V1 configuration fallback |
 
-Only `auto`, `1`, and `2` are accepted; `v1` and `v2` stop startup. Invalid combinations are rejected during model setup with an error naming the configured selectors and the missing implementation. Runtime V2 parse errors never retry through V1.
+Only `auto`, `1`, and `2` are accepted; `v1` and `v2` stop startup. Invalid combinations are rejected during model setup with an error naming the configured selectors and the missing implementation. Runtime V2 parse errors never retry through V1. On V1 routes, an empty tool selector is treated as unset; an empty reasoning selector is rejected. V1 reasoning names are case-insensitive; tool names are case-sensitive. Omit selectors you do not need.
+
+For token-input chat using a [Python chat processor](chat-processors.mdx), the processor owns both parser registries, so Dynamo does not validate those names against its Rust registries. Parser-generation environment values are still validated. Completions do not use chat parsers; text-input chat retains Rust selector validation.
 
 V2 uses one family grammar for reasoning, text, and tools. Either selector can usually choose that family; when both are set, they must resolve to the same family or a supported shared grammar. Auto requires both selectors to be `beam` for Beam. V1 uses separate reasoning and tool-call parsers, so it can mix formats when both names exist in their respective V1 registries. This table lists parser availability, not model/backend or GPU qualification.
 
@@ -150,7 +152,7 @@ Examples below list the tool-call selector first, then the reasoning selector:
 
 A single tool selector such as `qwen3_coder`, or reasoning selector such as `deepseek_v41`, selects the whole Unified family grammar. The serving layer still enforces tool policy. Family aliases accepted by V2 are not necessarily registered in the corresponding V1 slot.
 
-**Reasoning-only exceptions:** without a tool selector, auto stays on V1 for `qwen3`, `nemotron_v3`, or `nemotron3` reasoning. Qwen thinking/QwQ models can emit Hermes JSON tools rather than Coder XML; a Nemotron reasoning name alone does not identify its tool grammar. Explicit `2` selects the corresponding Unified grammar; use it only for matching output.
+**Reasoning-only exceptions:** without a tool selector, auto stays on V1 for `qwen3`, `nemotron_v3`, or `nemotron3` reasoning. Qwen thinking/QwQ models can emit Hermes JSON tools rather than Coder XML; a Nemotron reasoning name alone does not identify its tool grammar. Explicit `2` selects the corresponding Unified grammar; use it only for matching output. MiniMax M3 also stays on V1 in auto mode, including with both selectors configured, until Unified explicit-guided output is returned as content rather than reasoning. Select `2` to opt into its Unified route.
 
 **Deprecated setting:** replace `DYN_ENABLE_EXPERIMENTAL_PARSERS_V2` with `DYN_PARSER_VERSION`. Legacy `true` means explicit V2; `false` means auto, which now prefers compatible V2. Conflicting pairs (`true` + `1`, `false` + `2`) and malformed booleans reject. For rollback, unset the old variable and use `1` if both selectors exist in V1. Muse Glimmer, Muse Spark, Beam, and DeepSeek V4.1 are Unified-only.
 

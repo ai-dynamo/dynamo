@@ -180,27 +180,26 @@ pub(crate) fn selected_family_for_selection(
     reasoning_parser: Option<&str>,
     selection: dynamo_runtime::config::ParserVersion,
 ) -> Option<&'static str> {
-    let configured = configured_family(tool_call_parser, reasoning_parser);
     // Qwen3 thinking models can use Hermes syntax; reasoning-only Nemotron cards
     // do not identify their tool grammar. Auto keeps both on the legacy path.
-    // MiniMax M3 stays legacy in Auto until Unified guided output uses content.
-    if tool_call_parser.is_none()
-        && matches!(
-            reasoning_parser,
-            Some("qwen3" | "nemotron_v3" | "nemotron3")
-        )
-        && selection == dynamo_runtime::config::ParserVersion::Auto
-        || configured == Some(MINIMAX_M3_UNIFIED_FAMILY)
-            && selection == dynamo_runtime::config::ParserVersion::Auto
+    if selection == dynamo_runtime::config::ParserVersion::V1
+        || (selection == dynamo_runtime::config::ParserVersion::Auto
+            && tool_call_parser.is_none()
+            && matches!(
+                reasoning_parser,
+                Some("qwen3" | "nemotron_v3" | "nemotron3")
+            ))
     {
-        None
-    } else {
-        match selection {
-            dynamo_runtime::config::ParserVersion::Auto
-            | dynamo_runtime::config::ParserVersion::V2 => configured,
-            dynamo_runtime::config::ParserVersion::V1 => None,
-        }
+        return None;
     }
+    let configured = configured_family(tool_call_parser, reasoning_parser);
+    // MiniMax M3 stays legacy in Auto until Unified guided output uses content.
+    if selection == dynamo_runtime::config::ParserVersion::Auto
+        && configured == Some(MINIMAX_M3_UNIFIED_FAMILY)
+    {
+        return None;
+    }
+    configured
 }
 
 pub(crate) fn selected_content_decoder_family(
