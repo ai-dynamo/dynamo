@@ -57,11 +57,8 @@ from dynamo.common.configuration.groups.router_args import (
 from dynamo.common.configuration.utils import ArgEnv
 from dynamo.frontend.frontend_args import build_frontend_parser
 from dynamo.llm import KvRouterConfig
-from dynamo.planner.retune.domains import (
-    OVERLAP_SCORE_CREDIT,
-    expand_router_domain,
-    grid_points,
-)
+from dynamo.planner.retune.controller import startup_router_domain
+from dynamo.planner.retune.domains import expand_router_domain
 from dynamo.planner.retune.live.contracts import FrontendStartup, PremiseReport
 
 if TYPE_CHECKING:
@@ -321,10 +318,6 @@ def evaluate_premises(
     else:
         p4.extend(analysis.p4_violations)
         p4.extend(_startup_errors(startup, retune, mode))
-        if dgdr.startup_router_config is not None:
-            mismatch = _startup_config_mismatch(dgdr.startup_router_config, startup)
-            if mismatch is not None:
-                p4.append(mismatch)
     # A worker's advertised router configuration replaces the frontend's for
     # its worker set (watcher.rs effective_router_config), whatever the
     # frontend's flags say.
@@ -1039,10 +1032,7 @@ def _startup_errors(
             f"P4: the frontend routes with {startup.router_mode!r}; live retune "
             "needs --router-mode kv"
         ]
-    try:
-        searched = set(_router_domain_keys(retune))
-    except ValueError as error:
-        return [f"P4: cannot expand retune.router: {error}"]
+    searched = set(expand_router_domain(retune))
     config = startup.router_config
     errors: list[str] = []
     load_model = config.get(_LOAD_MODEL, "none")
@@ -1065,12 +1055,18 @@ def _startup_errors(
             continue
         errors.append(
             f"P4: the frontend sets {key}={config[key]!r}; only the searched "
-            f"router knobs ({', '.join(sorted(searched)) or 'none'}) may differ "
-            "from their defaults"
+            f"router knobs ({', '.join(sorted(searched))}) may differ from "
+            "their defaults"
         )
     if errors:
         return errors
-    return _controller_errors(retune, config, worker_types(planner_mode))
+    # The controller constructor's own checks, so that P4 passes only for a
+    # startup a controller can be built on.
+    try:
+        startup_router_domain(retune, config, worker_types(planner_mode))
+    except ValueError as error:
+        return [f"P4: retune.router does not fit the frontend startup: {error}"]
+    return []
 
 
 def _worker_router_errors(
@@ -1206,96 +1202,6 @@ def _worker_argv(component: Mapping[str, Any], env: _Env) -> tuple[list[str], bo
     return words, True
 
 
-def _router_domain_keys(retune: RetuneConfig) -> list[str]:
-    if retune.router is None:
-        return []
-    return list(expand_router_domain(retune))
-
-
-def _controller_errors(
-    retune: RetuneConfig, router_config: Mapping[str, Any], wts: tuple[str, ...]
-) -> list[str]:
-    """The startup-dependent checks of ``RetuneController._router_domain``.
-
-    A startup failing them would make the controller constructor raise, so
-    P4 rejects it before a controller is built.
-    """
-
-    if retune.router is None:
-        return []
-    startup_json = canonical_json(dict(router_config))
-    try:
-        startup_maps = _policy_maps(startup_json, wts)
-        load_model = json.loads(KvRouterConfig.from_json(startup_json).to_json())[
-            _LOAD_MODEL
-        ]
-    except ValueError as error:
-        return [
-            f"P4: the frontend startup is not a valid router configuration: {error}"
-        ]
-    # A worker type that starts with no overlap credit can never get it.
-    zero_credit = sorted(
-        wt
-        for wt, params in startup_maps.items()
-        if wt != "decode" and params[OVERLAP_SCORE_CREDIT] == 0
-    )
-    try:
-        domain = expand_router_domain(
-            retune,
-            startup_load_model=load_model,
-            zero_startup_credit=bool(zero_credit),
-        )
-    except ValueError as error:
-        return [f"P4: retune.router does not fit the frontend startup: {error}"]
-    for point in grid_points(domain, {}):
-        try:
-            maps = _policy_maps(canonical_json({**router_config, **point.router}), wts)
-        except ValueError as error:
-            return [
-                f"P4: retune.router candidate {point.router} is not a valid "
-                f"router configuration for this frontend: {error}"
-            ]
-        for wt in zero_credit:
-            if maps[wt][OVERLAP_SCORE_CREDIT] != 0:
-                return [
-                    f"P4: retune.router candidate {point.router} gives the {wt} "
-                    "router overlap_score_credit > 0, but the frontend starts it "
-                    "at 0 (a live router rejects that update)"
-                ]
-    return []
-
-
-def _startup_config_mismatch(
-    declared: Mapping[str, Any], startup: FrontendStartup
-) -> Optional[str]:
-    """``retune.dgdr.startup_router_config`` must mean the parsed startup."""
-
-    try:
-        declared_full = json.loads(
-            KvRouterConfig.from_json(json.dumps(dict(declared))).to_json()
-        )
-    except ValueError as error:
-        return (
-            "P4: retune.dgdr.startup_router_config is not a KvRouterConfig "
-            f"JSON: {error}"
-        )
-    parsed_full = json.loads(
-        KvRouterConfig.from_json(json.dumps(dict(startup.router_config))).to_json()
-    )
-    keys = sorted(
-        key
-        for key in set(declared_full) | set(parsed_full)
-        if declared_full.get(key) != parsed_full.get(key)
-    )
-    if not keys:
-        return None
-    diffs = "; ".join(
-        f"{key}: declared {declared_full.get(key)!r}, frontend {parsed_full.get(key)!r}"
-        for key in keys
-    )
-    return f"P4: retune.dgdr.startup_router_config differs from the frontend ({diffs})"
-
-
 def _planner_replica_errors(
     components: Sequence[Mapping[str, Any]], warnings: list[str]
 ) -> list[str]:
@@ -1372,9 +1278,8 @@ def _trace_recipe_errors(
     if path is None:
         errors.append(f"P10: the frontend must set {ENV_TRACE_PATH}")
     elif mounts:
-        segments = segments_dir.strip("/")
         prefixes = [
-            _join_dir(mount, segments, dgd_dir, f"$({ENV_POD_NAME})")
+            _join_dir(mount, segments_dir, dgd_dir, f"$({ENV_POD_NAME})")
             for mount in mounts
             for dgd_dir in (f"$({ENV_PARENT_DGD_NAME})", dgd_name)
         ]

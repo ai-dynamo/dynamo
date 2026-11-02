@@ -15,42 +15,23 @@ timeout::
 - Segments, only when the frontend pod set is known and nonempty: never the
   highest-numbered segment of a live pod; other segments of a live pod, and
   the whole directory of a pod that no longer exists, once every file is
-  older than ``T + G + timeout + visibility margin``. A live pod's segments
-  are the files directly in its directory: the frontend premise check
-  requires the sink's file prefix to sit directly under
-  ``$(DYN_POD_NAME)/``. A pod directory that
-  cannot be read is skipped for the round; the other pods are still
-  collected.
+  older than ``T + G + timeout + VISIBILITY_MARGIN_S``.
 - Window files, never while protected: ``window_end_ms`` in
   ``[last_window_end_ms, due_window_end_ms]`` with ``now < D_k``, or in use
   by this process's sweep (``protect``). Otherwise deleted when at least one
   Request references the file and every referencing Request's current Run
   has ``Completed=True`` and no Job pod left, or when no Request references
   it and it is older than ``T + timeout``.
-- Temp files older than ``cut_budget_seconds`` plus a margin, unless their
-  window is in use by this process's sweep.
+- Temp files older than ``cut_budget_seconds + TEMP_MARGIN_S``, unless
+  their window is in use by this process's sweep.
 - Requests of this DGD name, never one this process's sweep protects: a
   terminal Request outside the newest ``keep_requests`` windows, a
   non-terminal Request whose window deadline has passed, a Request in the
   delete queue, and a Request of another DGD uid (the DGD was recreated).
 
-``run_once(should_continue=...)`` asks the caller before every delete,
-unlink or Kubernetes read and ends the round as soon as it says no
-(leadership or the term was lost, or the round's budget passed, while it
-ran on its worker thread). ``set_dgd`` follows the DGD identity when the DGD
-is recreated under the same name. Conditions that persist across rounds
-(a frontend without a trace directory, an unlabelled Request) are logged
-when they start, not every round.
-
-``Reconciler`` is also the ``SweepRegistry`` the DGDR sweep uses to protect
-its window and Requests and to queue deletions; those methods are thread-safe
-(the sweep runs on the controller's executor thread). Protection is
-reference-counted per window: each ``protect`` call takes one reference,
-each ``release`` drops one, and the window with the union of every name
-given to it stays protected while any reference is held. Two sweeps of the
-same window (a rebuilt controller relaunching it while the old one winds
-down) therefore cannot drop each other's protection. ``run_once`` blocks on
-the filesystem and the Kubernetes API: call it with ``asyncio.to_thread``.
+``Reconciler`` is also the ``SweepRegistry`` the DGDR sweep uses, from the
+controller's executor thread, to protect its window and Requests and to
+queue deletions.
 """
 
 from __future__ import annotations
@@ -76,18 +57,22 @@ from dynamo.planner.retune.live.contracts import (
     RetuneKube,
     RetuneMetricsSink,
 )
+from dynamo.planner.retune.live.window_cut import (
+    SEGMENT_SUFFIX,
+    TEMP_NAME_RE,
+    TEMP_PREFIX,
+)
 
 logger = logging.getLogger(__name__)
 
 # Allowance for RWX attribute caching and the frontend's flush interval on
 # top of T + G + timeout before a segment counts as unused.
-DEFAULT_VISIBILITY_MARGIN_S = 600.0
+VISIBILITY_MARGIN_S = 600.0
 # Allowance on top of cut_budget_seconds before a temp file counts as
 # abandoned (the cut subprocess is killed at its deadline).
-DEFAULT_TEMP_MARGIN_S = 300.0
+TEMP_MARGIN_S = 300.0
+KUBE_TIMEOUT_S = 10.0
 
-WINDOW_SUFFIX = ".jsonl.gz"
-TEMP_PREFIX = ".tmp-"
 # Label the Job controller puts on a Job's pods (batchv1.JobNameLabel).
 JOB_NAME_LABEL = "batch.kubernetes.io/job-name"
 _FINISHED_POD_PHASES = frozenset({"Succeeded", "Failed"})
@@ -98,22 +83,10 @@ RUN_COMPLETED_CONDITION = "Completed"
 REQUEST_ACCEPTED_CONDITION = "Accepted"
 REQUEST_INVALID_SPEC_REASON = "InvalidSpec"
 
-_WINDOW_RE = re.compile(r"^(\d+)" + re.escape(WINDOW_SUFFIX) + r"$")
-_TEMP_RE = re.compile(r"^" + re.escape(TEMP_PREFIX) + r"(\d+)-")
+# A window file: <window_end_ms>.jsonl.gz
+_WINDOW_RE = re.compile(r"^(\d+)" + re.escape(SEGMENT_SUFFIX) + r"$")
 # A Rust gzip JSONL sink segment: <prefix>.<index, at least 6 digits>.jsonl.gz
-_SEGMENT_RE = re.compile(r"^(.*)\.(\d{6,})\.jsonl\.gz$")
-
-
-def window_file_name(window_end_ms: int) -> str:
-    return f"{int(window_end_ms)}{WINDOW_SUFFIX}"
-
-
-def window_relpath(cfg: DgdrExecutorConfig, dgd_name: str, window_end_ms: int) -> str:
-    """Claim-relative path of a window file (the Request's trace path)."""
-
-    return "/".join(
-        (cfg.windows_dir.strip("/"), dgd_name, window_file_name(window_end_ms))
-    )
+_SEGMENT_RE = re.compile(r"^(.*)\.(\d{6,})" + re.escape(SEGMENT_SUFFIX) + r"$")
 
 
 def trace_pvc_source(spec: Any) -> tuple[Optional[str], Optional[str]]:
@@ -204,27 +177,22 @@ class Reconciler:
         fs_root: str,
         metrics: RetuneMetricsSink,
         now: Callable[[], float] = time.time,
-        *,
-        visibility_margin_s: float = DEFAULT_VISIBILITY_MARGIN_S,
-        temp_margin_s: float = DEFAULT_TEMP_MARGIN_S,
-        kube_timeout_s: float = 10.0,
     ) -> None:
         self._kube = kube
         self._cfg = cfg
         self._fs_root = fs_root
         self._metrics = metrics
         self._now = now
-        self._timeout_s = float(kube_timeout_s)
         interval_s = float(retune.interval_seconds)
         sweep_timeout_s = float(retune.effective_timeout_seconds)
         self._segment_max_age_s = (
             interval_s
             + float(retune.grace_seconds)
             + sweep_timeout_s
-            + float(visibility_margin_s)
+            + VISIBILITY_MARGIN_S
         )
         self._window_max_age_s = interval_s + sweep_timeout_s
-        self._temp_max_age_s = float(cfg.cut_budget_seconds) + float(temp_margin_s)
+        self._temp_max_age_s = float(cfg.cut_budget_seconds) + TEMP_MARGIN_S
 
         self._lock = threading.Lock()
         # Guarded by _lock (set_dgd may run while a round is on its thread).
@@ -351,7 +319,8 @@ class Reconciler:
         actuator's listing (None when it failed). ``should_continue`` is
         called before every delete, unlink or Kubernetes read; once it
         returns False (or raises) the round deletes and reads nothing more
-        and returns."""
+        and returns. It blocks on the filesystem and the Kubernetes API:
+        call it with ``asyncio.to_thread``."""
 
         now = float(self._now())
         with self._lock:
@@ -610,7 +579,7 @@ class Reconciler:
         if not entry.is_file(follow_symlinks=False):
             return
         if entry.name.startswith(TEMP_PREFIX):
-            temp = _TEMP_RE.match(entry.name)
+            temp = TEMP_NAME_RE.match(entry.name)
             window = int(temp.group(1)) if temp is not None else None
             # A temp file of a window this process's sweep is cutting
             # belongs to the running cut subprocess.
@@ -643,7 +612,7 @@ class Reconciler:
 
     def _list_requests(self, dgd: DgdRef) -> list[_RequestView]:
         items = self._kube.list_requests(
-            f"{LABEL_DGD}={dgd.name}", timeout_s=self._timeout_s
+            f"{LABEL_DGD}={dgd.name}", timeout_s=KUBE_TIMEOUT_S
         )
         views = []
         prefix = self._cfg.windows_dir.strip("/") + "/" + dgd.name + "/"
@@ -731,7 +700,7 @@ class Reconciler:
             if not self._proceed(state):
                 return
             try:
-                self._kube.delete_request(name, timeout_s=self._timeout_s)
+                self._kube.delete_request(name, timeout_s=KUBE_TIMEOUT_S)
             except KubeError as exc:
                 logger.warning(
                     "retune reconciler: deleting Request %s (%s) failed: %s",
@@ -829,7 +798,7 @@ class Reconciler:
                 finished = job is None or not any(
                     pod.phase not in _FINISHED_POD_PHASES
                     for pod in self._kube.list_pods(
-                        f"{JOB_NAME_LABEL}={job}", timeout_s=self._timeout_s
+                        f"{JOB_NAME_LABEL}={job}", timeout_s=KUBE_TIMEOUT_S
                     )
                 )
         except KubeError as exc:
@@ -863,7 +832,7 @@ class Reconciler:
             if ref.get("name")
         )
         for name in names:
-            run = self._kube.get_run(name, timeout_s=self._timeout_s)
+            run = self._kube.get_run(name, timeout_s=KUBE_TIMEOUT_S)
             if run is None:
                 continue
             annotations = _dig(run, "metadata", "annotations") or {}

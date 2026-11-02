@@ -12,48 +12,17 @@ file a DGDR Run replays. Selection, censoring, de-duplication, the single
 block-size rule and ``row_counts`` are those of
 ``retune.window.read_trace_window`` over the segments the cut reads, and the
 rows are the same bytes; only the output is gzip-compressed and the memory
-is bounded. Only ``.jsonl.gz`` segments are read: the frontend's live trace
-sink must write gzip, and the reconciler collects only those segments.
+is bounded. The cut runs in a child process, reads the segments in two
+passes (``_Selection``, ``_write_rows``) and publishes the file atomically
+(``_publish``).
 
-* **Segments.** A row is appended to its segment when the request
-  completes, after it arrived, so a segment last modified before
-  ``start_ms`` holds no row of the window and is not read; the
-  ``SEGMENT_MTIME_MARGIN_S`` margin covers clock skew between the frontends,
-  which stamp arrivals, and the file server, which stamps modification
-  times. The reconciler keeps segments well past the window, so this skips
-  most of what it retains.
-* **Members.** Each gzip member is decoded on its own and checked against its
-  CRC32 and ISIZE before any of its lines is read. A member that fails (cut
-  short by a segment still being written, a zero-filled hole a lagging RWX
-  client shows, a flipped bit) is dropped whole and the reader resynchronises
-  on the next gzip header, so one run of bad bytes may hold many members.
-  Runs of bad bytes above ``MAX_DROPPED_MEMBER_RATIO`` of the members, or
-  bad bytes above that ratio of the gzip bytes, fail the cut
-  (``trace_corrupt``); a run that reaches the end of a writer's newest
-  segment is its in-flight flush (or a crashed writer's last one) and is
-  counted but does not count toward either ratio.
-* **Pass 1** parses every row of the segments it reads as the replay reader
-  does (a row it would reject, in a member whose CRC is good, fails the cut
-  as ``trace_corrupt``) and keeps only columns for each selected row (~45 B:
-  arrival, completion, a 128-bit digest of ``request_id``, where its line
-  is, block size, flags). Duplicates are removed by digest, keeping the
-  first in file order, whenever the columns outgrow ``max_rows`` by a slack,
-  so ``max_rows`` bounds memory and is checked on de-duplicated rows.
-* **Pass 2** re-reads only the members that hold kept rows, in output order
-  (arrival, completion, then ``request_id`` within equal pairs), re-parses
-  each line with its hashes and streams ``_window_record`` rows to gzip.
-  Decoded lines wait in a bounded cache that evicts the member needed
-  furthest in the future. A member or row that no longer matches pass 1
-  fails the cut (the segment changed).
-* **Atomic output.** The file is one gzip member whose header comment holds
-  the cut's counts as JSON. It is written to ``.tmp-<window_end>-<nonce>``
-  next to ``out_path``, fsynced, made 0600 and hard-linked into place. An
-  existing ``out_path`` (another process cut the same window) is checked
-  before any segment is read and reused with the counts in its header, so a
-  later leader adopting a published window never cuts it again.
-* **Child process.** ``cut_window`` runs the cut in a ``spawn`` child, like
-  the replay sweep's workers, and kills it at the deadline or on cancel, so
-  a hung RWX read or a runaway cut never holds the sweep thread.
+A gzip member that fails validation is dropped whole. Runs of bad bytes
+above ``MAX_DROPPED_MEMBER_RATIO`` of the members, or bad bytes above that
+ratio of the gzip bytes, fail the cut (``trace_corrupt``). A run that
+reaches the end of a segment is a writer's in-flight flush, or the last
+flush of a writer that crashed, and is counted but does not count toward
+either ratio: after an in-place container restart the sink continues in a
+new segment, so that tail can end any segment.
 """
 
 from __future__ import annotations
@@ -111,12 +80,15 @@ WindowCutFailure = Literal[
 ]
 WINDOW_CUT_FAILURES: tuple[str, ...] = get_args(WindowCutFailure)
 
-# Runs of bad bytes (other than in-flight tails) over all members, or their
+# Runs of bad bytes (other than segment tails) over all members, or their
 # bytes over all gzip bytes, above which the cut fails as trace_corrupt. A run
 # counts once however many members it wiped out (a zero-filled hole); its
 # bytes measure how much of the trace it took.
 MAX_DROPPED_MEMBER_RATIO = 0.01
-# Segments last modified more than this before start_ms are not read.
+# A row is appended when its request completes, after it arrived, so a
+# segment last modified before start_ms holds no row of the window and is not
+# read. The margin covers clock skew between the frontends, which stamp
+# arrivals, and the file server, which stamps modification times.
 SEGMENT_MTIME_MARGIN_S = 300.0
 # Window files are written fast rather than small: on hash-chain rows level
 # 1 is ~5x faster than level 6 for ~8% more bytes, and the cut budget pays
@@ -124,10 +96,9 @@ SEGMENT_MTIME_MARGIN_S = 300.0
 OUTPUT_COMPRESSLEVEL = 1
 # Temporary window files: ``.tmp-<window_end_ms>-<nonce>`` next to out_path.
 TEMP_PREFIX = ".tmp-"
+TEMP_NAME_RE = re.compile(r"^" + re.escape(TEMP_PREFIX) + r"(\d+)-[0-9A-Za-z]+$")
 SEGMENT_SUFFIX = ".jsonl.gz"
 
-_TEMP_NAME = re.compile(r"^\.tmp-(\d+)-([0-9A-Za-z]+)$")
-_SEGMENT_INDEX = re.compile(r"\.(\d+)\.jsonl\.gz$")
 _GZIP_MAGIC = b"\x1f\x8b\x08"  # ID1, ID2, CM=deflate
 _GZIP_WBITS = 16 + zlib.MAX_WBITS  # one gzip member, header and trailer
 # The header of a window file: FLG=FCOMMENT, MTIME=0 (equal cuts are equal
@@ -180,20 +151,6 @@ def temp_file_name(window_end_ms: float, nonce: Optional[str] = None) -> str:
     elif not re.fullmatch(r"[0-9A-Za-z]+", nonce):
         raise ValueError(f"nonce must be alphanumeric, got {nonce!r}")
     return f"{TEMP_PREFIX}{int(round(window_end_ms))}-{nonce}"
-
-
-def temp_file_window_end(name: str) -> Optional[int]:
-    """The window end of a ``temp_file_name`` name; ``None`` for any other name."""
-
-    match = _TEMP_NAME.match(name)
-    return int(match.group(1)) if match else None
-
-
-def segment_index(name: str) -> Optional[int]:
-    """The ``NNNNNN`` of a ``<prefix>.NNNNNN.jsonl.gz`` segment name, else ``None``."""
-
-    match = _SEGMENT_INDEX.search(name)
-    return int(match.group(1)) if match else None
 
 
 # ------------------------------------------------------------- entry points
@@ -305,12 +262,11 @@ def cut_window_inprocess(
         )
         if result.path is None:
             return result
-        paths = [path for path, _ in files]
         created = _publish(
             out_path,
             temp_path,
             _counts_comment(result),
-            lambda sink: _write_rows(selection, paths, sink),
+            lambda sink: _write_rows(selection, files, sink),
         )
         # Another process published it first: report the counts it holds.
         return result if created else _published(out_path)
@@ -625,8 +581,8 @@ def _decode_exact_member(data: bytes) -> Optional[bytes]:
 # ---------------------------------------------------------------- pass 1
 
 
-def _segment_files(root: str) -> list[tuple[str, bool]]:
-    """Trace segments under ``root`` in replay-reader order, and which are newest.
+def _segment_files(root: str) -> list[str]:
+    """Trace segments under ``root``, in replay-reader order.
 
     The files are the sorted ``*.jsonl.gz`` regular files under ``root``, in
     the order ``resolve_trace_files([root])`` reads them; plain ``*.jsonl``
@@ -635,9 +591,7 @@ def _segment_files(root: str) -> list[tuple[str, bool]]:
     on NFS: the reconciler deletes a dead pod's segments) is skipped; any
     other error listing or stat-ing one (EACCES, EIO, ETIMEDOUT on a soft
     mount, ...) fails the cut as ``window_cut_failed`` rather than silently
-    losing a pod's rows, as does any error on ``root`` itself. Each file
-    comes with whether it is the newest segment (highest ``NNNNNN``) of its
-    directory, the one its writer may still be appending to.
+    losing a pod's rows, as does any error on ``root`` itself.
     """
 
     try:
@@ -679,20 +633,12 @@ def _segment_files(root: str) -> list[tuple[str, bool]]:
                 SEGMENT_SUFFIX,
                 min(plain),
             )
-        paths = sorted(found)
-    elif root.endswith(SEGMENT_SUFFIX):
-        paths = [Path(root)]
-    else:
-        raise WindowCutError(
-            "window_cut_failed", f"trace segment {root} is not a {SEGMENT_SUFFIX} file"
-        )
-    newest: dict[Path, tuple[int, str]] = {}
-    for path in paths:
-        index = segment_index(path.name)
-        key = (-1 if index is None else index, path.name)
-        if path.parent not in newest or key > newest[path.parent]:
-            newest[path.parent] = key
-    return [(str(path), newest[path.parent][1] == path.name) for path in paths]
+        return [str(path) for path in sorted(found)]
+    if root.endswith(SEGMENT_SUFFIX):
+        return [root]
+    raise WindowCutError(
+        "window_cut_failed", f"trace segment {root} is not a {SEGMENT_SUFFIX} file"
+    )
 
 
 def _is_regular_file(path: str) -> bool:
@@ -716,12 +662,12 @@ def _unreadable(path: Any, error: OSError) -> WindowCutError:
     )
 
 
-# (file index, path, newest, item); an OSError item means the file vanished.
-_TraceItem = tuple[int, str, bool, Union[_Member, _Garbage, OSError]]
+# (file index, path, item); an OSError item means the file vanished.
+_TraceItem = tuple[int, str, Union[_Member, _Garbage, OSError]]
 
 
 def _trace_items(
-    files: Sequence[tuple[str, bool]], not_before_s: float
+    files: Sequence[str], not_before_s: float
 ) -> Generator[_TraceItem, None, None]:
     """Every member and bad byte run of ``files``, in file order.
 
@@ -732,7 +678,7 @@ def _trace_items(
     yields its error and the walk goes on; other I/O errors raise.
     """
 
-    for file_index, (path, newest) in enumerate(files):
+    for file_index, path in enumerate(files):
         try:
             with open(path, "rb") as source:
                 if os.fstat(source.fileno()).st_mtime < not_before_s:
@@ -743,11 +689,11 @@ def _trace_items(
                     )
                     continue
                 for item in _GzipMemberReader(source):
-                    yield file_index, path, newest, item
+                    yield file_index, path, item
         except OSError as error:
             if error.errno not in _VANISHED:
                 raise
-            yield file_index, path, newest, error
+            yield file_index, path, error
 
 
 class _Selection:
@@ -757,7 +703,8 @@ class _Selection:
     (BLAKE2b of ``request_id``), line ``line[i]`` of member
     ``members[member[i]]``, ``block[i]`` and ``flags[i]``. Rows are in file
     order, the order the replay reader sees them, so de-duplication keeps the
-    same (first) row it does.
+    same (first) row it does. A row the replay reader would reject, in a
+    member whose CRC is good, fails the cut as ``trace_corrupt``.
     """
 
     def __init__(
@@ -804,7 +751,7 @@ class _Selection:
     def scan(self, items: Iterable[_TraceItem]) -> None:
         """Consume ``_trace_items`` (in file order)."""
 
-        for file_index, path, newest, item in items:
+        for file_index, path, item in items:
             if isinstance(item, _Member):
                 self.valid_members += 1
                 self.gzip_bytes += item.end - item.offset
@@ -812,7 +759,7 @@ class _Selection:
                     item.payload, file_index, path, item.offset, item.end
                 )
             elif isinstance(item, _Garbage):
-                self._dropped(path, item, newest=newest)
+                self._dropped(path, item)
             else:
                 # The reconciler deletes only segments far older than any
                 # window being cut; a row taken from this one fails pass 2.
@@ -861,17 +808,17 @@ class _Selection:
             np.count_nonzero(flags & _FLAG_NO_TOTAL_TIME)
         )
 
-    def _dropped(self, path: str, item: _Garbage, *, newest: bool) -> None:
+    def _dropped(self, path: str, item: _Garbage) -> None:
         size = item.end - item.offset
         self.dropped_members += 1
         self.dropped_bytes += size
         self.gzip_bytes += size
-        if item.at_eof and newest:
-            # The flush its writer is appending, or a crashed writer's last
-            # one: at most one batch, written after the cut began.
+        if item.at_eof:
+            # The flush its writer is appending, or the last one of a writer
+            # that crashed (an in-place restart continues in a new segment).
             logger.debug(
                 "retune window cut: %d trailing bytes of %s hold no complete "
-                "gzip member (in-flight write)",
+                "gzip member (in-flight or interrupted write)",
                 size,
                 path,
             )
@@ -1059,9 +1006,10 @@ def _publish(
             sink.close()
             raw.flush()
             os.fsync(raw.fileno())
-        # Only the owner reads the window. The Run Job reads it as the planner
-        # image user (uid 1000), which the Planner also runs as by default.
-        os.chmod(temp_path, 0o600)
+        # The Run's sweeper reads the window as uid 1000 with supplemental
+        # group 65532 and no fsGroup, so it must be readable by others: 0600
+        # would fail every Run of a Planner that runs as another uid.
+        os.chmod(temp_path, 0o644)
         try:
             os.link(temp_path, out_path)
             created = True
@@ -1187,6 +1135,8 @@ def _write_rows(selection: _Selection, paths: Sequence[str], sink: _ByteSink) ->
     The order is ``read_trace_window``'s: (arrival, completion, request_id).
     The columns order rows by the first two; rows with an equal pair are
     collected and ordered by their ``request_id`` before they are written.
+    Only the members that hold kept rows are read again; one that no longer
+    matches pass 1 fails the cut (the segment changed).
     """
 
     count = selection.num_rows

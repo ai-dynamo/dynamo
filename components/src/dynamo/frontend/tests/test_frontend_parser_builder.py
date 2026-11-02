@@ -6,9 +6,11 @@
 import argparse
 import logging
 import os
+import sys
 
 import pytest
 
+from dynamo.common.configuration.utils import env_or_default
 from dynamo.frontend.frontend_args import build_frontend_parser
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
@@ -27,6 +29,37 @@ def test_reads_only_the_given_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert env_dests["DYN_ROUTER_MODE"] == "router_mode"
     assert env_dests["DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT"] == "overlap_score_credit"
     assert dict(os.environ) == before
+
+
+def test_no_registered_env_var_is_read_from_os_environ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An argument registered without ``env=`` would take its default from
+    # the parsing process's os.environ. Record every env var the
+    # registrations look up, wherever ``env_or_default`` was imported.
+    registered: set[str] = set()
+
+    def recording_env_or_default(env_var, default, value_type=None, *, env=None):
+        registered.add(env_var)
+        return env_or_default(env_var, default, value_type, env=env)
+
+    for name, module in list(sys.modules.items()):
+        if name.startswith("dynamo.") and (
+            vars(module).get("env_or_default") is env_or_default
+        ):
+            monkeypatch.setattr(module, "env_or_default", recording_env_or_default)
+    build_frontend_parser({})
+    assert "DYN_ROUTER_MODE" in registered
+    for name in registered:
+        monkeypatch.delenv(name, raising=False)
+    defaults = vars(build_frontend_parser({})[0].parse_args([]))
+
+    # Two sentinels, so that a leaked env var changes at least one default.
+    for sentinel in ("0", "1"):
+        for name in registered:
+            monkeypatch.setenv(name, sentinel)
+        parser, _ = build_frontend_parser({})
+        assert vars(parser.parse_args([])) == defaults, sentinel
 
 
 def test_parses_without_notices_or_local_files(

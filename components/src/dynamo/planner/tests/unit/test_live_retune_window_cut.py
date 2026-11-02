@@ -28,6 +28,7 @@ from dynamo.planner.retune.live.contracts import WindowCutResult
 from dynamo.planner.retune.live.window_cut import (
     MAX_DROPPED_MEMBER_RATIO,
     SEGMENT_MTIME_MARGIN_S,
+    TEMP_NAME_RE,
     WINDOW_CUT_FAILURES,
     WindowCutError,
     _decode_exact_member,
@@ -38,9 +39,7 @@ from dynamo.planner.retune.live.window_cut import (
     _segment_files,
     cut_window,
     cut_window_inprocess,
-    segment_index,
     temp_file_name,
-    temp_file_window_end,
 )
 from dynamo.planner.retune.window import ROW_COUNT_KEYS, read_trace_window
 
@@ -391,7 +390,7 @@ def test_cut_matches_read_trace_window(tmp_path, seed):
     assert result.dropped_members == 0
     assert result.dropped_bytes == 0
     assert not result.reused
-    assert stat.S_IMODE(out.stat().st_mode) == 0o600
+    assert stat.S_IMODE(out.stat().st_mode) == 0o644
     assert _temp_files(out.parent) == []
 
 
@@ -603,36 +602,27 @@ def _cut_and_twin(tmp_path, build):
     return result
 
 
-def test_in_flight_tail_of_the_newest_segment_is_not_corruption(tmp_path):
-    lost = _member([_row("in-flight", START + 900)])
+@pytest.mark.parametrize("truncated", ["req.000001", "req.000000"])
+def test_truncated_tail_of_a_segment_is_not_corruption(tmp_path, truncated):
+    # req.000001's tail is the flush its writer is appending. req.000000's is
+    # the last flush of a writer that crashed: after an in-place restart the
+    # sink continues in req.000001.
+    lost = _member([_row("lost", START + 900)])
 
     def build(root, bad):
-        _write(root / "a" / "req.000000.jsonl.gz", *_tiny_members("old", 3))
-        members = _tiny_members("new", 2, START + 100)
-        _write(
-            root / "a" / "req.000001.jsonl.gz",
-            *members,
-            *([lost[: len(lost) // 2]] if bad else []),
-        )
+        for name, prefix in (("req.000000", "old"), ("req.000001", "new")):
+            tail = [lost[: len(lost) // 2]] if bad and name == truncated else []
+            _write(
+                root / "a" / f"{name}.jsonl.gz",
+                *_tiny_members(prefix, 3),
+                *tail,
+            )
 
     result = _cut_and_twin(tmp_path, build)
 
-    # 1 of 6 members is far above the ratio, but it is the writer's tail.
+    # 1 of 7 members is far above the ratio, but it is a writer's tail.
     assert result.dropped_members == 1
     assert result.dropped_bytes == len(lost) // 2
-
-
-def test_truncated_tail_of_an_older_segment_is_corruption(tmp_path):
-    root = tmp_path / "segments"
-    lost = _member([_row("lost", START + 900)])
-    _write(root / "a" / "req.000000.jsonl.gz", *_tiny_members("old", 3), lost[:20])
-    _write(root / "a" / "req.000001.jsonl.gz", *_tiny_members("new", 3))
-
-    with pytest.raises(WindowCutError) as caught:
-        _cut(root, tmp_path)
-    assert caught.value.reason == "trace_corrupt"
-    assert "1 of 7 gzip members" in str(caught.value)
-    assert "req.000000.jsonl.gz@" in str(caught.value)
 
 
 @pytest.mark.parametrize("damage", ["partial", "crc", "hole"])
@@ -676,8 +666,7 @@ def test_damaged_members_above_the_ratio_are_trace_corrupt(tmp_path):
     assert "2 of 100 gzip members" in str(caught.value)
 
 
-@pytest.mark.parametrize("newest", [True, False])
-def test_hole_spanning_many_members_is_trace_corrupt(tmp_path, newest):
+def test_hole_spanning_many_members_is_trace_corrupt(tmp_path):
     # A zero-filled hole over 20 of 200 members is one run of bad bytes: 1 of
     # 181 members is within the ratio, but 10% of the bytes is not.
     root = tmp_path / "segments"
@@ -685,16 +674,13 @@ def test_hole_spanning_many_members_is_trace_corrupt(tmp_path, newest):
     hole = sum(map(len, members[50:70]))
     data = b"".join([*members[:50], bytes(hole), *members[70:]])
     _write(root / "a" / "req.000000.jsonl.gz", data)
-    if not newest:
-        _write(root / "a" / "req.000001.jsonl.gz", *_tiny_members("next", 3))
-    total_members = 181 + (0 if newest else 3)
 
     with pytest.raises(WindowCutError) as caught:
         _cut(root, tmp_path)
 
     assert caught.value.reason == "trace_corrupt"
     message = str(caught.value)
-    assert f"1 of {total_members} gzip members" in message
+    assert "1 of 181 gzip members" in message
     assert f"({hole} of " in message
     assert f"req.000000.jsonl.gz@{sum(map(len, members[:50]))}+{hole}" in message
 
@@ -715,7 +701,7 @@ def test_hole_within_the_byte_ratio_is_dropped(tmp_path):
     assert result.dropped_bytes == len(members[50])
 
 
-def test_segment_files_order_and_newest(tmp_path):
+def test_segment_files_order(tmp_path):
     root = tmp_path / "segments"
     for name in (
         "b/req.000999.jsonl.gz",
@@ -730,10 +716,10 @@ def test_segment_files_order_and_newest(tmp_path):
     files = _segment_files(str(root))
 
     assert files == [
-        (str(root / "a/req.000000.jsonl.gz"), True),
-        (str(root / "b/req.000999.jsonl.gz"), False),
-        (str(root / "b/req.1000000.jsonl.gz"), True),
-        (str(root / "c/single.jsonl.gz"), True),
+        str(root / "a/req.000000.jsonl.gz"),
+        str(root / "b/req.000999.jsonl.gz"),
+        str(root / "b/req.1000000.jsonl.gz"),
+        str(root / "c/single.jsonl.gz"),
     ]
 
 
@@ -785,7 +771,7 @@ def test_vanished_file_is_skipped(tmp_path, monkeypatch):
     _write(root / "a" / "req.000000.jsonl.gz", _member([_row("a", START)]))
     listed = _segment_files(str(root))
     gone = str(root / "a" / "req.000001.jsonl.gz")
-    monkeypatch.setattr(window_cut, "_segment_files", lambda _: [*listed, (gone, True)])
+    monkeypatch.setattr(window_cut, "_segment_files", lambda _: [*listed, gone])
 
     result, _ = _cut(root, tmp_path)
 
@@ -840,43 +826,28 @@ def test_unreadable_segments_root_fails(tmp_path):
     assert str(root) in str(caught.value)
 
 
-@pytest.mark.parametrize("where", ["pod-list", "file-stat", "root-list", "root-stat"])
-@pytest.mark.parametrize(
-    "code", [errno.ENOENT, errno.ESTALE, errno.EIO, errno.ETIMEDOUT, errno.EACCES]
-)
-def test_segment_walk_skips_only_vanished_entries(tmp_path, monkeypatch, where, code):
+@pytest.mark.parametrize("code", [errno.ENOENT, errno.EACCES])
+def test_segment_walk_skips_only_vanished_entries(tmp_path, monkeypatch, code):
     root = _two_pods(tmp_path / "segments")
-    target = {
-        "pod-list": root / "b",
-        "file-stat": root / "b" / "req.000000.jsonl.gz",
-        "root-list": root,
-        "root-stat": root,
-    }[where]
-    name = "scandir" if where.endswith("list") else "stat"
-    real = getattr(os, name)
+    pod = root / "b"
+    real = os.scandir
 
     def failing(path, *args, **kwargs):
-        if os.fspath(path) == str(target):
+        if os.fspath(path) == str(pod):
             raise OSError(code, os.strerror(code), os.fspath(path))
         return real(path, *args, **kwargs)
 
-    monkeypatch.setattr(os, name, failing)
-    vanished = code in (errno.ENOENT, errno.ESTALE)
+    monkeypatch.setattr(os, "scandir", failing)
 
-    if vanished and not where.startswith("root"):
+    if code == errno.ENOENT:
         # The reconciler deleted pod b's segments under the walk.
-        assert _segment_files(str(root)) == [
-            (str(root / "a" / "req.000000.jsonl.gz"), True)
-        ]
+        assert _segment_files(str(root)) == [str(root / "a" / "req.000000.jsonl.gz")]
         return
     with pytest.raises(WindowCutError) as caught:
         _segment_files(str(root))
     assert caught.value.reason == "window_cut_failed"
-    if vanished and where == "root-stat":
-        assert "does not exist" in str(caught.value)
-    else:
-        assert str(target) in str(caught.value)
-        assert os.strerror(code) in str(caught.value)
+    assert str(pod) in str(caught.value)
+    assert os.strerror(code) in str(caught.value)
 
 
 # -------------------------------------------------------- atomic output
@@ -941,7 +912,7 @@ def test_link_race_reports_the_winners_counts(tmp_path, monkeypatch):
 
     assert result == _reused(winner, out)
     assert out.read_bytes() == winner_out.read_bytes()
-    assert temp_file_window_end(linked[0]) == END
+    assert linked[0].startswith(f".tmp-{END}-")
     assert _temp_files(out.parent) == []
 
 
@@ -961,7 +932,7 @@ def test_link_enoent_is_window_cut_failed(tmp_path, monkeypatch):
     assert _temp_files(out.parent) == []
 
 
-def test_output_is_deterministic_and_0600_under_any_umask(tmp_path):
+def test_output_is_deterministic_and_0644_under_any_umask(tmp_path):
     root = _random_trace(tmp_path / "segments", 8)
     first, second = _out(tmp_path, "a.jsonl.gz"), _out(tmp_path, "b.jsonl.gz")
     previous = os.umask(0o077)
@@ -972,7 +943,7 @@ def test_output_is_deterministic_and_0600_under_any_umask(tmp_path):
         os.umask(previous)
 
     assert first.read_bytes() == second.read_bytes()
-    assert stat.S_IMODE(first.stat().st_mode) == 0o600
+    assert stat.S_IMODE(first.stat().st_mode) == 0o644
     with gzip.open(first, "rb") as source:
         assert source.read(1)
     # A comment (the counts) but no file name or mtime in the gzip header.
@@ -1077,20 +1048,13 @@ def test_temp_path_must_be_next_to_out_path(tmp_path):
         )
 
 
-def test_temp_and_segment_names():
-    name = temp_file_name(1_700_000_000_000.0, "ab12")
-    assert name == ".tmp-1700000000000-ab12"
-    assert temp_file_window_end(name) == 1_700_000_000_000
-    assert temp_file_window_end(temp_file_name(5)) == 5
+def test_temp_file_name():
+    assert temp_file_name(1_700_000_000_000.0, "ab12") == ".tmp-1700000000000-ab12"
     assert temp_file_name(5) != temp_file_name(5)
-    assert temp_file_window_end("1700000000000.jsonl.gz") is None
-    assert temp_file_window_end(".tmp-12-") is None
+    # The reconciler finds a temp file's window with TEMP_NAME_RE.
+    assert TEMP_NAME_RE.match(temp_file_name(5)).group(1) == "5"
     with pytest.raises(ValueError):
         temp_file_name(5, "../x")
-    assert segment_index("req.000042.jsonl.gz") == 42
-    assert segment_index("req.1000000.jsonl.gz") == 1_000_000
-    assert segment_index("req.000042.jsonl") is None
-    assert segment_index("req.jsonl.gz") is None
 
 
 def test_window_cut_error_reason_and_pickle():
