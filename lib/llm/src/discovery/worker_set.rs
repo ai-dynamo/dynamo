@@ -17,11 +17,13 @@ use dynamo_runtime::{
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+#[path = "worker_set/decision_state.rs"]
+mod decision_state;
+pub(crate) use decision_state::DecisionState;
+
 use crate::{
-    discovery::{
-        DecisionEngine, DecisionRoute, LoadThresholdHandle, TokenExecutor,
-        allocator::AllocatorTrimOnDrop,
-    },
+    decision_profile::DecisionExecutionProfile,
+    discovery::{DecisionResources, LoadThresholdHandle, allocator::AllocatorTrimOnDrop},
     kv_router::{EncoderRouter, RoutingLoadContext, prefill_router::PrefillRouterLifecycle},
     model_card::ModelDeploymentCard,
     types::{
@@ -128,7 +130,7 @@ where
     }
 }
 
-fn retain_teardown_until_requests_finish<Req, Resp>(
+pub(super) fn retain_teardown_until_requests_finish<Req, Resp>(
     inner: Arc<dyn AsyncEngine<Req, Resp, Error>>,
     teardown: &Arc<AllocatorTrimOnDrop>,
 ) -> Arc<dyn AsyncEngine<Req, Resp, Error>>
@@ -140,26 +142,6 @@ where
         inner,
         teardown: teardown.clone(),
     })
-}
-
-impl DecisionRoute {
-    fn retain_for_requests(self, teardown: &Arc<AllocatorTrimOnDrop>) -> Self {
-        match self {
-            Self::Available(engine) => Self::Available(match engine {
-                DecisionEngine::Token(executor) => DecisionEngine::Token(TokenExecutor {
-                    engine: retain_teardown_until_requests_finish(executor.engine, teardown),
-                    ..executor
-                }),
-                DecisionEngine::Head(engine) => {
-                    DecisionEngine::Head(retain_teardown_until_requests_finish(engine, teardown))
-                }
-                DecisionEngine::Read(engine) => {
-                    DecisionEngine::Read(retain_teardown_until_requests_finish(engine, teardown))
-                }
-            }),
-            Self::UnsupportedRouting => Self::UnsupportedRouting,
-        }
-    }
 }
 
 struct LoraContextEngine<Req: Data, Resp: Data> {
@@ -250,7 +232,7 @@ pub struct WorkerSet {
     pub(crate) tensor_engine: Option<TensorStreamingEngine>,
     pub(crate) realtime_engine: Option<RealtimeBidirectionalEngine>,
     pub(crate) generate_engine: Option<GenerateStreamingEngine>,
-    pub(crate) decision: Option<DecisionRoute>,
+    pub(crate) decision: Option<super::DecisionSurface>,
 
     /// Owns load monitoring for routed surfaces that do not use `RoutingHost`.
     load_context: Option<Arc<RoutingLoadContext>>,
@@ -336,6 +318,7 @@ impl WorkerSet {
         self.load_context = Some(load_context);
     }
 
+    #[cfg(test)]
     pub(crate) fn load_context(&self) -> Option<&Arc<RoutingLoadContext>> {
         self.load_context.as_ref()
     }
@@ -421,6 +404,10 @@ impl WorkerSet {
     /// that can serve a request?" question — keep the engine-kind list here so
     /// new modalities don't need to be added in multiple readiness predicates.
     pub fn has_any_serving_engine(&self) -> bool {
+        self.has_ordinary_serving_engine() || self.decision_state().is_present()
+    }
+
+    fn has_ordinary_serving_engine(&self) -> bool {
         self.has_chat_engine()
             || self.has_completions_engine()
             || self.has_embeddings_engine()
@@ -434,14 +421,14 @@ impl WorkerSet {
             || self.has_transcriptions_engine()
             || self.has_realtime_engine()
             || self.has_generate_engine()
-            || self.has_decision_engine()
+    }
+
+    pub(crate) fn has_ready_serving_engine(&self) -> bool {
+        self.has_ordinary_serving_engine() || self.decision_state().is_ready()
     }
 
     pub(crate) fn has_decision_engine(&self) -> bool {
-        self.decision
-            .as_ref()
-            .and_then(DecisionRoute::available)
-            .is_some()
+        self.decision_state().is_qualified()
     }
 
     /// Whether this set tracks an Encode worker. Encode WorkerSets carry
@@ -529,39 +516,14 @@ impl WorkerSet {
         self.topology_target
             .as_ref()
             .map(|target| &target.admitted_ids)
-            .or(self.instance_count_rx.as_ref())
     }
 
     pub(crate) fn decision_worker_count(&self) -> usize {
-        if self
-            .lifecycle_cancellation
-            .as_ref()
-            .is_some_and(CancellationToken::is_cancelled)
-        {
-            return 0;
-        }
-        let Some(available) = &self.instance_count_rx else {
-            return usize::from(self.topology_target.is_none());
-        };
-        if available.has_changed().is_err() {
-            return 0;
-        }
-        let Some(target) = &self.topology_target else {
-            return available.borrow().len();
-        };
-        if target.admitted_ids.has_changed().is_err() {
-            return 0;
-        }
-        let admitted = target.admitted_ids.borrow();
-        available
-            .borrow()
-            .iter()
-            .filter(|id| admitted.contains(id))
-            .count()
+        self.decision_state().live_workers()
     }
 
-    pub(crate) fn lifecycle_cancellation(&self) -> Option<CancellationToken> {
-        self.lifecycle_cancellation.clone()
+    pub(crate) fn lifecycle_cancellation(&self) -> Option<&CancellationToken> {
+        self.lifecycle_cancellation.as_ref()
     }
 
     pub(crate) fn set_lifecycle_cancellation(&mut self, cancellation: CancellationToken) {
@@ -600,10 +562,6 @@ impl WorkerSet {
         retain_for_requests!(tensor_engine);
         retain_for_requests!(realtime_engine);
         retain_for_requests!(generate_engine);
-        self.decision = self
-            .decision
-            .take()
-            .map(|route| route.retain_for_requests(&teardown));
         self.allocator_trim_wrapped = true;
     }
 
@@ -672,6 +630,28 @@ impl Drop for WorkerSet {
 }
 
 #[cfg(test)]
+pub(crate) fn prepare_teardown_for_test(
+    workers: &mut WorkerSet,
+    teardown: &Arc<AllocatorTrimOnDrop>,
+) {
+    workers
+        .allocator_trim
+        .get_or_insert_with(|| teardown.clone());
+}
+
+#[cfg(test)]
+pub(crate) fn instance_watcher_for_test(workers: &WorkerSet) -> &watch::Receiver<Vec<u64>> {
+    workers
+        .instance_count_rx
+        .as_ref()
+        .expect("fixture membership")
+}
+
+#[cfg(test)]
+#[path = "worker_set/decision_tests.rs"]
+mod decision_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::model_card::ModelDeploymentCard;
@@ -734,10 +714,10 @@ mod tests {
     /// object. `generate` is unreachable: the stub exists only to populate typed engine
     /// slots on `WorkerSet` so `is_prefill_set`'s exclusion logic can be exercised per
     /// field. `Req` / `Resp` are inferred from the assignment-site engine alias.
-    struct StubEngine<Req, Resp>(PhantomData<fn() -> (Req, Resp)>);
+    pub(super) struct StubEngine<Req, Resp>(PhantomData<fn() -> (Req, Resp)>);
 
     impl<Req, Resp> StubEngine<Req, Resp> {
-        fn new() -> Arc<Self> {
+        pub(super) fn new() -> Arc<Self> {
             Arc::new(Self(PhantomData))
         }
     }

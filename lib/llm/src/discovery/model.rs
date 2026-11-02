@@ -15,9 +15,7 @@ use serde::Serialize;
 
 use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
-#[cfg(test)]
-use super::{DecisionEngine, TokenExecutor};
-use super::{DecisionRoute, ModelManagerError, SystemOneExecutionSelection};
+use super::{ModelManagerError, SystemOneExecutionPlan};
 use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
 #[cfg(test)]
 use crate::preprocessor::OpenAIPreprocessor;
@@ -101,6 +99,8 @@ pub(crate) enum SystemOneSelectionError {
     Unsupported,
     #[error("decision scoring worker is unavailable")]
     Unavailable,
+    #[error("model decision qualification failed")]
+    QualificationFailed,
 }
 
 /// Readiness facts for one namespace, from [`Model::evaluate_namespace`].
@@ -588,7 +588,7 @@ impl Model {
     /// chat engine but no prefill peer would report ready while every request
     /// was rejected.
     pub fn is_ready_to_serve(&self) -> bool {
-        self.select_worker_set_with(|ws| ws.has_any_serving_engine().then_some(()))
+        self.select_worker_set_with(|ws| ws.has_ready_serving_engine().then_some(()))
             .is_some()
     }
 
@@ -603,7 +603,7 @@ impl Model {
             if ws.worker_count() == 0 {
                 return false;
             }
-            ws.has_any_serving_engine() || (!any_set_has_engine && ws.is_prefill_set())
+            ws.has_ready_serving_engine() || (!any_set_has_engine && ws.is_prefill_set())
         })
     }
 
@@ -748,45 +748,38 @@ impl Model {
         .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))
     }
 
-    pub(crate) fn get_systemone_execution_selection(
+    pub(crate) fn get_systemone_execution_plan(
         &self,
-    ) -> Result<SystemOneExecutionSelection, SystemOneSelectionError> {
+    ) -> Result<SystemOneExecutionPlan, SystemOneSelectionError> {
         self.select_worker_set_with_worker_count(
-            |ws| self.systemone_execution_inputs(ws),
+            |ws| SystemOneExecutionPlan::from_worker_set(self.name.clone(), ws),
             WorkerSet::decision_worker_count,
         )
         .ok_or_else(|| {
-            if self.worker_sets.load().values().any(|worker_set| {
-                !matches!(worker_set.decision, Some(DecisionRoute::UnsupportedRouting))
-                    && worker_set.card().decision_execution_profile().is_some()
+            let workers = self.worker_sets.load();
+            if workers.values().any(|workers| {
+                matches!(
+                    workers.decision_state(),
+                    super::DecisionState::Pending | super::DecisionState::Qualified { .. }
+                )
             }) {
                 SystemOneSelectionError::Unavailable
+            } else if workers
+                .values()
+                .any(|workers| matches!(workers.decision_state(), super::DecisionState::Failed))
+            {
+                SystemOneSelectionError::QualificationFailed
             } else {
                 SystemOneSelectionError::Unsupported
             }
         })
     }
 
-    fn systemone_execution_inputs(
-        &self,
-        worker_set: &WorkerSet,
-    ) -> Option<SystemOneExecutionSelection> {
-        SystemOneExecutionSelection::from_worker_set(self.name.clone(), worker_set)
-    }
-
     pub(crate) fn has_decision_engine(&self) -> bool {
-        self.select_worker_set_with_worker_count(
-            |workers| {
-                let profile = workers.card().decision_execution_profile()?;
-                workers
-                    .decision
-                    .as_ref()?
-                    .available_for(profile)
-                    .map(|_| ())
-            },
-            WorkerSet::decision_worker_count,
-        )
-        .is_some()
+        self.worker_sets
+            .load()
+            .values()
+            .any(|worker_set| worker_set.has_decision_engine())
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
@@ -972,7 +965,7 @@ impl Model {
 }
 
 #[cfg(test)]
-#[path = "model/decision_tests_legacy.rs"]
+#[path = "model/decision_tests.rs"]
 mod decision_tests;
 
 #[cfg(test)]
@@ -1308,15 +1301,21 @@ mod tests {
         assert!(selection_b.tower_connector_lora_enabled);
     }
 
-    pub(super) fn systemone_worker_set(
+    pub(super) async fn systemone_worker_set(
         namespace: &str,
         configure: impl FnOnce(&mut ModelDeploymentCard),
-    ) -> (Arc<WorkerSet>, watch::Sender<Vec<u64>>) {
+    ) -> (
+        Arc<WorkerSet>,
+        watch::Sender<Vec<u64>>,
+        watch::Sender<crate::discovery::DecisionAvailability>,
+    ) {
         let mut card = ModelDeploymentCard::load_from_disk(
             "tests/data/sample-models/mock-llama-3.1-8b-instruct",
             None,
         )
         .unwrap();
+        card.model_input = crate::model_type::ModelInput::Tokens;
+        card.model_type = crate::model_type::ModelType::Chat;
         card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
         card.runtime_config.runtime_data.insert(
             crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY.to_string(),
@@ -1329,22 +1328,18 @@ mod tests {
         configure(&mut card);
         let preprocessor = OpenAIPreprocessor::new(card.clone()).unwrap();
         let mut worker_set = WorkerSet::new(namespace.to_string(), namespace.to_string(), card);
-        let backend = match worker_set
-            .card()
-            .decision_execution_profile()
-            .map(|profile| profile.kind())
-        {
-            Some(crate::local_model::runtime_config::DecisionProfileKind::Token(backend)) => {
-                backend
-            }
-            _ => crate::local_model::runtime_config::TokenBackend::Sglang,
-        };
-        worker_set.decision = Some(DecisionRoute::Available(DecisionEngine::Token(
-            TokenExecutor::new(backend, Arc::new(StubGenerateEngine), preprocessor),
-        )));
+        let resources = crate::discovery::test_support::token_resources(
+            Arc::new(StubGenerateEngine),
+            preprocessor,
+        );
         let (worker_tx, worker_rx) = watch::channel(vec![1]);
         worker_set.set_instance_watcher(worker_rx);
-        (Arc::new(worker_set), worker_tx)
+        let qualification = crate::discovery::test_support::attach_card_surface_for_test(
+            &mut worker_set,
+            resources,
+        )
+        .await;
+        (Arc::new(worker_set), worker_tx, qualification)
     }
 
     fn make_realtime_worker_set(namespace: &str) -> Arc<WorkerSet> {

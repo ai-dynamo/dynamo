@@ -195,11 +195,6 @@ pub use crate::decision_profile::{
     VLLM_LIQUID_DECISION_V1,
 };
 
-pub(crate) use crate::decision_profile::{
-    DecisionExecutionProfile, DecisionProfileKind, NativeExecutorKind, TokenBackend,
-    VLLM_NATIVE_DECISION_MAX_CANDIDATES,
-};
-
 /// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

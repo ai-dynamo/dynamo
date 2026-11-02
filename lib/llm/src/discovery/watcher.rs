@@ -63,7 +63,7 @@ use crate::{
     worker_type::WorkerType,
 };
 
-mod decision;
+pub(super) mod decision;
 
 use super::readiness::normalize_legacy_prefill_topology;
 use super::{
@@ -503,7 +503,7 @@ impl ModelWatcher {
             group: spec.key.id(),
             generation: spec.generation,
             card: Arc::new(card.clone()),
-            admitted_ids,
+            admitted_ids: admitted_ids.clone(),
         });
         worker_set.set_instance_watcher(instance_watcher);
 
@@ -556,9 +556,13 @@ impl ModelWatcher {
             return Ok(PreparedWorkerSet::new(worker_set, card.clone()));
         }
 
-        let decision_plan =
-            DecisionPlan::new(card, self.systemone_enabled, router_config.router_mode);
-        let mut token_execution = None;
+        let mut decision_plan = DecisionPlan::with_kinds(
+            card,
+            self.systemone_enabled,
+            router_config.router_mode,
+            spec.decision_kinds,
+            allocator_trim.clone(),
+        );
         let mut routing_load_context = None;
 
         if card.model_input == ModelInput::Tokens
@@ -581,18 +585,6 @@ impl ModelWatcher {
                 needs_local_chat_pipeline || needs_local_completions_pipeline;
             let tokenizer = if needs_local_tokenizer && card.has_tokenizer() {
                 Some(card.tokenizer().context("tokenizer")?)
-            } else if decision_plan.needs_internal_generate() && card.has_tokenizer() {
-                match card.tokenizer().context("System One tokenizer") {
-                    Ok(tokenizer) => Some(tokenizer),
-                    Err(cause) => {
-                        tracing::warn!(
-                            model_name = card.name(),
-                            error = %format!("{cause:#}"),
-                            "System One tokenizer is unavailable; keeping other model surfaces active"
-                        );
-                        None
-                    }
-                }
             } else {
                 None
             };
@@ -603,13 +595,11 @@ impl ModelWatcher {
                 card.model_type.supports_chat() && self.chat_engine_factory.is_some();
             let needs_generate_pipeline =
                 supports_enabled_engine_generate(card, &self.generate_engine_capabilities);
-            let needs_preprocessed_routing = needs_factory_chat_pipeline
-                || tokenizer.is_some()
-                || needs_generate_pipeline
-                || decision_plan.needs_routing();
+            let needs_preprocessed_routing =
+                needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
 
             let load_thresholds = load_threshold_handle(&router_config);
-            let load_context = if needs_preprocessed_routing {
+            let load_context = if needs_preprocessed_routing || decision_plan.needs_load_context() {
                 let source = RouterLoadSource::from_worker_type(effective_worker_type(
                     card.worker_type,
                     card.model_type,
@@ -711,17 +701,18 @@ impl ModelWatcher {
                 None
             };
 
-            worker_set.load_thresholds =
-                needs_preprocessed_routing.then_some(load_thresholds.clone());
+            worker_set.load_thresholds = load_context
+                .as_ref()
+                .map(|context| context.load_thresholds());
             worker_set.prefill_router = prefill_chooser.clone().map(|router| {
                 router as Arc<dyn crate::kv_router::prefill_router::PrefillRouterLifecycle>
             });
             worker_set.encoder_router = encoder_chooser.clone();
 
-            let systemone_preprocessor =
-                decision_plan.preprocessor(card, tokenizer.as_ref(), &cancellation);
-
             let preprocessed_routing = if needs_preprocessed_routing {
+                let dispatch = decision_plan
+                    .routing_dispatch(&client, kv_chooser.as_ref())
+                    .await?;
                 Some(
                     entrypoint::input::build_preprocessed_routing(
                         &client,
@@ -737,7 +728,7 @@ impl ModelWatcher {
                             enable_multimodal_cache_indexer: uses_multimodal_cache_routing(card),
                             session_affinity_ttl_secs: router_config.session_affinity_ttl_secs,
                             session_affinity_mode: router_config.session_affinity_mode,
-                            dispatch: None,
+                            dispatch,
                         },
                     )
                     .await
@@ -747,12 +738,18 @@ impl ModelWatcher {
                 None
             };
 
+            decision_plan.prepare_resources(
+                tokenizer.as_ref(),
+                preprocessed_routing.as_ref(),
+                load_context.clone(),
+            );
+
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {
-                let routing = preprocessed_routing.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("chat pipeline requires preprocessed routing")
-                })?;
                 let chat_engine = if let Some(ref factory) = self.chat_engine_factory {
+                    let routing = preprocessed_routing.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("chat pipeline requires preprocessed routing")
+                    })?;
                     let routed_engine = routing
                         .build_preprocessed_pipeline(
                             card,
@@ -767,11 +764,12 @@ impl ModelWatcher {
                             .context("python chat_engine_factory")?,
                     )
                 } else if let Some(tk) = tokenizer.clone() {
+                    let routing = preprocessed_routing.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("chat pipeline requires preprocessed routing")
+                    })?;
                     // Only chat pipelines use speculative prefill.
-                    let preprocessor = match systemone_preprocessor.clone() {
-                        Some(preprocessor) => preprocessor,
-                        None => worker_set_chat_preprocessor(card, tk.clone(), &cancellation)?,
-                    };
+                    let preprocessor =
+                        decision_plan.chat_preprocessor(card, tk.clone(), &cancellation)?;
                     Some(
                         routing
                             .build_pipeline::<
@@ -787,17 +785,8 @@ impl ModelWatcher {
                             )
                             .context("PreprocessedRouting::build_pipeline")?,
                         )
-                } else if needs_generate_pipeline || decision_plan.has_native_route() {
-                    tracing::warn!(
-                        "Skipping chat engine: no supported Rust tokenizer or chat_engine_factory; token-native serving remains available"
-                    );
-                    None
                 } else {
-                    anyhow::bail!(
-                        "Model has no supported Rust tokenizer and no chat_engine_factory. \
-                         Use --dyn-chat-processor vllm/sglang or provide a supported \
-                         tokenizer file (tokenizer.json, tiktoken.model, or *.tiktoken)."
-                    );
+                    None
                 };
                 if let Some(chat_engine) = chat_engine {
                     worker_set.chat_engine = Some(chat_engine);
@@ -837,7 +826,7 @@ impl ModelWatcher {
             // Generate is a frontend-native token-in/token-out surface. It
             // reuses the raw routed pipeline so the complete request envelope
             // reaches the worker without passing through the OpenAI decoder.
-            if needs_generate_pipeline || decision_plan.needs_internal_generate() {
+            if needs_generate_pipeline {
                 let routing = preprocessed_routing.as_ref().ok_or_else(|| {
                     anyhow::anyhow!("generate pipeline requires preprocessed routing")
                 })?;
@@ -849,14 +838,10 @@ impl ModelWatcher {
                         self.metrics.clone(),
                     )
                     .context("build generate (preprocessed) pipeline")?;
-                token_execution = systemone_preprocessor
-                    .map(|preprocessor| (generate_engine.clone(), preprocessor));
-                if needs_generate_pipeline {
-                    worker_set.generate_engine = Some(generate_engine);
-                    tracing::info!("Generate (token-in/token-out) is ready");
-                }
+                worker_set.generate_engine = Some(generate_engine);
+                tracing::info!("Generate (token-in/token-out) is ready");
             }
-
+            decision_plan.check_ordinary_surfaces(card, &worker_set)?;
             routing_load_context = load_context;
         } else if card.model_input == ModelInput::Text {
             // Text workers tokenize in the backend and can advertise multiple
@@ -875,6 +860,7 @@ impl ModelWatcher {
                 Some(allocator_trim.clone()),
             )
             .await?;
+            decision_plan.prepare_resources(None, None, Some(load_context.clone()));
             let client = load_context.client().clone();
 
             if card.model_type.supports_embedding() {
@@ -1118,21 +1104,7 @@ impl ModelWatcher {
         if let Some(load_context) = routing_load_context {
             worker_set.set_load_context(load_context);
         }
-        decision_plan
-            .attach(&mut worker_set, token_execution)
-            .await?;
-
-        if card.model_input == ModelInput::Tokens
-            && (card.model_type.supports_chat() || card.model_type.supports_completions())
-            && !worker_set.has_any_serving_engine()
-        {
-            anyhow::bail!(
-                "Model '{}' requires frontend tokenization/preprocessing (ModelInput::Tokens) \
-                 but no serving engine could be built. Provide a working tokenizer config or \
-                 perform tokenization in the backend (ModelInput::Text).",
-                card.name()
-            );
-        }
+        decision_plan.attach(&mut worker_set, spec.decision_fleet.clone());
 
         Ok(PreparedWorkerSet::new(worker_set, card.clone()))
     }
@@ -1606,7 +1578,7 @@ pub(super) fn qwen_video_contract_digest(card: &ModelDeploymentCard) -> Option<S
     Some(blake3::hash(contracts.to_string().as_bytes()).to_string())
 }
 
-fn worker_set_chat_preprocessor(
+pub(super) fn worker_set_chat_preprocessor(
     card: &ModelDeploymentCard,
     tokenizer: crate::tokenizers::Tokenizer,
     cancellation: &CancellationToken,
@@ -1624,11 +1596,23 @@ fn worker_set_chat_preprocessor(
 }
 
 #[cfg(test)]
-#[path = "watcher/decision_tests_legacy.rs"]
+mod capability_tests;
+#[cfg(test)]
 mod decision_tests;
+#[cfg(test)]
+mod fleet_tests;
+#[cfg(test)]
+mod lifecycle_tests;
+#[cfg(test)]
+mod test_support;
+#[cfg(test)]
+mod token_tests;
 
 #[cfg(test)]
 mod tests {
+    use super::test_support::{
+        apply_discovery_event, discovered_card, wait_for_model, watch_test_cards,
+    };
     use super::*;
     use crate::discovery::Model;
     use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
@@ -1847,21 +1831,6 @@ mod tests {
         }
     }
 
-    fn discovered_card(
-        namespace: &str,
-        instance_id: u64,
-        card: &ModelDeploymentCard,
-    ) -> DiscoveryEvent {
-        DiscoveryEvent::Added(DiscoveryInstance::Model {
-            namespace: namespace.to_string(),
-            component: "workers".to_string(),
-            endpoint: "generate".to_string(),
-            instance_id,
-            card_json: serde_json::to_value(card).unwrap(),
-            model_suffix: None,
-        })
-    }
-
     #[tokio::test]
     async fn operator_namespace_scope_filters_model_discovery() {
         let runtime = Runtime::from_current().unwrap();
@@ -1922,71 +1891,6 @@ mod tests {
             );
         }
         runtime.shutdown();
-    }
-
-    type TestDiscoverySender =
-        tokio::sync::mpsc::UnboundedSender<(DiscoveryEvent, tokio::sync::oneshot::Sender<()>)>;
-
-    async fn apply_discovery_event(events: &TestDiscoverySender, event: DiscoveryEvent) {
-        let (applied, acknowledged) = tokio::sync::oneshot::channel();
-        events.send((event, applied)).unwrap();
-        tokio::time::timeout(Duration::from_secs(5), acknowledged)
-            .await
-            .expect("controller stopped consuming discovery events")
-            .unwrap();
-    }
-
-    fn watch_test_cards(
-        drt: DistributedRuntime,
-        manager: Arc<ModelManager>,
-        router_config: RouterConfig,
-    ) -> (TestDiscoverySender, tokio::task::JoinHandle<()>) {
-        let watcher = Arc::new(ModelWatcher::new(
-            drt,
-            manager,
-            router_config,
-            0,
-            None,
-            None,
-            None,
-            Arc::new(Metrics::new()),
-        ));
-        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let stream = futures::stream::unfold(
-            (event_rx, None::<tokio::sync::oneshot::Sender<()>>),
-            |(mut receiver, applied)| async {
-                // The controller polls again only after applying the previous event.
-                if let Some(applied) = applied {
-                    let _ = applied.send(());
-                }
-                receiver
-                    .recv()
-                    .await
-                    .map(|(event, applied)| (Ok(event), (receiver, Some(applied))))
-            },
-        )
-        .boxed();
-        let task = tokio::spawn(watcher.watch(stream, NamespaceFilter::Global));
-        (event_tx, task)
-    }
-
-    async fn wait_for_model(
-        manager: &ModelManager,
-        name: &str,
-        ready: impl Fn(&Model) -> bool,
-    ) -> Arc<Model> {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if let Some(model) = manager.get_committed_model(name)
-                    && ready(&model)
-                {
-                    return model;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("model did not reach the expected serving state")
     }
 
     #[tokio::test]
@@ -2524,11 +2428,19 @@ request_classifier:
                 .normalize(discovery, &NamespaceFilter::Global)
                 .unwrap()
                 .unwrap();
+            let (_qualification, decision_fleet) = crate::discovery::test_support::fleet(
+                desired.card.decision_qualification(),
+                vec![worker_id],
+            );
             let spec = GroupSpec {
                 key: desired.group_key.clone(),
                 mdc_checksum: desired.mdc_checksum.clone(),
                 fingerprint: desired.mdc_checksum.clone(),
                 generation: instance as u64 + 1,
+                decision_kinds: crate::model_card::decision_profile::DecisionKinds::advertised(
+                    &desired.card,
+                ),
+                decision_fleet,
                 video_contract: desired.video_contract.clone(),
                 representative: desired,
             };
@@ -2999,11 +2911,17 @@ request_classifier:
             card,
             group_key: key.clone(),
         };
+        let (_qualification, decision_fleet) =
+            crate::discovery::test_support::fleet(desired.card.decision_qualification(), vec![1]);
         let spec = GroupSpec {
             key,
             mdc_checksum: desired.mdc_checksum.clone(),
             fingerprint: desired.mdc_checksum.clone(),
             generation: 1,
+            decision_kinds: crate::model_card::decision_profile::DecisionKinds::advertised(
+                &desired.card,
+            ),
+            decision_fleet,
             representative: desired,
             video_contract: None,
         };

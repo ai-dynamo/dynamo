@@ -1414,12 +1414,6 @@ impl ModelDeploymentCard {
                         .extend_from_slice(b"\0vllm_inference_v1_generate\0true");
                 }
 
-                if let Some(profile) = self.decision_execution_profile()
-                    && let Some(max_candidates) = self.decision_max_candidates(profile)
-                {
-                    decision_profile::append_checksum(&mut bytes_to_hash, profile, max_candidates);
-                }
-
                 // The Qwen video contract is resolved per cohort, not per card.
                 // Nemotron contracts still partition WorkerSets by checksum.
                 append_runtime_contract_checksum(
@@ -3398,7 +3392,7 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "model_card/ownership_tests_legacy.rs"]
+#[path = "model_card/ownership_tests_staged.rs"]
 mod ownership_tests;
 
 #[cfg(test)]

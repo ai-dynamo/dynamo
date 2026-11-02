@@ -1,14 +1,22 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#[path = "discovery/decision_legacy.rs"]
 mod decision;
-pub(crate) use decision::DecisionAvailability;
+mod decision_policy;
+mod decision_resources;
+pub(crate) use decision_resources::{
+    DecisionResources, ScoreFactory, TokenResources, TokenizerLoad,
+};
+mod decision_dispatch;
+#[cfg(test)]
+pub(crate) use decision::test_support;
+pub(crate) use decision_dispatch::{DecisionDispatch, GuardPolicy};
 pub(crate) mod image_edits;
 mod model;
 pub(crate) mod readiness;
 pub(crate) use decision::{
-    DecisionContext, DecisionEngine, DecisionRoute, SystemOneExecutionSelection, TokenExecutor,
+    DecisionAdmission, DecisionAvailability, DecisionContext, DecisionEngine, DecisionFleet,
+    DecisionSurface, SystemOneExecutionPlan, SystemOneExecutionSelection, TokenExecutor,
 };
 pub use model::Model;
 pub(crate) use model::{GenerateEngineSelection, SystemOneSelectionError};
@@ -38,7 +46,9 @@ mod allocator;
 
 mod worker_set;
 pub use worker_set::WorkerSet;
-pub(crate) use worker_set::{CommittedWorkerSetTarget, WorkerSetTarget, WorkerSetTargetId};
+pub(crate) use worker_set::{
+    CommittedWorkerSetTarget, DecisionState, WorkerSetTarget, WorkerSetTargetId,
+};
 
 pub(crate) mod runtime_configs;
 pub use runtime_configs::{RuntimeConfigWatch, runtime_config_watch};

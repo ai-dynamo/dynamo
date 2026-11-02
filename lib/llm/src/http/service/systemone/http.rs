@@ -105,6 +105,10 @@ async fn handle_http(
     guard.mark_error(ErrorType::Cancelled);
     let mut response = handle_request(state.clone(), request_id.clone(), request).await;
     attach_request_ids(&mut response, &request_id);
+    if let Some(classification) = response.extensions().get::<ErrorType>() {
+        guard.mark_error(classification.clone());
+        return response;
+    }
     match response.status().as_u16() {
         _ if response
             .extensions()

@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 use super::worker_monitor::LoadThresholdConfig;
 use super::{
     GenerateEngineSelection, KvSourceMembershipWatch, Model, RuntimeConfigWatch,
-    SystemOneExecutionSelection, SystemOneSelectionError, WorkerSet,
+    SystemOneExecutionPlan, SystemOneSelectionError, WorkerSet,
     kv_source_watch::KvSourceMembershipCoordinator, runtime_config_watch,
 };
 
@@ -1589,10 +1589,10 @@ impl ModelManager {
     }
 
     /// Resolve an alias and select all System One execution inputs from one catalog snapshot.
-    pub(crate) fn get_systemone_execution_selection(
+    pub(crate) fn get_systemone_execution_plan(
         &self,
         requested_model: &str,
-    ) -> Result<SystemOneExecutionSelection, SystemOneSelectionError> {
+    ) -> Result<SystemOneExecutionPlan, SystemOneSelectionError> {
         let catalog = self.catalog.load();
         let canonical_model = catalog
             .aliases
@@ -1600,7 +1600,7 @@ impl ModelManager {
             .map(String::as_str)
             .unwrap_or(requested_model);
         if let Some(model) = catalog.models.get(canonical_model) {
-            return model.get_systemone_execution_selection();
+            return model.get_systemone_execution_plan();
         }
 
         Err(SystemOneSelectionError::NotFound)
@@ -3101,55 +3101,62 @@ mod tests {
         }
     }
 
-    fn register_systemone_model(
+    async fn register_systemone_model(
         manager: &ModelManager,
         name: &str,
-    ) -> tokio::sync::watch::Sender<Vec<u64>> {
+    ) -> (
+        tokio::sync::watch::Sender<Vec<u64>>,
+        tokio::sync::watch::Sender<crate::discovery::DecisionAvailability>,
+    ) {
         let mut card = ModelDeploymentCard::load_from_disk(
             "tests/data/sample-models/mock-llama-3.1-8b-instruct",
             None,
         )
         .unwrap();
         card.set_name(name);
+        card.model_input = crate::model_type::ModelInput::Tokens;
+        card.model_type = crate::model_type::ModelType::Chat;
         card.worker_type = Some(WorkerType::Aggregated);
         card.runtime_config.runtime_data.insert(
             crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY.to_string(),
             true.into(),
         );
         card.runtime_config.runtime_data.insert(
-            crate::local_model::runtime_config::SGLANG_SYSTEMONE_SERIAL_V1.to_string(),
+            crate::decision_profile::SGLANG_SYSTEMONE_SERIAL_V1.to_string(),
             true.into(),
         );
         card.runtime_config.max_num_seqs = Some(1);
         let preprocessor = crate::preprocessor::OpenAIPreprocessor::new(card.clone()).unwrap();
         let mut worker_set = WorkerSet::new(name.to_string(), name.to_string(), card);
-        worker_set.decision = Some(crate::discovery::DecisionRoute::Available(
-            crate::discovery::DecisionEngine::Token(crate::discovery::TokenExecutor::new(
-                crate::local_model::runtime_config::TokenBackend::Sglang,
-                Arc::new(SystemOneStubEngine),
-                preprocessor,
-            )),
-        ));
         let (workers, receiver) = tokio::sync::watch::channel(vec![1]);
         worker_set.set_instance_watcher(receiver);
+        let qualification = crate::discovery::test_support::attach_card_surface_for_test(
+            &mut worker_set,
+            crate::discovery::test_support::token_resources(
+                Arc::new(SystemOneStubEngine),
+                preprocessor,
+            ),
+        )
+        .await;
         assert!(manager.add_worker_set(name, name, worker_set));
-        workers
+        (workers, qualification)
     }
 
-    #[test]
-    fn systemone_model_resolution_requires_registered_aliases() {
+    #[tokio::test]
+    async fn systemone_model_resolution_requires_registered_aliases() {
         let manager = ModelManager::new();
-        let _workers = register_systemone_model(&manager, "model-a");
+        let (_workers, _qualification) = register_systemone_model(&manager, "model-a").await;
         for unregistered in ["jev-latest", "default", "typo"] {
             assert!(matches!(
-                manager.get_systemone_execution_selection(unregistered),
+                manager.prepared_selection_for_test(unregistered).await,
                 Err(SystemOneSelectionError::NotFound)
             ));
         }
         assert!(manager.register_alias("jev-latest", "model-a"));
         assert_eq!(
             manager
-                .get_systemone_execution_selection("jev-latest")
+                .prepared_selection_for_test("jev-latest")
+                .await
                 .unwrap()
                 .context
                 .canonical_model,
@@ -3158,41 +3165,43 @@ mod tests {
         assert!(manager.register_alias("public-model", "model-a"));
         assert_eq!(
             manager
-                .get_systemone_execution_selection("public-model")
+                .prepared_selection_for_test("public-model")
+                .await
                 .unwrap()
                 .context
                 .canonical_model,
             "model-a"
         );
         assert!(matches!(
-            manager.get_systemone_execution_selection("typo"),
+            manager.prepared_selection_for_test("typo").await,
             Err(SystemOneSelectionError::NotFound)
         ));
         manager.add_worker_set("unsupported", "other", make_worker_set("other", "other"));
         assert!(matches!(
-            manager.get_systemone_execution_selection("unsupported"),
+            manager.prepared_selection_for_test("unsupported").await,
             Err(SystemOneSelectionError::Unsupported)
         ));
     }
 
-    #[test]
-    fn systemone_default_model_does_not_retarget_during_worker_churn() {
+    #[tokio::test]
+    async fn systemone_default_model_does_not_retarget_during_worker_churn() {
         let manager = ModelManager::new();
-        let workers_a = register_systemone_model(&manager, "model-a");
+        let (workers_a, _qualification_a) = register_systemone_model(&manager, "model-a").await;
         assert!(manager.register_alias("jev-latest", "model-a"));
         workers_a.send(vec![]).unwrap();
         assert!(matches!(
-            manager.get_systemone_execution_selection("jev-latest"),
+            manager.prepared_selection_for_test("jev-latest").await,
             Err(SystemOneSelectionError::Unavailable)
         ));
-        let _workers_b = register_systemone_model(&manager, "model-b");
+        let (_workers_b, _qualification_b) = register_systemone_model(&manager, "model-b").await;
         assert!(matches!(
-            manager.get_systemone_execution_selection("jev-latest"),
+            manager.prepared_selection_for_test("jev-latest").await,
             Err(SystemOneSelectionError::Unavailable)
         ));
         assert_eq!(
             manager
-                .get_systemone_execution_selection("model-b")
+                .prepared_selection_for_test("model-b")
+                .await
                 .unwrap()
                 .context
                 .canonical_model,
@@ -3200,12 +3209,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn systemone_dispatch_rejects_retired_or_missing_admissions() {
+    #[tokio::test]
+    async fn systemone_dispatch_rejects_retired_or_missing_admissions() {
         let manager = ModelManager::new();
-        let workers = register_systemone_model(&manager, "model-a");
+        let (workers, _qualification) = register_systemone_model(&manager, "model-a").await;
         let selection = manager
-            .get_systemone_execution_selection("model-a")
+            .prepared_selection_for_test("model-a")
+            .await
             .unwrap();
         assert_eq!(selection.context.validate_dispatch(None), Ok(()));
         assert_eq!(selection.context.validate_dispatch(Some(1)), Ok(()));

@@ -66,11 +66,16 @@ pub(super) async fn run<R: NativeRequest>(
         DispatchError::unavailable("selected native decision revision is unavailable")
     })?;
     let max_input_tokens = wire.body().max_input_tokens;
-    let context = Context::with_id_and_metadata(
+    let mut context = Context::with_id_and_metadata(
         wire,
         format!("{request_id}-{}", R::SUFFIX),
-        Default::default(),
+        [(
+            crate::protocols::systemone::DECISION_DISPATCH_METADATA_KEY.to_owned(),
+            R::SUFFIX.to_owned(),
+        )]
+        .into(),
     );
+    selection.attach_dispatch_guard(&mut context);
     let mut stream = decision_lifecycle::start_linked(parent.as_ref(), context, engine.as_ref())
         .await
         .map_err(backend_error::lifecycle_error)?;
@@ -80,7 +85,7 @@ pub(super) async fn run<R: NativeRequest>(
         .map_err(backend_error::lifecycle_error)?
     {
         if terminal.replace(response).is_some() {
-            return Err(DispatchError::malformed(
+            return Err(DispatchError::invalid_executor(
                 "multiple terminal native decision responses",
             ));
         }
@@ -89,7 +94,9 @@ pub(super) async fn run<R: NativeRequest>(
         return Err(DispatchError::cancelled());
     }
     terminal
-        .ok_or_else(|| DispatchError::malformed("missing terminal native decision response"))?
+        .ok_or_else(|| {
+            DispatchError::invalid_executor("missing terminal native decision response")
+        })?
         .validate(request, selection.profile(), max_input_tokens)
-        .map_err(|cause| DispatchError::malformed(cause.to_string()))
+        .map_err(|cause| DispatchError::invalid_executor(cause.to_string()))
 }

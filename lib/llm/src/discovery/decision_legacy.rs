@@ -43,6 +43,13 @@ impl DecisionAvailability {
         }))
     }
 
+    pub(crate) fn admission(&self) -> Option<&Arc<DecisionAdmission>> {
+        match self {
+            Self::Qualified(admission) => Some(admission),
+            Self::Unadvertised | Self::Pending | Self::Failed => None,
+        }
+    }
+
     pub(crate) fn publish(sender: &tokio::sync::watch::Sender<Self>, mut next: Self) {
         sender.send_if_modified(|current| {
             if match (&*current, &next) {
@@ -66,6 +73,18 @@ impl DecisionAvailability {
             *current = next;
             true
         });
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DecisionFleet {
+    pub(crate) state: tokio::sync::watch::Receiver<DecisionAvailability>,
+}
+
+impl DecisionFleet {
+    pub(crate) fn current(&self) -> Option<tokio::sync::watch::Ref<'_, DecisionAvailability>> {
+        self.state.has_changed().ok()?;
+        Some(self.state.borrow())
     }
 }
 

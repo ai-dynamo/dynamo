@@ -33,6 +33,7 @@ use crate::{
             },
             completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         },
+        openai::generate::GenerateStreamingEngine,
     },
 };
 
@@ -436,6 +437,24 @@ where
 }
 
 impl PreprocessedRouting {
+    /// Text-only aggregated scoring uses the routed envelope directly, without generation
+    /// migration/decoding; its typed private dispatch guard must reach the final hop intact.
+    pub(crate) fn score_engine(&self) -> GenerateStreamingEngine {
+        self.backend_engine.clone()
+    }
+    #[cfg(test)]
+    pub(crate) fn from_score_host_for_test(host: Arc<RoutingHost>) -> Self {
+        Self {
+            backend_engine: host,
+            prefill_router: PrefillRouter::disabled(
+                Arc::new(ModelManager::new()),
+                RouterMode::RoundRobin,
+                None,
+            ),
+            encoder_router: EncoderRouter::disabled(),
+        }
+    }
+
     /// The normal way to build an inference pipeline. Connect this directly to HTTP layer.
     pub fn build_pipeline<Req, Resp>(
         &self,
