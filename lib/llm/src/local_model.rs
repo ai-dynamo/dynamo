@@ -19,6 +19,7 @@ use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
 use crate::model_card::{ModelDeploymentCard, is_weight_file};
 use crate::model_type::{ModelInput, ModelType};
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
+use crate::protocols::tensor::TensorModelConfig;
 use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 
@@ -83,6 +84,7 @@ pub struct LocalModelBuilder {
     namespace_prefix: Option<String>,
     media_decoder: Option<MediaDecoder>,
     media_fetcher: Option<MediaFetcher>,
+    tensor_model_config: Option<TensorModelConfig>,
 }
 
 impl Default for LocalModelBuilder {
@@ -117,6 +119,7 @@ impl Default for LocalModelBuilder {
             namespace_prefix: Default::default(),
             media_decoder: Default::default(),
             media_fetcher: Default::default(),
+            tensor_model_config: Default::default(),
         }
     }
 }
@@ -319,6 +322,14 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn tensor_model_config(
+        &mut self,
+        tensor_model_config: Option<TensorModelConfig>,
+    ) -> &mut Self {
+        self.tensor_model_config = tensor_model_config;
+        self
+    }
+
     /// Make an LLM ready for use:
     /// - Download it from Hugging Face or NGC if necessary
     /// - Resolve the path
@@ -362,6 +373,7 @@ impl LocalModelBuilder {
             card.runtime_config = self.runtime_config.clone();
             card.media_decoder = self.media_decoder.clone();
             card.media_fetcher = self.media_fetcher.clone();
+            card.tensor_model_config = self.tensor_model_config.clone();
             card.router_config = self.router_config.clone();
             if !self.model_aliases.is_empty() {
                 card.set_aliases(self.model_aliases.clone());
@@ -426,6 +438,7 @@ impl LocalModelBuilder {
         card.runtime_config = self.runtime_config.clone();
         card.media_decoder = self.media_decoder.clone();
         card.media_fetcher = self.media_fetcher.clone();
+        card.tensor_model_config = self.tensor_model_config.clone();
         card.router_config = self.router_config.clone();
         if !self.model_aliases.is_empty() {
             card.set_aliases(self.model_aliases.clone());
