@@ -67,7 +67,9 @@ and the booking lifecycle these rules protect.
 - Selection reads a request only through `RouteRequest`. When you add a selection input, add a
   method to it, implement it for `SingleIn<PreprocessedRequest>`, add it to the inputs table in
   `README.md`, and decide whether the Runtime EPP
-  (`deploy/inference-gateway/ext-proc/src/epp.rs`) must supply it too.
+  (`deploy/inference-gateway/ext-proc/src/epp.rs`) must supply it too. Record that decision as
+  a row in the EPP's routing parity table
+  (`deploy/inference-gateway/ext-proc/README.md`).
 - The Runtime EPP selects only through the planning interface: `PrefillRouter::schedule` for
   prefill and `RoutingHost::plan_route` on its decode host for decode. It never dispatches, so
   it keeps each booking with `RoutePlan::into_booking` (prefill) or `detach_booking` (decode,
