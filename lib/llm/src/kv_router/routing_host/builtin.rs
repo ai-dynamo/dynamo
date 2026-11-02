@@ -589,14 +589,20 @@ pub(crate) struct BuiltinRoutePlan {
 
 impl BuiltinRoutePlan {
     /// The selected worker. The send can still move to another instance.
-    #[cfg(test)]
-    pub(crate) fn worker_id(&self) -> u64 {
-        self.selection.initial_worker
+    pub(crate) fn target(&self) -> AffinityTarget {
+        self.selection.target_constraint.unwrap_or_else(|| {
+            let worker_id = self.selection.initial_worker;
+            AffinityTarget::new(
+                worker_id,
+                self.soft_affinity_target
+                    .filter(|target| target.worker_id == worker_id)
+                    .and_then(|target| target.dp_rank),
+            )
+        })
     }
 
     /// Give the route up before dispatch: release the guard's reservations
     /// and drop the affinity hold.
-    #[cfg(test)]
     pub(crate) async fn abort(mut self, error: Option<&Error>) {
         self.guard.abort(error.map(|error| error.as_ref())).await;
     }

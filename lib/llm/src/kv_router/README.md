@@ -178,7 +178,7 @@ releasing it.
 1. **Admit.** A `Lease` admission returns a `BookingHandle` for one scheduler attempt.
 2. **Own.** `KvRequestCleanup` commits the handle and registers a local `RequestAttemptLease`
    with the `RequestLeaseManager`, plus an approximate-LRU lease when the approximate indexer is
-   on. A `RoutePlan` (preview or plan path) holds this cleanup until dispatch.
+   on. A `KvRoutePlan` (preview or plan path) holds this cleanup until dispatch.
 3. **Track.** At dispatch, `RequestGuard` takes ownership. The first output tokens mark prefill
    complete on the booking, and output progress keeps the lease alive.
 4. **Release.** Stream end, error, or drop releases the lease, which enqueues the scheduler

@@ -24,7 +24,8 @@ and the booking lifecycle these rules protect.
   - `routing_host/kv.rs`: the KV path: preview, plan, select, track, dispatch.
   - `routing_host/kv_selection.rs`: turns a request's routing inputs into a `KvRouter` call.
   - `routing_host/builtin.rs`, `routing_host/occupancy.rs`: non-KV modes (random, round-robin,
-    load-based) and Direct mode.
+    load-based) and Direct mode. Like a KV route, a built-in route is planned (`RoutePlan`),
+    then dispatched.
   - `routing_host/request_guard.rs`: tracks a dispatched request's progress and releases its
     booking.
   - `routing_host/cancellation.rs`: what a client disconnect cancels, and the cleanup budget.
