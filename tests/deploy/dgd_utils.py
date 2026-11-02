@@ -66,10 +66,8 @@ MIN_RESPONSE_CONTENT_LENGTH = 100
 PORT_FORWARD_REQUEST_RETRY_LIMIT = 1
 DISCOVERY_SNAPSHOT_TIMEOUT = 15
 DISCOVERY_RESOURCE_TIMEOUT = 3
-# The operator reports a Failed automatic SnapshotJob with this text and never
-# recreates the job (resolveAutomaticSnapshotJob in
-# deploy/operator/internal/controller/dgd_checkpoints_reconciler.go), so the DGD
-# cannot become Ready.
+# Matches the operator's Failed automatic SnapshotJob message; the operator never
+# recreates that job (resolveAutomaticSnapshotJob), so the DGD cannot become Ready.
 AUTOMATIC_SNAPSHOT_JOB_FAILED_RE = re.compile(r"automatic SnapshotJob \S+/\S+ failed: ")
 _KR8S_VCLUSTER_CONNECTION_ERRORS = (httpx.TransportError, kr8s.APITimeoutError)
 
