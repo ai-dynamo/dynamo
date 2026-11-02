@@ -1419,6 +1419,107 @@ class TestGenerateLocally:
             },
         ]
 
+    @staticmethod
+    def _prompt_logprobs_fixture():
+        raw = [None, {2: MagicMock(logprob=-0.25, rank=1, decoded_token="two")}]
+        payload = [None, {"2": {"logprob": -0.25, "rank": 1, "decoded_token": "two"}}]
+        return raw, payload
+
+    @staticmethod
+    def _chunks_with_prompt_logprobs(chunks):
+        return [
+            i
+            for i, chunk in enumerate(chunks)
+            if "prompt_logprobs" in (chunk.get("engine_data") or {})
+        ]
+
+    @pytest.mark.asyncio
+    async def test_prompt_logprobs_sent_once_on_first_token_chunk(self):
+        handler = self._make_handler()
+        raw, payload = self._prompt_logprobs_fixture()
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._make_mock_generation_result_sequence([raw, raw, raw])
+        )
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+            "output_options": {"prompt_logprobs": 0},
+        }
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert len(chunks) == 3
+        assert self._chunks_with_prompt_logprobs(chunks) == [0]
+        assert chunks[0]["engine_data"]["prompt_logprobs"] == payload
+
+    @pytest.mark.asyncio
+    async def test_prompt_logprobs_sent_before_terminal(self):
+        handler = self._make_handler()
+        raw, payload = self._prompt_logprobs_fixture()
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._make_mock_generation_result_sequence([raw, [], []])
+        )
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+            "output_options": {"prompt_logprobs": 0},
+        }
+
+        # The frontend matches a stop string after the second chunk and cancels
+        # the worker, so the terminal output is never read.
+        stream = handler.generate_locally(request, self._make_context())
+        chunks = []
+        try:
+            async for chunk in stream:
+                chunks.append(chunk)
+                if len(chunks) == 2:
+                    break
+        finally:
+            await stream.aclose()
+
+        assert all("finish_reason" not in chunk for chunk in chunks)
+        assert chunks[0]["engine_data"]["prompt_logprobs"] == payload
+        assert self._chunks_with_prompt_logprobs(chunks) == [0]
+
+    @pytest.mark.asyncio
+    async def test_prefill_keeps_prompt_logprobs_on_terminal_output(self):
+        handler = self._make_handler()
+        handler.disaggregation_mode = DisaggregationMode.PREFILL
+        raw, payload = self._prompt_logprobs_fixture()
+        handler._setup_disaggregated_params_for_mode = MagicMock(
+            return_value=(
+                SimpleNamespace(request_type="context_only", disagg_request_id=None),
+                None,
+                {},
+            )
+        )
+        handler._encode_and_pack_disaggregated_params = MagicMock(return_value=None)
+        # Prefill normally yields one terminal output; a token output before it
+        # checks that prefill does not move the payload earlier.
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._make_mock_generation_result_sequence([raw, raw])
+        )
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+            "output_options": {"prompt_logprobs": 0},
+        }
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert len(chunks) == 2
+        assert self._chunks_with_prompt_logprobs(chunks) == [1]
+        assert chunks[1]["engine_data"]["prompt_logprobs"] == payload
+
     def test_trtllm_sampling_params_accepts_zero_prompt_logprobs(self):
         sampling_params = SamplingParams(prompt_logprobs=0)
 

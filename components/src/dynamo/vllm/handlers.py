@@ -3551,10 +3551,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             raw_routed_experts_by_output: dict[int, Any] = {}
             raw_sampling_mask_by_output: dict[int, Any] = {}
             # vLLM surfaces prompt_logprobs once (at end-of-prefill) and clears
-            # them on subsequent chunks, so the generation-finish chunk often
-            # carries None. Capture the first non-None payload and attach it to
-            # the final chunk instead of reading res.prompt_logprobs there.
+            # them on subsequent chunks. Capture the first non-None payload and
+            # send it once, on the first output that can carry it.
             prompt_logprobs_payload: Optional[list] = None
+            prompt_logprobs_sent = False
             engine_prompt_token_ids: Optional[list[int]] = None
             async for res in gen:
                 # res is vllm's RequestOutput
@@ -3662,12 +3662,26 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         )
                         usage_metadata_by_index[output_idx] = usage_metadata
 
+                    # Send prompt logprobs with the first token output, not the
+                    # terminal: the frontend can match a stop string and cancel
+                    # the stream before vLLM's terminal output arrives. The
+                    # payload is per request, so it is sent once, not per choice.
+                    if (
+                        prompt_logprobs_payload is not None
+                        and not prompt_logprobs_sent
+                        and (token_ids or finish_reason)
+                    ):
+                        _attach_prompt_logprobs_engine_data(
+                            out, prompt_logprobs_payload
+                        )
+                        prompt_logprobs_sent = True
+
                     if finish_reason:
                         out["finish_reason"] = normalized_finish_reason
                         if engine_prompt_token_ids is not None:
-                            out["engine_data"] = {
-                                "prompt_token_ids": list(engine_prompt_token_ids)
-                            }
+                            out.setdefault("engine_data", {})[
+                                "prompt_token_ids"
+                            ] = list(engine_prompt_token_ids)
                         # With n > 1, later samples hit the prompt blocks earlier
                         # ones just cached, and vLLM keeps the first buffered
                         # sample's count when it merges outputs, so no sample's
@@ -3681,10 +3695,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             out.setdefault("engine_data", {})[
                                 "kv_cache_hit"
                             ] = kv_cache_hit
-                        if prompt_logprobs_payload is not None:
-                            _attach_prompt_logprobs_engine_data(
-                                out, prompt_logprobs_payload
-                            )
                         kv_transfer_params = getattr(res, "kv_transfer_params", None)
                         if kv_transfer_params is not None:
                             engine_data = out.setdefault("engine_data", {})
