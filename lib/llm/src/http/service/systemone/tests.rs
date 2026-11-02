@@ -56,16 +56,16 @@ use crate::{
     },
 };
 
-#[test]
-fn cumulative_input_limit_is_checked_without_overflow() {
+#[tokio::test]
+async fn cumulative_input_limit_is_checked_without_overflow() {
     assert_eq!(add_input_tokens(7, 5, 12), Ok(12));
     assert_eq!(add_input_tokens(65_536, 1, 131_072), Ok(65_537));
     assert!(add_input_tokens(7, 6, 12).is_err());
     assert!(add_input_tokens(usize::MAX, 1, usize::MAX).is_err());
 }
 
-#[test]
-fn placement_pin_sets_both_worker_and_rank() {
+#[tokio::test]
+async fn placement_pin_sets_both_worker_and_rank() {
     crate::generate_format::test_formats::install();
     let native = build_native_score_request(&[1], &[2], "test-salt").unwrap();
     let mut preprocessed = bind_native("sglang", "test-model", 16, &native, "request-1")
@@ -170,9 +170,9 @@ async fn finish_branch_parses_terminal_scores_and_tracker_placement() {
     ));
 }
 
-#[test]
-fn sglang_scoring_preprocessing_preserves_exact_tracker_isl() {
-    let selected = selection(TestEngine::new(EngineBehavior::Success));
+#[tokio::test]
+async fn sglang_scoring_preprocessing_preserves_exact_tracker_isl() {
+    let selected = selection_for_test(TestEngine::new(EngineBehavior::Success)).await;
     let request = super::token_execution::backend::PreparedScoringRequest::sglang(
         vec![1, 2, 3],
         &[17, 4],
@@ -491,7 +491,25 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     }
 }
 
-fn selection(engine: Arc<TestEngine>) -> SystemOneExecutionSelection {
+struct PreparedSelectionFixture {
+    selection: SystemOneExecutionSelection,
+    _workers: WorkerSet,
+}
+
+impl std::ops::Deref for PreparedSelectionFixture {
+    type Target = SystemOneExecutionSelection;
+    fn deref(&self) -> &Self::Target {
+        &self.selection
+    }
+}
+
+impl std::ops::DerefMut for PreparedSelectionFixture {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.selection
+    }
+}
+
+async fn selection_for_test(engine: Arc<TestEngine>) -> PreparedSelectionFixture {
     crate::generate_format::test_formats::install();
     let mut card = ModelDeploymentCard::load_from_disk(
         "tests/data/sample-models/mock-llama-3.1-8b-instruct",
@@ -501,15 +519,15 @@ fn selection(engine: Arc<TestEngine>) -> SystemOneExecutionSelection {
     card.set_name("test-model");
     card.runtime_config.data_parallel_size = 4;
     let preprocessor = OpenAIPreprocessor::new(card.clone()).unwrap();
-    token_selection(card, engine, preprocessor, Profile::SglangSerialV1)
+    token_selection_for_test(card, engine, preprocessor, Profile::SglangSerialV1).await
 }
 
-fn token_selection(
+async fn token_selection_for_test(
     card: ModelDeploymentCard,
     engine: crate::types::openai::generate::GenerateStreamingEngine,
     preprocessor: Arc<OpenAIPreprocessor>,
     profile: Profile,
-) -> SystemOneExecutionSelection {
+) -> PreparedSelectionFixture {
     let mut workers = WorkerSet::new("test-workers".into(), card.mdcsum().into(), card);
     let crate::local_model::runtime_config::DecisionProfileKind::Token(backend) = profile.kind()
     else {
@@ -518,7 +536,12 @@ fn token_selection(
     workers.decision = Some(DecisionRoute::Available(DecisionEngine::Token(
         TokenExecutor::new(backend, engine, preprocessor),
     )));
-    SystemOneExecutionSelection::for_test("test-model".into(), profile, &workers).unwrap()
+    let selection =
+        SystemOneExecutionSelection::for_test("test-model".into(), profile, &workers).unwrap();
+    PreparedSelectionFixture {
+        selection,
+        _workers: workers,
+    }
 }
 
 fn token_executor(selection: &SystemOneExecutionSelection) -> &TokenExecutor {
@@ -543,7 +566,7 @@ fn prepare_branches(
 }
 
 async fn dispatch(
-    selection: SystemOneExecutionSelection,
+    fixture: PreparedSelectionFixture,
     branches: Vec<PreparedBranch>,
     request_id: String,
     parent: Arc<dyn AsyncEngineContext>,
@@ -551,8 +574,8 @@ async fn dispatch(
     metrics: Arc<super::Metrics>,
     request: Arc<dynamo_decisions::CanonicalRequest>,
 ) -> Response {
-    super::execution::dispatch(
-        super::execution::PreparedExecution::token(selection, branches).unwrap(),
+    let response = super::execution::dispatch(
+        super::execution::PreparedExecution::token(fixture.selection.clone(), branches).unwrap(),
         request_id,
         parent,
         permit,
@@ -560,7 +583,9 @@ async fn dispatch(
         "test-model".into(),
         request,
     )
-    .await
+    .await;
+    drop(fixture);
+    response
 }
 
 async fn response_body(response: Response) -> Value {
@@ -603,7 +628,7 @@ async fn dispatch_request(
         .unwrap();
     let cache_salt = super::fresh_cache_salt();
     let response = dispatch(
-        selection(engine),
+        selection_for_test(engine).await,
         (0..branch_count)
             .map(|index| prepared_noul_branch_with_salt(index, &cache_salt))
             .collect(),
@@ -624,7 +649,7 @@ async fn dispatch_limits_active_siblings_and_cancels_queued_work() {
     let admission = Arc::new(Semaphore::new(20));
     let permit = admission.clone().acquire_many_owned(20).await.unwrap();
     let task = tokio::spawn(dispatch(
-        selection(engine.clone()),
+        selection_for_test(engine.clone()).await,
         (0..20).map(prepared_noul_branch).collect(),
         "bounded-fanout".to_string(),
         parent.clone(),
@@ -762,7 +787,7 @@ async fn assert_cancellation(behavior: EngineBehavior) {
     let semaphore = Arc::new(Semaphore::new(2));
     let permit = semaphore.clone().acquire_many_owned(2).await.unwrap();
     let task = tokio::spawn(dispatch(
-        selection(engine.clone()),
+        selection_for_test(engine.clone()).await,
         vec![prepared_noul_branch(0), prepared_noul_branch(1)],
         "request".to_string(),
         parent.clone(),

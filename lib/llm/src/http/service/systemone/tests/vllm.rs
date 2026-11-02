@@ -11,19 +11,20 @@ fn vllm_frame(request: &PreprocessedRequest) -> (Value, Annotated<LLMEngineOutpu
     (native, terminal)
 }
 
-fn causal_selection(engine: Arc<TestEngine>) -> SystemOneExecutionSelection {
-    let selected = selection(engine);
+async fn causal_selection_for_test(engine: Arc<TestEngine>) -> PreparedSelectionFixture {
+    let selected = selection_for_test(engine).await;
     let mut card = selected.context.card.clone();
     card.runtime_config.max_num_seqs = Some(1);
     card.runtime_config.data_parallel_size = 1;
     card.runtime_config.data_parallel_start_rank = 3;
     let executor = token_executor(&selected);
-    token_selection(
+    token_selection_for_test(
         card,
         executor.engine().clone(),
         executor.preprocessor().clone(),
         Profile::VllmCausalV1,
     )
+    .await
 }
 
 fn prepared_causal_branch(index: usize) -> PreparedBranch {
@@ -66,7 +67,7 @@ async fn causal_dispatch_preserves_both_contracts_usage_and_placement() {
         dynamo_decisions::Dialect::OpenAi,
     ] {
         let engine = TestEngine::with_frame(EngineBehavior::Success, vllm_frame);
-        let selected = causal_selection(engine.clone());
+        let selected = causal_selection_for_test(engine.clone()).await;
         let branches = (0..3).map(prepared_causal_branch).collect();
         let parent = Context::new(()).context();
         let semaphore = Arc::new(Semaphore::new(3));
@@ -117,7 +118,7 @@ async fn causal_dispatch_runs_only_one_sibling_at_a_time() {
     let parent = Context::new(()).context();
     let admission = Arc::new(Semaphore::new(5));
     let task = tokio::spawn(dispatch(
-        causal_selection(engine.clone()),
+        causal_selection_for_test(engine.clone()).await,
         (0..5).map(prepared_causal_branch).collect(),
         "serial".into(),
         parent.clone(),

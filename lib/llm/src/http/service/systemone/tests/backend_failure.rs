@@ -4,13 +4,19 @@
 use super::super::PreparedScoringRequest;
 use super::*;
 
-#[test]
-fn prepared_token_execution_rejects_a_mismatched_wire_before_dispatch() {
+#[tokio::test]
+async fn prepared_token_execution_rejects_a_mismatched_wire_before_dispatch() {
     let engine = TestEngine::new(EngineBehavior::Success);
-    let selection = selection(engine.clone());
+    let selection = selection_for_test(engine.clone()).await;
     let mut branch = prepared_noul_branch(0);
     branch.wire = PreparedScoringRequest::vllm(vec![1, 2], &[13, 14], "salt").unwrap();
-    assert!(super::super::execution::PreparedExecution::token(selection, vec![branch]).is_none());
+    assert!(
+        super::super::execution::PreparedExecution::token(
+            selection.selection.clone(),
+            vec![branch]
+        )
+        .is_none()
+    );
     assert!(engine.observations.lock().unwrap().is_empty());
 }
 
@@ -33,7 +39,7 @@ async fn token_backend_validation_errors_preserve_dialect_specific_status() {
             let mut request = canonical_request(1);
             Arc::make_mut(&mut request).dialect = dialect;
             let response = dispatch(
-                selection(engine),
+                selection_for_test(engine).await,
                 vec![prepared_noul_branch(0)],
                 "invalid".into(),
                 Context::new(()).context(),
@@ -48,8 +54,8 @@ async fn token_backend_validation_errors_preserve_dialect_specific_status() {
     }
 }
 
-#[test]
-fn derives_only_a_proven_single_data_parallel_rank() {
+#[tokio::test]
+async fn derives_only_a_proven_single_data_parallel_rank() {
     assert_eq!(resolve_dp_rank(None, 7, 1), Some(7));
     assert_eq!(resolve_dp_rank(None, 7, 2), None);
     assert_eq!(resolve_dp_rank(Some(9), 7, 2), Some(9));
@@ -141,7 +147,7 @@ async fn admitted_worker_removal_during_fanout_does_not_reroute_siblings() {
         admissions: Some(admissions),
         frame: sglang_frame,
     });
-    let mut selection = selection(engine.clone());
+    let mut selection = selection_for_test(engine.clone()).await;
     selection.context.admitted_ids = Some(receiver);
     let parent = Context::new(()).context();
     let admission = Arc::new(Semaphore::new(3));
@@ -165,8 +171,8 @@ async fn admitted_worker_removal_during_fanout_does_not_reroute_siblings() {
     assert_eq!(observations[1].routing.backend_instance_id, Some(41));
 }
 
-#[test]
-fn canonical_backend_errors_preserve_client_error_classification() {
+#[tokio::test]
+async fn canonical_backend_errors_preserve_client_error_classification() {
     use dynamo_runtime::error::{DynamoError, ErrorClass};
     for (class, expected) in [
         (ErrorClass::InvalidRequest, StatusCode::UNPROCESSABLE_ENTITY),
