@@ -7,8 +7,8 @@ use dynamo_decisions::{QuestionOutcome, reduce_vocab_logprobs};
 use dynamo_runtime::engine::AsyncEngineContext;
 use futures::StreamExt;
 
-use super::super::decision_lifecycle;
-use super::{
+use super::super::super::decision_lifecycle;
+use super::super::{
     BranchResult, DispatchError, MAX_CONCURRENT_SIBLINGS, Placement, StartedBranch, backend_error,
     resolve_dp_rank, run_until_killed,
 };
@@ -22,12 +22,12 @@ use crate::{
     },
 };
 
-pub(super) enum PreparedScoringRequest {
+pub(in super::super) enum PreparedScoringRequest {
     Sglang(Box<serde_json::Value>),
     Vllm(Box<serde_json::Value>),
 }
 
-pub(super) fn measured_cached_tokens(
+pub(in super::super) fn measured_cached_tokens(
     response: &serde_json::Value,
     input_tokens: usize,
 ) -> Result<Option<usize>, DispatchError> {
@@ -45,7 +45,7 @@ pub(super) fn measured_cached_tokens(
     Ok(Some(count))
 }
 
-pub(super) fn build(
+pub(in super::super) fn build(
     backend: TokenBackend,
     prompt_ids: Vec<u32>,
     label_ids: &[u32],
@@ -57,7 +57,7 @@ pub(super) fn build(
     }
 }
 
-pub(super) fn max_concurrent_siblings(backend: TokenBackend) -> usize {
+pub(in super::super) fn max_concurrent_siblings(backend: TokenBackend) -> usize {
     match backend {
         TokenBackend::Sglang => MAX_CONCURRENT_SIBLINGS,
         TokenBackend::VllmCausal => 1,
@@ -65,13 +65,13 @@ pub(super) fn max_concurrent_siblings(backend: TokenBackend) -> usize {
 }
 
 impl PreparedScoringRequest {
-    pub(super) fn backend(&self) -> TokenBackend {
+    pub(in super::super) fn backend(&self) -> TokenBackend {
         match self {
             Self::Sglang(_) => TokenBackend::Sglang,
             Self::Vllm(_) => TokenBackend::VllmCausal,
         }
     }
-    pub(super) fn sglang(
+    pub(in super::super) fn sglang(
         prompt_ids: Vec<u32>,
         label_ids: &[u32],
         cache_salt: &str,
@@ -80,7 +80,7 @@ impl PreparedScoringRequest {
             .map(Box::new)
             .map(Self::Sglang)
     }
-    pub(super) fn vllm(
+    pub(in super::super) fn vllm(
         prompt_ids: Vec<u32>,
         label_ids: &[u32],
         cache_salt: &str,
@@ -89,7 +89,7 @@ impl PreparedScoringRequest {
             .map(Box::new)
             .map(Self::Vllm)
     }
-    pub(super) fn compile(
+    pub(in super::super) fn compile(
         self,
         canonical_model: &str,
         kv_cache_block_size: u32,
@@ -125,7 +125,7 @@ impl PreparedScoringRequest {
     }
 }
 
-pub(super) fn scoring_placement(
+pub(in super::super) fn scoring_placement(
     tracker: &RequestTracker,
     data_parallel_start_rank: u32,
     data_parallel_size: u32,
@@ -151,7 +151,7 @@ pub(super) fn scoring_placement(
         })
 }
 
-pub(super) async fn finish_branch(
+pub(in super::super) async fn finish_branch(
     backend: TokenBackend,
     started: StartedBranch,
     data_parallel_start_rank: u32,

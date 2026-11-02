@@ -150,7 +150,7 @@ async fn finish_branch_parses_terminal_scores_and_tracker_placement() {
         Context::new(()).context(),
     );
     let parent = Context::new(());
-    let result = super::token_scorer::finish_branch(
+    let result = super::token_execution::backend::finish_branch(
         TokenBackend::Sglang,
         started_branch(prepared_noul_branch(0), tracker, stream),
         0,
@@ -173,9 +173,12 @@ async fn finish_branch_parses_terminal_scores_and_tracker_placement() {
 #[test]
 fn sglang_scoring_preprocessing_preserves_exact_tracker_isl() {
     let selected = selection(TestEngine::new(EngineBehavior::Success));
-    let request =
-        super::token_scorer::PreparedScoringRequest::sglang(vec![1, 2, 3], &[17, 4], "isolated")
-            .unwrap();
+    let request = super::token_execution::backend::PreparedScoringRequest::sglang(
+        vec![1, 2, 3],
+        &[17, 4],
+        "isolated",
+    )
+    .unwrap();
     let preprocessed = request
         .compile(
             &selected.context.canonical_model,
@@ -212,7 +215,7 @@ async fn finish_branch_stops_when_parent_is_cancelled() {
     let parent = Context::new(());
     let parent_context = parent.context();
     parent_context.kill();
-    let result = super::token_scorer::finish_branch(
+    let result = super::token_execution::backend::finish_branch(
         TokenBackend::Sglang,
         started_branch(prepared_noul_branch(0), tracker, stream),
         0,
@@ -234,7 +237,7 @@ async fn cancelled_stream_completion_is_not_a_malformed_response() {
         stream_parent.kill();
         std::task::Poll::Ready(None::<Annotated<LLMEngineOutput>>)
     });
-    let result = super::token_scorer::finish_branch(
+    let result = super::token_execution::backend::finish_branch(
         TokenBackend::Sglang,
         started_branch(
             prepared_noul_branch(0),
@@ -530,7 +533,7 @@ fn prepare_branches(
     selection: &SystemOneExecutionSelection,
     limit: usize,
 ) -> Result<Vec<PreparedBranch>, (StatusCode, String)> {
-    super::scoring::prepare_branches(
+    super::token_execution::prepare_branches(
         request,
         &selection.context,
         token_executor(selection),
