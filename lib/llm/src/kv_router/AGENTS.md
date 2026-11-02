@@ -51,8 +51,8 @@ and the booking lifecycle these rules protect.
 - `KvRouter` never dispatches. `RoutingHost` dispatches decode, aggregated, and prefill requests
   (the prefill hop through the prefill set's own `RoutingHost`); `EncoderRouter` dispatches
   encode requests through a round-robin `PushRouter`.
-- Each booking has exactly one owner at a time (`RoutePlan`, then `RequestGuard`, or a detached
-  lease) and is released exactly once.
+- Each booking has exactly one owner at a time (`RoutePlan`, then `RequestGuard`, a
+  `RouteBooking`, or a lease detached under its request id) and is released exactly once.
 - A preview never books capacity and never creates an affinity binding.
 - Validate request-supplied worker pins only at initial selection. A pinned worker that
   disappears after a preview or at dispatch is a service failure, not a client error.

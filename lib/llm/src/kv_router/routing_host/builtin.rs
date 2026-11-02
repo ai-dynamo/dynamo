@@ -576,7 +576,7 @@ impl RoutingHost {
 /// the LoRA load and the session-affinity hold until
 /// [`RoutingHost::dispatch_builtin_plan`] moves them into a request guard, or
 /// dropping the plan releases them.
-pub(crate) struct BuiltinRoutePlan {
+pub struct BuiltinRoutePlan {
     phase: RequestPhase,
     /// Direct mode with no affinity session: send to the explicit target.
     direct: bool,

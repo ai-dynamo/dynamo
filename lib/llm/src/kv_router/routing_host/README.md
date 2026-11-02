@@ -54,6 +54,8 @@ do not fit the mode.
 | `generate` | The pipeline's terminal engine: select, book, send. | The response stream releases the booking when it ends. |
 | `generate` with `query_instance_id` | An advisory lookup. | Nothing: it selects with `Query` admission and returns the selection as `routing_data` without sending. |
 | `plan_route`, then `dispatch_route` | A stage router that books before it sends, such as the prefill hop. | The `RoutePlan` owns the booking until `dispatch_route` moves it into the request guard, or until `abort`. |
+| `plan_route`, then `RoutePlan::into_booking` | A host that books but never sends, and releases the booking itself. | The `RouteBooking` owns the booking until `release` or a drop. The classifier lifecycle is aborted, and the affinity hold is dropped without binding the session. |
+| `plan_route`, then `RoutePlan::detach_booking` | A host that books but never sends, and releases by request id. | The request lease manager keeps the booking under the plan's request id until `KvRouter::free` with that id, or until the lease expires. The classifier lifecycle and affinity hold are handled as for `into_booking`. |
 | `preview_kv_route`, then `plan_kv_route_from_preview`, then `dispatch_kv_plan` | Conditional disaggregation: decide from a decode preview before booking anything. | A `RoutePreview` holds nothing. The plan made from it books the previewed worker. |
 | `prefill_worker_busy` | The conditional-disaggregation prefill-load probe. | Nothing. |
 | `kv_router()` | Direct `KvRouter` queries, such as the EPP's prefill reservation. | Whatever the caller books there. |
@@ -79,6 +81,7 @@ How a KV route runs:
 | `generate` | The pipeline's terminal engine: select, send. | The response stream releases the reservation when it ends. |
 | `generate` with `query_instance_id` | Nothing different: the built-in plane has no query path. The request is selected and **sent**. The session-affinity lookup does not acquire a hold, so the session is not bound. | As above. |
 | `plan_route`, then `dispatch_route` | A stage router that selects before it sends, such as the prefill hop. | The `RoutePlan` owns the occupancy reservation, LoRA load, and affinity hold until `dispatch_route` moves them into the request guard, or until `abort` or a drop. |
+| `plan_route`, then `into_booking` or `detach_booking` | A host that selects but never sends. | Nothing is kept: occupancy and LoRA load are not keyed by request, so both release them at once. A round-robin cursor stays advanced. |
 | `peek_next_worker` | An advisory pick, such as the EPP's built-in prefill reservation. | Nothing: it does not advance the round-robin cursor or reserve occupancy. |
 
 How a built-in route runs:
@@ -127,6 +130,9 @@ How a built-in route runs:
   worker for Migration, and accept the dispatch the same way.
 - **Giving a plan up.** `abort` releases what the plan holds. Dropping a plan also releases
   it, without waiting for acknowledgement.
+- **Keeping a plan without sending it.** `into_booking` and `detach_booking` end the plan
+  without dispatch for a host that never sends, such as the inference-gateway EPP. Neither
+  counts the request as started.
 
 ## What is different
 

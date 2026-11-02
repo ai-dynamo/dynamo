@@ -316,7 +316,7 @@ pub struct RoutingHost {
 /// An admitted KV route awaiting dispatch: the selected worker, its booking,
 /// and the affinity hold, until [`RoutingHost::dispatch_kv_plan`] sends it or
 /// [`KvRoutePlan::abort`] gives it up.
-pub(crate) struct KvRoutePlan {
+pub struct KvRoutePlan {
     /// The phase the worker was selected for; dispatch tracks under it rather
     /// than re-reading the request.
     phase: RequestPhase,
@@ -386,15 +386,47 @@ impl KvRoutePlan {
         }
         self.cleanup.finish().await;
     }
+
+    /// Keep the booking without dispatching. Only a dispatching host can
+    /// follow a classifier lifecycle, so it is aborted; the affinity hold is
+    /// dropped without binding the session.
+    fn into_cleanup(mut self) -> KvRequestCleanup {
+        if let Some(mut lifecycle) = self.selection.request_lifecycle.take() {
+            lifecycle.abort(None);
+        }
+        self.cleanup
+    }
+}
+
+/// The booking of a route its host keeps without dispatching, from
+/// [`RoutePlan::into_booking`]. [`Self::release`] frees it and waits for the
+/// scheduler to acknowledge; dropping it frees it without waiting.
+#[must_use = "dropping a route booking releases it"]
+pub struct RouteBooking {
+    /// `None` for a built-in route, whose reservations end with the plan.
+    cleanup: Option<KvRequestCleanup>,
+}
+
+impl RouteBooking {
+    /// Release the booking and wait for the scheduler to acknowledge it.
+    pub async fn release(self) {
+        if let Some(cleanup) = &self.cleanup {
+            cleanup.finish().await;
+        }
+    }
 }
 
 /// A route selected for one request but not sent yet, in any routing mode:
 /// the worker and what holds it (a KV booking, an occupancy reservation, an
 /// affinity hold), until [`RoutingHost::dispatch_route`] sends it or
 /// [`RoutePlan::abort`] gives it up.
+///
+/// A host that selects but never sends, such as the inference-gateway EPP,
+/// keeps the booking instead with [`Self::into_booking`] or
+/// [`Self::detach_booking`]. Dropping a plan releases what it holds.
 // Built once per request and moved straight into dispatch.
 #[allow(clippy::large_enum_variant)]
-pub(crate) enum RoutePlan {
+pub enum RoutePlan {
     Kv(KvRoutePlan),
     Builtin(BuiltinRoutePlan),
 }
@@ -402,10 +434,7 @@ pub(crate) enum RoutePlan {
 impl RoutePlan {
     /// The selected worker. A KV route is sent there exactly; a built-in route
     /// moves to another instance if this one is gone by the send.
-    // No caller yet: the EPP, which hands the worker to the frontend instead
-    // of dispatching, is the intended first one.
-    #[allow(dead_code)]
-    pub(crate) fn target(&self) -> AffinityTarget {
+    pub fn target(&self) -> AffinityTarget {
         match self {
             Self::Kv(plan) => route_target(plan.worker()),
             Self::Builtin(plan) => plan.target(),
@@ -423,15 +452,37 @@ impl RoutePlan {
     }
 
     /// Give the route up before dispatch, releasing what it holds.
-    // No caller yet: the frontend dispatches every plan it makes. The EPP,
-    // which can give a reservation up, is the intended first one.
-    #[allow(dead_code)]
-    pub(crate) async fn abort(self, error: Option<&Error>) {
+    pub async fn abort(self, error: Option<&Error>) {
         match self {
             Self::Kv(plan) => plan.abort(error).await,
             // Built-in modes have no classifier lifecycle to tell; dropping
             // the plan releases its reservations.
             Self::Builtin(plan) => drop(plan),
+        }
+    }
+
+    /// Keep the booking without dispatching, for a host that releases it
+    /// itself. A KV booking stays with the returned [`RouteBooking`]. A
+    /// built-in route's occupancy reservation and LoRA load are not keyed by
+    /// request, so they are released now; a round-robin cursor stays advanced.
+    pub fn into_booking(self) -> RouteBooking {
+        match self {
+            Self::Kv(plan) => RouteBooking {
+                cleanup: Some(plan.into_cleanup()),
+            },
+            Self::Builtin(_) => RouteBooking { cleanup: None },
+        }
+    }
+
+    /// Keep a KV booking under the plan's request id without dispatching. The
+    /// host frees it by that id with `KvRouter::free` (and reports prefill
+    /// done with `KvRouter::mark_prefill_completed`); otherwise the booking
+    /// expires with its lease. A built-in route releases what it holds now,
+    /// as with [`Self::into_booking`].
+    pub fn detach_booking(self) {
+        match self {
+            Self::Kv(plan) => plan.into_cleanup().detach(),
+            Self::Builtin(_) => {}
         }
     }
 }

@@ -199,6 +199,12 @@ releasing it.
 `register_detached` is the other registration: the booking is tracked by request id and
 released by `KvRouter::free`, not by a handle. `KvRouter::add_request` uses it.
 
+A host that books but never sends ends the plan instead of dispatching it:
+`RoutePlan::into_booking` moves the cleanup into a `RouteBooking`, which releases it on
+`release()` or drop; `RoutePlan::detach_booking` detaches the local lease
+(`RequestAttemptLease::detach`), making it reachable by request id, so `KvRouter::free` or
+expiry releases it as for `register_detached`.
+
 Booking descriptors carry the attempt id, so late cleanup from an old attempt cannot release a
 newer booking that reused the same request id and worker.
 

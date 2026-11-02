@@ -85,7 +85,8 @@ pub use prefill_router::PrefillRouter;
 pub(crate) use request_lease::RequestAttemptRelease;
 pub use route_request::RouteRequest;
 pub use routing_host::{
-    KvPushRouter, LlmDispatch, MultimodalCache, RoutingHost, RoutingHostBuilder,
+    KvPushRouter, LlmDispatch, MultimodalCache, RouteBooking, RoutePlan, RoutingHost,
+    RoutingHostBuilder,
 };
 pub use routing_load::{
     ManagedKvRouter, RouterLoadSource, RoutingLoadContext, SchedulerLoadSender,

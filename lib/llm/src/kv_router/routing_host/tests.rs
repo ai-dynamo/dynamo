@@ -306,6 +306,54 @@ async fn builtin_route_plan_holds_its_reservation_until_aborted() {
     runtime.shutdown();
 }
 
+/// A built-in route has nothing keyed by request to keep, so keeping its
+/// booking releases its occupancy reservation at once.
+#[tokio::test]
+#[serial_test::serial]
+async fn builtin_route_booking_releases_its_reservation() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("builtin-route-booking".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate".to_string());
+    let client = endpoint.client().await.unwrap();
+    let load_context = test_load_context(&client).await;
+    client.override_discovered_instances(vec![1, 2]);
+    client.override_instance_avail(vec![1, 2]);
+    let host = RoutingHost::builder(client, RouterMode::LeastLoaded)
+        .load_context(load_context)
+        .build()
+        .await
+        .unwrap();
+
+    let request = Context::new(request());
+    let plan = host
+        .plan_route(&request, RequestPhase::Aggregated)
+        .await
+        .unwrap();
+    let worker_id = plan.target().worker_id;
+    assert_eq!(host.inner.occupancy_for_test(worker_id), 1);
+    let booking = plan.into_booking();
+    assert_eq!(host.inner.occupancy_for_test(worker_id), 0);
+    booking.release().await;
+
+    let plan = host
+        .plan_route(&request, RequestPhase::Aggregated)
+        .await
+        .unwrap();
+    let worker_id = plan.target().worker_id;
+    plan.detach_booking();
+    assert_eq!(host.inner.occupancy_for_test(worker_id), 0);
+
+    drop(host);
+    runtime.shutdown();
+}
+
 /// The selected worker can leave between a built-in plan and its dispatch. The
 /// send moves to another instance, and `prepare` sees the worker the request is
 /// actually sent to.
@@ -2899,6 +2947,107 @@ async fn kv_route_plans_from_a_route_request_alone() {
     assert_eq!(
         router.request_metrics.requests_started_total.get(),
         started_before
+    );
+
+    drop(router);
+    runtime.shutdown();
+}
+
+/// Waits for a booking released without acknowledgement to leave the scheduler.
+async fn wait_for_no_active_requests(router: &RoutingHost) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let loads = potential_loads(router).await;
+            if loads.iter().all(|load| load.active_requests == 0) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the booking must be released");
+}
+
+/// A host that keeps a KV booking without dispatching it holds the booking
+/// until it releases it, or until the booking is dropped.
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_route_booking_holds_until_released_or_dropped() {
+    let (router, runtime) = router(None).await;
+    let started_before = router.request_metrics.requests_started_total.get();
+
+    let released = Context::new(request());
+    let booking = router
+        .plan_route(&released, RequestPhase::Decode)
+        .await
+        .unwrap()
+        .into_booking();
+    assert_eq!(
+        active_requests_for(&potential_loads(&router).await, 7, 0),
+        1
+    );
+    booking.release().await;
+    assert!(
+        potential_loads(&router)
+            .await
+            .iter()
+            .all(|load| load.active_requests == 0)
+    );
+
+    let dropped = Context::new(request());
+    let booking = router
+        .plan_route(&dropped, RequestPhase::Decode)
+        .await
+        .unwrap()
+        .into_booking();
+    assert_eq!(
+        active_requests_for(&potential_loads(&router).await, 7, 0),
+        1
+    );
+    drop(booking);
+    wait_for_no_active_requests(&router).await;
+    assert_eq!(
+        router.request_metrics.requests_started_total.get(),
+        started_before,
+        "a booking kept without dispatch is not a started request"
+    );
+
+    drop(router);
+    runtime.shutdown();
+}
+
+/// A detached KV booking stays under the plan's request id after the plan is
+/// gone, and `KvRouter::free` with that id releases it.
+#[tokio::test]
+#[serial_test::serial]
+async fn detached_kv_booking_is_freed_by_its_request_id() {
+    let (router, runtime) = router(None).await;
+    let request = Context::new(request());
+    let request_id = request.context().id().to_string();
+
+    router
+        .plan_route(&request, RequestPhase::Decode)
+        .await
+        .unwrap()
+        .detach_booking();
+    // Give a wrongly armed lease the chance to release on drop.
+    tokio::task::yield_now().await;
+    assert_eq!(
+        active_requests_for(&potential_loads(&router).await, 7, 0),
+        1
+    );
+
+    router
+        .kv_router()
+        .mark_prefill_completed(&request_id)
+        .await
+        .unwrap();
+    router.kv_router().free(&request_id).await.unwrap();
+    assert!(
+        potential_loads(&router)
+            .await
+            .iter()
+            .all(|load| load.active_requests == 0)
     );
 
     drop(router);
