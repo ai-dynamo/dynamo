@@ -110,8 +110,12 @@ pub struct RequestTraceMetrics {
     pub input_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
+    /// The router's estimate of the prompt tokens already cached on the chosen worker.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<u64>,
+    /// The prompt tokens the engine reported it reused. Absent when no report came.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_reused_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_received_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -344,6 +348,7 @@ mod tests {
                 input_tokens: None,
                 output_tokens: Some(4),
                 cached_tokens: None,
+                engine_reused_tokens: None,
                 request_received_ms: Some(1_000),
                 prefill_wait_time_ms: None,
                 prefill_time_ms: None,
@@ -374,6 +379,7 @@ mod tests {
         assert!(value.get("tool").is_none());
         assert!(value.get("payload").is_none());
         assert!(value["request"].get("model").is_none());
+        assert!(value["request"].get("engine_reused_tokens").is_none());
         assert!(value["request"].get("finish_reason_metadata").is_none());
     }
 

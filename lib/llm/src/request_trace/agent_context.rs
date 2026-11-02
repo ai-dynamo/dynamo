@@ -211,6 +211,7 @@ pub(crate) fn request_metrics(
         input_tokens: tracker.and_then(|tracker| tracker.isl_tokens().map(|v| v as u64)),
         output_tokens: tracker.map(RequestTracker::osl_tokens),
         cached_tokens: tracker.and_then(|tracker| tracker.cached_tokens().map(|v| v as u64)),
+        engine_reused_tokens: tracker.and_then(RequestTracker::engine_reused_tokens),
         request_received_ms: timing.as_ref().map(|timing| timing.request_received_ms),
         prefill_wait_time_ms: timing
             .as_ref()
@@ -642,6 +643,7 @@ mod tests {
         thread::sleep(Duration::from_millis(1));
         tracker.record_decode_first_token();
         thread::sleep(Duration::from_millis(1));
+        tracker.record_engine_reused_tokens(48);
         tracker.record_finish();
 
         let metrics = request_metrics(
@@ -657,6 +659,7 @@ mod tests {
         assert_eq!(metrics.input_tokens, Some(128));
         assert_eq!(metrics.output_tokens, Some(5));
         assert_eq!(metrics.cached_tokens, Some(32));
+        assert_eq!(metrics.engine_reused_tokens, Some(48));
         assert!(metrics.request_received_ms.is_some_and(|ms| ms > 0));
         assert!(metrics.prefill_wait_time_ms.is_some());
         assert!(metrics.prefill_time_ms.is_some());
@@ -689,6 +692,7 @@ mod tests {
         assert_eq!(metrics.input_tokens, None);
         assert_eq!(metrics.output_tokens, None);
         assert_eq!(metrics.cached_tokens, None);
+        assert_eq!(metrics.engine_reused_tokens, None);
         assert_eq!(metrics.request_received_ms, None);
         assert_eq!(metrics.prefill_wait_time_ms, None);
         assert_eq!(metrics.prefill_time_ms, None);
