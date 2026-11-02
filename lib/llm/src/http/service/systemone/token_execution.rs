@@ -1,10 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::backend_error::lifecycle_error;
 use super::*;
-use super::{backend_error::lifecycle_error, token_scorer};
+#[path = "token_execution/backend.rs"]
+pub(super) mod backend;
 use crate::discovery::{DecisionContext, TokenExecutor};
 use crate::local_model::runtime_config::TokenBackend;
+use backend as token_scorer;
 use futures::{StreamExt, stream};
 
 pub(super) struct PreparedTokenExecution {

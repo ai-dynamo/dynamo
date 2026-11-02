@@ -46,13 +46,11 @@ mod backend_error;
 
 #[path = "systemone/execution.rs"]
 mod execution;
-#[path = "systemone/scoring.rs"]
-mod scoring;
-#[path = "systemone/token_scorer.rs"]
-mod token_scorer;
-use token_scorer::PreparedScoringRequest;
+#[path = "systemone/token_execution.rs"]
+mod token_execution;
+use token_execution::backend::PreparedScoringRequest;
 #[cfg(test)]
-use token_scorer::measured_cached_tokens;
+use token_execution::backend::measured_cached_tokens;
 
 #[path = "systemone/response.rs"]
 mod response;
