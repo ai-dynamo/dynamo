@@ -15,8 +15,8 @@ use super::prefill_load::effective_prefill_tokens;
 use crate::kv_hints::{KvTransferCandidates, KvTransferSourceChoice};
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
-    LocalBlockHash, RoutingConstraints, SelectionTrace, SharedCacheHits, WorkerAffinityTarget,
-    WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    LocalBlockHash, RoutingConstraints, SelectionLogFields, SelectionTrace, SharedCacheHits,
+    WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::policy_queue::QueueRejection;
 use crate::sequences::WorkerLoadProjection;
@@ -45,7 +45,7 @@ impl std::fmt::Display for AttemptId {
 }
 
 pub type OverloadedWorkerProvider =
-    Arc<dyn Fn() -> Option<HashSet<WorkerId>> + Send + Sync + 'static>;
+    Arc<dyn Fn() -> Option<Arc<HashSet<WorkerId>>> + Send + Sync + 'static>;
 
 /// Supplies the authoritative set of workers currently available for selection.
 ///
@@ -166,6 +166,9 @@ pub struct SchedulingResponse {
     /// Per-candidate costs, present only when the scheduler has a selection
     /// trace spec installed and this selection was admitted.
     pub selection_trace: Option<SelectionTrace>,
+    /// Fields the routing task logs the selection with; see
+    /// [`crate::protocols::WorkerSelectionResult::log_fields`].
+    pub log_fields: Option<SelectionLogFields>,
 }
 
 /// Internal result that pairs a public scheduling response with its attempt identity.

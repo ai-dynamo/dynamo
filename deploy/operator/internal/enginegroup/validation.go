@@ -625,7 +625,7 @@ func validateTransitionOutcome(status GroupStatus) error {
 		if transition.Failure != nil {
 			return errors.New("completed transition must not carry a failure")
 		}
-		if !membershipCommitConverged(status) {
+		if !membershipCommitRecorded(status) {
 			return errors.New("completed transition has no committed membership")
 		}
 		if transition.Spec.Plan.VerificationRequirement == VerificationRequirementRequired &&
@@ -704,7 +704,7 @@ func validateTransitionCapacityTarget(status GroupStatus, base MembershipTopolog
 
 func expectedReleaseFences(status GroupStatus, base MembershipTopology, resolution planResolution, targetRevision int64) ([]ReleaseFence, error) {
 	// Committed retirement binds the exact selected allocations to this transition's immutable result generation.
-	if membershipCommitConverged(status) {
+	if membershipCommitRecorded(status) {
 		return releaseFencesFor(status.Transition.Spec.ID,
 			status.Membership.Observed.Transition.ResultTopology.Generation, base, status.Registry, resolution.retiringReplicaIDs)
 	}
@@ -900,13 +900,14 @@ func validateTargetPreflight(status GroupStatus) error {
 	return nil
 }
 
-func membershipCommitConverged(status GroupStatus) bool {
+// Durable commit authority comes from the correlated immutable result and recorded history.
+// A fresh engine observation may disagree; reconciliation checks that observation before effects.
+func membershipCommitRecorded(status GroupStatus) bool {
 	if !membershipCommittedForTransition(status) || status.Membership.Observed.Transition.ResultTopology == nil {
 		return false
 	}
 	result := *status.Membership.Observed.Transition.ResultTopology
-	return sameTopology(status.Membership.Observed.CommittedTopology, result) &&
-		sameTopologyWithCurrent(status.Topologies, result)
+	return sameTopologyWithCurrent(status.Topologies, result)
 }
 
 func validateTransitionMembership(status GroupStatus, resolution planResolution) error {

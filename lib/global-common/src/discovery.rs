@@ -134,10 +134,12 @@ pub struct PoolListing {
     pub frontends: Vec<Url>,
     #[serde(default)]
     pub capacity: Vec<Capacity>,
-    /// The only PoolRelay allowed to stream this pool's state, by each
-    /// identity it can connect with. On a trusted network these are its pod's
-    /// addresses, as [`address_identity`] writes them: two on a dual-stack
-    /// cluster. Empty when the service does not know the PoolRelay.
+    /// The PoolRelays allowed to stream this pool's state, by each identity
+    /// they can connect with. A pool runs active-active PoolRelay replicas,
+    /// each reporting to every router, and routers dedupe the overlapping
+    /// reports. On a trusted network these are the addresses of every Ready
+    /// replica's pod, as [`address_identity`] writes them: two per pod on a
+    /// dual-stack cluster. Empty when the service does not know the PoolRelays.
     #[serde(default)]
     pub relay_identities: Vec<String>,
 }
