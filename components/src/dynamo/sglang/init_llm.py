@@ -71,13 +71,14 @@ async def _warmup_prefill_engine(
 
 def _uses_image_warmup(engine: sgl.Engine, server_args) -> bool:
     """Whether launch_server would warm up with an image chat request
-    (http_server._execute_server_warmup)."""
+    (http_server._execute_server_warmup). Fields newer than the oldest
+    supported SGLang default to off."""
     return (
         engine.tokenizer_manager.model_config.is_image_understandable_model
-        and not server_args.language_only
-        and not server_args.language_model_only
-        and not server_args.enable_encoder_swa_bounded_replay
         and not server_args.skip_tokenizer_init
+        and not getattr(server_args, "language_only", False)
+        and not getattr(server_args, "language_model_only", False)
+        and not getattr(server_args, "enable_encoder_swa_bounded_replay", False)
         and not is_mps()
     )
 
@@ -132,12 +133,16 @@ async def _warmup_decode_engine(engine: sgl.Engine, server_args) -> None:
 
     Without an eager forward first, CUDA-graph decode stays slower for the life
     of the process. Without the freeze, full collections walk ~1M startup
-    objects and stall every stream for 0.3-1 s. Honors --skip-server-warmup
-    like SGLang (the freeze still runs). Raises if the warmup fails, as
-    launch_server exits then.
+    objects and stall every stream for 0.3-1 s. Like launch_server, skips
+    both generations with --skip-server-warmup and on elastic EP scale
+    joiners, whose requests the primary serves after adoption; the freeze
+    still runs. Raises if the warmup fails, as launch_server exits then.
     """
     started = time.time()
-    if not server_args.skip_server_warmup:
+    generate = not server_args.skip_server_warmup and (
+        getattr(server_args, "ep_join_mode", None) != "scale"
+    )
+    if generate:
         if _uses_image_warmup(engine, server_args):
             await _image_warmup(engine)
         else:
@@ -145,7 +150,7 @@ async def _warmup_decode_engine(engine: sgl.Engine, server_args) -> None:
             await warmup_engine(engine, server_args)
     # Freezes the tokenizer manager (this process), schedulers and detokenizer.
     await engine.tokenizer_manager.freeze_gc()
-    if not server_args.skip_server_warmup:
+    if generate:
         # Engine requests are not bounded by SGLang's HTTP polling timeout.
         await asyncio.wait_for(
             engine.async_generate(

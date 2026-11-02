@@ -2717,6 +2717,7 @@ def _decode_warmup_server_args(**overrides):
     values = dict(
         skip_server_warmup=False,
         skip_tokenizer_init=False,
+        ep_join_mode=None,
         language_only=False,
         language_model_only=False,
         enable_encoder_swa_bounded_replay=False,
@@ -2756,6 +2757,18 @@ async def test_decode_warmup_skip_server_warmup_still_freezes_gc(record_text_war
     await init_llm_mod._warmup_decode_engine(
         _decode_warmup_engine(events),
         _decode_warmup_server_args(skip_server_warmup=True),
+    )
+
+    assert [name for name, _ in events] == ["freeze_gc"]
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_decode_warmup_skips_generation_on_scale_joiner(record_text_warmup):
+    events = record_text_warmup
+    await init_llm_mod._warmup_decode_engine(
+        _decode_warmup_engine(events, image=True),
+        _decode_warmup_server_args(ep_join_mode="scale"),
     )
 
     assert [name for name, _ in events] == ["freeze_gc"]
@@ -2819,6 +2832,15 @@ def test_decode_warmup_chooses_image_request_like_launch_server(
         init_llm_mod._uses_image_warmup(engine, _decode_warmup_server_args(**overrides))
         is expected
     )
+
+
+def test_decode_warmup_image_check_tolerates_older_sglang_args(monkeypatch):
+    # SGLang 0.5.19 (the XPU image) has no enable_encoder_swa_bounded_replay.
+    monkeypatch.setattr(init_llm_mod, "is_mps", lambda: False)
+    server_args = SimpleNamespace(skip_tokenizer_init=False)
+    engine = _decode_warmup_engine([], image=True)
+
+    assert init_llm_mod._uses_image_warmup(engine, server_args) is True
 
 
 def _import_sglang_main_without_reconfiguring_logging(monkeypatch):
