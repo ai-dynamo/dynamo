@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer, de::IgnoredAny};
 use serde_json::{Map, Value};
 use utoipa::ToSchema;
 use validator::Validate;
@@ -14,11 +14,11 @@ pub use nvext::{NvExt, NvExtProvider};
 
 /// `/v1/embeddings` request.
 ///
-/// Deserialized through [`normalize_chat_input`] (see `messages`) and
+/// Deserialized through [`RequestFields`] (see `messages`) and
 /// serialized by hand, so a chat-style request reaches the worker without the
 /// placeholder `input`. The field attributes still describe the OpenAPI schema.
 #[derive(ToSchema, Deserialize, Validate, Debug, Clone)]
-#[serde(try_from = "Map<String, Value>")]
+#[serde(try_from = "RequestFields")]
 pub struct NvCreateEmbeddingRequest {
     #[serde(flatten)]
     #[schema(value_type = Object)]
@@ -72,91 +72,127 @@ pub enum EmbeddingMessages {
     Batch(Vec<Vec<EmbeddingChatMessage>>),
 }
 
-fn is_chat_message(value: &Value) -> bool {
-    value
-        .as_object()
-        .is_some_and(|message| message.get("role").is_some_and(Value::is_string))
-}
-
-fn is_conversation(value: &Value) -> bool {
-    value
-        .as_array()
-        .is_some_and(|messages| !messages.is_empty() && messages.iter().all(is_chat_message))
-}
-
-fn is_conversation_batch(value: &Value) -> bool {
-    value.as_array().is_some_and(|conversations| {
-        !conversations.is_empty() && conversations.iter().all(is_conversation)
-    })
-}
-
-/// Moves vLLM's chat-style `input` to `messages`, validates the shape of
-/// `messages`, and gives the OpenAI request type, which requires `input`, an
-/// empty placeholder.
-fn normalize_chat_input(body: &mut Map<String, Value>) -> Result<(), String> {
-    let chat_in_input = body
-        .get("input")
-        .is_some_and(|input| is_conversation(input) || is_conversation_batch(input));
-    if chat_in_input {
-        if body
-            .get("messages")
-            .is_some_and(|messages| !messages.is_null())
-        {
-            return Err("pass the conversation in either `messages` or `input`, not both".into());
+impl EmbeddingMessages {
+    /// Every conversation is non-empty and every message has a string `role`.
+    fn is_well_formed(&self) -> bool {
+        fn is_conversation(messages: &[EmbeddingChatMessage]) -> bool {
+            !messages.is_empty()
+                && messages
+                    .iter()
+                    .all(|message| message.get("role").is_some_and(Value::is_string))
         }
-        let input = body.remove("input").unwrap_or_default();
-        body.insert("messages".into(), input);
-    }
-
-    match body.get("messages") {
-        None => return Ok(()),
-        Some(Value::Null) => {
-            body.remove("messages");
-            return Ok(());
+        match self {
+            Self::Conversation(messages) => is_conversation(messages),
+            Self::Batch(conversations) => {
+                !conversations.is_empty()
+                    && conversations
+                        .iter()
+                        .all(|conversation| is_conversation(conversation))
+            }
         }
-        Some(messages) if !is_conversation(messages) && !is_conversation_batch(messages) => {
-            return Err(
-                "`messages` must be a non-empty list of chat messages, or a non-empty \
-                        list of such lists, and every message needs a string `role`"
-                    .into(),
-            );
-        }
-        Some(_) => {}
     }
-    if body.contains_key("input") {
-        return Err("pass either `input` or chat-style `messages`, not both".into());
-    }
-    body.insert("input".into(), Value::Array(vec![]));
-    Ok(())
 }
 
-/// The request's fields, deserialized after [`normalize_chat_input`].
+const INPUT_SHAPE_ERROR: &str = "`input` must be a string, a list of strings, a list of token \
+                                 IDs, a list of token-ID lists, or chat-style messages in which \
+                                 every message has a string `role`";
+const MESSAGES_SHAPE_ERROR: &str = "`messages` must be a non-empty list of chat messages, or a \
+                                    non-empty list of such lists, and every message needs a \
+                                    string `role`";
+
+/// `input` as sent: OpenAI's text and token-ID forms (in [`EmbeddingInput`]'s
+/// variant order), or vLLM's chat-style conversations. Parsed directly, so
+/// text and token-ID requests skip building a generic JSON tree.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum InputField {
+    String(String),
+    StringArray(Vec<String>),
+    IntegerArray(Vec<u32>),
+    ArrayOfIntegerArray(Vec<Vec<u32>>),
+    Messages(EmbeddingMessages),
+    /// Any other shape, rejected with [`INPUT_SHAPE_ERROR`].
+    Invalid(IgnoredAny),
+}
+
+/// `messages` as sent; any other shape is rejected with [`MESSAGES_SHAPE_ERROR`].
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum MessagesField {
+    Messages(EmbeddingMessages),
+    Invalid(IgnoredAny),
+}
+
+/// The request's fields as sent, before chat-style `input` moves to `messages`.
 #[derive(Deserialize)]
 struct RequestFields {
-    #[serde(flatten)]
-    inner: dynamo_protocols::types::CreateEmbeddingRequest,
+    model: String,
+    #[serde(default)]
+    input: Option<InputField>,
+    #[serde(default)]
+    messages: Option<MessagesField>,
+    #[serde(default)]
+    encoding_format: Option<dynamo_protocols::types::EncodingFormat>,
+    #[serde(default)]
+    user: Option<String>,
+    #[serde(default)]
+    dimensions: Option<u32>,
     #[serde(default)]
     add_special_tokens: Option<bool>,
     #[serde(default)]
     truncate_prompt_tokens: Option<i64>,
     #[serde(default)]
-    messages: Option<EmbeddingMessages>,
-    #[serde(default)]
     nvext: Option<NvExt>,
 }
 
-impl TryFrom<Map<String, Value>> for NvCreateEmbeddingRequest {
-    type Error = String;
+impl TryFrom<RequestFields> for NvCreateEmbeddingRequest {
+    type Error = &'static str;
 
-    fn try_from(mut body: Map<String, Value>) -> Result<Self, Self::Error> {
-        normalize_chat_input(&mut body)?;
-        let fields: RequestFields =
-            serde_json::from_value(Value::Object(body)).map_err(|err| err.to_string())?;
+    fn try_from(fields: RequestFields) -> Result<Self, Self::Error> {
+        use dynamo_protocols::types::EmbeddingInput;
+
+        let messages = match fields.messages {
+            None => None,
+            Some(MessagesField::Messages(messages)) if messages.is_well_formed() => Some(messages),
+            Some(_) => return Err(MESSAGES_SHAPE_ERROR),
+        };
+        let (input, messages) = match (fields.input, messages) {
+            (Some(InputField::Messages(_)), Some(_)) => {
+                return Err("pass the conversation in either `messages` or `input`, not both");
+            }
+            (Some(_), Some(_)) => {
+                return Err("pass either `input` or chat-style `messages`, not both");
+            }
+            (None, None) => return Err("missing field `input`"),
+            // The OpenAI request type requires `input`; a chat-style request
+            // gets an empty placeholder that is never serialized.
+            (None, Some(messages)) => (EmbeddingInput::StringArray(vec![]), Some(messages)),
+            (Some(input), None) => match input {
+                InputField::String(text) => (EmbeddingInput::String(text), None),
+                InputField::StringArray(texts) => (EmbeddingInput::StringArray(texts), None),
+                InputField::IntegerArray(tokens) => (EmbeddingInput::IntegerArray(tokens), None),
+                InputField::ArrayOfIntegerArray(tokens) => {
+                    (EmbeddingInput::ArrayOfIntegerArray(tokens), None)
+                }
+                InputField::Messages(messages) if messages.is_well_formed() => {
+                    (EmbeddingInput::StringArray(vec![]), Some(messages))
+                }
+                InputField::Messages(_) | InputField::Invalid(_) => {
+                    return Err(INPUT_SHAPE_ERROR);
+                }
+            },
+        };
         Ok(Self {
-            inner: fields.inner,
+            inner: dynamo_protocols::types::CreateEmbeddingRequest {
+                model: fields.model,
+                input,
+                encoding_format: fields.encoding_format,
+                user: fields.user,
+                dimensions: fields.dimensions,
+            },
             add_special_tokens: fields.add_special_tokens,
             truncate_prompt_tokens: fields.truncate_prompt_tokens,
-            messages: fields.messages,
+            messages,
             nvext: fields.nvext,
         })
     }
@@ -390,6 +426,16 @@ mod tests {
                 "string `role`",
             ),
             (json!({"model": "m", "messages": "hello"}), "non-empty"),
+            (
+                json!({"model": "m", "input": [{"text": "no role"}]}),
+                "string `role`",
+            ),
+            (
+                json!({"model": "m", "input": {"text": "hello"}}),
+                "`input` must be",
+            ),
+            (json!({"model": "m"}), "missing field `input`"),
+            (json!({"input": "hello"}), "missing field `model`"),
         ];
         for (body, expected) in cases {
             let err = parse(body.clone()).unwrap_err().to_string();
