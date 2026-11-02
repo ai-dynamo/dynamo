@@ -111,11 +111,16 @@ legacy workers, mixed contracts, or a processor override fall back to
 text-prefix routing without failing the request.
 
 Step 4 needs an SGLang build and processor that accept `mm_hashes`. Dynamo's
-SGLang image carries the upstream support. Kimi processors use processor-owned
-wide identities and reject caller hashes, so Dynamo does not forward them.
-Kimi requests still serve, but image-aware cache routing is unsupported and KV
-event batches containing wide pad IDs may be omitted. A custom build without
-hash forwarding is supported with text-prefix routing.
+SGLang image carries the upstream support. A custom build without hash forwarding
+is supported with text-prefix routing.
+
+Image-aware KV routing is unsupported for Kimi K2.5 and Kimi K3 on SGLang. Their
+processors generate their own image identifiers and reject caller-supplied
+`mm_hashes`, so Dynamo does not forward them. Requests still serve, but the router
+cannot match cached images. When a cache-event batch contains these image
+identifiers, Dynamo cannot decode the batch and discards all its events,
+including updates for text blocks. The router can therefore miss cached text as
+well as images, so a full text-prefix fallback is not guaranteed.
 
 ### Wide-Token SGLang Builds
 
