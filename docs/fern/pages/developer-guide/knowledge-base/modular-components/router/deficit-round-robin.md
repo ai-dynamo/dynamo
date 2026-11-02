@@ -268,8 +268,8 @@ curl http://localhost:8000/v1/completions \
     -d '{"model":"YOUR_MODEL","prompt":"YOUR_PROMPT","max_tokens":1}'
 ```
 
-Requests with a missing or unrecognized class header use the `regular`
-default class in this configuration. See
+Requests without the class header use the `regular` default class in this
+configuration, and a request that names an unknown class fails. See
 [Policy-Class Queues](configuration-and-tuning.md#policy-class-queues) for the
 complete class resolution rules.
 

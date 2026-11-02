@@ -107,6 +107,9 @@ pub enum KvSchedulerError {
     #[error("pinned worker {worker_id} is not in allowed worker set")]
     PinnedWorkerNotAllowed { worker_id: WorkerId },
 
+    #[error("unknown policy class {0:?}")]
+    UnknownPolicyClass(String),
+
     #[error("endpoint subscriber shutdown")]
     SubscriberShutdown,
 

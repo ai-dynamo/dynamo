@@ -129,14 +129,17 @@ impl ClassifyRequest {
 
     /// Busy thresholds of the policy class this request resolves to now, including a class
     /// set with [`set_policy_class`](Self::set_policy_class). The queue holds the request
-    /// while every eligible worker is past them.
+    /// while every eligible worker is past them. A name that matches no configured class
+    /// reads the default class's thresholds; the request fails before it is queued unless
+    /// its class is then set to a configured one.
     pub fn queue_thresholds(&self) -> BusyThresholds {
         self.busy_thresholds
             .as_ref()
             .map(|thresholds| {
                 let profile = &thresholds.profile;
                 profile
-                    .class(profile.resolve_class_index(self.policy_class()))
+                    .resolve_class_index(self.policy_class())
+                    .map_or(profile.default_class(), |index| profile.class(index))
                     .busy_thresholds
             })
             .unwrap_or_default()

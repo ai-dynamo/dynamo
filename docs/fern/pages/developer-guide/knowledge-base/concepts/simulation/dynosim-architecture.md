@@ -112,7 +112,8 @@ Policy-class replay resolves classes the same way as the live router:
 flowchart LR
     R["Replay request"] --> C{"policy_class"}
     C -->|Configured class name| Q["Policy class queue"]
-    C -->|Missing or unknown| F["default_policy_class"]
+    C -->|Missing| F["default_policy_class"]
+    C -->|Unknown| X["Request fails"]
     F --> Q
     Q --> D["Deficit round-robin dispatch"]
 ```
