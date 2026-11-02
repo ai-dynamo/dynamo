@@ -95,7 +95,13 @@ pub(super) fn adapt(
     if let Some(count) = *cached_tokens {
         response["meta_info"]["cached_tokens"] = json!(count);
     }
-    output.engine_data = Some(json!({"sglang_response": response}));
+    // Keep sibling keys such as `kv_cache_hit`, which the router reads beside the response.
+    match output.engine_data.as_mut().and_then(Value::as_object_mut) {
+        Some(engine_data) => {
+            engine_data.insert("sglang_response".to_string(), response);
+        }
+        None => output.engine_data = Some(json!({"sglang_response": response})),
+    }
 }
 
 fn native_finish_reason(reason: &FinishReason) -> Value {
