@@ -11,7 +11,11 @@ Request deletion, and injectable faults (including writes that time out but
 land). ``FakeDgdrOperator`` drives the Requests in a ``FakeRetuneKube``
 through the DGDR v1beta2 lifecycle (Accepted -> Run -> Completed with
 Candidates) the way the operator at #17483 does, lowering each Request into
-``Run.status.aisimulate.input`` with the same merge-patch rules.
+``Run.status.aisimulate.input`` with the same merge-patch rules. The
+operator's golden
+``deploy/operator/internal/aisimulate/testdata/trace_request_lowering.golden.json``
+is the oracle for that lowering; ``test_live_retune_dgdr`` checks
+``lower_request_input`` against it.
 
 This is a plain module, not a conftest: tests import what they need.
 """
@@ -180,7 +184,8 @@ def lower_request_input(
     the public role underlay, the ``dgdr_run`` static underlay, the typed
     underlay, the derived defaults, ``inputOverrides`` as the final merge
     patch, then the operator-owned ``dgdr_run`` fields. ``inputOverrides``
-    wins over the typed trace source: nothing restores it afterwards.
+    wins over the typed trace source: nothing restores it afterwards. For
+    the golden's ``request_spec`` it returns the golden's ``run_input``.
     """
 
     spec = request.get("spec") or {}

@@ -20,6 +20,7 @@ import math
 import threading
 import time
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any, Optional
 
 import pytest
@@ -847,6 +848,62 @@ def test_input_read_back_allows_operator_defaults_and_follows_overrides():
     effective = lower_request_input(body, run_name="r-1")
     assert effective["traffic"]["source"]["paths"] == ["/data/other.jsonl"]
     assert input_mismatches(body["spec"], effective) == []
+
+
+# Written by the operator's TestDGDRV1beta2TraceRequestLoweringGolden
+# (deploy/operator/internal/controller): request_spec is the Request this
+# executor builds for _body(), run_input what dgdrRunInput lowers it to.
+LOWERING_GOLDEN = Path(
+    "deploy/operator/internal/aisimulate/testdata/trace_request_lowering.golden.json"
+)
+
+
+def _lowering_golden() -> dict[str, Any]:
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / LOWERING_GOLDEN
+        if candidate.is_file():
+            return json.loads(candidate.read_text(encoding="utf-8"))
+    raise AssertionError(f"{LOWERING_GOLDEN} not found above {Path(__file__)}")
+
+
+def test_request_and_run_input_match_the_operator_golden():
+    golden = _lowering_golden()
+    body = _body()
+    assert json.loads(json.dumps(body["spec"])) == golden["request_spec"]
+    run_input = golden["run_input"]
+    assert input_mismatches(body["spec"], run_input) == []
+    # The fake operator lowers the Request like the real one.
+    request = {"metadata": {"namespace": "test-ns"}, "spec": golden["request_spec"]}
+    assert (
+        lower_request_input(
+            request,
+            run_name=run_input["dgdr_run"]["name"],
+            runtime_image=run_input["dgdr_run"]["runtime_image"],
+            dynamo_version=run_input["dgdr_run"]["runtime_version_override"],
+            gpus_per_node=run_input["dgdr_run"]["num_gpus_per_node"],
+        )
+        == run_input
+    )
+
+    restored = json.loads(json.dumps(run_input))
+    restored["engine"]["workers"]["prefill"] = {}
+    assert input_mismatches(body["spec"], restored) == [
+        "engine.workers.prefill: expected unset, got {}"
+    ]
+    moved = json.loads(json.dumps(run_input))
+    moved["traffic"]["source"]["paths"] = ["/var/run/aisimulate/trace/trace.jsonl"]
+    assert input_mismatches(body["spec"], moved) == [
+        "traffic.source.paths.0: expected '/var/run/aisimulate/trace/trace.jsonl.gz',"
+        " got '/var/run/aisimulate/trace/trace.jsonl'"
+    ]
+    # An uncompressed window is mounted as trace.jsonl.
+    uncompressed = json.loads(json.dumps(body["spec"]))
+    claim = uncompressed["workload"]["trace"]["source"]["persistentVolumeClaim"]
+    claim["subPath"] = claim["subPath"].removesuffix(".gz")
+    assert input_mismatches(uncompressed, run_input) == [
+        "traffic.source.paths.0: expected '/var/run/aisimulate/trace/trace.jsonl',"
+        " got '/var/run/aisimulate/trace/trace.jsonl.gz'"
+    ]
 
 
 def test_missing_fields_reports_pruned_leaves_and_allows_defaults():
