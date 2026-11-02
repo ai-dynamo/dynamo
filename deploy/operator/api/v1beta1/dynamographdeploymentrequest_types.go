@@ -407,8 +407,8 @@ type FeaturesSpec struct {
 // If all four fields are set, discovery is skipped.
 type HardwareSpec struct {
 	// GPUSKU selects the GPU type to target.
-	// When omitted, auto-detected by selecting the GPU with the highest
-	// node count, then highest VRAM. In mixed-GPU clusters, set this to
+	// When omitted, auto-detected as the GPU type of the node with the most GPUs
+	// (ties broken by highest VRAM per GPU). In mixed-GPU clusters, set this to
 	// choose which GPU type to use. Discovery and totalGpus are then
 	// restricted to nodes matching this SKU.
 	// The legacy value gb200_sxm is deprecated; use gb200 instead.
@@ -417,21 +417,37 @@ type HardwareSpec struct {
 	GPUSKU GPUSKUType `json:"gpuSku,omitempty"`
 
 	// VRAMMB is the VRAM per GPU in MiB.
-	// When omitted, auto-detected from cluster GPU nodes.
+	// When omitted, auto-detected from cluster GPU nodes. An explicit value within 10%
+	// of the auto-selected shape's measured VRAM permits automatic GPU-budget discovery.
+	// This tolerance applies only to the requested value; aggregating discovered nodes
+	// still requires equal measured VRAM. When this value differs by more than 10%
+	// and totalGpus is omitted, automatic GPU-budget discovery fails and the DGDR
+	// enters phase Failed before a profiling Job is created; set totalGpus explicitly
+	// to use that override.
 	// +optional
 	VRAMMB *float64 `json:"vramMb,omitempty"`
 
 	// TotalGPUs is the GPU budget for profiling and deployment.
 	// The profiler uses this to determine parallelism and replica count.
-	// When omitted, computed by counting GPUs on discovered nodes
-	// (filtered by gpuSku when set), temporarily capped at 32 to
-	// limit profiler search space. This cap may be removed in a future
-	// release. Set this field explicitly to override.
+	// When omitted, computed by summing GPUs on nodes matching the auto-selected
+	// shape: GPU type, GPUs per node, and VRAM per GPU. The result is temporarily
+	// capped at 32 to limit profiler search space. For example, same-type nodes
+	// with 8 and 4 GPUs represent 12 GPUs of inventory, while the auto-selected 8-GPU
+	// shape yields an automatic budget of 8. This cap may be removed in a future
+	// release. Set this field explicitly to override the derived budget, use a
+	// different numGpusPerNode, or use a vramMb value more than 10% from the
+	// auto-selected shape's measured VRAM. These shape overrides require an explicit
+	// totalGpus.
 	// +optional
 	TotalGPUs *int32 `json:"totalGpus,omitempty"`
 
 	// NumGPUsPerNode is the number of GPUs per node.
-	// When omitted, auto-detected from cluster GPU nodes.
+	// When omitted, auto-detected as the highest GPU count on any discovered node
+	// of the selected GPU type. In clusters whose nodes have different GPU counts,
+	// set this explicitly to the node size you intend to schedule on. When this value
+	// differs from the auto-selected shape and totalGpus is omitted, automatic
+	// GPU-budget discovery fails and the DGDR enters phase Failed before a profiling
+	// Job is created; set totalGpus explicitly to use that override.
 	// +optional
 	NumGPUsPerNode *int32 `json:"numGpusPerNode,omitempty"`
 	// Interconnect describes the primary GPU-to-GPU interconnect *within a node*.

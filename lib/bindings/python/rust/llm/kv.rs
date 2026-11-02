@@ -32,10 +32,11 @@ use dynamo_kv_router::protocols::*;
 use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::services::selection::{
-    self, OverlapScoresRequest, PotentialLoadsRequest, ReservationRequest, SelectAndReserveRequest,
-    SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig, SelectionError,
-    SelectionService as RustSelectionService, SelectionServiceBuilder, SelectionServiceConfig,
-    WorkerPatchRequest, WorkerRequest, warn_for_unserved_worker_selection_policies,
+    self, OverlapScoresRequest, PotentialLoadsRequest, PromptRequest, ReservationRequest,
+    SelectAndReserveRequest, SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig,
+    SelectionError, SelectionService as RustSelectionService, SelectionServiceBuilder,
+    SelectionServiceConfig, WorkerPatchRequest, WorkerRequest,
+    warn_for_unserved_worker_selection_policies,
 };
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
@@ -571,6 +572,70 @@ where
     rt.block_on(selection::run_server(config.port, service))
 }
 
+/// Depythonize a prompt-carrying request dict. `token_ids` is read by [`extract_token_ids`]
+/// rather than pythonize, whose per-element serde path costs several times more per token,
+/// all of it on the calling thread under the GIL.
+#[cfg(feature = "select-service")]
+fn depythonize_prompt_request<T: serde::de::DeserializeOwned>(
+    request: &Bound<'_, PyAny>,
+    prompt: impl FnOnce(&mut T) -> &mut PromptRequest,
+) -> PyResult<T> {
+    let invalid = |e: pythonize::PythonizeError| PyValueError::new_err(e.to_string());
+    let Ok(dict) = request.downcast::<pyo3::types::PyDict>() else {
+        return depythonize(request).map_err(invalid);
+    };
+    let Some(tokens) = dict
+        .get_item("token_ids")?
+        .filter(|tokens| !tokens.is_none())
+    else {
+        return depythonize(request).map_err(invalid);
+    };
+    let token_ids = extract_token_ids(&tokens)?;
+    let rest = dict.copy()?;
+    rest.del_item("token_ids")?;
+    let mut req: T = depythonize(rest.as_any()).map_err(invalid)?;
+    prompt(&mut req).token_ids = Some(token_ids);
+    Ok(req)
+}
+
+/// `token_ids` as `Vec<u32>`. An exact `list` of `int`s is read by index with borrowed
+/// items, skipping the per-element iterator and refcount work of pyo3's generic
+/// conversion, which costs more than converting the ints at prompt sizes. Everything
+/// else (list subclasses, whose `__iter__` the generic conversion honors; other
+/// sequences; any element the fast read declines) takes the generic conversion, so
+/// accepted inputs and errors are unchanged.
+#[cfg(feature = "select-service")]
+fn extract_token_ids(tokens: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
+    let generic = || {
+        tokens
+            .extract::<Vec<u32>>()
+            .map_err(|e| PyValueError::new_err(format!("token_ids: {e}")))
+    };
+    let Ok(list) = tokens.downcast_exact::<pyo3::types::PyList>() else {
+        return generic();
+    };
+    let mut token_ids = Vec::with_capacity(list.len());
+    // SAFETY: the GIL is held and the loop runs no Python code (only exact `int`s are
+    // converted, and `PyLong_AsUnsignedLong` does not call `__index__`), so the exact
+    // list cannot change, every index is in range, and the borrowed items stay valid.
+    unsafe {
+        for index in 0..list.len() {
+            let item = pyo3::ffi::PyList_GetItem(list.as_ptr(), index as pyo3::ffi::Py_ssize_t);
+            if pyo3::ffi::PyLong_CheckExact(item) == 0 {
+                return generic();
+            }
+            // A negative int sets OverflowError and returns `c_ulong::MAX`; both it and
+            // values past `u32::MAX` fail `try_from`, and the generic path raises.
+            let Ok(id) = u32::try_from(pyo3::ffi::PyLong_AsUnsignedLong(item)) else {
+                pyo3::ffi::PyErr_Clear();
+                return generic();
+            };
+            token_ids.push(id);
+        }
+    }
+    Ok(token_ids)
+}
+
 /// Map a [`SelectionError`] to a Python exception: invalid input becomes a
 /// `ValueError`, anything else a `SelectionServiceError` carrying `kind` and
 /// `status_code`.
@@ -658,11 +723,35 @@ pub(crate) struct SelectionService {
 }
 
 #[cfg(feature = "select-service")]
+#[pyclass]
+pub(crate) struct SessionBindingStream {
+    updates: Arc<selection::SessionBindingUpdates>,
+}
+
+#[cfg(feature = "select-service")]
+#[pymethods]
+impl SessionBindingStream {
+    fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __anext__<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let updates = self.updates.clone();
+        crate::future_into_py(py, async move {
+            let events = updates.recv_many().await.ok_or_else(|| {
+                pyo3::exceptions::PyStopAsyncIteration::new_err("selection service shut down")
+            })?;
+            Python::with_gil(|py| pythonize(py, &events).map(|o| o.unbind()).map_err(to_pyerr))
+        })
+    }
+}
+
+#[cfg(feature = "select-service")]
 #[pymethods]
 impl SelectionService {
     /// Create a selection service. `indexer_threads` sizes the KV indexer pool.
     #[new]
-    #[pyo3(signature = (*, indexer_threads = 4, indexer_peers = None, replica_sync_port = None, replica_sync_peers = None, selection_cache = None, session_affinity_ttl_secs = None))]
+    #[pyo3(signature = (*, indexer_threads = 4, indexer_peers = None, replica_sync_port = None, replica_sync_peers = None, selection_cache = None, session_affinity_ttl_secs = None, session_affinity_mode = "hard", session_replication_writer_id = None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -672,7 +761,12 @@ impl SelectionService {
         replica_sync_peers: Option<Vec<String>>,
         selection_cache: Option<SelectionCacheConfig>,
         session_affinity_ttl_secs: Option<f64>,
+        session_affinity_mode: &str,
+        session_replication_writer_id: Option<u64>,
     ) -> PyResult<Self> {
+        let session_affinity_mode = session_affinity_mode
+            .parse::<RsSessionAffinityMode>()
+            .map_err(PyValueError::new_err)?;
         let replica_sync_peers = replica_sync_peers.unwrap_or_default();
         if replica_sync_port.is_none() && !replica_sync_peers.is_empty() {
             return Err(PyValueError::new_err(
@@ -690,7 +784,8 @@ impl SelectionService {
         )
         .indexer_threads(indexer_threads)
         .indexer_peers(indexer_peers.unwrap_or_default())
-        .selection_cache(selection_cache.unwrap_or_default().inner);
+        .selection_cache(selection_cache.unwrap_or_default().inner)
+        .session_affinity_mode(session_affinity_mode);
         if let Some(port) = replica_sync_port {
             builder = builder.replica_sync(port, replica_sync_peers);
         }
@@ -698,6 +793,9 @@ impl SelectionService {
             builder = builder.session_affinity(
                 session_affinity_ttl_from_secs(ttl).map_err(PyValueError::new_err)?,
             );
+        }
+        if let Some(writer_id) = session_replication_writer_id {
+            builder = builder.session_binding_replication(writer_id);
         }
         let inner = py
             .allow_threads(|| crate::bridge_runtime().block_on(builder.build()))
@@ -715,6 +813,26 @@ impl SelectionService {
     fn shutdown(&self, py: Python<'_>) {
         let service = Arc::clone(&self.inner);
         py.allow_threads(|| crate::bridge_runtime().block_on(service.shutdown()));
+    }
+
+    /// Session bindings this replica commits or refreshes, for the host to
+    /// broadcast to its peers. Ends when the service shuts down.
+    fn session_binding_updates(&self) -> PyResult<SessionBindingStream> {
+        Ok(SessionBindingStream {
+            updates: Arc::new(
+                self.inner
+                    .session_binding_updates()
+                    .map_err(selection_to_pyerr)?,
+            ),
+        })
+    }
+
+    fn apply_session_binding(&self, py: Python<'_>, update: PyObject) -> PyResult<()> {
+        let event =
+            depythonize(update.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        self.inner
+            .apply_session_binding(event)
+            .map_err(selection_to_pyerr)
     }
 
     /// Await service shutdown without blocking the Python event loop.
@@ -793,8 +911,9 @@ impl SelectionService {
 
     /// Per-worker KV-overlap scores for a prompt (dict, see `OverlapScoresRequest`).
     fn overlap_scores<'p>(&self, py: Python<'p>, request: PyObject) -> PyResult<Bound<'p, PyAny>> {
-        let req: OverlapScoresRequest =
-            depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let req = depythonize_prompt_request::<OverlapScoresRequest>(request.bind(py), |req| {
+            &mut req.prompt
+        })?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let resp = core.overlap_scores(req).await.map_err(selection_to_pyerr)?;
@@ -804,8 +923,8 @@ impl SelectionService {
 
     /// Select the best worker by KV-overlap + load, no booking (dict, see `SelectRequest`).
     fn select<'p>(&self, py: Python<'p>, request: PyObject) -> PyResult<Bound<'p, PyAny>> {
-        let req: SelectRequest =
-            depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let req =
+            depythonize_prompt_request::<SelectRequest>(request.bind(py), |req| &mut req.prompt)?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let resp = core.select(req).await.map_err(selection_to_pyerr)?;
@@ -819,8 +938,9 @@ impl SelectionService {
         py: Python<'p>,
         request: PyObject,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let req: SelectAndReserveRequest =
-            depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let req = depythonize_prompt_request::<SelectAndReserveRequest>(request.bind(py), |req| {
+            &mut req.prompt
+        })?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let resp = core
@@ -838,8 +958,9 @@ impl SelectionService {
         py: Python<'p>,
         request: PyObject,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let req: ReservationRequest =
-            depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let req = depythonize_prompt_request::<ReservationRequest>(request.bind(py), |req| {
+            &mut req.prompt
+        })?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let resp = core
@@ -904,8 +1025,9 @@ impl SelectionService {
 
     /// Per-worker potential loads for a prompt, without booking (dict, see `PotentialLoadsRequest`).
     fn potential_loads<'p>(&self, py: Python<'p>, request: PyObject) -> PyResult<Bound<'p, PyAny>> {
-        let req: PotentialLoadsRequest =
-            depythonize(request.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let req = depythonize_prompt_request::<PotentialLoadsRequest>(request.bind(py), |req| {
+            &mut req.prompt
+        })?;
         let core = self.inner.clone();
         crate::future_into_py(py, async move {
             let resp = core
@@ -987,9 +1109,10 @@ mod selection_service_lifecycle_tests {
     #[test]
     fn idempotent_shutdown() {
         pyo3::prepare_freethreaded_python();
-        let service =
-            Python::with_gil(|py| SelectionService::new(py, 1, None, None, None, None, None))
-                .unwrap();
+        let service = Python::with_gil(|py| {
+            SelectionService::new(py, 1, None, None, None, None, None, "hard", None)
+        })
+        .unwrap();
         Python::with_gil(|py| {
             service.shutdown(py);
             service.shutdown(py);
@@ -1300,6 +1423,7 @@ impl KvEventPublisher {
             topic: zmq_topic.unwrap_or_default(),
             image_token_id,
             video_token_id,
+            recovery: None,
         });
 
         if kv_block_size == 0 {
@@ -2273,25 +2397,23 @@ impl KvRouter {
                 .await
                 .map_err(to_pyerr)?;
 
-                let push_router = rs::pipeline::PushRouter::<
-                    llm_rs::protocols::common::preprocessor::PreprocessedRequest,
-                    rs::protocols::annotated::Annotated<
-                        llm_rs::protocols::common::llm_backend::LLMEngineOutput,
-                    >,
-                >::from_client(
+                let kv_router = managed_router.router().clone();
+                let affinity = session_affinity_ttl_secs
+                    .map(|ttl| {
+                        kv_router
+                            .affinity_coordinator(Duration::from_secs(ttl), session_affinity_mode)
+                    })
+                    .transpose()
+                    .map_err(to_pyerr)?;
+                let routing_host = RsRoutingHost::builder(
                     managed_router.load_context().client().clone(),
                     rs::pipeline::network::egress::push_router::RouterMode::KV,
                 )
+                .kv_router(kv_router)
+                .load_context(managed_router.load_context().clone())
+                .affinity_coordinator(affinity)
+                .build()
                 .await
-                .map_err(to_pyerr)?;
-
-                let routing_host = RsRoutingHost::new_with_load_context(
-                    push_router,
-                    managed_router.router().clone(),
-                    managed_router.load_context().clone(),
-                    session_affinity_ttl_secs.map(Duration::from_secs),
-                    session_affinity_mode,
-                )
                 .map_err(to_pyerr)?;
 
                 Ok(Self {

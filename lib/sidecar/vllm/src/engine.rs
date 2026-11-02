@@ -26,7 +26,7 @@ use crate::args::Args;
 use crate::client::{self, CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
 use crate::convert::{
     ResponseState, build_generate_request, consume_reasoning_parser_args, data_parallel_rank,
-    normalize_response_options, request_has_multimodal_input, require_proto_0_6_controls,
+    request_has_multimodal_input, require_proto_0_6_controls,
 };
 use crate::lora::{self, build_downloader, parse_load_lora, parse_lora_name, resolve_source_path};
 use crate::model::DiscoveredModel;
@@ -848,7 +848,7 @@ impl LLMEngine for VllmSidecarEngine {
             .get()
             .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
-        let mut request = normalize_response_options(request)?;
+        let mut request = request;
         if !self.model.reports_proto_0_6()
             && consume_reasoning_parser_args(&mut request.extra_args)
             && let Some(parser) = self.model.reasoning_parser()

@@ -3,9 +3,11 @@
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+use validator::Validate;
 
 /// NVIDIA extensions to the OpenAI Images API
-#[derive(ToSchema, Serialize, Deserialize, Default, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Default, Debug, Clone)]
+#[schema(as = ImageNvExt)]
 pub struct NvExt {
     /// Annotations
     /// User requests triggers which result in the request issue back out-of-band information in the SSE
@@ -17,8 +19,10 @@ pub struct NvExt {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub negative_prompt: Option<String>,
 
-    /// The number of denoising steps. More denoising steps usually lead to a higher quality image at the expense of slower inference.
+    /// The number of denoising steps, at least 1. More denoising steps usually lead to a higher quality image at the expense of slower inference.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(minimum = 1)]
+    #[validate(range(min = 1, message = "num_inference_steps must be at least 1"))]
     pub num_inference_steps: Option<u8>,
 
     /// The CFG scale. Higher values usually lead to more coherent images.
@@ -54,6 +58,7 @@ pub struct ImageAccounting {
     /// Reference images the request consumed: 0 for text-to-image, 1 for an
     /// `input_reference` or an `/v1/images/edits` request.
     #[serde(default)]
+    #[schema(default = 0)]
     pub input_images: u32,
 
     /// The step count the backend ran. Omitted when the backend does not
