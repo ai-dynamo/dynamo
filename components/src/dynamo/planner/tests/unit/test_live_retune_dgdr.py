@@ -13,9 +13,12 @@ all deterministic.
 
 from __future__ import annotations
 
+import gzip
 import itertools
+import json
 import math
 import threading
+import time
 from collections.abc import Callable, Mapping
 from typing import Any, Optional
 
@@ -30,6 +33,7 @@ from dynamo.planner.config.planner_config import (
     DgdrExecutorConfig,
     RetuneConfig,
     RetuneEngineSpec,
+    dgdr_need_seconds,
 )
 from dynamo.planner.core.types import RetuneParams
 from dynamo.planner.retune.live import dgdr
@@ -51,15 +55,14 @@ from dynamo.planner.retune.live.dgdr import (
     DgdrContext,
     Shard,
     build_request,
-    crn_unsupported,
     input_mismatches,
     missing_fields,
-    need_seconds,
     plan_shards,
     request_name,
     run_dgdr_sweep,
     spec_hash,
 )
+from dynamo.planner.retune.live.reconciler import trace_pvc_source
 from dynamo.planner.retune.sweep import SweepRequest, score_summary
 from dynamo.planner.tests.live_retune_fakes import (
     FakeDgdrOperator,
@@ -582,28 +585,6 @@ def test_plan_shards_validates_inputs_and_probe_falls_back_to_zero_temperature()
     assert shards[-1].points == ({CREDIT: 1.0, SCALE: 1.0, TEMP: 0.0},)
 
 
-def test_need_seconds_follows_the_design_formula():
-    cfg = make_cfg(
-        cut_budget_seconds=900.0,
-        job_startup_seconds=300.0,
-        run={"parallelism": 8, "candidate_timeout_seconds": 1800.0},
-    )
-    shard = plan_shards(
-        DEFAULT_DOMAIN,
-        baseline=grid(DEFAULT_DOMAIN)[0],
-        startup=grid(DEFAULT_DOMAIN)[0],
-        max_shards=3,
-    )[0]
-    assert shard.size == 36
-    # 1 + ceil(35 / 8) = 6 rounds.
-    assert need_seconds(shard, cfg, needs_cut=True) == 900 + 300 + 6 * 1800
-    assert need_seconds(shard, cfg, needs_cut=False) == 300 + 6 * 1800
-    single = Shard(
-        id="probe", kind="probe", choices={CREDIT: (1.0,)}, points=({CREDIT: 1.0},)
-    )
-    assert need_seconds(single, cfg, needs_cut=False) == 300 + 1800
-
-
 # ---------------------------------------------------------------- Request
 
 
@@ -644,13 +625,13 @@ def test_build_request_aggregated_grid_shard():
     assert spec["backends"] == ["vllm"]
     # 3 replicas x (tensor 2 x pipeline 1 x attention_data 1).
     assert spec["hardware"] == {"gpu": {"sku": "h200_sxm", "budget": 6}}
+    # The trace format is left to the CRD default.
     assert spec["workload"] == {
         "trace": {
-            "format": "dynamo",
             "source": {
-                "pvc": {
+                "persistentVolumeClaim": {
                     "claimName": "request-traces",
-                    "path": f"windows/llm/{WINDOW_END_MS}.jsonl.gz",
+                    "subPath": f"windows/llm/{WINDOW_END_MS}.jsonl.gz",
                 }
             },
         }
@@ -821,28 +802,51 @@ def test_input_read_back_accepts_the_operator_lowering_and_finds_drift():
     drifted["engine"]["workers"]["aggregated"]["parallelism"]["preset"][0][
         "replicas"
     ] = 1
+    # A role the overrides delete must stay deleted.
     drifted["engine"]["workers"]["prefill"] = {}
     drifted["router"]["temperature"] = {"choices": [0.0]}
     drifted["evaluation"]["sla"]["e2e_ms"] = 10.0
     drifted["traffic"]["load"]["speedup"] = 2.0
+    drifted["traffic"]["source"]["paths"] = ["/elsewhere/trace.jsonl.gz"]
     drifted["optimization"]["strict_sla"] = True
     problems = input_mismatches(body["spec"], drifted)
-    joined = "\n".join(problems)
-    for path in (
-        "engine:",
-        "router:",
+    assert sorted(problem.split(":")[0] for problem in problems) == [
+        "engine.workers.aggregated.parallelism.preset.0.replicas",
+        "engine.workers.prefill",
         "evaluation.sla.e2e_ms",
-        "traffic.load",
         "optimization.strict_sla",
-    ):
-        assert path in joined, (path, problems)
+        "router.temperature.choices",
+        "traffic.load.speedup",
+        "traffic.source.paths.0",
+    ]
+    assert "engine.workers.prefill: expected unset, got {}" in problems
 
     stripped = lower_request_input(body, run_name="r-1")
     del stripped["dgdr_run"]["generator"]
     del stripped["optimization"]["constraints"]
     problems = input_mismatches(body["spec"], stripped)
-    assert any(p.startswith("dgdr_run.generator") for p in problems)
-    assert any("max_candidate_gpus" in p for p in problems)
+    assert "dgdr_run.generator: expected 'direct', got unset" in problems
+    assert any(p.startswith("optimization.constraints:") for p in problems)
+
+
+def test_input_read_back_allows_operator_defaults_and_follows_overrides():
+    body = _body()
+    effective = lower_request_input(body, run_name="r-1")
+    # Fields the Request does not set, such as a new operator default.
+    effective["engine"]["kv_cache_dtype"] = "auto"
+    preset = effective["engine"]["workers"]["aggregated"]["parallelism"]["preset"]
+    preset[0]["prefill_context"] = 1
+    effective["router"]["queue_threshold"] = 0.5
+    effective["optimizer"]["seed"] = 0
+    effective["traffic"]["source"]["compression"] = "auto"
+    assert input_mismatches(body["spec"], effective) == []
+
+    # inputOverrides win over the typed trace source.
+    overrides = body["spec"]["aisimulate"]["inputOverrides"]
+    overrides["traffic"] = {"source": {"paths": ["/data/other.jsonl"]}}
+    effective = lower_request_input(body, run_name="r-1")
+    assert effective["traffic"]["source"]["paths"] == ["/data/other.jsonl"]
+    assert input_mismatches(body["spec"], effective) == []
 
 
 def test_missing_fields_reports_pruned_leaves_and_allows_defaults():
@@ -856,15 +860,10 @@ def test_missing_fields_reports_pruned_leaves_and_allows_defaults():
         "a.gone",
         "d",
     ]
-
-
-def test_crn_unsupported_compares_parseable_versions_only():
-    assert not crn_unsupported("1.7.0", None, None)
-    assert crn_unsupported("1.7.0", None, "1.8.0")
-    assert not crn_unsupported("1.8.0", None, "1.8.0")
-    assert not crn_unsupported("1.9.1rc0", None, "1.8.0")
-    assert crn_unsupported(None, "nvcr.io/nvidia/planner:1.7.2@sha256:ab", "1.8")
-    assert not crn_unsupported("main", "image-without-tag", "1.8.0")
+    # The mappings of a list may hold defaults too; the list keeps its length.
+    assert missing_fields({"p": [{"a": 1, "b": 2}]}, {"p": [{"a": 1}]}) == []
+    assert missing_fields({"p": [{"a": 2}]}, {"p": [{"a": 1}]}) == ["p.0.a"]
+    assert missing_fields({"p": [{"a": 1}, {"a": 2}]}, {"p": [{"a": 1}]}) == ["p"]
 
 
 # ------------------------------------------------------------ the sweep
@@ -997,6 +996,26 @@ def test_shutdown_returns_at_once_without_deleting(tmp_path):
     assert result.failure_reason == "shutdown"
     assert result.status == "failed"
     assert h.registry.deleted == []
+    assert len(h.kube.requests) == 2
+
+
+@pytest.mark.parametrize(
+    "event, reason", [("cancel", "shutdown"), ("abort", "lost_leadership")]
+)
+def test_the_wait_between_polls_ends_when_the_sweep_is_stopped(tmp_path, event, reason):
+    # Wall-clock time and the sweep's own wait: the poll interval is far
+    # longer than the test, so only the event can end the wait.
+    h = Harness(tmp_path, operator=False)
+    request = make_request(deadline_s=time.time() + TIMEOUT_S)
+    timer = threading.Timer(0.2, getattr(h, event).set)
+    timer.start()
+    started = time.monotonic()
+    try:
+        result = h.sweep(request, now=time.time, sleep=None, poll_interval_s=600.0)
+    finally:
+        timer.cancel()
+    assert result.failure_reason == reason
+    assert time.monotonic() - started < 60.0
     assert len(h.kube.requests) == 2
 
 
@@ -1332,6 +1351,44 @@ def test_job_created_but_not_started_is_not_run_pending(tmp_path):
     assert not any(shard["run_pending"] for shard in result.details["shards"].values())
 
 
+@pytest.mark.parametrize(
+    "job, reason, message, failure",
+    [
+        (True, "ContainerWaiting", "sweeper: ErrImagePull", "timeout"),
+        (
+            False,
+            "TraceSourceMissing",
+            'trace PersistentVolumeClaim "request-traces" does not exist',
+            "run_pending",
+        ),
+    ],
+)
+def test_a_waiting_run_reports_why_at_the_deadline(
+    tmp_path, job, reason, message, failure
+):
+    h = Harness(tmp_path, operator=False)
+
+    def operator():
+        for name in list(h.kube.requests):
+            if h.kube.run_of(name) is None:
+                run = h.kube.accept_request(name)["metadata"]["name"]
+                if job:
+                    h.kube.start_run(run)
+                h.kube.set_run_completed(
+                    run, status="False", reason=reason, message=message
+                )
+
+    h.clock.hooks.append(operator)
+    result = h.sweep(make_request(deadline_s=LAUNCH_S + 900.0))
+    assert result.status == "timeout"
+    assert result.failure_reason == failure
+    for shard_id in ("grid-0", "probe"):
+        shard = result.details["shards"][shard_id]
+        assert shard["state"] == "wait"
+        assert shard["message"].endswith(f"{reason}: {message}")
+        assert f"{shard_id}: {shard['message']}" in result.error
+
+
 def test_running_job_past_the_deadline_times_out(tmp_path):
     h = Harness(tmp_path)
     h.operator.max_phase = "started"
@@ -1376,8 +1433,8 @@ def test_launch_too_late_for_an_ordinary_shard_leaves_its_points_missing(tmp_pat
         "probe": 1,
     }
     assert shards[-1].points[0][CREDIT] == 5.0
-    need6 = need_seconds(shards[1], cfg, needs_cut=True)
-    need8 = need_seconds(shards[0], cfg, needs_cut=True)
+    need6 = dgdr_need_seconds(shards[1].size, cfg, needs_cut=True)
+    need8 = dgdr_need_seconds(shards[0].size, cfg, needs_cut=True)
     assert need6 < need8
     request = make_request(domain, baseline=baseline, deadline_s=LAUNCH_S + need6 + 1)
     result = h.sweep(request)
@@ -1597,14 +1654,6 @@ def test_missing_run_input_on_a_succeeded_run_is_a_mismatch(tmp_path):
     result = h.sweep(make_request())
     assert result.failure_reason == "input_mismatch"
     assert "status.aisimulate.input is missing" in result.error
-
-
-def test_crn_unsupported_runtime_fails_the_window(tmp_path):
-    h = Harness(tmp_path)
-    h.operator.dynamo_version = "1.7.0"
-    result = h.sweep(make_request(), crn_min_version="1.8.0")
-    assert result.failure_reason == "crn_unsupported"
-    assert result.details["runtime_version"] == "1.7.0"
 
 
 def test_crn_probe_mismatch_fails_the_window(tmp_path):
@@ -1850,10 +1899,6 @@ def test_sweep_with_the_real_window_cutter(tmp_path):
     """The executor and ``window_cut.cut_window`` agree on paths and deadline."""
 
     window_cut = pytest.importorskip("dynamo.planner.retune.live.window_cut")
-    import gzip
-    import json
-    import time
-
     from dynamo.planner.tests.retune_sweep_helpers import trace_rows
 
     pod_dir = tmp_path / "trace" / "segments" / "llm" / "frontend-0"
@@ -1879,6 +1924,6 @@ def test_sweep_with_the_real_window_cutter(tmp_path):
     window_file = tmp_path / "trace" / "windows" / "llm" / f"{WINDOW_END_MS}.jsonl.gz"
     with gzip.open(window_file, "rt", encoding="utf-8") as lines:
         assert len(lines.readlines()) == 5
-    claim_path = h.created()[0]["spec"]["workload"]["trace"]["source"]["pvc"]["path"]
+    _, claim_path = trace_pvc_source(h.created()[0]["spec"])
     assert tmp_path / "trace" / claim_path == window_file
     assert_scores(result, request)

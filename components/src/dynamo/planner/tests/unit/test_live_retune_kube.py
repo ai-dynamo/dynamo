@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for ``KubernetesRetuneKube`` and the shared ``FakeRetuneKube``.
+"""Unit tests for ``KubernetesRetuneKube``.
 
-The client tests run the real ``kubernetes`` API classes and replace only
+The tests run the real ``kubernetes`` API classes and replace only
 the REST transport, so they check the URLs, query parameters, timeouts and
 bodies the client library actually sends, and the error mapping.
 """
@@ -28,11 +28,6 @@ from dynamo.planner.retune.live.contracts import (
     RetuneKube,
 )
 from dynamo.planner.retune.live.kube import KubernetesRetuneKube, request_timeout
-from dynamo.planner.tests.live_retune_fakes import (
-    FakeRetuneKube,
-    lower_request_input,
-    match_labels,
-)
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -133,7 +128,7 @@ def test_satisfies_the_protocol(kube):
     _: RetuneKube = retune_kube
     assert retune_kube.namespace == NS
     with pytest.raises(ValueError):
-        KubernetesRetuneKube("")
+        KubernetesRetuneKube("", api_client=retune_kube.api_client)
 
 
 def test_get_dgd(kube):
@@ -404,127 +399,3 @@ def test_from_kube_api_shares_the_connector_client():
     assert retune_kube.namespace == "ns2"
     assert retune_kube.api_client is api_client
     api_client.close()
-
-
-# ------------------------------------------------------------------ fake
-
-
-def test_fake_label_selectors():
-    labels = {"a": "1", "b": "2"}
-    assert match_labels(labels, "")
-    assert match_labels(labels, "a=1,b==2")
-    assert match_labels(labels, "a,!c")
-    assert not match_labels(labels, "a!=1")
-    assert not match_labels(labels, "c")
-    assert not match_labels(labels, "!a")
-    with pytest.raises(ValueError):
-        match_labels(labels, "a in (1,2)")
-
-
-def test_fake_lease_compare_and_swap_and_faults():
-    kube = FakeRetuneKube(NS, now=lambda: 1_793_000_000.0)
-    created = kube.create_lease(
-        {"metadata": {"name": "l"}, "spec": {"holderIdentity": ""}}
-    )
-    with pytest.raises(KubeAlreadyExists):
-        kube.create_lease({"metadata": {"name": "l"}})
-    stale = dict(created, spec={"holderIdentity": "me"})
-    updated = kube.replace_lease("l", stale)
-    assert updated["spec"]["holderIdentity"] == "me"
-    assert (
-        updated["metadata"]["resourceVersion"] != created["metadata"]["resourceVersion"]
-    )
-    with pytest.raises(KubeConflict):
-        kube.replace_lease("l", stale)  # resourceVersion is stale now
-    with pytest.raises(KubeNotFound):
-        kube.replace_lease("missing", stale)
-
-    # A write that times out but lands.
-    kube.fail("replace_lease", KubeError("timeout"), landed=True)
-    with pytest.raises(KubeError):
-        kube.replace_lease("l", dict(updated, spec={"holderIdentity": "other"}))
-    assert kube.get_lease("l")["spec"]["holderIdentity"] == "other"
-    # A write that fails before landing.
-    current = kube.get_lease("l")
-    kube.fail("replace_lease", KubeError("503"))
-    with pytest.raises(KubeError):
-        kube.replace_lease("l", dict(current, spec={"holderIdentity": "x"}))
-    assert kube.get_lease("l")["spec"]["holderIdentity"] == "other"
-    kube.delete_lease("l")
-    kube.delete_lease("l")
-    assert kube.get_lease("l") is None
-    assert [call.method for call in kube.calls].count("replace_lease") == 5
-
-
-def test_fake_requests_cascade_and_copies():
-    kube = FakeRetuneKube(NS)
-    body = {"metadata": {"name": "r", "labels": {"w": "1"}}, "spec": {"x": 1}}
-    stored = kube.create_request(body)
-    stored["spec"]["x"] = 2  # copies never alias the store
-    assert kube.get_request("r")["spec"]["x"] == 1
-    assert kube.create_request({"metadata": {"name": "dry"}}, dry_run=True)
-    assert kube.get_request("dry") is None
-    run = kube.accept_request("r")
-    kube.start_run(run["metadata"]["name"])
-    kube.complete_run(run["metadata"]["name"], candidates=[({"p": 1}, {"m": 2})])
-    request = kube.get_request("r")
-    assert request["status"]["recentRunRefs"] == [{"name": "r-1"}]
-    assert "activeRunRef" not in request["status"]
-    assert (
-        len(kube.list_candidates(f"nvidia.com/dgdr-run-uid={run['metadata']['uid']}"))
-        == 1
-    )
-    assert kube.list_requests("w=1")[0]["metadata"]["name"] == "r"
-    kube.delete_request("r", propagation="Foreground")
-    assert kube.runs == {} and kube.candidates == {}
-    assert kube.deleted_requests == [("r", "Foreground")]
-
-
-def test_fake_lowering_applies_overrides_and_operator_fields():
-    request = {
-        "metadata": {"name": "r", "namespace": NS},
-        "spec": {
-            "model": {"name": "m"},
-            "backends": ["vllm"],
-            "hardware": {"gpu": {"sku": "h200_sxm", "budget": 4}},
-            "workload": {
-                "trace": {
-                    "format": "dynamo",
-                    "source": {"pvc": {"claimName": "c", "path": "w/1.jsonl.gz"}},
-                }
-            },
-            "objective": {
-                "mode": "Optimize",
-                "metric": "GoodputPerGPU",
-                "sla": {"ttftMs": 1.0},
-            },
-            "recommendation": {"maxCandidates": 3},
-            "aisimulate": {
-                "inputOverrides": {
-                    "engine": {"backend": "vllm", "workers": {"prefill": None}},
-                    "dgdr_run": {"generator": "direct"},
-                }
-            },
-        },
-    }
-    lowered = lower_request_input(request, run_name="r-1")
-    assert lowered["engine"]["backend"] == "vllm"
-    assert "prefill" not in lowered["engine"]["workers"]
-    assert lowered["engine"]["workers"]["decode"] == {}
-    assert lowered["optimization"] == {
-        "constraints": {"max_candidate_gpus": 4},
-        "target": "goodput_per_gpu",
-        "strict_sla": True,
-    }
-    assert lowered["traffic"] == {
-        "source": {
-            "type": "trace",
-            "format": "dynamo",
-            "paths": ["/var/run/aisimulate/trace/trace.jsonl.gz"],
-        },
-        "load": {"type": "trace_timestamps"},
-    }
-    assert lowered["optimizer"] == {"max_trials": 320.0}
-    assert lowered["dgdr_run"]["generator"] == "direct"
-    assert lowered["dgdr_run"]["max_candidates"] == 3
-    assert lowered["dgdr_run"]["namespace"] == NS

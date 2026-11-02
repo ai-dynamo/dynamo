@@ -375,6 +375,13 @@ class WindowCutResult:
     reused: bool = False  # the final file already existed (EEXIST)
 
 
+class SupportsIsSet(Protocol):
+    """A cancellation flag: a ``threading.Event`` or any object with ``is_set()``."""
+
+    def is_set(self) -> bool:
+        ...
+
+
 class WindowCutter(Protocol):
     def __call__(
         self,
@@ -386,7 +393,7 @@ class WindowCutter(Protocol):
         *,
         max_rows: int,
         deadline_s: float,
-        cancel: Optional[threading.Event] = None,
+        cancel: Optional[SupportsIsSet] = None,
     ) -> WindowCutResult:
         ...
 

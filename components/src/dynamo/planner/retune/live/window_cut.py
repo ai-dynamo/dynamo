@@ -69,7 +69,6 @@ import re
 import secrets
 import stat
 import struct
-import threading
 import time
 import zlib
 from array import array
@@ -83,7 +82,7 @@ from typing import Any, BinaryIO, Literal, Optional, Protocol, Union, get_args
 
 import numpy as np
 
-from dynamo.planner.retune.live.contracts import WindowCutResult
+from dynamo.planner.retune.live.contracts import SupportsIsSet, WindowCutResult
 from dynamo.planner.retune.window import (
     _dumps,
     _new_counts,
@@ -209,7 +208,7 @@ def cut_window(
     *,
     max_rows: int,
     deadline_s: float,
-    cancel: Optional[threading.Event] = None,
+    cancel: Optional[SupportsIsSet] = None,
 ) -> WindowCutResult:
     """Cut a window file in a spawned child process (``contracts.WindowCutter``).
 
@@ -356,7 +355,7 @@ def _run_in_child(
     kwargs: Mapping[str, Any],
     *,
     deadline: float,
-    cancel: Optional[threading.Event],
+    cancel: Optional[SupportsIsSet],
     cleanup: Sequence[str] = (),
     name: str = "retune-window-cut",
 ) -> Any:
@@ -416,7 +415,7 @@ def _run_in_child(
     raise WindowCutError(reason, message)
 
 
-def _check_interrupted(deadline: float, cancel: Optional[threading.Event]) -> None:
+def _check_interrupted(deadline: float, cancel: Optional[SupportsIsSet]) -> None:
     if cancel is not None and cancel.is_set():
         raise WindowCutError("cancelled", "window cut cancelled")
     if time.monotonic() >= deadline:
