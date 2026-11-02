@@ -17,7 +17,9 @@ use dynamo_scheduler::host::{
 use dynamo_session_affinity::host::WorkerAffinityTarget;
 
 use crate::{
-    kv_router::{FindBestMatchAdmission, FindBestMatchOutcome, routing_host::RoutingHost},
+    kv_router::{
+        FindBestMatchAdmission, FindBestMatchOutcome, RouteRequest, routing_host::RoutingHost,
+    },
     preprocessor::PreprocessedRequest,
     protocols::{
         TokenIdType,
@@ -72,7 +74,16 @@ pub(super) struct RoutingRequestParts<'a> {
 
 impl<'a> RoutingRequestParts<'a> {
     pub(super) fn new(request: &'a PreprocessedRequest) -> Self {
-        let (token_ids, block_mm_infos) = request.block_mm_routing_info();
+        Self::from_parts(request.block_mm_routing_info())
+    }
+
+    pub(super) fn for_route(request: &'a dyn RouteRequest) -> Self {
+        Self::from_parts(request.routing_tokens())
+    }
+
+    fn from_parts(
+        (token_ids, block_mm_infos): (&'a [TokenIdType], Option<&'a [Option<BlockExtraInfo>]>),
+    ) -> Self {
         Self {
             token_ids,
             block_mm_infos,
@@ -114,12 +125,17 @@ struct BestMatchArgs<'a> {
 impl RoutingHost {
     pub(super) fn check_current_kv_candidate(
         &self,
-        request: &PreprocessedRequest,
+        request: &dyn RouteRequest,
         worker: u64,
     ) -> Result<(), Error> {
-        if !crate::routing_policy::execution_requirements(request).policy_required {
+        if !crate::routing_policy::execution_requirements_for(request.routing_hints())
+            .policy_required
+        {
             return Ok(());
         }
+        let Some(request) = crate::routing_policy::policy_request(request)? else {
+            return Ok(());
+        };
         let policy = self
             .kv_router()
             .admission_policy
@@ -207,14 +223,14 @@ impl RoutingHost {
     pub(super) async fn select_worker_outcome(
         &self,
         context_id: &str,
-        request: &PreprocessedRequest,
+        request: &dyn RouteRequest,
         routing_parts: RoutingRequestParts<'_>,
         phase: RequestPhase,
         is_query_only: bool,
         options: SelectionOptions,
     ) -> Result<SelectionOutcome, Error> {
         let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
-        let routing = request.routing.as_ref();
+        let routing = request.routing_hints();
         let explicit_pin = pinned_worker_hint(phase, routing);
         let lora_name = routing.and_then(|routing| routing.lora_name.clone());
         let cache_namespace = routing.and_then(|routing| routing.cache_namespace.clone());
@@ -226,13 +242,19 @@ impl RoutingHost {
             .unwrap_or(0);
         let expected_output_tokens = routing.and_then(|routing| routing.expected_output_tokens);
         let needs_uncached_prefill =
-            phase == RequestPhase::Aggregated && request.output_options.prompt_logprobs.is_some();
+            phase == RequestPhase::Aggregated && request.requests_prompt_logprobs();
         let routing_constraints = routing
             .and_then(|routing| routing.routing_constraints.clone())
             .unwrap_or_default();
         let mut allowed_worker_ids = routing.and_then(|routing| routing.allowed_worker_ids.clone());
-        check_candidate_policy(request, self.kv_router().admission_policy.is_some())?;
-        if crate::routing_policy::execution_requirements(request).policy_required
+        // The LoRA admission policy reads the frontend's request; see
+        // `policy_request` for a host that plans without one.
+        let policy_request = crate::routing_policy::policy_request(request)?;
+        if let Some(policy_request) = policy_request {
+            check_candidate_policy(policy_request, self.kv_router().admission_policy.is_some())?;
+        }
+        if let Some(policy_request) = policy_request
+            && crate::routing_policy::execution_requirements(policy_request).policy_required
             && let Some(policy) = self.kv_router().admission_policy.as_ref()
         {
             let workers = self.kv_router().workers_with_configs.borrow();
@@ -243,7 +265,7 @@ impl RoutingHost {
                 .chain(options.pinned_target.map(|target| target.worker_id))
                 .collect::<Vec<_>>();
             allowed_worker_ids = policy.restrict(
-                request,
+                policy_request,
                 &workers,
                 &live,
                 allowed_worker_ids,
@@ -252,8 +274,7 @@ impl RoutingHost {
             )?;
         }
         let migration_excluded_worker_ids = request
-            .migration_state
-            .as_ref()
+            .migration_state()
             .map(|state| state.excluded_worker_ids())
             .unwrap_or_default();
         if explicit_pin.is_none() && !migration_excluded_worker_ids.is_empty() {
@@ -267,8 +288,7 @@ impl RoutingHost {
             });
             if eligible.is_empty()
                 && let Some(error) = request
-                    .migration_state
-                    .as_ref()
+                    .migration_state()
                     .and_then(|state| state.exhausted_error())
             {
                 return Err(anyhow::anyhow!(error));
@@ -344,11 +364,13 @@ impl RoutingHost {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
             let selection = self
                 .select_best_match(BestMatchArgs {
-                    accounting_attribution: crate::routing_policy::execution_requirements(request)
-                        .accounting_attribution,
+                    accounting_attribution: crate::routing_policy::execution_requirements_for(
+                        request.routing_hints(),
+                    )
+                    .accounting_attribution,
                     context_id,
                     routing_parts,
-                    router_config_override: request.router_config_override.as_ref(),
+                    router_config_override: request.router_config_override(),
                     update_states: !is_query_only,
                     return_routing_hashes,
                     lora_name,
@@ -415,11 +437,13 @@ impl RoutingHost {
         );
 
         self.select_best_match(BestMatchArgs {
-            accounting_attribution: crate::routing_policy::execution_requirements(request)
-                .accounting_attribution,
+            accounting_attribution: crate::routing_policy::execution_requirements_for(
+                request.routing_hints(),
+            )
+            .accounting_attribution,
             context_id,
             routing_parts,
-            router_config_override: request.router_config_override.as_ref(),
+            router_config_override: request.router_config_override(),
             update_states: !is_query_only,
             return_routing_hashes,
             lora_name,

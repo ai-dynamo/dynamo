@@ -9,12 +9,21 @@ pub(crate) fn hosted_request(request: &PreprocessedRequest) -> HostedSelectionRe
     HostedSelectionRequest::new(request.token_ids.len())
 }
 
+/// [`hosted_request`] for a route request. Without the frontend's request, the
+/// prompt length is the routing token count.
+fn hosted_route_request(request: &dyn RouteRequest) -> HostedSelectionRequest {
+    match request.preprocessed() {
+        Some(request) => hosted_request(request),
+        None => HostedSelectionRequest::new(request.routing_tokens().0.len()),
+    }
+}
+
 use super::*;
 
 impl RoutingHost {
     pub(super) fn select_hosted_worker(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         target_constraint: Option<AffinityTarget>,
         affinity_target: Option<AffinityTarget>,
     ) -> Result<HostedSelection, Error> {
@@ -51,7 +60,7 @@ impl RoutingHost {
                     let selection = occupancy.select_and_reserve(
                         &self.inner,
                         picker,
-                        request.content(),
+                        &hosted_route_request(request),
                         target_constraint
                             .map(|target| target.worker_id)
                             .or(preferred_worker),
@@ -75,7 +84,7 @@ impl RoutingHost {
                                 Ok(worker_id)
                             } else {
                                 picker
-                                    .select(ids, None, &hosted_request(request.content()))
+                                    .select(ids, None, &hosted_route_request(request))
                                     .map_err(KvSchedulerError::from)
                             }
                         })??,
@@ -92,8 +101,11 @@ impl RoutingHost {
             }
             RoutingPolicy::DeviceAwareWeighted => {
                 let preferred_worker = preferred_worker()?;
+                let request = request.preprocessed().ok_or_else(|| {
+                    anyhow::anyhow!("device-aware routing requires the frontend's request")
+                })?;
                 let selection = self.inner.select_device_aware_and_reserve(
-                    request.content(),
+                    request,
                     target_constraint
                         .map(|target| target.worker_id)
                         .or(preferred_worker),
@@ -120,58 +132,71 @@ impl RoutingHost {
 
     /// Select a built-in route without sending it: check the request's worker
     /// targets, run the candidate policy, acquire the session-affinity hold,
-    /// pick the worker (advancing a round-robin cursor or reserving
-    /// occupancy), and start the request guard.
+    /// and pick the worker (advancing a round-robin cursor or reserving
+    /// occupancy). The request counts as started only at dispatch, where the
+    /// request guard begins.
     pub(super) async fn plan_builtin_route(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         phase: RequestPhase,
     ) -> Result<RoutePlan, Error> {
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
-        let explicit = explicit_target(request.content(), phase)?;
-        let has_affinity_session = self.affinity.is_some() && affinity_id(request)?.is_some();
+        let routing = request.routing_hints();
+        let explicit = explicit_routing_target(routing, phase)?;
+        let has_affinity_session =
+            self.affinity.is_some() && request.session_affinity_id()?.is_some();
         let is_direct = matches!(&self.policy, RoutingPolicy::Direct);
         if is_direct && explicit.is_none() && !has_affinity_session {
             return Err(invalid_argument(format!(
                 "worker ID required for {phase} request in Direct routing mode"
             )));
         }
-        let is_query_only = request.get_annotation_value("query_instance_id").is_some();
+        let is_query_only = request.is_query_only();
         // Declared before worker selection because the session-affinity wait is
         // the first stage that can spend it.
         let budget = CleanupBudget::default();
-        check_candidate_policy(request.content(), self.candidate_policy.is_some())?;
-        let candidate = self
-            .candidate_policy
-            .as_ref()
-            .map(|policy| {
-                policy.select(
-                    request.content(),
-                    explicit.map(|pin| pin.worker_id),
-                    &|| self.inner.client.instance_ids_avail(),
-                    &|| self.inner.client.instance_ids_free(),
-                )
-            })
-            .transpose()?
-            .flatten();
-        let (candidate_target, candidate_fallback, attempt_lease) = match candidate {
-            Some(selection) => (
-                Some(selection.worker),
-                Some(selection.fallback),
-                selection.lease,
-            ),
-            None => (None, None, None),
-        };
-        if let (Some(target), Some(policy)) = (candidate_target, self.candidate_policy.as_ref()) {
-            policy.check_selected(
-                request.content(),
-                target,
-                explicit.map(|pin| pin.worker_id),
-                &|| self.inner.client.instance_ids_avail(),
-            )?;
-        }
-        let (mut selection, affinity) = if let Some(target) = candidate_target {
+        // The candidate policy (LoRA routing) reads the frontend's request; see
+        // `policy_request` for a host that plans without one.
+        let (candidate_target, candidate_fallback, attempt_lease) =
+            match crate::routing_policy::policy_request(request)? {
+                Some(preprocessed) => {
+                    check_candidate_policy(preprocessed, self.candidate_policy.is_some())?;
+                    let candidate = self
+                        .candidate_policy
+                        .as_ref()
+                        .map(|policy| {
+                            policy.select(
+                                preprocessed,
+                                explicit.map(|pin| pin.worker_id),
+                                &|| self.inner.client.instance_ids_avail(),
+                                &|| self.inner.client.instance_ids_free(),
+                            )
+                        })
+                        .transpose()?
+                        .flatten();
+                    if let (Some(selection), Some(policy)) =
+                        (candidate.as_ref(), self.candidate_policy.as_ref())
+                    {
+                        policy.check_selected(
+                            preprocessed,
+                            selection.worker,
+                            explicit.map(|pin| pin.worker_id),
+                            &|| self.inner.client.instance_ids_avail(),
+                        )?;
+                    }
+                    match candidate {
+                        Some(selection) => (
+                            Some(selection.worker),
+                            Some(selection.fallback),
+                            selection.lease,
+                        ),
+                        None => (None, None, None),
+                    }
+                }
+                None => (None, None, None),
+            };
+        let (selection, affinity) = if let Some(target) = candidate_target {
             (
                 HostedSelection {
                     initial_worker: target,
@@ -184,7 +209,7 @@ impl RoutingHost {
                 None,
             )
         } else {
-            self.validate_explicit_worker(request.content(), phase)?;
+            self.validate_explicit_worker(routing, phase)?;
             self.select_with_session_affinity(request, phase, is_query_only, &budget, |target| {
                 let pinned_target = explicit.or(match self.session_affinity_mode {
                     SessionAffinityMode::Hard => target,
@@ -204,17 +229,6 @@ impl RoutingHost {
         } else {
             None
         };
-        let guard = RequestGuard::new_builtin(
-            self.request_metrics.clone(),
-            selection.initial_worker,
-            selection.occupancy_reservation.take(),
-            attempt_lease,
-            request,
-        );
-        self.request_metrics
-            .input_sequence_tokens
-            .with_label_values(&[request.phase().as_str(), &request.model])
-            .observe(request.token_ids.len() as f64);
         drop(route_guard);
         Ok(RoutePlan {
             phase,
@@ -223,11 +237,11 @@ impl RoutingHost {
                 explicit,
                 selection,
                 candidate_fallback,
+                attempt_lease,
                 soft_affinity_target,
                 uses_occupancy: self
                     .required_worker_inputs()
                     .contains(WorkerInputs::ACTIVE_REQUESTS),
-                guard,
             }),
             affinity,
             budget,
@@ -256,16 +270,29 @@ impl RoutingHost {
                 HostedSelection {
                     initial_worker,
                     target_constraint,
+                    occupancy_reservation,
                     candidate_count,
                     selected_occupancy,
                     device_aware_telemetry,
-                    ..
                 },
             candidate_fallback,
+            attempt_lease,
             soft_affinity_target,
             uses_occupancy,
-            mut guard,
         } = booking;
+        // The request counts as started here, as a KV route does when its
+        // plan is tracked. A plan that is never sent counts nothing.
+        let mut guard = RequestGuard::new_builtin(
+            self.request_metrics.clone(),
+            initial_worker,
+            occupancy_reservation,
+            attempt_lease,
+            &request,
+        );
+        self.request_metrics
+            .input_sequence_tokens
+            .with_label_values(&[request.phase().as_str(), &request.model])
+            .observe(request.token_ids.len() as f64);
         let phase_label = phase.to_string();
         let staged_kv = StagedKv::for_request(request.content());
         let target_for_worker = |worker_id| {
@@ -454,10 +481,10 @@ impl RoutingHost {
 
 /// What holds a built-in route's worker between
 /// [`RoutingHost::plan_builtin_route`] and [`RoutingHost::dispatch_builtin_plan`]:
-/// the selection and the request guard (with any occupancy reservation and
-/// candidate-policy attempt lease), plus what dispatch needs to send it. The
+/// the selection with its occupancy reservation, any candidate-policy attempt
+/// lease, and what dispatch needs to send it. Dispatch moves the reservation
+/// and lease into a request guard; dropping the booking releases them. The
 /// [`RoutePlan`] that owns it holds the phase, affinity hold and budget.
-/// Dropping it releases the guard's reservations.
 // TODO(gluo): revisit after the rebase onto main: whether every field is still
 // needed at dispatch (e.g. `explicit` only feeds the candidate policy's check
 // of a fallback worker), and the name (`HostedRoute`/`HostedPlan`), to avoid
@@ -468,12 +495,12 @@ pub(super) struct HostedBooking {
     /// The request's explicit worker pin, for the candidate policy's check of
     /// the worker the send lands on.
     explicit: Option<AffinityTarget>,
-    /// The selection, its occupancy reservation already moved into `guard`.
+    /// The selection, with its occupancy reservation.
     selection: HostedSelection,
     candidate_fallback: Option<HashSet<u64>>,
+    attempt_lease: Option<crate::routing_policy::AttemptLease>,
     soft_affinity_target: Option<AffinityTarget>,
     uses_occupancy: bool,
-    guard: RequestGuard,
 }
 
 impl HostedBooking {
@@ -488,12 +515,6 @@ impl HostedBooking {
                     .and_then(|target| target.dp_rank),
             )
         })
-    }
-
-    /// Give the route up before dispatch: release the guard's reservations.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(super) async fn abort(mut self, error: Option<&Error>) {
-        self.guard.abort(error.map(|error| error.as_ref())).await;
     }
 }
 

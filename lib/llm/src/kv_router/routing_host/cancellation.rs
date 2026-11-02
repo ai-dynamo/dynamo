@@ -12,7 +12,10 @@ use dynamo_runtime::{
     pipeline::{AsyncEngineContext, Error},
 };
 
-use crate::{preprocessor::PreprocessedRequest, protocols::common::timing::RequestPhase};
+use crate::{
+    kv_router::RouteRequest, preprocessor::PreprocessedRequest,
+    protocols::common::timing::RequestPhase,
+};
 
 /// How long a disconnected decode request may keep router state alive while it
 /// finishes reaching its worker. On expiry we abandon the operation and release
@@ -60,7 +63,15 @@ pub(super) enum StagedKv {
 
 impl StagedKv {
     pub(super) fn for_request(request: &PreprocessedRequest) -> Self {
-        if request.staged_kv_cleanup {
+        Self::from_flag(request.staged_kv_cleanup)
+    }
+
+    pub(super) fn for_route(request: &dyn RouteRequest) -> Self {
+        Self::from_flag(request.staged_kv_cleanup())
+    }
+
+    fn from_flag(staged_kv_cleanup: bool) -> Self {
+        if staged_kv_cleanup {
             Self::Present
         } else {
             Self::Absent

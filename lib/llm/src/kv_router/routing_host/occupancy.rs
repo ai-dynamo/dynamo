@@ -29,7 +29,7 @@ impl HostedOccupancy {
         &self,
         router: &PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         picker: &HostedWorkerPicker,
-        request: &PreprocessedRequest,
+        request: &HostedSelectionRequest,
         pinned_worker: Option<u64>,
     ) -> Result<HostedOccupancySelection> {
         if let Some(worker_id) = pinned_worker {
@@ -43,13 +43,12 @@ impl HostedOccupancy {
             });
         }
 
-        let request = super::hosted::hosted_request(request);
         let candidates = router.selectable_worker_ids()?;
         let selection = self
             .state
             .select_and_reserve_with(&candidates, |occupancy| {
                 picker
-                    .select(&candidates, Some(occupancy), &request)
+                    .select(&candidates, Some(occupancy), request)
                     .map_err(KvSchedulerError::from)
             })?;
         let result = HostedOccupancySelection {
