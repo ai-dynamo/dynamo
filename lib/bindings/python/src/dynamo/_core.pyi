@@ -41,6 +41,10 @@ def get_reasoning_parser_names() -> list[str]:
     """Get list of available reasoning parser names."""
     ...
 
+def get_structural_tag_parser_names() -> list[str]:
+    """Get selectable parser names with registered structural-tag builders."""
+    ...
+
 def run_kv_indexer(args: List[str]) -> None:
     """Run the KV indexer with the given arguments."""
     ...
@@ -2459,6 +2463,7 @@ def run_mocker_trace_replay(
     agentic_warmup: bool = False,
     agentic_profile: Optional[Dict[str, Any]] = None,
     deterministic: bool = False,
+    conversation_affinity: Optional[Dict[str, Any]] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
@@ -3185,6 +3190,7 @@ class EntrypointArgs:
         tls_client_ca_cert_path: Optional[str] = None,
         metrics_prefix: Optional[str] = None,
         enable_anthropic_api: Optional[bool] = None,
+        enable_systemone_api: Optional[bool] = None,
         strip_anthropic_preamble: Optional[bool] = None,
         enable_streaming_tool_dispatch: Optional[bool] = None,
         enable_streaming_reasoning_dispatch: Optional[bool] = None,
@@ -3223,6 +3229,7 @@ class EntrypointArgs:
             ais_perf_config: Canonical AIS configuration for default KV routing
             metrics_prefix: Optional Prometheus metrics prefix override
             enable_anthropic_api: Optional Anthropic Messages API override
+            enable_systemone_api: Optional System One typed-decisions API override
             strip_anthropic_preamble: Optional Anthropic preamble stripping override
             enable_streaming_tool_dispatch: Optional streaming tool dispatch override
             enable_streaming_reasoning_dispatch: Optional streaming reasoning dispatch override
