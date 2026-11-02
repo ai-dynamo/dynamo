@@ -27,6 +27,7 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.health_check import HEALTH_CHECK_KEY
+from dynamo.llm.exceptions import HttpError
 from dynamo.vllm.health_check import VllmPrefillHealthCheckPayload
 from dynamo.vllm.multimodal_utils.protocol import (
     PatchedTokensPrompt,
@@ -3307,13 +3308,18 @@ class TestEmbeddingWorkerHandlerChatInput:
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
     @pytest.mark.parametrize(
-        "case", ["text_only_model", "unsupported_modality", "media_not_loadable"]
+        ("case", "expected_status"),
+        [
+            ("text_only_model", None),
+            ("unsupported_modality", 400),
+            ("media_not_loadable", 422),
+        ],
     )
-    async def test_vllm_rejection_is_invalid_argument(self, case):
-        """vLLM's rejection reaches the client as a 400 with its message,
-        instead of a generic "Invalid request" or a 500. Typed vLLM client
-        errors must stay InvalidArgument: as HttpError(422), the frontend would
-        answer a 400 without the message."""
+    async def test_vllm_rejection_is_a_client_error(self, case, expected_status):
+        """vLLM's rejection is a client error, not a 500. Typed vLLM client
+        errors keep their status through the shared mapper, as on the other
+        vLLM paths, so a media URL that can't be loaded is a 422; other
+        validation failures are InvalidArgument with vLLM's message."""
         from vllm.exceptions import VLLMUnprocessableEntityError, VLLMValidationError
 
         error = {
@@ -3332,11 +3338,14 @@ class TestEmbeddingWorkerHandlerChatInput:
         handler, encoded = self._make_handler()
         handler.engine_client.renderer.render_chat_async = AsyncMock(side_effect=error)
 
-        with pytest.raises(mod.InvalidArgument) as exc_info:
+        expected_type = mod.InvalidArgument if expected_status is None else HttpError
+        with pytest.raises(expected_type) as exc_info:
             await self._generate(
                 handler,
                 {"model": "test-model", "messages": self.AUDIO_CONVERSATION},
             )
+        if expected_status is not None:
+            assert exc_info.value.code == expected_status
         assert str(error) in str(exc_info.value)
         assert exc_info.value.__cause__ is error
         assert encoded == []

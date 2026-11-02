@@ -4871,14 +4871,13 @@ class EmbeddingWorkerHandler:
         accepts (``image_url``, ``video_url``, ``audio_url``, ``input_audio``),
         subject to the engine's media limits and allowed media sources.
 
-        Input vLLM rejects (a text-only model given media, a modality or item
-        count the model doesn't take, media that can't be loaded, a malformed
-        message) raises ``InvalidArgument`` with vLLM's message, so the client
-        gets a 400 with the reason ``vllm serve`` would give rather than a
-        bare "Invalid request" or a 500. vLLM's typed client errors are not
-        raised as ``HttpError``: the frontend answers a worker's 422 with a
-        400 and only shows the message of an ``InvalidArgument``, so
-        ``HttpError(422, ...)`` would reach the client as a 400 with no reason.
+        Input vLLM rejects is a client error rather than a 500. vLLM's typed
+        client errors go through ``vllm_client_error_to_http_error``, as on the
+        other vLLM request paths: the worker raises their status (422 for
+        media that can't be loaded), and the frontend maps it to its error
+        class and keeps the message private, since it can name the media URL.
+        Other validation failures (a text-only model given media, a malformed
+        message) raise ``InvalidArgument``, a 400 with vLLM's message.
         """
         from vllm.entrypoints.pooling.embed.protocol import (
             EmbeddingBatchChatRequest,
@@ -4886,6 +4885,8 @@ class EmbeddingWorkerHandler:
         )
         from vllm.exceptions import VLLMClientError
         from vllm.utils.mistral import is_mistral_tokenizer
+
+        from .errors import vllm_client_error_to_http_error
 
         messages = request["messages"]
         batched = (
@@ -4921,9 +4922,11 @@ class EmbeddingWorkerHandler:
                 chat_params,
                 chat_request.build_tok_params(model_config),
             )
-        # The errors vLLM's server answers with 4xx (pydantic's ValidationError
-        # is a ValueError).
-        except (ValueError, TypeError, VLLMClientError) as e:
+        except VLLMClientError as e:
+            raise vllm_client_error_to_http_error(e) from e
+        # The other errors vLLM's server answers with 400 (pydantic's
+        # ValidationError is a ValueError).
+        except (ValueError, TypeError) as e:
             raise InvalidArgument(str(e)) from e
         return list(engine_prompts)
 
