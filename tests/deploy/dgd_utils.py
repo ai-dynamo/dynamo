@@ -66,6 +66,11 @@ MIN_RESPONSE_CONTENT_LENGTH = 100
 PORT_FORWARD_REQUEST_RETRY_LIMIT = 1
 DISCOVERY_SNAPSHOT_TIMEOUT = 15
 DISCOVERY_RESOURCE_TIMEOUT = 3
+# The operator reports a Failed automatic SnapshotJob with this text and never
+# recreates the job (resolveAutomaticSnapshotJob in
+# deploy/operator/internal/controller/dgd_checkpoints_reconciler.go), so the DGD
+# cannot become Ready.
+AUTOMATIC_SNAPSHOT_JOB_FAILED_RE = re.compile(r"automatic SnapshotJob \S+/\S+ failed: ")
 _KR8S_VCLUSTER_CONNECTION_ERRORS = (httpx.TransportError, kr8s.APITimeoutError)
 
 
@@ -1092,6 +1097,16 @@ class ManagedDeployment:
                             )
                         ):
                             raise DeploymentStartupError(detail.format())
+                if desired_ready_condition_val:
+                    for condition in status.get("status", {}).get("conditions", []):  # type: ignore[attr-defined]
+                        if condition.get("type") != "Ready":
+                            continue
+                        message = condition.get("message") or ""
+                        if AUTOMATIC_SNAPSHOT_JOB_FAILED_RE.search(message):
+                            raise DeploymentStartupError(
+                                f"Deployment {self._deployment_name} automatic "
+                                f"checkpoint failed: {message}"
+                            )
                 # Check both conditions:
                 # 1. Ready condition is True
                 # 2. State is successful

@@ -346,3 +346,70 @@ async def test_discovery_capture_and_cleanup(
             pass
 
     assert events == expected_events
+
+
+def _dgd_status_with_ready_message(message: str) -> dict:
+    return {
+        "status": {
+            "state": "failed",
+            "conditions": [
+                {
+                    "type": "Ready",
+                    "status": "False",
+                    "reason": "failed_to_reconcile_the_resources",
+                    "message": message,
+                }
+            ],
+        }
+    }
+
+
+def _deployment_with_dgd_status(tmp_path, status: dict) -> ManagedDeployment:
+    deployment = managed_deployment(tmp_path)
+    deployment._custom_api = MagicMock()
+    deployment._custom_api.get_namespaced_custom_object = AsyncMock(return_value=status)
+    deployment._get_pod_status_details = AsyncMock(return_value=[])
+    deployment._dump_in_flight_restart_logs = AsyncMock(return_value=[])
+    deployment._get_pod_events = AsyncMock(return_value=[])
+    return deployment
+
+
+async def test_wait_for_ready_fails_fast_on_failed_automatic_snapshot_job(
+    tmp_path,
+) -> None:
+    """A Failed automatic SnapshotJob is final, so stop waiting for Ready."""
+    # DGD status from the TRTLLM Snapshot Deploy Test failure in DYN-5276.
+    message = (
+        "failed to reconcile checkpoints: failed to resolve checkpoint for "
+        "component TRTLLMWorker: automatic SnapshotJob "
+        "default/checkpoint-a3bc461b18d203960e367ed2848dc024 failed: "
+        "CaptureFailed: checkpoint: CRIU dump failed: EOF\n"
+        "criu swrk failed: exit status 1"
+    )
+    deployment = _deployment_with_dgd_status(
+        tmp_path, _dgd_status_with_ready_message(message)
+    )
+
+    with pytest.raises(dgd_utils.DeploymentStartupError, match="CRIU dump failed"):
+        await deployment._wait_for_condition(timeout=5, sleep=0)
+
+    assert deployment._custom_api.get_namespaced_custom_object.await_count == 1
+
+
+async def test_wait_for_ready_keeps_waiting_on_other_reconcile_failure(
+    tmp_path,
+) -> None:
+    """Other reconcile failures can be transient and must not fail fast."""
+    message = (
+        "failed to reconcile checkpoints: patch automatic SnapshotJob "
+        "default/checkpoint-a3bc461b18d203960e367ed2848dc024 lifecycle "
+        "metadata: the object has been modified"
+    )
+    deployment = _deployment_with_dgd_status(
+        tmp_path, _dgd_status_with_ready_message(message)
+    )
+
+    with pytest.raises(TimeoutError, match="failed to reach Ready=True"):
+        await deployment._wait_for_condition(timeout=0.05, sleep=0.01)
+
+    assert deployment._custom_api.get_namespaced_custom_object.await_count > 1
