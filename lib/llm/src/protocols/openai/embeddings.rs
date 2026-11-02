@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
-use serde::{Deserialize, Serialize, Serializer, de::IgnoredAny};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::IgnoredAny};
 use serde_json::{Map, Value};
 use utoipa::ToSchema;
 use validator::Validate;
@@ -14,7 +14,7 @@ pub use nvext::{NvExt, NvExtProvider};
 
 /// `/v1/embeddings` request.
 ///
-/// Deserialized through [`RequestFields`] (see `messages`) and
+/// Deserialized through `RequestFields` (see `messages`) and
 /// serialized by hand, so a chat-style request reaches the worker without the
 /// placeholder `input`. The field attributes still describe the OpenAPI schema.
 #[derive(ToSchema, Deserialize, Validate, Debug, Clone)]
@@ -100,7 +100,7 @@ const MESSAGES_SHAPE_ERROR: &str = "`messages` must be a non-empty list of chat 
                                     non-empty list of such lists, and every message needs a \
                                     string `role`";
 
-/// `input` as sent: OpenAI's text and token-ID forms (in [`EmbeddingInput`]'s
+/// `input` as sent: OpenAI's text and token-ID forms (in `EmbeddingInput`'s
 /// variant order), or vLLM's chat-style conversations. Parsed directly, so
 /// text and token-ID requests skip building a generic JSON tree.
 #[derive(Deserialize)]
@@ -127,7 +127,8 @@ enum MessagesField {
 #[derive(Deserialize)]
 struct RequestFields {
     model: String,
-    #[serde(default)]
+    // An explicit `null` is an invalid `input`, not a missing one.
+    #[serde(default, deserialize_with = "present")]
     input: Option<InputField>,
     #[serde(default)]
     messages: Option<MessagesField>,
@@ -143,6 +144,16 @@ struct RequestFields {
     truncate_prompt_tokens: Option<i64>,
     #[serde(default)]
     nvext: Option<NvExt>,
+}
+
+/// Deserializes a field that is present, so `null` reaches `T` instead of
+/// becoming `None`; an absent field still takes its `default`.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 impl TryFrom<RequestFields> for NvCreateEmbeddingRequest {
@@ -435,6 +446,11 @@ mod tests {
                 "`input` must be",
             ),
             (json!({"model": "m"}), "missing field `input`"),
+            (json!({"model": "m", "input": null}), "`input` must be"),
+            (
+                json!({"model": "m", "input": null, "messages": image_conversation()}),
+                "not both",
+            ),
             (json!({"input": "hello"}), "missing field `model`"),
         ];
         for (body, expected) in cases {
