@@ -89,7 +89,8 @@ pub(crate) use request_lease::RequestAttemptRelease;
 pub use route_request::RouteRequest;
 pub(crate) use routing_host::{EVERY_ROLE, check_hint_policies_route_on_kv_path};
 pub use routing_host::{
-    KvPushRouter, LlmDispatch, MultimodalCache, RoutingHost, RoutingHostBuilder,
+    KvPushRouter, LlmDispatch, MultimodalCache, RouteBooking, RoutePlan, RoutingHost,
+    RoutingHostBuilder,
 };
 pub use routing_load::{
     ManagedKvRouter, RouterLoadSource, RoutingLoadContext, SchedulerLoadSender,

@@ -306,7 +306,11 @@ pub struct RoutingHost {
 /// A route selected for one request but not sent yet, in any routing mode:
 /// the worker, what books it, and the affinity hold, until
 /// [`RoutingHost::dispatch_route`] sends it or [`RoutePlan::abort`] gives it up.
-pub(crate) struct RoutePlan {
+///
+/// A host that selects but never sends, such as the inference-gateway EPP,
+/// keeps the booking instead with [`Self::into_booking`] or
+/// [`Self::detach_booking`]. Dropping a plan releases what it holds.
+pub struct RoutePlan {
     /// The phase the worker was selected for; dispatch tracks under it rather
     /// than re-reading the request.
     phase: RequestPhase,
@@ -375,7 +379,7 @@ impl RoutePlan {
 
     /// The selected worker. A KV route is sent there exactly; a built-in route
     /// moves to another instance if this one is gone by the send.
-    pub(crate) fn target(&self) -> AffinityTarget {
+    pub fn target(&self) -> AffinityTarget {
         match &self.booking {
             PlanBooking::Kv { selection, .. } => route_target(selection.worker),
             PlanBooking::Hosted(booking) => booking.target(),
@@ -394,10 +398,7 @@ impl RoutePlan {
 
     /// Give the route up before dispatch: abort the classifier lifecycle with
     /// `error` as its cause, release the booking, and drop the affinity hold.
-    // No non-test caller yet: the frontend dispatches every plan it makes. The
-    // EPP, which can give a reservation up, is the intended first one.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) async fn abort(self, error: Option<&Error>) {
+    pub async fn abort(self, error: Option<&Error>) {
         let Self {
             booking, affinity, ..
         } = self;
@@ -416,6 +417,65 @@ impl RoutePlan {
             PlanBooking::Hosted(booking) => drop(booking),
         }
         drop(affinity);
+    }
+
+    /// Keep the booking without dispatching, for a host that releases it
+    /// itself. A KV booking stays with the returned [`RouteBooking`]. A
+    /// built-in route's occupancy reservation and candidate-policy attempt
+    /// lease are not keyed by request, so they are released now; a
+    /// round-robin cursor stays advanced.
+    pub fn into_booking(self) -> RouteBooking {
+        RouteBooking {
+            cleanup: self.into_kv_cleanup(),
+        }
+    }
+
+    /// Keep a KV booking under the plan's request id without dispatching. The
+    /// host frees it by that id with `KvRouter::free` (and reports prefill
+    /// done with `KvRouter::mark_prefill_completed`); otherwise the booking
+    /// expires with its lease. A built-in route releases what it holds now,
+    /// as with [`Self::into_booking`].
+    pub fn detach_booking(self) {
+        if let Some(cleanup) = self.into_kv_cleanup() {
+            cleanup.detach();
+        }
+    }
+
+    /// End the plan without dispatching and keep only its KV booking. Only a
+    /// dispatching host can follow a classifier lifecycle, so it is aborted;
+    /// the affinity hold is dropped without binding the session. A built-in
+    /// booking is dropped, releasing its reservations.
+    fn into_kv_cleanup(self) -> Option<KvRequestCleanup> {
+        match self.booking {
+            PlanBooking::Kv {
+                mut selection,
+                cleanup,
+            } => {
+                if let Some(mut lifecycle) = selection.request_lifecycle.take() {
+                    lifecycle.abort(None);
+                }
+                Some(cleanup)
+            }
+            PlanBooking::Hosted(_) => None,
+        }
+    }
+}
+
+/// The booking of a route its host keeps without dispatching, from
+/// [`RoutePlan::into_booking`]. [`Self::release`] frees it and waits for the
+/// scheduler to acknowledge; dropping it frees it without waiting.
+#[must_use = "dropping a route booking releases it"]
+pub struct RouteBooking {
+    /// `None` for a built-in route, whose reservations end with the plan.
+    cleanup: Option<KvRequestCleanup>,
+}
+
+impl RouteBooking {
+    /// Release the booking and wait for the scheduler to acknowledge it.
+    pub async fn release(self) {
+        if let Some(cleanup) = &self.cleanup {
+            cleanup.finish().await;
+        }
     }
 }
 
