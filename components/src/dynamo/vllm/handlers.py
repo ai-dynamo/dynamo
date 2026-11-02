@@ -89,7 +89,12 @@ from dynamo.llm import (
     register_model,
     unregister_model,
 )
-from dynamo.llm.exceptions import EngineShutdown, InvalidArgument, WorkerOverloaded
+from dynamo.llm.exceptions import (
+    Cancelled,
+    EngineShutdown,
+    InvalidArgument,
+    WorkerOverloaded,
+)
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.kv_connector_protocols import (
@@ -4866,12 +4871,14 @@ class EmbeddingWorkerHandler:
         accepts (``image_url``, ``video_url``, ``audio_url``, ``input_audio``),
         subject to the engine's media limits and allowed media sources.
 
-        Input vLLM rejects reaches the client with the status and message
-        ``vllm serve`` would give, rather than a bare "Invalid request" or a
-        500: vLLM's typed client errors keep their status (422 for media that
-        can't be loaded, such as an image URL returning 404), and other
-        validation failures (a text-only model given media, a malformed
-        message) raise ``InvalidArgument``, a 400.
+        Input vLLM rejects (a text-only model given media, a modality or item
+        count the model doesn't take, media that can't be loaded, a malformed
+        message) raises ``InvalidArgument`` with vLLM's message, so the client
+        gets a 400 with the reason ``vllm serve`` would give rather than a
+        bare "Invalid request" or a 500. vLLM's typed client errors are not
+        raised as ``HttpError``: the frontend answers a worker's 422 with a
+        400 and only shows the message of an ``InvalidArgument``, so
+        ``HttpError(422, ...)`` would reach the client as a 400 with no reason.
         """
         from vllm.entrypoints.pooling.embed.protocol import (
             EmbeddingBatchChatRequest,
@@ -4879,8 +4886,6 @@ class EmbeddingWorkerHandler:
         )
         from vllm.exceptions import VLLMClientError
         from vllm.utils.mistral import is_mistral_tokenizer
-
-        from .errors import vllm_client_error_to_http_error
 
         messages = request["messages"]
         batched = (
@@ -4916,24 +4921,25 @@ class EmbeddingWorkerHandler:
                 chat_params,
                 chat_request.build_tok_params(model_config),
             )
-        except VLLMClientError as e:
-            raise vllm_client_error_to_http_error(e) from e
-        # The other errors vLLM's server answers with 400 (pydantic's
-        # ValidationError is a ValueError).
-        except (ValueError, TypeError) as e:
+        # The errors vLLM's server answers with 4xx (pydantic's ValidationError
+        # is a ValueError).
+        except (ValueError, TypeError, VLLMClientError) as e:
             raise InvalidArgument(str(e)) from e
         return list(engine_prompts)
 
     async def _render_chat_embedding_input_until_stopped(
         self, request: dict, context: Context
-    ) -> Optional[list[Any]]:
+    ) -> list[Any]:
         """Render chat-style input unless the request stops first.
 
         Rendering can download media before any engine request exists, so
         ``_abort_monitor`` has nothing to abort yet. Instead the render is
         raced against the request stopping and the worker shutting down; when
-        either wins, the render is canceled. Returns None if the request
-        stopped, and raises EngineShutdown on shutdown.
+        either wins, the render is canceled and nothing is encoded. Media
+        already handed to vLLM's decode thread pool finishes decoding in the
+        background. Raises Cancelled if the request stopped (an empty stream
+        would aggregate to a successful response with no embeddings), and
+        EngineShutdown on shutdown.
         """
         render_task = asyncio.create_task(self._render_chat_embedding_input(request))
         stopped = context.async_killed_or_stopped()
@@ -4957,10 +4963,7 @@ class EmbeddingWorkerHandler:
         if shutdown_task is not None and shutdown_task in done:
             raise EngineShutdown("Engine was shut down during embedding.")
         if stopped in done:
-            logger.debug(
-                f"Embedding request {context.id()} stopped while rendering its input"
-            )
-            return None
+            raise Cancelled("Embedding request stopped while rendering its input")
         return render_task.result()
 
     async def generate(
@@ -5086,12 +5089,9 @@ class EmbeddingWorkerHandler:
             pooling_kwargs["dimensions"] = dimensions
         pooling_params = PoolingParams(**pooling_kwargs)
         if messages is not None:
-            rendered = await self._render_chat_embedding_input_until_stopped(
+            prompts = await self._render_chat_embedding_input_until_stopped(
                 request, context
             )
-            if rendered is None:
-                return
-            prompts = rendered
         # Use the per-request context id (same as the chat/completion paths
         # in this file) so concurrent embeddings never collide inside
         # ``AsyncLLM``. ``context.trace_id`` is a distributed-trace id

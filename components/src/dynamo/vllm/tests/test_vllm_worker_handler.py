@@ -27,7 +27,6 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.health_check import HEALTH_CHECK_KEY
-from dynamo.llm.exceptions import HttpError
 from dynamo.vllm.health_check import VllmPrefillHealthCheckPayload
 from dynamo.vllm.multimodal_utils.protocol import (
     PatchedTokensPrompt,
@@ -3308,20 +3307,13 @@ class TestEmbeddingWorkerHandlerChatInput:
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
     @pytest.mark.parametrize(
-        ("case", "expected_status"),
-        [
-            ("text_only_model", None),
-            ("unsupported_modality", 400),
-            ("media_not_loadable", 422),
-        ],
+        "case", ["text_only_model", "unsupported_modality", "media_not_loadable"]
     )
-    async def test_vllm_rejection_keeps_its_status_and_message(
-        self, case, expected_status
-    ):
-        """vLLM's rejection reaches the client with the status and message
-        ``vllm serve`` gives, instead of a generic "Invalid request" or a 500.
-        Typed vLLM client errors keep their own status; a media URL that
-        can't be loaded is a 422, not a 400."""
+    async def test_vllm_rejection_is_invalid_argument(self, case):
+        """vLLM's rejection reaches the client as a 400 with its message,
+        instead of a generic "Invalid request" or a 500. Typed vLLM client
+        errors must stay InvalidArgument: as HttpError(422), the frontend would
+        answer a 400 without the message."""
         from vllm.exceptions import VLLMUnprocessableEntityError, VLLMValidationError
 
         error = {
@@ -3340,14 +3332,11 @@ class TestEmbeddingWorkerHandlerChatInput:
         handler, encoded = self._make_handler()
         handler.engine_client.renderer.render_chat_async = AsyncMock(side_effect=error)
 
-        expected_type = mod.InvalidArgument if expected_status is None else HttpError
-        with pytest.raises(expected_type) as exc_info:
+        with pytest.raises(mod.InvalidArgument) as exc_info:
             await self._generate(
                 handler,
                 {"model": "test-model", "messages": self.AUDIO_CONVERSATION},
             )
-        if expected_status is not None:
-            assert exc_info.value.code == expected_status
         assert str(error) in str(exc_info.value)
         assert exc_info.value.__cause__ is error
         assert encoded == []
@@ -3385,8 +3374,10 @@ class TestEmbeddingWorkerHandlerChatInput:
 
         if signal == "request_stopped":
             stopped.set_result(True)
-            responses, _ = await generate
-            assert responses == []
+            # Not an empty stream, which would aggregate to a successful
+            # response with no embeddings.
+            with pytest.raises(mod.Cancelled):
+                await generate
         else:
             handler.shutdown_event.set()
             with pytest.raises(mod.EngineShutdown):
