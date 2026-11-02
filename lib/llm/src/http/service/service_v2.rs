@@ -4458,6 +4458,58 @@ mod tests {
         assert!(!state.model_http_routes_ready(&model));
     }
 
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn decision_only_model_readiness_requires_its_enabled_http_routes() {
+        install_readiness_formats();
+        use crate::{
+            decision_profile::{VLLM_LIQUID_DECISION_V1, VLLM_NATIVE_DECISION_MAX_CANDIDATES},
+            discovery::WorkerSet,
+            model_card::ModelDeploymentCard,
+            model_type::{ModelInput, ModelType},
+            worker_type::WorkerType,
+        };
+        for enabled in [false, true] {
+            let mut api = FrontendApiConfig::default();
+            api.set_systemone_enabled(enabled);
+            let service = HttpService::builder()
+                .frontend_api_config(api)
+                .build()
+                .unwrap();
+            let state = service.state_clone();
+            let mut card = ModelDeploymentCard::with_name_only("decision-only");
+            card.model_input = ModelInput::Tokens;
+            card.model_type = ModelType::Chat;
+            card.worker_type = Some(WorkerType::Aggregated);
+            card.runtime_config
+                .runtime_data
+                .insert(VLLM_LIQUID_DECISION_V1.into(), true.into());
+            card.runtime_config
+                .runtime_data
+                .insert(VLLM_NATIVE_DECISION_MAX_CANDIDATES.into(), 26.into());
+            let mut workers = WorkerSet::new("worker".into(), card.mdcsum().into(), card);
+            let (admissions, admitted_ids) = tokio::sync::watch::channel(vec![1]);
+            workers.set_instance_watcher(admitted_ids);
+            let _qualification = crate::discovery::test_support::attach_card_surface_for_test(
+                &mut workers,
+                crate::discovery::test_support::native_resources(
+                    crate::discovery::DecisionEngine::Read(Arc::new(ReadinessOnlyEngine)),
+                ),
+            )
+            .await;
+            let model = crate::discovery::Model::new("decision-only".into());
+            model.add_worker_set("worker".into(), Arc::new(workers));
+            assert!(!model.has_generate_engine());
+            assert!(!model.has_chat_engine());
+            assert!(model.prepared_selection_for_test().await.is_ok());
+            assert_eq!(state.model_http_routes_ready(&model), enabled);
+            admissions.send_replace(Vec::new());
+            assert!(model.has_decision_engine());
+            assert!(!model.is_ready_to_serve());
+            assert_eq!(state.model_http_routes_ready(&model), enabled);
+        }
+    }
+
     #[test]
     #[serial_test::serial]
     fn generate_route_paths_use_overrides() {
