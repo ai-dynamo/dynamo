@@ -14,6 +14,18 @@ pub mod agents;
 pub mod anthropic;
 pub mod codec;
 pub mod common;
+#[expect(
+    dead_code,
+    reason = "protocol foundation precedes its serving consumer"
+)]
+pub(crate) mod decision_head;
+#[cfg_attr(not(test), expect(dead_code, reason = "pending serving consumer"))]
+pub(crate) mod decision_native;
+#[expect(
+    dead_code,
+    reason = "protocol foundation precedes its serving consumer"
+)]
+pub(crate) mod decision_read;
 pub mod openai;
 pub mod response_merge;
 pub mod systemone;

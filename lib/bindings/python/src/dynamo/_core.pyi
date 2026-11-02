@@ -1787,6 +1787,10 @@ class ModelType:
         """Return True if this model type supports chat."""
         ...
 
+    def supports_completions(self) -> bool:
+        """Return True if this model type supports /v1/completions."""
+        ...
+
     def supports_embedding(self) -> bool:
         """Return True if this model type supports /v1/embeddings."""
         ...
