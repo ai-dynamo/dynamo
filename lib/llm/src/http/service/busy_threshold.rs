@@ -180,8 +180,6 @@ async fn busy_threshold_handler(
         );
     }
 
-    // A frontend in direct routing mode does not pick workers, so it ignores
-    // busy thresholds.
     if is_setting && !manager.accepts_load_thresholds(&request.model) {
         return (
             StatusCode::CONFLICT,

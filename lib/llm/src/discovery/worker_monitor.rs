@@ -150,30 +150,29 @@ impl LoadThresholdConfig {
 #[derive(Clone)]
 pub struct LoadThresholdHandle {
     config: Arc<ArcSwap<LoadThresholdConfig>>,
-    /// False for a handle from [`Self::disabled`].
-    accepts_thresholds: bool,
+    enabled: bool,
 }
 
 impl LoadThresholdHandle {
     pub fn new(config: LoadThresholdConfig) -> Self {
         Self {
             config: Arc::new(ArcSwap::from_pointee(config)),
-            accepts_thresholds: true,
+            enabled: true,
         }
     }
 
-    /// A handle that ignores thresholds, for a frontend in direct routing mode,
-    /// which does not pick workers. Its monitor never subscribes to KV metrics.
+    /// A handle that ignores thresholds, for a frontend in direct routing mode.
+    /// Its monitor never subscribes to KV metrics.
     pub(crate) fn disabled() -> Self {
         Self {
-            accepts_thresholds: false,
+            enabled: false,
             ..Self::new(LoadThresholdConfig::default())
         }
     }
 
     /// False for a handle from [`Self::disabled`].
-    pub(crate) fn accepts_thresholds(&self) -> bool {
-        self.accepts_thresholds
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     pub fn get(&self) -> LoadThresholdConfig {
@@ -184,7 +183,7 @@ impl LoadThresholdHandle {
     /// retry through `rcu`; they are rare and never block readers. A handle from
     /// [`Self::disabled`] ignores the update.
     pub fn update(&self, config: &LoadThresholdConfig) {
-        if !self.accepts_thresholds {
+        if !self.enabled {
             return;
         }
         self.config.rcu(|current| {
@@ -903,12 +902,12 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
         // Subscribe to KV metrics over the configured event transport. This is
         // optional; cleanup of TTFT and ITL metrics continues without it. The
         // reports feed only threshold-based overload detection, and the
-        // subscription connects to every worker. A frontend in direct routing
-        // mode ignores thresholds, so it skips the subscription.
-        let kv_metrics_rx = if !self.thresholds.handle().accepts_thresholds() {
+        // subscription connects to every worker, so skip it when the threshold
+        // handle is disabled.
+        let kv_metrics_rx = if !self.thresholds.handle().is_enabled() {
             tracing::debug!(
                 endpoint = %endpoint.id(),
-                "KvWorkerMonitor: direct routing mode, skipping the KV metrics subscription"
+                "KvWorkerMonitor: threshold handle disabled, skipping the KV metrics subscription"
             );
             None
         } else {

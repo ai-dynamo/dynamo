@@ -1589,7 +1589,7 @@ mod tests {
         };
         let direct = load_threshold_handle(&config(RouterMode::Direct));
         direct.update(&thresholds);
-        assert!(!direct.accepts_thresholds());
+        assert!(!direct.is_enabled());
         assert!(!direct.is_configured());
         assert!(load_threshold_handle(&config(RouterMode::KV)).is_configured());
     }

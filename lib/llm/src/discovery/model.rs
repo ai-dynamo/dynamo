@@ -859,38 +859,34 @@ impl Model {
     // -- Worker monitoring (aggregated across WorkerSets) --
 
     /// Get load threshold config from the first WorkerSet with a threshold handle,
-    /// preferring one that applies thresholds: a WorkerSet in direct routing mode
-    /// ignores them. When `config` is Some, updates every handle. WorkerSets may
-    /// share a handle.
+    /// preferring an enabled one. When `config` is Some, updates every handle.
+    /// WorkerSets may share a handle.
     pub fn load_threshold_config(
         &self,
         config: Option<&LoadThresholdConfig>,
     ) -> Option<LoadThresholdConfig> {
-        let mut result: Option<(bool, LoadThresholdConfig)> = None;
-        for worker_set in self.worker_sets.load().values() {
-            if let Some(ref thresholds) = worker_set.load_thresholds {
-                if let Some(cfg) = config {
-                    thresholds.update(cfg);
-                }
-                let accepts = thresholds.accepts_thresholds();
-                if result
-                    .as_ref()
-                    .is_none_or(|(reported_accepts, _)| accepts && !reported_accepts)
-                {
-                    result = Some((accepts, thresholds.get()));
-                }
-            }
+        let worker_sets = self.worker_sets.load();
+        let handles: Vec<_> = worker_sets
+            .values()
+            .filter_map(|worker_set| worker_set.load_thresholds.as_ref())
+            .collect();
+        if let Some(cfg) = config {
+            handles.iter().for_each(|handle| handle.update(cfg));
         }
-        result.map(|(_, config)| config)
+        handles
+            .iter()
+            .find(|handle| handle.is_enabled())
+            .or(handles.first())
+            .map(|handle| handle.get())
     }
 
-    /// Whether any WorkerSet takes busy thresholds; none does in direct routing mode.
+    /// Whether any WorkerSet has an enabled threshold handle.
     pub(crate) fn accepts_load_thresholds(&self) -> bool {
         self.worker_sets.load().values().any(|worker_set| {
             worker_set
                 .load_thresholds
                 .as_ref()
-                .is_some_and(|thresholds| thresholds.accepts_thresholds())
+                .is_some_and(|thresholds| thresholds.is_enabled())
         })
     }
 

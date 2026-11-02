@@ -356,7 +356,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
         if self.conditional_disagg_enabled and not self.use_kv_events:
             raise ValueError("--router-conditional-disagg requires --router-kv-events")
         self.validate_rejection_thresholds()
-        # Direct mode does not pick workers and ignores the thresholds.
+        # Direct mode ignores the thresholds.
         if self.router_mode != "direct":
             self.log_rejection_thresholds()
 

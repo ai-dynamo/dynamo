@@ -2001,8 +2001,6 @@ where
                             ErrorType::WorkerRankOverloaded(dp_rank) => tracing::debug!(
                                 "Leaving instance {instance_id} routable: its overload is limited to DP rank {dp_rank}: {err}"
                             ),
-                            // In direct mode the caller picked the worker, as the
-                            // EPP does, so the refusal goes back to it unmarked.
                             _ if self.router_mode.is_direct_routing() => tracing::debug!(
                                 "Leaving instance {instance_id} routable in direct mode; its refusal goes back to the caller: {err}"
                             ),
@@ -2667,10 +2665,9 @@ mod tests {
     /// Through the router's own fault detection, on one client: a refusal
     /// that names one DP rank leaves the worker selectable for its other work,
     /// while a whole-worker refusal — as an older worker's, which names none,
-    /// also is — marks it overloaded, except in direct mode, where the caller
-    /// picked the worker. Time is held still throughout, so no
-    /// lease can lapse between a refusal and the check after it. Neither
-    /// reports the worker down; a real connection failure still does.
+    /// also is — marks it overloaded, except in direct mode. Time is held still
+    /// throughout, so no lease can lapse between a refusal and the check after
+    /// it. Neither reports the worker down; a real connection failure still does.
     #[tokio::test]
     async fn fault_detection_marks_only_a_whole_worker_refusal_overloaded_and_never_down() {
         const TEST_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);

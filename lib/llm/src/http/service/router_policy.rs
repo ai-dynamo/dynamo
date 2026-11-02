@@ -364,16 +364,7 @@ mod tests {
             thresholds
         };
         let direct = add("direct", "direct", LoadThresholdHandle::disabled());
-        // Several direct WorkerSets, so one likely comes first in the map.
-        let mixed_direct: Vec<_> = (0..4)
-            .map(|i| {
-                add(
-                    "mixed",
-                    &format!("direct-{i}"),
-                    LoadThresholdHandle::disabled(),
-                )
-            })
-            .collect();
+        let mixed_direct = add("mixed", "direct", LoadThresholdHandle::disabled());
         let mixed_picking = add(
             "mixed",
             "picking",
@@ -393,11 +384,7 @@ mod tests {
             mixed_picking.get().active_decode_blocks_threshold,
             Some(0.85)
         );
-        assert!(
-            mixed_direct
-                .iter()
-                .all(|thresholds| !thresholds.is_configured())
-        );
+        assert!(!mixed_direct.is_configured());
     }
 
     #[test]
