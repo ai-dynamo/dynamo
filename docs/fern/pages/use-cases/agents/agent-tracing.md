@@ -101,7 +101,7 @@ The endpoint is a ZMQ PULL bind address. The harness publishes `agent-tool-event
 
 The wire format is `[topic, seq_be_u64, msgpack(RequestTraceToolEventIngress)]`. Use a monotonic sequence and a background PUSH publisher with a bounded queue. Include `started_at_unix_ms`, `ended_at_unix_ms`, and `duration_ms` on terminal `tool_end` and `tool_error` events so timing survives a dropped `tool_start`.
 
-Use the same `session_id` as the surrounding LLM requests. Set `tool_call_id` to the ID the client received: `toolu_...` on `/v1/messages`, `call-...` otherwise.
+Use the same `session_id` as the surrounding LLM requests. Set `tool_call_id` to the exact ID the client received in the model response. On `/v1/messages` that is the `toolu_...` ID, not the backend's ID.
 
 ```json title="Explicit tool_end event"
 {
