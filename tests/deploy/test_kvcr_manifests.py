@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -20,6 +22,9 @@ pytestmark = [
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MANIFEST_DIR = _REPO_ROOT / "examples/backends/vllm/deploy/kvcr"
 _MANIFESTS = ("agg.yaml", "agg-memory-service.yaml")
+_GUARD_DAEMONSET_WORKER = "agg-guard-daemonset.yaml"
+_STATE_AGENT = "agg-state-agent.yaml"
+_MODEL_NAMESPACE = "kvcr-qwen3-0-6b"
 
 
 def _worker(manifest_name: str) -> dict:
@@ -291,3 +296,123 @@ def test_deploy_script_rejects_unsafe_compatibility_digest() -> None:
     assert result.returncode == 2
     assert result.stdout == ""
     assert "unsupported character" in result.stderr
+
+
+def _docs(name: str) -> list[dict]:
+    return list(yaml.safe_load_all((_MANIFEST_DIR / name).read_text()))
+
+
+def _guard_owner(node_name: str, guard_index: str = "0", count: str = "1"):
+    main = _worker(_GUARD_DAEMONSET_WORKER)["podTemplate"]["spec"]["containers"][0]
+    env = {
+        **os.environ,
+        "KVCR_NODE_NAME": node_name,
+        "KVCR_GUARD_INDEX": guard_index,
+        "KVCR_GUARD_COUNT": count,
+        "POD_IP": "192.0.2.1",
+    }
+    return subprocess.run(
+        ["python3", "-c", _kv_transfer_config_python(main["args"][0])],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+        timeout=30,
+    )
+
+
+def test_guard_daemonset_slot_depends_on_node_and_guard_index_only() -> None:
+    def owner(*args: str) -> str:
+        result = _guard_owner(*args)
+        assert result.returncode == 0, result.stderr
+        config = json.loads(result.stdout)["kv_connector_extra_config"]
+        return config["dynamo_state_agent"]["cache_owner_ids"]["0"]
+
+    digest = hashlib.sha256(b"kvcr-guard-slot/v1\0node-a\x000").digest()
+    assert owner("node-a").endswith("/" + digest[:16].hex())
+    assert owner("node-b") != owner("node-a")
+    assert owner("node-a", "1", "2") != owner("node-a")
+    for args, message in (
+        (("",), "node name must not be empty"),
+        (("n", "1", "1"), "outside [0, 1)"),
+    ):
+        result = _guard_owner(*args)
+        assert result.returncode != 0
+        assert message in result.stderr
+
+
+def test_guard_daemonset_and_worker_share_the_node_contract() -> None:
+    (daemonset,) = _docs("guard-daemonset.yaml")
+    guard_spec = daemonset["spec"]["template"]["spec"]
+    (guard,) = guard_spec["containers"]
+    worker_spec = _worker(_GUARD_DAEMONSET_WORKER)["podTemplate"]["spec"]
+
+    assert "--adopt-pools" not in guard["command"]
+    for spec in (guard_spec, worker_spec):
+        assert spec["hostNetwork"] is True
+        assert spec["securityContext"]["runAsUser"] == 1000
+    assert guard_spec["initContainers"][0]["securityContext"]["runAsUser"] == 0
+
+    def host_paths(spec: dict) -> dict:
+        mounts = {
+            mount["name"]: mount["mountPath"]
+            for container in spec["containers"]
+            for mount in container["volumeMounts"]
+        }
+        return {v["hostPath"]["path"]: mounts[v["name"]] for v in spec["volumes"]}
+
+    # The worker gets the pool as a descriptor, so it mounts only the socket dir.
+    guard_paths, worker_paths = host_paths(guard_spec), host_paths(worker_spec)
+    assert len(worker_paths) == 1 and worker_paths.items() <= guard_paths.items()
+    assert all(host == mount for host, mount in guard_paths.items())
+
+    # One worker per model per node, because the slot depends on the node only.
+    (term,) = worker_spec["affinity"]["podAntiAffinity"][
+        "requiredDuringSchedulingIgnoredDuringExecution"
+    ]
+    assert term["topologyKey"] == "kubernetes.io/hostname"
+    assert term["labelSelector"]["matchExpressions"][0]["values"] == [_MODEL_NAMESPACE]
+
+
+def test_state_agent_is_a_persistent_singleton_in_the_model_namespace() -> None:
+    documents = _docs(_STATE_AGENT)
+    deployment = next(doc for doc in documents if doc["kind"] == "Deployment")
+    pod_spec = deployment["spec"]["template"]["spec"]
+    (container,) = pod_spec["containers"]
+    env = {item["name"]: item.get("value") for item in container["env"]}
+
+    assert deployment["spec"]["replicas"] == 1
+    assert deployment["spec"]["strategy"]["type"] == "Recreate"
+    assert env["DYN_NAMESPACE"] == _MODEL_NAMESPACE
+    role = next(doc for doc in documents if doc["kind"] == "Role")
+    assert any("dynamoworkermetadatas" in rule["resources"] for rule in role["rules"])
+    assert pod_spec["serviceAccountName"] == role["metadata"]["name"]
+    # Workers target the agent's namespace; all three endpoint parts are needed.
+    command = _worker(_GUARD_DAEMONSET_WORKER)["podTemplate"]["spec"]["containers"][0][
+        "args"
+    ][0]
+    assert re.search(rf"--kv-state-endpoint {_MODEL_NAMESPACE}/\w+/\w+ ", command)
+
+
+@pytest.mark.skipif(shutil.which("envsubst") is None, reason="envsubst is unavailable")
+def test_deploy_script_renders_external_guard_mode() -> None:
+    env = {
+        **os.environ,
+        "DYNAMO_UCX_NET_DEVICES": "mlx5_test:1",
+        "DYNAMO_KVCR_COMPATIBILITY_DIGEST": "d1",
+        "DYNAMO_VLLM_IMAGE": "runtime:1.4.0@sha256:test",
+        "KVCR_MEMORY_SERVICE_ENABLED": "external",
+        "KVCR_STATE_AGENT_MAX_SLOTS": "4",
+    }
+    result = subprocess.run(
+        [str(_MANIFEST_DIR / "deploy.sh"), "--render-only"],
+        check=True,
+        capture_output=True,
+        env=env,
+        text=True,
+        timeout=30,
+    )
+    kinds = [doc["kind"] for doc in yaml.safe_load_all(result.stdout)]
+    assert kinds[0] == "DaemonSet" and kinds[-1] == "DynamoGraphDeployment"
+    assert '- "4"' in result.stdout
+    assert '--kv-transfer-config "$kv_transfer_config"' in result.stdout
