@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 use thiserror::Error;
 
 use super::KvSchedulerError;
@@ -385,21 +385,10 @@ struct RawRouterPolicyConfig {
     models: HashMap<String, RawPolicyProfile>,
     worker_selection: Option<RawWorkerSelectionConfig>,
     request_classifier: Option<RawRequestClassifierConfig>,
-    #[serde(default, deserialize_with = "key_present")]
-    default_policy_family: bool,
-    #[serde(default, deserialize_with = "key_present")]
-    uncached_isl_buckets: bool,
 }
 
 impl RawRouterPolicyConfig {
     fn resolve(self) -> Result<RouterPolicyConfig, RouterPolicyConfigError> {
-        reject_removed_keys(
-            "root",
-            [
-                ("default_policy_family", self.default_policy_family),
-                ("uncached_isl_buckets", self.uncached_isl_buckets),
-            ],
-        )?;
         if let Some(router) = &self.router {
             router
                 .apply(&mut super::config::KvRouterConfig::default())
@@ -427,13 +416,6 @@ impl RawRouterPolicyConfig {
                 ));
             }
             let location = format!("model {model_name:?}");
-            reject_removed_keys(
-                &location,
-                [
-                    ("default_policy_family", profile.default_policy_family),
-                    ("uncached_isl_buckets", profile.uncached_isl_buckets),
-                ],
-            )?;
             let resolved = resolve_profile(
                 profile.default_policy_class,
                 profile.policy_classes,
@@ -477,10 +459,6 @@ impl RawRouterPolicyConfig {
 struct RawPolicyProfile {
     default_policy_class: Option<String>,
     policy_classes: Vec<RawPolicyClassConfig>,
-    #[serde(default, deserialize_with = "key_present")]
-    default_policy_family: bool,
-    #[serde(default, deserialize_with = "key_present")]
-    uncached_isl_buckets: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -497,29 +475,6 @@ struct RawPolicyClassConfig {
     request_queue_limit_per_worker: Option<usize>,
     raw_isl_token_queue_limit_per_worker: Option<usize>,
     cached_token_queue_limit_per_worker: Option<usize>,
-    #[serde(default, deserialize_with = "key_present")]
-    policy_family: bool,
-    #[serde(default, deserialize_with = "key_present")]
-    cache_bucket: bool,
-}
-
-/// Records that a key is present, whatever its value, including `null` or an empty value.
-fn key_present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
-    serde::de::IgnoredAny::deserialize(deserializer).map(|_| true)
-}
-
-/// Rejects keys of the removed policy-family and cache-bucket hierarchy.
-fn reject_removed_keys(
-    location: &str,
-    keys: [(&str, bool); 2],
-) -> Result<(), RouterPolicyConfigError> {
-    match keys.into_iter().find(|&(_, present)| present) {
-        Some((key, _)) => Err(RouterPolicyConfigError::Validation(format!(
-            "{location} {key} was removed; select policy classes directly by name and set \
-             default_policy_class to the default class"
-        ))),
-        None => Ok(()),
-    }
 }
 
 fn resolve_profile(
@@ -574,13 +529,6 @@ fn resolve_policy_class(
     raw: RawPolicyClassConfig,
     location: &str,
 ) -> Result<PolicyClassConfig, RouterPolicyConfigError> {
-    reject_removed_keys(
-        &format!("{location} policy class {:?}", raw.name),
-        [
-            ("policy_family", raw.policy_family),
-            ("cache_bucket", raw.cache_bucket),
-        ],
-    )?;
     validate_identifier(&raw.name, "policy class", location)?;
     if raw.quantum == 0 {
         return Err(RouterPolicyConfigError::Validation(format!(
@@ -1115,52 +1063,40 @@ policy_classes:
 
     #[test]
     fn removed_hierarchy_keys_are_rejected_even_when_null_or_empty() {
+        let assert_unknown_field = |yaml: String, key: &str| {
+            let error = RouterPolicyConfig::from_yaml(&yaml).unwrap_err();
+            assert!(
+                matches!(error, RouterPolicyConfigError::Parse { .. })
+                    && error
+                        .to_string()
+                        .contains(&format!("unknown field `{key}`")),
+                "{yaml}: {error}"
+            );
+        };
         for value in ["", "null", "\"\"", "[]", "standard"] {
             for key in ["default_policy_family", "uncached_isl_buckets"] {
-                for (yaml, location) in [
-                    (
-                        format!("{key}: {value}\npolicy_classes:\n  - name: c\n    quantum: 1\n"),
-                        "root".to_string(),
+                assert_unknown_field(
+                    format!("{key}: {value}\npolicy_classes:\n  - name: c\n    quantum: 1\n"),
+                    key,
+                );
+                assert_unknown_field(
+                    format!(
+                        "models:\n  m:\n    {key}: {value}\n    policy_classes:\n      - name: c\n        quantum: 1\n"
                     ),
-                    (
-                        format!(
-                            "models:\n  m:\n    {key}: {value}\n    policy_classes:\n      - name: c\n        quantum: 1\n"
-                        ),
-                        "model \"m\"".to_string(),
-                    ),
-                ] {
-                    let error = RouterPolicyConfig::from_yaml(&yaml)
-                        .unwrap_err()
-                        .to_string();
-                    assert!(
-                        error.contains(&format!("{location} {key} was removed")),
-                        "{yaml}: {error}"
-                    );
-                }
+                    key,
+                );
             }
             for key in ["policy_family", "cache_bucket"] {
-                for (yaml, location) in [
-                    (
-                        format!(
-                            "policy_classes:\n  - name: c\n    quantum: 1\n    {key}: {value}\n"
-                        ),
-                        "root policy class \"c\"",
+                assert_unknown_field(
+                    format!("policy_classes:\n  - name: c\n    quantum: 1\n    {key}: {value}\n"),
+                    key,
+                );
+                assert_unknown_field(
+                    format!(
+                        "models:\n  m:\n    policy_classes:\n      - name: c\n        quantum: 1\n        {key}: {value}\n"
                     ),
-                    (
-                        format!(
-                            "models:\n  m:\n    policy_classes:\n      - name: c\n        quantum: 1\n        {key}: {value}\n"
-                        ),
-                        "model \"m\" policy class \"c\"",
-                    ),
-                ] {
-                    let error = RouterPolicyConfig::from_yaml(&yaml)
-                        .unwrap_err()
-                        .to_string();
-                    assert!(
-                        error.contains(&format!("{location} {key} was removed")),
-                        "{yaml}: {error}"
-                    );
-                }
+                    key,
+                );
             }
         }
     }
