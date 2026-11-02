@@ -49,6 +49,26 @@ def _build_parser():
             "(for example, --posix-backend-param ios_pool_size=64)."
         ),
     )
+    mx = parser.add_argument_group(
+        "mx backend", "Fill from a ModelExpress peer serving the same weights."
+    )
+    mx.add_argument(
+        "--mx-source-key",
+        help="Key the peers publish these weights under, e.g. their checkpoint.",
+    )
+    mx.add_argument(
+        "--mx-server-url",
+        help=(
+            "ModelExpress server host:port. Default: the ModelExpress client's "
+            "own setting, the MX_SERVER_ADDRESS environment variable."
+        ),
+    )
+    mx.add_argument(
+        "--mx-listen-port",
+        type=int,
+        default=25555,
+        help="NIXL listen port of device 0; device N listens on this port + N.",
+    )
     return parser
 
 
@@ -62,6 +82,16 @@ def _backend_config(parser, args) -> dict[str, object]:
         "sharded_ssd_queues_per_root": args.sharded_ssd_queues_per_root,
         "posix_backend_params": posix_backend_params,
     }
+    if args.transfer_backend == "mx":
+        if not args.mx_source_key:
+            parser.error("--transfer-backend=mx needs --mx-source-key")
+        # A pod's GMS device N serves the N-th rank of the peer.
+        config.update(
+            mx_rank=args.device,
+            mx_source_key=args.mx_source_key,
+            mx_server_url=args.mx_server_url,
+            mx_listen_port=args.mx_listen_port + args.device,
+        )
     return config
 
 

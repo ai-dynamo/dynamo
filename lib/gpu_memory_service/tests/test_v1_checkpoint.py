@@ -198,6 +198,22 @@ def test_prepare_rejects_invalid_domain_and_session_state(
 
 
 @pytest.mark.timeout(10)
+def test_prepare_refuses_a_held_lease_and_keeps_serving(v1_owner) -> None:
+    v1_owner.publish_weights()
+    # Stands in for an MX source, which holds an RO lease while it serves.
+    source = _GMSClientSession(v1_owner.paths["weights"], RequestedLockType.RO)
+    control = v1_owner.control()
+
+    with pytest.raises(RuntimeError, match="MX source still holds a lease"):
+        control.prepare()
+
+    assert control.state().state == "serving"
+    reader = _GMSClientSession(v1_owner.paths["weights"], RequestedLockType.RO)
+    reader.close()
+    source.close()
+
+
+@pytest.mark.timeout(10)
 def test_prepare_rejects_committed_or_active_kv(v1_owner) -> None:
     v1_owner.publish_weights()
     control = v1_owner.control()
