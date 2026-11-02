@@ -4,3 +4,7 @@
 # vLLM
 
 See [docs/backends/vllm/](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/overview.md) for documentation.
+
+## Decision Execution
+
+See [Experimental Decision Execution](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/reference-guide.md#experimental-decision-execution) for runtime qualification, routing, accounting and failure contracts.
