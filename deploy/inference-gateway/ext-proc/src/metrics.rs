@@ -882,6 +882,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn scrape_reports_the_async_runtime() {
         register_all();
+        // A labeled family appears in a scrape only once it has a series, so
+        // record one here rather than rely on another test having done so.
+        const MODEL: &str = "scrape-test";
+        observe_stage_for(MODEL, Stage::Pick, Duration::from_millis(1));
+        drop(pick_in_flight_for(MODEL));
         let response = render().await.into_response();
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
