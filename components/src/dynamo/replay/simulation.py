@@ -409,13 +409,9 @@ class DynamoReplayRunner:
         # embedded value instead of imposing the synthetic-workload default.
         if trace_format not in {"weka", "dynamo"} and trace_block_size is None:
             trace_block_size = self.trace_block_size
-        # Common random numbers: every candidate of a trace sweep replays the
-        # same trace with ordinal request ids and the canonical router seed,
-        # so candidates differ only by their configuration and a score does
-        # not depend on the other candidates, the Run or the parallelism.
-        # Live planner retune compares candidates scored by different DGDR
-        # Runs of one window on that basis. The synthetic path has no such
-        # option.
+        # Trace replays use ordinal request ids and the canonical router seed,
+        # so a candidate's score depends only on its configuration and the
+        # trace.
         if deployment.deployment_mode == "agg":
             return run_trace_replay(
                 trace_files=trace_files,
