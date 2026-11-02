@@ -325,13 +325,14 @@ def test_model_weight_size_from_hub_estimates_without_checkpoint_sizes(
     assert get_model_weight_size_from_hub("test/model") == 6
 
 
+@pytest.mark.parametrize("client", ["httpx", "httpx2"])
 @pytest.mark.parametrize("error_name", ["ConnectError", "ReadTimeout"])
 def test_model_weight_size_from_hub_estimates_on_index_transport_error(
-    monkeypatch, tmp_path, error_name
+    monkeypatch, tmp_path, client, error_name
 ) -> None:
-    """huggingface_hub 1.x raises httpx transport errors, which are not OSError."""
-    httpx = pytest.importorskip("httpx")
-    error = getattr(httpx, error_name)("index download failed")
+    """huggingface_hub raises httpx (1.x) or httpx2 (2.x) errors, not OSError."""
+    module = pytest.importorskip(client)
+    error = getattr(module, error_name)("index download failed")
     _patch_hub(
         monkeypatch,
         tmp_path,

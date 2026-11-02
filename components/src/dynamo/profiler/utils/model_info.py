@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib
 import json
 import logging
 from pathlib import Path
@@ -23,11 +24,14 @@ except ImportError:
 
     _load_model_config_from_model_path = None
 
-try:
-    # huggingface_hub 1.x raises httpx network errors, which are not OSError.
-    from httpx import HTTPError as HTTPXError
-except ImportError:  # Older huggingface_hub raises requests errors (OSError).
-    HTTPXError = OSError
+# huggingface_hub raises its HTTP client's network errors, which are not
+# OSError: httpx in 1.x, httpx2 in 2.x. Older versions use requests (OSError).
+HUB_NETWORK_ERRORS: tuple[type[Exception], ...] = ()
+for _client in ("httpx", "httpx2"):
+    try:
+        HUB_NETWORK_ERRORS += (importlib.import_module(_client).HTTPError,)
+    except ImportError:
+        pass
 logger = logging.getLogger(__name__)
 
 DTYPE_BYTES_MAP = {
@@ -140,7 +144,7 @@ def _select_hub_checkpoint_files(model_name: str, info, token: Optional[str]) ->
                 )
                 with open(index_path) as f:
                     indexed = set(json.load(f)["weight_map"].values())
-            except (OSError, ValueError, KeyError, HTTPXError) as e:
+            except (OSError, ValueError, KeyError, *HUB_NETWORK_ERRORS) as e:
                 # Gated repos refuse the download; the network can fail.
                 logger.warning(
                     "Cannot read %s for %s: %s", SAFETENSORS_INDEX_NAME, model_name, e
