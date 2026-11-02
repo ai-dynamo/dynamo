@@ -15,6 +15,54 @@ engine with Dynamo discovery, forwards engine events into the Dynamo event
 plane, and serves requests from the Dynamo frontend by calling the engine's
 native gRPC API.
 
+## Backend Support Matrix
+
+This table describes OpenAI-compatible chat/completions through the Dynamo frontend and its standard sidecar generation path. It was source-reviewed at [Dynamo revision 318ab03](https://github.com/ai-dynamo/dynamo/tree/318ab0390d8e3e1fa7517ea6a1ebf46a7854c236) on November 2, 2026; no GPU validation was performed for this inventory. All sidecars remain experimental. Use the engine versions in the linked sidecar guides; released versions can differ.
+
+Compare with the in-process feature matrices for [vLLM](../../modular-components/backends/vllm/overview.md#feature-support-matrix), [SGLang](../../modular-components/backends/sglang/overview.md#feature-support-matrix), and [TensorRT-LLM](../../modular-components/backends/tensorrt-llm/overview.md#feature-support-matrix). The main sidecar gaps concern engine input/adapter coverage, planner telemetry, and operator-managed GMS, checkpointing, and failover.
+
+**Legend:** Supported = implemented through the stated path; Limited = a known missing capability, explained below; Engine-configured = enabled inside the native engine; No = unavailable through the stated path. **Not validated** describes runtime evidence, not feature support: model and feature combinations without end-to-end evidence are not certified by this table.
+
+| Capability | vLLM | SGLang | TensorRT-LLM |
+|---|---|---|---|
+| Text generation, streaming, and cancellation | Supported | Supported | Supported |
+| Tool calling through the Dynamo frontend | Supported | Supported | Supported |
+| Disaggregated prefill/decode serving | Supported | Supported | Supported |
+| KV-aware routing | Supported | Supported | Supported |
+| Multimodal input | Limited: image, video, audio | No | Limited: images only |
+| Separate multimodal encoder workers | Supported | No | No |
+| LoRA adapters | Supported | No | No |
+| Structured output and logprobs | Limited | Limited | Limited: no prompt logprobs |
+| Embedding endpoints | No | No | No |
+| Runtime weight updates and sleep/wake controls | Limited | No | No |
+| Kubernetes multinode deployment | Experimental | Experimental | Experimental |
+
+### Operations and Recovery
+
+| Capability | vLLM | SGLang | TensorRT-LLM |
+|---|---|---|---|
+| Observability: metrics, logs, and tracing | Limited | Limited | Limited |
+| SLA-based planner and autoscaling | No | No | No |
+| Native engine cache offloading | Engine-configured | Engine-configured | Engine-configured |
+| Operator-managed GPU Memory Service (GMS) | No | No | No |
+| Operator-managed checkpoint/restore | No | No | No |
+| Operator-managed shadow-engine failover | No | No | No |
+| In-flight request migration | Limited: opt-in token replay | Limited: opt-in token replay | Limited: opt-in token replay |
+| Graceful shutdown and draining | Limited: bounded drain | Limited: bounded drain | Limited: bounded drain |
+| Speculative decoding | Engine-configured | Engine-configured | Engine-configured |
+
+- **Serving:** vLLM accepts image/video/audio but rejects prompt embeddings and per-request `mm_processor_kwargs`. SGLang's standard gRPC path rejects multimodal input. TensorRT-LLM accepts images but rejects separate encoder handoffs, video, and audio. All three standard generation paths require one completion per request. Basic structured output is implemented across the engines, with narrower constraint controls; TensorRT-LLM returns output logprobs but not prompt logprobs. vLLM runtime weight/sleep controls require the corresponding advertised engine capabilities.
+- **SGLang LoRA:** forwarding an adapter name internally does not make it discoverable through OpenAI model lookup. The sidecar does not register the engine's adapter inventory or expose Dynamo-managed adapter loading/unloading. Its separate, opt-in native `/generate` passthrough can select a preloaded adapter using `lora_path`; that is outside the standard path summarized here. Native passthrough and manually published adapter records are separate integration choices.
+- **Observability:** Dynamo runtime metrics, logs, and request spans are implemented. Native engine metrics need separate scraping; full engine-internal tracing and existing dashboard parity are not provided by the sidecar. TensorRT-LLM also publishes routing-load snapshots, which are different from the per-iteration Forward Pass Metrics (FPM) required by load-based planning.
+- **Planner:** a supported service-level agreement (SLA) autoscaling workflow is not available for these sidecars. Kubernetes worker discovery is implemented, but built-in FPM emission/relay is missing, so default load-based scaling has no input and cannot make scaling decisions. A separate predictive-scaling code path does not establish an integrated sidecar workflow. See [Planner Limitations](../../modular-components/planner/overview.md#current-limitations).
+- **Cache offloading:** configure it in the native engine, with any required plugin installed in the engine container. Sidecar separation does not prevent engine-local caching. SGLang explicitly reports HiCache capacity. Offload-aware routing, storage tiers, and combinations with prefill/decode transfer require separate qualification; a prefix-cache hit or KV event alone does not prove them.
+- **GMS and recovery:** the Kubernetes operator rejects sidecar mode combined with GMS, enabled checkpointing, or shadow failover. See the [sidecar deployment contract](../../../../reference/kubernetes-api/dynamo-component-deployment.mdx#dynamo-sidecar-mode).
+- **Request migration:** enable it with `--migration-limit > 0`; the default is off. Eligible requests can retry connection failures, timeouts, and supported interrupted streams, continuing from delivered tokens. Structured-output requests and explicit worker pins are excluded. Generic engine errors are not all migratable. Premature clean stream closure is migratable for SGLang but is classified as a non-migratable protocol error by vLLM and TensorRT-LLM. TensorRT-LLM KV-session/transfer failures are also non-migratable. Migration is distinct from shadow-engine failover.
+- **Shutdown:** the shared worker unregisters, waits, and cleans up. The sidecars do not report engine quiescence, so prefill draining uses a bounded wait rather than proving that engine KV transfers have completed.
+- **Speculative decoding:** configure it on the native engine. The sidecars preserve generation output and native handoffs; SGLang also handles EAGLE-family routing metadata and draft-token reserves. Algorithm/model, routing, disaggregation, and telemetry combinations are not fully qualified. The TensorRT-LLM aggregated convenience launcher rejects custom config files; start the native engine directly with the required merged configuration.
+
+For engine-version requirements and launch examples, see [vLLM](../../modular-components/backends/vllm/sidecar.md), [SGLang](../../modular-components/backends/sglang/sidecar.md), and [TensorRT-LLM](../../modular-components/backends/tensorrt-llm/sidecar.md).
+
 ## Design Goals
 
 - Keep the upstream engine's native serve path and argument surface.
