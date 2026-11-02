@@ -44,6 +44,28 @@ fn app() -> Router {
     create_router(Arc::new(AppState { service }))
 }
 
+#[tokio::test]
+async fn binding_stream_rejects_invalid_config() {
+    let builder = || {
+        SelectionServiceBuilder::new(
+            test_config(),
+            crate::WorkerType::Aggregated,
+            RouterPluginRegistry::default(),
+        )
+        .session_binding_replication(11)
+    };
+    let error = builder().build().await.err().expect("affinity disabled");
+    assert!(error.to_string().contains("requires session affinity"));
+    let error = builder()
+        .session_affinity(Duration::from_secs(10))
+        .replica_sync(0, Vec::new())
+        .build()
+        .await
+        .err()
+        .expect("mesh enabled");
+    assert!(error.to_string().contains("cannot be combined"));
+}
+
 struct WorkerIdScorer;
 
 impl WorkerScorer for WorkerIdScorer {

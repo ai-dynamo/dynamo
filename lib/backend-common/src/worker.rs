@@ -81,7 +81,7 @@ pub struct RuntimeConfig {
     pub request_plane: Option<String>,
     /// Response transport. Frontend and workers must use the same value.
     /// Maps to `DYN_RESPONSE_PLANE`.
-    #[arg(long, env = "DYN_RESPONSE_PLANE", value_parser = ["tcp", "quic"])]
+    #[arg(long, env = "DYN_RESPONSE_PLANE", value_parser = ["tcp", "quic", "velo"])]
     pub response_plane: Option<String>,
     /// Event-plane transport — `"nats"` or `"zmq"`. When `None` the runtime
     /// uses its default transport. Maps to `DYN_EVENT_PLANE`.
@@ -115,8 +115,9 @@ impl RuntimeConfig {
         config.response_plane = match self.response_plane.as_deref() {
             Some("tcp") => Some(ResponsePlaneMode::Tcp),
             Some("quic") => Some(ResponsePlaneMode::Quic),
+            Some("velo") => Some(ResponsePlaneMode::Velo),
             Some(value) => {
-                anyhow::bail!("invalid response plane '{value}'; expected 'tcp' or 'quic'")
+                anyhow::bail!("invalid response plane '{value}'; expected 'tcp', 'quic', or 'velo'")
             }
             None => None,
         };
@@ -1035,6 +1036,14 @@ impl Worker {
             build_local_model(&self.config, engine_config, self.engine.is_raw()).await?;
         tracing::debug!("local model built");
 
+        // An LLM engine admits its network requests through this worker's
+        // gate. Create it before the engine receives its endpoint or the model
+        // is published, so an invalid admission configuration fails startup
+        // with nothing published; the ingress below gets the same gate.
+        if let EngineKind::Llm(_) = &self.engine {
+            self.admission_gate.get_or_create(endpoint.component())?;
+        }
+
         // Hand the engine its serving endpoint before registering the model
         // with discovery. on_endpoint_ready is a fatal handoff: doing it first
         // means a failure leaves nothing published, so there is no stale
@@ -1107,7 +1116,7 @@ impl Worker {
                 // before they reach the engine, sized by the model card it
                 // registered above; the local health-check probe below calls
                 // the adapter directly, outside admission.
-                let admission_gate = self.admission_gate.get_or_create(endpoint.component());
+                let admission_gate = self.admission_gate.get()?;
                 admission_gate.record_model_card(local_model.card());
                 let ingress = Ingress::for_engine_with_lifecycle_role(
                     AdmissionEngine::new(admission_gate, engine_adapter.clone()),

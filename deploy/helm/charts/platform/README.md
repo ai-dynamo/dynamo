@@ -154,6 +154,25 @@ Without separately configured gang scheduling or group admission
 (e.g., through Kueue), multinode DGD/DCD workloads using LWS may remain
 partially scheduled.
 
+##### Multinode sidecars for SGLang, vLLM, and TensorRT-LLM
+
+**Change:** Admission accepts `multinode` on a component that declares a `runtime` init
+container when the component supplies complete `leader` and `worker` role templates. Set
+`backendFramework` explicitly, as the examples do; the operator does not infer a backend from
+a native engine command. The operator renders the authored engine commands,
+probes, and ports unchanged and merges Dynamo defaults into each declared `runtime`.
+
+**Affected:** New multinode DGDs that opt into sidecar mode.
+
+**Action:** None for existing workloads. To opt in, see the
+[SGLang](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/sidecar.md#deploy-on-kubernetes),
+[vLLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/sidecar.md#deploy-on-kubernetes),
+and [TensorRT-LLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/sidecar.md#deploy-on-kubernetes)
+sidecar guides.
+
+**Existing deployments:** No existing workload rolls. Components without a `runtime` init
+container keep running the engine and Dynamo together in `main`.
+
 ### v1.6.0
 
 #### Runtime Compatibility
@@ -258,6 +277,11 @@ created by Dynamo 1.6.0 when Grove is managed outside the platform chart.
 using rollout budgets or Coherent updates, or creating new multinode DGDs. Updating Dynamo's
 dependency or platform chart does not upgrade separately managed Grove installations.
 
+**Existing deployments:** `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS` are injected only into DGDs
+created by operator 1.6.0 or later. An operator upgrade does not add them to an older DGD, and
+later edits of that DGD do not add them. See
+[Use the variables in a DGD created before 1.6.0](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/multinode-orchestration.md#use-the-variables-in-a-dgd-created-before-160).
+
 #### External Grove installation preflight
 
 With `global.grove.enabled=true` and `global.grove.install=false`, a read-only
@@ -304,10 +328,6 @@ Helm 3.18+ also prints them via `helm.sh/hook-output-log-policy: hook-failed`, u
 installer's Pod/log read permissions. With older Helm, read them with `kubectl logs`.
 Successful Jobs are deleted. Supporting ServiceAccount/ClusterRole/ClusterRoleBinding hooks
 persist until the next attempt and require manual removal when retiring the release.
-
-**Existing deployments:** The operator origin version gates alias injection. An operator-only
-upgrade leaves existing multinode workload pod templates unchanged and does not roll them solely to
-add the aliases.
 
 ### v1.5.0
 
@@ -528,7 +548,7 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.grovePreflight.deploymentName | string | `""` | External Grove Deployment name. Requires namespace; empty discovers by container name. |
 | dynamo-operator.enabled | bool | `true` | Whether to enable the Dynamo Kubernetes operator deployment |
 | dynamo-operator.upgradeCRD | bool | `true` | Whether the cluster-wide operator applies CRDs from its image through the crd-apply init container. When false, the chart installs no CRDs; apply them separately before starting a cluster-wide operator. Namespace-restricted installations must set this to false and use the CRDs managed by the cluster-wide operator. |
-| dynamo-operator.dgdrV1Beta2.enabled | bool | `false` | EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Serve the unfinished DGDR v1beta2 Request API with conversion and install the Run and Candidate APIs. Run and Candidate objects are persisted in etcd; incompatible schema changes may make them unreadable or block future CRD upgrades. The operator does not reconcile v1beta2 requests. |
+| dynamo-operator.dgdrV1Beta2.enabled | bool | `false` | EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Serve the unfinished DGDR v1beta2 Request API with conversion and install the Run and Candidate APIs. Run and Candidate objects are persisted in etcd; incompatible schema changes may make them unreadable or block future CRD upgrades. When true, the operator reconciles v1beta2 Requests into Runs and executes each Run as an AISimulate planner Job with a publisher sidecar that persists deployment Candidates. |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication. When empty, the operator uses bundled NATS only if global.nats.install=true; otherwise NATS is not configured. Format: `nats://hostname:4222` |
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: `http://hostname:2379` or `https://hostname:2379` |
 | dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |

@@ -16,7 +16,7 @@ sequenceDiagram
     end
     participant S as WorkerSelector
 
-    H->>H: Resolve class_index, sample snapshot, stamp arrival
+    H->>H: Resolve class_index, sample snapshot, stamp arrival, prepare candidate rows
     H->>A: Enqueue(request, metadata)
     alt Direct path (never-queues class or zero workers)
         A->>S: select_worker(request)
@@ -39,6 +39,14 @@ sequenceDiagram
 - `SchedulerQueue` is the public handle. It resolves the class index, samples the
   cache-overlap snapshot, and stamps the arrival offset on the caller task before
   sending the Enqueue command.
+- For a selector with a `candidate_preparer`, the handle also builds the candidate
+  rows on the caller task: eligibility plus cache, preferred-taint, and fetch inputs.
+  The actor fills only load inputs, which depend on its earlier bookings. It uses the
+  rows only when it would build the same ones: the worker configuration, availability,
+  and overload it reads at selection match preparation, no rank is past the host's
+  reject thresholds, and the request is admitted in the actor turn that received it.
+  Otherwise it rebuilds them, and rows for a request that stays queued are dropped
+  when that turn ends.
 - `SchedulerQueueActor` routes every request through the policy queue and drains the
   ready backlog in the same actor turn, so freed capacity can go to another class's
   queued head under DRR rather than to the arriving request. The direct path remains
@@ -85,6 +93,9 @@ PolicyClassQueue("agents")
 - Before an unpinned retry, exclude every worker already failed by that migration state machine. Preserve caller allowlists and routing constraints. An affinity-derived pin may be invalidated and rebound; an explicit request pin remains exact.
 - A failed stream releases its scheduler booking before the error reaches the retry manager. This ordering prevents a later attempt from overlapping stale cleanup.
 - Cleanup that can outlive an admitted request attempt must carry its internal `AttemptId`. `RequestGuard` fences scheduler mutations with `(request_id, attempt_id)` and the admission lifecycle lease remains request-ID-only until handoff.
+- Prepared candidate rows must not hold anything the actor's bookings change. Load
+  inputs are filled on the actor at selection, so each admission still observes
+  every earlier booking.
 - `SchedulerQueueActor::admit_one` is the required admission path: compute projected
   load, select a worker, skip the capacity reservation if the response receiver
   is closed, then reserve capacity before responding. Failed response delivery

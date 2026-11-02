@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from sglang.srt.managers.io_struct import GenerateReqInput
 
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.http.url_validator import UrlValidationError
 from dynamo.common.metadata_upload import MetadataUploader
 from dynamo.llm import HttpError
 from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
@@ -815,6 +816,58 @@ def test_engine_generate_allows_top_logprobs_by_default():
     assert native.top_logprobs_num == 1
 
 
+_REMOTE = "https://example.com/media"
+
+
+@pytest.mark.parametrize("field", ["image_data", "audio_data", "video_data"])
+@pytest.mark.parametrize(
+    "value",
+    [_REMOTE, [_REMOTE], [[_REMOTE]], {"url": _REMOTE}],
+    ids=["item", "list", "batch", "dict"],
+)
+def test_native_generate_rejects_remote_media_when_disabled(monkeypatch, field, value):
+    monkeypatch.setenv("DYN_MM_ALLOW_REMOTE_URLS", "0")
+
+    with pytest.raises(UrlValidationError, match="DYN_MM_ALLOW_REMOTE_URLS"):
+        build_native_generate_request(
+            {field: value}, input_ids=[1], request_id="request", priority=None
+        )
+
+
+@pytest.mark.parametrize(
+    "allow,url", [("0", "data:image/png;base64,AAAA"), ("1", _REMOTE)]
+)
+def test_native_generate_keeps_allowed_media(monkeypatch, allow, url):
+    monkeypatch.setenv("DYN_MM_ALLOW_REMOTE_URLS", allow)
+
+    native = build_native_generate_request(
+        {"image_data": [url]}, input_ids=[1], request_id="request", priority=None
+    )
+
+    assert native.image_data == [url]
+
+
+@pytest.mark.asyncio
+async def test_native_generate_remote_media_never_reaches_engine(monkeypatch):
+    monkeypatch.setenv("DYN_MM_ALLOW_REMOTE_URLS", "0")
+    handler = _new_decode_handler()
+    handler._engine_supports_priority = False
+    handler.enable_trace = False
+    handler._get_input_param = lambda request: {"input_ids": [1, 2]}
+    handler._resolve_lora = lambda request: None
+    handler.engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(generate_request=Mock()),
+        async_generate=AsyncMock(),
+    )
+    request = {"extra_args": {"sglang_tito": {"image_data": [_REMOTE]}}}
+
+    with pytest.raises(UrlValidationError):
+        await anext(handler.generate(request, _Context()))
+
+    handler.engine.tokenizer_manager.generate_request.assert_not_called()
+    handler.engine.async_generate.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_native_generate_stream_forwards_opaque_response_and_token_ids():
     native_response = {
@@ -1327,7 +1380,7 @@ def test_ordered_cancellation_rejects_native_batch():
     )
 
 
-def test_build_sampling_params_forwards_repetition_controls_for_token_requests():
+def test_build_sampling_params_forwards_sampling_options_for_token_requests():
     handler = _new_decode_handler(use_sglang_tokenizer=False)
 
     sampling_params = handler._build_sampling_params(
@@ -1340,6 +1393,7 @@ def test_build_sampling_params_forwards_repetition_controls_for_token_requests()
                 "top_p": 0.95,
                 "top_k": 40,
                 "min_p": 0.01,
+                "logit_bias": {"18": -10.0},
                 "seed": 1234,
             },
             "stop_conditions": {"max_tokens": 8},
@@ -1353,6 +1407,7 @@ def test_build_sampling_params_forwards_repetition_controls_for_token_requests()
     assert sampling_params["top_p"] == 0.95
     assert sampling_params["top_k"] == 40
     assert sampling_params["min_p"] == 0.01
+    assert sampling_params["logit_bias"] == {"18": -10.0}
     assert sampling_params["sampling_seed"] == 1234
     assert "seed" not in sampling_params
 
@@ -1726,7 +1781,7 @@ def test_build_sampling_params_passes_n_for_sglang_tokenizer_requests():
     assert sampling_params["stop_token_ids"] == [32, 34]
 
 
-def test_build_sampling_params_forwards_repetition_controls_for_openai_requests():
+def test_build_sampling_params_forwards_sampling_options_for_openai_requests():
     handler = _new_decode_handler(use_sglang_tokenizer=True)
 
     sampling_params = handler._build_sampling_params(
@@ -1738,6 +1793,7 @@ def test_build_sampling_params_forwards_repetition_controls_for_openai_requests(
             "top_p": 0.95,
             "top_k": 40,
             "min_p": 0.01,
+            "logit_bias": {"18": -10.0},
             "seed": 1234,
             "max_tokens": 8,
         }
@@ -1750,6 +1806,7 @@ def test_build_sampling_params_forwards_repetition_controls_for_openai_requests(
     assert sampling_params["top_p"] == 0.95
     assert sampling_params["top_k"] == 40
     assert sampling_params["min_p"] == 0.01
+    assert sampling_params["logit_bias"] == {"18": -10.0}
     assert sampling_params["sampling_seed"] == 1234
     assert "seed" not in sampling_params
 

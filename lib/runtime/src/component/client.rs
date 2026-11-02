@@ -130,7 +130,9 @@ pub(crate) struct RoutingInstances {
     monitor_overloaded_ids: HashSet<u64>,
     request_overload_deadlines: HashMap<u64, Instant>,
     next_request_overload_expiry: Option<Instant>,
-    overloaded_ids: HashSet<u64>,
+    /// Shared with readers, and kept across rebuilds that leave it unchanged, so they
+    /// can tell one overload snapshot from another by pointer.
+    overloaded_ids: Arc<HashSet<u64>>,
     free_ids: Vec<u64>,
     routable_id_set: Arc<HashSet<u64>>,
     /// True after this client has observed at least one discovered instance.
@@ -173,7 +175,7 @@ impl RoutingInstances {
             monitor_overloaded_ids,
             request_overload_deadlines,
             next_request_overload_expiry,
-            overloaded_ids,
+            overloaded_ids: Arc::new(overloaded_ids),
             free_ids,
             routable_id_set,
             availability_initialized,
@@ -210,12 +212,21 @@ impl RoutingInstances {
         self.overloaded_ids.contains(&instance_id)
     }
 
-    fn overloaded_ids(&self) -> Option<HashSet<u64>> {
+    fn overloaded_ids(&self) -> Option<Arc<HashSet<u64>>> {
         if self.overloaded_ids.is_empty() {
             return None;
         }
 
-        Some(self.overloaded_ids.clone())
+        Some(Arc::clone(&self.overloaded_ids))
+    }
+
+    /// This rebuild of `previous`, sharing its overloaded set when the rebuild left
+    /// the set unchanged.
+    fn sharing_overloaded_ids(mut self, previous: &Self) -> Self {
+        if self.overloaded_ids == previous.overloaded_ids {
+            self.overloaded_ids = Arc::clone(&previous.overloaded_ids);
+        }
+        self
     }
 
     fn reconcile_discovered(&self, discovered_ids: Vec<u64>) -> Self {
@@ -378,7 +389,11 @@ impl RoutingInstancesState {
             return;
         }
 
-        let next = Arc::new(current.clear_expired_request_overloads(now));
+        let next = Arc::new(
+            current
+                .clear_expired_request_overloads(now)
+                .sharing_overloaded_ids(&current),
+        );
         self.snapshot.store(next);
     }
 
@@ -389,7 +404,7 @@ impl RoutingInstancesState {
     ) -> Arc<RoutingInstances> {
         let _guard = self.update_lock.lock().unwrap();
         let current = self.snapshot.load();
-        let next = Arc::new(update(&current));
+        let next = Arc::new(update(&current).sharing_overloaded_ids(&current));
         self.snapshot.store(next.clone());
         if publish_routable_ids {
             self.publish_routable_ids(&next);
@@ -419,7 +434,7 @@ impl RoutingInstancesState {
         self.snapshot().counts()
     }
 
-    fn overloaded_ids(&self) -> Option<HashSet<u64>> {
+    fn overloaded_ids(&self) -> Option<Arc<HashSet<u64>>> {
         self.snapshot().overloaded_ids()
     }
 
@@ -434,7 +449,11 @@ impl RoutingInstancesState {
             .collect::<HashSet<_>>();
         let _guard = self.update_lock.lock().unwrap();
         let current = self.snapshot.load();
-        let next = Arc::new(current.set_overloaded(overloaded_ids));
+        let next = Arc::new(
+            current
+                .set_overloaded(overloaded_ids)
+                .sharing_overloaded_ids(&current),
+        );
         let effective_changed = current.overloaded_ids != next.overloaded_ids;
         let source_changed = current.monitor_overloaded_ids != next.monitor_overloaded_ids
             || !current.request_overload_deadlines.is_empty();
@@ -453,7 +472,11 @@ impl RoutingInstancesState {
     fn mark_overloaded_until(&self, instance_id: u64, deadline: Instant) {
         let _guard = self.update_lock.lock().unwrap();
         let current = self.snapshot.load();
-        let next = Arc::new(current.mark_overloaded_until(instance_id, deadline));
+        let next = Arc::new(
+            current
+                .mark_overloaded_until(instance_id, deadline)
+                .sharing_overloaded_ids(&current),
+        );
         self.snapshot.store(next);
     }
 
@@ -848,7 +871,7 @@ impl Client {
             .clear_overloaded_for_removed(removed_instance_ids);
     }
 
-    pub fn overloaded_instance_ids(&self) -> Option<HashSet<u64>> {
+    pub fn overloaded_instance_ids(&self) -> Option<Arc<HashSet<u64>>> {
         self.routing_instances.overloaded_ids()
     }
 
@@ -1619,7 +1642,10 @@ mod tests {
         assert_eq!(client.overloaded_instance_ids(), None);
 
         assert!(client.set_overloaded_instances(&[7]));
-        assert_eq!(client.overloaded_instance_ids(), Some(HashSet::from([7])));
+        assert_eq!(
+            client.overloaded_instance_ids(),
+            Some(Arc::new(HashSet::from([7])))
+        );
         assert!(!client.set_overloaded_instances(&[7]));
 
         assert!(client.set_overloaded_instances(&[]));
@@ -1627,6 +1653,16 @@ mod tests {
         assert!(!client.set_overloaded_instances(&[]));
 
         rt.shutdown();
+    }
+
+    #[test]
+    fn unrelated_rebuild_keeps_the_overloaded_snapshot() {
+        let (state, _rx) = RoutingInstancesState::new(vec![1, 2, 3]);
+        assert!(state.set_overloaded_instances(&[1]));
+        let before = state.overloaded_ids().unwrap();
+
+        state.report_instance_down(2);
+        assert!(Arc::ptr_eq(&before, &state.overloaded_ids().unwrap()));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1646,7 +1682,10 @@ mod tests {
             .unwrap();
 
         client.mark_overloaded_immediate(7);
-        assert_eq!(client.overloaded_instance_ids(), Some(HashSet::from([7])));
+        assert_eq!(
+            client.overloaded_instance_ids(),
+            Some(Arc::new(HashSet::from([7])))
+        );
 
         tokio::time::advance(REQUEST_PATH_OVERLOAD_COOLDOWN).await;
 
@@ -1686,7 +1725,7 @@ mod tests {
 
         assert_eq!(
             client.overloaded_instance_ids(),
-            Some(HashSet::from([8, 11]))
+            Some(Arc::new(HashSet::from([8, 11])))
         );
         assert!(client.overload_reconciliation_needed());
         rt.shutdown();
