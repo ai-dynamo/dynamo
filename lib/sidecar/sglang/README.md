@@ -29,6 +29,16 @@ server. See the [sidecar overview](../README.md) for installation.
 | KV routing | Yes |
 | Kubernetes multinode tensor parallelism (TP) and attention data parallelism (attention-DP) | Experimental |
 
+## Support notes
+
+The standard gRPC generation path requires `n=1` and rejects multimodal input. Basic structured output is implemented with a narrower set of constraint controls than the in-process backend.
+
+The sidecar does not register the engine's LoRA adapter inventory or expose Dynamo-managed adapter loading/unloading. Forwarding an adapter name internally does not make it available through OpenAI model lookup. The separate, opt-in native `/generate` passthrough can select a preloaded adapter using `lora_path`; native passthrough and manually published adapter records are separate integration choices.
+
+Configure HiCache and speculative decoding in the native engine. The sidecar reports HiCache capacity for recognized configurations and handles EAGLE-family routing metadata and draft-token reserves. Model, algorithm, routing, disaggregation, and telemetry combinations require separate qualification.
+
+Premature clean stream closure is eligible for request migration. See the [shared operational limits](../README.md#operational-limits) for migration eligibility, observability, planning, cache offloading, and shutdown behavior.
+
 ## Run locally
 
 See [`launch/`](launch/) for all topologies. For example, aggregated serving on
