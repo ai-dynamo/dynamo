@@ -9,11 +9,12 @@ use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use axum::http::HeaderMap;
 use dynamo_global_common::PoolKey;
 use dynamo_global_frontend::{Metrics, PoolSnapshot};
 use dynamo_global_router::{
-    InFlightTracker, Pool, PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest,
+    InFlightTracker, Pool, PoolSelector, RoundRobinSelector, RoutingRequest, Selection,
 };
 use dynamo_llm::endpoint_type::EndpointType;
 use dynamo_llm::engines::{StreamingEngineAdapter, make_echo_engine};
@@ -43,7 +44,7 @@ impl Drop for Server {
 }
 
 fn client() -> reqwest::Client {
-    reqwest::Client::builder()
+    dynamo_global_frontend::pool_client()
         .no_proxy()
         .timeout(Duration::from_secs(10))
         .build()
@@ -323,6 +324,12 @@ async fn forwards_each_route_to_the_pool() {
         assert_eq!(status, StatusCode::OK, "{route}: {body}");
         assert_eq!(text(&body), "hello", "{route}: {body}");
     }
+    // Each request records the time it took to select its pool.
+    let selections = "dynamo_global_frontend_overhead_selection_ms_count";
+    metrics_when(&global.server.url, |metrics| {
+        sample(metrics, selections, &[]) == Some(4.0)
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -424,6 +431,35 @@ async fn pool_errors_pass_through() {
     .await;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     assert_eq!(response.text().await.unwrap(), "pool says no");
+
+    // A redirect is a response like any other: the Global Frontend does not
+    // follow it.
+    let redirecting = pool_frontend(
+        axum::Router::new()
+            .route(
+                "/v1/chat/completions",
+                axum::routing::post(|| async {
+                    (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        [(axum::http::header::LOCATION, "/v1/elsewhere")],
+                    )
+                }),
+            )
+            .route(
+                "/v1/elsewhere",
+                axum::routing::post(|| async { "followed" }),
+            ),
+    )
+    .await;
+    let global = global_frontend(vec![pool("blue", MODEL, &redirecting.url)]).await;
+    let response = post(
+        &global.server.url,
+        "v1/chat/completions",
+        &chat(MODEL, "hi", false),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(response.headers()["location"], "/v1/elsewhere");
 }
 
 #[tokio::test]
@@ -553,15 +589,16 @@ struct SessionRecorder {
     inner: RoundRobinSelector,
 }
 
+#[async_trait]
 impl PoolSelector for SessionRecorder {
-    fn select<'a>(
+    async fn select<'a>(
         &self,
         request: &RoutingRequest<'_>,
         candidates: &[&'a Pool],
-    ) -> Option<PoolTarget<'a>> {
+    ) -> Option<Selection<'a>> {
         let session = request.session.map(str::to_owned);
         self.sessions.lock().unwrap().push(session);
-        self.inner.select(request, candidates)
+        self.inner.select(request, candidates).await
     }
 }
 

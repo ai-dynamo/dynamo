@@ -35,6 +35,15 @@ impl InFlightTracker {
             .get(pool)
             .map_or(0, |count| count.load(Ordering::Relaxed))
     }
+
+    /// Every pool this process has sent to, with its requests in flight now,
+    /// zero included, so a reader learns that a pool's count fell.
+    pub fn snapshot(&self) -> Vec<(PoolId, u64)> {
+        self.pools
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().load(Ordering::Relaxed)))
+            .collect()
+    }
 }
 
 /// One request in flight. Dropping it ends the request's count.
@@ -74,5 +83,21 @@ mod tests {
         drop((second, other));
         assert_eq!((tracker.get(&blue), tracker.get(&green)), (0, 0));
         assert_eq!(tracker.get(&id("unseen")), 0);
+    }
+
+    #[test]
+    fn a_snapshot_lists_every_pool_seen_with_its_count_now() {
+        let tracker = InFlightTracker::new();
+        let (blue, green) = (id("blue"), id("green"));
+        let held = [tracker.start(&blue), tracker.start(&blue)];
+        drop(tracker.start(&green));
+
+        let by_id =
+            |pairs: &mut Vec<(PoolId, u64)>| pairs.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+        let (mut snapshot, mut expected) = (tracker.snapshot(), vec![(blue, 2), (green, 0)]);
+        by_id(&mut snapshot);
+        by_id(&mut expected);
+        assert_eq!(snapshot, expected);
+        drop(held);
     }
 }

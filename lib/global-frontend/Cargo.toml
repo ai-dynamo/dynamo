@@ -36,3 +36,7 @@ tokio-util = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
+
+[dev-dependencies]
+# The tests implement `PoolSelector`, an async trait.
+async-trait = { workspace = true }

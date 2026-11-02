@@ -4,11 +4,13 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use dashmap::DashMap;
 use dynamo_global_common::PoolId;
 
 use crate::Pool;
-use crate::selector::{Cursors, PoolSelector, PoolTarget, RoutingRequest, reachable, target};
+use crate::placement::{self, Placed};
+use crate::selector::{Cursors, PoolSelector, RoutingRequest, Selection, reachable, target};
 use crate::signals::PoolSignals;
 
 /// Keeps each session's turns on one pool, so the pool's KV cache for the
@@ -89,13 +91,17 @@ impl AffinitySelector {
     }
 }
 
+#[async_trait]
 impl PoolSelector for AffinitySelector {
-    fn select<'a>(
+    async fn select<'a>(
         &self,
         request: &RoutingRequest<'_>,
         candidates: &[&'a Pool],
-    ) -> Option<PoolTarget<'a>> {
+    ) -> Option<Selection<'a>> {
         let placed = place(candidates, &self.region, &self.signals);
+        if placed.is_empty() {
+            return None;
+        }
         let pinned = request.session.and_then(|session| {
             let pin = self.pins.get(session)?;
             if pin.used.elapsed() > self.idle {
@@ -103,79 +109,39 @@ impl PoolSelector for AffinitySelector {
             }
             placed
                 .iter()
-                .find(|candidate| candidate.pool.id == pin.pool)
+                .position(|candidate| candidate.item.id == pin.pool)
         });
-        let choice = headroom(&placed, pinned.or(placed.first()), self.headroom_factor)?;
+        let choice =
+            placed[placement::headroom(&placed, pinned.unwrap_or(0), self.headroom_factor)].item;
         if let Some(session) = request.session {
-            self.pin(session, &choice.pool.id);
+            self.pin(session, &choice.id);
         }
-        target(&self.frontends, choice.pool)
+        target(&self.frontends, choice).map(Selection::from)
     }
 }
 
-/// A reachable pool, with what the affinity selector weighs.
-#[derive(Debug)]
-struct Candidate<'a> {
-    pool: &'a Pool,
-    /// How full the pool is against its own capacity, 1 being full (see
-    /// [`PoolSignals::occupancy`]). `None` without a fresh report.
-    load: Option<f64>,
-    /// Round trip to the pool's region: zero for the region the request
-    /// entered, otherwise as last measured. `None` until measured.
-    distance: Option<Duration>,
-}
-
 /// The candidates that have a frontend, for a request entering `region`,
-/// from least to most expensive: nearest region first, then less full, then
-/// catalog order. Pools whose distance or load is unknown come after those
-/// whose is known.
-fn place<'a>(candidates: &[&'a Pool], region: &str, signals: &PoolSignals) -> Vec<Candidate<'a>> {
+/// ordered by [`placement::order`] on their occupancy: nearest region first,
+/// then less full, then catalog order.
+fn place<'a>(
+    candidates: &[&'a Pool],
+    region: &str,
+    signals: &PoolSignals,
+) -> Vec<Placed<&'a Pool>> {
     let round_trips = signals.region_round_trips();
     let mut placed = candidates
         .iter()
         .copied()
         .filter(|pool| reachable(pool))
-        .map(|pool| Candidate {
-            pool,
+        .map(|pool| Placed {
+            item: pool,
             load: signals.occupancy(&pool.id).map(|occupancy| occupancy.load),
-            distance: if pool.location.region == region {
-                Some(Duration::ZERO)
-            } else {
-                round_trips.get(&pool.location.region).copied()
-            },
+            distance: placement::distance(&pool.location.region, region, &round_trips),
+            in_flight: 0,
         })
         .collect::<Vec<_>>();
-    // Stable, so ties keep catalog order.
-    placed.sort_by(|left, right| {
-        let distance = |candidate: &Candidate<'_>| candidate.distance.unwrap_or(Duration::MAX);
-        let load = |candidate: &Candidate<'_>| candidate.load.unwrap_or(f64::INFINITY);
-        distance(left)
-            .cmp(&distance(right))
-            .then_with(|| load(left).total_cmp(&load(right)))
-    });
+    placement::order(&mut placed);
     placed
-}
-
-/// `default`, unless another pool has more than `factor` times its spare
-/// capacity (1 minus its load); then the first such pool in `candidates`'
-/// order. A default whose load is unknown counts as full. Without a default,
-/// the first candidate.
-fn headroom<'a, 'b>(
-    candidates: &'b [Candidate<'a>],
-    default: Option<&'b Candidate<'a>>,
-    factor: f64,
-) -> Option<&'b Candidate<'a>> {
-    let Some(default) = default else {
-        return candidates.first();
-    };
-    let need = default
-        .load
-        .map_or(0.0, |load| (factor * (1.0 - load)).max(0.0));
-    candidates
-        .iter()
-        .filter(|candidate| candidate.pool.id != default.pool.id)
-        .find(|candidate| candidate.load.is_some_and(|load| 1.0 - load > need))
-        .or(Some(default))
 }
 
 #[cfg(test)]
@@ -231,10 +197,10 @@ mod tests {
         }
     }
 
-    fn names(placed: &[Candidate<'_>]) -> Vec<String> {
+    fn names(placed: &[Placed<&Pool>]) -> Vec<String> {
         placed
             .iter()
-            .map(|candidate| candidate.pool.frontends[0].host_str().unwrap().to_owned())
+            .map(|candidate| candidate.item.frontends[0].host_str().unwrap().to_owned())
             .collect()
     }
 
@@ -251,8 +217,8 @@ mod tests {
         assert_eq!(names(&place(&candidates, TOKYO, &signals))[0], "tokyo-a");
     }
 
-    #[test]
-    fn pools_without_load_or_distance_are_tried_last() {
+    #[tokio::test]
+    async fn pools_without_load_or_distance_are_tried_last() {
         let (pools, signals) = fleet();
         let candidates = pools.iter().collect::<Vec<_>>();
         set_occupancy(&pools, &signals, [0.6, 0.2, 0.1, 0.0]);
@@ -273,120 +239,120 @@ mod tests {
         AffinitySelector::new(signals.clone(), OHIO.into(), 2.0, idle)
     }
 
-    fn pick(selector: &AffinitySelector, pools: &[Pool], session: Option<&str>) -> String {
+    async fn pick(selector: &AffinitySelector, pools: &[Pool], session: Option<&str>) -> String {
         let candidates = pools.iter().collect::<Vec<_>>();
         let request = RoutingRequest::new("qwen").with_session(session);
-        let target = selector.select(&request, &candidates).unwrap();
+        let target = selector.select(&request, &candidates).await.unwrap().target;
         target.frontend.host_str().unwrap().to_owned()
     }
 
-    #[test]
-    fn moves_for_twice_the_room_and_does_not_flip_back() {
+    #[tokio::test]
+    async fn moves_for_twice_the_room_and_does_not_flip_back() {
         let (pools, signals) = fleet();
         let selector = selector(&signals, Duration::from_secs(60));
         set_occupancy(&pools, &signals, [0.1, 0.5, 0.5, 0.5]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "ohio-a");
 
         // 10% against 2%: 0.9 spare against 0.98, nothing to gain.
         set_occupancy(&pools, &signals, [0.1, 0.02, 0.02, 0.02]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "ohio-a");
         // 50% against 30%: 0.5 spare against 0.7, under twice.
         set_occupancy(&pools, &signals, [0.5, 0.3, 0.3, 0.3]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "ohio-a");
         // 80% against 10%: 0.2 against 0.9, so to the nearest such pool.
         set_occupancy(&pools, &signals, [0.8, 0.1, 0.1, 0.1]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-b");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "ohio-b");
         // Ohio-a recovers to 40% and Ohio-b fills to 60%: 0.4 spare
         // against 0.6 is under twice, so no flip back.
         set_occupancy(&pools, &signals, [0.4, 0.6, 0.6, 0.6]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-b");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "ohio-b");
     }
 
-    #[test]
-    fn fails_over_from_a_full_pool_or_stays_if_all_are_full() {
+    #[tokio::test]
+    async fn fails_over_from_a_full_pool_or_stays_if_all_are_full() {
         let (pools, signals) = fleet();
         let selector = selector(&signals, Duration::from_secs(60));
         set_occupancy(&pools, &signals, [0.1, 0.5, 0.5, 0.5]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "ohio-a");
 
         // Ohio-a is full; Ohio-b has a little room, Oregon more, but the
         // nearest pool with any room wins.
         set_occupancy(&pools, &signals, [1.2, 0.95, 0.5, 0.5]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-b");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "ohio-b");
         // Every pool is full: moving would only cost a cold prefill.
         set_occupancy(&pools, &signals, [1.1, 1.2, 1.1, 1.3]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-b");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "ohio-b");
     }
 
-    #[test]
-    fn lets_a_quiet_region_take_load_from_busy_ones() {
+    #[tokio::test]
+    async fn lets_a_quiet_region_take_load_from_busy_ones() {
         let (pools, signals) = fleet();
         let selector = selector(&signals, Duration::from_secs(60));
         set_occupancy(&pools, &signals, [0.1, 0.2, 0.2, 0.2]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "ohio-a");
 
         // Ohio and Oregon at 90%, Tokyo at 20%: only Tokyo has twice the room.
         set_occupancy(&pools, &signals, [0.9, 0.9, 0.9, 0.2]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "tokyo-a");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "tokyo-a");
         // A new session from Ohio goes there too.
-        assert_eq!(pick(&selector, &pools, Some("t")), "tokyo-a");
+        assert_eq!(pick(&selector, &pools, Some("t")).await, "tokyo-a");
         // With Ohio at 60%, a new session stays local: 0.4 spare against
         // Tokyo's 0.8 is not more than twice.
         set_occupancy(&pools, &signals, [0.6, 0.7, 0.9, 0.2]);
-        assert_eq!(pick(&selector, &pools, Some("u")), "ohio-a");
+        assert_eq!(pick(&selector, &pools, Some("u")).await, "ohio-a");
     }
 
-    #[test]
-    fn requests_without_a_session_are_placed_but_not_pinned() {
+    #[tokio::test]
+    async fn requests_without_a_session_are_placed_but_not_pinned() {
         let (pools, signals) = fleet();
         let selector = selector(&signals, Duration::from_secs(60));
         set_occupancy(&pools, &signals, [0.5, 0.3, 0.9, 0.0]);
-        assert_eq!(pick(&selector, &pools, None), "ohio-b");
+        assert_eq!(pick(&selector, &pools, None).await, "ohio-b");
         set_occupancy(&pools, &signals, [0.9, 0.9, 0.9, 0.0]);
-        assert_eq!(pick(&selector, &pools, None), "tokyo-a");
+        assert_eq!(pick(&selector, &pools, None).await, "tokyo-a");
         assert_eq!(selector.pinned_sessions(), 0);
     }
 
-    #[test]
-    fn a_pool_whose_load_is_unknown_counts_as_full() {
+    #[tokio::test]
+    async fn a_pool_whose_load_is_unknown_counts_as_full() {
         let (pools, signals) = fleet();
         let selector = selector(&signals, Duration::from_secs(60));
         set_occupancy(&pools, &signals, [0.1, 0.5, 0.5, 0.5]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "ohio-a");
 
         // Ohio-a's Relay goes quiet while every other pool is full: the
         // session stays rather than move to a full pool.
         set_occupancy(&pools, &signals, [0.1, 1.0, 1.1, 1.0]);
         signals.forget(&pools[0].id);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "ohio-a");
         // Once a pool has room, the session goes to the nearest such pool.
         set_occupancy(&pools, &signals, [0.1, 1.0, 0.9, 0.2]);
         signals.forget(&pools[0].id);
-        assert_eq!(pick(&selector, &pools, Some("s")), "oregon-a");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "oregon-a");
     }
 
-    #[test]
-    fn forgets_idle_pins() {
+    #[tokio::test]
+    async fn forgets_idle_pins() {
         let (pools, signals) = fleet();
         let selector = selector(&signals, Duration::from_millis(200));
         set_occupancy(&pools, &signals, [0.1, 0.5, 0.5, 0.5]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "ohio-a");
         // 0.5 spare against 0.9 is under twice, so the pin holds...
         set_occupancy(&pools, &signals, [0.5, 0.1, 0.5, 0.5]);
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-a");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "ohio-a");
         // ...until it expires, and the session starts over on the emptier pool.
         std::thread::sleep(Duration::from_millis(250));
-        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-b");
+        assert_eq!(pick(&selector, &pools, Some("s")).await, "ohio-b");
         selector.sweep();
         assert_eq!(selector.pinned_sessions(), 1);
     }
 
-    #[test]
-    fn sweep_drops_expired_pins() {
+    #[tokio::test]
+    async fn sweep_drops_expired_pins() {
         let (pools, signals) = fleet();
         let selector = selector(&signals, Duration::ZERO);
         set_occupancy(&pools, &signals, [0.1, 0.5, 0.5, 0.5]);
-        pick(&selector, &pools, Some("s"));
+        pick(&selector, &pools, Some("s")).await;
         assert_eq!(selector.pinned_sessions(), 1);
         std::thread::sleep(Duration::from_millis(1));
         selector.sweep();

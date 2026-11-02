@@ -19,6 +19,6 @@ mod round_trip;
 
 pub use catalog::PoolSnapshot;
 pub use metrics::Metrics;
-pub use proxy::{app, serve};
+pub use proxy::{app, pool_client, serve};
 pub use relay::follow_relays;
 pub use round_trip::measure_round_trips;

@@ -42,7 +42,7 @@ model; every policy then rotates across the pool's frontends.
 | Policy | Picks |
 |---|---|
 | `round-robin` (default) | Each pool in turn. |
-| `least-in-flight` | The pool with the fewest of this process's requests in flight. |
+| `least-in-flight` | The nearest pool with the fewest requests in flight, moving only for a pool with much more room. |
 | `affinity` | The session's pool, nearest region first, moving only for a pool with much more room. |
 
 `affinity` keeps each session's turns on one pool, so the pool's KV cache for
@@ -57,8 +57,18 @@ nearest such pool, or when that pool is full, choosing the nearest pool with any
 room. The session's pin moves with it. Pins are per process and expire after
 `--session-idle-secs` (default 1800) without a request.
 
-`affinity` needs `--region`, this process's region named as `--pool` names
-clusters. It reads each pool's load from the pool's PoolRelay, given per pool
+`least-in-flight` places requests by the same rule, with requests in flight
+over each pool's capacity as the load: this process's requests in flight to the
+pool over the requests its workers can run at once, as its Relay reports. Pools
+are ordered nearest region first, then less loaded, then fewer in flight; the
+request goes to the first, rotating among pools that tie with it, unless
+another pool has more than `--headroom-factor` times its spare room. A pool
+without a Relay report counts as full, so without `--pool-relay` requests stay
+on the nearest pools, fewest in flight first. This differs from the selector on
+`main` before it, which picked the fewest in flight with no notion of region.
+
+`affinity` and `least-in-flight` need `--region`, this process's region named
+as `--pool` names clusters. Each reads each pool's load from the pool's PoolRelay, given per pool
 over plain HTTP. Each pool needs a Relay of its own, since a Relay reports the
 load of everything it watches as one:
 
@@ -85,8 +95,8 @@ zero.
 named `dynamo_global_frontend_*`: requests per pool by response status,
 `no_response` when the pool sends no response, or `cancelled` when the client
 leaves before the pool's response headers arrive; requests answered without a
-pool; time to first byte and duration per pool; and requests in flight per
-pool. The `pool` label is the pool's
+pool; time to first byte and duration per pool; requests in flight per
+pool; and the time to select a pool, in milliseconds. The `pool` label is the pool's
 `<cluster>/<namespace>/<DGD name>` and `region` its region. On requests, `local`
 says whether the pool is in `--region` (`unknown` without it), which gives the
 share of requests kept in the region. Nothing is labelled from the request
@@ -106,6 +116,20 @@ for each family.
   between bursts. Set `net.ipv4.tcp_slow_start_after_idle=0` on the Global
   Frontend's hosts, or each idle connection starts over with a small send
   window and a long prompt costs extra round trips.
+
+## Router core
+
+With `--use-selection-core`, each Global Frontend picks pools through its
+embedded router core (DEP [#17638](https://github.com/ai-dynamo/dynamo/issues/17638)):
+each pool is one of the core's workers and each `--router-policy` one of its
+picker plugins, picking as the selectors above do. `round-robin` and
+`least-in-flight` run on the core; `affinity` does not yet. Every pick is
+the core's: the frontend sends it an advisory select, which books nothing,
+and the core runs the policy's picker. Least-in-flight counts this
+frontend's own requests in flight per pool and places them by the rule
+above, as without the core; a pick
+counts as pending on its pool until the request is forwarded, so picks made
+at the same time see each other.
 
 ## Limitations
 

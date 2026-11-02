@@ -2562,6 +2562,7 @@ name = "dynamo-global-frontend"
 version = "1.7.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum 0.8.4",
  "clap",
  "dynamo-global-common",
@@ -2585,10 +2586,17 @@ dependencies = [
 name = "dynamo-global-router"
 version = "1.7.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "dashmap",
  "dynamo-global-common",
+ "dynamo-kv-router",
  "parking_lot",
+ "tokio",
+ "tokio-util",
+ "tracing",
  "url",
+ "xxhash-rust",
 ]
 
 [[package]]
