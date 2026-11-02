@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! SGLang-native HTTP protocol types.
+//! Implementations of [`crate::pool_discovery`], one module per
+//! backend.
 
-pub mod generate;
-pub mod merge;
-pub(crate) mod stream;
+pub mod kubernetes;
+pub mod memory;
+mod stream;
