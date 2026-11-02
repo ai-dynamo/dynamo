@@ -18,17 +18,17 @@ use futures::{StreamExt, stream};
 use serde_json::{Value, json};
 use tokio::sync::{Notify, Semaphore};
 
-#[path = "tests/backend_failure.rs"]
+#[path = "tests/backend_failure_legacy.rs"]
 mod backend_failure;
 #[path = "tests/native_abort.rs"]
 mod native_abort;
-#[path = "tests/preflight.rs"]
+#[path = "tests/preflight_legacy.rs"]
 mod preflight;
 
-#[path = "tests/vllm.rs"]
+#[path = "tests/vllm_legacy.rs"]
 mod vllm;
 
-#[path = "tests/http.rs"]
+#[path = "tests/http_legacy.rs"]
 mod http;
 
 #[path = "tests/metrics.rs"]
