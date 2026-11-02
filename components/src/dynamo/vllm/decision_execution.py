@@ -129,10 +129,6 @@ def publish_vllm_decision_capability(
         or model_input != ModelInput.Tokens
         or worker_type != WorkerType.Aggregated
         or any(needs or ())
-        or not any(
-            is_exact_vllm_release(installed, release)
-            for release in ("0.32.0", "0.33.0")
-        )
     ):
         return False
     try:
@@ -147,9 +143,9 @@ def publish_vllm_decision_capability(
         return False
     if not qualified:
         return False
-    if not _decision_api_available():
-        return False
     if not qualified_cache_runtime(installed):
+        return False
+    if not _decision_api_available():
         return False
     runtime_config.set_engine_specific(
         VLLM_CAUSAL_DECISION_CAPABILITY, json.dumps(True)

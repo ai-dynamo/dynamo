@@ -15,6 +15,7 @@ import pytest
 
 from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import ModelInput, ModelType, WorkerType
+from dynamo.vllm import decision_cache_provenance as cache
 from dynamo.vllm.decision_execution import (
     VLLM_CAUSAL_DECISION_CAPABILITY,
     publish_vllm_decision_capability,
@@ -70,7 +71,7 @@ class RequestOutputSchema:
 @pytest.fixture
 def profile(monkeypatch):
     monkeypatch.setattr(
-        "dynamo.vllm.decision_execution.qualified_cache_runtime", lambda _: True
+        "dynamo.vllm.decision_cache_provenance.verify_installed_sources", lambda _: True
     )
     monkeypatch.setattr("dynamo.vllm.decision_execution.version", lambda _: "0.32.0")
     schemas = {
@@ -155,7 +156,7 @@ def test_causal_scoring_rejects_unqualified_scheduling(profile, max_num_seqs):
     profile["runtime_config"].set_engine_specific.assert_not_called()
 
 
-@pytest.mark.parametrize("release", ["0.32.0", "0.33.0"])
+@pytest.mark.parametrize("release", tuple(cache.CAUSAL_CACHE_SOURCE_BLOBS))
 def test_modified_cache_source_never_publishes_causal_capability(
     profile, monkeypatch, release
 ):
@@ -163,7 +164,12 @@ def test_modified_cache_source_never_publishes_causal_capability(
     monkeypatch.setattr(
         "dynamo.vllm.decision_execution.qualified_cache_runtime", lambda _: False
     )
+    engine_import = Mock(
+        side_effect=AssertionError("Engine import before provenance gate")
+    )
+    monkeypatch.setattr("dynamo.vllm.decision_execution.import_module", engine_import)
     assert not publish_vllm_decision_capability(**profile)
+    engine_import.assert_not_called()
     profile["runtime_config"].set_engine_specific.assert_not_called()
 
 
@@ -213,7 +219,7 @@ def test_causal_scoring_rejects_replacement_implementations(profile, field, valu
         ModelType.Chat | ModelType.Pooling,
     ],
 )
-@pytest.mark.parametrize("installed", ["0.32.0", "0.33.0"])
+@pytest.mark.parametrize("installed", tuple(cache.CAUSAL_CACHE_SOURCE_BLOBS))
 def test_publishes_only_boolean_capability(
     profile, monkeypatch, architecture, model_type, installed
 ):
@@ -299,13 +305,54 @@ def test_unqualified_versions_do_not_import_engine_apis(
 
 
 @pytest.mark.parametrize(
-    "vllm_version", ["0.32.0", "0.32.0+cu130", "0.33.0", "0.33.0+cu130"]
+    "vllm_version",
+    [
+        value
+        for release in cache.CAUSAL_CACHE_SOURCE_BLOBS
+        for value in (release, release + "+cu130")
+    ],
 )
 def test_qualified_version_family(profile, monkeypatch, vllm_version):
     monkeypatch.setattr(
         "dynamo.vllm.decision_execution.version", lambda _: vllm_version
     )
     assert publish_vllm_decision_capability(**profile)
+
+
+@pytest.mark.parametrize("mapped", [False, True])
+def test_cache_source_map_is_the_only_supported_release_gate(
+    profile, monkeypatch, mapped
+):
+    sources = (("vllm/future_scheduler.py", "future-pinned-blob"),)
+    monkeypatch.setattr(
+        cache,
+        "CAUSAL_CACHE_SOURCE_BLOBS",
+        {
+            **cache.CAUSAL_CACHE_SOURCE_BLOBS,
+            **({"0.34.0": sources} if mapped else {}),
+        },
+    )
+    verify = Mock(return_value=True)
+    monkeypatch.setattr(cache, "verify_installed_sources", verify)
+    monkeypatch.setattr("dynamo.vllm.decision_execution.version", lambda _: "0.34.0")
+    engine_import = Mock(
+        side_effect={
+            "vllm.sampling_params": SimpleNamespace(
+                SamplingParams=SamplingParamsSchema
+            ),
+            "vllm.outputs": SimpleNamespace(RequestOutput=RequestOutputSchema),
+        }.__getitem__
+    )
+    monkeypatch.setattr("dynamo.vllm.decision_execution.import_module", engine_import)
+    assert publish_vllm_decision_capability(**profile) is mapped
+    if mapped:
+        verify.assert_called_once_with(sources)
+        assert engine_import.call_count == 2
+        profile["runtime_config"].set_engine_specific.assert_called_once()
+    else:
+        verify.assert_not_called()
+        engine_import.assert_not_called()
+        profile["runtime_config"].set_engine_specific.assert_not_called()
 
 
 @pytest.mark.parametrize(
