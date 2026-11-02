@@ -148,9 +148,14 @@ errors, which return to the client.
 | Tokens, multimodal block info | `PreprocessedRequest::block_mm_routing_info` |
 | Pins, DP ranks, priority, LoRA, cache namespace, constraints, allowed workers | `PreprocessedRequest::routing` (`RoutingHints`), from `nvext` and `x-dynamo-*` headers |
 | Scoring and accounting overrides | `PreprocessedRequest::router_config_override` |
+| Prefix-cache read permission | Inverse of `PreprocessedRequest::skip_reading_prefix_cache`, normalized by the aggregated host for capable token-based vLLM pools; absent decisions retain legacy estimates |
 | Excluded workers, parked classifier lifecycle | `PreprocessedRequest::migration_state` |
 | Staged KV that only this decode can release | `PreprocessedRequest::staged_kv_cleanup` |
 | Query-only selection (KV plane) | annotation `query_instance_id` in `PreprocessedRequest::annotations` |
+
+The Runtime EPP uses the token-only selection API and supplies no normalized cache-read
+permission. Its estimates retain their existing behavior; extending this control to EPP requires
+its own request normalization and worker contract.
 
 ## Admission modes
 

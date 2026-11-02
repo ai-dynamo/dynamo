@@ -390,9 +390,15 @@ def rust_cache_read_contract_cases():
     fixture_path = Path(__file__).parent / "data" / "prefix_cache_read_contract.json"
     if exported_path := os.environ.get("DYNAMO_CACHE_READ_CONTRACT_INPUT"):
         fixture_path = Path(exported_path)
-    cases = json.loads(fixture_path.read_text())
-    assert cases, "Rust cache-read contract output must contain requests"
-    return cases
+    corpus = json.loads(fixture_path.read_text())
+    assert corpus["cases"], "Rust cache-read contract output must contain requests"
+    return [
+        {
+            **case,
+            "request": {**corpus["default_request"], **case["overrides"]},
+        }
+        for case in corpus["cases"]
+    ]
 
 
 def test_rust_cache_read_contract_reaches_sampling_params(

@@ -124,31 +124,8 @@ mod tests {
     }
 
     #[test]
-    fn prompt_logprobs_and_overrides_match_worker_precedence() {
+    fn ordinary_and_invalid_controls_preserve_worker_precedence() {
         for (prompt, extra, expected) in [
-            (None, json!({}), None),
-            (Some(0), json!({}), Some(true)),
-            (
-                Some(1),
-                json!({"skip_reading_prefix_cache": false}),
-                Some(false),
-            ),
-            (
-                Some(1),
-                json!({"sampling_options": {"skip_reading_prefix_cache": false}, "skip_reading_prefix_cache": true}),
-                Some(false),
-            ),
-            (
-                Some(1),
-                json!({"sampling_options": {"skip_reading_prefix_cache": null}, "skip_reading_prefix_cache": false}),
-                Some(true),
-            ),
-            (None, json!({"skip_reading_prefix_cache": true}), None),
-            (
-                None,
-                json!({"sampling_options": {"skip_reading_prefix_cache": true}}),
-                Some(true),
-            ),
             (
                 None,
                 json!({"sampling_options": {"skip_reading_prefix_cache": false}}),

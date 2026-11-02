@@ -1884,8 +1884,7 @@ async fn router_with_config_and_classifier(
 #[derive(Default)]
 struct PendingThenCompletedDispatch {
     worker_ids: Mutex<Vec<u64>>,
-    cache_read_controls: Mutex<Vec<Option<bool>>>,
-    cache_read_shadows: Mutex<Vec<Option<bool>>>,
+    cache_read_controls: Mutex<Vec<(Option<bool>, Option<bool>)>>,
 }
 
 #[async_trait]
@@ -1899,18 +1898,15 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
         tokio::task::yield_now().await;
         let (addressed, context) = request.transfer(());
         let (content, _, instance) = addressed.into_parts();
-        self.cache_read_controls
-            .lock()
-            .unwrap()
-            .push(content.skip_reading_prefix_cache);
-        self.cache_read_shadows.lock().unwrap().push(
+        self.cache_read_controls.lock().unwrap().push((
+            content.skip_reading_prefix_cache,
             content
                 .extra_args
                 .as_ref()
                 .and_then(|extra| extra.get("sampling_options"))
                 .and_then(|sampling| sampling.get("skip_reading_prefix_cache"))
                 .and_then(serde_json::Value::as_bool),
-        );
+        ));
         self.worker_ids
             .lock()
             .unwrap()
@@ -1947,10 +1943,11 @@ async fn router_with_recorded_dispatch_and_affinity(
     namespace: &str,
     session_affinity_ttl: Option<Duration>,
 ) -> (RoutingHost, Arc<PendingThenCompletedDispatch>, u64, Runtime) {
-    router_with_recorded_dispatch_and_config(
+    router_with_recorded_dispatch_and_classifier(
         namespace,
         session_affinity_ttl,
         ModelRuntimeConfig::default(),
+        None::<RecordingClassifier>,
     )
     .await
 }
@@ -1965,20 +1962,6 @@ async fn router_with_recorded_dispatch_affinity_and_classifier(
         session_affinity_ttl,
         ModelRuntimeConfig::default(),
         classifier,
-    )
-    .await
-}
-
-async fn router_with_recorded_dispatch_and_config(
-    namespace: &str,
-    session_affinity_ttl: Option<Duration>,
-    worker_config: ModelRuntimeConfig,
-) -> (RoutingHost, Arc<PendingThenCompletedDispatch>, u64, Runtime) {
-    router_with_recorded_dispatch_and_classifier(
-        namespace,
-        session_affinity_ttl,
-        worker_config,
-        None::<RecordingClassifier>,
     )
     .await
 }
@@ -2063,9 +2046,10 @@ async fn frontend_prefix_cache_read_wire_contract() {
 
     let (host, runtime) =
         router_with_worker_configs(None, HashMap::from([(7, cache_read_capable_config())])).await;
+    let default_request = serde_json::to_value(request()).unwrap();
     let mut corpus = Vec::new();
-    for (name, prompt_logprobs, extra, typed, expected_skip, normalized) in [
-        ("prompt_zero", Some(0), None, None, true, true),
+    for (name, prompt_logprobs, extra, typed, expected) in [
+        ("prompt_zero", Some(0), None, None, Some(true)),
         (
             "nested_false",
             Some(0),
@@ -2073,24 +2057,21 @@ async fn frontend_prefix_cache_read_wire_contract() {
                 json!({"sampling_options": {"skip_reading_prefix_cache": false}, "skip_reading_prefix_cache": true}),
             ),
             None,
-            false,
-            true,
+            Some(false),
         ),
         (
             "direct_false",
             Some(0),
             Some(json!({"skip_reading_prefix_cache": false})),
             None,
-            false,
-            true,
+            Some(false),
         ),
         (
             "typed_overrides_legacy",
             Some(0),
             Some(json!({"sampling_options": {"skip_reading_prefix_cache": true}})),
             Some(false),
-            false,
-            true,
+            Some(false),
         ),
         (
             "nested_field_null_masks_direct",
@@ -2099,41 +2080,36 @@ async fn frontend_prefix_cache_read_wire_contract() {
                 json!({"sampling_options": {"skip_reading_prefix_cache": null}, "skip_reading_prefix_cache": false}),
             ),
             None,
-            true,
-            true,
+            Some(true),
         ),
-        ("ordinary", None, None, None, false, false),
+        ("ordinary", None, None, None, None),
         (
             "ordinary_direct_ignored",
             None,
             Some(json!({"skip_reading_prefix_cache": true})),
             None,
-            false,
-            false,
+            None,
         ),
         (
             "ordinary_nested_true",
             None,
             Some(json!({"sampling_options": {"skip_reading_prefix_cache": true}})),
             None,
-            true,
-            true,
+            Some(true),
         ),
         (
             "sampling_container_null",
             Some(0),
             Some(json!({"sampling_options": null, "skip_reading_prefix_cache": false})),
             None,
-            false,
-            true,
+            Some(false),
         ),
         (
             "extra_args_null",
             Some(0),
             Some(json!(null)),
             None,
-            true,
-            true,
+            Some(true),
         ),
     ] {
         let mut input = request();
@@ -2142,10 +2118,10 @@ async fn frontend_prefix_cache_read_wire_contract() {
         input.skip_reading_prefix_cache = typed;
         host.normalize_prefix_cache_read_control(&mut input, RequestPhase::Aggregated);
         let wire = serde_json::to_value(&input).unwrap();
-        if normalized {
-            assert_eq!(wire["skip_reading_prefix_cache"], expected_skip, "{name}");
+        if let Some(skip) = expected {
+            assert_eq!(wire["skip_reading_prefix_cache"], skip, "{name}");
             assert_eq!(
-                wire["extra_args"]["sampling_options"]["skip_reading_prefix_cache"], expected_skip,
+                wire["extra_args"]["sampling_options"]["skip_reading_prefix_cache"], skip,
                 "{name}"
             );
         } else {
@@ -2157,13 +2133,22 @@ async fn frontend_prefix_cache_read_wire_contract() {
                 "{name}"
             );
         }
+        // Store common wire defaults once; Python reconstructs each full request.
+        let mut overrides = wire.as_object().unwrap().clone();
+        overrides.retain(|key, value| default_request.get(key) != Some(value));
+        let mut reconstructed = default_request.clone();
+        reconstructed
+            .as_object_mut()
+            .unwrap()
+            .extend(overrides.clone());
+        assert_eq!(reconstructed, wire, "{name}");
         corpus.push(json!({
             "name": name,
-            "request": wire,
-            "expected_skip": expected_skip,
-            "normalized": normalized,
+            "overrides": overrides,
+            "expected_skip": expected.unwrap_or(false),
         }));
     }
+    let corpus = json!({"default_request": default_request, "cases": corpus});
     if let Some(output) = std::env::var_os("DYNAMO_CACHE_READ_CONTRACT_OUTPUT") {
         std::fs::write(output, serde_json::to_vec_pretty(&corpus).unwrap()).unwrap();
     }
@@ -2171,7 +2156,7 @@ async fn frontend_prefix_cache_read_wire_contract() {
     // the fixture without comparing against a stale compile-time include.
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../components/src/dynamo/vllm/tests/data/prefix_cache_read_contract.json");
-    let expected: Vec<serde_json::Value> =
+    let expected: serde_json::Value =
         serde_json::from_slice(&std::fs::read(fixture).unwrap()).unwrap();
     assert_eq!(
         corpus, expected,
@@ -2233,10 +2218,11 @@ async fn prefix_cache_control_gates_mixed_pools_and_preserves_legacy_inputs() {
 #[tokio::test]
 #[serial_test::serial]
 async fn prefix_cache_control_reaches_native_query_selection_and_worker_dispatch() {
-    let (host, dispatch, worker_id, runtime) = router_with_recorded_dispatch_and_config(
+    let (host, dispatch, worker_id, runtime) = router_with_recorded_dispatch_and_classifier(
         "prefix-cache-read-control",
         None,
         cache_read_capable_config(),
+        None::<RecordingClassifier>,
     )
     .await;
     let tokens = (0..32).collect::<Vec<_>>();
@@ -2312,14 +2298,10 @@ async fn prefix_cache_control_reaches_native_query_selection_and_worker_dispatch
         while stream.next().await.is_some() {}
         assert_eq!(tracker.cached_tokens(), Some(cached_tokens));
         if !query_only {
-            assert_eq!(
-                *dispatch.cache_read_controls.lock().unwrap().last().unwrap(),
-                expected
-            );
             // An N-2 worker ignoring the new field reads this same explicit decision.
             assert_eq!(
-                *dispatch.cache_read_shadows.lock().unwrap().last().unwrap(),
-                expected
+                *dispatch.cache_read_controls.lock().unwrap().last().unwrap(),
+                (expected, expected)
             );
         }
     }
@@ -2375,11 +2357,7 @@ async fn prefix_cache_control_keeps_legacy_shadow_while_selection_waits() {
     while stream.next().await.is_some() {}
     assert_eq!(
         dispatch.cache_read_controls.lock().unwrap().as_slice(),
-        &[Some(false)]
-    );
-    assert_eq!(
-        dispatch.cache_read_shadows.lock().unwrap().as_slice(),
-        &[Some(false)]
+        &[(Some(false), Some(false))]
     );
     drop(host);
     runtime.shutdown();
