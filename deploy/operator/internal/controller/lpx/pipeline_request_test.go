@@ -6,6 +6,7 @@
 package lpx
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"slices"
@@ -17,6 +18,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	grovev1beta1 "github.com/ai-dynamo/grove/operator/api/core/v1beta1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -30,10 +32,13 @@ import (
 func TestRemoveReleasedAgentPods(t *testing.T) {
 	for _, tc := range []struct {
 		name, change                                  string
+		podOwnerVersion, cliqueOwnerVersion           string
 		reason                                        lpxv1alpha1.ReleaseReason
 		remove, wantError, deleteError, missingClique bool
 	}{
 		{name: "dependency changed", remove: true},
+		{name: "beta Pod owner", podOwnerVersion: grovev1beta1.SchemeGroupVersion.String(), remove: true},
+		{name: "beta PodClique owner", cliqueOwnerVersion: grovev1beta1.SchemeGroupVersion.String(), remove: true},
 		{name: "request changed", reason: lpxv1alpha1.ReleaseReasonRequestChanged, remove: true},
 		{name: "binding failed", reason: lpxv1alpha1.ReleaseReasonBindingFailed, remove: true},
 		{name: "unbound target", change: "target", remove: true},
@@ -64,6 +69,8 @@ func TestRemoveReleasedAgentPods(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Observe one released Agent Pod and its ownership beneath a trusted scaling group")
 			pcsgs, pclq, pod := newLPXTestAgentHierarchy()
+			pod.OwnerReferences[0].APIVersion = cmp.Or(tc.podOwnerVersion, grovev1alpha1.SchemeGroupVersion.String())
+			pclq.OwnerReferences[0].APIVersion = cmp.Or(tc.cliqueOwnerVersion, grovev1alpha1.SchemeGroupVersion.String())
 			request := newLPXTestReleaseRequest(pod)
 			execution := &request.Status.Committed.Execution
 			if tc.reason != "" {
@@ -221,7 +228,7 @@ func TestGetPipelineRequests(t *testing.T) {
 		uid       types.UID
 		want      []string
 	}{
-		{name: "owned requests", namespace: "default", uid: "pcs-uid", want: []string{"first", "last"}},
+		{name: "owned requests", namespace: "default", uid: "pcs-uid", want: []string{"first", "last", "beta"}},
 		{name: "different PCS with the same name", namespace: "default", uid: "other-uid", want: []string{"other-owner"}},
 		{name: "different namespace", namespace: "other", uid: "pcs-uid", want: []string{"other-namespace"}},
 		{name: "no owned requests", namespace: "default", uid: "missing-uid"},
@@ -232,16 +239,18 @@ func TestGetPipelineRequests(t *testing.T) {
 			for _, request := range []struct {
 				name, namespace string
 				uid             types.UID
+				apiVersion      string
 			}{
-				{"last", "default", "pcs-uid"},
-				{"first", "default", "pcs-uid"},
-				{"other-owner", "default", "other-uid"},
-				{"other-namespace", "other", "pcs-uid"},
+				{"last", "default", "pcs-uid", grovev1alpha1.SchemeGroupVersion.String()},
+				{"first", "default", "pcs-uid", grovev1alpha1.SchemeGroupVersion.String()},
+				{"beta", "default", "pcs-uid", grovev1beta1.SchemeGroupVersion.String()},
+				{"other-owner", "default", "other-uid", grovev1beta1.SchemeGroupVersion.String()},
+				{"other-namespace", "other", "pcs-uid", grovev1beta1.SchemeGroupVersion.String()},
 			} {
 				objects = append(objects, &lpxv1alpha1.LPUPipelineRequest{
 					Name: request.name, Namespace: request.namespace,
 					OwnerReferences: []metav1.OwnerReference{{
-						APIVersion: grovev1alpha1.SchemeGroupVersion.String(), Kind: "PodCliqueSet",
+						APIVersion: request.apiVersion, Kind: "PodCliqueSet",
 						Name: "pcs", UID: request.uid, Controller: new(true),
 					}}})
 			}

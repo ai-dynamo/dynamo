@@ -15,6 +15,7 @@ import (
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	grovev1beta1 "github.com/ai-dynamo/grove/operator/api/core/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -74,7 +75,10 @@ func (r *graphReconciler) setupWithManager(mgr ctrl.Manager) error {
 
 func pipelineRequestOwnerUID(obj client.Object) []string {
 	owner := metav1.GetControllerOf(obj)
-	if owner == nil || owner.APIVersion != grovev1alpha1.SchemeGroupVersion.String() || owner.Kind != podCliqueSetKind {
+	// PCS owner references may use either served Grove version.
+	if owner == nil ||
+		(owner.APIVersion != grovev1alpha1.SchemeGroupVersion.String() && owner.APIVersion != grovev1beta1.SchemeGroupVersion.String()) ||
+		owner.Kind != podCliqueSetKind {
 		return nil
 	}
 	return []string{string(owner.UID)}
