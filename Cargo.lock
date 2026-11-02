@@ -2883,7 +2883,7 @@ dependencies = [
 [[package]]
 name = "dynamo-parsers"
 version = "10.0.7"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=e6efb77404896c68bd98d4545500c9d5ff44245d#e6efb77404896c68bd98d4545500c9d5ff44245d"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=9676b50cca82ef4826fe54a8303eb055c9bf2aef#9676b50cca82ef4826fe54a8303eb055c9bf2aef"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2906,7 +2906,7 @@ dependencies = [
 [[package]]
 name = "dynamo-parsers-v2"
 version = "0.7.24"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=e6efb77404896c68bd98d4545500c9d5ff44245d#e6efb77404896c68bd98d4545500c9d5ff44245d"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=9676b50cca82ef4826fe54a8303eb055c9bf2aef#9676b50cca82ef4826fe54a8303eb055c9bf2aef"
 dependencies = [
  "anyhow",
  "openai-harmony",
@@ -2922,7 +2922,7 @@ dependencies = [
 [[package]]
 name = "dynamo-protocols"
 version = "8.2.0"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=e6efb77404896c68bd98d4545500c9d5ff44245d#e6efb77404896c68bd98d4545500c9d5ff44245d"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=9676b50cca82ef4826fe54a8303eb055c9bf2aef#9676b50cca82ef4826fe54a8303eb055c9bf2aef"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2940,7 +2940,7 @@ dependencies = [
 [[package]]
 name = "dynamo-renderer"
 version = "8.0.3"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=e6efb77404896c68bd98d4545500c9d5ff44245d#e6efb77404896c68bd98d4545500c9d5ff44245d"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=9676b50cca82ef4826fe54a8303eb055c9bf2aef#9676b50cca82ef4826fe54a8303eb055c9bf2aef"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3169,7 +3169,7 @@ dependencies = [
 [[package]]
 name = "dynamo-tokenizers"
 version = "3.1.1"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=e6efb77404896c68bd98d4545500c9d5ff44245d#e6efb77404896c68bd98d4545500c9d5ff44245d"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=9676b50cca82ef4826fe54a8303eb055c9bf2aef#9676b50cca82ef4826fe54a8303eb055c9bf2aef"
 dependencies = [
  "aho-corasick",
  "anyhow",
