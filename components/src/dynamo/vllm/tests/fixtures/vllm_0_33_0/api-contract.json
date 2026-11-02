@@ -1,0 +1,40 @@
+{
+  "_generated": "Do not edit; regenerate with python3 -m dynamo.vllm.tests.decision_stub_contract --source-repo <repo>",
+  "pinned_vllm_commit": "4ba787ec9959e566d3b587a796dff07673324da5",
+  "scope": "CPU stub signatures and native-read sampling fields only; not renderer, engine, or GPU behavior.",
+  "sources": {
+    "vllm/inputs/engine.py": {
+      "git_blob": "aa8c9054335e75242dc2d89b80fc364e590f0de5",
+      "signatures": {
+        "tokens_input": "(prompt_token_ids, *, prompt=None, cache_salt=None)"
+      }
+    },
+    "vllm/renderers/inputs/preprocess.py": {
+      "git_blob": "9daf38fdbd3bd54a9cb32175329af9ca5bc07099",
+      "signatures": {
+        "extract_prompt_components": "(model_config, prompt)"
+      }
+    },
+    "vllm/renderers/online_renderer.py": {
+      "git_blob": "941d173bd1d5cb2ad2c6e3f07f8d052c54770739",
+      "signatures": {
+        "OnlineRenderer.__init__": "(self, model_config, renderer, *, request_logger, chat_template, chat_template_content_format, trust_request_chat_template=False, trust_request_mm_kwargs=False, enable_auto_tools=False, exclude_tools_when_tool_choice_none=False, tool_parser=None, reasoning_parser=None, tool_strict_level=None, default_chat_template_kwargs=None, reasoning_effort_map=None, log_error_stack=False)",
+        "OnlineRenderer.preprocess_chat": "(self, request, messages, default_template, default_template_content_format, default_template_kwargs, tool_dicts=None, parser=None, *, skip_mm_cache=False)"
+      }
+    },
+    "vllm/sampling_params.py": {
+      "git_blob": "466c19e6bb74c2d6127e0c2ab986631f3beea69f",
+      "field_defaults": {
+        "SamplingParams": {
+          "temperature": 1.0,
+          "max_tokens": 16,
+          "logprob_token_ids": null,
+          "extra_args": null
+        }
+      },
+      "constants": {
+        "MAX_LOGPROB_TOKEN_IDS": 128
+      }
+    }
+  }
+}
