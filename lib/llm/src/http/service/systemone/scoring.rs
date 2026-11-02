@@ -3,11 +3,38 @@
 
 use super::*;
 use super::{backend_error::lifecycle_error, token_scorer};
+use crate::discovery::{DecisionContext, TokenExecutor};
 use crate::local_model::runtime_config::TokenBackend;
 use futures::{StreamExt, stream};
 
+pub(super) struct PreparedTokenExecution {
+    executor: TokenExecutor,
+    branches: Vec<PreparedBranch>,
+}
+
+impl PreparedTokenExecution {
+    pub(super) fn new(
+        executor: TokenExecutor,
+        branches: Vec<PreparedBranch>,
+    ) -> Result<Self, DispatchError> {
+        if branches.is_empty()
+            || branches
+                .iter()
+                .any(|branch| branch.wire.backend() != executor.backend())
+        {
+            return Err(DispatchError::malformed(
+                "prepared scoring transport disagrees with its executor",
+            ));
+        }
+        Ok(Self { executor, branches })
+    }
+    pub(super) fn branches(&self) -> &[PreparedBranch] {
+        &self.branches
+    }
+}
+
 struct TokenDispatch<'a> {
-    selection: &'a SystemOneExecutionSelection,
+    selection: &'a DecisionContext,
     engine: &'a crate::types::openai::generate::GenerateStreamingEngine,
     backend: TokenBackend,
     request_id: &'a str,
@@ -18,11 +45,13 @@ struct TokenDispatch<'a> {
 
 pub(super) fn prepare_branches(
     request: &CanonicalRequest,
-    selection: &SystemOneExecutionSelection,
+    selection: &DecisionContext,
+    executor: &TokenExecutor,
     max_input_tokens: usize,
+    cache_salt: &str,
 ) -> Result<Vec<PreparedBranch>, (StatusCode, String)> {
-    let cache_salt = fresh_cache_salt();
-    let preprocessor = &selection.preprocessor;
+    let preprocessor = executor.preprocessor();
+    let backend = executor.backend();
     let context_length = selection.card.effective_context_length() as usize;
     let mut total_input_tokens = 0_usize;
     let mut remaining_tokenization_work = tokenization_work_limit(
@@ -116,14 +145,14 @@ pub(super) fn prepare_branches(
         remaining_tokenization_work -= prompt_ids.len() * (rendered.labels.len() + 2);
         remaining_encoding_bytes -= encoding_bytes;
         let prompt_len = prompt_ids.len();
-        let wire = token_scorer::build(TokenBackend::Sglang, prompt_ids, &label_ids, &cache_salt)
-            .map_err(|cause| {
-            tracing::error!(error = %cause, "failed to build System One native request");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal server error".to_string(),
-            )
-        })?;
+        let wire =
+            token_scorer::build(backend, prompt_ids, &label_ids, cache_salt).map_err(|cause| {
+                tracing::error!(error = %cause, "failed to build System One native request");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error".to_string(),
+                )
+            })?;
         branches.push(PreparedBranch {
             scoring: ScoringBranch {
                 index,
@@ -138,35 +167,27 @@ pub(super) fn prepare_branches(
 }
 
 pub(super) async fn dispatch(
-    selection: SystemOneExecutionSelection,
-    mut branches: Vec<PreparedBranch>,
+    selection: &DecisionContext,
+    prepared: PreparedTokenExecution,
     request_id: String,
     parent_context: Arc<dyn AsyncEngineContext>,
-    _admission_permit: OwnedSemaphorePermit,
     metrics: Arc<Metrics>,
+    metric_model: String,
     request: Arc<CanonicalRequest>,
 ) -> Response {
     let dialect = request.dialect;
-    if branches.is_empty()
-        || branches
-            .iter()
-            .any(|branch| branch.wire.backend() != TokenBackend::Sglang)
-    {
-        return dispatch_error(
-            &request_id,
-            &parent_context,
-            DispatchError::malformed("prepared scoring transport disagrees with its executor"),
-            dialect,
-        );
-    }
+    let PreparedTokenExecution {
+        executor,
+        mut branches,
+    } = prepared;
     let dispatch = TokenDispatch {
-        selection: &selection,
-        engine: &selection.engine,
-        backend: TokenBackend::Sglang,
+        selection,
+        engine: executor.engine(),
+        backend: executor.backend(),
         request_id: &request_id,
         parent_context: &parent_context,
         metrics: &metrics,
-        metric_model: &selection.canonical_model,
+        metric_model: &metric_model,
     };
     let first = branches.remove(0);
     let first_started = Instant::now();
@@ -175,7 +196,7 @@ pub(super) async fn dispatch(
         Err(cause) => return dispatch_error(&request_id, &parent_context, cause, dialect),
     };
     metrics.observe_systemone_phase(
-        &selection.canonical_model,
+        &metric_model,
         SystemOnePhase::FirstBranch,
         first_started.elapsed().as_secs_f64(),
     );
@@ -216,7 +237,7 @@ pub(super) async fn dispatch(
     }
 
     metrics.observe_systemone_phase(
-        &selection.canonical_model,
+        &metric_model,
         SystemOnePhase::Fanout,
         fanout_started.elapsed().as_secs_f64(),
     );

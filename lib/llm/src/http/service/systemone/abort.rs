@@ -13,7 +13,7 @@ pub(super) fn classify(finish: &Value) -> Option<DispatchError> {
     Some(if status == Some(429) {
         DispatchError {
             status: super::super::error::overload_status_code(),
-            public_message: "SGLang scoring worker capacity is exhausted",
+            public_message: "decision scoring worker capacity is exhausted",
             detail: "native scoring worker capacity exhausted".to_string(),
             retry_after: true,
             is_capacity_exhausted: true,

@@ -1,34 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::super::PreparedScoringRequest;
 use super::*;
 
-#[tokio::test]
-async fn sglang_dispatch_rejects_mismatched_scoring_transport_before_starting() {
-    for mismatched in [0, 1] {
-        let engine = TestEngine::new(EngineBehavior::Success);
-        let mut branches: Vec<_> = (0..2).map(prepared_noul_branch).collect();
-        branches[mismatched].wire =
-            super::super::PreparedScoringRequest::vllm(vec![1, 2], &[13, 14], "salt").unwrap();
-        let parent = Context::new(()).context();
-        let admission = Arc::new(Semaphore::new(2));
-        let permit = admission.clone().acquire_many_owned(2).await.unwrap();
-        let response = dispatch(
-            selection(engine.clone()),
-            branches,
-            "mismatched-transport".into(),
-            parent.clone(),
-            permit,
-            Arc::new(super::super::super::metrics::Metrics::new()),
-            canonical_request(2),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(response_body(response).await.get("answers").is_none());
-        assert!(engine.observations.lock().unwrap().is_empty());
-        assert!(parent.is_killed());
-        assert_eq!(admission.available_permits(), 2);
-    }
+#[test]
+fn prepared_token_execution_rejects_a_mismatched_wire_before_dispatch() {
+    let engine = TestEngine::new(EngineBehavior::Success);
+    let selection = selection(engine.clone());
+    let mut branch = prepared_noul_branch(0);
+    branch.wire = PreparedScoringRequest::vllm(vec![1, 2], &[13, 14], "salt").unwrap();
+    assert!(super::super::execution::PreparedExecution::token(selection, vec![branch]).is_none());
+    assert!(engine.observations.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -158,10 +141,8 @@ async fn admitted_worker_removal_during_fanout_does_not_reroute_siblings() {
         admissions: Some(admissions),
         frame: sglang_frame,
     });
-    let selection = SystemOneExecutionSelection {
-        admitted_ids: Some(receiver),
-        ..selection(engine.clone())
-    };
+    let mut selection = selection(engine.clone());
+    selection.context.admitted_ids = Some(receiver);
     let parent = Context::new(()).context();
     let admission = Arc::new(Semaphore::new(3));
     let permit = admission.clone().acquire_many_owned(3).await.unwrap();

@@ -35,6 +35,7 @@ use crate::{
         common::{
             llm_backend::LLMEngineOutput, preprocessor::PreprocessedRequest, timing::RequestTracker,
         },
+        systemone::{MAX_DECISION_ENCODING_BYTES, MAX_DECISION_INPUT_TOKENS},
     },
 };
 
@@ -42,18 +43,24 @@ use crate::{
 mod abort;
 #[path = "systemone/backend_error.rs"]
 mod backend_error;
+
+#[path = "systemone/execution.rs"]
+mod execution;
 #[path = "systemone/scoring.rs"]
 mod scoring;
-use scoring::{dispatch, prepare_branches};
 #[path = "systemone/token_scorer.rs"]
 mod token_scorer;
 use token_scorer::PreparedScoringRequest;
 #[cfg(test)]
 use token_scorer::measured_cached_tokens;
+
 #[path = "systemone/response.rs"]
 mod response;
 pub(super) use response::attach_request_ids;
 use response::{decision_error, error};
+
+#[path = "systemone/native.rs"]
+mod native;
 
 #[path = "systemone/http.rs"]
 mod http;
@@ -63,9 +70,8 @@ pub(super) const DEFAULT_PATH: &str = "/v1/systemone";
 pub(super) const DECISIONS_PATH: &str = "/v1/decisions";
 
 // The configured input ceiling and deployment candidate ceiling bound amplification.
-const MAX_TOKENIZATION_WORK: usize =
-    crate::protocols::systemone::MAX_DECISION_INPUT_TOKENS * (255 + 2);
-const MAX_TOKENIZATION_TEXT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_TOKENIZATION_WORK: usize = MAX_DECISION_INPUT_TOKENS * (255 + 2);
+const MAX_TOKENIZATION_TEXT_BYTES: usize = MAX_DECISION_ENCODING_BYTES;
 const MAX_CONCURRENT_SIBLINGS: usize = 4;
 
 #[derive(Clone, Copy)]
@@ -135,7 +141,7 @@ impl DispatchError {
     fn unavailable(detail: impl Into<String>) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
-            public_message: "SGLang scoring worker is unavailable",
+            public_message: "decision scoring worker is unavailable",
             detail: detail.into(),
             retry_after: false,
             is_capacity_exhausted: false,
@@ -145,7 +151,7 @@ impl DispatchError {
     fn malformed(detail: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            public_message: "malformed SGLang scoring response",
+            public_message: "malformed decision scoring response",
             detail: detail.into(),
             retry_after: false,
             is_capacity_exhausted: false,
@@ -253,18 +259,18 @@ async fn handle_request(
             return error(
                 dialect,
                 StatusCode::SERVICE_UNAVAILABLE,
-                "model has no eligible aggregate SGLang worker",
+                "model has no eligible aggregate decision worker",
             );
         }
         Err(SystemOneSelectionError::Unsupported) => {
             return error(
                 dialect,
                 StatusCode::BAD_REQUEST,
-                "model does not support aggregate SGLang scoring",
+                "model does not support aggregate decision scoring",
             );
         }
     };
-    if let Err(cause) = request.validate_capabilities(&selection.decision_capabilities()) {
+    if let Err(cause) = request.validate_capabilities(&selection.context.decision_capabilities()) {
         return decision_error(cause);
     }
 
@@ -291,18 +297,17 @@ async fn handle_request(
         }
     };
     let preflight_started = Instant::now();
-    let selection_for_preflight = selection.clone();
+    let metric_model = state
+        .manager()
+        .metric_model_for(&selection.context.canonical_model)
+        .to_owned();
     let request = Arc::new(request);
     let preflight_request = request.clone();
     let (branches, admission_permit) = match tokio::time::timeout_at(
         deadline,
         spawn_blocking_with_permit(admission_permit, move || {
             let _preflight_permit = preflight_permit;
-            prepare_branches(
-                &preflight_request,
-                &selection_for_preflight,
-                max_input_tokens,
-            )
+            execution::prepare(&preflight_request, selection, max_input_tokens)
         }),
     )
     .await
@@ -327,32 +332,17 @@ async fn handle_request(
     };
 
     let metrics = state.metrics_clone();
-    let metric_model = state.manager().metric_model_for(&selection.canonical_model);
     metrics.observe_systemone_phase(
-        metric_model,
+        &metric_model,
         SystemOnePhase::Preflight,
         preflight_started.elapsed().as_secs_f64(),
     );
-    metrics.observe_systemone_work(
-        metric_model,
-        branches.len(),
-        branches
-            .iter()
-            .map(|branch| branch.scoring.prompt_len)
-            .sum(),
-        branches
-            .iter()
-            .map(|branch| branch.scoring.label_ids.len())
-            .sum(),
-    );
+    execution::observe_work(&metric_model, &branches, &metrics);
 
     let parent = Context::with_id_and_metadata((), request_id.clone(), Default::default());
     let parent_context = parent.context();
     let cancellation_labels = CancellationLabels {
-        model: state
-            .manager()
-            .metric_model_for(&selection.canonical_model)
-            .to_string(),
+        model: metric_model.clone(),
         endpoint: metric_endpoint(dialect).to_string(),
         request_type: "unary".to_string(),
     };
@@ -362,13 +352,13 @@ async fn handle_request(
         cancellation_labels,
     )
     .await;
-    let task = tokio::spawn(dispatch(
-        selection,
+    let task = tokio::spawn(execution::dispatch(
         branches,
         request_id.clone(),
         parent_context.clone(),
         admission_permit,
         metrics,
+        metric_model,
         request,
     ));
     let response = response::dispatch_with_deadline(task, deadline, parent_context, dialect).await;
