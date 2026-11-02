@@ -7,8 +7,11 @@ Exercises the deterministic parser + renderer that turn the upstream
 api-reference-k8s.md`` (crd-ref-docs output + header/footer +
 fix-api-anchors.py) into a typed model and thin MDX shell. The generator
 writes into a scratch workspace so a failing test can never mutate the
-tracked docs tree. Hermetic; no network, no Dynamo runtime. Invocation::
+docs tree. Both pages are gitignored publish-time artifacts, so generate
+them first (needs Go); the tests themselves need no network and no Dynamo
+runtime. Invocation::
 
+    make -C deploy/operator generate-api-docs
     uv run --no-project --python 3.13 --with pytest --with pyyaml \\
         python3 -m pytest docs/fern/scripts/tests -v
 """
@@ -491,19 +494,8 @@ def test_check_mode_flags_mdx_shell_drift(workspace: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Cross-checks against the shipped tree
+# Cross-checks against the generated tree
 # ---------------------------------------------------------------------------
-
-
-def test_shipped_mdx_matches_regeneration_output() -> None:
-    """The shipped ``full-api-reference.mdx`` is generator output; running
-    the generator against the same source must produce byte-identical
-    text. Any drift here means the tracked file is stale."""
-    text = SOURCE_MD.read_text(encoding="utf-8")
-    reference = kubernetes_api_discovery.parse_reference(text)
-    rendered = kubernetes_api_rendering.render_mdx(reference)
-    shipped = TARGET_MDX.read_text(encoding="utf-8")
-    assert rendered == shipped
 
 
 def test_generator_adds_no_hardcoded_dev_paths() -> None:

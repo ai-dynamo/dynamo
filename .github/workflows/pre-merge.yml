@@ -177,6 +177,10 @@ jobs:
     - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
       with:
         python-version: '3.13'
+    - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
+      with:
+        go-version-file: deploy/operator/go.mod
+        cache-dependency-path: deploy/operator/go.sum
     - name: Install API docs test dependencies
       # pydantic and pytest-benchmark satisfy the module-referencing
       # filterwarnings entries in the repository's pyproject.toml so pytest
@@ -191,6 +195,12 @@ jobs:
           'pytest-asyncio>=1.0' \
           'pytest-benchmark>=4' \
           'fsspec'
+    - name: Generate Kubernetes API reference
+      # Like the Python/Rust pages, the Kubernetes reference is a publish-time
+      # artifact (gitignored, not committed). The tests below parse both of its
+      # pages, so generate them first. Write mode also proves a CRD type or
+      # footer change cannot break generation.
+      run: make -C deploy/operator generate-api-docs
     - name: Test generated API references
       # docs/fern/scripts/tests is an explicit path so it opts back into
       # collection despite the pyproject's docs/* ignore-glob (which keeps
@@ -204,7 +214,7 @@ jobs:
           docs/fern/scripts/tests/test_api_freshness.py \
           docs/fern/scripts/tests/test_relink_shared_reference.py \
           docs/fern/scripts/tests/test_resolve_translation_links.py
-    - name: Generate API references from source
+    - name: Generate Python/Rust API references
       # The Python/Rust references are publish-time artifacts (generated in
       # fern-docs.yml against the branch being published), not committed
       # files, so there is no freshness to check on a PR. What a code PR CAN
@@ -216,31 +226,6 @@ jobs:
         set -euo pipefail
         python3 docs/fern/scripts/gen_python_api.py
         python3 docs/fern/scripts/gen_rust_api.py
-    - name: Check generated Kubernetes API reference freshness
-      # Unlike the Python/Rust pages, the Kubernetes reference regenerates
-      # from a docs-owned source file and its output IS committed, so the
-      # freshness gate stays. On a PR, --since scopes the gate to what the
-      # branch itself changed (an unscoped gate reddens branches for merges
-      # to main they never made). On push to main there is no base and none
-      # is wanted: main is where global freshness must hold.
-      #
-      # The base commit is fetched explicitly because this job checks out
-      # shallow. Without it the range cannot resolve, and the helper fails
-      # closed to the strict gate -- safe, but the flag would do nothing.
-      env:
-        BASE_SHA: ${{ github.event.pull_request.base.sha }}
-      run: |
-        set -euo pipefail
-        SINCE=()
-        if [ -n "${BASE_SHA:-}" ]; then
-          git fetch --no-tags --depth=1 origin "$BASE_SHA" 2>/dev/null || true
-          if git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
-            SINCE=(--since "$BASE_SHA")
-          else
-            echo "::notice::base $BASE_SHA unavailable; using the strict gate"
-          fi
-        fi
-        python3 docs/fern/scripts/gen_kubernetes_api.py --check "${SINCE[@]}"
 
   # Safe Fern docs checks run in pre-merge with read-only permissions.
   fern-check:
@@ -258,14 +243,20 @@ jobs:
     - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
       with:
         python-version: '3.13'
+    - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
+      with:
+        go-version-file: deploy/operator/go.mod
+        cache-dependency-path: deploy/operator/go.sum
     - name: Generate API reference pages
-      # index.yml's Reference tab points at the Python/Rust API pages, which
-      # are publish-time artifacts (gitignored, not committed). fern check
-      # validates that every nav path exists, so materialize them first.
+      # index.yml's Reference tab points at the Python/Rust/Kubernetes API
+      # pages, which are publish-time artifacts (gitignored, not committed).
+      # fern check validates that every nav path exists, so materialize them
+      # first.
       run: |
         python3 -m pip install 'griffe==2.1.0'
         python3 docs/fern/scripts/gen_python_api.py
         python3 docs/fern/scripts/gen_rust_api.py
+        make -C deploy/operator generate-api-docs
     - name: Install Fern CLI
       run: npm install -g fern-api
     - name: Validate Fern configuration
@@ -361,6 +352,12 @@ jobs:
     - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
       with:
         python-version: '3.13'
+    # The replay generates the Kubernetes API pages with
+    # `make -C deploy/operator generate-api-docs`, which needs Go.
+    - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
+      with:
+        go-version-file: deploy/operator/go.mod
+        cache-dependency-path: deploy/operator/go.sum
     - name: Install replay dependencies
       # The replay generates the publish-time Python/Rust API pages exactly
       # like the real sync job; the script hard-fails without griffe. pyyaml
@@ -388,14 +385,19 @@ jobs:
     - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
       with:
         python-version: '3.13'
+    - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
+      with:
+        go-version-file: deploy/operator/go.mod
+        cache-dependency-path: deploy/operator/go.sum
     - name: Generate API reference pages
-      # The committed API landing links relatively to the publish-time
-      # Python/Rust pages; the broken-links checker resolves those through
-      # the file graph, so materialize them first.
+      # Committed pages link relatively to the publish-time Python/Rust/
+      # Kubernetes pages; the broken-links checker resolves those through the
+      # file graph, so materialize them first.
       run: |
         python3 -m pip install 'griffe==2.1.0'
         python3 docs/fern/scripts/gen_python_api.py
         python3 docs/fern/scripts/gen_rust_api.py
+        make -C deploy/operator generate-api-docs
     - name: Install Fern CLI
       run: npm install -g fern-api
     - name: Check for broken links

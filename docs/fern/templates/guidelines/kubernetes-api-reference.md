@@ -43,7 +43,7 @@ The generation pipeline has two stages. `make -C deploy/operator generate-api-do
 
 ### Generate both reference files
 
-Run:
+Generating locally needs Go. Run:
 
 ```bash
 make -C deploy/operator generate-api-docs
@@ -76,8 +76,9 @@ The renderer parses `api-reference-k8s.md` and writes
 `docs/fern/pages/reference/kubernetes-api/full-api-reference.mdx`. It converts packages and types to
 Fern cards, accordions, parameter fields, badges, and links while preserving validation details.
 
-Do not edit either generated file by hand. Change the Go types, generator configuration, header,
-footer, anchor fixer, parser, or renderer that owns the output.
+Both generated files are gitignored. CI generates them when it checks and publishes the docs, so
+there is nothing to commit and nothing to edit by hand. Change the Go types, generator
+configuration, header, footer, anchor fixer, parser, or renderer that owns the output.
 
 ## Update a Curated Resource Page
 
@@ -242,5 +243,5 @@ fern check
 fern docs broken-links
 ```
 
-Review the diff for both generated files and every affected curated page. Confirm that no generated
-page was hand-edited and that the curated reference still matches the current `v1beta1` surface.
+Review the diff for every affected curated page, and confirm against the regenerated full reference
+that the curated reference still matches the current `v1beta1` surface.

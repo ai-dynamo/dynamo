@@ -327,9 +327,9 @@ def _api_reference_sources(
 ) -> dict[str, str]:
     """name -> page text for every page this reference owns.
 
-    Committed pages (the hand-written API landing, the Kubernetes output)
-    read from disk; the publish-time Python/Rust pages come from a fresh
-    render."""
+    The hand-written API landing and the Kubernetes output (generated before
+    these tests run) read from disk; the publish-time Python/Rust pages come
+    from a fresh render."""
     sources = {
         str(page.relative_to(REPO_ROOT)): page.read_text(encoding="utf-8")
         for page in sorted((FERN_ROOT / "pages" / "reference" / "api").rglob("*.mdx"))
@@ -458,16 +458,18 @@ def test_kubernetes_page_is_self_contained(kubernetes_page: _KubernetesPage) -> 
     assert not (K8S_DIR / "api-reference.data.ts").exists()
 
 
-def test_kubernetes_source_path_note_points_at_a_real_file() -> None:
-    """The rendered page tells readers where the raw crd-ref-docs Markdown
-    lives. That path is emitted as inline code rather than a link, so the
-    broken-link checker cannot catch it when the source file moves -- as it
-    did when the reference was relocated under ``pages/reference/``."""
-    quoted = kubernetes_api_rendering.SOURCE_PATH_MD
-    missing = f"SOURCE_PATH_MD does not exist on disk: {quoted}"
+def test_kubernetes_source_note_points_at_committed_sources() -> None:
+    """The rendered page tells readers which sources it is generated from.
+    Those paths are emitted as inline code rather than links, so the
+    broken-link checker cannot catch it when a source moves. They must name
+    committed sources: the raw crd-ref-docs Markdown is gitignored, so
+    pointing readers at it sends them to a file the repository lacks."""
+    api_dir = kubernetes_api_rendering.SOURCE_API_DIR
+    footer = kubernetes_api_rendering.SOURCE_FOOTER
 
-    assert (REPO_ROOT / quoted).is_file(), missing
-    assert quoted == str(K8S_SOURCE_MD.relative_to(REPO_ROOT))
+    assert (REPO_ROOT / api_dir).is_dir(), f"SOURCE_API_DIR is missing: {api_dir}"
+    assert (REPO_ROOT / footer).is_file(), f"SOURCE_FOOTER is missing: {footer}"
+    assert kubernetes_api_rendering.GENERATE_COMMAND == K8S_GENERATE
 
 
 def test_kubernetes_prose_carries_no_literal_br_markers(
@@ -561,29 +563,40 @@ def test_kubernetes_page_carries_enum_semantics(
 
 
 def test_pre_merge_gates_every_api_generator_input() -> None:
-    filters = (REPO_ROOT / ".github" / "filters.yaml").read_text(encoding="utf-8")
+    # Parsed, not grepped: the Kubernetes inputs sit in both filters, so a
+    # whole-file substring check cannot tell which filter lost one.
+    filters = yaml.safe_load(
+        (REPO_ROOT / ".github" / "filters.yaml").read_text(encoding="utf-8")
+    )
     action = (
         REPO_ROOT / ".github" / "actions" / "changed-files" / "action.yml"
     ).read_text(encoding="utf-8")
 
-    assert "\napi_docs:\n" in filters
     for source_path in (
         "lib/bindings/python/src/**",
         "components/src/dynamo/**",
         "**/Cargo.toml",
-        "docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md",
-        # Navigation and the operator footer are read by the tests this job
-        # runs, so an edit that touches only them still has to gate the job.
+        # The Kubernetes reference is generated in this job from the CRD Go
+        # types, the crd-ref-docs config and header/footer, and the make target.
+        "deploy/operator/api/**",
+        "deploy/operator/docs/**",
+        "deploy/operator/Makefile",
+        # Navigation is read by the tests this job runs, so an edit that
+        # touches only it still has to gate the job.
         "docs/fern/index.yml",
         "docs/fern/docs.yml",
-        "deploy/operator/docs/footer.md",
     ):
-        assert source_path in filters
+        assert source_path in filters["api_docs"]
+    # fern check, broken links, and the website replay gate on `docs` and
+    # render the Kubernetes pages, so a CRD type change must trigger them too.
+    for source_path in ("deploy/operator/api/**", "deploy/operator/docs/**"):
+        assert source_path in filters["docs"]
     assert "api_docs:" in action
     assert "steps.filter.outputs.api_docs_any_modified" in action
 
 
-K8S_DRIFT_GATE_STEP = "Fail if the committed Kubernetes API reference was stale"
+K8S_GENERATE = "make -C deploy/operator generate-api-docs"
+K8S_PUBLISH_GENERATE = "make -C source-checkout/deploy/operator generate-api-docs"
 
 
 def _publish_step_run(step_name: str) -> str:
@@ -605,6 +618,21 @@ def _publish_step_run(step_name: str) -> str:
     raise AssertionError(f"fern-docs.yml has no step named {step_name!r}")
 
 
+def _pre_merge_job_runs(job_id: str) -> str:
+    """Return every `run` body of one pre-merge.yml job, joined.
+
+    Parsed for the same reason as _publish_step_run, and per job so that a
+    command kept in one job cannot stand in for the copy another job lost.
+    """
+    document = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "pre-merge.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    steps = document["jobs"][job_id]["steps"]
+    return "\n".join(step.get("run", "") for step in steps)
+
+
 def test_pre_merge_runs_all_api_generators_hermetically() -> None:
     workflow = (REPO_ROOT / ".github" / "workflows" / "pre-merge.yml").read_text(
         encoding="utf-8"
@@ -621,63 +649,39 @@ def test_pre_merge_runs_all_api_generators_hermetically() -> None:
     assert "docs/fern/scripts/tests/test_gen_rust_api.py" in workflow
     assert "docs/fern/scripts/tests/test_gen_kubernetes_api.py" in workflow
     assert "-c /dev/null" not in workflow
-    # Python/Rust references are publish-time artifacts: pre-merge must run
-    # both generators in WRITE mode (proving a source PR cannot break
+    # Python/Rust/Kubernetes references are publish-time artifacts: pre-merge
+    # must run every generator in WRITE mode (proving a source PR cannot break
     # generation) and never as a freshness diff against committed pages,
-    # which no longer exist. Kubernetes output stays committed, so its
-    # freshness gate stays.
+    # which no longer exist.
     for generator in ("python", "rust"):
         assert f"gen_{generator}_api.py\n" in workflow
         assert f"gen_{generator}_api.py --check" not in workflow
-    assert "gen_kubernetes_api.py --check" in workflow
+    assert "gen_kubernetes_api.py --check" not in workflow
+    # Each job that reads the Kubernetes pages generates them itself.
+    for job_id in ("api-docs", "fern-check", "fern-broken-links"):
+        assert K8S_GENERATE in _pre_merge_job_runs(job_id), job_id
+    # The Kubernetes tests parse the generated pages, so the job must
+    # generate them before running the tests.
+    assert workflow.index("Generate Kubernetes API reference") < workflow.index(
+        "Test generated API references"
+    )
     # The publish and preview paths must GENERATE the pages before syncing
     # them to the docs-website branch (dev sync and version snapshots both).
     # Asserted against the parsed `run` body, not the file text: the step's
     # comment names these same commands, so a whole-file substring check would
     # pass on prose after the command itself changed.
     generate = _publish_step_run("Generate API references")
-    for generator in ("python", "rust"):
+    for generator in ("python", "rust", "kubernetes"):
         assert f"gen_{generator}_api.py --check" not in generate
-    # Kubernetes output stays committed, but publish REGENERATES it rather than
-    # gating on it. As `--check` this step failed, which skipped the sync and
-    # publish steps below, so a main left stale by merge skew silently froze the
-    # live site. The probe records drift and the gate below fails the run after
-    # the site is current.
-    assert re.search(r"gen_kubernetes_api\.py$", generate, re.MULTILINE)
-    assert "gen_kubernetes_api.py --check" in generate
-    assert "kubernetes_drift=true" in generate
-    gate = _publish_step_run(K8S_DRIFT_GATE_STEP)
-    assert "exit 1" in gate
-    # Wiring and polarity, not only shape. `steps.<id>` for an id that does
-    # not exist renders empty, so dropping or renaming `id: api_refs`, or
-    # inverting either the probe or the gate, leaves the gate permanently
-    # inert while every assertion above still passes. Nothing else in the repo
-    # catches a dangling step reference: no hook or workflow runs actionlint.
-    fern_docs = yaml.safe_load(
-        (REPO_ROOT / ".github" / "workflows" / "fern-docs.yml").read_text(
-            encoding="utf-8"
-        )
+    assert K8S_PUBLISH_GENERATE in generate
+    # Tags that commit no Kubernetes pages generate them; older tags that do
+    # commit them are snapshotted as-is.
+    assert K8S_PUBLISH_GENERATE in _publish_step_run(
+        "Generate API references at the tag"
     )
-    by_name = {
-        step.get("name"): step
-        for step in fern_docs["jobs"]["preview-or-publish-docs"]["steps"]
-    }
-    assert by_name[K8S_DRIFT_GATE_STEP]["if"] == (
-        "${{ !cancelled() && steps."
-        f"{by_name['Generate API references']['id']}"
-        ".outputs.kubernetes_drift == 'true' }}"
-    )
-    assert re.search(
-        r"--check[^\n]*then\n\s*echo \"kubernetes_drift=false\"[^\n]*\n"
-        r"\s*else\n\s*echo \"kubernetes_drift=true\"",
-        generate,
-    )
-    # The regenerated page is rsynced before the gate runs, so write mode needs
-    # its own floor: a generator that exits 0 on a gutted page must not publish.
-    assert "regenerated_bytes" in generate
-    assert "committed_bytes * 4 / 5" in generate
-    # The gate is only honest if it runs after the site has been published.
-    assert publish.index("Publish Docs") < publish.index(K8S_DRIFT_GATE_STEP)
+    # crd-ref-docs needs Go wherever the Kubernetes pages are generated.
+    assert "actions/setup-go@" in workflow
+    assert "actions/setup-go@" in publish
     assert "Generate API references" in publish
     assert "Generate API references at the tag" in publish
     # fern check validates nav paths, so the fern-check job must materialize
