@@ -119,6 +119,7 @@ struct Placement {
 #[derive(Debug)]
 struct DispatchError {
     status: StatusCode,
+    code: Option<&'static str>,
     public_message: &'static str,
     detail: String,
     retry_after: bool,
@@ -129,6 +130,7 @@ impl DispatchError {
     fn cancelled() -> Self {
         Self {
             status: StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST),
+            code: None,
             public_message: "request was cancelled",
             detail: "parent request context was cancelled".to_string(),
             retry_after: false,
@@ -139,6 +141,7 @@ impl DispatchError {
     fn unavailable(detail: impl Into<String>) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
+            code: None,
             public_message: "decision scoring worker is unavailable",
             detail: detail.into(),
             retry_after: false,
@@ -147,9 +150,22 @@ impl DispatchError {
     }
 
     fn malformed(detail: impl Into<String>) -> Self {
+        // Frontend construction/serialization failure, not executor evidence.
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            public_message: "malformed decision scoring response",
+            code: None,
+            public_message: "decision request construction failed",
+            detail: detail.into(),
+            retry_after: false,
+            is_capacity_exhausted: false,
+        }
+    }
+
+    fn invalid_executor(detail: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            code: Some("invalid_executor_result"),
+            public_message: "invalid decision executor response",
             detail: detail.into(),
             retry_after: false,
             is_capacity_exhausted: false,
@@ -406,7 +422,15 @@ fn dispatch_error(
     if cause.is_capacity_exhausted {
         return response::capacity_error(dialect, cause.status, cause.public_message);
     }
-    let mut response = error(dialect, cause.status, cause.public_message);
+    let mut response = match cause.code {
+        Some(code) => response::decision_error(DecisionError::new(
+            dialect,
+            cause.status.as_u16(),
+            code,
+            cause.public_message,
+        )),
+        None => error(dialect, cause.status, cause.public_message),
+    };
     if cause.retry_after {
         response.headers_mut().insert(
             axum::http::header::RETRY_AFTER,
@@ -416,7 +440,7 @@ fn dispatch_error(
     response
 }
 
-/// Build a scoring branch through SGLang's native `/generate` format.
+/// Build a scoring branch through the selected backend's native generate format.
 fn bind_native(
     backend: &str,
     model: &str,

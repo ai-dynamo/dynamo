@@ -298,6 +298,7 @@ async fn capacity_error_code_is_independent_of_configured_status() {
                     detail: "private detail".into(),
                     retry_after: true,
                     is_capacity_exhausted: true,
+                    code: None,
                 },
                 dialect,
             );
