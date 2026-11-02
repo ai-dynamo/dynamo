@@ -1,0 +1,255 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
+{{ template "chart.header" . }}
+
+{{ template "chart.description" . }}
+
+{{ template "chart.versionBadge" . }}{{ template "chart.typeBadge" . }}{{ template "chart.appVersionBadge" . }}
+
+This chart deploys the Kubernetes Multi-Cluster Services API (KEP-1645,
+`multicluster.x-k8s.io/v1beta1`) of the Dynamo Global Router, built from
+[`deploy/global-discovery-mcs`](../../../global-discovery-mcs):
+
+- `mcs-registry` (`registry.enabled`, off by default): the registry server.
+  It keeps the clusters of every clusterset with their ServiceExports and
+  endpoints in memory or in one DynamoDB table, merges them into
+  ServiceImports and serves the `dynamo.mcs.v1` API over gRPC and REST.
+- `mcs-controller` (`controller.enabled`, on by default): runs in every
+  member cluster. It registers the cluster with the registry, exports the
+  cluster's ServiceExports and materialises the clusterset's ServiceImports,
+  derived Services and EndpointSlices, which the Global Discovery Service
+  reads.
+- The ServiceExport, ServiceImport and ClusterProperty CRDs (`crds.install`).
+
+The module's [README](../../../global-discovery-mcs/README.md) lists every
+flag; [docs/mcs-controller.md](../../../global-discovery-mcs/docs/mcs-controller.md)
+describes the controller, and [docs/iam.md](../../../global-discovery-mcs/docs/iam.md)
+the registry's AWS permissions.
+
+## Prerequisites
+
+- Kubernetes 1.30 or later.
+- Helm 3.8 or later.
+- The `global-discovery-mcs` image (`image.repository`), built with
+  `make docker-build` in `deploy/global-discovery-mcs`.
+- For `registry.store=dynamodb`: the DynamoDB table, created once with
+  `mcs-admin create-table`, and an IAM role for the registry pods.
+- Pod IPs routable between the member clusters for ClusterSetIP imports
+  (see "Reachability prerequisite" in docs/mcs-controller.md).
+
+## Installing
+
+The chart has no default registry URL: install it with the registry, with
+`controller.registryUrls`, or both. The resources are named after their
+component, not the release: the Deployments, Services and ServiceAccounts
+are `mcs-registry` and `mcs-controller` (`fullnameOverride` changes the
+`mcs` prefix), so install one release per namespace. One release may enable
+both components.
+
+A member cluster whose controller talks to registries elsewhere:
+
+```bash
+helm install mcs deploy/helm/charts/global-discovery-mcs \
+  --namespace mcs-system --create-namespace \
+  --set 'controller.registryUrls={https://mcs.us-east-1.example.internal:9090,https://mcs.us-west-2.example.internal:9090}' \
+  --set controller.registryTlsCa.configMapName=mcs-registry-ca \
+  --set controller.clustersetId=prod \
+  --set controller.clusterId=use1-a \
+  --set controller.region=us-east-1
+```
+
+A registry cluster serving the DynamoDB store over TLS behind an internal
+NLB, with IRSA:
+
+```bash
+helm install mcs deploy/helm/charts/global-discovery-mcs \
+  --namespace mcs-system --create-namespace \
+  --set controller.enabled=false \
+  --set registry.enabled=true \
+  --set registry.store=dynamodb \
+  --set registry.dynamodb.table=global-discovery-mcs \
+  --set registry.replicas=2 \
+  --set registry.podDisruptionBudget.enabled=true \
+  --set registry.tls.secretName=mcs-registry-tls \
+  --set registry.service.type=LoadBalancer \
+  --set registry.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"=external \
+  --set registry.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-scheme"=internal \
+  --set registry.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-nlb-target-type"=ip \
+  --set registry.serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=arn:aws:iam::123456789012:role/mcs-registry
+```
+
+The same as a values file:
+
+```yaml
+controller:
+  enabled: false
+registry:
+  enabled: true
+  store: dynamodb
+  dynamodb:
+    table: global-discovery-mcs
+  replicas: 2
+  podDisruptionBudget:
+    enabled: true
+  tls:
+    secretName: mcs-registry-tls
+  service:
+    type: LoadBalancer
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-type: external
+      service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+      service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+  serviceAccount:
+    annotations:
+      eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/mcs-registry
+```
+
+One cluster with both components and the memory store, for development
+(for example on kind):
+
+```bash
+helm install mcs deploy/helm/charts/global-discovery-mcs \
+  --namespace mcs-system --create-namespace \
+  --set image.repository=global-discovery-mcs --set image.tag=dev \
+  --set registry.enabled=true \
+  --set controller.registryAllowInsecureHttp=true \
+  --set controller.clustersetId=dev \
+  --set controller.clusterId=kind \
+  --set controller.region=local
+kubectl -n mcs-system port-forward deployment/mcs-registry 8080 9091
+kubectl -n mcs-system logs deployment/mcs-controller
+```
+
+With `registry.enabled` and no `controller.registryUrls`, the controller
+uses the registry Service of the release,
+`http://mcs-registry.<namespace>.svc:9090`, or `https://` with
+`registry.tls.secretName`. A plaintext URL needs
+`controller.registryAllowInsecureHttp=true` (`--registry-allow-insecure-http`);
+the chart fails otherwise, as the controller would.
+
+Install the CRDs from one release per cluster: a second release with
+`crds.install=true` fails on Helm's ownership check. Set `crds.install=false`
+in the others.
+
+## CRDs
+
+`crds.install` (default `true`) renders three CRDs from `files/crds`, a copy
+of `deploy/global-discovery-mcs/config/crd/bases`:
+
+- `serviceexports.multicluster.x-k8s.io` and
+  `serviceimports.multicluster.x-k8s.io`, unchanged from `sigs.k8s.io/mcs-api`
+  v0.5.2. They serve `v1alpha1` and `v1beta1` and store `v1beta1`; the
+  controller uses `v1beta1`.
+- `clusterproperties.about.k8s.io` (KEP-2149), with the
+  `api-approved.kubernetes.io` annotation the protected `about.k8s.io` group
+  requires.
+
+The CRDs are templates rather than files in `crds/`, so `crds.install`
+switches them off and `helm upgrade` updates them. With `crds.keep` (default
+`true`) they carry `helm.sh/resource-policy: keep`: `helm uninstall`, or an
+upgrade to `crds.install=false`, leaves them and every ServiceExport and
+ServiceImport in place.
+
+Set `crds.install=false` when the cluster already serves these CRDs, for
+example with Karmada or another MCS implementation, or when another release
+owns them. Another implementation's CRDs must serve
+`multicluster.x-k8s.io/v1beta1`; the controller skips ServiceImports it did
+not create unless `controller.adoptUnmanagedImports` is set. Without the
+ClusterProperty CRD the controller reads no ClusterProperty, so set
+`controller.clustersetId` and `controller.clusterId`.
+
+## Registry
+
+- **Store.** `registry.store=memory` keeps everything in the memory of one
+  replica and loses it on restart: it requires `registry.replicas=1`, and
+  both the values schema and the templates refuse more. Its Deployment
+  uses the `Recreate` strategy, so a rollout (upgrade or values change)
+  stops the old pod before the new one starts and the registry is down
+  until the new pod is ready, instead of two independent stores serving at
+  once. Run several replicas with `registry.store=dynamodb`, which reads
+  and writes the replica of the DynamoDB Global Table
+  (`registry.dynamodb.table`) in `registry.region` (default `$AWS_REGION`)
+  and rolls out with `RollingUpdate`. `registry.strategy` overrides either.
+- **AWS credentials.** The registry uses the AWS SDK default credential
+  chain, so DynamoDB credentials come from the pod identity: annotate the
+  ServiceAccount with `eks.amazonaws.com/role-arn` for IRSA
+  (`registry.serviceAccount.annotations`), or create an EKS Pod Identity
+  association for it. The role's policy and trust policy are in
+  [docs/iam.md](../../../global-discovery-mcs/docs/iam.md). The chart creates
+  no AWS credentials Secret; for dynamodb-local, set dummy
+  `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_REGION` in
+  `registry.extraEnv` and `registry.dynamodb.endpoint`.
+- **TLS.** `registry.tls.secretName` names a `kubernetes.io/tls` Secret (for
+  example from cert-manager) that enables TLS on the gRPC and REST
+  listeners. The admin listener stays plaintext. The registry reads the key
+  pair at startup, so restart it after a certificate rotation.
+- **Exposure.** The Service `mcs-registry` exposes gRPC (9090), REST (8080)
+  and admin (9091: `/metrics`, `/healthz`, `/readyz`, `/debug/pprof`); the
+  ports are `registry.ports`. The registry has no authentication: expose it
+  to other clusters only on private networks, for example through an
+  internal NLB (`registry.service.type=LoadBalancer` with the AWS Load
+  Balancer Controller's annotations in `registry.service.annotations`, as
+  above), and keep `registry.watch.bookmarkInterval` below the load
+  balancer's idle timeout. The admin port is on the same Service, so the
+  load balancer exposes it too.
+- **Shutdown.** On SIGTERM the registry reports not ready for
+  `registry.shutdownDrain`, then stops within `registry.shutdownTimeout`;
+  keep `registry.terminationGracePeriodSeconds` above their sum.
+- **Flags.** Every `mcs-registry` flag also reads `MCS_<FLAG_NAME>` from the
+  environment, but a flag on the command line wins and the chart passes its
+  values as flags: change the values or `registry.extraArgs`, not
+  `registry.extraEnv`.
+
+## Controller
+
+- **Registry.** `controller.registryUrls` lists the registries in failover
+  order (one `--registry-url` each), for example
+  `--set 'controller.registryUrls={https://mcs.example.internal:9090}'`.
+  `controller.registryTlsCa` mounts a CA bundle from a ConfigMap or Secret
+  for `--registry-tls-ca-file`; without it the system roots verify the
+  registry. `controller.registryAllowInsecureHttp` passes
+  `--registry-allow-insecure-http` for `http://` URLs.
+- **Identity.** `controller.clustersetId` and `controller.clusterId` are DNS
+  labels; empty ids come from the ClusterProperty objects
+  (`controller.clusterIdentitySource=auto`). The cluster id is the
+  `source-cluster` other clusters see; run exactly one controller per
+  cluster id. `controller.region` sets the region of the registration;
+  empty uses the nodes' `topology.kubernetes.io/region` label.
+- **Replicas and leader election.** Two replicas by default, with leader
+  election on: only the leader writes to the registry and applies imports,
+  holding the Lease `mcs-controller.dynamo.nvidia.com` in the release
+  namespace. `POD_NAMESPACE` comes from the downward API and is the default
+  of `--operator-namespace`. More than one replica requires leader election.
+- **RBAC.** The ClusterRole is rendered from `files/controller-role.yaml`,
+  which `make manifests` in `deploy/global-discovery-mcs` generates from the
+  controller's `+kubebuilder:rbac` markers. A Role and RoleBinding in the
+  release namespace grant the leader election Lease and its Events.
+- **Metrics.** `/metrics` on port 8080 behind a ClusterIP Service;
+  `controller.metrics.serviceMonitor.enabled` adds a prometheus-operator
+  ServiceMonitor (`registry.metrics.serviceMonitor.enabled` does the same
+  for the registry's admin port).
+
+## Development
+
+```bash
+make -C deploy/helm/charts/global-discovery-mcs lint       # helm lint and renders; fails when files/crds is stale
+make -C deploy/helm/charts/global-discovery-mcs test       # helm-unittest (installs the plugin)
+make -C deploy/helm/charts/global-discovery-mcs docs       # regenerate this README with helm-docs
+make -C deploy/helm/charts/global-discovery-mcs sync-crds  # copy the module's CRDs into files/crds
+```
+
+- `files/controller-role.yaml` is generated: run `make manifests` in
+  `deploy/global-discovery-mcs`, then copy its rules into
+  `tests/rbac_test.yaml`.
+- `files/crds` is a copy: change `deploy/global-discovery-mcs/config/crd/bases`
+  (`make sync-crds` there), then run `make sync-crds` here.
+  `make check` in the module fails while the copies differ.
+- Edit `README.md.gotmpl` and the `# --` comments in `values.yaml`, then run
+  `make docs`; do not edit `README.md`.
+
+{{ template "chart.valuesSection" . }}
+
+{{ template "helm-docs.versionFooter" . }}

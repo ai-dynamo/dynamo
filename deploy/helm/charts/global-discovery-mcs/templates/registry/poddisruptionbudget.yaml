@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{- if and .Values.registry.enabled .Values.registry.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "global-discovery-mcs.registry.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "global-discovery-mcs.componentLabels" (dict "context" . "component" "registry") | nindent 4 }}
+spec:
+  {{- if not (kindIs "invalid" .Values.registry.podDisruptionBudget.maxUnavailable) }}
+  maxUnavailable: {{ .Values.registry.podDisruptionBudget.maxUnavailable }}
+  {{- else }}
+  minAvailable: {{ .Values.registry.podDisruptionBudget.minAvailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "global-discovery-mcs.componentSelectorLabels" (dict "context" . "component" "registry") | nindent 6 }}
+{{- end }}

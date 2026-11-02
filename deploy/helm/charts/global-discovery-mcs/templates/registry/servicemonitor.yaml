@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{- if and .Values.registry.enabled .Values.registry.metrics.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "global-discovery-mcs.registry.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- $labels := include "global-discovery-mcs.componentLabels" (dict "context" . "component" "registry") | fromYaml }}
+    {{- toYaml (merge $labels (.Values.registry.metrics.serviceMonitor.labels | default dict)) | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "global-discovery-mcs.componentSelectorLabels" (dict "context" . "component" "registry") | nindent 6 }}
+  endpoints:
+    - port: admin
+      path: /metrics
+      scheme: http
+      interval: {{ .Values.registry.metrics.serviceMonitor.interval }}
+{{- end }}

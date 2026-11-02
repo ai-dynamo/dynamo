@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{- if and .Values.controller.enabled .Values.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "global-discovery-mcs.controller.fullname" . }}
+  labels:
+    {{- include "global-discovery-mcs.componentLabels" (dict "context" . "component" "controller") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "global-discovery-mcs.controller.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "global-discovery-mcs.controller.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

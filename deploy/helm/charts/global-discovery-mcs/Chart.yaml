@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v2
+name: global-discovery-mcs
+description: Multi-Cluster Services registry and controller for the Dynamo Global Router
+type: application
+version: 0.1.0
+# appVersion tracks the runtime code of the global-discovery-mcs image
+# (deploy/global-discovery-mcs: mcs-registry, mcs-controller, mcs-admin), as
+# power-agent's does for its image; image.tag defaults to it. Advance it
+# when the chart needs a newer image.
+appVersion: "0.1.0"
+# The mcs-controller envtest suite runs against Kubernetes 1.30
+# (ENVTEST_K8S_VERSION in deploy/global-discovery-mcs/Makefile).
+kubeVersion: ">=1.30.0-0"
+keywords:
+  - nvidia
+  - dynamo
+  - global-router
+  - multi-cluster
+  - mcs
+  - kep-1645
+  - serviceexport
+  - serviceimport
+home: https://github.com/ai-dynamo/dynamo
+sources:
+  - https://github.com/ai-dynamo/dynamo/tree/main/deploy/global-discovery-mcs
+maintainers:
+  - name: NVIDIA

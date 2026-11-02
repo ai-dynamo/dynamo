@@ -1,0 +1,744 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$comment": "SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\nSPDX-License-Identifier: Apache-2.0",
+  "title": "global-discovery-mcs values",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "global": {
+      "type": "object",
+      "description": "Values shared with a parent chart."
+    },
+    "nameOverride": {
+      "type": "string"
+    },
+    "fullnameOverride": {
+      "type": "string"
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "type": [
+            "string",
+            "number"
+          ]
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        }
+      },
+      "required": [
+        "repository"
+      ]
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "name"
+        ]
+      }
+    },
+    "podSecurityContext": {
+      "$ref": "#/definitions/kubernetesObject"
+    },
+    "securityContext": {
+      "$ref": "#/definitions/kubernetesObject"
+    },
+    "rbac": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": {
+          "type": "boolean"
+        }
+      }
+    },
+    "crds": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "install": {
+          "type": "boolean"
+        },
+        "keep": {
+          "type": "boolean"
+        }
+      }
+    },
+    "registry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Deploy mcs-registry."
+        },
+        "replicas": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "store": {
+          "type": "string",
+          "enum": [
+            "memory",
+            "dynamodb"
+          ]
+        },
+        "strategy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "Recreate",
+                "RollingUpdate"
+              ]
+            },
+            "rollingUpdate": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "maxSurge": {
+                  "type": [
+                    "integer",
+                    "string"
+                  ]
+                },
+                "maxUnavailable": {
+                  "type": [
+                    "integer",
+                    "string"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "dynamodb": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "table": {
+              "type": "string",
+              "minLength": 1
+            },
+            "endpoint": {
+              "type": "string",
+              "pattern": "^(https?://.+)?$"
+            }
+          },
+          "required": [
+            "table"
+          ]
+        },
+        "region": {
+          "type": "string"
+        },
+        "refreshInterval": {
+          "$ref": "#/definitions/duration"
+        },
+        "leaseEvalInterval": {
+          "$ref": "#/definitions/duration"
+        },
+        "clustersetDiscoveryInterval": {
+          "$ref": "#/definitions/duration"
+        },
+        "leaseSkew": {
+          "$ref": "#/definitions/duration"
+        },
+        "retention": {
+          "$ref": "#/definitions/duration"
+        },
+        "compactionInterval": {
+          "$ref": "#/definitions/duration"
+        },
+        "watch": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "bookmarkInterval": {
+              "$ref": "#/definitions/duration"
+            },
+            "history": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "queueSize": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "maxWatchers": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "maxMessageBytes": {
+          "type": "integer",
+          "minimum": 1048576
+        },
+        "advertiseEndpoints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "region": {
+                "type": "string",
+                "minLength": 1
+              },
+              "grpcUrl": {
+                "type": "string",
+                "pattern": "^https?://.+$"
+              },
+              "httpUrl": {
+                "type": "string",
+                "pattern": "^https?://.+$"
+              },
+              "primary": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "region"
+            ]
+          }
+        },
+        "tls": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "secretName": {
+              "type": "string"
+            }
+          }
+        },
+        "shutdownDrain": {
+          "$ref": "#/definitions/duration"
+        },
+        "shutdownTimeout": {
+          "$ref": "#/definitions/duration"
+        },
+        "terminationGracePeriodSeconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "logLevel": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "otel": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          }
+        },
+        "ports": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "grpc": {
+              "$ref": "#/definitions/port"
+            },
+            "http": {
+              "$ref": "#/definitions/port"
+            },
+            "admin": {
+              "$ref": "#/definitions/port"
+            }
+          },
+          "required": [
+            "grpc",
+            "http",
+            "admin"
+          ]
+        },
+        "service": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "ClusterIP",
+                "NodePort",
+                "LoadBalancer"
+              ]
+            },
+            "annotations": {
+              "$ref": "#/definitions/stringMap"
+            }
+          }
+        },
+        "serviceAccount": {
+          "$ref": "#/definitions/serviceAccount"
+        },
+        "automountServiceAccountToken": {
+          "type": "boolean"
+        },
+        "podDisruptionBudget": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "minAvailable": {
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            "maxUnavailable": {
+              "type": [
+                "integer",
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "serviceMonitor": {
+              "$ref": "#/definitions/serviceMonitor"
+            }
+          }
+        },
+        "readinessProbe": {
+          "$ref": "#/definitions/probe"
+        },
+        "livenessProbe": {
+          "$ref": "#/definitions/probe"
+        },
+        "extraArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "extraEnv": {
+          "$ref": "#/definitions/objectList"
+        },
+        "extraVolumes": {
+          "$ref": "#/definitions/objectList"
+        },
+        "extraVolumeMounts": {
+          "$ref": "#/definitions/objectList"
+        },
+        "resources": {
+          "$ref": "#/definitions/kubernetesObject"
+        },
+        "nodeSelector": {
+          "$ref": "#/definitions/stringMap"
+        },
+        "tolerations": {
+          "$ref": "#/definitions/objectList"
+        },
+        "affinity": {
+          "$ref": "#/definitions/kubernetesObject"
+        },
+        "topologySpreadConstraints": {
+          "$ref": "#/definitions/objectList"
+        },
+        "priorityClassName": {
+          "type": "string"
+        },
+        "podAnnotations": {
+          "$ref": "#/definitions/stringMap"
+        },
+        "podLabels": {
+          "$ref": "#/definitions/stringMap"
+        }
+      },
+      "required": [
+        "enabled",
+        "store",
+        "replicas"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              },
+              "store": {
+                "const": "memory"
+              }
+            },
+            "required": [
+              "enabled",
+              "store"
+            ]
+          },
+          "then": {
+            "properties": {
+              "replicas": {
+                "maximum": 1,
+                "description": "registry.store=memory requires registry.replicas=1."
+              }
+            }
+          }
+        }
+      ]
+    },
+    "controller": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Deploy mcs-controller."
+        },
+        "replicas": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "registryUrls": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^https?://[^\\s,]+$"
+          }
+        },
+        "registryAllowInsecureHttp": {
+          "type": "boolean"
+        },
+        "registryTlsCa": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "configMapName": {
+              "type": "string"
+            },
+            "secretName": {
+              "type": "string"
+            },
+            "key": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "key"
+          ]
+        },
+        "clustersetId": {
+          "type": "string",
+          "pattern": "^([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)?$"
+        },
+        "clusterId": {
+          "type": "string",
+          "pattern": "^([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)?$"
+        },
+        "clusterIdentitySource": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "flags",
+            "clusterproperty"
+          ]
+        },
+        "region": {
+          "type": "string"
+        },
+        "clusterLabels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "number",
+              "boolean"
+            ]
+          }
+        },
+        "leaseTtl": {
+          "$ref": "#/definitions/duration"
+        },
+        "watchNamespaces": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"
+          },
+          "uniqueItems": true
+        },
+        "createNamespaces": {
+          "type": "boolean"
+        },
+        "adoptUnmanagedImports": {
+          "type": "boolean"
+        },
+        "writeClusterProperties": {
+          "type": "boolean"
+        },
+        "deregisterOnShutdown": {
+          "type": "boolean"
+        },
+        "endpointsPerSlice": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "maxConcurrentReconciles": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "leaderElect": {
+          "type": "boolean"
+        },
+        "otel": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          }
+        },
+        "log": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "level": {
+              "type": [
+                "string",
+                "integer"
+              ],
+              "pattern": "^(debug|info|error|panic|[0-9]+)?$",
+              "minimum": 1
+            },
+            "encoder": {
+              "type": "string",
+              "enum": [
+                "",
+                "json",
+                "console"
+              ]
+            },
+            "stacktraceLevel": {
+              "type": "string",
+              "enum": [
+                "",
+                "info",
+                "error",
+                "panic"
+              ]
+            },
+            "timeEncoding": {
+              "type": "string",
+              "enum": [
+                "",
+                "epoch",
+                "millis",
+                "nano",
+                "iso8601",
+                "rfc3339",
+                "rfc3339nano"
+              ]
+            },
+            "development": {
+              "type": "boolean"
+            }
+          }
+        },
+        "healthProbePort": {
+          "$ref": "#/definitions/port"
+        },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "port": {
+              "$ref": "#/definitions/port"
+            },
+            "serviceMonitor": {
+              "$ref": "#/definitions/serviceMonitor"
+            }
+          }
+        },
+        "terminationGracePeriodSeconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "serviceAccount": {
+          "$ref": "#/definitions/serviceAccount"
+        },
+        "readinessProbe": {
+          "$ref": "#/definitions/probe"
+        },
+        "livenessProbe": {
+          "$ref": "#/definitions/probe"
+        },
+        "extraArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "extraEnv": {
+          "$ref": "#/definitions/objectList"
+        },
+        "extraVolumes": {
+          "$ref": "#/definitions/objectList"
+        },
+        "extraVolumeMounts": {
+          "$ref": "#/definitions/objectList"
+        },
+        "resources": {
+          "$ref": "#/definitions/kubernetesObject"
+        },
+        "nodeSelector": {
+          "$ref": "#/definitions/stringMap"
+        },
+        "tolerations": {
+          "$ref": "#/definitions/objectList"
+        },
+        "affinity": {
+          "$ref": "#/definitions/kubernetesObject"
+        },
+        "topologySpreadConstraints": {
+          "$ref": "#/definitions/objectList"
+        },
+        "priorityClassName": {
+          "type": "string"
+        },
+        "podAnnotations": {
+          "$ref": "#/definitions/stringMap"
+        },
+        "podLabels": {
+          "$ref": "#/definitions/stringMap"
+        }
+      },
+      "required": [
+        "enabled"
+      ]
+    }
+  },
+  "definitions": {
+    "duration": {
+      "type": "string",
+      "description": "A Go duration such as 500ms, 30s, 10m or 1h30m.",
+      "pattern": "^(0|([0-9]+(\\.[0-9]+)?(ns|us|\u00b5s|ms|s|m|h))+)$"
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "stringMap": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "objectList": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "kubernetesObject": {
+      "type": "object"
+    },
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "initialDelaySeconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "periodSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "successThreshold": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "failureThreshold": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "description": "Probe timing; the chart sets the HTTP path and port."
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "annotations": {
+          "$ref": "#/definitions/stringMap"
+        }
+      },
+      "required": [
+        "create"
+      ]
+    },
+    "serviceMonitor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "interval": {
+          "type": "string",
+          "pattern": "^[0-9]+(ms|s|m|h)$"
+        },
+        "labels": {
+          "$ref": "#/definitions/stringMap"
+        }
+      },
+      "required": [
+        "enabled"
+      ]
+    }
+  }
+}

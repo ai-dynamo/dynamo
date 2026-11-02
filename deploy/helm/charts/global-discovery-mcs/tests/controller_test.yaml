@@ -1,0 +1,427 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# mcs-controller: flags from values, registry URLs, the CA bundle, the
+# downward API, probes and the metrics objects. Flag names and defaults:
+# deploy/global-discovery-mcs/internal/mcs/config.
+
+suite: controller
+templates:
+  - templates/controller/deployment.yaml
+  - templates/controller/metrics-service.yaml
+  - templates/controller/servicemonitor.yaml
+  - templates/controller/serviceaccount.yaml
+release:
+  name: mcs
+  namespace: mcs-system
+set:
+  controller.registryUrls:
+    - https://mcs.us-east-1.example.internal
+
+tests:
+  - it: renders the default flags, which match the binary defaults
+    template: templates/controller/deployment.yaml
+    asserts:
+      - isKind:
+          of: Deployment
+      - isAPIVersion:
+          of: apps/v1
+      - equal:
+          path: metadata.name
+          value: mcs-controller
+      - equal:
+          path: spec.replicas
+          value: 2
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: nvcr.io/nvidia/ai-dynamo/global-discovery-mcs:0.1.0
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value:
+            - /mcs-controller
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value:
+            - --registry-url=https://mcs.us-east-1.example.internal
+            - --registry-allow-insecure-http=false
+            - --cluster-identity-source=auto
+            - --lease-ttl=30s
+            - --create-namespaces=false
+            - --adopt-unmanaged-imports=false
+            - --write-cluster-properties=false
+            - --deregister-on-shutdown=false
+            - --endpoints-per-slice=100
+            - --max-concurrent-reconciles=4
+            - --metrics-bind-address=:8080
+            - --health-probe-bind-address=:8081
+            - --leader-elect=true
+            - --otel-enabled=false
+            - --zap-log-level=info
+            - --zap-encoder=json
+            - --zap-stacktrace-level=error
+            - --zap-time-encoding=rfc3339
+      - notExists:
+          path: spec.template.spec.volumes
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: mcs-controller
+
+  - it: renders every flag from values
+    template: templates/controller/deployment.yaml
+    set:
+      controller.replicas: 3
+      controller.registryUrls:
+        - https://mcs.us-east-1.example.internal
+        - https://mcs.us-west-2.example.internal
+      controller.clustersetId: prod
+      controller.clusterId: use1-a
+      controller.clusterIdentitySource: flags
+      controller.region: us-east-1
+      controller.clusterLabels:
+        tier: gpu
+        env: prod
+      controller.leaseTtl: 45s
+      controller.watchNamespaces:
+        - llm
+        - router
+      controller.createNamespaces: true
+      controller.adoptUnmanagedImports: true
+      controller.writeClusterProperties: true
+      controller.deregisterOnShutdown: true
+      controller.endpointsPerSlice: 500
+      controller.maxConcurrentReconciles: 8
+      controller.healthProbePort: 9441
+      controller.metrics.port: 9440
+      controller.otel.enabled: true
+      controller.log.level: debug
+      controller.log.encoder: console
+      controller.log.stacktraceLevel: panic
+      controller.log.timeEncoding: iso8601
+      controller.log.development: true
+      controller.extraArgs:
+        - --kubeconfig=/etc/kube/config
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 3
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value:
+            - --registry-url=https://mcs.us-east-1.example.internal
+            - --registry-url=https://mcs.us-west-2.example.internal
+            - --registry-allow-insecure-http=false
+            - --clusterset-id=prod
+            - --cluster-id=use1-a
+            - --cluster-identity-source=flags
+            - --region=us-east-1
+            - --cluster-labels=env=prod,tier=gpu
+            - --lease-ttl=45s
+            - --watch-namespaces=llm,router
+            - --create-namespaces=true
+            - --adopt-unmanaged-imports=true
+            - --write-cluster-properties=true
+            - --deregister-on-shutdown=true
+            - --endpoints-per-slice=500
+            - --max-concurrent-reconciles=8
+            - --metrics-bind-address=:9440
+            - --health-probe-bind-address=:9441
+            - --leader-elect=true
+            - --otel-enabled=true
+            - --zap-log-level=debug
+            - --zap-encoder=console
+            - --zap-stacktrace-level=panic
+            - --zap-time-encoding=iso8601
+            - --zap-devel=true
+            - --kubeconfig=/etc/kube/config
+      - equal:
+          path: spec.template.spec.containers[0].ports
+          value:
+            - name: metrics
+              containerPort: 9440
+              protocol: TCP
+            - name: health
+              containerPort: 9441
+              protocol: TCP
+
+  - it: sets POD_NAMESPACE from the downward API for --operator-namespace
+    template: templates/controller/deployment.yaml
+    set:
+      controller.extraEnv:
+        - name: OTEL_SERVICE_NAME
+          value: mcs-controller
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env
+          value:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: OTEL_SERVICE_NAME
+              value: mcs-controller
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --operator-namespace=global-discovery-mcs
+
+  - it: defaults the registry URL to the registry Service of the release
+    template: templates/controller/deployment.yaml
+    set:
+      registry.enabled: true
+      controller.registryUrls: []
+      controller.registryAllowInsecureHttp: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --registry-url=http://mcs-registry.mcs-system.svc:9090
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --registry-allow-insecure-http=true
+
+  - it: uses https for the in-release registry with TLS
+    template: templates/controller/deployment.yaml
+    set:
+      registry.enabled: true
+      registry.tls.secretName: mcs-registry-tls
+      registry.ports.grpc: 443
+      controller.registryUrls: []
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --registry-url=https://mcs-registry.mcs-system.svc:443
+
+  - it: prefers explicit registry URLs over the in-release registry
+    template: templates/controller/deployment.yaml
+    set:
+      registry.enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].args[0]
+          value: --registry-url=https://mcs.us-east-1.example.internal
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --registry-url=http://mcs-registry.mcs-system.svc:9090
+
+  - it: requires a registry URL
+    template: templates/controller/deployment.yaml
+    set:
+      controller.registryUrls: []
+    asserts:
+      - failedTemplate:
+          errorMessage: controller.registryUrls is required unless registry.enabled deploys the registry in this release
+
+  - it: refuses plaintext URLs without registryAllowInsecureHttp
+    template: templates/controller/deployment.yaml
+    set:
+      controller.registryUrls:
+        - http://mcs.example.internal:9090
+    asserts:
+      - failedTemplate:
+          errorPattern: is plaintext; set controller.registryAllowInsecureHttp=true
+
+  - it: passes the insecure-http flag for plaintext URLs
+    template: templates/controller/deployment.yaml
+    set:
+      controller.registryUrls:
+        - http://mcs.example.internal:9090
+      controller.registryAllowInsecureHttp: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --registry-allow-insecure-http=true
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --registry-url=http://mcs.example.internal:9090
+
+  - it: refuses mixed URL schemes
+    template: templates/controller/deployment.yaml
+    set:
+      controller.registryUrls:
+        - https://a.example.internal
+        - http://b.example.internal
+      controller.registryAllowInsecureHttp: true
+    asserts:
+      - failedTemplate:
+          errorMessage: "controller.registryUrls: every URL must use the same scheme"
+
+  - it: mounts the registry CA bundle from a ConfigMap
+    template: templates/controller/deployment.yaml
+    set:
+      controller.registryTlsCa.configMapName: mcs-registry-ca
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --registry-tls-ca-file=/etc/mcs-controller/registry-ca/ca.crt
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts
+          value:
+            - name: registry-ca
+              mountPath: /etc/mcs-controller/registry-ca
+              readOnly: true
+      - equal:
+          path: spec.template.spec.volumes
+          value:
+            - name: registry-ca
+              configMap:
+                name: mcs-registry-ca
+                items:
+                  - key: ca.crt
+                    path: ca.crt
+
+  - it: mounts the registry CA bundle from a Secret with a custom key
+    template: templates/controller/deployment.yaml
+    set:
+      controller.registryTlsCa.secretName: mcs-registry-ca
+      controller.registryTlsCa.key: bundle.pem
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --registry-tls-ca-file=/etc/mcs-controller/registry-ca/bundle.pem
+      - equal:
+          path: spec.template.spec.volumes
+          value:
+            - name: registry-ca
+              secret:
+                secretName: mcs-registry-ca
+                items:
+                  - key: bundle.pem
+                    path: bundle.pem
+
+  - it: refuses a CA bundle from both a ConfigMap and a Secret
+    template: templates/controller/deployment.yaml
+    set:
+      controller.registryTlsCa.configMapName: a
+      controller.registryTlsCa.secretName: b
+    asserts:
+      - failedTemplate:
+          errorMessage: "controller.registryTlsCa: set configMapName or secretName, not both"
+
+  - it: requires both ids with the flags identity source
+    template: templates/controller/deployment.yaml
+    set:
+      controller.clusterIdentitySource: flags
+      controller.clustersetId: prod
+    asserts:
+      - failedTemplate:
+          errorMessage: controller.clusterIdentitySource=flags requires controller.clustersetId and controller.clusterId
+
+  - it: requires leader election for several replicas
+    template: templates/controller/deployment.yaml
+    set:
+      controller.replicas: 2
+      controller.leaderElect: false
+    asserts:
+      - failedTemplate:
+          errorMessage: controller.replicas=2 requires controller.leaderElect=true
+
+  - it: probes /healthz and /readyz on the health port
+    template: templates/controller/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet
+          value:
+            path: /readyz
+            port: health
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet
+          value:
+            path: /healthz
+            port: health
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: health
+            containerPort: 8081
+            protocol: TCP
+
+  - it: keeps the controller-runtime logging defaults when the log values are empty
+    template: templates/controller/deployment.yaml
+    set:
+      controller.log.level: ""
+      controller.log.encoder: ""
+      controller.log.stacktraceLevel: ""
+      controller.log.timeEncoding: ""
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --zap-log-level=info
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --zap-encoder=json
+
+  - it: disables metrics
+    set:
+      controller.metrics.enabled: false
+      controller.metrics.serviceMonitor.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --metrics-bind-address=0
+        template: templates/controller/deployment.yaml
+      - notContains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: metrics
+            containerPort: 8080
+            protocol: TCP
+        template: templates/controller/deployment.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/controller/metrics-service.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/controller/servicemonitor.yaml
+
+  - it: exposes metrics on a Service
+    template: templates/controller/metrics-service.yaml
+    asserts:
+      - isKind:
+          of: Service
+      - equal:
+          path: metadata.name
+          value: mcs-controller-metrics
+      - equal:
+          path: spec.ports
+          value:
+            - name: metrics
+              port: 8080
+              targetPort: metrics
+              protocol: TCP
+      - equal:
+          path: spec.selector["app.kubernetes.io/component"]
+          value: controller
+
+  - it: renders the ServiceMonitor only on request
+    set:
+      controller.metrics.serviceMonitor.enabled: true
+      controller.metrics.serviceMonitor.interval: 15s
+      controller.metrics.serviceMonitor.labels:
+        release: kube-prometheus-stack
+    template: templates/controller/servicemonitor.yaml
+    asserts:
+      - isKind:
+          of: ServiceMonitor
+      - equal:
+          path: metadata.labels.release
+          value: kube-prometheus-stack
+      - equal:
+          path: spec.endpoints
+          value:
+            - port: metrics
+              path: /metrics
+              scheme: http
+              interval: 15s
+
+  - it: annotates the controller ServiceAccount
+    template: templates/controller/serviceaccount.yaml
+    set:
+      controller.serviceAccount.annotations:
+        example.com/owner: router
+    asserts:
+      - isKind:
+          of: ServiceAccount
+      - equal:
+          path: metadata.name
+          value: mcs-controller
+      - equal:
+          path: metadata.annotations["example.com/owner"]
+          value: router

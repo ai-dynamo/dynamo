@@ -1,0 +1,202 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{- if .Values.controller.enabled }}
+{{- include "global-discovery-mcs.controller.validate" . }}
+{{- $c := .Values.controller }}
+{{- $ca := $c.registryTlsCa }}
+{{- $hasCA := or $ca.configMapName $ca.secretName }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "global-discovery-mcs.controller.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "global-discovery-mcs.componentLabels" (dict "context" . "component" "controller") | nindent 4 }}
+spec:
+  replicas: {{ $c.replicas | int }}
+  selector:
+    matchLabels:
+      {{- include "global-discovery-mcs.componentSelectorLabels" (dict "context" . "component" "controller") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- $selector := include "global-discovery-mcs.componentSelectorLabels" (dict "context" . "component" "controller") | fromYaml }}
+        {{- toYaml (merge $selector ($c.podLabels | default dict)) | nindent 8 }}
+      {{- with $c.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "global-discovery-mcs.controller.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ $c.terminationGracePeriodSeconds | int }}
+      {{- with $c.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: mcs-controller
+          image: {{ include "global-discovery-mcs.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /mcs-controller
+          args:
+            {{- range (include "global-discovery-mcs.controller.registryURLs" . | fromJsonArray) }}
+            - {{ printf "--registry-url=%s" . | quote }}
+            {{- end }}
+            {{- if $hasCA }}
+            - {{ printf "--registry-tls-ca-file=%s/%s" (include "global-discovery-mcs.controller.caDir" .) $ca.key | quote }}
+            {{- end }}
+            - {{ printf "--registry-allow-insecure-http=%t" $c.registryAllowInsecureHttp | quote }}
+            {{- with $c.clustersetId }}
+            - {{ printf "--clusterset-id=%s" . | quote }}
+            {{- end }}
+            {{- with $c.clusterId }}
+            - {{ printf "--cluster-id=%s" . | quote }}
+            {{- end }}
+            - {{ printf "--cluster-identity-source=%s" $c.clusterIdentitySource | quote }}
+            {{- with $c.region }}
+            - {{ printf "--region=%s" . | quote }}
+            {{- end }}
+            {{- with $c.clusterLabels }}
+            {{- $labels := list }}
+            {{- range $k, $v := . }}
+            {{- $labels = append $labels (printf "%s=%s" $k ($v | toString)) }}
+            {{- end }}
+            - {{ printf "--cluster-labels=%s" (join "," $labels) | quote }}
+            {{- end }}
+            - {{ printf "--lease-ttl=%s" $c.leaseTtl | quote }}
+            {{- with $c.watchNamespaces }}
+            - {{ printf "--watch-namespaces=%s" (join "," .) | quote }}
+            {{- end }}
+            - {{ printf "--create-namespaces=%t" $c.createNamespaces | quote }}
+            - {{ printf "--adopt-unmanaged-imports=%t" $c.adoptUnmanagedImports | quote }}
+            - {{ printf "--write-cluster-properties=%t" $c.writeClusterProperties | quote }}
+            - {{ printf "--deregister-on-shutdown=%t" $c.deregisterOnShutdown | quote }}
+            - {{ printf "--endpoints-per-slice=%d" ($c.endpointsPerSlice | int64) | quote }}
+            - {{ printf "--max-concurrent-reconciles=%d" ($c.maxConcurrentReconciles | int64) | quote }}
+            {{- if $c.metrics.enabled }}
+            - {{ printf "--metrics-bind-address=:%d" ($c.metrics.port | int) | quote }}
+            {{- else }}
+            - "--metrics-bind-address=0"
+            {{- end }}
+            - {{ printf "--health-probe-bind-address=:%d" ($c.healthProbePort | int) | quote }}
+            # The Lease lives in --operator-namespace, which defaults to
+            # $POD_NAMESPACE (the release namespace, from the downward API).
+            - {{ printf "--leader-elect=%t" $c.leaderElect | quote }}
+            - {{ printf "--otel-enabled=%t" $c.otel.enabled | quote }}
+            {{- with $c.log.level }}
+            - {{ printf "--zap-log-level=%v" . | quote }}
+            {{- end }}
+            {{- with $c.log.encoder }}
+            - {{ printf "--zap-encoder=%s" . | quote }}
+            {{- end }}
+            {{- with $c.log.stacktraceLevel }}
+            - {{ printf "--zap-stacktrace-level=%s" . | quote }}
+            {{- end }}
+            {{- with $c.log.timeEncoding }}
+            - {{ printf "--zap-time-encoding=%s" . | quote }}
+            {{- end }}
+            {{- if $c.log.development }}
+            - "--zap-devel=true"
+            {{- end }}
+            {{- range $c.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- with $c.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            {{- if $c.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ $c.metrics.port | int }}
+              protocol: TCP
+            {{- end }}
+            - name: health
+              containerPort: {{ $c.healthProbePort | int }}
+              protocol: TCP
+          # /readyz: the registry client connected at least once and, on the
+          # leader, the cluster is registered. /healthz is a ping.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            {{- with $c.readinessProbe }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            {{- with $c.livenessProbe }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $c.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if or $hasCA $c.extraVolumeMounts }}
+          volumeMounts:
+            {{- if $hasCA }}
+            - name: registry-ca
+              mountPath: {{ include "global-discovery-mcs.controller.caDir" . }}
+              readOnly: true
+            {{- end }}
+            {{- with $c.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+      {{- if or $hasCA $c.extraVolumes }}
+      volumes:
+        {{- if $ca.configMapName }}
+        - name: registry-ca
+          configMap:
+            name: {{ $ca.configMapName }}
+            items:
+              - key: {{ $ca.key }}
+                path: {{ $ca.key }}
+        {{- else if $ca.secretName }}
+        - name: registry-ca
+          secret:
+            secretName: {{ $ca.secretName }}
+            items:
+              - key: {{ $ca.key }}
+                path: {{ $ca.key }}
+        {{- end }}
+        {{- with $c.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      {{- with $c.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

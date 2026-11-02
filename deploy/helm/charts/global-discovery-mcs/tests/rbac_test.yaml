@@ -1,0 +1,247 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Controller RBAC. The ClusterRole rules are rendered from
+# files/controller-role.yaml, which `make manifests` in
+# deploy/global-discovery-mcs generates from the +kubebuilder:rbac markers.
+# The first test pins the rendered rules to that file: after regenerating it,
+# copy its rules here, so that every RBAC change is reviewed in the chart.
+
+suite: controller RBAC
+templates:
+  - templates/controller/clusterrole.yaml
+  - templates/controller/clusterrolebinding.yaml
+  - templates/controller/leader-election-rbac.yaml
+release:
+  name: mcs
+  namespace: mcs-system
+set:
+  controller.registryUrls:
+    - https://mcs.example.internal
+
+tests:
+  - it: renders the ClusterRole rules of files/controller-role.yaml unchanged
+    template: templates/controller/clusterrole.yaml
+    asserts:
+      - isKind:
+          of: ClusterRole
+      - isAPIVersion:
+          of: rbac.authorization.k8s.io/v1
+      - equal:
+          path: metadata.name
+          value: mcs-controller
+      - equal:
+          path: rules
+          value:
+            - apiGroups:
+              - ""
+              resources:
+              - namespaces
+              verbs:
+              - create
+              - get
+              - list
+              - watch
+            - apiGroups:
+              - ""
+              resources:
+              - nodes
+              verbs:
+              - get
+              - list
+              - watch
+            - apiGroups:
+              - ""
+              resources:
+              - services
+              verbs:
+              - create
+              - delete
+              - get
+              - list
+              - patch
+              - update
+              - watch
+            - apiGroups:
+              - ""
+              - events.k8s.io
+              resources:
+              - events
+              verbs:
+              - create
+              - patch
+            - apiGroups:
+              - about.k8s.io
+              resources:
+              - clusterproperties
+              verbs:
+              - create
+              - get
+              - list
+              - patch
+              - update
+              - watch
+            - apiGroups:
+              - discovery.k8s.io
+              resources:
+              - endpointslices
+              verbs:
+              - create
+              - delete
+              - get
+              - list
+              - patch
+              - update
+              - watch
+            - apiGroups:
+              - multicluster.x-k8s.io
+              resources:
+              - serviceexports
+              - serviceimports
+              verbs:
+              - create
+              - delete
+              - get
+              - list
+              - patch
+              - update
+              - watch
+            - apiGroups:
+              - multicluster.x-k8s.io
+              resources:
+              - serviceexports/finalizers
+              verbs:
+              - update
+            - apiGroups:
+              - multicluster.x-k8s.io
+              resources:
+              - serviceexports/status
+              - serviceimports/status
+              verbs:
+              - get
+              - patch
+              - update
+
+  - it: binds the ClusterRole to the controller ServiceAccount
+    template: templates/controller/clusterrolebinding.yaml
+    asserts:
+      - isKind:
+          of: ClusterRoleBinding
+      - equal:
+          path: roleRef
+          value:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: mcs-controller
+      - equal:
+          path: subjects
+          value:
+            - kind: ServiceAccount
+              name: mcs-controller
+              namespace: mcs-system
+
+  - it: grants leases and events in the release namespace for leader election
+    template: templates/controller/leader-election-rbac.yaml
+    asserts:
+      - hasDocuments:
+          count: 2
+      - isKind:
+          of: Role
+        documentIndex: 0
+      - equal:
+          path: metadata.namespace
+          value: mcs-system
+        documentIndex: 0
+      - equal:
+          path: rules
+          value:
+            - apiGroups:
+                - coordination.k8s.io
+              resources:
+                - leases
+              verbs:
+                - get
+                - list
+                - watch
+                - create
+                - update
+                - patch
+                - delete
+            - apiGroups:
+                - ""
+                - events.k8s.io
+              resources:
+                - events
+              verbs:
+                - create
+                - patch
+        documentIndex: 0
+      - isKind:
+          of: RoleBinding
+        documentIndex: 1
+      - equal:
+          path: metadata.namespace
+          value: mcs-system
+        documentIndex: 1
+      - equal:
+          path: roleRef.name
+          value: mcs-controller-leader-election
+        documentIndex: 1
+      - equal:
+          path: subjects
+          value:
+            - kind: ServiceAccount
+              name: mcs-controller
+              namespace: mcs-system
+        documentIndex: 1
+
+  - it: binds an existing ServiceAccount
+    set:
+      controller.serviceAccount.create: false
+      controller.serviceAccount.name: mcs-controller
+    asserts:
+      - equal:
+          path: subjects[0].name
+          value: mcs-controller
+        template: templates/controller/clusterrolebinding.yaml
+      - equal:
+          path: subjects[0].name
+          value: mcs-controller
+        template: templates/controller/leader-election-rbac.yaml
+        documentIndex: 1
+
+  - it: renders no leader election RBAC without leader election
+    template: templates/controller/leader-election-rbac.yaml
+    set:
+      controller.leaderElect: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders no RBAC with rbac.create=false
+    set:
+      rbac.create: false
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: templates/controller/clusterrole.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/controller/clusterrolebinding.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/controller/leader-election-rbac.yaml
+
+  - it: renders no RBAC without the controller
+    set:
+      controller.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: templates/controller/clusterrole.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/controller/clusterrolebinding.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/controller/leader-election-rbac.yaml

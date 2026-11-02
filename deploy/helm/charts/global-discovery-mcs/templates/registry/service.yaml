@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{- if .Values.registry.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "global-discovery-mcs.registry.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "global-discovery-mcs.componentLabels" (dict "context" . "component" "registry") | nindent 4 }}
+  {{- with .Values.registry.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.registry.service.type }}
+  selector:
+    {{- include "global-discovery-mcs.componentSelectorLabels" (dict "context" . "component" "registry") | nindent 4 }}
+  ports:
+    - name: grpc
+      port: {{ .Values.registry.ports.grpc | int }}
+      targetPort: grpc
+      protocol: TCP
+    - name: http
+      port: {{ .Values.registry.ports.http | int }}
+      targetPort: http
+      protocol: TCP
+    - name: admin
+      port: {{ .Values.registry.ports.admin | int }}
+      targetPort: admin
+      protocol: TCP
+{{- end }}

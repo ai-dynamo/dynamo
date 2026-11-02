@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{- if and .Values.controller.enabled .Values.controller.metrics.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "global-discovery-mcs.controller.fullname" . }}-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "global-discovery-mcs.componentLabels" (dict "context" . "component" "controller") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "global-discovery-mcs.componentSelectorLabels" (dict "context" . "component" "controller") | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.controller.metrics.port | int }}
+      targetPort: metrics
+      protocol: TCP
+{{- end }}
