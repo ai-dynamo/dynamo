@@ -71,7 +71,8 @@ rule violation is a contract defect, not a style preference.
    Query?, and Docs block for each new metric. When the block or an answer is missing, ask for
    it under "Questions for the author"; do not report it as a defect. When you cannot see the
    description, ask the questions anyway. Check both numbers that **A6** asks for against the
-   declared labels and buckets: label combinations, and series (1 per combination for a counter
+   declared labels, the buckets, and the number of endpoints or components that register the
+   metric in one process: label combinations, and series (1 per combination for a counter
    or gauge, buckets + 3 for a histogram in Rust and Go, and in Python buckets + 4 per histogram
    and 2 per counter combination). Report a metric whose declared labels alone can exceed 100
    combinations in one process when the pull request does not justify it; ask when the count
@@ -131,12 +132,16 @@ rule violation is a contract defect, not a style preference.
 
 ### Stability
 
-18. **S1-S4.** For a change to an existing metric, read its catalog entry at the pull request
-    head: an entry with no `**Experimental.**` mark is stable, and one with `deprecated={true}`
-    is deprecated. Report, on a stable metric, a rename, a type or unit change, or an added or
-    removed label that does not add a new metric and deprecate the old one. Report a
-    deprecation that lacks the catalog mark, the help-text note, the replacement or PromQL
-    recipe, or the removal release. Report a removal of a stable metric that has not been
+18. **S1-S4.** For a change to an existing metric, decide its stability from its catalog entry
+    (Operator Metrics for operator metrics) at the base revision, for example with
+    `git show <base>:<catalog file>`, because a pull request that removes a metric may also
+    remove its entry. A table row with the Status `Current` is stable, `Experimental` is
+    experimental, and `Deprecated` is deprecated; a detailed entry is stable unless its
+    description starts with `**Experimental.**` or it carries `deprecated={true}`. Report, on a
+    stable metric, a rename, a type or unit change, or an added or removed label that does not
+    add a new metric and deprecate the old one. Report a deprecation whose entry at the pull
+    request head lacks the catalog mark, or that lacks the help-text note, the replacement or
+    PromQL recipe, or the removal release. Report a removal of a stable metric that has not been
     deprecated for two releases, or any removal on a `release/*` base branch. Search the in-repo
     readers (dashboards under `dev/observability/` and `deploy/observability/`, and the planner)
     for a renamed or removed name, and report each reader that still uses it.
@@ -145,7 +150,8 @@ rule violation is a contract defect, not a style preference.
 
 19. **D1.** Report a new or changed Dynamo metric whose catalog entry the pull request does not
     add or update, and a new entry that lacks the type, unit, labels and their values, or the
-    `**Experimental.**` mark.
+    experimental mark (the Status `Experimental` in a table, or `**Experimental.**` at the start
+    of a detailed entry).
 
 20. **D2.** When the pull request adds a metric and does not describe it in the `AGENTS.md`
     nearest to the owning code, ask for that description under "Questions for the author" and
