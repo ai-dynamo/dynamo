@@ -119,25 +119,17 @@ def test_sidecar_runs_the_frontend_image_in_direct_mode(arm_a, arm_b):
     assert sidecar["args"] == ["-m", "dynamo.frontend", "--router-mode", "direct"]
 
 
-def test_only_the_sidecar_skips_the_workers_load_reports(arm_a, arm_b):
-    # With no broker deployed, broker mode makes the sidecar's subscription to
-    # every worker's load reports fail (b-epp.yaml explains). The routers and
-    # the workers need the event plane for KV events.
-    broker = "DYN_ZMQ_BROKER_ENABLED"
-    worker = component(by_kind(arm_b, "DynamoGraphDeployment"), "decode")
-    sidecar = containers(worker)[worker["frontendSidecar"]]
-    assert {"name": broker, "value": "true"} in sidecar["env"]
-    others = {
-        "frontend": containers(
-            component(by_kind(arm_a, "DynamoGraphDeployment"), "frontend")
-        )["main"],
-        "epp": containers(component(by_kind(arm_b, "DynamoGraphDeployment"), "epp"))[
-            "main"
-        ],
-        "mocker": containers(worker)["main"],
-    }
-    for name, container in others.items():
-        assert all(e["name"] != broker for e in container["env"]), name
+def test_no_container_turns_off_the_event_plane(arm_a, arm_b):
+    # Direct-mode sidecars skip the workers' load reports themselves since
+    # #17237; the manifests no longer force it with broker mode.
+    for dgd in (
+        by_kind(arm_a, "DynamoGraphDeployment"),
+        by_kind(arm_b, "DynamoGraphDeployment"),
+    ):
+        for comp in dgd["spec"]["components"]:
+            for name, container in containers(comp).items():
+                names = {e["name"] for e in container.get("env", [])}
+                assert "DYN_ZMQ_BROKER_ENABLED" not in names, (comp["type"], name)
 
 
 @pytest.mark.parametrize("arm", ["a-frontend.yaml", "b-epp.yaml"])
@@ -218,6 +210,8 @@ def render_args(**overrides):
         worker_image="registry.test/planner:x",
         epp_image="",
         epp_replicas=1,
+        epp_env="",
+        sidecar_env="",
         runtime_version="",
         model_cache_pvc="shared-cache",
         image_pull_secret="pull-secret",
@@ -256,6 +250,51 @@ def test_render_arm_scales_the_epp_with_replica_sync(arm_b, replicas):
     assert epp["replicas"] == replicas
     sync = {"name": "DYN_ROUTER_REPLICA_SYNC", "value": "true"}
     assert (sync in containers(epp)["main"]["env"]) == (replicas > 1)
+
+
+def test_render_arm_sets_extra_env_on_the_epp_and_the_sidecars_only(arm_a, arm_b):
+    args = render_args(
+        epp_env="DYN_EPP_TASK_METRICS=1,DYN_EPP_STREAM_SUMMARY=all",
+        sidecar_env="HF_HUB_OFFLINE=0, DYN_LOG=debug",
+    )
+    dgd_b = by_kind(
+        render.render_arm(copy.deepcopy(arm_b), args), "DynamoGraphDeployment"
+    )
+    epp_env = containers(component(dgd_b, "epp"))["main"]["env"]
+    assert {"name": "DYN_EPP_TASK_METRICS", "value": "1"} in epp_env
+    assert {"name": "DYN_EPP_STREAM_SUMMARY", "value": "all"} in epp_env
+
+    worker = component(dgd_b, "decode")
+    sidecar_env = containers(worker)["sidecar-frontend"]["env"]
+    assert {"name": "DYN_LOG", "value": "debug"} in sidecar_env
+    # A variable the manifest already sets is replaced, not repeated.
+    offline = [e for e in sidecar_env if e["name"] == "HF_HUB_OFFLINE"]
+    assert offline == [{"name": "HF_HUB_OFFLINE", "value": "0"}]
+
+    # The mockers and arm A's Frontend keep their manifest's environment.
+    original_b = by_kind(arm_b, "DynamoGraphDeployment")
+    assert containers(worker)["main"].get("env") == containers(
+        component(original_b, "decode")
+    )["main"].get("env")
+    dgd_a = by_kind(
+        render.render_arm(copy.deepcopy(arm_a), args), "DynamoGraphDeployment"
+    )
+    original_a = by_kind(arm_a, "DynamoGraphDeployment")
+    assert containers(component(dgd_a, "frontend"))["main"].get("env") == containers(
+        component(original_a, "frontend")
+    )["main"].get("env")
+
+
+def test_parse_env_reads_name_value_pairs():
+    assert render.parse_env("") == []
+    assert render.parse_env("A=1,,B=x=y, C=") == [
+        {"name": "A", "value": "1"},
+        {"name": "B", "value": "x=y"},
+        {"name": "C", "value": ""},
+    ]
+    for bad in ("NOVALUE", "=1"):
+        with pytest.raises(SystemExit):
+            render.parse_env(bad)
 
 
 @pytest.mark.parametrize("version", ["", "1.6.0"])

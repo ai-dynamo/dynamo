@@ -68,19 +68,24 @@ def render_arm(
                 if args.runtime_version:
                     component["runtimeVersionOverride"] = args.runtime_version
                 spec = component["podTemplate"]["spec"]
+                env: dict[str, list[dict[str, str]]] = {}
                 if component["type"] in ROUTER_TYPES:
                     router_image = args.frontend_image
                     if component["type"] == "epp":
                         router_image = args.epp_image or args.frontend_image
                         set_epp_replicas(component, args.epp_replicas)
+                        env["main"] = parse_env(args.epp_env)
                     images = {"main": router_image}
                 else:
                     component["replicas"] = args.replicas
                     images = {"main": args.worker_image}
                     if "frontendSidecar" in component:
-                        images[component["frontendSidecar"]] = args.frontend_image
+                        sidecar = component["frontendSidecar"]
+                        images[sidecar] = args.frontend_image
+                        env[sidecar] = parse_env(args.sidecar_env)
                 for container in spec["containers"]:
                     container["image"] = images[container["name"]]
+                    set_env(container, env.get(container["name"], []))
                 set_model_cache(spec, args.model_cache_pvc)
                 set_pull_secret(spec, args.image_pull_secret)
         elif obj["kind"] == "HTTPRoute":
@@ -95,6 +100,27 @@ def render_arm(
         else:
             raise SystemExit(f"unexpected {obj['kind']} in an arm manifest")
     return objects
+
+
+def parse_env(text: str) -> list[dict[str, str]]:
+    """Environment variables from comma-separated NAME=value pairs."""
+    env: list[dict[str, str]] = []
+    for pair in filter(None, (part.strip() for part in text.split(","))):
+        name, sep, value = pair.partition("=")
+        if not sep or not name:
+            raise SystemExit(f"expected NAME=value, got {pair!r}")
+        env.append({"name": name, "value": value})
+    return env
+
+
+def set_env(container: dict[str, Any], env: list[dict[str, str]]) -> None:
+    """Set each variable on the container, replacing one of the same name."""
+    if not env:
+        return
+    current = container.setdefault("env", [])
+    for var in env:
+        current[:] = [entry for entry in current if entry["name"] != var["name"]]
+        current.append(dict(var))
 
 
 def set_epp_replicas(component: dict[str, Any], replicas: int) -> None:
@@ -225,6 +251,10 @@ def main(argv: list[str] | None = None) -> None:
         "--epp-image", default="", help="arm B's EPP; empty means --frontend-image"
     )
     arm.add_argument("--epp-replicas", type=int, default=1, help="arm B's EPPs")
+    arm.add_argument("--epp-env", default="", help="NAME=value,... for arm B's EPP")
+    arm.add_argument(
+        "--sidecar-env", default="", help="NAME=value,... for arm B's sidecars"
+    )
     arm.add_argument(
         "--runtime-version", default="", help="Dynamo version of the images"
     )

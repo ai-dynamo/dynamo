@@ -316,16 +316,16 @@ Keep these limits in mind when reading the results:
 - **Discovery traffic.** The same watches make the traffic at startup grow with the square of the
   number of pods. `deploy` adds `RAMP_STEP` workers (256) at a time, and `teardown` removes them
   the same way. Lower it if the API server throttles.
-- **The sidecars skip the workers' load reports.** Every Frontend subscribes to the load reports
-  (`kv_metrics`) of every worker, one ZMQ socket each, though only busy thresholds use them. With a
-  sidecar in every worker pod, that grows with the square of the workers. At 2048 workers each
-  sidecar hit libzmq's limit of 1,023 sockets and grew to 3.3–3.7 GiB. Its 4 GiB limit killed it
-  again and again, and the pods, which use far more memory than they request, overloaded their
-  nodes. `b-epp.yaml` therefore sets `DYN_ZMQ_BROKER_ENABLED=true` on the sidecar only. With no ZMQ
-  broker deployed, the subscription fails at startup and the Frontend runs without load reports,
-  which a direct-mode sidecar without thresholds does not use. This departs from `gaie/agg.yaml`
-  until [#17237](https://github.com/ai-dynamo/dynamo/pull/17237) ships: it opens the subscription
-  only once a threshold is set.
+- **Sidecars need [#17237](https://github.com/ai-dynamo/dynamo/pull/17237) from about 1,000
+  workers.** Before it, every Frontend subscribed to the load reports (`kv_metrics`) of every
+  worker, one ZMQ socket each, even a direct-mode sidecar that never reads them. With a sidecar in
+  every worker pod, that grows with the square of the workers. At 2048 workers each sidecar hit
+  libzmq's limit of 1,023 sockets and grew to 3.3–3.7 GiB. Its 4 GiB limit killed it again and
+  again, and the pods, which use far more memory than they request, overloaded their nodes. With
+  #17237 a direct-mode Frontend skips the subscription. Releases up to 1.6.0 and nightlies up to
+  `20261027-53258de` lack it; with them, set `SIDECAR_ENV=DYN_ZMQ_BROKER_ENABLED=true`. With no
+  ZMQ broker deployed, the subscription then fails at startup and the sidecar runs without load
+  reports.
 - **Changing a deployed arm.** `deploy` ramps only the worker count. A change to a deployed arm's
   images, resources or mocker settings makes the operator replace every worker at once, without the
   ramp. Tear the arm down before you deploy it with a changed spec.
@@ -367,6 +367,8 @@ Keep these limits in mind when reading the results:
 | `WORKER_IMAGE` | `nvcr.io/nvidia/ai-dynamo/dynamo-planner:$DYNAMO_VERSION` | mocker workers |
 | `EPP_REPLICAS` | `1` | arm B's EPPs. Above 1 the harness sets `DYN_ROUTER_REPLICA_SYNC=true` on them, so they share their load bookkeeping and each still sees every routed request |
 | `EPP_IMAGE` | empty, meaning `FRONTEND_IMAGE` | arm B's EPP only, for comparing EPP builds: a frontend image or a `dynamo-epp` image. The sidecars and arm A keep `FRONTEND_IMAGE`, and aiperf runs from `FRONTEND_IMAGE` unless `AIPERF_IMAGE` is set |
+| `EPP_ENV` | none | extra environment for arm B's EPP, as comma-separated `NAME=value` pairs, such as the EPP's stall diagnostics: `DYN_EPP_TASK_METRICS=1,DYN_EPP_STREAM_SUMMARY=all` |
+| `SIDECAR_ENV` | none | extra environment for arm B's Frontend sidecars, in the same form. Images without #17237 need `DYN_ZMQ_BROKER_ENABLED=true` from about 1,000 workers (see "Running 2048 workers") |
 | `RUNTIME_VERSION` | none | Dynamo version of both images, for tags without one, such as nightly tags; the operator then requires it |
 | `AIPERF_IMAGE` | the image of the arm's Frontend or EPP; `FRONTEND_IMAGE` when `EPP_IMAGE` is set | the aiperf Job; the frontend image ships aiperf. Pin it to keep one aiperf version across the builds you compare |
 | `MODEL_CACHE_PVC` | `model-cache` | PVC with the model files |

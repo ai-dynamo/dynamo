@@ -37,6 +37,11 @@ WORKER_IMAGE=${WORKER_IMAGE:-nvcr.io/nvidia/ai-dynamo/dynamo-planner:$DYNAMO_VER
 EPP_IMAGE=${EPP_IMAGE:-}
 # Arm B's EPPs. Above 1 they share their load bookkeeping (router replica sync).
 EPP_REPLICAS=${EPP_REPLICAS:-1}
+# Extra environment for arm B's EPP and for its Frontend sidecars, as
+# comma-separated NAME=value pairs. For example, the EPP's stall diagnostics:
+# EPP_ENV=DYN_EPP_TASK_METRICS=1,DYN_EPP_STREAM_SUMMARY=all
+EPP_ENV=${EPP_ENV:-}
+SIDECAR_ENV=${SIDECAR_ENV:-}
 # The Dynamo version of those images, for tags the operator cannot read a
 # version from, such as nightly tags.
 RUNTIME_VERSION=${RUNTIME_VERSION:-}
@@ -75,7 +80,7 @@ BURST_PHASE_STARTS=${BURST_PHASE_STARTS:-1}
 
 # Every setting above. deploy and bench record them with the arm's results.
 SETTINGS=(
-  KUBE_CONTEXT NAMESPACE WORKERS RAMP_STEP MAX_WORKERS_PER_NODE DYNAMO_VERSION FRONTEND_IMAGE WORKER_IMAGE EPP_IMAGE EPP_REPLICAS RUNTIME_VERSION
+  KUBE_CONTEXT NAMESPACE WORKERS RAMP_STEP MAX_WORKERS_PER_NODE DYNAMO_VERSION FRONTEND_IMAGE WORKER_IMAGE EPP_IMAGE EPP_REPLICAS EPP_ENV SIDECAR_ENV RUNTIME_VERSION
   AIPERF_IMAGE MODEL_CACHE_PVC IMAGE_PULL_SECRET GATEWAY_NAME GATEWAY_NAMESPACE READY_TIMEOUT SETTLE_SECONDS
   BENCH_TIMEOUT ORDER KEEP SESSIONS DURATION_S ROUNDS DATASET MAX_CONTEXT TRACES COOLDOWN_S SEED
   SMOKE_TIMEOUT_S SAMPLE_WORKERS SERVER_METRICS_FORMATS BURST_PHASE_STARTS
@@ -182,6 +187,7 @@ render_arm() {
     python3 "$HERE/render.py" arm --replicas "$2" \
       --frontend-image "$FRONTEND_IMAGE" --worker-image "$WORKER_IMAGE" \
       --epp-image "$EPP_IMAGE" --epp-replicas "$EPP_REPLICAS" \
+      --epp-env "$EPP_ENV" --sidecar-env "$SIDECAR_ENV" \
       --runtime-version "$RUNTIME_VERSION" \
       --model-cache-pvc "$MODEL_CACHE_PVC" --image-pull-secret "$IMAGE_PULL_SECRET" \
       --gateway-name "$GATEWAY_NAME" --gateway-namespace "$GATEWAY_NAMESPACE" \
