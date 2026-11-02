@@ -39,7 +39,9 @@ CUDA_VISIBLE_DEVICES=0 python -m dynamo.sglang \
 
 ## DeepSeek Prompt Encoding
 
-For DeepSeek V4 and V4.1 checkpoints without a chat template, the processor uses SGLang's recipe renderer when that module is available. This path requires the checkpoint's fast tokenizer and the `deepseek-recipe` package supplied by the SGLang installation. SGLang v0.5.22 keeps the existing V4 encoder path.
+For DeepSeek V4 and V4.1 checkpoints identified by checkpoint metadata, the processor prefers SGLang's recipe renderer when that module is available, including when the tokenizer has a chat template. An explicit `--chat-template` override takes precedence over checkpoint encoding. This path requires the checkpoint's fast tokenizer and the `deepseek-recipe` package supplied by the SGLang installation. SGLang v0.5.22 keeps the existing V4 encoder path. V4.1 checkpoints without a chat template require the recipe renderer available in SGLang v0.5.23 or newer; they cannot fall back to the V4 encoder.
+
+Recipe encoding rejects `continue_final_message=true` combined with thinking because the current output parser does not track the continued prompt's reasoning state. Continuation with thinking disabled remains supported.
 
 Dynamo continues to own sampling settings, constrained decoding, and output parsing. Image URLs must match the recipe's placeholder order; requests with a different order or UUID-only images are rejected before inference.
 

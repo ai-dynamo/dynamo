@@ -1239,7 +1239,10 @@ class SglangEngineFactory:
             tokenizer.chat_template = chat_template
 
         eos_token_ids = _model_eos_token_ids(tokenizer, local_dir)
-        deepseek_spec = resolve_deepseek_spec(local_dir)
+        # An explicit user template takes precedence over checkpoint encoding.
+        deepseek_spec = (
+            resolve_deepseek_spec(local_dir) if chat_template is None else None
+        )
 
         # Static reasoning-template scan (mirrors sglang's template_manager).
         # Shared with worker-pool processes via initargs so they compute the

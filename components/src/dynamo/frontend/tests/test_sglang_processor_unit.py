@@ -3786,16 +3786,24 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert captured["messages"][0]["tools"][0]["function"]["name"] == "get_weather"
         assert captured["messages"][1]["role"] == "user"
 
-    def test_deepseek_checkpoint_spec_overrides_model_alias(self, monkeypatch):
+    @pytest.mark.parametrize("chat_template", [None, "checkpoint template"])
+    def test_deepseek_checkpoint_spec_overrides_model_alias(
+        self, monkeypatch, chat_template
+    ):
         captured = {}
 
         def render(request, **kwargs):
             captured.update(kwargs)
             return [1, 2, 3]
 
-        class NoTemplateTokenizer:
-            chat_template = None
+        class CheckpointTokenizer:
+            def __init__(self):
+                self.chat_template = chat_template
 
+            def apply_chat_template(self, *args, **kwargs):
+                raise AssertionError("checkpoint recipe must take precedence")
+
+        monkeypatch.setattr(sglang_prepost_module, "recipe_renderer", object())
         monkeypatch.setattr(
             sglang_prepost_module, "_render_deepseek_v4_prompt_token_ids", render
         )
@@ -3803,14 +3811,22 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             {
                 "model": "deepseek-v4-prod",
                 "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_kwargs": {"thinking": False},
             },
-            tokenizer=NoTemplateTokenizer(),
+            tokenizer=CheckpointTokenizer(),
             tool_call_parser_name=None,
             reasoning_parser_name=None,
             deepseek_spec="dsv41",
         )
         assert captured["spec"] == "dsv41"
         assert result.prompt_token_ids == [1, 2, 3]
+
+    def test_deepseek_v41_rejects_legacy_v4_encoder(self, monkeypatch):
+        monkeypatch.setattr(sglang_prepost_module, "recipe_renderer", None)
+        with pytest.raises(ValueError, match="DeepSeek-V4.1 preprocessing requires"):
+            sglang_prepost_module._render_deepseek_v4_prompt_token_ids(
+                {}, messages=[], tokenizer=object(), template_tools=None, spec="dsv41"
+            )
 
     def test_deepseek_v4_tool_call_arguments_reach_encoder_as_json_string(
         self, monkeypatch
@@ -4219,6 +4235,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert [tool["function"]["name"] for tool in tools] == ["get_time"]
 
     def test_deepseek_v4_respects_existing_chat_template(self, monkeypatch):
+        monkeypatch.setattr(sglang_prepost_module, "recipe_renderer", object())
         fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
 
         def fake_encode_messages(messages, *, thinking_mode, reasoning_effort=None):

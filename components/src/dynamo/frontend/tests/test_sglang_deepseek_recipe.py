@@ -14,6 +14,7 @@ from dynamo.frontend import sglang_deepseek  # noqa: E402 -- optional SGLang gua
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -58,11 +59,14 @@ def render(request, tokenizer, *, spec="dsv4", images=None):
 
 
 @pytest.mark.parametrize("spec,effort", [("dsv4", "max"), ("dsv41", 37)])
-def test_recipe_uses_served_tokenizer_and_request_effort(tokenizer, spec, effort):
+@pytest.mark.parametrize("thinking", [False, True])
+def test_recipe_uses_served_tokenizer_and_request_effort(
+    tokenizer, spec, effort, thinking
+):
     request = {
         "messages": [{"role": "user", "content": "Hello"}],
         "reasoning_effort": effort,
-        "chat_template_kwargs": {"thinking": True, "reasoning_effort": "low"},
+        "chat_template_kwargs": {"thinking": thinking, "reasoning_effort": "low"},
         "temperature": 0,
         "max_tokens": 19,
     }
@@ -70,8 +74,9 @@ def test_recipe_uses_served_tokenizer_and_request_effort(tokenizer, spec, effort
     ids = render(request, tokenizer, spec=spec)
     prompt = tokenizer.backend_tokenizer.decode(ids, skip_special_tokens=False)
     assert "Hello" in prompt
-    assert prompt.endswith("<think>")
-    assert "Reasoning Effort: 37" in prompt if spec == "dsv41" else "max" in prompt
+    assert prompt.endswith("<think>" if thinking else "</think>")
+    if thinking:
+        assert "Reasoning Effort: 37" in prompt if spec == "dsv41" else "max" in prompt
     assert ids[0] == tokenizer.backend_tokenizer.token_to_id("<｜begin▁of▁sentence｜>")
     assert request == original
 
@@ -120,18 +125,27 @@ def test_recipe_request_errors_do_not_hide_tokenizer_configuration_errors(tokeni
 
 
 @pytest.mark.parametrize("spec", ["dsv4", "dsv41"])
-def test_recipe_continues_final_assistant_message(tokenizer, spec):
+@pytest.mark.parametrize("thinking", [False, True])
+def test_recipe_continues_final_assistant_message(tokenizer, spec, thinking):
     request = {
         "messages": [
             {"role": "user", "content": "Hello"},
             {"role": "assistant", "content": "The answer is"},
         ],
         "continue_final_message": True,
+        "chat_template_kwargs": {"thinking": thinking},
     }
     original = copy.deepcopy(request)
-    ids = render(request, tokenizer, spec=spec)
-    prompt = tokenizer.backend_tokenizer.decode(ids, skip_special_tokens=False)
-    assert prompt.endswith("The answer is")
+    if thinking:
+        with pytest.raises(
+            sglang_deepseek.RecipeRequestError,
+            match="continue_final_message with thinking",
+        ):
+            render(request, tokenizer, spec=spec)
+    else:
+        ids = render(request, tokenizer, spec=spec)
+        prompt = tokenizer.backend_tokenizer.decode(ids, skip_special_tokens=False)
+        assert prompt.endswith("The answer is")
     assert request == original
 
 
@@ -150,3 +164,31 @@ def test_recipe_spec_comes_from_checkpoint(
         json.dumps({"model_type": model_type, "architectures": [architecture]})
     )
     assert sglang_deepseek.resolve_deepseek_spec(str(tmp_path)) == expected
+
+
+def test_recipe_normalizes_reasoning_history_without_mutating_request(tokenizer):
+    request = {
+        "messages": [
+            {"role": "user", "content": "Weather?"},
+            {
+                "role": "assistant",
+                "content": None,
+                "reasoning_content": ["Check the weather", "", "Use the tool"],
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "weather", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "Sunny"},
+        ],
+        "chat_template_kwargs": {"thinking": True},
+    }
+    original = copy.deepcopy(request)
+    ids = render(request, tokenizer, spec="dsv41")
+    expected = copy.deepcopy(request)
+    expected["messages"][1]["reasoning_content"] = "Check the weather\nUse the tool"
+    assert ids == render(expected, tokenizer, spec="dsv41")
+    assert request == original

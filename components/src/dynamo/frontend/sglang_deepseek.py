@@ -37,11 +37,7 @@ class RecipeRequestError(ValueError):
 
 @lru_cache(maxsize=8)
 def _encoder(tokenizer: Any, spec: str):
-    # SGLang renamed RecipeEncoder when adding recipe output parsing.
-    encoder_type = getattr(recipe_renderer, "DeepSeekRecipe", None)
-    if encoder_type is None:
-        encoder_type = recipe_renderer.RecipeEncoder
-    return encoder_type.from_hf_tokenizer(spec, tokenizer)
+    return recipe_renderer.DeepSeekRecipe.from_hf_tokenizer(spec, tokenizer)
 
 
 def render_recipe_prompt(
@@ -60,6 +56,17 @@ def render_recipe_prompt(
     effort = request.get("reasoning_effort")
     if effort is None:
         effort = kwargs.get("reasoning_effort")
+    if request.get("continue_final_message") and kwargs.get("thinking"):
+        raise RecipeRequestError(
+            "continue_final_message with thinking is not supported "
+            "with DeepSeek recipe encoding"
+        )
+    messages = [
+        {**m, "reasoning_content": "\n".join(s for s in m["reasoning_content"] if s)}
+        if isinstance(m.get("reasoning_content"), list)
+        else m
+        for m in messages
+    ]
     # The caller already filters template tools; the host enforces tool choice.
     body = {
         "messages": messages,

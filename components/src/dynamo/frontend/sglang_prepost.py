@@ -551,6 +551,11 @@ def _render_deepseek_v4_prompt_token_ids(
         except RecipeRequestError as exc:
             raise PreprocessError(str(exc)) from exc
 
+    if spec == "dsv41":
+        raise ValueError(
+            "DeepSeek-V4.1 preprocessing requires SGLang's deepseek-recipe renderer "
+            "(sglang.srt.parser.deepseek_recipe_renderer, SGLang 0.5.23 or newer)."
+        )
     try:
         from sglang.srt.entrypoints.openai.encoding_dsv4 import encode_messages
     except ImportError as exc:
@@ -988,7 +993,11 @@ def preprocess_chat_request(
     )
 
     if (
-        deepseek_spec is not None and getattr(tokenizer, "chat_template", None) is None
+        deepseek_spec is not None
+        and (
+            recipe_renderer is not None
+            or getattr(tokenizer, "chat_template", None) is None
+        )
     ) or _should_use_deepseek_v4_encoding(
         request,
         tokenizer=tokenizer,
