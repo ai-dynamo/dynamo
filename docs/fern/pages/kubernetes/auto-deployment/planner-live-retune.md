@@ -66,8 +66,8 @@ This applies to all DGDR trace Runs, not only those the Planner creates.
   `retune.dgdr.model` must be a public Hugging Face repository id that AISimulate can resolve.
 - **A ReadWriteMany claim** in the DGD namespace, dedicated to traces. Create `segments/` and
   `windows/` at its root, writable by the user the frontend and Planner containers run as. The
-  Planner writes each window file with mode `0600`, and the Run Job reads it as the planner image
-  user (UID 1000), so run the Planner as that user, which is its default.
+  Planner writes each window file with mode `0644`, so the Run Job, which reads it as UID 1000
+  with supplemental group 65532, can read it whatever user the Planner runs as.
 - **A KV-router frontend with default routing fields**, and workers that do not set their own
   router mode. See [Deployment rules](#deployment-rules).
 - **One Planner replica.**
@@ -182,7 +182,6 @@ retune:
 | `model` | required | Hugging Face repository id the workers serve; the Requests' `spec.model.name` |
 | `sku` | required | The Requests' `spec.hardware.gpu.sku` |
 | `engine` | required | The pinned AISimulate engine section; see [Engine section](#engine-section) |
-| `startup_router_config` | `null` | Optional startup `KvRouterConfig` JSON; when set it must equal what the Planner parses from the frontend |
 | `cut_budget_seconds` | `900` | Deadline of the window cut subprocess |
 | `job_startup_seconds` | `300` | Run Job start-up time reserved when deciding whether a shard can still finish |
 | `run.parallelism` | `8` | AISimulate `optimizer.parallelism` of each Run; Job resources may lower it |
@@ -304,8 +303,9 @@ The Planner only warns when AISimulate does not list the model among its default
    ```
 
    While the chart still grants the live retune RBAC, a Planner without `retune` does this on
-   its own: it finds the Leases in the background after it starts, resets any router the
-   removed retune changed, then deletes the Requests and both Leases.
+   its own: it looks for the Leases in the background after it starts (once more after a
+   transient API error), resets any router the removed retune changed, then deletes the
+   Requests and both Leases.
 
 5. Delete `<segments_dir>/<dgd>` and `<windows_dir>/<dgd>` from the claim.
 
