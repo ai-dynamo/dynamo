@@ -242,9 +242,11 @@ export function UpgradePanelStyles() {
 export function UpgradePolicyNotice() {
   return (
     <p className="dynref-up-policy">
-      Supported Helm path: within one minor release or between adjacent minors. Upgrade from{" "}
+      Supported upgrade path: within a minor release or to an adjacent minor. Upgrade from{" "}
       <span className="dynref-mono">N.M</span> to <span className="dynref-mono">N.(M+1)</span> and
-      downgrade in the reverse direction. Apply every intermediate minor release in order.
+      downgrade in the reverse direction. Apply every intermediate minor release in order. See{" "}
+      <a href="/dynamo/dev/kubernetes/installation/install-dynamo#upgrade-dynamo">Upgrade Dynamo</a>{" "}
+      for commands, overrides, and enforcement limits.
     </p>
   );
 }

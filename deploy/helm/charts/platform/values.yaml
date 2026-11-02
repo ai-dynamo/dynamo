@@ -105,7 +105,8 @@ dynamo-operator:
       activeDeadlineSeconds: 120
       # -- Independent preflight affinity. Does not inherit controllerManager.affinity.
       affinity: {}
-      # -- Full replacement of the preflight pod security context. Null uses secure defaults.
+      # -- Full replacement of the preflight pod security context. Null uses runAsNonRoot: true,
+      # runAsUser: 65532, and seccompProfile.type: RuntimeDefault.
       # Omit runAsUser on OpenShift for admission to assign the namespace UID.
       podSecurityContext: null
 
