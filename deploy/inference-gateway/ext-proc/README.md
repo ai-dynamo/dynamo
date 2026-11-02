@@ -29,6 +29,17 @@ body and headers. It then keeps each booking instead of dispatching it:
 
 With no prefill target, or on any prefill selection error, the request routes aggregated.
 
+### Planned
+
+These changes are planned for the near term, as part of
+[#15457](https://github.com/ai-dynamo/dynamo/issues/15457). Neither is implemented yet.
+
+- **Decode through `StageRouter`.** Decode will select through a decode `StageRouter`, as
+  prefill does, instead of calling `RoutingHost::plan_route` on the decode host directly. Every
+  stage the EPP picks for then uses the same `schedule` interface.
+- **Encode stage.** An encode router will implement `StageRouter`, so the EPP can also pick the
+  encode worker for a multimodal request. Today the EPP picks only prefill and decode workers.
+
 ## Routing parity with the frontend
 
 The frontend reads every selection input from its `PreprocessedRequest`. The Runtime EPP supplies
