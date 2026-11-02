@@ -927,28 +927,32 @@ be used independently.
 
 ### Optionally capture traces and sandbox metrics
 
-For sandbox metrics, prepare Prometheus Operator and Grafana, such as an
-existing `kube-prometheus-stack` installation.
+Use Perfetto to inspect model and tool timing, or Grafana to inspect sandbox
+activity. Configure either view or both after saving your first trial.
+Harbor's trajectory and verifier output remain available without this setup.
 
-After saving the first trial, add either or both views below. Stop active jobs
-before changing telemetry because those changes can restart workers. Harbor's
-raw Pi log and verifier output are available without either setup.
+| View | What it shows | Requirement |
+| --- | --- | --- |
+| Perfetto | Model requests and measured Pi tool spans, correlated by session ID | A Dynamo frontend you control |
+| Grafana | Worker occupancy, actor lifecycle operations, and sampled resource usage | Prometheus Operator and Grafana; works with either inference option |
+
+#### Configure collection
+
+Stop active Harbor jobs before changing telemetry; the configuration changes
+can restart workers or the frontend. Complete the setup for each view you want:
 
 <CardGroup cols={2}>
-<Card title="Inference and tool traces" href="https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/TRACING.md#prepare-the-transport">
-Configure capture on a Dynamo frontend you control. Correlate model requests
-and measured tool spans by session ID in Perfetto.
+<Card title="Trace sandboxed agents" href="trace-sandboxed-agents.mdx">
+Enable frontend capture and connect Pi's tool events through Substrate egress.
+Verify the frontend and tool-event endpoint before returning here.
 </Card>
-<Card title="Sandbox metrics" href="https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/METRICS.md#deploy-the-metrics-bridge">
-Connect Substrate to Prometheus and Grafana. Inspect worker occupancy,
-lifecycle operations, and resource usage for either inference option.
+<Card title="Monitor Substrate" href="../../kubernetes/agent-sandboxes/monitor-substrate.mdx">
+Install the metrics bridge and dashboard. Require healthy scrape targets and
+emitting services before returning here.
 </Card>
 </CardGroup>
 
-Follow each guide through its **Setup complete** checkpoint, then return here.
-For tracing, preserve the model recipe's serving configuration and edit its
-source manifest or Kustomize overlay as directed by the guide. For metrics,
-require healthy scrape targets and emitting services before continuing.
+#### Run an observed trial
 
 Set `job_name: swe-observed` in `harbor-job.yaml` to keep this run separate from
 `swe-one`. Update the ConfigMap and start another Job:
@@ -969,26 +973,77 @@ Repeat [View and understand the trial](#view-the-trial) with
 
 #### Inspect measured spans in Perfetto
 
-Export the native capture using the commands in
-[Capture inference and tool traces](https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/TRACING.md#export-the-completed-capture).
-Use the session ID to find the same trial in Perfetto. Inspect model requests,
-time to first token, and measured tool spans. Check tool IDs against Pi's log.
-Do not present inferred waits as measured tool execution.
+If you enabled tracing, wait for the frontend's trace writer to flush after
+the trial completes. From `examples/agents/harbor-substrate`, find the frontend
+Pod using the `MODEL_NAMESPACE` and `DGD_NAME` values from tracing setup:
+
+```bash title="Workstation"
+kubectl -n "$MODEL_NAMESPACE" get pods \
+  -l "nvidia.com/dynamo-namespace=$MODEL_NAMESPACE-$DGD_NAME,nvidia.com/dynamo-component=Frontend"
+export FRONTEND_POD=your-frontend-pod
+mkdir -p "results/$JOB_NAME/traces"
+kubectl -n "$MODEL_NAMESPACE" cp -c main \
+  "$FRONTEND_POD:/traces/." "results/$JOB_NAME/traces"
+python3 ../../../benchmarks/request_trace/convert_to_perfetto.py \
+  results/"$JOB_NAME"/traces/request-trace*.jsonl \
+  --output "results/$JOB_NAME/trace.perfetto.json"
+```
+
+Copy the capture before replacing or deleting the frontend Pod; its trace
+volume is ephemeral. With multiple frontend replicas, collect each Pod's
+segments into a separate directory and pass all segments to the converter.
+
+Open [Perfetto](https://ui.perfetto.dev/), select **Open trace file**, and load
+`results/swe-observed/trace.perfetto.json`. Find the trial by session ID and
+select a tool slice. In **Current Selection**, inspect its duration,
+`tool_call_id`, status, and `event_source`.
+
+The separate Qwen3-8B capture below shows a measured `bash` call lasting about
+1 second alongside model requests. Your model, timings, and number of turns
+will differ.
+
+![Perfetto timeline with a selected bash tool span and its session ID, tool-call ID, duration, and harness event source.](../../../assets/img/harbor-substrate/perfetto-tool-span.png)
+
+Match tool-call IDs against Pi's log and confirm that model and tool records
+share the session ID. A successful inference request alone does not prove
+that tool-event delivery works. Request duration includes queueing, prefill,
+and generation; tool spans measure Pi's observed invocation. Spans marked
+`inferred` or `synthetic` are not measured tool execution.
+See [Agent Tracing](agent-tracing.md#choose-the-tool-detail-you-need) for these
+capture boundaries.
 
 #### Inspect sandbox activity in Grafana
 
-Use the [metrics validation checklist](https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/METRICS.md#validate-with-one-task)
-for the completed trial.
+If you enabled metrics, start a port-forward in a separate terminal. Replace
+the namespace and service if your Grafana installation uses different names:
 
-Select the job's time window in the Substrate dashboard. Inspect worker
-occupancy, lifecycle operations, image-cache requests, resource usage, and
-checkpoint or restore activity. Empty restore panels are expected for a run
-that only boots fresh actors.
+```bash title="Workstation"
+kubectl -n monitoring port-forward \
+  service/kube-prometheus-stack-grafana 3007:80
+```
+
+Open `http://localhost:3007/d/substrate-native-metrics` and select the job's
+time window. Start with **Bridge scrape healthy**, then inspect **Worker fleet
+by state** and the lifecycle panels. During the trial, a worker becomes
+partial or at capacity, then returns to idle after cleanup.
+
+This separate capture shows five ready worker Pods. One becomes partial
+while a sandbox is active, then returns to idle. Your fleet size depends on
+your worker pools.
+
+![Substrate dashboard showing a healthy metrics bridge, five ready workers, one worker temporarily in partial state, and actor lifecycle operations.](../../../assets/img/harbor-substrate/sandbox-metrics.png)
+
+Check image-cache activity and resource usage next. Native CPU and memory
+samples arrive roughly once per minute, so short trials can miss samples.
+Empty restore panels are expected when a run only boots fresh actors.
+Operation totals and means are cumulative since process start, even when
+you select a shorter dashboard time window.
 
 The native parking metrics are aggregate. They do not identify which Harbor
 session waited, and their duration can include restoration. Use `substrate.json`
-for actor correlation, without assuming a shared distributed trace across all
-three viewers.
+for the actor mapping; these views do not form one distributed trace.
+For other panel semantics and cleanup, see
+[Monitor Substrate](../../kubernetes/agent-sandboxes/monitor-substrate.mdx#interpret-workload-activity).
 
 ### Optionally restore from a golden snapshot
 
@@ -1192,8 +1247,8 @@ Delete it separately when those results are no longer needed.
 
 Delete only templates, golden tags, Secrets, and collector resources created
 for this walkthrough. Keep shared Substrate services, storage, and inference
-endpoints. Follow the metrics guide's restore procedure before removing the
-Collector. If you added tracing to an existing frontend, remove the tutorial's
-trace additions by comparing with `.build/frontend-before.yaml`. For Kustomize,
+endpoints. [Restore the previous telemetry configuration](../../kubernetes/agent-sandboxes/monitor-substrate.mdx#restore-the-previous-telemetry-configuration)
+before removing the Collector. If you added tracing to an existing frontend,
+remove the tutorial's trace additions by comparing with `.build/frontend-before.yaml`. For Kustomize,
 remove those additions from the source or overlay and regenerate the manifest.
 Apply the updated frontend manifest and stop the local viewer.

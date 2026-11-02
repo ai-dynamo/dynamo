@@ -144,6 +144,8 @@ navigation:
         contents:
           - page: Install Substrate
             path: pages/kubernetes/agent-sandboxes/install-substrate.mdx
+          - page: Monitor Substrate
+            path: pages/kubernetes/agent-sandboxes/monitor-substrate.mdx
 
       # ==================== Usage ====================
       - section: Model Deployment
@@ -762,6 +764,8 @@ navigation:
             path: pages/use-cases/agents/priority-scheduling.mdx
           - page: Sandboxed Coding Agents
             path: pages/use-cases/agents/harbor-substrate.mdx
+          - page: Trace Sandboxed Agents
+            path: pages/use-cases/agents/trace-sandboxed-agents.mdx
           - page: Trace an Agent Run
             slug: agent-tracing
             path: pages/use-cases/agents/agent-tracing.md

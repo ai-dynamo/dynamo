@@ -38,7 +38,8 @@ This directory contains the runnable files:
 - `*.patch`: compatibility changes applied to the pinned upstream sources.
 - [Install Substrate](../../../docs/fern/pages/kubernetes/agent-sandboxes/install-substrate.mdx):
   platform setup in the Kubernetes Guide.
-- [Capture inference and tools](TRACING.md) and [Collect Substrate metrics](METRICS.md):
+- [Trace Sandboxed Agents](../../../docs/fern/pages/use-cases/agents/trace-sandboxed-agents.mdx)
+  and [Monitor Substrate](../../../docs/fern/pages/kubernetes/agent-sandboxes/monitor-substrate.mdx):
   supporting procedures.
 
 Generate the file list with `git ls-files examples/agents/harbor-substrate`.

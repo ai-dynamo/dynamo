@@ -588,8 +588,7 @@ Keep the referenced YAML file. The installer no longer applies that resource,
 so it does not require the Google monitoring API. Substrate still runs, and
 the Envoy metrics endpoint remains available for another scraper.
 
-The Harbor tutorial's
-[sandbox metrics setup](https://github.com/ai-dynamo/dynamo/blob/main/examples/agents/harbor-substrate/METRICS.md#deploy-the-metrics-bridge)
+[Monitor Substrate](monitor-substrate.mdx)
 uses a Prometheus Operator `ServiceMonitor` to scrape an OpenTelemetry
 Collector. That setup collects Substrate's native metrics and Collector
 self-metrics without the Google API. It does not scrape Envoy's separate
