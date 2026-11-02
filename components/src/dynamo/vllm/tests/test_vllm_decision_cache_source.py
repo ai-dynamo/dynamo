@@ -8,10 +8,12 @@ import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from dynamo.vllm import decision_cache_provenance as cache
+from dynamo.vllm import decision_runtime_policy as policy
 from dynamo.vllm.tests.decision_cache_contract import CONTRACT_PATH, project_contract
 
 pytestmark = [
@@ -55,7 +57,7 @@ def test_malformed_installed_source_path_fails_closed(monkeypatch, explicit_root
     assert not cache.verify_installed_sources((("source.py", "unused"),), root=root)
 
 
-@pytest.mark.parametrize("release", ["0.32.0", "0.33.0"])
+@pytest.mark.parametrize("release", tuple(cache.CAUSAL_CACHE_SOURCE_BLOBS))
 @pytest.mark.parametrize("mode", ["valid", "changed", "missing", "unknown", "no-path"])
 def test_causal_cache_source_gate_is_exact_and_fail_closed(
     tmp_path, monkeypatch, release, mode
@@ -99,6 +101,15 @@ def test_invalid_version_never_imports_backend_source(monkeypatch, installed):
         cache, "import_module", lambda _: pytest.fail("Unexpected import")
     )
     assert not cache.qualified_cache_runtime(installed)
+
+
+@pytest.mark.parametrize("installed", [None, 1])
+def test_nonstring_cache_release_never_calls_version_parser(monkeypatch, installed):
+    parser = Mock(side_effect=TypeError("version must be a string"))
+    monkeypatch.setattr(policy, "Version", parser)
+    monkeypatch.setattr(cache, "Version", parser, raising=False)
+    assert not cache.qualified_cache_runtime(installed)
+    parser.assert_not_called()
 
 
 def test_released_cache_provenance_contracts_are_identical():

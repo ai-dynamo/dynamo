@@ -10,7 +10,7 @@ from importlib import import_module
 from pathlib import Path
 from types import MappingProxyType
 
-from packaging.version import InvalidVersion, Version
+from .decision_runtime_policy import is_exact_vllm_release
 
 logger = logging.getLogger(__name__)
 
@@ -95,8 +95,7 @@ def verify_installed_sources(
 
 def qualified_cache_runtime(installed: str) -> bool:
     """Fail closed for missing or modified cache-provenance owners, not generation."""
-    try:
-        sources = CAUSAL_CACHE_SOURCE_BLOBS.get(Version(installed).public)
-    except InvalidVersion:
-        return False
-    return sources is not None and verify_installed_sources(sources)
+    return any(
+        is_exact_vllm_release(installed, release) and verify_installed_sources(sources)
+        for release, sources in CAUSAL_CACHE_SOURCE_BLOBS.items()
+    )
