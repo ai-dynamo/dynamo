@@ -82,6 +82,29 @@ Prefer ordinary KV-aware routing when cache state is enough. Affinity does not c
 
 Add router queueing only after measuring dispatch and engine queue pressure. Compare first-come, first-served (`fcfs`) for tail behavior with weighted shortest processing time (`wspt`) for mixed prompt lengths. Use bounded service classes; never encode rollout IDs, users, or policy versions as queue classes or Prometheus labels.
 
+### Prioritize Older Rollout Groups
+
+The `group_priority` request classifier orders the router queue by data group. It reads `X-Dynamo-Group`, `X-Dynamo-Group-Size`, `X-Dynamo-Weight-Version`, and optionally `X-Dynamo-Env-S` from requests that also carry `X-Dynamo-Session-ID`. A group's version is the highest weight version seen when its first session arrives, and its age is the current version minus that. Send `X-Dynamo-Session-Final: true` when a rollout ends so the group counts down.
+
+The classifier releases every request immediately and sets no worker target, so worker selection stays KV-aware. It changes only the router queue order, so it has an effect only when queueing is enabled:
+
+```yaml
+request_classifier:
+  type: group_priority
+  parameters:
+    age_tiers: 8                  # strict tier = min(group age, 8); 0 leaves the tier unchanged
+    jump: { offset: 100.0, left: -1.0 }  # seconds of FCFS precedence; omit to keep the request's own
+```
+
+```bash
+python -m dynamo.frontend \
+  --router-mode kv \
+  --router-queue-threshold 0.9 \
+  --router-policy-config policy.yaml
+```
+
+The `jump` weights are `offset`, `age` (per weight version), `left` (per unfinished session in the group), and `env_s` (per second of `X-Dynamo-Env-S`). The classifier does not change the `priority` value the engine receives.
+
 ## Handle Worker Loss and Overload
 
 Discovery and leases remove lost workers from the eligible set so new rollouts use healthy capacity. Requests already assigned to a failed worker fail unless request migration is enabled. Because a replacement worker does not inherit the failed worker's KV cache, migrated and newly routed requests can require a fresh prefill.

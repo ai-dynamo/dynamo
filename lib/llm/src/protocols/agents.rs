@@ -121,6 +121,11 @@ fn is_agent_header(name: &str) -> bool {
                 | "x-openai-memgen-request"
                 | HEADER_OPENCODE_SESSION_ID
                 | HEADER_OPENCODE_PARENT_SESSION_ID
+                // RL data-group headers read by the `group_priority` classifier.
+                | "x-dynamo-group"
+                | "x-dynamo-group-size"
+                | "x-dynamo-env-s"
+                | "x-dynamo-weight-version"
         )
 }
 
@@ -208,6 +213,14 @@ mod tests {
             "reactive".parse().unwrap(),
         );
         headers.insert("x-claude-code-prompt-id", "prompt-1".parse().unwrap());
+        for name in [
+            "x-dynamo-group",
+            "x-dynamo-group-size",
+            "x-dynamo-env-s",
+            "x-dynamo-weight-version",
+        ] {
+            headers.insert(name, "1".parse().unwrap());
+        }
         let captured = agent_context_header_values(&headers).unwrap();
         assert_eq!(
             captured.agent_headers["x-claude-code-future"],
