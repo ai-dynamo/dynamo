@@ -4,6 +4,12 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import signal
+import subprocess
+import sys
+import textwrap
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -143,6 +149,60 @@ def test_mx_source_serves_every_device_by_default(monkeypatch):
     assert launched == [
         ["--source-key", "ckpt-1", "--device", str(device)] for device in range(3)
     ]
+
+
+def _wait_for(paths, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    while not all(path.exists() for path in paths):
+        assert time.monotonic() < deadline, f"timed out waiting for {paths}"
+        time.sleep(0.05)
+
+
+@pytest.mark.timeout(60)
+def test_sigterm_stops_each_device_process_and_waits_for_its_cleanup(tmp_path):
+    # Stands in for one device's process, e.g. an MX source that must
+    # unpublish before it exits. It quits on its own if orphaned.
+    (tmp_path / "device_child.py").write_text(
+        textwrap.dedent(
+            """
+            import os, pathlib, signal, sys, time
+            out = pathlib.Path(sys.argv[1])
+            device = sys.argv[sys.argv.index("--device") + 1]
+            parent = os.getppid()
+
+            def stop(*_):
+                time.sleep(0.2)
+                (out / f"cleaned-{device}").touch()
+                sys.exit(0)
+
+            signal.signal(signal.SIGTERM, stop)
+            (out / f"ready-{device}").touch()
+            while os.getppid() == parent:
+                time.sleep(0.05)
+            """
+        )
+    )
+    python_path = [str(tmp_path), os.environ.get("PYTHONPATH", "")]
+    launcher = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys\n"
+            "from gpu_memory_service.cli.snapshot import run_per_device\n"
+            "run_per_device('device_child', sys.argv[1:], [0, 1])",
+            str(tmp_path),
+        ],
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(python_path)},
+    )
+    try:
+        _wait_for([tmp_path / "ready-0", tmp_path / "ready-1"], timeout=30)
+        launcher.send_signal(signal.SIGTERM)
+        assert launcher.wait(timeout=30) == 128 + signal.SIGTERM
+        assert (tmp_path / "cleaned-0").exists()
+        assert (tmp_path / "cleaned-1").exists()
+    finally:
+        launcher.kill()
+        launcher.wait()
 
 
 def test_mx_source_fails_without_gpus(monkeypatch):
