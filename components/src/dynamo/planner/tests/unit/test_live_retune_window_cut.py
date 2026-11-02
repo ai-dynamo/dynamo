@@ -15,9 +15,11 @@ import json
 import os
 import pickle
 import random
+import shutil
 import stat
 import threading
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -25,6 +27,7 @@ from dynamo.planner.retune.live import window_cut
 from dynamo.planner.retune.live.contracts import WindowCutResult
 from dynamo.planner.retune.live.window_cut import (
     MAX_DROPPED_MEMBER_RATIO,
+    SEGMENT_MTIME_MARGIN_S,
     WINDOW_CUT_FAILURES,
     WindowCutError,
     _decode_exact_member,
@@ -151,7 +154,7 @@ def _temp_files(directory):
     return [name for name in os.listdir(directory) if name.startswith(".tmp-")]
 
 
-def _random_trace(root, seed, *, pods=3, segments=3, members=5, plain_pod=False):
+def _random_trace(root, seed, *, pods=3, segments=3, members=5):
     """Segments with every row shape ``read_trace_window`` handles.
 
     Arrivals and durations are coarse so (arrival, completion) pairs tie
@@ -220,14 +223,10 @@ def _random_trace(root, seed, *, pods=3, segments=3, members=5, plain_pod=False)
                 if rng.random() < 0.1:
                     payload += b"\n   \n"  # blank lines are skipped
                 chunks.append(payload)
-            directory = root / f"frontend-{pod}"
-            if plain_pod and pod == 0:
-                _write(directory / f"req.{segment:06d}.jsonl", *chunks)
-            else:
-                _write(
-                    directory / f"req.{segment:06d}.jsonl.gz",
-                    *(gzip.compress(chunk) for chunk in chunks),
-                )
+            _write(
+                root / f"frontend-{pod}" / f"req.{segment:06d}.jsonl.gz",
+                *(gzip.compress(chunk) for chunk in chunks),
+            )
     return root
 
 
@@ -396,9 +395,12 @@ def test_cut_matches_read_trace_window(tmp_path, seed):
     assert _temp_files(out.parent) == []
 
 
-def test_cut_matches_golden_with_plain_jsonl_files(tmp_path):
-    root = _random_trace(tmp_path / "segments" / "dgd", 3, plain_pod=True)
+def test_plain_jsonl_files_are_ignored(tmp_path):
+    # The reconciler never collects them, and the live sink writes gzip.
+    root = _random_trace(tmp_path / "segments" / "dgd", 3)
     window, golden_bytes = _golden(root, tmp_path)
+    for pod in ("frontend-0", "frontend-9"):
+        _write(root / pod / "req.000000.jsonl", _lines([_row("plain", START + 1)]))
 
     result, out = _cut(root, tmp_path)
 
@@ -466,8 +468,9 @@ def test_too_many_rows_is_window_too_large(tmp_path, monkeypatch):
     monkeypatch.setattr(window_cut, "_DEDUP_SLACK_MIN", 1)
     monkeypatch.setattr(window_cut, "_DEDUP_SLACK_RATIO", 0.0)
 
-    result, _ = _cut(root, tmp_path, max_rows=30)
+    result, out = _cut(root, tmp_path, max_rows=30)
     assert result.num_requests == 30
+    out.unlink()
     with pytest.raises(WindowCutError) as caught:
         _cut(root, tmp_path, max_rows=29)
     assert caught.value.reason == "window_too_large"
@@ -712,88 +715,13 @@ def test_hole_within_the_byte_ratio_is_dropped(tmp_path):
     assert result.dropped_bytes == len(members[50])
 
 
-@pytest.mark.parametrize("plain_block", [None, 64])
-def test_plain_jsonl_unterminated_tail(tmp_path, monkeypatch, plain_block):
-    if plain_block is not None:
-        # Blocks of one line each: the tail is in a later block.
-        monkeypatch.setattr(window_cut, "_PLAIN_BLOCK", plain_block)
-    good = [_row("a", START), _row("b", START + 1)]
-
-    def build(root, bad):
-        _write(
-            root / "a" / "req.000000.jsonl",
-            _lines(good),
-            *([b'{"schema": "dynamo.req'] if bad else []),
-        )
-
-    result = _cut_and_twin(tmp_path, build)
-    assert result.dropped_bytes == len(b'{"schema": "dynamo.req')
-    assert result.dropped_members == 0
-
-    # An unterminated last line that parses is a row, as replay reads it.
-    root = tmp_path / "parses"
-    _write(
-        root / "a" / "req.000000.jsonl",
-        _lines(good) + json.dumps(_row("c", START + 2)).encode(),
-    )
-    window, golden_bytes = _golden(root, tmp_path)
-    assert window.num_requests == 3
-    out = _out(tmp_path, "parses.jsonl.gz")
-    result = cut_window_inprocess(root, START, END, AS_OF, out, max_rows=10)
-    _assert_golden(result, out, window, golden_bytes)
-
-
-@pytest.mark.parametrize("tail", ["partial", "parses"])
-def test_plain_jsonl_stops_at_the_unterminated_tail(tmp_path, tail):
-    # The writer finishes the last line (and writes another) right after the
-    # first read: reading on would start inside that line.
-    path = tmp_path / "req.000000.jsonl"
-    first = _lines([_row("a", START)])
-    if tail == "partial":
-        line = _lines([_row("b", START + 1)])
-        written, rest = line[:20], line[20:]
-    else:
-        written, rest = json.dumps(_row("b", START + 1)).encode(), b"\n"
-    _write(path, first, written)
-
-    class Appending:
-        def __init__(self, source):
-            self.source = source
-            self.reads = 0
-
-        def readlines(self, hint):
-            lines = self.source.readlines(hint)
-            self.reads += 1
-            if self.reads == 1:
-                with open(path, "ab") as writer:
-                    writer.write(rest + _lines([_row("c", START + 2)]))
-            return lines
-
-    with open(path, "rb") as source:
-        reader = Appending(source)
-        blocks = list(window_cut._plain_blocks(reader))
-
-    assert reader.reads == 1
-    assert len(blocks) == 1
-    if tail == "partial":
-        assert blocks[0].payload == first
-        assert blocks[0].dropped == len(written)
-    else:
-        assert blocks[0].payload == first + written
-        assert blocks[0].dropped == 0
-    assert blocks[0].end == len(blocks[0].payload)
-    selection = window_cut._Selection(START, END, AS_OF, 10)
-    selection.scan((0, str(path), True, block) for block in blocks)
-    assert selection.num_rows == (1 if tail == "partial" else 2)
-
-
 def test_segment_files_order_and_newest(tmp_path):
     root = tmp_path / "segments"
     for name in (
         "b/req.000999.jsonl.gz",
         "b/req.1000000.jsonl.gz",
         "a/req.000000.jsonl.gz",
-        "a/req.000001.jsonl",
+        "a/req.000001.jsonl",  # plain JSONL: ignored
         "a/notes.txt",
         "c/single.jsonl.gz",
     ):
@@ -802,22 +730,54 @@ def test_segment_files_order_and_newest(tmp_path):
     files = _segment_files(str(root))
 
     assert files == [
-        (str(root / "a/req.000000.jsonl.gz"), False),
-        (str(root / "a/req.000001.jsonl"), True),
+        (str(root / "a/req.000000.jsonl.gz"), True),
         (str(root / "b/req.000999.jsonl.gz"), False),
         (str(root / "b/req.1000000.jsonl.gz"), True),
         (str(root / "c/single.jsonl.gz"), True),
     ]
 
 
-def test_compressed_and_plain_copies_of_one_segment_fail(tmp_path):
-    root = tmp_path / "segments"
-    _write(root / "a" / "req.000000.jsonl.gz", _member([_row("a", START)]))
-    _write(root / "a" / "req.000000.jsonl", _lines([_row("a", START)]))
+def test_a_segments_root_that_is_not_a_gzip_segment_fails(tmp_path):
+    plain = _write(tmp_path / "req.000000.jsonl", _lines([_row("a", START)]))
 
     with pytest.raises(WindowCutError) as caught:
-        _cut(root, tmp_path)
+        _cut(plain, tmp_path)
     assert caught.value.reason == "window_cut_failed"
+    single = _write(tmp_path / "req.000000.jsonl.gz", _member([_row("a", START)]))
+    assert _cut(single, tmp_path)[0].num_requests == 1
+
+
+def test_segments_last_written_before_the_window_are_not_read(tmp_path):
+    # A row is written when its request completes, after it arrived: a
+    # segment last modified before the window started holds none of its
+    # rows. This one does (it cannot in production) to show it is not read,
+    # and its hole would fail the cut as trace_corrupt if it were.
+    start, end = 1_700_000_000_000, 1_700_000_010_000
+    root = tmp_path / "segments"
+    old = _write(
+        root / "a" / "req.000000.jsonl.gz",
+        _member([_row("old-0", start + 1)]),
+        bytes(64),
+        _member([_row("old-1", start + 2)]),
+    )
+    _write(root / "a" / "req.000001.jsonl.gz", _member([_row("new", start + 3)]))
+    out = _out(tmp_path)
+
+    def cut():
+        return cut_window_inprocess(root, start, end, end + 500, out, max_rows=10)
+
+    skipped = start / 1000 - SEGMENT_MTIME_MARGIN_S - 1
+    os.utime(old, (skipped, skipped))
+    result = cut()
+    assert result.num_requests == 1
+    assert result.dropped_members == 0
+    out.unlink()
+
+    within_margin = start / 1000 - SEGMENT_MTIME_MARGIN_S + 1
+    os.utime(old, (within_margin, within_margin))
+    with pytest.raises(WindowCutError) as caught:
+        cut()
+    assert caught.value.reason == "trace_corrupt"
 
 
 def test_vanished_file_is_skipped(tmp_path, monkeypatch):
@@ -922,38 +882,65 @@ def test_segment_walk_skips_only_vanished_entries(tmp_path, monkeypatch, where, 
 # -------------------------------------------------------- atomic output
 
 
-def test_existing_window_file_is_reused(tmp_path):
+def _reused(result, path):
+    return replace(
+        result, path=str(path), reused=True, dropped_members=0, dropped_bytes=0
+    )
+
+
+def test_published_window_is_reused_without_reading_the_trace(tmp_path):
     root = _random_trace(tmp_path / "segments", 5)
-    window, _ = _golden(root, tmp_path)
-    out = _out(tmp_path)
-    _write(out, b"published by another process")
+    first, out = _cut(root, tmp_path)
+    published = out.read_bytes()
+    # A later leader adopting the window must not fail it on segments that
+    # changed, broke or were collected since it was published.
+    shutil.rmtree(root)
 
-    result = cut_window_inprocess(root, START, END, AS_OF, out, max_rows=10**6)
+    result, _ = _cut(root, tmp_path)
 
-    assert result.reused
-    assert result.path == str(out)
-    assert result.num_requests == window.num_requests
-    assert out.read_bytes() == b"published by another process"
+    assert result == _reused(first, out)
+    assert out.read_bytes() == published
     assert _temp_files(out.parent) == []
 
 
-def test_link_race_reuses_the_winner(tmp_path, monkeypatch):
+def test_a_window_file_without_cut_counts_fails(tmp_path):
+    root = _random_trace(tmp_path / "segments", 5)
+    out = _out(tmp_path)
+    _write(out, gzip.compress(_lines([_row("a", START)])))
+
+    with pytest.raises(WindowCutError) as caught:
+        cut_window_inprocess(root, START, END, AS_OF, out, max_rows=10**6)
+    assert caught.value.reason == "window_cut_failed"
+    assert "holds no cut counts" in str(caught.value)
+
+
+def test_link_race_reports_the_winners_counts(tmp_path, monkeypatch):
     root = _random_trace(tmp_path / "segments", 6)
+    winner_out = _out(tmp_path, "winner.jsonl.gz")
+    winner = cut_window_inprocess(
+        _random_trace(tmp_path / "other", 7),
+        START,
+        END,
+        AS_OF,
+        winner_out,
+        max_rows=10**6,
+    )
+    assert winner.num_requests != _golden(root, tmp_path)[0].num_requests
     out = _out(tmp_path)
     real_link = os.link
     linked = []
 
     def racing_link(source, target):
         linked.append(os.path.basename(source))
-        _write(out, b"winner")
+        real_link(winner_out, target)  # another process published first
         return real_link(source, target)
 
     monkeypatch.setattr(os, "link", racing_link)
 
     result = cut_window_inprocess(root, START, END, AS_OF, out, max_rows=10**6)
 
-    assert result.reused
-    assert out.read_bytes() == b"winner"
+    assert result == _reused(winner, out)
+    assert out.read_bytes() == winner_out.read_bytes()
     assert temp_file_window_end(linked[0]) == END
     assert _temp_files(out.parent) == []
 
@@ -988,9 +975,9 @@ def test_output_is_deterministic_and_0600_under_any_umask(tmp_path):
     assert stat.S_IMODE(first.stat().st_mode) == 0o600
     with gzip.open(first, "rb") as source:
         assert source.read(1)
-    # No file name or mtime in the gzip header.
+    # A comment (the counts) but no file name or mtime in the gzip header.
     header = first.read_bytes()[:10]
-    assert header[3] & 0x08 == 0
+    assert header[3] == 0x10
     assert header[4:8] == b"\x00\x00\x00\x00"
 
 
@@ -1024,34 +1011,6 @@ def test_segment_changed_between_passes_fails(tmp_path, monkeypatch, change):
     assert caught.value.reason == "window_cut_failed"
     assert not out.exists()
     assert _temp_files(out.parent) == []
-
-
-def test_line_writer_writes_in_order_and_reraises_sink_errors(monkeypatch):
-    monkeypatch.setattr(window_cut, "_WRITE_BUFFER", 8)
-    sink = io.BytesIO()
-    writer = window_cut._LineWriter(sink)
-    for index in range(100):
-        writer.write(f"row {index}")
-    writer.close()
-    assert sink.getvalue() == b"".join(b"row %d\n" % i for i in range(100))
-
-    class FullDisk(io.BytesIO):
-        def write(self, data):
-            raise OSError(28, "No space left on device")
-
-    writer = window_cut._LineWriter(FullDisk())
-    with pytest.raises(OSError, match="No space left"):
-        for index in range(100):
-            writer.write(f"row {index}")
-        writer.close()
-    writer.abort()  # idempotent after a failure
-
-    aborted = io.BytesIO()
-    writer = window_cut._LineWriter(aborted)
-    writer.write("x" * 100)
-    writer.abort()
-    writer.abort()
-    assert writer._thread.is_alive() is False
 
 
 def test_write_failure_is_window_cut_failed_and_leaves_no_files(tmp_path, monkeypatch):
@@ -1129,7 +1088,8 @@ def test_temp_and_segment_names():
     with pytest.raises(ValueError):
         temp_file_name(5, "../x")
     assert segment_index("req.000042.jsonl.gz") == 42
-    assert segment_index("req.1000000.jsonl") == 1_000_000
+    assert segment_index("req.1000000.jsonl.gz") == 1_000_000
+    assert segment_index("req.000042.jsonl") is None
     assert segment_index("req.jsonl.gz") is None
 
 

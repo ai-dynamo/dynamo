@@ -6,7 +6,9 @@ DGDR Request garbage collection) and its ``SweepRegistry``."""
 
 from __future__ import annotations
 
+import logging
 import os
+import shutil
 import stat
 import threading
 from collections.abc import Callable
@@ -118,7 +120,7 @@ class FakeKube:
         job_pods: int = 0,
         job_pod_phase: Optional[str] = None,
         claim: str = "traces",
-        path: Optional[str] = None,
+        sub_path: Optional[str] = None,
         generation: int = 1,
     ) -> None:
         labels = {LABEL_DGD: DGD.name, LABEL_WINDOW: str(window)}
@@ -184,11 +186,10 @@ class FakeKube:
             "spec": {
                 "workload": {
                     "trace": {
-                        "format": "dynamo",
                         "source": {
-                            "pvc": {
+                            "persistentVolumeClaim": {
                                 "claimName": claim,
-                                "path": path or f"windows/dgd/{window}.jsonl.gz",
+                                "subPath": sub_path or f"windows/dgd/{window}.jsonl.gz",
                             }
                         },
                     }
@@ -423,8 +424,9 @@ def test_a_failing_sink_check_keeps_the_segment_counts(tmp_path: Path) -> None:
 def test_only_the_top_level_segments_of_a_live_pod_are_collected(
     tmp_path: Path,
 ) -> None:
-    # P10 requires the sink's file prefix directly under the pod directory,
-    # so the reconciler does not walk subdirectories of a live pod.
+    # The frontend premise check requires the sink's file prefix directly
+    # under the pod directory, so the reconciler does not walk
+    # subdirectories of a live pod.
     reconciler, _, _ = make(tmp_path)
     pod_dir = Path(reconciler.segments_root) / "fe-0"
     nested = [touch(pod_dir / "sub" / f"req.00000{i}.jsonl.gz", OLD) for i in range(3)]
@@ -596,7 +598,10 @@ def test_a_request_of_another_claim_does_not_reference_the_window(
     path = touch(window_path(reconciler, window), OLD)
     kube.add_request("rt-a", window, state="running", claim="other-claim")
     kube.add_request(
-        "rt-b", window, state="running", path=f"windows/other-dgd/{window}.jsonl.gz"
+        "rt-b",
+        window,
+        state="running",
+        sub_path=f"windows/other-dgd/{window}.jsonl.gz",
     )
     # Both Requests are past their deadline and get deleted anyway; the
     # window had no referrer and is old.
@@ -801,7 +806,9 @@ def deletions(report) -> int:
     )
 
 
-def test_should_continue_is_asked_before_every_delete(tmp_path: Path) -> None:
+def test_should_continue_is_asked_before_every_delete_and_read(
+    tmp_path: Path,
+) -> None:
     reconciler, _ = one_of_each(tmp_path)
     calls: list[int] = []
 
@@ -817,8 +824,33 @@ def test_should_continue_is_asked_before_every_delete(tmp_path: Path) -> None:
     )
 
     assert deletions(report) == 6
-    assert len(calls) == 6
+    # Six deletes, the Request listing and rt-a's Run read.
+    assert len(calls) == 8
     assert not report.stopped
+
+
+@pytest.mark.parametrize(("allowed", "run_reads"), [(2, 1), (4, 3)])
+def test_a_stopped_round_reads_no_more_run_state(
+    tmp_path: Path, allowed: int, run_reads: int
+) -> None:
+    # Each read can wait for its timeout: once the budget has passed or
+    # leadership is lost, neither the Request verdicts (allowed=2: the
+    # listing, then one Run read) nor the window referrers (allowed=4)
+    # read anything more.
+    reconciler, kube, _ = make(tmp_path, keep_requests=10)
+    for k in (4, 5, 6):
+        kube.add_request(f"rt-{k}", window_ms(k), state="completed")
+        touch(window_path(reconciler, window_ms(k)), 10)
+    answers = [True] * allowed
+
+    def should_continue() -> bool:
+        return answers.pop(0) if answers else False
+
+    report = run_once(reconciler, due=window_ms(0), should_continue=should_continue)
+
+    assert report.stopped
+    assert len(kube.get_run_calls) == run_reads
+    assert kube.deleted == [] and report.deleted_windows == ()
 
 
 def test_a_no_from_should_continue_ends_the_round(tmp_path: Path) -> None:
@@ -862,6 +894,41 @@ def test_a_failing_should_continue_ends_the_round(tmp_path: Path) -> None:
     assert deletions(report) == 0
     assert report.stopped
     assert kube.deleted == []
+
+
+def test_persistent_conditions_are_logged_when_they_start(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    reconciler, kube, _ = make(tmp_path, keep_requests=10)
+    current = int((NOW - 60) * 1000)
+    kube.add_request("rt-no-uid", current, dgd_uid=None, state="running")
+    kube.add_request("rt-no-window", current, state="running")
+    del kube.requests["rt-no-window"]["metadata"]["labels"][LABEL_WINDOW]
+    pods = [frontend("fe-0")]
+    sink = Path(reconciler.segments_root) / "fe-0"
+
+    def warnings() -> list[str]:
+        return [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+        ]
+
+    with caplog.at_level(logging.WARNING, logger=Reconciler.__module__):
+        for _ in range(3):
+            run_once(reconciler, due=current, pods=pods)
+        assert len(warnings()) == 3  # fe-0's sink, one per missing label
+        sink.mkdir(parents=True)
+        run_once(reconciler, due=current, pods=pods)
+        shutil.rmtree(sink)  # missing again: a new occurrence
+        run_once(reconciler, due=current, pods=pods)
+        run_once(reconciler, due=current, pods=pods)
+
+    messages = warnings()
+    assert len(messages) == 4
+    assert sum("without a trace directory" in m for m in messages) == 2
+    assert sum(LABEL_DGD_UID in m for m in messages) == 1
+    assert sum(LABEL_WINDOW in m for m in messages) == 1
 
 
 # --------------------------------------------------------------- set_dgd
