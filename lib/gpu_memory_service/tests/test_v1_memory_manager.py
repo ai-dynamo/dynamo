@@ -225,6 +225,7 @@ def test_client_arena_is_sized_from_the_cuda_visible_device(
         va = client.create_mapping(65)
         assert vmm.reservations[va] == 2048
 
+
 @pytest.mark.timeout(10)
 def test_client_slabs_pack_reuse_coalesce_and_remap(tmp_path, monkeypatch) -> None:
     with _connected_client(tmp_path, monkeypatch, slab_size=384) as (client, vmm):
