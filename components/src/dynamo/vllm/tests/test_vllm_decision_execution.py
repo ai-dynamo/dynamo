@@ -3,11 +3,13 @@
 
 """CPU-only tests for the narrowly qualified causal vLLM decision profile."""
 
+import ast
 import builtins
 import importlib
 import json
 from importlib.metadata import PackageNotFoundError
 from inspect import signature
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -489,6 +491,61 @@ def test_import_does_not_load_vllm(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", reject_engine_import)
     importlib.reload(module)
+
+
+def test_dispatch_metadata_has_a_neutral_definition_owner():
+    policy = importlib.import_module("dynamo.vllm.decision_runtime_policy")
+    dispatch = importlib.import_module("dynamo.vllm.decision_dispatch")
+    causal = importlib.import_module("dynamo.vllm.decision_execution")
+    surface = importlib.import_module("dynamo.vllm.decision_surface")
+    assert dispatch.DECISION_DISPATCH_METADATA_KEY == "dynamo.internal.decision"
+    assert "DECISION_DISPATCH_METADATA_KEY" not in vars(policy)
+    assert "DecisionDispatcher" not in vars(policy)
+    assert "DECISION_DISPATCH_METADATA_KEY" not in vars(causal)
+    assert "DECISION_DISPATCH_METADATA_KEY" not in vars(surface)
+    assert (
+        surface.NativeDecisionSurface.maybe_handle
+        is dispatch.DecisionDispatcher.maybe_handle
+    )
+
+
+def test_shared_runtime_policy_has_a_neutral_definition_owner():
+    policy = importlib.import_module("dynamo.vllm.decision_runtime_policy")
+    causal = importlib.import_module("dynamo.vllm.decision_execution")
+    tree = ast.parse(Path(causal.__file__).read_text())
+    definitions = {node.name for node in tree.body if isinstance(node, ast.FunctionDef)}
+    shared = {"is_exact_vllm_release", "pinned_default_scheduler", "qualified_runtime"}
+    assert not definitions & (shared | {"supports_decision_generation"})
+    assert not any(
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and (
+            "DiffusionScheduler" in node.value
+            or "DiffusionAsyncScheduler" in node.value
+            or node.value == "pooling"
+        )
+        for node in ast.walk(tree)
+    )
+    for name in shared:
+        assert getattr(policy, name).__module__ == policy.__name__
+    for owner, names in {
+        "decision_native_loader": {"is_exact_vllm_release"},
+        "decision_heads": {"qualified_runtime"},
+        "decision_reads": {"qualified_runtime"},
+    }.items():
+        module = importlib.import_module(f"dynamo.vllm.{owner}")
+        imports = {
+            alias.name
+            for node in ast.parse(Path(module.__file__).read_text()).body
+            if isinstance(node, ast.ImportFrom)
+            and node.module == "decision_runtime_policy"
+            for alias in node.names
+        }
+        assert imports >= names
+    lifecycle = importlib.import_module("dynamo.vllm.decision_native_lifecycle")
+    assert "pinned_default_scheduler" not in vars(lifecycle)
+    registry = importlib.import_module("dynamo.vllm.decision_native_registry")
+    assert registry.supports_decision_generation.__module__ == registry.__name__
 
 
 def test_neutral_runtime_policy_import_does_not_load_an_optional_backend(monkeypatch):
