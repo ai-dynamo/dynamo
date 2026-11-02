@@ -17,10 +17,6 @@ native gRPC API.
 
 ## Backend Support Matrix
 
-This table describes OpenAI-compatible chat/completions through the Dynamo frontend and its standard sidecar generation path. It was source-reviewed at [Dynamo revision 318ab03](https://github.com/ai-dynamo/dynamo/tree/318ab0390d8e3e1fa7517ea6a1ebf46a7854c236) on November 2, 2026; no GPU validation was performed for this inventory. All sidecars remain experimental. Use the engine versions in the linked sidecar guides; released versions can differ.
-
-Compare with the in-process feature matrices for [vLLM](../../modular-components/backends/vllm/overview.md#feature-support-matrix), [SGLang](../../modular-components/backends/sglang/overview.md#feature-support-matrix), and [TensorRT-LLM](../../modular-components/backends/tensorrt-llm/overview.md#feature-support-matrix). The main sidecar gaps concern engine input/adapter coverage, planner telemetry, and operator-managed GMS, checkpointing, and failover.
-
 **Legend:** Supported = implemented through the stated path; Limited = a known missing capability, explained below; Engine-configured = enabled inside the native engine; No = unavailable through the stated path. **Not validated** describes runtime evidence, not feature support: model and feature combinations without end-to-end evidence are not certified by this table.
 
 | Capability | vLLM | SGLang | TensorRT-LLM |
