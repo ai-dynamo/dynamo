@@ -4,9 +4,16 @@
 use dynamo_runtime::error::ErrorClass;
 
 use super::{
-    super::{error, metrics},
+    super::{decision_lifecycle, error, metrics},
     DispatchError,
 };
+
+pub(super) fn lifecycle_error(cause: decision_lifecycle::OperationError) -> DispatchError {
+    match cause {
+        decision_lifecycle::OperationError::Cancelled => DispatchError::cancelled(),
+        decision_lifecycle::OperationError::Backend(cause) => classify(cause.as_ref()),
+    }
+}
 
 pub(super) fn classify(cause: &(dyn std::error::Error + 'static)) -> DispatchError {
     if metrics::request_was_cancelled(cause) {
@@ -15,7 +22,7 @@ pub(super) fn classify(cause: &(dyn std::error::Error + 'static)) -> DispatchErr
     if metrics::request_was_rejected(cause) {
         return DispatchError {
             status: error::overload_status_code(),
-            public_message: "SGLang scoring worker capacity is exhausted",
+            public_message: "decision scoring worker capacity is exhausted",
             detail: "backend capacity exhausted".to_string(),
             retry_after: true,
             is_capacity_exhausted: true,
@@ -30,12 +37,17 @@ pub(super) fn classify(cause: &(dyn std::error::Error + 'static)) -> DispatchErr
             public_message,
         } = error::http_action_for_error(error)
         {
+            let class = error.class().normalized();
             return DispatchError {
-                status,
+                status: if class == ErrorClass::InvalidRequest {
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY
+                } else {
+                    status
+                },
                 public_message,
                 detail: error.reason().as_str().to_string(),
-                retry_after: error.class() == ErrorClass::CapacityExhausted,
-                is_capacity_exhausted: error.class() == ErrorClass::CapacityExhausted,
+                retry_after: class == ErrorClass::CapacityExhausted,
+                is_capacity_exhausted: class == ErrorClass::CapacityExhausted,
             };
         }
     }

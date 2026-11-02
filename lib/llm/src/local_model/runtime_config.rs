@@ -201,7 +201,7 @@ pub const VLLM_LIQUID_DECISION_V1: &str = "vllm_liquid_decision_v1";
 pub const VLLM_DIFFUSION_DECISION_V1: &str = "vllm_diffusion_canvas_decision_v1";
 
 pub(crate) use crate::model_card::decision_profile::{
-    DecisionExecutionProfile, DecisionProfileKind,
+    DecisionExecutionProfile, DecisionProfileKind, TokenBackend,
 };
 
 pub(crate) const VLLM_NATIVE_DECISION_MAX_CANDIDATES: &str = "vllm_native_decision_max_candidates";

@@ -29,11 +29,12 @@ mod preflight;
 mod http;
 
 use super::{
-    Placement, PreparedBranch, StartedBranch, add_input_tokens, bind_native, dispatch,
-    finish_branch, pin_to_placement, prepare_branches, resolve_dp_rank,
+    Placement, PreparedBranch, ScoringBranch, StartedBranch, add_input_tokens, bind_native,
+    dispatch, pin_to_placement, prepare_branches, resolve_dp_rank,
 };
 use crate::{
     discovery::SystemOneExecutionSelection,
+    local_model::runtime_config::TokenBackend,
     model_card::ModelDeploymentCard,
     preprocessor::OpenAIPreprocessor,
     protocols::{
@@ -59,7 +60,7 @@ fn cumulative_input_limit_is_checked_without_overflow() {
 fn placement_pin_sets_both_worker_and_rank() {
     crate::generate_format::test_formats::install();
     let native = build_native_score_request(&[1], &[2], "test-salt").unwrap();
-    let mut preprocessed = bind_native("test-model", 16, &native, "request-1")
+    let mut preprocessed = bind_native("sglang", "test-model", 16, &native, "request-1")
         .unwrap()
         .request;
     pin_to_placement(
@@ -75,15 +76,21 @@ fn placement_pin_sets_both_worker_and_rank() {
 }
 
 fn prepared_noul_branch(index: usize) -> PreparedBranch {
+    prepared_noul_branch_with_salt(index, "fixture")
+}
+
+fn prepared_noul_branch_with_salt(index: usize, cache_salt: &str) -> PreparedBranch {
     let prompt_ids = vec![1, 2];
     let label_ids = vec![17 + index as u32 * 100, 4 + index as u32 * 100];
-    let native = build_native_score_request(&prompt_ids, &label_ids, "validation").unwrap();
+    let native = build_native_score_request(&prompt_ids, &label_ids, cache_salt).unwrap();
     PreparedBranch {
-        index,
-        temperature: 1.0,
-        prompt_ids,
-        label_ids,
-        native: Some(native),
+        scoring: ScoringBranch {
+            index,
+            temperature: 1.0,
+            prompt_len: prompt_ids.len(),
+            label_ids,
+        },
+        wire: super::PreparedScoringRequest::Sglang(Box::new(native)),
     }
 }
 
@@ -93,12 +100,13 @@ fn started_branch(
     stream: ManyOut<Annotated<LLMEngineOutput>>,
 ) -> StartedBranch {
     crate::generate_format::test_formats::install();
-    let native = build_native_score_request(&prepared.prompt_ids, &prepared.label_ids, "salt");
-    let exchange = bind_native("test-model", 16, &native.unwrap(), "branch-0")
+    let exchange = prepared
+        .wire
+        .compile("test-model", 16, "branch-0")
         .unwrap()
         .exchange;
     StartedBranch {
-        prepared,
+        prepared: prepared.scoring,
         tracker,
         stream,
         exchange,
@@ -134,7 +142,8 @@ async fn finish_branch_parses_terminal_scores_and_tracker_placement() {
         Context::new(()).context(),
     );
     let parent = Context::new(());
-    let result = finish_branch(
+    let result = super::token_scorer::finish_branch(
+        TokenBackend::Sglang,
         started_branch(prepared_noul_branch(0), tracker, stream),
         0,
         4,
@@ -153,6 +162,37 @@ async fn finish_branch_parses_terminal_scores_and_tracker_placement() {
     ));
 }
 
+#[test]
+fn sglang_scoring_preprocessing_preserves_exact_tracker_isl() {
+    let selected = selection(TestEngine::new(EngineBehavior::Success));
+    let request =
+        super::token_scorer::PreparedScoringRequest::sglang(vec![1, 2, 3], &[17, 4], "isolated")
+            .unwrap();
+    let preprocessed = request
+        .compile(
+            &selected.canonical_model,
+            selected.card.kv_cache_block_size,
+            "isl-regression",
+        )
+        .unwrap()
+        .request;
+    let tracker = preprocessed
+        .tracker
+        .as_ref()
+        .expect("canonical preprocessor tracker");
+    assert_eq!(preprocessed.token_ids.as_slice(), &[1, 2, 3]);
+    assert_eq!(tracker.isl_tokens(), Some(3));
+    assert_eq!(tracker.cached_tokens(), None);
+    assert_eq!(
+        preprocessed
+            .routing
+            .as_ref()
+            .unwrap()
+            .expected_output_tokens,
+        Some(0)
+    );
+}
+
 #[tokio::test]
 async fn finish_branch_stops_when_parent_is_cancelled() {
     let tracker = Arc::new(RequestTracker::new());
@@ -164,7 +204,8 @@ async fn finish_branch_stops_when_parent_is_cancelled() {
     let parent = Context::new(());
     let parent_context = parent.context();
     parent_context.kill();
-    let result = finish_branch(
+    let result = super::token_scorer::finish_branch(
+        TokenBackend::Sglang,
         started_branch(prepared_noul_branch(0), tracker, stream),
         0,
         1,
@@ -185,7 +226,8 @@ async fn cancelled_stream_completion_is_not_a_malformed_response() {
         stream_parent.kill();
         std::task::Poll::Ready(None::<Annotated<LLMEngineOutput>>)
     });
-    let result = finish_branch(
+    let result = super::token_scorer::finish_branch(
+        TokenBackend::Sglang,
         started_branch(
             prepared_noul_branch(0),
             Arc::new(RequestTracker::new()),
@@ -239,18 +281,33 @@ struct TestEngine {
     started: Notify,
     sibling_started: Notify,
     admissions: Option<tokio::sync::watch::Sender<Vec<u64>>>,
+    frame: fn(&PreprocessedRequest) -> (Value, Annotated<LLMEngineOutput>),
 }
 
 impl TestEngine {
     fn new(behavior: EngineBehavior) -> Arc<Self> {
+        Self::with_frame(behavior, sglang_frame)
+    }
+    fn with_frame(
+        behavior: EngineBehavior,
+        frame: fn(&PreprocessedRequest) -> (Value, Annotated<LLMEngineOutput>),
+    ) -> Arc<Self> {
         Arc::new(Self {
             behavior,
             observations: Mutex::new(Vec::new()),
             started: Notify::new(),
             sibling_started: Notify::new(),
             admissions: None,
+            frame,
         })
     }
+}
+
+fn sglang_frame(request: &PreprocessedRequest) -> (Value, Annotated<LLMEngineOutput>) {
+    let native = request.extra_args.as_ref().unwrap()["sglang_tito"].clone();
+    let labels: Vec<u32> = serde_json::from_value(native["token_ids_logprob"].clone()).unwrap();
+    let terminal = terminal_output(&labels);
+    (native, terminal)
 }
 
 #[async_trait]
@@ -262,9 +319,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let index: usize = request.id().rsplit('-').next().unwrap().parse().unwrap();
-        let native = request.extra_args.as_ref().unwrap()["sglang_tito"].clone();
-        let label_ids: Vec<u32> =
-            serde_json::from_value(native["token_ids_logprob"].clone()).unwrap();
+        let (native, terminal) = (self.frame)(&request);
         let stream_context = Context::new(()).context();
         self.observations.lock().unwrap().push(ObservedBranch {
             index,
@@ -419,7 +474,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             }
         }
         Ok(ResponseStream::new(
-            Box::pin(stream::iter([terminal_output(&label_ids)])),
+            Box::pin(stream::iter([terminal])),
             stream_context,
         ))
     }
@@ -483,9 +538,12 @@ async fn dispatch_request(
         .acquire_many_owned(branch_count as u32)
         .await
         .unwrap();
+    let cache_salt = super::fresh_cache_salt();
     let response = dispatch(
         selection(engine),
-        (0..branch_count).map(prepared_noul_branch).collect(),
+        (0..branch_count)
+            .map(|index| prepared_noul_branch_with_salt(index, &cache_salt))
+            .collect(),
         request_id.to_string(),
         parent.clone(),
         permit,
