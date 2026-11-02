@@ -81,15 +81,12 @@ impl VllmClient {
 
     /// Wait until each service reports SERVING. A draining or stalled engine
     /// leaves calls hanging, so each check is retried after `attempt_timeout`.
-    /// On a reconnect, an unregistered service is retried too: vLLM removes its
-    /// health services just before its listener closes.
     pub(crate) async fn wait_for_services(
         &self,
         services: &[&str],
         startup_deadline: Instant,
         retry_interval: Duration,
         attempt_timeout: Duration,
-        is_reconnect: bool,
     ) -> Result<(), DynamoError> {
         for service in services {
             self.wait_for_service(
@@ -97,7 +94,7 @@ impl VllmClient {
                 startup_deadline,
                 retry_interval,
                 attempt_timeout,
-                Unregistered::on_connect(is_reconnect),
+                Unregistered::Fatal,
             )
             .await?;
         }

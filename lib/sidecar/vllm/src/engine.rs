@@ -1604,7 +1604,6 @@ async fn bootstrap_discover(
             startup_deadline,
             transport.retry_interval,
             transport.connect_attempt_timeout,
-            false,
         )
         .await?;
     let (model, server) = client.discover(startup_deadline).await?;
