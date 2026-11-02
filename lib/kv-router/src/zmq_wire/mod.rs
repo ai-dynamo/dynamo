@@ -22,9 +22,9 @@ mod convert;
 mod deserialize;
 mod extra_keys;
 mod filter;
-mod mm_labels;
+mod mm_exclusion;
 #[cfg(test)]
-mod mm_labels_tests;
+mod mm_exclusion_tests;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -38,7 +38,6 @@ pub use extra_keys::{
     mark_mm_hash_for_extra_key, parse_mm_hash_from_extra_key,
 };
 pub use filter::KvCacheSpecKind;
-pub use mm_labels::EngineMmStats;
 pub use types::{
     BlockHashValue, ExtraKeyItem, KvEventBatch, KvEventOwnership, KvTokenIds, Locality, RawKvEvent,
     WIDE_TOKEN_SENTINEL,
@@ -86,8 +85,8 @@ pub struct ZmqEventNormalizer {
     group_metadata: FxHashMap<(DpRank, u32), KvCacheGroupMetadata>,
     cache_namespaces: FxHashMap<(WorkerWithDpRank, u64), CacheNamespaceState>,
     /// Exclusion of multimodal values the request side cannot reproduce. See
-    /// `mm_labels` and [`Self::with_engine_owned_mm_identity`].
-    engine_mm: mm_labels::EngineMmState,
+    /// `mm_exclusion` and [`Self::with_engine_owned_mm_identity`].
+    engine_mm: mm_exclusion::EngineMmState,
     /// Workers that have published at least one full-size block. Once a worker
     /// has proven its block size matches, a smaller `BlockStored` event is a
     /// partial tail (vLLM `--prefix-match-unit` below the block size), not a
@@ -149,7 +148,7 @@ impl ZmqEventNormalizer {
             warning_count: Arc::new(AtomicU32::new(0)),
             group_metadata: FxHashMap::default(),
             cache_namespaces: FxHashMap::default(),
-            engine_mm: mm_labels::EngineMmState::new(false),
+            engine_mm: mm_exclusion::EngineMmState::new(false),
             full_block_workers: FxHashSet::default(),
         }
     }
@@ -162,7 +161,7 @@ impl ZmqEventNormalizer {
             warning_count,
             group_metadata: FxHashMap::default(),
             cache_namespaces: FxHashMap::default(),
-            engine_mm: mm_labels::EngineMmState::new(false),
+            engine_mm: mm_exclusion::EngineMmState::new(false),
             full_block_workers: FxHashSet::default(),
         }
     }
@@ -172,21 +171,17 @@ impl ZmqEventNormalizer {
     /// `MM_PAD_SHIFT_VALUE` is excluded with the blocks chained after it.
     /// Unflagged sources exclude only values that did not fit in `u32`.
     pub fn with_engine_owned_mm_identity(mut self, enabled: bool) -> Self {
-        self.engine_mm = mm_labels::EngineMmState::new(enabled);
+        self.engine_mm = mm_exclusion::EngineMmState::new(enabled);
         self
     }
 
     #[cfg(test)]
     pub(crate) fn with_engine_mm_excluded_capacity(mut self, excluded_capacity: usize) -> Self {
-        self.engine_mm = mm_labels::EngineMmState::with_excluded_capacity(
+        self.engine_mm = mm_exclusion::EngineMmState::with_excluded_capacity(
             self.engine_mm.engine_owned(),
             excluded_capacity,
         );
         self
-    }
-
-    pub fn engine_mm_stats(&self) -> &EngineMmStats {
-        &self.engine_mm.stats
     }
 
     /// Set the model's image placeholder token id so vLLM BlockStored events

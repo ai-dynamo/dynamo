@@ -32,16 +32,6 @@ const DEFAULT_EXCLUDED_CAPACITY: usize = 1 << 20;
 
 type Key = (WorkerWithDpRank, StorageTier, u64);
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct EngineMmStats {
-    /// Blocks dropped because their hashed tokens hold multimodal values.
-    pub excluded_unmapped: u64,
-    /// Blocks dropped because their parent was excluded or exclusion state overflowed.
-    pub excluded_parent: u64,
-    /// Exclusion entries not recorded because the set was full.
-    pub excluded_overflow: u64,
-}
-
 #[derive(Debug, Clone)]
 pub(super) struct EngineMmState {
     engine_owned: bool,
@@ -49,7 +39,6 @@ pub(super) struct EngineMmState {
     excluded_capacity: usize,
     /// One latch per affected source worker/rank, independent of its block count.
     overflowed_workers: FxHashSet<WorkerWithDpRank>,
-    pub(super) stats: EngineMmStats,
 }
 
 impl EngineMmState {
@@ -59,7 +48,6 @@ impl EngineMmState {
             excluded: FxHashSet::default(),
             excluded_capacity: DEFAULT_EXCLUDED_CAPACITY,
             overflowed_workers: FxHashSet::default(),
-            stats: EngineMmStats::default(),
         }
     }
 
@@ -85,6 +73,7 @@ impl EngineMmState {
 
     /// Cut the store at the first block whose hashed tokens hold a multimodal
     /// value. Returns `false` when nothing in the store may be indexed.
+    /// Duplicate checks leave the store untouched so conversion can log it.
     pub(super) fn prepare_store(
         &mut self,
         raw: &mut RawKvEvent,
@@ -104,7 +93,6 @@ impl EngineMmState {
         };
 
         if parent_block_hash.is_some() && self.overflowed_workers.contains(&worker) {
-            self.stats.excluded_parent += block_hashes.len() as u64;
             // This may repeat a text store indexed before overflow. Do not mark
             // its ids excluded: its eventual removal must still reach the index.
             return false;
@@ -115,9 +103,8 @@ impl EngineMmState {
             && self.excluded.contains(&(worker, tier, parent))
         {
             if has_duplicate_block_hashes(block_hashes, *parent_block_hash) {
-                return false;
+                return true;
             }
-            self.stats.excluded_parent += block_hashes.len() as u64;
             for hash in block_hashes.iter() {
                 self.exclude((worker, tier, hash.into_u64()));
             }
@@ -140,9 +127,8 @@ impl EngineMmState {
             // Validate before truncation can hide a repeated text id and mark
             // it excluded, which would suppress that text block's eviction.
             if has_duplicate_block_hashes(block_hashes, *parent_block_hash) {
-                return false;
+                return true;
             }
-            self.stats.excluded_unmapped += (block_hashes.len() - block_idx) as u64;
             for hash in block_hashes.drain(block_idx..) {
                 self.exclude((worker, tier, hash.into_u64()));
             }
@@ -180,16 +166,13 @@ impl EngineMmState {
     fn exclude(&mut self, key: Key) {
         if self.excluded.len() < self.excluded_capacity {
             self.excluded.insert(key);
-        } else if !self.excluded.contains(&key) {
-            self.stats.excluded_overflow += 1;
-            if self.overflowed_workers.insert(key.0) {
-                tracing::warn!(
-                    worker_id = key.0.worker_id,
-                    dp_rank = key.0.dp_rank,
-                    capacity = self.excluded_capacity,
-                    "Multimodal exclusion state is full; accepting only root stores until cache clear"
-                );
-            }
+        } else if !self.excluded.contains(&key) && self.overflowed_workers.insert(key.0) {
+            tracing::warn!(
+                worker_id = key.0.worker_id,
+                dp_rank = key.0.dp_rank,
+                capacity = self.excluded_capacity,
+                "Multimodal exclusion state is full; accepting only root stores until cache clear"
+            );
         }
     }
 }

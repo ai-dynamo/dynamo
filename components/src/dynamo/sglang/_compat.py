@@ -385,6 +385,8 @@ def sglang_has_wide_mm_pad_values() -> bool:
 
     Both caller hashes and engine-owned identities produce wide values.
     """
+    # Compatibility with SGLang <= 0.5.22. Remove the probe once the minimum
+    # supported CUDA and XPU SGLang versions are both 0.5.23+.
     try:
         # Deferred: schedule_batch imports torch and other SGLang runtime modules.
         from sglang.srt.managers.schedule_batch import MultimodalDataItem
