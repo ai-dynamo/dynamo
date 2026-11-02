@@ -3349,7 +3349,9 @@ func DetectBackendFrameworkFromArgs(command []string, args []string) (BackendFra
 	}
 
 	if len(detected) > 1 {
-		return "", fmt.Errorf("multiple backend frameworks detected from command: %v in %q", detected, fullCommand)
+		// The error can surface in admission responses, so it names the
+		// detected frameworks but never echoes the container command.
+		return "", fmt.Errorf("multiple backend frameworks detected from command: %v", detected)
 	}
 
 	return detected[0], nil
