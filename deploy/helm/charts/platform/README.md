@@ -189,7 +189,10 @@ release tags and requires the pinned version or later.
 bundled Grove, replacing `grove.crdInstaller.enabled`. The API server must be able
 to reach Grove's conversion webhook. Read the
 [Grove upgrade and downgrade guide](https://github.com/ai-dynamo/grove/blob/v0.2.0-beta1/docs/user-guide/upgrading-to-v1beta1-v0.2.0-beta1.md)
-before upgrading; rollback requires migrating stored resources back to `v1alpha1`.
+before upgrading. Run the downgrade migration back to `v1alpha1` while the
+`v0.2.0-beta1` operator is still running, then roll back to Grove
+`v0.1.0-alpha.16`, rather than the previously bundled `v0.1.0-alpha.15`.
+Earlier CRDs can drop fields written by newer releases.
 
 **Existing deployments:** Grove converts existing alpha resources without requiring
 manifest changes. An unset clique or scaling-group `scaleConfig.minReplicas` now
