@@ -10,23 +10,9 @@ each can be built and tested with fakes.
 
 from __future__ import annotations
 
-import threading
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional, Protocol
-
-# The eight builtin default-policy parameters a frontend router exposes on
-# GET/PATCH /router_policy, by their live (PATCH) names.
-POLICY_PARAMETER_KEYS: tuple[str, ...] = (
-    "decode_active_request_weight",
-    "disk_cache_hit_weight",
-    "host_cache_hit_weight",
-    "overlap_score_credit",
-    "overlap_score_credit_decay",
-    "prefill_load_scale",
-    "router_temperature",
-    "shared_cache_multiplier",
-)
 
 # Router knobs a DGDR v1beta2 Request can search, AISimulate public name ->
 # live name. ``dynamo.router.simulation.config.ROUTER_PUBLIC_TO_LIVE`` is the
@@ -62,34 +48,6 @@ RUN_UID_LABEL = "nvidia.com/dgdr-run-uid"
 # controller rewinds so the window can be relaunched or adopted by the next
 # leader.
 NON_DECISION_FAILURES = frozenset({"shutdown", "lost_leadership"})
-
-GateReason = Literal["not_leader", "not_ready", "already_decided"]
-
-
-# --------------------------------------------------------------- controller
-
-
-@dataclass(frozen=True)
-class GateResult:
-    """What ``launch_gate`` tells the controller about a due window.
-
-    ``reason`` is ``None`` to let the window launch (or record ``busy``).
-    ``not_leader``/``not_ready`` keep ``_last_k`` so the window is retried on
-    a later tick; ``already_decided`` advances it without a decision.
-    ``spec_replicas`` (worker type -> DGD spec replicas) and ``abort`` (set
-    by the supervisor when this process stops leading) are only meaningful
-    when ``reason`` is ``None``.
-    """
-
-    reason: Optional[GateReason] = None
-    spec_replicas: Optional[dict[str, int]] = None
-    abort: Optional[threading.Event] = None
-
-
-# (k, (window_start_s, window_end_s, as_of_s)) -> GateResult
-LaunchGate = Callable[[int, tuple[float, float, float]], GateResult]
-# controller generation of the sweep's controller -> may it be harvested?
-HarvestAllowed = Callable[[int], bool]
 
 
 # ------------------------------------------------------------ kubernetes
@@ -150,9 +108,6 @@ class RetuneKube(Protocol):
 
     namespace: str
 
-    def get_dgd(self, name: str, *, timeout_s: float = 10.0) -> dict:
-        ...
-
     def list_pods(
         self, label_selector: str, *, timeout_s: float = 10.0
     ) -> list[PodInfo]:
@@ -194,19 +149,6 @@ class RetuneKube(Protocol):
     ) -> list[dict]:
         ...
 
-    def get_lease(self, name: str, *, timeout_s: float = 10.0) -> Optional[dict]:
-        ...
-
-    def create_lease(self, body: dict, *, timeout_s: float = 10.0) -> dict:
-        ...
-
-    def replace_lease(self, name: str, body: dict, *, timeout_s: float = 10.0) -> dict:
-        """Update with ``body['metadata']['resourceVersion']``; 409 -> KubeConflict."""
-        ...
-
-    def delete_lease(self, name: str, *, timeout_s: float = 10.0) -> None:
-        ...
-
 
 # ------------------------------------------------------- frontend config
 
@@ -244,94 +186,6 @@ class PremiseReport:
     reasons: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
     startup: Optional[FrontendStartup] = None
-
-
-# ---------------------------------------------------------- router policy
-
-
-@dataclass(frozen=True)
-class RouterInfo:
-    """One router on GET /router_policy."""
-
-    router_id: str
-    namespace: str
-    worker_type: str
-    revision: int
-    # The 8 PolicyParameters; None for a custom policy without runtime config.
-    configuration: Optional[dict[str, float]]
-    model: Optional[str] = None
-
-
-@dataclass(frozen=True)
-class PolicyCallResult:
-    """Outcome of one GET or PATCH. ``status`` is the HTTP status (0 on a
-    network error or timeout)."""
-
-    status: int
-    routers: tuple[RouterInfo, ...] = ()  # GET
-    router: Optional[RouterInfo] = None  # PATCH/reset response, when 200
-    error: Optional[str] = None
-
-
-class RouterPolicyClient(Protocol):
-    async def get(self, pod: PodInfo) -> PolicyCallResult:
-        ...
-
-    async def patch(
-        self,
-        pod: PodInfo,
-        router_id: str,
-        expected_revision: int,
-        parameters: Mapping[str, float],
-    ) -> PolicyCallResult:
-        ...
-
-    async def reset(
-        self, pod: PodInfo, router_id: str, expected_revision: int
-    ) -> PolicyCallResult:
-        """PATCH ``{router_id, expected_revision, reset: true}``."""
-        ...
-
-
-ActuationMode = Literal["apply", "rollback", "observe"]
-
-
-@dataclass(frozen=True)
-class ActuationTarget:
-    """What one actuator round converges to.
-
-    ``apply``: PATCH explicit values so every router's 8 parameters equal
-    ``desired_by_wt[worker_type]``. ``rollback``: reset every router whose
-    configuration differs from its latched initial (never by revision).
-    ``observe``: no writes; latch initials and check parity only.
-    ``include_not_ready`` also targets NotReady, non-terminating pods.
-    ``learn_unknown`` lets the actuator reset a router whose initial was
-    never latched (revision > 0) once to learn it; that is active mode only.
-    With False (advisory) such a router is never written: rollback
-    leaves it alone and does not wait for it to converge.
-    """
-
-    mode: ActuationMode
-    desired_by_wt: Optional[dict[str, dict[str, float]]] = None
-    include_not_ready: bool = False
-    learn_unknown: bool = True
-
-
-@dataclass(frozen=True)
-class ActuationReport:
-    converged: bool
-    # router_id -> configuration latched this round (revision 0 or reset).
-    new_initials: dict[str, dict[str, float]] = field(default_factory=dict)
-    # router_ids seen this round (to prune stale initials).
-    seen_router_ids: frozenset[str] = frozenset()
-    # P14: every known initial equals startup_maps[worker_type].
-    parity_ok: Optional[bool] = None
-    parity_mismatches: tuple[str, ...] = ()
-    admin_api_disabled: bool = False
-    errors: dict[str, int] = field(default_factory=dict)  # by status code / kind
-    # P12: enough Ready frontends, each with a configured router for every
-    # worker type, whatever their values. Gates launches; convergence does not.
-    routers_present: Optional[bool] = None
 
 
 # ----------------------------------------------------------- reconciler
@@ -445,34 +299,3 @@ class RetuneMetricsSink(Protocol):
 
     def dropped_members(self, count: int) -> None:
         ...
-
-
-class NullMetrics:
-    """A ``RetuneMetricsSink`` that records nothing (tests, disabled metrics)."""
-
-    def decision(self, outcome: str) -> None:
-        pass
-
-    def failure(self, reason: str) -> None:
-        pass
-
-    def skipped(self, reason: str) -> None:
-        pass
-
-    def supervisor_state(self, **_: Any) -> None:
-        pass
-
-    def scores(self, **_: Any) -> None:
-        pass
-
-    def router_converged(self, converged: bool) -> None:
-        pass
-
-    def patch_error(self, code: str) -> None:
-        pass
-
-    def trace_sink_missing(self, pod: str, missing: bool) -> None:
-        pass
-
-    def dropped_members(self, count: int) -> None:
-        pass
