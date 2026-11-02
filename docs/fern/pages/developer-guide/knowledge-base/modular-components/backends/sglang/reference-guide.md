@@ -176,6 +176,10 @@ Dynamo parses and resolves the complete route list during worker startup. Startu
 > [!WARNING]
 > Treat each configured descriptor as remote administrative access to that SGLang method. Expose only the required allowlist and restrict network access to the Dynamo system server.
 
+## Decision Rollout Compatibility
+
+**Experimental.** Optional System One qualification does not exclude otherwise-compatible workers from ordinary serving. If at least one worker is qualified but its peers disagree or lack qualification, decisions are temporarily unavailable for the whole cohort and return a retryable 503, rather than routing to a healthy subset; ordinary generation remains available. Decision availability returns when the cohort is uniformly qualified. Cohorts with no valid qualification remain unsupported and return 400. This changes the former serial-eligibility partitioning behavior, so qualify every cohort member before relying on decision availability. This policy concerns Dynamo's OpenAI Decisions and Jev/System One routes, not a SGLang-native public request format.
+
 ## See Also
 
 - **[Examples](../../../../../recipes/cli-templates/sglang.mdx)**: Local deployment launch scripts
