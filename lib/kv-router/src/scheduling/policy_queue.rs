@@ -3,6 +3,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap};
+use std::time::Duration;
 
 use tokio::time::Instant;
 
@@ -37,12 +38,20 @@ impl QueueSnapshot {
     }
 }
 
+/// Queue inputs resolved once per admission attempt, after its final policy class is known.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct QueueMetadata {
-    pub(crate) class_index: usize,
-    pub(crate) snapshot: QueueSnapshot,
-    pub(crate) due_at: Option<Instant>,
-    pub(crate) arrival_offset_secs: f64,
+pub struct QueueMetadata {
+    pub class_index: usize,
+    pub snapshot: QueueSnapshot,
+    /// Trusted explicit deadline. Every queue policy orders by it ahead of the policy score,
+    /// and it is the only due time indexed for expiry.
+    pub due_at: Option<Instant>,
+    /// Router ingress plus the class's `slo_ttft_ms`, from
+    /// [`PolicyClassConfig::slo_ttft_due_at`]. Only an EDF class orders by it, and only for a
+    /// request without `due_at`; it never expires.
+    pub class_due_at: Option<Instant>,
+    /// Seconds from the queue's arrival origin to router ingress. FCFS and LCFS order by it.
+    pub arrival_offset_secs: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,18 +94,115 @@ pub struct PolicyQueueStats {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct QueuePriority {
     strict_priority: u32,
-    due_time_key: u64,
+    /// `DueKey::low` of the ordering due time. Bit 31 (`EXPIRES`) marks an explicit deadline,
+    /// indexed in `due_entries` for expiry; it never orders, because an EDF class also orders
+    /// by class due times, which never expire. The key's words are stored flat so the priority
+    /// stays 24 bytes and an entry stays within one cache line.
+    due_low: u32,
+    /// `DueKey::high` of the ordering due time.
+    due_high: i64,
     policy_score: OrderedFloat<f64>,
 }
 
-const NO_DUE_TIME: u64 = u64::MAX;
+impl QueuePriority {
+    #[inline]
+    fn due(self) -> DueKey {
+        DueKey {
+            high: self.due_high,
+            low: self.due_low & !EXPIRES,
+        }
+    }
+
+    #[inline]
+    fn expires(self) -> bool {
+        self.due_low & EXPIRES != 0
+    }
+}
+
+/// Marks an explicit deadline in `QueuePriority::due_low`.
+const EXPIRES: u32 = 1 << 31;
+/// The lowest bit of the offset's whole seconds, in `DueKey::low` above the nanoseconds.
+const SECS_LOW_BIT: u32 = 1 << 30;
+const NANOS_MASK: u32 = SECS_LOW_BIT - 1;
+const NANOS_PER_SEC: u32 = 1_000_000_000;
+
+/// A due time's exact offset from the queue's fixed origin: whole seconds, floored, and the
+/// nanoseconds after them. Any two representable instants differ by less than 2^64 seconds, so
+/// the seconds take 65 signed bits: `high` holds all but the lowest, and `low` holds that bit
+/// (`SECS_LOW_BIT`) above the 30-bit nanoseconds. `(high, low)` therefore orders exactly as the
+/// due times do, for every representable instant, with no horizon or clamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct DueKey {
+    high: i64,
+    low: u32,
+}
+
+impl DueKey {
+    /// An absent due time, after every finite one: a finite `low` is at most
+    /// `SECS_LOW_BIT | 999_999_999`.
+    const NONE: Self = Self {
+        high: i64::MAX,
+        low: !EXPIRES,
+    };
+
+    fn new(origin: Instant, due_at: Instant) -> Self {
+        let (secs, nanos) = match due_at.checked_duration_since(origin) {
+            Some(after) => (i128::from(after.as_secs()), after.subsec_nanos()),
+            None => {
+                // Floor a negative offset: borrow a second for any sub-second part.
+                let before = origin.duration_since(due_at);
+                let secs = -i128::from(before.as_secs());
+                match before.subsec_nanos() {
+                    0 => (secs, 0),
+                    nanos => (secs - 1, NANOS_PER_SEC - nanos),
+                }
+            }
+        };
+        Self::from_offset(secs, nanos)
+    }
+
+    /// `secs` in `[-2^64, 2^64)`, `nanos` below one second.
+    fn from_offset(secs: i128, nanos: u32) -> Self {
+        debug_assert!((-(1_i128 << 64)..(1_i128 << 64)).contains(&secs) && nanos < NANOS_PER_SEC);
+        Self {
+            high: i64::try_from(secs >> 1).expect("an offset between instants fits 65 bits"),
+            low: (((secs & 1) as u32) << 30) | nanos,
+        }
+    }
+
+    fn offset(self) -> (i128, u32) {
+        let secs = (i128::from(self.high) << 1) | i128::from((self.low & SECS_LOW_BIT) >> 30);
+        (secs, self.low & NANOS_MASK)
+    }
+
+    /// The due time this key was made from, relative to the same origin. `NONE` encodes no
+    /// instant (its nanoseconds field is out of range), so it decodes to `None`.
+    fn due_at(self, origin: Instant) -> Option<Instant> {
+        if self == Self::NONE {
+            return None;
+        }
+        let (secs, nanos) = self.offset();
+        if secs >= 0 {
+            return origin.checked_add(Duration::new(u64::try_from(secs).ok()?, nanos));
+        }
+        // Undo the floor without negating `secs` into a `u64`: at the most negative offset,
+        // -2^64 seconds with a sub-second part, the borrowed form is the one that fits.
+        let before = match nanos {
+            0 => Duration::new(u64::try_from(-secs).ok()?, 0),
+            nanos => Duration::new(u64::try_from(-secs - 1).ok()?, NANOS_PER_SEC - nanos),
+        };
+        origin.checked_sub(before)
+    }
+}
 
 // Within one strict tier, deadline-bearing entries order earliest-due-first
 // ahead of every non-deadline entry, before the FCFS/LCFS/WSPT policy score
 // applies: a request that must finish by a wall-clock time cannot trade its
 // slot for cache affinity, so EDF deliberately preempts the cost-aware score
-// (DEP #13891). Entries without a deadline tie at NO_DUE_TIME and fall through
-// to the policy score unchanged.
+// (DEP #13891). Entries without a deadline tie at `DueKey::NONE` and fall through
+// to the policy score unchanged. An EDF class zeroes strict priority and the
+// policy score and also keys a request without a deadline by its class due
+// time, so it orders by due time alone, absent last, then enqueue sequence.
 #[inline]
 fn cmp_queue_order(
     lhs_priority: QueuePriority,
@@ -107,7 +213,7 @@ fn cmp_queue_order(
     lhs_priority
         .strict_priority
         .cmp(&rhs_priority.strict_priority)
-        .then_with(|| rhs_priority.due_time_key.cmp(&lhs_priority.due_time_key))
+        .then_with(|| rhs_priority.due().cmp(&lhs_priority.due()))
         .then_with(|| lhs_priority.policy_score.cmp(&rhs_priority.policy_score))
         .then_with(|| rhs_enqueue_seq.cmp(&lhs_enqueue_seq))
 }
@@ -166,8 +272,9 @@ impl<T> PolicyQueueEntry<T> {
         self.snapshot.into()
     }
 
-    fn due_time_key(&self) -> Option<u64> {
-        (self.priority.due_time_key != NO_DUE_TIME).then_some(self.priority.due_time_key)
+    /// The explicit deadline's key while the entry is indexed for expiry.
+    fn expiry_key(&self) -> Option<DueKey> {
+        self.priority.expires().then_some(self.priority.due())
     }
 
     pub fn payload(&self) -> &T {
@@ -480,7 +587,9 @@ pub struct PolicyQueue<T> {
     carry_class: Option<usize>,
     next_enqueue_seq: u64,
     pending_count: usize,
-    due_entries: BTreeSet<(u64, u64)>,
+    due_entries: BTreeSet<(DueKey, u64)>,
+    /// Origin of every due-time key, fixed at construction: an EDF class due time can stay
+    /// queued past its due time, so keys taken at different times must share one origin.
     deadline_origin: Instant,
     candidates: Vec<Option<DispatchCandidate>>,
 }
@@ -540,8 +649,13 @@ impl<T> PolicyQueue<T> {
     }
 
     pub(crate) fn next_due_at(&self) -> Option<Instant> {
-        let &(due_time_key, _) = self.due_entries.first()?;
-        Some(self.deadline_origin + std::time::Duration::from_nanos(due_time_key))
+        let &(due, _) = self.due_entries.first()?;
+        // The key was made from a representable instant, so it converts back. Should a past
+        // deadline ever not, the origin is an equally past wake-up.
+        Some(
+            due.due_at(self.deadline_origin)
+                .unwrap_or(self.deadline_origin),
+        )
     }
 
     pub fn class_count(&self) -> usize {
@@ -607,6 +721,7 @@ impl<T> PolicyQueue<T> {
                 class_index,
                 snapshot,
                 due_at: None,
+                class_due_at: None,
                 arrival_offset_secs,
             },
             worker_count,
@@ -617,7 +732,9 @@ impl<T> PolicyQueue<T> {
         )
     }
 
-    pub(crate) fn enqueue_with_due_at(
+    /// [`enqueue`](Self::enqueue) with resolved metadata, including explicit and class due
+    /// times.
+    pub fn enqueue_with_due_at(
         &mut self,
         metadata: QueueMetadata,
         worker_count: usize,
@@ -630,36 +747,37 @@ impl<T> PolicyQueue<T> {
             class_index,
             snapshot,
             due_at,
+            class_due_at,
             arrival_offset_secs,
         } = metadata;
-        if due_at.is_some() && self.due_entries.is_empty() {
-            self.deadline_origin = Instant::now();
-        }
-        let due_time_key = due_at.map_or(NO_DUE_TIME, |due_at| {
-            due_at
-                .saturating_duration_since(self.deadline_origin)
-                .as_nanos()
-                .min((NO_DUE_TIME - 1) as u128) as u64
-        });
+        let deadline_origin = self.deadline_origin;
         let class = &mut self.classes[class_index];
         if let Some(rejection) = queue_rejection(class, worker_count) {
             return Err((rejection, payload));
         }
 
+        let queue_policy = class.config.queue_policy;
+        let ordering_due_at = match queue_policy {
+            // An explicit deadline takes precedence over the class due time, earlier or later.
+            RouterQueuePolicy::Edf => due_at.or(class_due_at),
+            RouterQueuePolicy::Fcfs | RouterQueuePolicy::Lcfs | RouterQueuePolicy::Wspt => due_at,
+        };
+        let due =
+            ordering_due_at.map_or(DueKey::NONE, |due_at| DueKey::new(deadline_origin, due_at));
         let entry = make_entry(
             class_index,
             snapshot,
             arrival_offset_secs,
             priority_jump,
             strict_priority,
-            due_time_key,
-            class.config.queue_policy,
+            due,
+            due_at.is_some(),
+            queue_policy,
             self.next_enqueue_seq,
             payload,
         );
-        if due_time_key != NO_DUE_TIME {
-            self.due_entries
-                .insert((due_time_key, self.next_enqueue_seq));
+        if let Some(due) = entry.expiry_key() {
+            self.due_entries.insert((due, self.next_enqueue_seq));
         }
         self.next_enqueue_seq = self.next_enqueue_seq.wrapping_add(1);
         add_stats(&mut class.stats, snapshot);
@@ -687,10 +805,7 @@ impl<T> PolicyQueue<T> {
         if self.due_entries.is_empty() {
             return Vec::new();
         }
-        let now_key = now
-            .saturating_duration_since(self.deadline_origin)
-            .as_nanos()
-            .min((NO_DUE_TIME - 1) as u128) as u64;
+        let now_key = DueKey::new(self.deadline_origin, now);
         let expired_sequences: FxHashSet<u64> = self
             .due_entries
             .range(..=(now_key, u64::MAX))
@@ -904,9 +1019,9 @@ impl<T> PolicyQueue<T> {
     }
 }
 
-fn remove_due_time<T>(due_entries: &mut BTreeSet<(u64, u64)>, entry: &PolicyQueueEntry<T>) {
-    if let Some(due_time_key) = entry.due_time_key() {
-        let removed = due_entries.remove(&(due_time_key, entry.enqueue_seq));
+fn remove_due_time<T>(due_entries: &mut BTreeSet<(DueKey, u64)>, entry: &PolicyQueueEntry<T>) {
+    if let Some(due) = entry.expiry_key() {
+        let removed = due_entries.remove(&(due, entry.enqueue_seq));
         debug_assert!(removed);
     }
 }
@@ -918,18 +1033,26 @@ fn make_entry<T>(
     arrival_offset_secs: f64,
     priority_jump: f64,
     strict_priority: u32,
-    due_time_key: u64,
+    due: DueKey,
+    expires: bool,
     queue_policy: RouterQueuePolicy,
     enqueue_seq: u64,
     payload: T,
 ) -> PolicyQueueEntry<T> {
     let policy_score =
         queue_policy_score(queue_policy, snapshot, arrival_offset_secs, priority_jump);
+    let strict_priority = match queue_policy {
+        RouterQueuePolicy::Edf => 0,
+        RouterQueuePolicy::Fcfs | RouterQueuePolicy::Lcfs | RouterQueuePolicy::Wspt => {
+            strict_priority
+        }
+    };
     PolicyQueueEntry {
         class_index,
         priority: QueuePriority {
             strict_priority,
-            due_time_key,
+            due_low: due.low | if expires { EXPIRES } else { 0 },
+            due_high: due.high,
             policy_score: OrderedFloat(policy_score),
         },
         enqueue_seq,
@@ -945,6 +1068,8 @@ fn queue_policy_score(
     priority_jump: f64,
 ) -> f64 {
     match queue_policy {
+        // EDF has no score: due time, then enqueue sequence, orders it.
+        RouterQueuePolicy::Edf => 0.0,
         RouterQueuePolicy::Fcfs => priority_jump.max(0.0) - arrival_offset_secs.max(0.0),
         RouterQueuePolicy::Wspt => {
             (1.0 + priority_jump.max(0.0)) / snapshot.scheduling_cost_tokens as f64
@@ -1025,6 +1150,8 @@ policy_classes:
     fn queue_entry_stays_compact() {
         // One cache line per header: the drain benchmarks are header-bound and
         // regress heavily past 64 bytes (see QueueEntrySnapshot).
+        // The due key's two words are stored flat: a nested pair would pad the priority to 32.
+        assert_eq!(std::mem::size_of::<QueuePriority>(), 24);
         assert!(std::mem::size_of::<PolicyQueueEntry<()>>() <= 64);
         assert!(std::mem::size_of::<WorkerLaneHead>() <= 48);
     }
@@ -1095,6 +1222,7 @@ policy_classes:
                     class_index: 0,
                     snapshot: QueueSnapshot::new(1, 0),
                     due_at: Some(now + std::time::Duration::from_secs(20)),
+                    class_due_at: None,
                     arrival_offset_secs: 0.0,
                 },
                 1,
@@ -1110,6 +1238,7 @@ policy_classes:
                     class_index: 0,
                     snapshot: QueueSnapshot::new(1, 0),
                     due_at: Some(now + std::time::Duration::from_secs(10)),
+                    class_due_at: None,
                     arrival_offset_secs: 1.0,
                 },
                 1,
@@ -1151,6 +1280,7 @@ policy_classes:
                     class_index: 0,
                     snapshot: QueueSnapshot::new(1, 0),
                     due_at: Some(due_at + std::time::Duration::from_nanos(1)),
+                    class_due_at: None,
                     arrival_offset_secs: 0.0,
                 },
                 1,
@@ -1166,6 +1296,7 @@ policy_classes:
                     class_index: 0,
                     snapshot: QueueSnapshot::new(1, 0),
                     due_at: Some(due_at),
+                    class_due_at: None,
                     arrival_offset_secs: 1.0,
                 },
                 1,
@@ -1204,6 +1335,7 @@ policy_classes:
                     class_index: 0,
                     snapshot: QueueSnapshot::new(1, 0),
                     due_at: Some(due_at),
+                    class_due_at: None,
                     arrival_offset_secs: 1.0,
                 },
                 2,
@@ -1232,6 +1364,7 @@ policy_classes:
                     class_index: 0,
                     snapshot: QueueSnapshot::new(1, 0),
                     due_at: Some(due_at),
+                    class_due_at: None,
                     arrival_offset_secs: 0.0,
                 },
                 1,
@@ -1270,6 +1403,7 @@ policy_classes:
                     class_index: 0,
                     snapshot: QueueSnapshot::new(1, 0),
                     due_at: Some(now + std::time::Duration::from_secs(20)),
+                    class_due_at: None,
                     arrival_offset_secs: 0.0,
                 },
                 1,
@@ -1285,6 +1419,7 @@ policy_classes:
                     class_index: 0,
                     snapshot: QueueSnapshot::new(1, 0),
                     due_at: Some(now + std::time::Duration::from_secs(10)),
+                    class_due_at: None,
                     arrival_offset_secs: 1.0,
                 },
                 1,
@@ -1298,6 +1433,455 @@ policy_classes:
         assert_eq!(
             queue.pop_next(|_, _, _| true).unwrap().into_payload(),
             "high-priority-later-due"
+        );
+    }
+
+    fn edf_profile() -> PolicyProfile {
+        // A configured class without queue_policy is EDF.
+        profile(
+            r#"
+policy_classes:
+  - name: edf
+    quantum: 10
+"#,
+        )
+    }
+
+    fn enqueue_due(
+        queue: &mut PolicyQueue<&'static str>,
+        due_at: Option<Instant>,
+        class_due_at: Option<Instant>,
+        placement: WorkerPlacement,
+        payload: &'static str,
+    ) {
+        queue
+            .enqueue_with_due_at(
+                QueueMetadata {
+                    class_index: 0,
+                    snapshot: QueueSnapshot::new(1, 0),
+                    due_at,
+                    class_due_at,
+                    arrival_offset_secs: 0.0,
+                },
+                2,
+                0.0,
+                0,
+                placement,
+                payload,
+            )
+            .unwrap();
+    }
+
+    fn drain_payloads(
+        queue: &mut PolicyQueue<&'static str>,
+        is_dispatchable: impl FnMut(usize, &PolicyClassConfig, &&'static str) -> bool + Copy,
+    ) -> Vec<&'static str> {
+        std::iter::from_fn(|| queue.pop_next(is_dispatchable))
+            .map(PolicyQueueEntry::into_payload)
+            .collect()
+    }
+
+    #[test]
+    fn edf_orders_by_due_time_then_enqueue_order_and_ignores_priority_modifiers() {
+        let mut queue = PolicyQueue::new(&edf_profile());
+        assert_eq!(queue.class_config(0).queue_policy, RouterQueuePolicy::Edf);
+        let now = Instant::now();
+        let at = |secs| Some(now + std::time::Duration::from_secs(secs));
+        for (payload, due_at, class_due_at, priority_jump, strict_priority) in [
+            ("absent-first", None, None, 0.0, 0),
+            ("class-30-boosted", None, at(30), 100.0, 9),
+            ("explicit-20-over-class-5", at(20), at(5), 0.0, 0),
+            ("class-10", None, at(10), 0.0, 0),
+            ("absent-boosted", None, None, 1_000.0, 9),
+            ("class-10-tie", None, at(10), 0.0, 0),
+            ("explicit-40-over-class-1", at(40), at(1), 0.0, 0),
+        ] {
+            queue
+                .enqueue_with_due_at(
+                    QueueMetadata {
+                        class_index: 0,
+                        snapshot: QueueSnapshot::new(1, 0),
+                        due_at,
+                        class_due_at,
+                        arrival_offset_secs: 0.0,
+                    },
+                    1,
+                    priority_jump,
+                    strict_priority,
+                    WorkerPlacement::Any,
+                    payload,
+                )
+                .unwrap();
+        }
+        // Only the explicit deadlines are indexed for expiry.
+        assert_eq!(queue.due_entries.len(), 2);
+        assert_eq!(queue.next_due_at(), at(20));
+
+        // Earliest due first; an explicit deadline replaces the class due time, earlier or
+        // later. Equal and absent due times keep enqueue order.
+        assert_eq!(
+            drain_payloads(&mut queue, |_, _, _| true),
+            [
+                "class-10",
+                "class-10-tie",
+                "explicit-20-over-class-5",
+                "class-30-boosted",
+                "explicit-40-over-class-1",
+                "absent-first",
+                "absent-boosted",
+            ]
+        );
+        assert!(queue.due_entries.is_empty());
+    }
+
+    #[test]
+    fn edf_lanes_compare_due_times_and_a_blocked_lane_holds_only_itself() {
+        let mut queue = PolicyQueue::new(&edf_profile());
+        let now = Instant::now();
+        let at = |secs| Some(now + std::time::Duration::from_secs(secs));
+        let worker = |id| WorkerPlacement::Exact(WorkerWithDpRank::new(id, 0));
+        for (payload, class_due_at, placement) in [
+            ("shared-30", at(30), WorkerPlacement::Any),
+            ("full-worker-10", at(10), worker(1)),
+            ("idle-worker-20", at(20), worker(2)),
+            ("shared-25", at(25), WorkerPlacement::Any),
+            ("full-worker-15", at(15), worker(1)),
+        ] {
+            enqueue_due(&mut queue, None, class_due_at, placement, payload);
+        }
+
+        // The earliest head is pinned to a full worker. It holds only its own lane: the other
+        // lane and the shared heap still dispatch, in due-time order.
+        assert_eq!(
+            drain_payloads(&mut queue, |_, _, payload| !payload
+                .starts_with("full-worker")),
+            ["idle-worker-20", "shared-25", "shared-30"]
+        );
+        assert_eq!(queue.pending_count(), 2);
+        queue.recheck_all_workers();
+        assert_eq!(
+            drain_payloads(&mut queue, |_, _, _| true),
+            ["full-worker-10", "full-worker-15"]
+        );
+    }
+
+    #[test]
+    fn edf_class_due_times_order_but_never_expire() {
+        let mut queue = PolicyQueue::new(&edf_profile());
+        let now = Instant::now();
+        let after = |secs| now + std::time::Duration::from_secs(secs);
+        enqueue_due(
+            &mut queue,
+            None,
+            Some(after(1)),
+            WorkerPlacement::Any,
+            "class-1",
+        );
+        enqueue_due(
+            &mut queue,
+            Some(after(5)),
+            Some(after(2)),
+            WorkerPlacement::Any,
+            "explicit-5",
+        );
+        assert_eq!(queue.next_due_at(), Some(after(5)));
+
+        // Long after both due times, expiry takes only the explicit deadline.
+        let expired = queue
+            .take_expired(after(60))
+            .into_iter()
+            .map(PolicyQueueEntry::into_payload)
+            .collect::<Vec<_>>();
+        assert_eq!(expired, ["explicit-5"]);
+        assert!(queue.due_entries.is_empty());
+        assert_eq!(queue.next_due_at(), None);
+        assert_eq!(drain_payloads(&mut queue, |_, _, _| true), ["class-1"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn due_time_order_survives_the_expiry_index_emptying() {
+        let mut queue = PolicyQueue::new(&edf_profile());
+        let start = Instant::now();
+        let after = |secs| start + std::time::Duration::from_secs(secs);
+        enqueue_due(
+            &mut queue,
+            None,
+            Some(after(10)),
+            WorkerPlacement::Any,
+            "class-10",
+        );
+        // The expiry index is empty when this deadline arrives 20 s later; due-time keys
+        // keep one origin regardless.
+        tokio::time::advance(std::time::Duration::from_secs(20)).await;
+        enqueue_due(
+            &mut queue,
+            Some(after(120)),
+            None,
+            WorkerPlacement::Any,
+            "explicit-120",
+        );
+        // This class due time has already passed, and still orders after the earlier one.
+        enqueue_due(
+            &mut queue,
+            None,
+            Some(after(12)),
+            WorkerPlacement::Any,
+            "class-12",
+        );
+        assert_eq!(
+            drain_payloads(&mut queue, |_, _, _| true),
+            ["class-10", "class-12", "explicit-120"]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn due_times_before_the_queue_origin_keep_their_order() {
+        // A due time can precede the queue's construction, for example one counted from an
+        // ingress passed in from an earlier clock reading.
+        let early = Instant::now();
+        tokio::time::advance(std::time::Duration::from_secs(60)).await;
+        let mut queue = PolicyQueue::new(&edf_profile());
+        let at = |secs| early + std::time::Duration::from_secs(secs);
+        enqueue_due(
+            &mut queue,
+            None,
+            Some(at(3)),
+            WorkerPlacement::Any,
+            "class-3",
+        );
+        enqueue_due(
+            &mut queue,
+            None,
+            Some(at(120)),
+            WorkerPlacement::Any,
+            "class-120",
+        );
+        enqueue_due(
+            &mut queue,
+            None,
+            Some(at(1)),
+            WorkerPlacement::Any,
+            "class-1",
+        );
+        enqueue_due(
+            &mut queue,
+            Some(at(2)),
+            None,
+            WorkerPlacement::Any,
+            "explicit-2",
+        );
+
+        // The explicit deadline's timer wakes at its own, already passed, time.
+        assert_eq!(queue.next_due_at(), Some(at(2)));
+        assert_eq!(
+            drain_payloads(&mut queue, |_, _, _| true),
+            ["class-1", "explicit-2", "class-3", "class-120"]
+        );
+        assert!(queue.due_entries.is_empty());
+    }
+
+    #[test]
+    fn due_keys_order_and_round_trip_exactly_across_the_offset_domain() {
+        // Offsets in ascending order: the reachable ends (-2^64 s + 1 ns and 2^64 - 1 s +
+        // 999,999,999 ns), both sides of the 64-bit nanosecond range, the whole-second parity
+        // that `high` drops, and the borrow of negative sub-second parts.
+        let max = (1_i128 << 64) - 1;
+        let offsets: [(i128, u32); 22] = [
+            (-(1 << 64), 1),
+            (-(1 << 64), 999_999_999),
+            (-max, 0),
+            (-max, 1),
+            (-(1 << 63) - 1, 0),
+            (-(1 << 63), 0),
+            (-3, 999_999_999),
+            (-2, 0),
+            (-1, 0),
+            (-1, 999_999_999),
+            (0, 0),
+            (0, 1),
+            (0, 999_999_999),
+            (1, 0),
+            (1, 1),
+            (2, 0),
+            (3, 999_999_999),
+            ((1 << 63) - 1, 999_999_999),
+            (1 << 63, 0),
+            (max - 1, 999_999_999),
+            (max, 0),
+            (max, 999_999_999),
+        ];
+        for pair in offsets.windows(2) {
+            assert!(pair[0] < pair[1], "{pair:?}");
+            let (lower, upper) = (
+                DueKey::from_offset(pair[0].0, pair[0].1),
+                DueKey::from_offset(pair[1].0, pair[1].1),
+            );
+            assert!(lower < upper, "{pair:?}");
+        }
+        for (secs, nanos) in offsets {
+            let key = DueKey::from_offset(secs, nanos);
+            assert_eq!(key.offset(), (secs, nanos));
+            assert_eq!(key.low & EXPIRES, 0, "the flag bit never carries ordering");
+            assert!(
+                key < DueKey::NONE,
+                "an absent due time follows every finite one"
+            );
+        }
+        let origin = Instant::now();
+        assert_eq!(DueKey::NONE.due_at(origin), None);
+
+        // Instants on both sides of the origin, out to the farthest this platform represents,
+        // order as their keys do and convert back exactly.
+        let farthest = |step: fn(&Instant, Duration) -> Option<Instant>| {
+            let (mut low, mut high) = (0_u64, u64::MAX);
+            while low < high {
+                let mid = low + (high - low).div_ceil(2);
+                if step(&origin, Duration::from_secs(mid)).is_some() {
+                    low = mid;
+                } else {
+                    high = mid - 1;
+                }
+            }
+            let whole = step(&origin, Duration::from_secs(low)).unwrap();
+            step(&whole, Duration::from_nanos(999_999_999)).unwrap_or(whole)
+        };
+        let mut instants = vec![
+            origin,
+            farthest(Instant::checked_add),
+            farthest(Instant::checked_sub),
+        ];
+        for span in [
+            Duration::from_nanos(1),
+            Duration::from_millis(1500),
+            Duration::from_secs(2),
+            Duration::from_secs(300 * 365 * 24 * 3600),
+            Duration::from_secs(400 * 365 * 24 * 3600),
+        ] {
+            instants.extend(origin.checked_add(span));
+            instants.extend(origin.checked_sub(span));
+        }
+        instants.sort();
+        instants.dedup();
+        for pair in instants.windows(2) {
+            assert!(DueKey::new(origin, pair[0]) < DueKey::new(origin, pair[1]));
+        }
+        for instant in instants {
+            assert_eq!(DueKey::new(origin, instant).due_at(origin), Some(instant));
+        }
+    }
+
+    #[test]
+    fn deadlines_beyond_292_years_keep_their_exact_order_and_expiry() {
+        // Signed nanoseconds from the origin end about 292 years out, and a trusted classifier
+        // may set any representable deadline. A 400-year deadline enqueued before a 300-year one
+        // still dispatches second, in an EDF class and as an explicit deadline in an FCFS class,
+        // from the shared heap and from an exact lane, and only the 300-year one is due at its
+        // own time.
+        let years = |count: u64| Duration::from_secs(count * 365 * 24 * 3600);
+        let fcfs = profile(
+            r#"
+policy_classes:
+  - name: fcfs
+    queue_policy: fcfs
+    quantum: 10
+"#,
+        );
+        let lane = WorkerPlacement::Exact(WorkerWithDpRank::new(7, 0));
+        for (profile, placement) in [
+            (edf_profile(), WorkerPlacement::Any),
+            (edf_profile(), lane),
+            (fcfs.clone(), WorkerPlacement::Any),
+            (fcfs.clone(), lane),
+        ] {
+            let mut queue = PolicyQueue::new(&profile);
+            let later = queue
+                .deadline_origin
+                .checked_add(years(400))
+                .expect("representable");
+            let earlier = queue
+                .deadline_origin
+                .checked_add(years(300))
+                .expect("representable");
+            enqueue_due(&mut queue, Some(later), None, placement, "400-years");
+            enqueue_due(&mut queue, Some(earlier), None, placement, "300-years");
+            assert_eq!(queue.next_due_at(), Some(earlier));
+            let expired: Vec<_> = queue
+                .take_expired(earlier)
+                .into_iter()
+                .map(PolicyQueueEntry::into_payload)
+                .collect();
+            assert_eq!(expired, ["300-years"]);
+            assert_eq!(queue.next_due_at(), Some(later));
+
+            enqueue_due(&mut queue, Some(earlier), None, placement, "300-years");
+            assert_eq!(
+                drain_payloads(&mut queue, |_, _, _| true),
+                ["300-years", "400-years"]
+            );
+            assert!(queue.due_entries.is_empty());
+        }
+    }
+
+    #[test]
+    fn fcfs_and_wspt_do_not_order_by_class_due_times() {
+        let now = Instant::now();
+        let at = |secs| Some(now + std::time::Duration::from_secs(secs));
+        let queue_for = |policy: &str| {
+            PolicyQueue::new(&profile(&format!(
+                "policy_classes:\n  - name: c\n    queue_policy: {policy}\n    quantum: 100\n"
+            )))
+        };
+        let metadata = |tokens, due_at, class_due_at, arrival_offset_secs| QueueMetadata {
+            class_index: 0,
+            snapshot: QueueSnapshot::new(tokens, 0),
+            due_at,
+            class_due_at,
+            arrival_offset_secs,
+        };
+
+        // FCFS keeps arrival order although the later arrival's class due time is earlier.
+        let mut fcfs = queue_for("fcfs");
+        for (payload, arrival_offset_secs, class_due_at) in
+            [("first", 0.0, at(30)), ("second", 1.0, at(1))]
+        {
+            fcfs.enqueue_with_due_at(
+                metadata(1, None, class_due_at, arrival_offset_secs),
+                1,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                payload,
+            )
+            .unwrap();
+        }
+        assert!(fcfs.due_entries.is_empty());
+        assert_eq!(
+            drain_payloads(&mut fcfs, |_, _, _| true),
+            ["first", "second"]
+        );
+
+        // WSPT dispatches the shorter request first although the longer one's class due time
+        // is earlier. An explicit deadline still precedes the score.
+        let mut wspt = queue_for("wspt");
+        for (payload, tokens, due_at, class_due_at) in [
+            ("long", 50, None, at(1)),
+            ("short", 1, None, at(30)),
+            ("long-explicit", 50, at(60), None),
+        ] {
+            wspt.enqueue_with_due_at(
+                metadata(tokens, due_at, class_due_at, 0.0),
+                1,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                payload,
+            )
+            .unwrap();
+        }
+        assert_eq!(wspt.due_entries.len(), 1);
+        assert_eq!(
+            drain_payloads(&mut wspt, |_, _, _| true),
+            ["long-explicit", "short", "long"]
         );
     }
 
