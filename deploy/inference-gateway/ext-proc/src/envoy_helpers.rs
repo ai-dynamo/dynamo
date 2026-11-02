@@ -299,13 +299,17 @@ pub fn build_response_trailer_response() -> ProcessingResponse {
 
 /// Build an ImmediateResponse for error cases.
 pub fn build_error_response(status_code: StatusCode, body: Option<&str>) -> ProcessingResponse {
+    build_error_response_with_code(status_code.into(), body)
+}
+
+/// Build an ImmediateResponse for error cases from a numeric status. `HttpStatus.code` is a
+/// numeric field, so a status Envoy's enum does not name, such as 529, is still sent as is.
+pub fn build_error_response_with_code(code: i32, body: Option<&str>) -> ProcessingResponse {
     ProcessingResponse {
         response: Some(
             crate::proto::envoy::service::ext_proc::v3::processing_response::Response::ImmediateResponse(
                 ImmediateResponse {
-                    status: Some(HttpStatus {
-                        code: status_code.into(),
-                    }),
+                    status: Some(HttpStatus { code }),
                     body: body.map(|b| b.as_bytes().to_vec()).unwrap_or_default(),
                     ..Default::default()
                 },

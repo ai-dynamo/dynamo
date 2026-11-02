@@ -1032,6 +1032,16 @@ impl<T> PolicyQueue<T> {
                     .peek()
                     .is_some_and(|entry| remove_sequences.contains(&entry.enqueue_seq))
             });
+        // A lane is blocked when its root could not dispatch. Once that root leaves, nothing has
+        // checked the lane's next head: unblock the lane, as head expiry does, so the next
+        // dispatch checks it.
+        let ready_by_worker = &class.ready_by_worker;
+        class.blocked_workers.retain(|worker| {
+            !ready_by_worker
+                .get(worker)
+                .and_then(BinaryHeap::peek)
+                .is_some_and(|root| remove_sequences.contains(&root.enqueue_seq))
+        });
 
         let mut removed = Vec::new();
         let mut retained = Vec::with_capacity(class.pending.len());
@@ -2001,11 +2011,8 @@ policy_classes:
         let lane = WorkerPlacement::Exact(WorkerWithDpRank::new(7, 0));
         let explicit_only = |profile: &PolicyProfile| PolicyQueue::new(profile);
         let head_expiry = |profile: &PolicyProfile| PolicyQueue::with_class_budget_expiry(profile);
-        let cases: [(
-            PolicyProfile,
-            WorkerPlacement,
-            fn(&PolicyProfile) -> PolicyQueue<&'static str>,
-        ); 6] = [
+        type Build = fn(&PolicyProfile) -> PolicyQueue<&'static str>;
+        let cases: [(PolicyProfile, WorkerPlacement, Build); 6] = [
             (edf_profile(), WorkerPlacement::Any, explicit_only),
             (edf_profile(), lane, explicit_only),
             (fcfs.clone(), WorkerPlacement::Any, explicit_only),
@@ -2338,6 +2345,79 @@ policy_classes:
         assert_indexes_match_entries(&queue);
         assert_eq!(drain_all(&mut queue), ["full-40", "shared-50"]);
         assert!(queue.classes[0].expiring_roots.is_empty());
+    }
+
+    /// A removal that takes a blocked lane's root, by explicit-deadline expiry or cancellation,
+    /// unblocks the lane, as head expiry does, so the next dispatch checks the lane's next head.
+    /// A removal behind the root keeps the lane blocked.
+    #[test]
+    fn removing_a_blocked_lanes_root_unblocks_the_lane() {
+        let now = Instant::now();
+        let at = |millis| Some(now + std::time::Duration::from_millis(millis));
+        let worker = WorkerWithDpRank::new(1, 0);
+        let lane = WorkerPlacement::Exact(worker);
+        let full = |_: usize, _: &PolicyClassConfig, payload: &&str| !payload.starts_with("full");
+        for policy in [
+            RouterQueuePolicy::Edf,
+            RouterQueuePolicy::Fcfs,
+            RouterQueuePolicy::Lcfs,
+            RouterQueuePolicy::Wspt,
+        ] {
+            let profile = PolicyProfile::synthetic(None, policy);
+            for (constructor, mut queue) in [
+                ("new", PolicyQueue::new(&profile)),
+                (
+                    "with_class_budget_expiry",
+                    PolicyQueue::with_class_budget_expiry(&profile),
+                ),
+            ] {
+                let case = format!("{policy} {constructor}");
+                for (payload, millis) in [
+                    ("full-10", 10),
+                    ("full-20", 20),
+                    ("full-30", 30),
+                    ("full-40", 40),
+                ] {
+                    push_to(&mut queue, timed(1, at(millis), None), lane, payload);
+                }
+                push(&mut queue, timed(1, None, None), "shared");
+                // Worker 1 is full: its lane blocks at its root.
+                assert_eq!(
+                    queue.pop_next(full).unwrap().into_payload(),
+                    "shared",
+                    "{case}"
+                );
+                assert!(queue.classes[0].blocked_workers.contains(&worker), "{case}");
+
+                // Cancelling behind the root leaves the lane blocked.
+                queue.retain(|payload| *payload != "full-30");
+                assert!(queue.classes[0].blocked_workers.contains(&worker), "{case}");
+
+                // Expiry takes the root: the next dispatch checks the lane's next head.
+                let expiry = now + std::time::Duration::from_millis(10);
+                assert_eq!(
+                    take_expired_payloads(&mut queue, 0, expiry),
+                    ["full-10"],
+                    "{case}"
+                );
+                assert!(
+                    !queue.classes[0].blocked_workers.contains(&worker),
+                    "{case}"
+                );
+                assert_indexes_match_entries(&queue);
+                assert!(queue.pop_next(full).is_none(), "{case}");
+                assert!(queue.classes[0].blocked_workers.contains(&worker), "{case}");
+
+                // So does cancelling the root.
+                queue.retain(|payload| *payload != "full-20");
+                assert!(
+                    !queue.classes[0].blocked_workers.contains(&worker),
+                    "{case}"
+                );
+                assert_indexes_match_entries(&queue);
+                assert_eq!(drain_all(&mut queue), ["full-40"], "{case}");
+            }
+        }
     }
 
     #[test]

@@ -35,6 +35,56 @@ async fn backend_overload_preserves_retry_status_and_releases_admission() {
 }
 
 #[tokio::test]
+async fn queue_drops_use_the_overload_status_without_retry_after() {
+    for deadline in [true, false] {
+        let (response, parent, semaphore) = dispatch_request(
+            TestEngine::new(EngineBehavior::QueueDrop { deadline }),
+            2,
+            "drop",
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            super::super::super::error::overload_status_code(),
+            "{deadline}"
+        );
+        assert!(
+            !response.headers().contains_key("retry-after"),
+            "{deadline}"
+        );
+        assert!(
+            response
+                .extensions()
+                .get::<super::super::DecisionCapacityRejection>()
+                .is_none(),
+            "{deadline}"
+        );
+        let body = response_body(response).await;
+        assert!(body.get("answers").is_none());
+        let message = if deadline {
+            "request deadline exceeded"
+        } else {
+            "router queue limit reached"
+        };
+        assert!(body.to_string().contains(message), "{body}");
+        assert!(!body.to_string().contains("private worker detail"));
+        assert!(parent.is_killed());
+        assert_eq!(semaphore.available_permits(), 2);
+    }
+}
+
+#[test]
+fn a_caller_deadline_keeps_its_gateway_timeout() {
+    use dynamo_runtime::error::{DynamoError, ErrorClass};
+    let cause = DynamoError::builder()
+        .class(ErrorClass::DeadlineExceeded)
+        .build();
+    let dispatch = super::super::backend_error::classify(&cause);
+    assert_eq!(dispatch.status, StatusCode::GATEWAY_TIMEOUT);
+    assert!(!dispatch.retry_after);
+}
+
+#[tokio::test]
 async fn deterministic_worker_rejections_match_for_first_and_pinned_branches() {
     use dynamo_runtime::error::ErrorClass;
     for (class, status) in [

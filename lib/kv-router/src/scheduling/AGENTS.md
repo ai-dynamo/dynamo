@@ -107,13 +107,13 @@ PolicyClassQueue("agents")
 
 - `pending` is the shared ready heap for requests where the existing selector may choose any eligible worker.
 - `ready_by_worker` contains requests pinned to a particular worker and data-parallel rank. Each worker/rank heap is removed when its last request leaves.
-- `candidate_worker_heads` tracks the highest-priority request for each worker. A worker is removed from this index while it is full, then checked again when capacity changes.
+- `candidate_worker_heads` tracks the highest-priority request for each worker. A worker is removed from this index while it is full, then checked again when capacity changes or when expiry or cancellation removes its lane's root.
 - A `PolicyClassQueue` does not own worker configuration, capacity, or scoring state. `WorkerWithDpRank` only identifies a queue pinned to one worker/rank; the actor and selector retain worker knowledge.
 - Every heap uses the class's configured priority ordering. `BinaryHeap::peek()` reads its highest-priority root in O(1); push and pop are O(log n).
 - `PolicyClassQueue::next_dispatchable` compares the shared root with the highest indexed worker head. It removes blocked worker heads until it finds a dispatchable one, so each blocked lane is checked once per capacity update rather than once per pop.
 - `round_cursor` marks which class receives the next weighted turn. `carry_class` lets a class spend its unused share before that turn, but only if `next_dispatchable` confirms that its next request can run.
 - `extract_next` returns the winning head with a `DispatchCharge`; `settle` spends that cost only for an admitted request. Expiry, cancellation, and failed selection, booking, or delivery spend no credit, and the class keeps it for its next head. `pop_next` charges at once, for callers without an admission step.
-- With head expiry, `take_expired` pops each lane's overdue prefix from `expiring_roots` in due order, O(log n) per entry. An expired root of a blocked lane unblocks the lane, so its next head is checked at the next dispatch. Every other class finds its expired explicit deadlines in `due_entries` and removes them with one scan of the class and a heap rebuild, as cancellation does.
+- With head expiry, `take_expired` pops each lane's overdue prefix from `expiring_roots` in due order, O(log n) per entry. Every other class finds its expired explicit deadlines in `due_entries` and removes them with one scan of the class and a heap rebuild, as cancellation does. Any removal of a blocked lane's root, by expiry or cancellation, unblocks the lane, so its next head is checked at the next dispatch.
 - A full Worker 7 can block only Worker 7's first request. It cannot hide a ready request for Worker 9 or one that can run on any worker.
 
 ## Guardrails
@@ -133,11 +133,16 @@ PolicyClassQueue("agents")
   capacity before responding.
   Failed response delivery must release that capacity. Do not bypass this for
   normal scheduling.
-- The optional overlap refresh is the only await inside a drain. It races class timers,
-  commands, capacity wakes, and the candidate's response closing. An interruption abandons the
-  refresh, settles the candidate against its own due time, and handles the event before the
-  next candidate. The event starts a new actor turn, so rows prepared in an earlier turn are not
-  used after it. Never hold a command reply across that await.
+- The optional overlap refresh is the only await inside a drain. Class timers, capacity wakes,
+  and commands that arrive during it are handled at once, each in a new actor turn, and the
+  refresh keeps running: ordinary scheduler traffic never abandons it. A command applied there
+  is answered at once, and the drain it calls for resumes once the candidate is settled. The
+  candidate has left its class queue, so the refresh races the candidate's own due time
+  directly; that due time, the candidate's response closing, the cleanup of its lifecycle, or the
+  loss of every command sender ends the refresh early. The candidate is then settled against its
+  due time with its queued scores, or leaves unanswered when its lifecycle was released, as a
+  queued entry removed by cleanup does. Rows prepared before a turn that starts during the
+  refresh are not used after it. Never hold a command reply across that await.
 - Do not remove or weaken `admission_gate` without proving selection and
   capacity reservation cannot assign more work than the workers can hold.
 - Potential-load projection must go through

@@ -56,9 +56,11 @@ impl RefreshedOverlap {
 ///
 /// Implementations are expected to be cheap to clone (typically `Arc`-wrapped) and to never
 /// panic. Returning `None` indicates the refresh failed; the queue will then dispatch with
-/// the original scores. The queue also drops the returned future unfinished when other
-/// scheduler work arrives first, and then dispatches with the original scores, so a refresh
-/// must not depend on running to completion.
+/// the original scores. The queue keeps the returned future running while it handles other
+/// scheduler work, and drops it unfinished only when the waiting request's own due time
+/// passes, its caller goes away, or the scheduler shuts down. The request is then rejected,
+/// dropped, or, at shutdown, dispatched with the original scores, so a refresh must not depend
+/// on running to completion.
 #[async_trait]
 pub trait OverlapScoresRefresh: Send + Sync {
     async fn refresh(

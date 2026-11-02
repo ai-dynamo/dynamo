@@ -27,7 +27,7 @@ use serde::Serialize;
 use tracing::Instrument;
 
 use super::disconnect::create_connection_monitor;
-use super::error::{SanitizedError, find_canonical_error_in_chain};
+use super::error::{SanitizedError, find_canonical_error_in_chain, overload_status_code};
 use super::metrics::{
     CancellationLabels, ErrorType, HttpQueueGuard, InflightGuard, ResponseMetricCollector,
 };
@@ -198,14 +198,26 @@ fn generate_cancelled_response() -> Response {
     )
 }
 
-/// Caller-supplied deadline elapsed before the engine produced a stream: HTTP
-/// 429 with a `Cancelled` metric label, the same contract as the OpenAI and
+/// The request's due time passed while it waited in a router class queue, which dropped it:
+/// the configured overload status without `Retry-After`, the same contract as the OpenAI and
 /// SGLang generate surfaces.
 fn generate_deadline_exceeded_response() -> Response {
     generate_error_response(
-        StatusCode::TOO_MANY_REQUESTS,
+        overload_status_code(),
         "deadline_exceeded",
         super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE.to_string(),
+    )
+}
+
+/// A router class queue limit refused the request: the same drop response, with the
+/// rejection as its message.
+fn generate_queue_rejection_response(
+    rejection: &dynamo_kv_router::scheduling::QueueRejection,
+) -> Response {
+    generate_error_response(
+        overload_status_code(),
+        "queue_rejected",
+        rejection.to_string(),
     )
 }
 
@@ -1088,15 +1100,20 @@ async fn generate_dispatch(
     let stream = match generate_result {
         Ok(stream) => stream,
         Err(error) => {
-            // Deadline is checked before overload so a chain carrying both
-            // markers keeps the deadline outcome, matching the OpenAI surface.
+            // A router class queue drop, a due time that passed while the request waited or a
+            // class limit that refused it, is checked first, the deadline before the limit,
+            // matching the OpenAI surface. Both are the overload response with an `Overload`
+            // metric label and no rejection accounting.
             let deadline_exceeded = super::metrics::request_deadline_exceeded(error.as_ref());
+            let queue_rejection = super::metrics::queue_rejection(error.as_ref());
             let was_cancelled = request_context.is_killed()
                 || super::metrics::request_was_cancelled(error.as_ref());
             let was_rejected = super::metrics::request_was_rejected(error.as_ref());
             let was_unavailable = super::metrics::request_was_unavailable(error.as_ref());
             let invalid_request = generate_invalid_request_response(error.as_ref());
-            inflight_guard.mark_error(if deadline_exceeded || was_cancelled {
+            inflight_guard.mark_error(if deadline_exceeded || queue_rejection.is_some() {
+                ErrorType::Overload
+            } else if was_cancelled {
                 ErrorType::Cancelled
             } else if was_rejected || was_unavailable {
                 ErrorType::Unavailable
@@ -1107,6 +1124,9 @@ async fn generate_dispatch(
             });
             if deadline_exceeded {
                 return generate_deadline_exceeded_response();
+            }
+            if let Some(rejection) = queue_rejection {
+                return generate_queue_rejection_response(rejection);
             }
             if was_cancelled {
                 return generate_cancelled_response();
@@ -1306,6 +1326,9 @@ pub(crate) mod tests {
 
     struct DeadlineEngine;
 
+    /// Fails dispatch the way a router class queue limit does: with the bare rejection.
+    struct QueueRejectionEngine;
+
     struct MetricEngine;
 
     /// Fails dispatch the way an addressed worker that no longer serves the instance does.
@@ -1379,6 +1402,25 @@ pub(crate) mod tests {
                 .message("router deadline exceeded before stream start")
                 .build()
                 .into())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for QueueRejectionEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            Err(anyhow::Error::new(
+                dynamo_kv_router::scheduling::QueueRejection {
+                    policy_class: "latency".to_string(),
+                    limit_kind: dynamo_kv_router::scheduling::QueueLimitKind::Requests,
+                    current: 4,
+                    limit: 4,
+                },
+            ))
         }
     }
 
@@ -3041,37 +3083,78 @@ pub(crate) mod tests {
         assert_cancelled_dispatch_metrics(state.as_ref(), 0, 0);
     }
 
+    /// Both router queue drops, an expired due time and a class limit refusal, answer with the
+    /// configured overload status and no `Retry-After`, keep distinct bodies, and count as
+    /// overload errors without rejection accounting.
     #[tokio::test]
-    async fn immediate_deadline_exceeded_returns_429_with_cancelled_metric() {
-        let engine: crate::types::openai::generate::GenerateStreamingEngine =
-            Arc::new(DeadlineEngine);
-        let service = HttpService::builder().build().unwrap();
-        let state = service.state_clone();
+    async fn immediate_queue_drops_return_the_overload_status() {
+        let limit_message = "router policy class \"latency\" queue requests limit reached \
+                             (current=4, limit=4)";
+        let cases: [(
+            crate::types::openai::generate::GenerateStreamingEngine,
+            &str,
+            &str,
+        ); 2] = [
+            (
+                Arc::new(DeadlineEngine),
+                "deadline_exceeded",
+                "request deadline exceeded",
+            ),
+            (
+                Arc::new(QueueRejectionEngine),
+                "queue_rejected",
+                limit_message,
+            ),
+        ];
+        for (engine, error_type, message) in cases {
+            let service = HttpService::builder().build().unwrap();
+            let state = service.state_clone();
 
-        let response = generate_dispatch_for_test(
-            engine,
-            dispatch_test_context(),
-            "req-deadline".to_string(),
-            "test-model".to_string(),
-            state.clone(),
-            GenerateResponseOptions::default(),
-        )
-        .await;
+            let response = generate_dispatch_for_test(
+                engine,
+                dispatch_test_context(),
+                "req-queue-drop".to_string(),
+                "test-model".to_string(),
+                state.clone(),
+                GenerateResponseOptions::default(),
+            )
+            .await;
 
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body["error"]["message"], "request deadline exceeded");
-        assert_eq!(body["error"]["type"], "deadline_exceeded");
-        assert_eq!(body["error"]["code"], 429);
-        assert!(
-            !body
-                .to_string()
-                .contains("router deadline exceeded before stream start")
-        );
-        assert_cancelled_dispatch_metrics(state.as_ref(), 0, 0);
+            let overload = super::super::error::overload_status_code();
+            assert_eq!(response.status(), overload, "{error_type}");
+            assert!(!response.headers().contains_key("retry-after"));
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"]["message"], message);
+            assert_eq!(body["error"]["type"], error_type);
+            assert_eq!(body["error"]["code"], overload.as_u16());
+            assert!(
+                !body
+                    .to_string()
+                    .contains("router deadline exceeded before stream start")
+            );
+
+            let metric_model = state.manager().metric_model_for("test-model");
+            let metrics = state.metrics_clone();
+            assert_eq!(metrics.get_inflight_count(metric_model), 0);
+            assert_eq!(
+                metrics.get_request_counter(
+                    metric_model,
+                    &Endpoint::Generate,
+                    &RequestType::Unary,
+                    &Status::Error,
+                    &ErrorType::Overload,
+                ),
+                1,
+                "{error_type}"
+            );
+            assert_eq!(
+                metrics.get_rejection_count(metric_model, Endpoint::Generate),
+                0
+            );
+        }
     }
 
     #[tokio::test]
