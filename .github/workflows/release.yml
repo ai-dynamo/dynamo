@@ -2170,6 +2170,77 @@ jobs:
             exit 1
           fi
           echo "Posted GitLab trigger reply"
+
+  # ============================================================================
+  # CONSOLE STAGING UPDATE
+  # After an on-demand RC is in nvstaging/ai-dynamo, ask the console GitLab
+  # project to pin that same chart and operator image on ipp2-stg-nim01 via
+  # flux-management. Skipped when the console trigger secrets are unset, and
+  # skipped unless both the operator image and dynamo-platform chart landed.
+  # ============================================================================
+
+  trigger-console-stg-dynamo:
+    name: Trigger Console staging Dynamo update
+    needs: [prepare-release, release-publish]
+    if: >-
+      ${{ !cancelled() && needs.prepare-release.outputs.on_demand == 'true' &&
+          needs.release-publish.result == 'success' }}
+    runs-on:
+      group: gitlab_ci_runners
+    environment: automated-release
+    steps:
+      - *ops-token
+      - *ops-check
+      - name: Trigger console pipeline
+        env:
+          CONSOLE_TRIGGER_URL: ${{ secrets.CONSOLE_PIPELINE_TRIGGER_URL }}
+          CONSOLE_TRIGGER_TOKEN: ${{ secrets.CONSOLE_PIPELINE_TRIGGER_TOKEN }}
+          NGC_VERSION_TAG: ${{ needs.prepare-release.outputs.ngc_version_tag }}
+          STAGED_CONTAINERS: ${{ needs.release-publish.outputs.staged_containers }}
+          STAGED_HELM: ${{ needs.release-publish.outputs.staged_helm }}
+          COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! [[ "${NGC_VERSION_TAG}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "NGC tag '${NGC_VERSION_TAG}' is not an X.Y.Z-rc.N tag; not updating staging."
+            exit 0
+          fi
+          case ",${STAGED_CONTAINERS}," in
+            *",kubernetes-operator:${NGC_VERSION_TAG},"*) ;;
+            *) echo "::warning::kubernetes-operator:${NGC_VERSION_TAG} was not staged; not updating staging."; exit 0 ;;
+          esac
+          case ",${STAGED_HELM}," in
+            *",dynamo-platform:${NGC_VERSION_TAG},"*) ;;
+            *) echo "::warning::dynamo-platform:${NGC_VERSION_TAG} was not staged; not updating staging."; exit 0 ;;
+          esac
+          if [ -z "${CONSOLE_TRIGGER_URL}" ] || [ -z "${CONSOLE_TRIGGER_TOKEN}" ]; then
+            echo "::warning::CONSOLE_PIPELINE_TRIGGER_URL or CONSOLE_PIPELINE_TRIGGER_TOKEN is unset; staging Dynamo was not updated."
+            exit 0
+          fi
+          TOKEN_FILE=$(mktemp)
+          trap 'rm -f "${TOKEN_FILE}"' EXIT
+          chmod 600 "${TOKEN_FILE}"
+          printf '%s' "${CONSOLE_TRIGGER_TOKEN}" > "${TOKEN_FILE}"
+          RESPONSE=$(curl -fsSL \
+            --request POST \
+            --form "token=<${TOKEN_FILE}" \
+            --form-string "ref=main" \
+            --form-string "variables[DYNAMO_RC_TAG]=${NGC_VERSION_TAG}" \
+            --form-string "variables[DYNAMO_COMMIT_SHA]=${COMMIT_SHA}" \
+            --form-string "variables[DYNAMO_GITHUB_RUN_ID]=${GITHUB_RUN_ID}" \
+            "${CONSOLE_TRIGGER_URL}")
+          PIPELINE_ID=$(echo "${RESPONSE}" | jq -r '.id // empty')
+          if [ -z "${PIPELINE_ID}" ]; then
+            ERR=$(echo "${RESPONSE}" | jq -r '.message // .error // "unparseable response"' 2>/dev/null || echo "unparseable response")
+            echo "::error::Failed to trigger the console staging pipeline: ${ERR}"
+            exit 1
+          fi
+          echo "Console staging pipeline ${PIPELINE_ID} will pin ipp2-stg-nim01 to ${NGC_VERSION_TAG}"
+          echo "### Console staging Dynamo" >> "${GITHUB_STEP_SUMMARY}"
+          echo "" >> "${GITHUB_STEP_SUMMARY}"
+          echo "Pipeline ID \`${PIPELINE_ID}\` pins \`ipp2-stg-nim01\` to \`${NGC_VERSION_TAG}\`." >> "${GITHUB_STEP_SUMMARY}"
+
   # ============================================================================
   # LINEAR RELEASE SYNC
   # ============================================================================
