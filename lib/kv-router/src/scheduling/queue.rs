@@ -1077,12 +1077,26 @@ impl<
             due_at,
             scheduling_cost_tokens,
             worker_selection_target,
+            priority_jump,
+            strict_priority,
         } = classified_request.into_queue_inputs();
 
         if scheduling_cost_tokens == Some(0) {
             return Err(KvSchedulerError::InvalidClassificationMetadata(
                 "scheduling cost must be greater than zero".to_string(),
             ));
+        }
+        if priority_jump.is_some_and(|jump| !jump.is_finite()) {
+            return Err(KvSchedulerError::InvalidClassificationMetadata(
+                "priority jump must be finite".to_string(),
+            ));
+        }
+        // Only an explicit override replaces the request's own priority.
+        if let Some(priority_jump) = priority_jump {
+            request.priority_jump = priority_jump;
+        }
+        if let Some(strict_priority) = strict_priority {
+            request.strict_priority = strict_priority;
         }
         // An already-expired `due_at` is not validated here: the actor is the
         // single deadline authority and rejects it at enqueue on its own clock.
@@ -3298,6 +3312,50 @@ policy_classes:
             queue.validate_classification(&mut request, zero_cost, ingress_at),
             Err(KvSchedulerError::InvalidClassificationMetadata(_))
         ));
+
+        let mut non_finite = queue
+            .build_classify_request(&request, ingress_at, WorkerInputs::NONE)
+            .0;
+        non_finite.set_priority_jump(f64::NAN);
+        assert!(matches!(
+            queue.validate_classification(&mut request, non_finite, ingress_at),
+            Err(KvSchedulerError::InvalidClassificationMetadata(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn classifier_priority_overrides_replace_only_what_they_set() {
+        let (queue, _slots) = make_queue(1, 16, 64, None);
+        let (mut request, _rx) = make_request("prioritized", 16);
+        request.priority_jump = 3.0;
+        request.strict_priority = 2;
+        let now = Instant::now();
+
+        let untouched = queue
+            .build_classify_request(&request, now, WorkerInputs::NONE)
+            .0;
+        queue
+            .validate_classification(&mut request, untouched, now)
+            .unwrap();
+        assert_eq!((request.priority_jump, request.strict_priority), (3.0, 2));
+
+        let mut jump_only = queue
+            .build_classify_request(&request, now, WorkerInputs::NONE)
+            .0;
+        jump_only.set_priority_jump(9.5);
+        queue
+            .validate_classification(&mut request, jump_only, now)
+            .unwrap();
+        assert_eq!((request.priority_jump, request.strict_priority), (9.5, 2));
+
+        let mut tier_only = queue
+            .build_classify_request(&request, now, WorkerInputs::NONE)
+            .0;
+        tier_only.set_strict_priority(5);
+        queue
+            .validate_classification(&mut request, tier_only, now)
+            .unwrap();
+        assert_eq!((request.priority_jump, request.strict_priority), (9.5, 5));
     }
 
     #[tokio::test]

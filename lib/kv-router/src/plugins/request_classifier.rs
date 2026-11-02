@@ -63,6 +63,8 @@ pub(crate) struct ClassificationOverrides {
     pub(crate) due_at: Option<Instant>,
     pub(crate) scheduling_cost_tokens: Option<usize>,
     pub(crate) worker_selection_target: Option<Option<WorkerAffinityTarget>>,
+    pub(crate) priority_jump: Option<f64>,
+    pub(crate) strict_priority: Option<u32>,
 }
 
 impl ClassifyRequest {
@@ -236,6 +238,17 @@ impl ClassifyRequest {
 
     pub fn set_scheduling_cost_tokens(&mut self, scheduling_cost_tokens: usize) {
         self.overrides.scheduling_cost_tokens = Some(scheduling_cost_tokens);
+    }
+
+    /// Replace the request's queue priority boost, in the queue policy's score units
+    /// (seconds under FCFS/LCFS). Negative values count as zero, as they do from the request.
+    pub fn set_priority_jump(&mut self, priority_jump: f64) {
+        self.overrides.priority_jump = Some(priority_jump);
+    }
+
+    /// Replace the request's strict queue tier; a higher tier is always dequeued first.
+    pub fn set_strict_priority(&mut self, strict_priority: u32) {
+        self.overrides.strict_priority = Some(strict_priority);
     }
 
     /// Prefer a worker/rank for this request, replacing its soft affinity target.
