@@ -14,7 +14,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -88,6 +88,9 @@ const MAX_RESPONSE_BUFFER_CAPACITY: usize = 65_536;
 const MAX_DEFERRED_RESPONSE_FRAMES: usize = 1_024;
 const MAX_DEFERRED_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const CLOSE_CODE_INVARIANT: quinn::VarInt = quinn::VarInt::from_u32(1);
+// Pool keys include the Tokio runtime ID, so entries of stopped runtimes and
+// failed connects are pruned at least this often while the pool is in use.
+const CLIENT_POOL_PRUNE_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy)]
 pub struct QuicResponseConfig {
@@ -1650,11 +1653,28 @@ impl ClientConnectionBundle {
     }
 }
 
+/// True when only the pool map holds `entry` and it has no healthy bundle.
+/// Callers clone an entry out of the map before using or reconnecting it, and
+/// the map's shard lock, held while this runs, stops new clones, so no caller
+/// can still reconnect through a removed entry.
+fn is_idle_entry(entry: &Arc<ClientPoolEntry>) -> bool {
+    Arc::strong_count(entry) == 1
+        && entry
+            .current
+            .load()
+            .as_ref()
+            .is_none_or(|bundle| !bundle.is_healthy())
+}
+
+/// A bundle's endpoint drivers and lane tasks run on the Tokio runtime that
+/// connected it and stop with that runtime, so only callers on the same Tokio
+/// runtime may share it.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct ConnectionKey {
     address: String,
     frontend_id: String,
     certificate_sha256: String,
+    runtime: tokio::runtime::Id,
 }
 
 struct ClientPoolEntry {
@@ -1674,6 +1694,9 @@ impl ClientPoolEntry {
 pub struct QuicResponseClientPool {
     config: QuicResponseConfig,
     connections: DashMap<ConnectionKey, Arc<ClientPoolEntry>>,
+    created: Instant,
+    // Milliseconds after `created` when the next prune is due.
+    next_prune_ms: AtomicU64,
 }
 
 static PROCESS_CLIENT_POOL: OnceLock<Arc<QuicResponseClientPool>> = OnceLock::new();
@@ -1699,6 +1722,8 @@ impl QuicResponseClientPool {
         Ok(Arc::new(Self {
             config: QuicResponseConfig::from_env()?,
             connections: DashMap::new(),
+            created: Instant::now(),
+            next_prune_ms: AtomicU64::new(0),
         }))
     }
 
@@ -1730,6 +1755,8 @@ impl QuicResponseClientPool {
             address: info.address.clone(),
             frontend_id: info.frontend_id.clone(),
             certificate_sha256: info.certificate_sha256.clone(),
+            // connect() is awaited inline below, so its tasks start on this runtime.
+            runtime: tokio::runtime::Handle::current().id(),
         };
         let connection = self.connection(key).await?;
         let lane_index = xxh3_64(info.request_id.as_bytes()) as usize % connection.lanes.len();
@@ -1791,26 +1818,62 @@ impl QuicResponseClientPool {
     }
 
     async fn connection(&self, key: ConnectionKey) -> Result<Arc<ClientConnectionBundle>> {
-        let entry = self
-            .connections
-            .entry(key.clone())
-            .or_insert_with(|| Arc::new(ClientPoolEntry::new()))
-            .clone();
+        let (entry, inserted) = match self.connections.entry(key.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => (entry.get().clone(), false),
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                (entry.insert(Arc::new(ClientPoolEntry::new())).clone(), true)
+            }
+        };
+        if inserted || self.prune_due() {
+            self.prune_idle_entries();
+        }
         if let Some(connection) = entry.current.load_full()
             && connection.is_healthy()
         {
             return Ok(connection);
         }
 
-        let _reconnect = entry.reconnect.lock().await;
+        let reconnect = entry.reconnect.lock().await;
         if let Some(connection) = entry.current.load_full()
             && connection.is_healthy()
         {
             return Ok(connection);
         }
-        let connection = self.connect(&key).await?;
-        entry.current.store(Some(connection.clone()));
-        Ok(connection)
+        match self.connect(&key).await {
+            Ok(connection) => {
+                entry.current.store(Some(connection.clone()));
+                Ok(connection)
+            }
+            Err(error) => {
+                drop(reconnect);
+                drop(entry);
+                self.connections
+                    .remove_if(&key, |_, entry| is_idle_entry(entry));
+                Err(error)
+            }
+        }
+    }
+
+    fn prune_due(&self) -> bool {
+        let now = self.created.elapsed().as_millis() as u64;
+        let due = self.next_prune_ms.load(Ordering::Relaxed);
+        now >= due
+            && self
+                .next_prune_ms
+                .compare_exchange(
+                    due,
+                    now + CLIENT_POOL_PRUNE_INTERVAL.as_millis() as u64,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+    }
+
+    /// Removes entries with no healthy bundle that no caller holds, such as
+    /// those of stopped runtimes, so their sockets close and keys do not
+    /// accumulate.
+    fn prune_idle_entries(&self) {
+        self.connections.retain(|_, entry| !is_idle_entry(entry));
     }
 
     async fn connect(&self, key: &ConnectionKey) -> Result<Arc<ClientConnectionBundle>> {
@@ -1926,7 +1989,11 @@ fn spawn_client_lane(
     let writer_connections = connections.clone();
     let writer_contexts = contexts.clone();
     let writer_healthy = healthy.clone();
+    // Each guard is built before its spawn, so a task dropped before its first
+    // poll still marks the bundle unhealthy.
+    let writer_unhealthy_on_exit = MarkUnhealthyOnDrop(healthy.clone());
     tokio::spawn(async move {
+        let _unhealthy_on_exit = writer_unhealthy_on_exit;
         if let Err(error) = run_client_writer(
             send,
             receiver,
@@ -1948,7 +2015,9 @@ fn spawn_client_lane(
         }
     });
 
+    let reader_unhealthy_on_exit = MarkUnhealthyOnDrop(healthy.clone());
     tokio::spawn(async move {
+        let _unhealthy_on_exit = reader_unhealthy_on_exit;
         if let Err(error) = run_client_control_reader(recv, contexts.clone()).await {
             fail_client_connection_bundle(
                 &connections,
@@ -1960,6 +2029,18 @@ fn spawn_client_lane(
             );
         }
     });
+}
+
+/// Lane tasks only end on failure. Runtime shutdown drops them without running
+/// `fail_client_connection_bundle`, so this marks the bundle unhealthy and the
+/// pool reconnects instead of reusing it. It drops after the failure path, which
+/// still sees the bundle healthy and does the full cleanup.
+struct MarkUnhealthyOnDrop(Arc<AtomicBool>);
+
+impl Drop for MarkUnhealthyOnDrop {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 async fn run_client_writer(
@@ -2389,6 +2470,8 @@ mod tests {
                 response_buffer_capacity: RESPONSE_BUFFER_CAPACITY,
             },
             connections: DashMap::new(),
+            created: Instant::now(),
+            next_prune_ms: AtomicU64::new(0),
         }
     }
 
@@ -3065,6 +3148,108 @@ mod tests {
         shutdown.cancel();
     }
 
+    fn worker_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    fn cached_bundles(pool: &QuicResponseClientPool) -> Vec<Arc<ClientConnectionBundle>> {
+        pool.connections
+            .iter()
+            .filter_map(|entry| entry.current.load_full())
+            .collect()
+    }
+
+    /// Registers a response on the frontend and opens its worker sender on
+    /// `runtime`, so the pool connects from that runtime.
+    fn sender_on(
+        runtime: &tokio::runtime::Runtime,
+        pool: &QuicResponseClientPool,
+        server: &QuicResponseServer,
+    ) -> (
+        PipelineContext<()>,
+        QuicResponseSender,
+        super::super::StreamProvider<StreamReceiver>,
+    ) {
+        runtime.block_on(async {
+            let context = PipelineContext::new(());
+            let registered = server.register_response(context.context());
+            let (info, provider) = registered.into_parts();
+            let sender =
+                tokio::time::timeout(Duration::from_secs(5), pool.sender(context.context(), info))
+                    .await
+                    .expect("opening a QUIC response sender timed out")
+                    .unwrap();
+            (context, sender, provider)
+        })
+    }
+
+    /// Two worker runtimes serve one frontend through one pool, as two
+    /// external runtimes in one process do. Stopping the first leaves the
+    /// second runtime's bundle serving, and traffic on the second runtime
+    /// alone removes the stopped runtime's entry.
+    #[test]
+    fn stopped_runtime_leaves_other_runtime_bundle_serving() {
+        let frontend = worker_runtime();
+        let (shutdown, server) = frontend.block_on(async { test_server(RESPONSE_BUFFER_CAPACITY) });
+        let pool = Arc::new(test_pool());
+        let first_runtime = worker_runtime();
+        let second_runtime = worker_runtime();
+
+        let first = sender_on(&first_runtime, &pool, &server);
+        let first_bundle = only_bundle(&pool);
+        let second = sender_on(&second_runtime, &pool, &server);
+        let bundles = cached_bundles(&pool);
+        assert_eq!(bundles.len(), 2, "each Tokio runtime needs its own bundle");
+        let second_bundle = bundles
+            .into_iter()
+            .find(|bundle| !Arc::ptr_eq(bundle, &first_bundle))
+            .unwrap();
+
+        drop((first, second));
+        first_runtime.shutdown_timeout(Duration::from_secs(5));
+        assert!(second_bundle.is_healthy());
+
+        pool.next_prune_ms.store(0, Ordering::Relaxed);
+        second_runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(30), async {
+                let context = PipelineContext::new(());
+                let registered = server.register_response(context.context());
+                let (info, provider) = registered.into_parts();
+                let mut sender = pool.sender(context.context(), info).await.unwrap();
+                sender.send_prologue(None).await.unwrap();
+                sender.send(Bytes::from_static(b"alive")).await.unwrap();
+                sender.finish().await.unwrap();
+                let mut receiver = provider.await.unwrap().unwrap();
+                assert_eq!(
+                    receiver.rx.recv().await.unwrap(),
+                    Bytes::from_static(b"alive")
+                );
+                assert!(receiver.rx.recv().await.is_none());
+            })
+            .await
+            .expect("a response on the surviving runtime timed out");
+        });
+        assert!(Arc::ptr_eq(&only_bundle(&pool), &second_bundle));
+        frontend.block_on(async { shutdown.cancel() });
+    }
+
+    #[tokio::test]
+    async fn failed_connect_leaves_no_pool_entry() {
+        let pool = test_pool();
+        let key = ConnectionKey {
+            address: "not-a-socket-address".to_string(),
+            frontend_id: "unreachable".to_string(),
+            certificate_sha256: "00".repeat(32),
+            runtime: tokio::runtime::Handle::current().id(),
+        };
+        assert!(pool.connection(key).await.is_err());
+        assert!(pool.connections.is_empty());
+    }
+
     #[tokio::test]
     async fn different_connection_keys_initialize_in_parallel() {
         let (shutdown, server) = test_server(RESPONSE_BUFFER_CAPACITY);
@@ -3074,6 +3259,7 @@ mod tests {
             address: "127.0.0.1:1".to_string(),
             frontend_id: "blocked".to_string(),
             certificate_sha256: "00".repeat(32),
+            runtime: tokio::runtime::Handle::current().id(),
         };
         let blocked_entry = pool
             .connections

@@ -139,11 +139,13 @@ class VllmMetricsChecker(EngineMetrics):
         self._wait_for_progress(before=before, minimum=max_tokens, maximum=max_tokens)
 
     def transfer_progress(self) -> float:
+        # vllm-rs creates this series on the engine's first request.
         return sum(
             self.samples(
                 self.scrape(),
                 "vllm:prompt_tokens_by_source_total",
                 {"source": "external_kv_transfer"},
+                is_required=False,
             )
         )
 

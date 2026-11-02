@@ -62,8 +62,8 @@ pub async fn tensor_response_stream(
     streaming: bool,
     metadata: &MetadataMap,
 ) -> Result<impl Stream<Item = Annotated<NvCreateTensorResponse>>, Status> {
-    // create the context for the request
-    let request_id = get_or_create_request_id(request.id.as_deref());
+    // Client ids remain in the payload; only a server-minted id may key in-flight state.
+    let request_id = uuid::Uuid::new_v4().to_string();
     let model_name = request.model.clone();
     let cancellation_labels = CancellationLabels {
         model: model_name.clone(),
@@ -175,20 +175,6 @@ pub async fn tensor_response_stream(
     connection_handle.disarm();
 
     Ok(stream)
-}
-
-/// Get the request ID from a primary source, or lastly create a new one if not present
-fn get_or_create_request_id(primary: Option<&str>) -> String {
-    // Try to get the request ID from the primary source
-    if let Some(primary) = primary
-        && let Ok(uuid) = uuid::Uuid::parse_str(primary)
-    {
-        return uuid.to_string();
-    }
-
-    // Try to parse the request ID as a UUID, or generate a new one if missing/invalid
-    let uuid = uuid::Uuid::new_v4();
-    uuid.to_string()
 }
 
 /// Convert KServe InferParameter to Dynamo ParameterValue

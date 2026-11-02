@@ -8,30 +8,27 @@ from pathlib import Path
 import pytest
 import yaml
 
-try:
-    from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
-    from dynamo.planner.config.parallelization import PickedParallelConfig
-    from dynamo.planner.config.planner_config import (
-        PlannerConfig,
-        PlannerPreDeploymentSweepMode,
-    )
-    from dynamo.profiler.utils.dgd_generation import (
-        _build_planner_config,
-        _inject_mocker_ais_args,
-        _load_latest_database_version,
-        build_aic_interpolation_spec,
-        build_ais_perf_model_spec,
-        enable_vllm_benchmark_mode,
-    )
-    from dynamo.profiler.utils.dgd_template import load_dgd_template
-    from dynamo.profiler.utils.dgdr_v1beta1_types import (
-        DynamoGraphDeploymentRequestSpec,
-        FeaturesSpec,
-        MockerSpec,
-    )
-    from dynamo.profiler.utils.profile_common import needs_profile_data
-except ImportError as e:
-    pytest.skip(f"Missing dependency: {e}", allow_module_level=True)
+from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
+from dynamo.planner.config.parallelization import PickedParallelConfig
+from dynamo.planner.config.planner_config import (
+    PlannerConfig,
+    PlannerPreDeploymentSweepMode,
+)
+from dynamo.profiler.utils.dgd_generation import (
+    _build_planner_config,
+    _inject_mocker_ais_args,
+    _load_latest_database_version,
+    build_aic_interpolation_spec,
+    build_ais_perf_model_spec,
+    enable_vllm_benchmark_mode,
+)
+from dynamo.profiler.utils.dgd_template import load_dgd_template
+from dynamo.profiler.utils.dgdr_v1beta1_types import (
+    DynamoGraphDeploymentRequestSpec,
+    FeaturesSpec,
+    MockerSpec,
+)
+from dynamo.profiler.utils.profile_common import needs_profile_data
 
 pytestmark = [
     pytest.mark.gpu_0,
