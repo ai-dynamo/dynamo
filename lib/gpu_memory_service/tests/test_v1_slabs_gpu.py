@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import tempfile
 import threading
 
 import pytest
@@ -52,21 +53,29 @@ def _pattern(size: int, seed: int) -> torch.Tensor:
     return ((torch.arange(size, device="cuda") + seed) % 251).to(torch.uint8)
 
 
+@pytest.fixture
+def socket_dir(monkeypatch):
+    # tmp_path plus a GPU UUID can pass the AF_UNIX socket path limit.
+    with tempfile.TemporaryDirectory() as path:
+        monkeypatch.setenv("GMS_SOCKET_DIR", path)
+        yield
+
+
 @pytest.mark.timeout(60)
 @pytest.mark.parametrize(
     "commit", [True, False], ids=["committed-remap", "reallocate-remap"]
 )
-def test_allocation_spanning_two_slabs_survives_remap(tmp_path, commit) -> None:
+def test_allocation_spanning_two_slabs_survives_remap(socket_dir, commit) -> None:
     init_vmm(VMMDeviceType.CUDA)
     vmm = get_vmm()
     torch.cuda.set_device(0)
-    path = str(tmp_path / "gms.sock")
-    manager = GMSServerMemoryManager(device_identity.get_device_uuid(0), vmm, 0)
-    server = GMSRPCServer(path, manager)
+    gpu_uuid = device_identity.get_device_uuid(0)
+    manager = GMSServerMemoryManager(gpu_uuid, vmm, 0)
+    server = GMSRPCServer(device_identity.get_socket_path(gpu_uuid), manager)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     granularity = int(vmm.get_allocation_granularity(0))
-    client = GMSClientMemoryManager(path, vmm, 0, slab_size=2 * granularity)
+    client = GMSClientMemoryManager("weights", vmm, 0, slab_size=2 * granularity)
     try:
         client.connect(RequestedLockType.RW)
         client.create_mapping(granularity)
