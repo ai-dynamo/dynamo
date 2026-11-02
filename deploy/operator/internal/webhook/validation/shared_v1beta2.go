@@ -26,8 +26,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
-// maxTraceClaimPathLength is the CRD maxLength of spec.workload.trace.source.pvc.path.
-const maxTraceClaimPathLength = 1024
+// maxTraceClaimSubPathLength is the CRD maxLength of
+// spec.workload.trace.source.persistentVolumeClaim.subPath.
+const maxTraceClaimSubPathLength = 1024
 
 // validateWorkloadSpec validates workload, a type that Requests and Runs share. The CRD schema and
 // CEL enforce the same rules on every v1beta2 write; this recursion reaches a Request whose v1beta1
@@ -44,21 +45,11 @@ func validateWorkloadSpec(workload *nvidiacomv1beta2.WorkloadSpec, fldPath *fiel
 	return append(allErrs, validateTraceWorkloadSpec(workload.Trace, fldPath.Child("trace"))...)
 }
 
-// validateTraceWorkloadSpec validates trace. trace and fldPath must not be nil.
+// validateTraceWorkloadSpec validates trace. Its format is not checked here: the CRD schema
+// defaults and enumerates it, and lowering rejects a format it cannot translate. trace and fldPath
+// must not be nil.
 func validateTraceWorkloadSpec(trace *nvidiacomv1beta2.TraceWorkloadSpec, fldPath *field.Path) field.ErrorList {
-	allErrs := field.ErrorList{}
-
-	// The format has no default: AISimulate and the DEP default to mooncake, which is not admitted.
-	switch trace.Format {
-	case nvidiacomv1beta2.TraceFormatDynamo:
-	case "":
-		allErrs = append(allErrs, field.Required(fldPath.Child("format"), ""))
-	default:
-		allErrs = append(allErrs, field.NotSupported(fldPath.Child("format"), trace.Format,
-			[]nvidiacomv1beta2.TraceFormat{nvidiacomv1beta2.TraceFormatDynamo}))
-	}
-
-	allErrs = append(allErrs, validateTraceSourceSpec(&trace.Source, fldPath.Child("source"))...)
+	allErrs := validateTraceSourceSpec(&trace.Source, fldPath.Child("source"))
 	if trace.Replay != nil {
 		allErrs = append(allErrs, validateTraceReplaySpec(trace.Replay, fldPath.Child("replay"))...)
 	}
@@ -67,31 +58,31 @@ func validateTraceWorkloadSpec(trace *nvidiacomv1beta2.TraceWorkloadSpec, fldPat
 
 // validateTraceSourceSpec validates source. source and fldPath must not be nil.
 func validateTraceSourceSpec(source *nvidiacomv1beta2.TraceSourceSpec, fldPath *field.Path) field.ErrorList {
-	if source.PVC == nil {
-		return field.ErrorList{field.Required(fldPath.Child("pvc"), "")}
+	if source.PersistentVolumeClaim == nil {
+		return field.ErrorList{field.Required(fldPath.Child("persistentVolumeClaim"), "")}
 	}
-	return validateTracePVCSource(source.PVC, fldPath.Child("pvc"))
+	return validateTracePVCSource(source.PersistentVolumeClaim, fldPath.Child("persistentVolumeClaim"))
 }
 
-// validateTracePVCSource validates pvc: a PersistentVolumeClaim name and one nameable file inside
-// it. pvc and fldPath must not be nil.
-func validateTracePVCSource(pvc *nvidiacomv1beta2.TracePVCSource, fldPath *field.Path) field.ErrorList {
+// validateTracePVCSource validates claim: a PersistentVolumeClaim name and one nameable file inside
+// it. claim and fldPath must not be nil.
+func validateTracePVCSource(claim *nvidiacomv1beta2.TracePVCSource, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
-	for _, msg := range validation.IsDNS1123Subdomain(pvc.ClaimName) {
-		allErrs = append(allErrs, field.Invalid(fldPath.Child("claimName"), pvc.ClaimName, msg))
+	for _, msg := range validation.IsDNS1123Subdomain(claim.ClaimName) {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("claimName"), claim.ClaimName, msg))
 	}
 
-	// The path names one file below the claim root: relative, with only named segments.
-	pathPath := fldPath.Child("path")
-	if utf8.RuneCountInString(pvc.Path) > maxTraceClaimPathLength {
-		allErrs = append(allErrs, field.TooLongCharacters(pathPath, pvc.Path, maxTraceClaimPathLength))
+	// The subPath names one file below the claim root: relative, with only named segments.
+	subPath := fldPath.Child("subPath")
+	if utf8.RuneCountInString(claim.SubPath) > maxTraceClaimSubPathLength {
+		allErrs = append(allErrs, field.TooLongCharacters(subPath, claim.SubPath, maxTraceClaimSubPathLength))
 	}
-	if !traceClaimPathHasOnlyNamedSegments(pvc.Path) {
-		allErrs = append(allErrs, field.Invalid(pathPath, pvc.Path,
-			"path must be relative to the claim root without empty, '.' or '..' segments"))
+	if !traceClaimPathHasOnlyNamedSegments(claim.SubPath) {
+		allErrs = append(allErrs, field.Invalid(subPath, claim.SubPath,
+			"subPath must be relative to the claim root without empty, '.' or '..' segments"))
 	}
-	if strings.ContainsRune(pvc.Path, 0) {
-		allErrs = append(allErrs, field.Invalid(pathPath, pvc.Path, "path must not contain a NUL character"))
+	if strings.ContainsRune(claim.SubPath, 0) {
+		allErrs = append(allErrs, field.Invalid(subPath, claim.SubPath, "subPath must not contain a NUL character"))
 	}
 	return allErrs
 }

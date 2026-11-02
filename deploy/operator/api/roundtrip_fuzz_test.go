@@ -578,9 +578,9 @@ func fuzzBeta2Workload(workload *v1beta2.WorkloadSpec, c randfill.Continue) {
 	}
 	if workload.Trace != nil {
 		workload.Trace.Format = v1beta2.TraceFormatDynamo
-		workload.Trace.Source.PVC = &v1beta2.TracePVCSource{
+		workload.Trace.Source.PersistentVolumeClaim = &v1beta2.TracePVCSource{
 			ClaimName: fmt.Sprintf("traces-%d", c.Uint32()),
-			Path:      fmt.Sprintf("retune/window-%d.jsonl.gz", c.Uint32()),
+			SubPath:   fmt.Sprintf("retune/window-%d.jsonl.gz", c.Uint32()),
 		}
 		if workload.Trace.Replay != nil && workload.Trace.Replay.ArrivalSpeedupRatio != nil {
 			workload.Trace.Replay.ArrivalSpeedupRatio = oneOfPtr(c, 0.5, 1.0, 4.0)
