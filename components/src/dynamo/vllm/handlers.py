@@ -230,190 +230,6 @@ def _rl_init_weights_timeout_s() -> float:
     )
 
 
-class _DeferredAbort:
-    """Defers engine_client.abort(request_id) until the first engine output.
-
-    In disaggregated decode mode, calling engine_client.abort() while a NIXL
-    KV transfer is still in flight on the decode worker can crash EngineCore.
-    This guard delays the real abort call until the first generation result
-    has been yielded (which, for a decode worker, means the KV transfer has
-    completed and the engine has produced at least one token).
-
-    When abort() is called before the first token, a background asyncio.Task
-    is spawned to wait for the first-token signal and then perform the real
-    abort.
-    """
-
-    def __init__(
-        self,
-        engine_client: Any,
-        request_id: str,
-        on_engine_dead: Optional[Any] = None,
-    ):
-        self._engine_client = engine_client
-        self._request_id = request_id
-        # Escalation hook invoked if the (possibly deferred/background) engine
-        # abort hits EngineDeadError, so engine death shuts the runtime down even
-        # when the abort runs outside the request's own error handling (the
-        # disconnect-monitor or deferred-after-first-token path).
-        self._on_engine_dead = on_engine_dead
-        self._first_token_received = False
-        self._first_token_event = asyncio.Event()
-        # Strong reference to the deferred-abort background task so it is not
-        # garbage collected mid-execution (asyncio.create_task only holds a
-        # weak reference via the event loop).
-        self._abort_task: Optional[asyncio.Task] = None
-        # Exception the real engine abort raised (if it has run), so the admin
-        # abort_request route can report failure instead of a false "ok".
-        self._abort_exc: Optional[BaseException] = None
-
-    def signal_first_token(self) -> None:
-        """Called when the first engine output for the request is received."""
-        if not self._first_token_received:
-            self._first_token_received = True
-            self._first_token_event.set()
-
-    async def abort(self) -> None:
-        """Abort the request. Creates a Task to hold a strong reference so the
-        engine abort cannot be dropped if this coroutine is concurrently
-        cancelled."""
-        if self._abort_task is None:
-            if self._first_token_received:
-                logger.debug(
-                    f"Deferred abort: first token already received, "
-                    f"aborting request {self._request_id} now"
-                )
-                self._abort_task = asyncio.create_task(self._run_abort())
-            else:
-                logger.debug(
-                    f"Deferred abort: first token not received for request "
-                    f"{self._request_id}, spawning background task"
-                )
-                self._abort_task = asyncio.create_task(self._wait_and_abort())
-        # Only block on completion when the abort runs immediately (post first
-        # token). A pre-first-token deferred abort fires in the background when
-        # the first token arrives; awaiting it here would hang the caller (admin
-        # route or disconnect monitor) until — or unless — generation produces
-        # output. _abort_task keeps the background task alive; close() reaps it.
-        if not self._first_token_received:
-            return
-        try:
-            # shield() so that if the caller (e.g. a cancelled system-route
-            # request or a disconnected client) is cancelled while awaiting, the
-            # cancellation is NOT propagated into the abort task — it really does
-            # continue in the background. A bare `await self._abort_task` would
-            # cancel the task too, silently dropping the abort.
-            await asyncio.shield(self._abort_task)
-        except asyncio.CancelledError:
-            logger.debug(
-                f"Deferred abort: shielded from cancellation for request "
-                f"{self._request_id}, abort continues in background"
-            )
-
-    async def _run_abort(self) -> None:
-        """Execute engine.abort() and emit the canonical completion log."""
-        try:
-            await self._engine_client.abort(self._request_id)
-            logger.debug(f"Aborted Request ID: {self._request_id}")
-        except Exception as e:
-            # Record so abort_request can report the failure rather than a false
-            # success. Also escalate engine death here, since a deferred or
-            # disconnect-monitor abort runs in the background with no caller
-            # awaiting the result to handle EngineDeadError.
-            self._abort_exc = e
-            logger.warning(
-                f"Deferred abort: engine abort raised for request "
-                f"{self._request_id}: {e}"
-            )
-            if isinstance(e, EngineDeadError) and self._on_engine_dead is not None:
-                self._on_engine_dead(e)
-
-    async def _wait_and_abort(self) -> None:
-        """Background task: wait for first token, then abort."""
-        try:
-            await self._first_token_event.wait()
-        except Exception:
-            pass
-        await self._run_abort()
-
-    async def close(self) -> None:
-        """Clean up the deferred-abort waiter when generation exits.
-
-        Handles case 1b: if abort() was requested before the first token
-        arrived AND the generation loop exits without ever producing output,
-        the background _wait_and_abort task would otherwise remain parked on
-        first_token_event.wait() forever. Cancel it so it does not leak.
-
-        Safety invariant: this method must NOT call engine_client.abort() in
-        the pre-first-token window. Issuing abort before the engine has
-        produced output is exactly what this guard exists to avoid (it can
-        crash EngineCore while a NIXL KV transfer is still in flight on the
-        decode worker).
-        """
-        if self._abort_task is None:
-            return
-
-        if not self._first_token_received:
-            # Case 1b: cancel the local waiter without firing the real abort.
-            self._abort_task.cancel()
-
-        try:
-            # shield so that if cleanup is awaiting a real post-first-token abort
-            # and the caller is cancelled, the abort still completes (the
-            # pre-first-token path was cancelled just above and resolves here).
-            await asyncio.shield(self._abort_task)
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logger.warning(
-                f"Deferred abort: cleanup observed error for request "
-                f"{self._request_id}: {e}"
-            )
-
-
-@asynccontextmanager
-async def _deferred_abort_guard(
-    engine_client: Any,
-    request_id: str,
-    is_decode_only: bool,
-    registry: Optional[dict[str, "_DeferredAbort"]] = None,
-    on_engine_dead: Optional[Any] = None,
-) -> AsyncIterator[Optional[_DeferredAbort]]:
-    """Own the _DeferredAbort lifecycle for a single request.
-
-    Yields a _DeferredAbort in disaggregated-decode mode, otherwise yields
-    None. On exit, awaits guard.close() so the background waiter cannot leak
-    when generation finishes without producing output (case 1b). close() is
-    specifically designed not to call engine_client.abort() in the unsafe
-    pre-first-token window.
-
-    When `registry` is provided, the guard registers itself under `request_id`
-    for the request's lifetime so out-of-band callers (the admin abort_request
-    route) can route their abort through this same deferred path instead of
-    calling engine_client.abort() directly in the unsafe window.
-    """
-    guard = (
-        _DeferredAbort(engine_client, request_id, on_engine_dead)
-        if is_decode_only
-        else None
-    )
-    if guard is not None and registry is not None:
-        registry[request_id] = guard
-    try:
-        yield guard
-    finally:
-        if guard is not None:
-            # Keep the guard registered until close() finishes: close() may
-            # await a deferred abort, and an out-of-band admin abort_request
-            # during that window must still find the guard and route through
-            # the deferred path instead of taking the unsafe direct abort.
-            try:
-                await guard.close()
-            finally:
-                if registry is not None:
-                    registry.pop(request_id, None)
-
-
 class VllmEnginePauseController:
     def __init__(
         self,
@@ -1355,12 +1171,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
         self._pause_controller = VllmEnginePauseController(self.engine_client)
         self._pause_lock = asyncio.Lock()
-        # Maps request_id -> _DeferredAbort for in-flight decode-only requests so
-        # admin abort_request can route through the deferred-abort path instead
-        # of calling engine_client.abort() during the unsafe pre-first-token
-        # NIXL-KV-transfer window.
-        self._deferred_aborts: dict[str, _DeferredAbort] = {}
-
         self._multimodal_request_processor = VllmMultimodalRequestProcessor(
             model=config.model_source_path,
             engine_client=engine,
@@ -2167,28 +1977,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         if not request_id:
             return {"status": "error", "message": "Missing 'request_id' in body"}
         try:
-            guard = self._deferred_aborts.get(request_id)
-            if guard is not None:
-                # Route through the per-request deferred-abort guard so that in
-                # disaggregated decode mode the real engine abort is deferred
-                # until the first token, never firing during an in-flight NIXL
-                # KV transfer (which can crash EngineCore).
-                await guard.abort()
-                # If the abort already ran (post-first-token) and failed, report
-                # it instead of a false "ok"; escalate engine death like the
-                # direct path does. (Pre-first-token aborts are queued and have
-                # no result yet, so they correctly report accepted/ok.)
-                abort_exc = guard._abort_exc
-                if abort_exc is not None:
-                    if isinstance(abort_exc, EngineDeadError):
-                        self._shutdown_on_engine_dead(abort_exc)
-                    return {
-                        "status": "error",
-                        "request_id": request_id,
-                        "message": f"abort failed: {abort_exc}",
-                    }
-            else:
-                await self.engine_client.abort(request_id)
+            await self.engine_client.abort(request_id)
             logger.debug(f"[RL] Aborted request {request_id}")
             return {"status": "ok", "request_id": request_id}
         except EngineDeadError as e:
@@ -2434,14 +2223,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
         raise NotImplementedError
 
-    async def _monitor_abort(self, context, request_id, is_prefill, abort_guard=None):
+    async def _monitor_abort(self, context, request_id, is_prefill):
         """
         Background task that monitors for context cancellation and shutdown.
         Aborts the request if either occurs. Raises EngineShutdown if shutdown was triggered.
-
-        If abort_guard is provided, the abort call is routed through it so that
-        it can be deferred until the first engine output (used in disagg decode
-        mode to avoid aborting during an active NIXL KV transfer).
         """
         wait_for = []
         try:
@@ -2475,25 +2260,18 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 f"Aborting {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
             )
 
-            # Abort the request (via guard if provided, otherwise direct).
-            if abort_guard is not None:
-                # Guard owns completion logging: "Aborted Request ID:" is
-                # emitted from _run_abort() once engine.abort() returns,
-                # even if this task is concurrently cancelled.
-                await abort_guard.abort()
-            else:
-                # No guard: shield the abort so a concurrent CancelledError
-                # from _abort_monitor cleanup cannot interrupt it mid-flight.
-                try:
-                    await asyncio.shield(self.engine_client.abort(request_id))
-                except asyncio.CancelledError:
-                    logger.debug(
-                        f"Abort shielded from cancellation for request "
-                        f"{request_id}, continuing in background"
-                    )
+            # Shield the abort so a concurrent CancelledError from
+            # _abort_monitor cleanup cannot interrupt it mid-flight.
+            try:
+                await asyncio.shield(self.engine_client.abort(request_id))
+            except asyncio.CancelledError:
                 logger.debug(
-                    f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
+                    f"Abort shielded from cancellation for request "
+                    f"{request_id}, continuing in background"
                 )
+            logger.debug(
+                f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
+            )
 
             # Check which event triggered and raise EngineShutdown if shutdown
             if shutdown_task and shutdown_task in done:
@@ -2518,19 +2296,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 await asyncio.gather(*to_drain, return_exceptions=True)
 
     @asynccontextmanager
-    async def _abort_monitor(
-        self, context, request_id, is_prefill=False, abort_guard=None
-    ):
+    async def _abort_monitor(self, context, request_id, is_prefill=False):
         """
         Context manager that creates and automatically cleans up an abort monitoring task.
         If shutdown event was triggered, raises EngineShutdown on exit.
-
-        If abort_guard is provided, the abort call is routed through it so the
-        abort can be deferred until the first engine output.
         """
-        task = asyncio.create_task(
-            self._monitor_abort(context, request_id, is_prefill, abort_guard)
-        )
+        task = asyncio.create_task(self._monitor_abort(context, request_id, is_prefill))
         try:
             yield task
         finally:
@@ -4264,107 +4035,84 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     raise InvalidArgument(str(exc)) from None
                 raise
 
-        # In disagg decode mode, defer engine_client.abort() until the first
-        # token so we don't abort while a NIXL KV transfer is still in flight
-        # on the decode worker (which can crash EngineCore). The guard's
-        # cleanup runs after _abort_monitor tears down its monitor task, so
-        # any deferred-abort waiter spawned by the monitor is in a stable
-        # state when close() is awaited.
         with (
             closing(artifact_session) if artifact_session is not None else nullcontext()
         ):
-            async with _deferred_abort_guard(
-                self.engine_client,
-                request_id,
-                is_decode_only,
-                self._deferred_aborts,
-                self._shutdown_on_engine_dead,
-            ) as abort_guard:
-                async with self._abort_monitor(
-                    context, request_id, abort_guard=abort_guard
-                ):
-                    # nvext.engine_data opt-in: if the client requested
-                    # `nvext.extra_fields=["engine_data"]`, we accumulate
-                    # per-chunk token_ids and logprobs and attach them to the
-                    # FINAL chunk (the one carrying `finish_reason`). The Rust
-                    # frontend's response builder (delta.rs) gates emission via
-                    # `NvExtResponseFieldSelection.engine_data` so this payload
-                    # only reaches clients that asked for it.
-                    want_engine_data = _nvext_extra_field_requested(
-                        request, "engine_data"
-                    )
-                    # Fallback when the engine does not report prompt IDs. MITO
-                    # image expansion can change these during engine preprocessing.
-                    request_prompt_token_ids = (
-                        _prompt_token_ids_for_engine_data(request, prompt)
-                        if want_engine_data
-                        else None
-                    )
-                    accumulated_token_ids: dict[int, list[int]] = {}
-                    accumulated_log_probs: dict[int, list[float]] = {}
-                    try:
-                        async for tok in self.generate_tokens(
-                            prompt,
-                            sampling_params,
-                            request_id,
-                            data_parallel_rank=dp_rank,
-                            lora_request=lora_request,
-                            trace_headers=trace_headers,
-                            priority=priority,
-                            reasoning_ended=reasoning_ended,
-                            reasoning_parser_kwargs=reasoning_parser_kwargs,
-                            session_id=session_id,
-                            # Transferred prefill KV counts as cached in vLLM, so a
-                            # decode attempt's count would not be local reuse.
-                            report_kv_cache_hit=kv_params is None,
-                            want_engine_data=want_engine_data,
-                            kv_hints=kv_hints,
-                            artifact_session=artifact_session,
-                            emit_routed_experts=(
-                                artifact_session is None
-                                or want_engine_data
-                                or _nvext_extra_field_requested(
-                                    request, "routed_experts"
-                                )
-                            ),
-                        ):
-                            if abort_guard is not None:
-                                abort_guard.signal_first_token()
-                            if artifact_forced_logprobs:
-                                if client_logprob_width is None:
-                                    tok = {
-                                        key: value
-                                        for key, value in tok.items()
-                                        if key not in ("log_probs", "top_logprobs")
-                                    }
-                                elif (
-                                    client_logprob_width == 0 and "top_logprobs" in tok
-                                ):
-                                    tok = {
-                                        **tok,
-                                        "top_logprobs": [[] for _ in tok["token_ids"]],
-                                    }
-                            if prefill_result is not None and "completion_usage" in tok:
-                                tok["completion_usage"][
-                                    "prompt_tokens_details"
-                                ] = prefill_prompt_tokens_details
+            async with self._abort_monitor(context, request_id):
+                # nvext.engine_data opt-in: if the client requested
+                # `nvext.extra_fields=["engine_data"]`, we accumulate
+                # per-chunk token_ids and logprobs and attach them to the
+                # FINAL chunk (the one carrying `finish_reason`). The Rust
+                # frontend's response builder (delta.rs) gates emission via
+                # `NvExtResponseFieldSelection.engine_data` so this payload
+                # only reaches clients that asked for it.
+                want_engine_data = _nvext_extra_field_requested(request, "engine_data")
+                # Fallback when the engine does not report prompt IDs. MITO
+                # image expansion can change these during engine preprocessing.
+                request_prompt_token_ids = (
+                    _prompt_token_ids_for_engine_data(request, prompt)
+                    if want_engine_data
+                    else None
+                )
+                accumulated_token_ids: dict[int, list[int]] = {}
+                accumulated_log_probs: dict[int, list[float]] = {}
+                try:
+                    async for tok in self.generate_tokens(
+                        prompt,
+                        sampling_params,
+                        request_id,
+                        data_parallel_rank=dp_rank,
+                        lora_request=lora_request,
+                        trace_headers=trace_headers,
+                        priority=priority,
+                        reasoning_ended=reasoning_ended,
+                        reasoning_parser_kwargs=reasoning_parser_kwargs,
+                        session_id=session_id,
+                        # Transferred prefill KV counts as cached in vLLM, so a
+                        # decode attempt's count would not be local reuse.
+                        report_kv_cache_hit=kv_params is None,
+                        want_engine_data=want_engine_data,
+                        kv_hints=kv_hints,
+                        artifact_session=artifact_session,
+                        emit_routed_experts=(
+                            artifact_session is None
+                            or want_engine_data
+                            or _nvext_extra_field_requested(request, "routed_experts")
+                        ),
+                    ):
+                        if artifact_forced_logprobs:
+                            if client_logprob_width is None:
+                                tok = {
+                                    key: value
+                                    for key, value in tok.items()
+                                    if key not in ("log_probs", "top_logprobs")
+                                }
+                            elif client_logprob_width == 0 and "top_logprobs" in tok:
+                                tok = {
+                                    **tok,
+                                    "top_logprobs": [[] for _ in tok["token_ids"]],
+                                }
+                        if prefill_result is not None and "completion_usage" in tok:
+                            tok["completion_usage"]["prompt_tokens_details"] = (
+                                prefill_prompt_tokens_details
+                            )
 
-                            if want_engine_data:
-                                _accumulate_engine_data(
-                                    tok,
-                                    request_prompt_token_ids,
-                                    accumulated_token_ids,
-                                    accumulated_log_probs,
-                                )
-                            yield tok
-                    except EngineDeadError as e:
-                        logger.error(f"vLLM EngineDeadError: {e}")
-                        logger.warning("Initiating Dynamo Runtime shutdown.")
-                        self.runtime.shutdown()
-                        os._exit(1)
-                    finally:
-                        if artifact_session is not None:
-                            artifact_session.close()
+                        if want_engine_data:
+                            _accumulate_engine_data(
+                                tok,
+                                request_prompt_token_ids,
+                                accumulated_token_ids,
+                                accumulated_log_probs,
+                            )
+                        yield tok
+                except EngineDeadError as e:
+                    logger.error(f"vLLM EngineDeadError: {e}")
+                    logger.warning("Initiating Dynamo Runtime shutdown.")
+                    self.runtime.shutdown()
+                    os._exit(1)
+                finally:
+                    if artifact_session is not None:
+                        artifact_session.close()
 
     async def _generate_text_mode(self, request, context, request_id):
         """Generate text using OpenAI-compatible format (text-in-text-out)."""
@@ -4397,30 +4145,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         session_id = session_id_from_request(request)
         kv_hints = _build_vllm_kv_hints(request)
 
-        is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
-        if is_decode_only and BYPASS_REMOTE_PREFILL_ANNOTATION in (
-            request.get("annotations") or []
-        ):
-            logger.debug(
-                "DECODE: conditional-disagg bypass annotation present; "
-                "running text-mode request as AGG (prefill+decode on this worker)."
-            )
-            is_decode_only = False
-
-        # Mirror _generate_token_mode: in disagg decode mode route aborts through
-        # the per-request deferred guard so engine_client.abort() never fires in
-        # the unsafe pre-first-token window, and the admin abort_request route can
-        # reach this request via self._deferred_aborts.
-        async with (
-            _deferred_abort_guard(
-                self.engine_client,
-                request_id,
-                is_decode_only,
-                self._deferred_aborts,
-                self._shutdown_on_engine_dead,
-            ) as abort_guard,
-            self._abort_monitor(context, request_id, abort_guard=abort_guard),
-        ):
+        async with self._abort_monitor(context, request_id):
             try:
                 gen = self.engine_client.generate(
                     prompt,
@@ -4451,8 +4176,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         break
 
                     for output in res.outputs:
-                        if abort_guard is not None:
-                            abort_guard.signal_first_token()
                         if not first_token_output_seen and getattr(
                             output, "token_ids", None
                         ):
@@ -4783,7 +4506,7 @@ class EmbeddingWorkerHandler:
         ``_abort_monitor`` context manager can propagate it.
 
         Mirrors ``BaseWorkerHandler._monitor_abort`` but trimmed for the
-        embedding path (no ``is_prefill``, no ``abort_guard``).
+        embedding path (no ``is_prefill``).
         """
         shutdown_task: Optional[asyncio.Task] = None
         wait_for: list[Any] = []
