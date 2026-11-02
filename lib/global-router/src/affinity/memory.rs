@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use dashmap::{DashMap, mapref::entry::Entry};
 
-use super::{AffinityBinding, AffinityError, AffinityKey, AffinityStore, WriteOutcome};
+use super::{AffinityBinding, AffinityError, AffinityKey, AffinityStore, Expected, WriteOutcome};
 
 #[derive(Debug, Default)]
 pub struct InMemoryAffinityStore {
@@ -36,17 +36,21 @@ impl AffinityStore for InMemoryAffinityStore {
     async fn compare_exchange(
         &self,
         key: &AffinityKey,
-        expected_revision: Option<&str>,
+        expected: &Expected,
         binding: &AffinityBinding,
     ) -> Result<WriteOutcome, AffinityError> {
-        match self.bindings.entry(key.clone()) {
-            Entry::Occupied(mut entry)
-                if expected_revision == Some(entry.get().revision.as_str()) =>
+        match (self.bindings.entry(key.clone()), expected) {
+            (Entry::Occupied(mut entry), Expected::Revision(revision))
+                if entry.get().revision == *revision =>
             {
                 entry.insert(binding.clone());
                 Ok(WriteOutcome::Applied)
             }
-            Entry::Vacant(entry) if expected_revision.is_none() => {
+            (Entry::Occupied(mut entry), Expected::Unreadable) => {
+                entry.insert(binding.clone());
+                Ok(WriteOutcome::Applied)
+            }
+            (Entry::Vacant(entry), Expected::Absent | Expected::Unreadable) => {
                 entry.insert(binding.clone());
                 Ok(WriteOutcome::Applied)
             }

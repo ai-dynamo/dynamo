@@ -19,8 +19,8 @@ use aws_sdk_dynamodb::{
 };
 use dynamo_global_common::PoolKey;
 use dynamo_global_router::affinity::{
-    AffinityBinding, AffinityConfig, AffinityError, AffinityKey, AffinityStore, SessionAffinity,
-    StoreBackedSessionAffinity, WriteOutcome,
+    AffinityBinding, AffinityConfig, AffinityError, AffinityKey, AffinityStore, Expected,
+    SessionAffinity, StoreBackedSessionAffinity, WriteOutcome,
 };
 use dynamo_global_router::{
     AffinitySelector, InFlightTracker, Pool, PoolSelector, PoolSignals, RoutingRequest,
@@ -116,6 +116,7 @@ impl Table {
 fn key() -> AffinityKey {
     AffinityKey {
         scope: "test-deployment".into(),
+        tenant: "anonymous".into(),
         policy: "headroom-v1".into(),
         model: "qwen".into(),
         session: "s".into(),
@@ -155,8 +156,8 @@ async fn conditional_writes_expiration_and_schema_match_the_store_contract() {
     let east = binding("east", "a");
     let west = binding("west", "b");
     let (left, right) = tokio::join!(
-        a.compare_exchange(&key, None, &east),
-        b.compare_exchange(&key, None, &west)
+        a.compare_exchange(&key, &Expected::Absent, &east),
+        b.compare_exchange(&key, &Expected::Absent, &west)
     );
     let outcomes = [left.unwrap(), right.unwrap()];
     assert_eq!(
@@ -182,37 +183,40 @@ async fn conditional_writes_expiration_and_schema_match_the_store_contract() {
         ..winner.clone()
     };
     assert_eq!(
-        b.compare_exchange(&key, Some(&winner.revision), &expired)
+        b.compare_exchange(&key, &Expected::Revision(winner.revision.clone()), &expired)
             .await
             .unwrap(),
         WriteOutcome::Applied
     );
     assert_eq!(
-        a.compare_exchange(&key, Some(&winner.revision), &winner)
+        a.compare_exchange(&key, &Expected::Revision(winner.revision.clone()), &winner)
             .await
             .unwrap(),
         WriteOutcome::Conflict
     );
     assert_eq!(
-        a.compare_exchange(&key, None, &winner).await.unwrap(),
+        a.compare_exchange(&key, &Expected::Absent, &winner)
+            .await
+            .unwrap(),
         WriteOutcome::Conflict
     );
     let tracker = StoreBackedSessionAffinity::new(a.clone(), Duration::from_secs(1800)).unwrap();
     let observed = tracker.lookup(&key).await.unwrap();
     assert!(observed.pool.is_none());
-    assert_eq!(observed.revision.as_deref(), Some("expired"));
+    assert_eq!(observed.expected, Expected::Revision("expired".into()));
     assert_eq!(
         tracker.bind(&key, &observed, &west.pool).await.unwrap(),
         WriteOutcome::Applied
     );
     assert_eq!(b.read(&key).await.unwrap().unwrap().pool, west.pool);
 
-    for field in 0..4 {
+    for field in 0..5 {
         let mut other = key.clone();
         match field {
             0 => other.scope.push('x'),
-            1 => other.policy.push('x'),
-            2 => other.model.push('x'),
+            1 => other.tenant.push('x'),
+            2 => other.policy.push('x'),
+            3 => other.model.push('x'),
             _ => other.session.push('x'),
         }
         assert!(a.read(&other).await.unwrap().is_none());
@@ -241,8 +245,11 @@ async fn conditional_writes_expiration_and_schema_match_the_store_contract() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
+    // The idle deadline is rounded up to the next whole second, so a write
+    // at 10.4s expires at 1811, never at 1810: a binding is never cut short
+    // of the idle window it was given.
     assert!(
-        (now + 1790..=now + 1800).contains(&expires),
+        (now + 1790..=now + 1801).contains(&expires),
         "TTL must be epoch seconds"
     );
     item.insert("schemaVersion".into(), AttributeValue::N("999".into()));
@@ -258,6 +265,25 @@ async fn conditional_writes_expiration_and_schema_match_the_store_contract() {
         a.read(&key).await,
         Err(AffinityError::InvalidRecord(_))
     ));
+    // That row is now unreachable by any conditional write: its revision
+    // cannot be read, and `Absent` never matches a present item. Without a
+    // repair path the session stays fail-open until the table is fixed by
+    // hand, and TTL cannot clear it when `expiresAt` is what is corrupt.
+    let observed = tracker.lookup(&key).await.unwrap();
+    assert!(observed.pool.is_none());
+    assert_eq!(observed.expected, Expected::Unreadable);
+    assert_eq!(
+        tracker.bind(&key, &observed, &east.pool).await.unwrap(),
+        WriteOutcome::Applied
+    );
+    // Readable again, and bound normally from here, so a mixed-version
+    // rollout recovers as soon as an old reader serves that session.
+    let repaired = a.read(&key).await.unwrap().unwrap();
+    assert_eq!(repaired.pool, east.pool);
+    assert_eq!(
+        tracker.lookup(&key).await.unwrap().expected,
+        Expected::Revision(repaired.revision)
+    );
     table.delete().await;
 }
 
@@ -290,7 +316,6 @@ async fn independent_selectors_and_restarts_reuse_persisted_bindings() {
             east.id
         );
     }
-    // New tracker/store instance, with a different local-region preference.
     let restarted = selector(table.store(), "west");
     assert_eq!(
         restarted

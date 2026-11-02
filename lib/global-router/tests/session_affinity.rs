@@ -2,14 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use dynamo_global_common::{PoolId, PoolKey};
 use dynamo_global_router::affinity::{
     AffinityBinding, AffinityConfig, AffinityError, AffinityKey, AffinitySnapshot, AffinityStore,
-    InMemoryAffinityStore, SessionAffinity, StoreBackedSessionAffinity, WriteOutcome,
+    BreakerConfig, CachedAffinityStore, Expected, InMemoryAffinityStore, SessionAffinity,
+    StoreBackedSessionAffinity, WriteOutcome, tenant_id,
 };
 use dynamo_global_router::{
     AffinitySelector, InFlightTracker, Pool, PoolSelector, PoolSignals, RoutingRequest,
@@ -18,6 +19,7 @@ use dynamo_global_router::{
 fn key() -> AffinityKey {
     AffinityKey {
         scope: "test".into(),
+        tenant: "anonymous".into(),
         policy: "headroom-v1".into(),
         model: "qwen".into(),
         session: "s".into(),
@@ -38,15 +40,26 @@ fn tracker(store: Arc<dyn AffinityStore>) -> Arc<StoreBackedSessionAffinity> {
 }
 
 fn selector(store: Arc<dyn AffinityStore>, region: &str, scope: &str) -> AffinitySelector {
+    selector_with(store, region, scope, |_| ())
+}
+
+fn selector_with(
+    store: Arc<dyn AffinityStore>,
+    region: &str,
+    scope: &str,
+    adjust: impl FnOnce(&mut AffinityConfig),
+) -> AffinitySelector {
+    let mut config = AffinityConfig {
+        scope: scope.into(),
+        ..Default::default()
+    };
+    adjust(&mut config);
     AffinitySelector::new(
         Arc::new(PoolSignals::new(Arc::new(InFlightTracker::new()))),
         region.into(),
         2.0,
         tracker(store),
-        AffinityConfig {
-            scope: scope.into(),
-            ..Default::default()
-        },
+        config,
     )
 }
 
@@ -100,10 +113,21 @@ async fn selectors_share_pins_but_isolate_scope_model_and_policy() {
         pools[1].id
     );
     assert_eq!(pick(&west, &pools, "llama", Some("s")).await, pools[3].id);
-    let mut other_policy = key();
-    other_policy.policy = "new-policy".into();
-    assert!(store.read(&other_policy).await.unwrap().is_none());
-    assert_eq!(store.len(), 3);
+    // A different policy namespace is a different binding: this selector
+    // pins the same session independently rather than inheriting east's pin.
+    let other_policy = selector_with(store.clone(), "west", "test", |config| {
+        config.policy = "new-policy".into();
+    });
+    assert_eq!(
+        pick(&other_policy, &pools, "qwen", Some("s")).await,
+        pools[1].id
+    );
+    assert_eq!(pick(&west, &pools, "qwen", Some("s")).await, pools[0].id);
+    assert_eq!(
+        pick(&other_policy, &pools, "qwen", Some("s")).await,
+        pools[1].id
+    );
+    assert_eq!(store.len(), 4);
 }
 
 #[tokio::test]
@@ -128,13 +152,13 @@ async fn expired_present_record_is_replaced_before_sweep() {
     let new = pool("west", "qwen").id;
     let expired = binding(&old, "expired", 0, 1);
     store
-        .compare_exchange(&key(), None, &expired)
+        .compare_exchange(&key(), &Expected::Absent, &expired)
         .await
         .unwrap();
     let affinity = tracker(store.clone());
     let observed = affinity.lookup(&key()).await.unwrap();
     assert_eq!(observed.pool, None);
-    assert_eq!(observed.revision.as_deref(), Some("expired"));
+    assert_eq!(observed.expected, Expected::Revision("expired".into()));
     assert_eq!(
         affinity.bind(&key(), &observed, &new).await.unwrap(),
         WriteOutcome::Applied
@@ -148,7 +172,7 @@ async fn expired_present_record_is_replaced_before_sweep() {
     // An old request cannot recreate an item after cleanup under its old revision.
     assert_eq!(
         store
-            .compare_exchange(&key(), Some("expired"), &expired)
+            .compare_exchange(&key(), &Expected::Revision("expired".into()), &expired)
             .await
             .unwrap(),
         WriteOutcome::Conflict
@@ -203,7 +227,10 @@ async fn activity_refreshes_idle_expiration_and_changes_revision() {
         .unwrap()
         .as_secs();
     let old = binding(&pool, "old", now - 10, now + 60);
-    store.compare_exchange(&key(), None, &old).await.unwrap();
+    store
+        .compare_exchange(&key(), &Expected::Absent, &old)
+        .await
+        .unwrap();
     let observed = affinity.lookup(&key()).await.unwrap();
     affinity.bind(&key(), &observed, &pool).await.unwrap();
     let updated = store.read(&key()).await.unwrap().unwrap();
@@ -252,7 +279,7 @@ impl AffinityStore for FaultStore {
     async fn compare_exchange(
         &self,
         key: &AffinityKey,
-        expected: Option<&str>,
+        expected: &Expected,
         next: &AffinityBinding,
     ) -> Result<WriteOutcome, AffinityError> {
         self.writes.fetch_add(1, Ordering::Relaxed);
@@ -276,7 +303,7 @@ async fn failed_lookup_falls_back_without_writing_or_clobbering_a_binding() {
     let original = binding(&pools[1].id, "keep-me", 1, u64::MAX);
     store
         .inner
-        .compare_exchange(&key(), None, &original)
+        .compare_exchange(&key(), &Expected::Absent, &original)
         .await
         .unwrap();
     assert_eq!(pick(&router, &pools, "qwen", Some("s")).await, pools[0].id);
@@ -313,7 +340,7 @@ async fn failed_or_ambiguous_write_keeps_selected_pool_without_rollback() {
         let original = binding(&pools[1].id, "original", 1, u64::MAX);
         store
             .inner
-            .compare_exchange(&key(), None, &original)
+            .compare_exchange(&key(), &Expected::Absent, &original)
             .await
             .unwrap();
         assert_eq!(pick(&router, &pools, "qwen", Some("s")).await, pools[1].id);
@@ -334,7 +361,6 @@ async fn repeated_conflicts_have_a_fixed_retry_bound() {
     assert_eq!(store.writes.load(Ordering::Relaxed), 2);
 }
 
-/// Demonstrates replacing the whole affinity mechanism without any store.
 struct FixedAffinity(PoolId);
 
 #[async_trait]
@@ -342,7 +368,7 @@ impl SessionAffinity for FixedAffinity {
     async fn lookup(&self, _: &AffinityKey) -> Result<AffinitySnapshot, AffinityError> {
         Ok(AffinitySnapshot {
             pool: Some(self.0.clone()),
-            revision: None,
+            expected: Expected::Absent,
         })
     }
     async fn bind(
@@ -366,4 +392,257 @@ async fn affinity_mechanism_can_be_replaced_independently_of_storage() {
         AffinityConfig::default(),
     );
     assert_eq!(pick(&router, &pools, "qwen", Some("s")).await, pools[1].id);
+}
+
+#[tokio::test]
+async fn two_tenants_reusing_one_session_id_do_not_share_a_binding() {
+    let store = Arc::new(InMemoryAffinityStore::default());
+    let router = selector(store.clone(), "east", "test");
+    let pools = [pool("east", "qwen"), pool("west", "qwen")];
+    let candidates = pools.iter().collect::<Vec<_>>();
+    let pick_as = async |credential: Option<&str>, candidates: &[&Pool]| {
+        let tenant = tenant_id(credential);
+        let request = RoutingRequest::new("qwen")
+            .with_session(Some("s"))
+            .with_tenant(&tenant);
+        router
+            .select(&request, candidates)
+            .await
+            .unwrap()
+            .pool
+            .id
+            .clone()
+    };
+    // One tenant's session pins to east and follows that pin.
+    assert_eq!(
+        pick_as(Some("Bearer alice"), &candidates).await,
+        pools[0].id
+    );
+    assert_eq!(
+        pick_as(Some("Bearer alice"), &candidates[1..]).await,
+        pools[1].id
+    );
+    assert_eq!(
+        pick_as(Some("Bearer alice"), &candidates).await,
+        pools[1].id
+    );
+    // Another tenant reusing the same session ID is placed fresh, in its own
+    // binding, and does not inherit or disturb the first tenant's pin.
+    assert_eq!(pick_as(Some("Bearer bob"), &candidates).await, pools[0].id);
+    assert_eq!(
+        pick_as(Some("Bearer alice"), &candidates).await,
+        pools[1].id
+    );
+    // A request with no credential is a third namespace, not either tenant's.
+    assert_eq!(pick_as(None, &candidates).await, pools[0].id);
+    assert_eq!(store.len(), 3);
+}
+
+/// Fails every read until `recovered` is set, counting what reached it.
+struct Flaky {
+    inner: InMemoryAffinityStore,
+    recovered: AtomicBool,
+    reads: AtomicUsize,
+}
+
+impl Flaky {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: InMemoryAffinityStore::default(),
+            recovered: AtomicBool::new(false),
+            reads: AtomicUsize::new(0),
+        })
+    }
+}
+
+#[async_trait]
+impl AffinityStore for Flaky {
+    async fn read(&self, key: &AffinityKey) -> Result<Option<AffinityBinding>, AffinityError> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        if self.recovered.load(Ordering::Relaxed) {
+            return self.inner.read(key).await;
+        }
+        Err(AffinityError::Backend("injected outage".into()))
+    }
+
+    async fn compare_exchange(
+        &self,
+        key: &AffinityKey,
+        expected: &Expected,
+        binding: &AffinityBinding,
+    ) -> Result<WriteOutcome, AffinityError> {
+        self.inner.compare_exchange(key, expected, binding).await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failing_store_is_dropped_from_the_request_path_until_a_cooldown_passes() {
+    let store = Flaky::new();
+    let router = selector_with(store.clone(), "east", "test", |config| {
+        config.breaker = BreakerConfig {
+            failures: 3,
+            cooldown: Duration::from_secs(5),
+        };
+    });
+    let pools = [pool("east", "qwen")];
+
+    // The breaker is closed, so each request still pays for a lookup.
+    for _ in 0..3 {
+        pick(&router, &pools, "qwen", Some("s")).await;
+    }
+    assert_eq!(store.reads.load(Ordering::Relaxed), 3);
+
+    // Open: requests route on headroom alone and stop loading the backend.
+    for _ in 0..10 {
+        assert_eq!(pick(&router, &pools, "qwen", Some("s")).await, pools[0].id);
+    }
+    assert_eq!(store.reads.load(Ordering::Relaxed), 3);
+
+    // After the cooldown exactly one request probes, and it still fails.
+    tokio::time::advance(Duration::from_secs(6)).await;
+    for _ in 0..4 {
+        pick(&router, &pools, "qwen", Some("s")).await;
+    }
+    assert_eq!(store.reads.load(Ordering::Relaxed), 4);
+
+    // Once the store recovers, the next probe closes the breaker and every
+    // request consults storage again.
+    store.recovered.store(true, Ordering::Relaxed);
+    tokio::time::advance(Duration::from_secs(6)).await;
+    for _ in 0..3 {
+        pick(&router, &pools, "qwen", Some("s")).await;
+    }
+    assert_eq!(store.reads.load(Ordering::Relaxed), 7);
+}
+
+/// Holds one row that no reader can decode until it is overwritten.
+struct Corrupt(InMemoryAffinityStore);
+
+#[async_trait]
+impl AffinityStore for Corrupt {
+    async fn read(&self, key: &AffinityKey) -> Result<Option<AffinityBinding>, AffinityError> {
+        match self.0.read(key).await? {
+            Some(binding) => Ok(Some(binding)),
+            None => Err(AffinityError::InvalidRecord(
+                "unsupported schemaVersion".into(),
+            )),
+        }
+    }
+
+    async fn compare_exchange(
+        &self,
+        key: &AffinityKey,
+        expected: &Expected,
+        binding: &AffinityBinding,
+    ) -> Result<WriteOutcome, AffinityError> {
+        self.0.compare_exchange(key, expected, binding).await
+    }
+}
+
+#[tokio::test]
+async fn an_undecodable_record_is_repaired_rather_than_stranding_the_session() {
+    let store = Arc::new(Corrupt(InMemoryAffinityStore::default()));
+    let router = selector(store.clone(), "east", "test");
+    let pools = [pool("east", "qwen"), pool("west", "qwen")];
+
+    // The row cannot be read, so the request routes on headroom...
+    assert_eq!(pick(&router, &pools, "qwen", Some("s")).await, pools[0].id);
+    // ...and the same request replaced it with a row this build can read,
+    // rather than leaving the session fail-open until someone repairs the
+    // table by hand.
+    let repaired = store.0.read(&key()).await.unwrap().unwrap();
+    assert_eq!(repaired.pool, pools[0].id);
+    // From here the session is bound normally again.
+    assert_eq!(
+        pick(&router, &pools[1..], "qwen", Some("s")).await,
+        pools[1].id
+    );
+    assert_eq!(pick(&router, &pools, "qwen", Some("s")).await, pools[1].id);
+    assert_eq!(store.0.len(), 1);
+}
+
+#[tokio::test]
+async fn a_cached_store_serves_repeat_requests_without_re_reading() {
+    let store = Flaky::new();
+    store.recovered.store(true, Ordering::Relaxed);
+    let cache =
+        Arc::new(CachedAffinityStore::new(store.clone(), Duration::from_secs(60), 1024).unwrap());
+    let router = selector(cache, "east", "test");
+    let pools = [pool("east", "qwen"), pool("west", "qwen")];
+    for _ in 0..5 {
+        assert_eq!(pick(&router, &pools, "qwen", Some("s")).await, pools[0].id);
+    }
+    // One read on the first request; every later lookup came from memory,
+    // and each applied write refreshed the entry in place.
+    assert_eq!(store.reads.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        store.inner.read(&key()).await.unwrap().unwrap().pool,
+        pools[0].id
+    );
+}
+
+#[tokio::test]
+async fn a_cache_that_missed_another_replicas_write_conflicts_once_then_agrees() {
+    let backing = Arc::new(InMemoryAffinityStore::default());
+    let cache =
+        Arc::new(CachedAffinityStore::new(backing.clone(), Duration::from_secs(60), 1024).unwrap());
+    let cached = selector(cache.clone(), "east", "test");
+    let direct = selector(backing.clone(), "east", "test");
+    let pools = [pool("east", "qwen"), pool("west", "qwen")];
+
+    assert_eq!(pick(&cached, &pools, "qwen", Some("s")).await, pools[0].id);
+    // Another replica moves the session while the cache still holds the old
+    // revision.
+    assert_eq!(
+        pick(&direct, &pools[1..], "qwen", Some("s")).await,
+        pools[1].id
+    );
+    // The stale entry loses its conditional write; the retry reads through
+    // and lands on the binding that actually exists.
+    assert_eq!(pick(&cached, &pools, "qwen", Some("s")).await, pools[1].id);
+    assert_eq!(
+        backing.read(&key()).await.unwrap().unwrap().pool,
+        pools[1].id
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_probe_whose_client_left_does_not_wedge_the_breaker_open() {
+    let store = Flaky::new();
+    let router = Arc::new(selector_with(store.clone(), "east", "test", |config| {
+        config.breaker = BreakerConfig {
+            failures: 1,
+            cooldown: Duration::from_secs(5),
+        };
+    }));
+    let pools = Arc::new([pool("east", "qwen")]);
+    pick(&router, pools.as_ref(), "qwen", Some("s")).await;
+    assert_eq!(store.reads.load(Ordering::Relaxed), 1);
+
+    // After the cooldown, a request claims the probe and then goes away
+    // before it can report: its client left, so the future is dropped.
+    tokio::time::advance(Duration::from_secs(6)).await;
+    let (probe, probe_pools) = (router.clone(), pools.clone());
+    let abandoned = tokio::spawn(async move {
+        let candidates = probe_pools.iter().collect::<Vec<_>>();
+        probe
+            .select(
+                &RoutingRequest::new("qwen").with_session(Some("s")),
+                &candidates,
+            )
+            .await
+            .map(|target| target.pool.id.clone())
+    });
+    tokio::task::yield_now().await;
+    abandoned.abort();
+    assert_eq!(store.reads.load(Ordering::Relaxed), 2);
+
+    // The breaker is still open, and no request is admitted until the next
+    // cooldown: a lost probe costs one more cooldown, not the whole breaker.
+    pick(&router, pools.as_ref(), "qwen", Some("s")).await;
+    assert_eq!(store.reads.load(Ordering::Relaxed), 2);
+    tokio::time::advance(Duration::from_secs(6)).await;
+    store.recovered.store(true, Ordering::Relaxed);
+    pick(&router, pools.as_ref(), "qwen", Some("s")).await;
+    assert_eq!(store.reads.load(Ordering::Relaxed), 3);
 }

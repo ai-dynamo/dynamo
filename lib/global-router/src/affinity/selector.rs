@@ -2,12 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use dynamo_global_common::PoolId;
+// The runtime's clock, so a paused test clock opens and closes the breaker.
+use tokio::time::Instant;
 
+use super::stats::AffinityStats;
 use super::{AffinityError, AffinityKey, SessionAffinity, WriteOutcome};
 use crate::Pool;
 use crate::selector::{Cursors, PoolSelector, PoolTarget, RoutingRequest, reachable, target};
@@ -20,7 +23,33 @@ pub struct AffinityConfig {
     pub scope: String,
     pub policy: String,
     /// Total budget for lookup, write, SDK retries and one conflict retry.
+    /// It is a cap on added routing latency, not a target: a read-through
+    /// cache answers most lookups without reaching the backing store.
     pub timeout: Duration,
+    /// How storage failures take affinity out of the request path.
+    pub breaker: BreakerConfig,
+}
+
+/// When to stop consulting storage, and for how long.
+///
+/// Logging a failure once is not enough on its own: while the backend is down
+/// every session request still pays the full deadline and still loads the
+/// failing backend. After `failures` consecutive failures the selector routes
+/// on headroom alone for `cooldown`, then lets a single request through to
+/// test the backend before closing.
+#[derive(Clone, Copy, Debug)]
+pub struct BreakerConfig {
+    pub failures: u32,
+    pub cooldown: Duration,
+}
+
+impl Default for BreakerConfig {
+    fn default() -> Self {
+        Self {
+            failures: 5,
+            cooldown: Duration::from_secs(5),
+        }
+    }
 }
 
 impl Default for AffinityConfig {
@@ -28,8 +57,88 @@ impl Default for AffinityConfig {
         Self {
             scope: "default".into(),
             policy: "headroom-v1".into(),
-            timeout: Duration::from_millis(100),
+            timeout: Duration::from_millis(20),
+            breaker: BreakerConfig::default(),
         }
+    }
+}
+
+/// Takes affinity out of the request path while its storage is failing.
+///
+/// Closed, every request consults storage. `failures` consecutive failures
+/// open it for `cooldown`; open, requests route on headroom alone and never
+/// wait for the deadline. The first request after the cooldown is a probe: it
+/// consults storage, and its result closes or reopens the breaker. Any success
+/// closes it and resets the count.
+struct Breaker {
+    config: BreakerConfig,
+    /// Consecutive failures while closed.
+    failures: AtomicU32,
+    /// Milliseconds since `epoch` until which storage is skipped. Zero is
+    /// closed.
+    open_until: AtomicU64,
+    epoch: Instant,
+}
+
+impl Breaker {
+    fn new(config: BreakerConfig) -> Self {
+        Self {
+            config,
+            failures: AtomicU32::new(0),
+            open_until: AtomicU64::new(0),
+            epoch: Instant::now(),
+        }
+    }
+
+    fn now_millis(&self) -> u64 {
+        self.epoch.elapsed().as_millis() as u64
+    }
+
+    fn cooldown_millis(&self) -> u64 {
+        self.config.cooldown.as_millis() as u64
+    }
+
+    /// Whether this request should consult storage.
+    fn admit(&self) -> bool {
+        let open_until = self.open_until.load(Ordering::Relaxed);
+        if open_until == 0 {
+            return true;
+        }
+        let now = self.now_millis();
+        if now < open_until {
+            return false;
+        }
+        // The cooldown has passed, so one request probes the backend. Claiming
+        // the probe by pushing the deadline forward, rather than by holding a
+        // flag the probe must give back, keeps a probe whose client left from
+        // wedging the breaker open: it costs one more cooldown, not forever.
+        self.open_until
+            .compare_exchange(
+                open_until,
+                now + self.cooldown_millis(),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+    }
+
+    /// Returns whether this closed a breaker that had been open.
+    fn succeeded(&self) -> bool {
+        self.failures.store(0, Ordering::Relaxed);
+        self.open_until.swap(0, Ordering::Relaxed) != 0
+    }
+
+    /// Returns whether this opened a breaker that had been closed.
+    fn failed(&self) -> bool {
+        let failures = self.failures.fetch_add(1, Ordering::Relaxed) + 1;
+        if failures < self.config.failures {
+            return false;
+        }
+        // Counting restarts, so the count cannot run away during an outage;
+        // while open it is `admit` that keeps storage out of the path.
+        self.failures.store(0, Ordering::Relaxed);
+        let until = self.now_millis() + self.cooldown_millis();
+        self.open_until.swap(until, Ordering::Relaxed) == 0
     }
 }
 
@@ -38,7 +147,8 @@ impl Default for AffinityConfig {
 /// candidate eligibility, and requests without a session do not access it.
 ///
 /// Storage failures or deadline expiry leave the request on the best candidate
-/// selected so far. Bindings describe selection, before upstream dispatch. A
+/// selected so far, and repeated failures take storage out of the path until a
+/// cooldown passes. Bindings describe selection, before upstream dispatch. A
 /// write timeout does not prove the write failed and never triggers rollback.
 pub struct AffinitySelector {
     signals: Arc<PoolSignals>,
@@ -46,7 +156,8 @@ pub struct AffinitySelector {
     headroom_factor: f64,
     affinity: Arc<dyn SessionAffinity>,
     config: AffinityConfig,
-    unavailable: AtomicBool,
+    breaker: Breaker,
+    stats: Arc<AffinityStats>,
     frontends: Cursors<PoolId>,
 }
 
@@ -58,15 +169,40 @@ impl AffinitySelector {
         affinity: Arc<dyn SessionAffinity>,
         config: AffinityConfig,
     ) -> Self {
-        Self {
+        Self::with_stats(
             signals,
             region,
             headroom_factor,
             affinity,
             config,
-            unavailable: AtomicBool::new(false),
+            Arc::default(),
+        )
+    }
+
+    /// As [`new`](Self::new), reporting into counters the host also exports.
+    pub fn with_stats(
+        signals: Arc<PoolSignals>,
+        region: String,
+        headroom_factor: f64,
+        affinity: Arc<dyn SessionAffinity>,
+        config: AffinityConfig,
+        stats: Arc<AffinityStats>,
+    ) -> Self {
+        Self {
+            signals,
+            region,
+            headroom_factor,
+            affinity,
+            breaker: Breaker::new(config.breaker),
+            config,
+            stats,
             frontends: Cursors::default(),
         }
+    }
+
+    /// This selector's counters, for a host that exports metrics.
+    pub fn stats(&self) -> Arc<AffinityStats> {
+        self.stats.clone()
     }
 }
 
@@ -80,8 +216,13 @@ impl PoolSelector for AffinitySelector {
         let placed = place(candidates, &self.region, &self.signals);
         let mut choice = headroom(&placed, placed.first(), self.headroom_factor)?;
         if let Some(session) = request.session {
+            if !self.breaker.admit() {
+                self.stats.skipped.fetch_add(1, Ordering::Relaxed);
+                return target(&self.frontends, choice.pool);
+            }
             let key = AffinityKey {
                 scope: self.config.scope.clone(),
+                tenant: request.tenant.to_owned(),
                 policy: self.config.policy.clone(),
                 model: request.model.to_owned(),
                 session: session.to_owned(),
@@ -94,6 +235,12 @@ impl PoolSelector for AffinitySelector {
                     let pinned = observed.pool.as_ref().and_then(|pool| {
                         placed.iter().find(|candidate| candidate.pool.id == *pool)
                     });
+                    let counter = if pinned.is_some() {
+                        &self.stats.hits
+                    } else {
+                        &self.stats.misses
+                    };
+                    counter.fetch_add(1, Ordering::Relaxed);
                     choice = headroom(&placed, pinned.or(placed.first()), self.headroom_factor)
                         .expect("placement candidates are nonempty");
                     if self.affinity.bind(&key, &observed, &choice.pool.id).await?
@@ -102,23 +249,34 @@ impl PoolSelector for AffinitySelector {
                         return Ok::<(), AffinityError>(());
                     }
                 }
+                self.stats.conflicts.fetch_add(1, Ordering::Relaxed);
                 tracing::debug!("affinity updates conflicted; using the selected pool");
                 Ok(())
             };
             match tokio::time::timeout(self.config.timeout, update).await {
                 Ok(Ok(())) => {
-                    if self.unavailable.swap(false, Ordering::Relaxed) {
+                    if self.breaker.succeeded() {
                         tracing::info!("session affinity storage recovered");
                     }
                 }
                 Ok(Err(error)) => {
-                    if !self.unavailable.swap(true, Ordering::Relaxed) {
-                        tracing::warn!(%error, "affinity unavailable; using the selected pool");
+                    self.stats.failures.fetch_add(1, Ordering::Relaxed);
+                    if self.breaker.failed() {
+                        tracing::warn!(
+                            %error,
+                            cooldown = ?self.config.breaker.cooldown,
+                            "affinity unavailable; routing without it until the cooldown passes"
+                        );
                     }
                 }
                 Err(_) => {
-                    if !self.unavailable.swap(true, Ordering::Relaxed) {
-                        tracing::warn!("affinity deadline expired; using the selected pool");
+                    self.stats.timeouts.fetch_add(1, Ordering::Relaxed);
+                    if self.breaker.failed() {
+                        tracing::warn!(
+                            budget = ?self.config.timeout,
+                            cooldown = ?self.config.breaker.cooldown,
+                            "affinity deadline expired; routing without it until the cooldown passes"
+                        );
                     }
                 }
             }

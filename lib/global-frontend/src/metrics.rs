@@ -8,10 +8,12 @@
 //! and would mint a series per string. Pool frontends report what needs the
 //! stream parsed, such as inter-token latency and token counts.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use axum::http::StatusCode;
+use dynamo_global_router::affinity::{AffinityStats, CacheStats};
 use dynamo_global_router::{InFlightTracker, Pool};
 use dynamo_llm::http::service::metrics::generate_log_buckets;
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
@@ -43,8 +45,69 @@ pub struct Metrics {
     time_to_first_byte: HistogramVec,
     duration: HistogramVec,
     in_flight: IntGaugeVec,
+    /// Present only with `--router-policy affinity`.
+    affinity: Option<AffinityCounters>,
     /// A scrape resets and refills the gauges, so scrapes must not overlap.
     scrape: Mutex<()>,
+}
+
+/// Where one exported affinity series reads its cumulative count.
+type Series = (&'static str, fn(&AffinityCounters) -> &AtomicU64);
+
+/// How a request's affinity work ended. `skipped` and `timeout` are the
+/// degraded path: `skipped` means the breaker was open and storage was never
+/// consulted, `timeout` that the deadline ran out first.
+const LOOKUPS: [Series; 7] = [
+    ("hit", |counters| &counters.stats.hits),
+    ("miss", |counters| &counters.stats.misses),
+    ("conflict", |counters| &counters.stats.conflicts),
+    ("error", |counters| &counters.stats.failures),
+    ("timeout", |counters| &counters.stats.timeouts),
+    ("skipped", |counters| &counters.stats.skipped),
+    ("repair", |counters| &counters.stats.repairs),
+];
+
+/// Whether a lookup reached the backing store.
+const CACHE: [Series; 3] = [
+    ("hit", |counters| &counters.cache_stats.hits),
+    ("miss", |counters| &counters.cache_stats.misses),
+    ("invalidation", |counters| {
+        &counters.cache_stats.invalidations
+    }),
+];
+
+/// The affinity path keeps plain cumulative counters, which a scrape turns
+/// into Prometheus counters by adding what has arrived since the last one.
+#[derive(Debug)]
+struct AffinityCounters {
+    stats: Arc<AffinityStats>,
+    cache_stats: Arc<CacheStats>,
+    lookups: IntCounterVec,
+    cache: IntCounterVec,
+    /// What each series in `LOOKUPS` then `CACHE` last reported.
+    reported: Mutex<Vec<u64>>,
+}
+
+impl AffinityCounters {
+    /// Adds each series' arrivals since the last call. The caller holds the
+    /// scrape lock, so no count is reported twice.
+    fn drain(&self) {
+        let mut reported = self.reported.lock().unwrap_or_else(PoisonError::into_inner);
+        let series = LOOKUPS
+            .iter()
+            .map(|series| (&self.lookups, series))
+            .chain(CACHE.iter().map(|series| (&self.cache, series)));
+        for (index, (family, (outcome, count))) in series.enumerate() {
+            let current = count(self).load(Ordering::Relaxed);
+            // Saturating: these only ever grow, but a counter must never be
+            // handed a negative delta.
+            let arrived = current.saturating_sub(reported[index]);
+            if arrived > 0 {
+                family.with_label_values(&[outcome]).inc_by(arrived);
+                reported[index] = current;
+            }
+        }
+    }
 }
 
 impl Metrics {
@@ -131,8 +194,47 @@ impl Metrics {
             time_to_first_byte,
             duration,
             in_flight,
+            affinity: None,
             scrape: Mutex::new(()),
         }
+    }
+
+    /// Exports the affinity path's counters, including the degraded path:
+    /// requests that lost affinity to a storage error, to the deadline, or to
+    /// an open breaker, and how much of the lookup load the cache absorbed.
+    pub fn with_affinity(
+        mut self,
+        stats: Arc<AffinityStats>,
+        cache_stats: Arc<CacheStats>,
+    ) -> Self {
+        let lookups = register(
+            &self.registry,
+            IntCounterVec::new(
+                Opts::new(
+                    name("affinity_lookups_total"),
+                    "Session affinity decisions, by how the request's affinity work ended",
+                ),
+                &["outcome"],
+            ),
+        );
+        let cache = register(
+            &self.registry,
+            IntCounterVec::new(
+                Opts::new(
+                    name("affinity_cache_total"),
+                    "Session affinity store reads, by whether the in-memory cache answered them",
+                ),
+                &["outcome"],
+            ),
+        );
+        self.affinity = Some(AffinityCounters {
+            stats,
+            cache_stats,
+            lookups,
+            cache,
+            reported: Mutex::new(vec![0; LOOKUPS.len() + CACHE.len()]),
+        });
+        self
     }
 
     /// Counts a request answered without a pool. `error_type` is one of
@@ -185,6 +287,9 @@ impl Metrics {
             self.in_flight
                 .with_label_values(&[&pool.name, &pool.location.region])
                 .set(clamp_u64_to_i64(self.tracker.get(&pool.id)));
+        }
+        if let Some(affinity) = &self.affinity {
+            affinity.drain();
         }
         TextEncoder::new().encode_to_string(&self.registry.gather())
     }

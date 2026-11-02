@@ -9,7 +9,7 @@ mod item;
 use async_trait::async_trait;
 use aws_sdk_dynamodb::{Client, error::ProvideErrorMetadata, types::AttributeValue};
 use dynamo_global_router::affinity::{
-    AffinityBinding, AffinityError, AffinityKey, AffinityStore, WriteOutcome,
+    AffinityBinding, AffinityError, AffinityKey, AffinityStore, Expected, WriteOutcome,
 };
 
 /// Reuses one SDK client, whose region, endpoint, credentials, timeout and retry
@@ -63,7 +63,7 @@ impl AffinityStore for DynamoDbAffinityStore {
     async fn compare_exchange(
         &self,
         key: &AffinityKey,
-        expected_revision: Option<&str>,
+        expected: &Expected,
         binding: &AffinityBinding,
     ) -> Result<WriteOutcome, AffinityError> {
         let mut put = self
@@ -71,14 +71,20 @@ impl AffinityStore for DynamoDbAffinityStore {
             .put_item()
             .table_name(&self.table)
             .set_item(Some(item::encode(key, binding)));
-        put = match expected_revision {
-            Some(revision) => put
+        put = match expected {
+            Expected::Revision(revision) => put
                 .condition_expression("#revision = :expected")
                 .expression_attribute_names("#revision", "revision")
-                .expression_attribute_values(":expected", AttributeValue::S(revision.to_owned())),
-            None => put
+                .expression_attribute_values(":expected", AttributeValue::S(revision.clone())),
+            Expected::Absent => put
                 .condition_expression("attribute_not_exists(#pk)")
                 .expression_attribute_names("#pk", "itemHashKey"),
+            // Repairing a row no reader can decode: its revision cannot be
+            // read, and a conditional write would fail forever, leaving the
+            // row to outlive even DynamoDB's TTL sweep when `expiresAt` is
+            // what is corrupt. An unconditional PutItem restores a row that
+            // every version in the deployment can read.
+            Expected::Unreadable => put,
         };
         match put.send().await {
             Ok(_) => Ok(WriteOutcome::Applied),

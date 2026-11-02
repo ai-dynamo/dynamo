@@ -184,7 +184,8 @@ async fn main() -> Result<()> {
         .build()
         .context("build the pool HTTP client")?;
     let in_flight = Arc::new(InFlightTracker::new());
-    let metrics = Metrics::new(args.region.clone(), in_flight.clone());
+    // Only `affinity` has affinity counters to export.
+    let mut affinity_metrics = None;
     let selector: Arc<dyn PoolSelector> = match args.router_policy {
         RouterPolicy::RoundRobin => Arc::new(RoundRobinSelector::new()),
         RouterPolicy::LeastInFlight => Arc::new(LeastInFlightSelector::new(in_flight.clone())),
@@ -209,16 +210,24 @@ async fn main() -> Result<()> {
                 shutdown.child_token(),
             ));
             let idle = Duration::from_secs(args.session_idle_secs);
-            let (affinity, config) = args.affinity.build(idle, shutdown.child_token()).await?;
-            Arc::new(AffinitySelector::new(
+            let (affinity, config, counters) =
+                args.affinity.build(idle, shutdown.child_token()).await?;
+            let selector = Arc::new(AffinitySelector::with_stats(
                 signals,
                 region,
                 args.headroom_factor,
                 affinity,
                 config,
-            ))
+                counters.affinity.clone(),
+            ));
+            affinity_metrics = Some(counters);
+            selector
         }
     };
+    let mut metrics = Metrics::new(args.region.clone(), in_flight.clone());
+    if let Some(counters) = affinity_metrics {
+        metrics = metrics.with_affinity(counters.affinity, counters.cache);
+    }
     let app = app(pools, selector, in_flight, http, metrics);
     let address = format!("{}:{}", args.host, args.port);
     let listener = tokio::net::TcpListener::bind(&address)

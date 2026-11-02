@@ -11,8 +11,8 @@ use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_dynamodb::config::{Region, retry::RetryConfig, timeout::TimeoutConfig};
 use clap::{Args, ValueEnum};
 use dynamo_global_router::affinity::{
-    AffinityConfig, AffinityStore, InMemoryAffinityStore, SessionAffinity,
-    StoreBackedSessionAffinity,
+    AffinityConfig, AffinityStats, AffinityStore, BreakerConfig, CacheStats, CachedAffinityStore,
+    InMemoryAffinityStore, SessionAffinity, StoreBackedSessionAffinity,
 };
 use dynamo_global_router_store_dynamodb::DynamoDbAffinityStore;
 use tokio_util::sync::CancellationToken;
@@ -50,8 +50,25 @@ pub(crate) struct AffinityArgs {
     )]
     policy: String,
     /// Total affinity lookup/write/retry budget before routing without persistence.
-    #[arg(long = "affinity-timeout-ms", env = "DYN_GLOBAL_AFFINITY_TIMEOUT_MS", default_value_t = 100, value_parser = clap::value_parser!(u64).range(1..))]
+    #[arg(long = "affinity-timeout-ms", env = "DYN_GLOBAL_AFFINITY_TIMEOUT_MS", default_value_t = 20, value_parser = clap::value_parser!(u64).range(1..))]
     timeout_ms: u64,
+    /// How long a looked-up binding is reused from memory before the store is
+    /// read again. 0 reads the store on every request.
+    #[arg(
+        long = "affinity-cache-ttl-ms",
+        env = "DYN_GLOBAL_AFFINITY_CACHE_TTL_MS",
+        default_value_t = 1000
+    )]
+    cache_ttl_ms: u64,
+    /// Sessions held in the read-through cache. Further sessions read the store.
+    #[arg(long = "affinity-cache-entries", env = "DYN_GLOBAL_AFFINITY_CACHE_ENTRIES", default_value_t = 100_000, value_parser = clap::value_parser!(usize))]
+    cache_entries: usize,
+    /// Consecutive storage failures before affinity is taken out of the request path.
+    #[arg(long = "affinity-breaker-failures", env = "DYN_GLOBAL_AFFINITY_BREAKER_FAILURES", default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..))]
+    breaker_failures: u32,
+    /// How long to route without affinity before one request retests the store.
+    #[arg(long = "affinity-breaker-cooldown-ms", env = "DYN_GLOBAL_AFFINITY_BREAKER_COOLDOWN_MS", default_value_t = 5_000, value_parser = clap::value_parser!(u64).range(1..))]
+    breaker_cooldown_ms: u64,
     /// Existing table with string itemHashKey and sortKey keys; TTL attribute expiresAt.
     #[arg(
         long = "affinity-ddb-table",
@@ -78,11 +95,13 @@ impl AffinityArgs {
         self.store == Store::Dynamodb
     }
 
+    /// The configured affinity mechanism, its selector configuration, and the
+    /// counters the metrics endpoint exports.
     pub(crate) async fn build(
         &self,
         idle: Duration,
         shutdown: CancellationToken,
-    ) -> Result<(Arc<dyn SessionAffinity>, AffinityConfig)> {
+    ) -> Result<(Arc<dyn SessionAffinity>, AffinityConfig, AffinityMetrics)> {
         let scope = self.scope.as_deref().unwrap_or("default");
         if scope.trim().is_empty() || self.policy.trim().is_empty() {
             bail!("--affinity-scope and --affinity-policy must be nonempty");
@@ -91,7 +110,12 @@ impl AffinityArgs {
             scope: scope.into(),
             policy: self.policy.clone(),
             timeout: Duration::from_millis(self.timeout_ms),
+            breaker: BreakerConfig {
+                failures: self.breaker_failures,
+                cooldown: Duration::from_millis(self.breaker_cooldown_ms),
+            },
         };
+        let metrics = AffinityMetrics::default();
         let store: Arc<dyn AffinityStore> = match self.store {
             Store::Memory => {
                 let store = Arc::new(InMemoryAffinityStore::default());
@@ -133,17 +157,56 @@ impl AffinityArgs {
                     }
                     client = client.endpoint_url(endpoint.as_str());
                 }
-                Arc::new(DynamoDbAffinityStore::new(
+                let store: Arc<dyn AffinityStore> = Arc::new(DynamoDbAffinityStore::new(
                     aws_sdk_dynamodb::Client::from_conf(client.build()),
                     table,
                     self.consistent_reads,
-                )?)
+                )?);
+                // The memory store is already memory, so only a remote store
+                // is worth a cache. A hit skips the network round trip
+                // entirely; a stale entry costs one conditional-write
+                // conflict, which the selector's retry reads through.
+                match self.cache_ttl_ms {
+                    0 => store,
+                    ttl_ms => {
+                        let cache = Arc::new(CachedAffinityStore::with_stats(
+                            store,
+                            Duration::from_millis(ttl_ms),
+                            self.cache_entries,
+                            metrics.cache.clone(),
+                        )?);
+                        tokio::spawn(sweep_cache(cache.clone(), shutdown));
+                        cache
+                    }
+                }
             }
         };
         Ok((
-            Arc::new(StoreBackedSessionAffinity::new(store, idle)?),
+            Arc::new(StoreBackedSessionAffinity::with_stats(
+                store,
+                idle,
+                metrics.affinity.clone(),
+            )?),
             config,
+            metrics,
         ))
+    }
+}
+
+/// Counters the affinity path fills and the metrics endpoint exports.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AffinityMetrics {
+    pub(crate) affinity: Arc<AffinityStats>,
+    pub(crate) cache: Arc<CacheStats>,
+}
+
+async fn sweep_cache(cache: Arc<CachedAffinityStore>, cancel: CancellationToken) {
+    let mut ticks = tokio::time::interval(Duration::from_secs(60));
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = ticks.tick() => cache.sweep(),
+        }
     }
 }
 

@@ -25,7 +25,7 @@ pub(crate) fn key(key: &AffinityKey) -> Item {
             "itemHashKey".into(),
             AttributeValue::S(format!(
                 "AFFINITY#v1#{}",
-                digest(&[&key.scope, &key.session])
+                digest(&[&key.scope, &key.tenant, &key.session])
             )),
         ),
         (
@@ -106,6 +106,7 @@ mod tests {
     fn example() -> AffinityKey {
         AffinityKey {
             scope: "production".into(),
+            tenant: "anonymous".into(),
             policy: "headroom-v1".into(),
             model: "qwen".into(),
             session: "session-1".into(),
@@ -116,12 +117,13 @@ mod tests {
     fn key_encoding_is_unambiguous_and_scoped() {
         assert_ne!(digest(&["a", "bc"]), digest(&["ab", "c"]));
         let original = example();
-        for field in 0..4 {
+        for field in 0..5 {
             let mut other = original.clone();
             match field {
                 0 => other.scope.push('x'),
-                1 => other.policy.push('x'),
-                2 => other.model.push('x'),
+                1 => other.tenant.push('x'),
+                2 => other.policy.push('x'),
+                3 => other.model.push('x'),
                 _ => other.session.push('x'),
             }
             assert_ne!(key(&original), key(&other));
@@ -133,12 +135,15 @@ mod tests {
         );
     }
 
+    /// The schema is unreleased, so adding `tenant` to the partition key
+    /// changed these digests once. They are frozen from here: a change to the
+    /// derivation strands every live binding, so it needs a new key version.
     #[test]
     fn v1_keys_are_stable_across_releases() {
         let item = key(&example());
         assert_eq!(
             item["itemHashKey"].as_s().unwrap(),
-            "AFFINITY#v1#71b176389263fe02ad5b65e74f3ee300eaa22daf847f327a3705f006eb23354e"
+            "AFFINITY#v1#f1f60d0c193808f7690958aa15220cec50255a4d035867958f9185c0b6c72e62"
         );
         assert_eq!(
             item["sortKey"].as_s().unwrap(),

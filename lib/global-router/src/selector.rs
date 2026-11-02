@@ -12,6 +12,7 @@ use dynamo_global_common::PoolId;
 use url::Url;
 
 use crate::Pool;
+use crate::affinity::ANONYMOUS_TENANT;
 use crate::load::InFlightTracker;
 
 /// What a selector may know about a request. Routing inputs such as the
@@ -22,6 +23,11 @@ pub struct RoutingRequest<'a> {
     pub model: &'a str,
     /// The session the request belongs to, from `X-Dynamo-Session-ID`.
     pub session: Option<&'a str>,
+    /// An opaque identifier for the caller's credential (see
+    /// [`affinity::tenant_id`](crate::affinity::tenant_id)), so that two
+    /// tenants reusing one session ID are kept apart. Never the credential
+    /// itself, and never an admission decision.
+    pub tenant: &'a str,
 }
 
 impl<'a> RoutingRequest<'a> {
@@ -29,11 +35,18 @@ impl<'a> RoutingRequest<'a> {
         Self {
             model,
             session: None,
+            tenant: ANONYMOUS_TENANT,
         }
     }
 
     pub fn with_session(mut self, session: Option<&'a str>) -> Self {
         self.session = session;
+        self
+    }
+
+    /// `tenant` is an opaque identifier, not the caller's credential.
+    pub fn with_tenant(mut self, tenant: &'a str) -> Self {
+        self.tenant = tenant;
         self
     }
 }
@@ -47,6 +60,12 @@ pub struct PoolTarget<'a> {
 }
 
 /// Chooses a pool, and a frontend in it, for each request.
+///
+/// This trait is internal to the Global Router and its frontend: it is public
+/// so that selectors can live in sibling crates, not as a stable extension
+/// point, and it changes without a major version. `select` is `async` because
+/// a selector may consult shared storage; the policies that do not, such as
+/// round robin and least in flight, return without awaiting.
 #[async_trait]
 pub trait PoolSelector: Send + Sync {
     /// `candidates` are the pools serving the request's model. `None` means

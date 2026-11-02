@@ -2622,6 +2622,7 @@ name = "dynamo-global-router"
 version = "1.7.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "dashmap",
  "dynamo-global-common",
  "futures",

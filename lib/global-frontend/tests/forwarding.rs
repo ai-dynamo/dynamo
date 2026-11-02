@@ -546,10 +546,11 @@ async fn forwards_the_request_as_sent() {
     assert!(!seen[0].contains_key("transfer-encoding"));
 }
 
-/// Records the session each request carried, and routes round robin.
+/// Records the session and tenant each request carried, and routes round robin.
 #[derive(Default)]
 struct SessionRecorder {
     sessions: Mutex<Vec<Option<String>>>,
+    tenants: Mutex<Vec<String>>,
     inner: RoundRobinSelector,
 }
 
@@ -562,6 +563,7 @@ impl PoolSelector for SessionRecorder {
     ) -> Option<PoolTarget<'a>> {
         let session = request.session.map(str::to_owned);
         self.sessions.lock().unwrap().push(session);
+        self.tenants.lock().unwrap().push(request.tenant.to_owned());
         self.inner.select(request, candidates).await
     }
 }
@@ -585,6 +587,42 @@ async fn the_selector_sees_the_session() {
     }
     let sessions = recorder.sessions.lock().unwrap();
     assert_eq!(*sessions, [Some("session-123".to_owned()), None]);
+}
+
+#[tokio::test]
+async fn the_selector_sees_a_tenant_but_never_the_credential() {
+    use dynamo_global_router::affinity::{ANONYMOUS_TENANT, tenant_id};
+
+    let pool_frontend = echo_pool_frontend().await;
+    let recorder = Arc::new(SessionRecorder::default());
+    let blue = pool("blue", MODEL, &pool_frontend.url);
+    let in_flight = Arc::new(InFlightTracker::new());
+    let global = global_frontend_with(vec![blue], recorder.clone(), in_flight).await;
+
+    for credential in [Some("Bearer alice"), Some("Bearer bob"), None] {
+        let mut request = client()
+            .post(global.server.url.join("v1/chat/completions").unwrap())
+            .header("x-dynamo-session-id", "session-123")
+            .json(&chat(MODEL, "hi", false));
+        if let Some(credential) = credential {
+            request = request.header("authorization", credential);
+        }
+        ok_json(request.send().await.unwrap()).await;
+    }
+    let tenants = recorder.tenants.lock().unwrap();
+    // One session ID, three namespaces: each credential gets its own, and an
+    // unauthenticated request is anonymous rather than borrowing one.
+    assert_eq!(
+        *tenants,
+        [
+            tenant_id(Some("Bearer alice")),
+            tenant_id(Some("Bearer bob")),
+            ANONYMOUS_TENANT.to_owned(),
+        ]
+    );
+    // The credential itself never reaches the selector, so it never reaches
+    // a key or a stored row.
+    assert!(tenants.iter().all(|tenant| !tenant.contains("alice")));
 }
 
 #[tokio::test]
