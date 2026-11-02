@@ -105,7 +105,7 @@ func (e *Env) RunM(m *testing.M) int {
 // RunT creates a namespace and returns a test environment backed by the
 // explicitly unlocked cluster context.
 func (e *Env) RunT(tb testing.TB) *TestEnv {
-	e.startForTest(tb)
+	e.PrepareT(tb)
 	testEnv := newTestEnv(tb, e.rt, e.opts)
 	tb.Cleanup(testEnv.stop)
 	return testEnv
@@ -114,7 +114,7 @@ func (e *Env) RunT(tb testing.TB) *TestEnv {
 // RunTInNamespace takes ownership of a namespace prepared by BeforeWebhooks.
 // Keeping its name preserves namespace-dependent historical worker identities.
 func (e *Env) RunTInNamespace(tb testing.TB, namespace string) *TestEnv {
-	e.startForTest(tb)
+	e.PrepareT(tb)
 	var ns corev1.Namespace
 	if err := e.rt.client.Get(tb.Context(), client.ObjectKey{Name: namespace}, &ns); err != nil {
 		tb.Fatalf("get prepared namespace %q: %v", namespace, err)
@@ -124,13 +124,16 @@ func (e *Env) RunTInNamespace(tb testing.TB, namespace string) *TestEnv {
 	return testEnv
 }
 
-func (e *Env) startForTest(tb testing.TB) {
+// PrepareT initializes shared history and admission before scenarios start.
+// It is safe to call repeatedly or concurrently and does not create a test namespace.
+// RunM owns cleanup; RunT and RunTInNamespace also prepare lazily.
+func (e *Env) PrepareT(tb testing.TB) {
 	tb.Helper()
 	e.mu.Lock()
 	runM := e.runM
 	e.mu.Unlock()
 	if !runM {
-		tb.Fatal("clusterenv.RunT requires RunM from TestMain")
+		tb.Fatal("clusterenv.PrepareT requires RunM from TestMain")
 	}
 	e.once.Do(func() {
 		e.rt, e.err = startRuntime(e.opts)

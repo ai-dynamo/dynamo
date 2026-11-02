@@ -197,6 +197,10 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 		require.NotContains(t, namespaces, namespace, "namespace collision: %s", item.relative)
 		namespaces[namespace] = item.relative
 	}
+
+	t.Log("Prepare all historical state and shared admission before starting scenarios")
+	clusterTestEnv.PrepareT(t)
+
 	// Join ordinary scenarios and their cleanup before running the dependent special cases.
 	t.Run("scenarios", func(t *testing.T) {
 		for _, item := range scenarios {
@@ -218,7 +222,6 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 				if isHistory {
 					env = clusterTestEnv.RunTInNamespace(t, namespace)
 				} else {
-					// Trigger exclusive history preparation before creating new admitted inputs.
 					env = clusterTestEnv.RunT(t)
 					// Latest inputs have fixed names too, so their literal hashes are reviewable.
 					require.NoError(t, env.Client().Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}))
