@@ -284,8 +284,10 @@ policy_classes:
 ```
 
 Clients select a class by sending its exact name in
-`x-dynamo-meta-policy-class`. A missing, empty, or unknown name uses
-`default_policy_class`. A profile with more than one class must set
+`x-dynamo-meta-policy-class`. A request without the header uses
+`default_policy_class`. A name that matches no configured class fails the
+request; the frontend returns HTTP 400. When a request classifier sets a class,
+that class replaces the requested name before this check. A profile with more than one class must set
 `default_policy_class` to one of its class names. With exactly one class, that
 class is the default and `default_policy_class` can be omitted:
 

@@ -1023,7 +1023,7 @@ impl OfflineReplayRouter {
         let decay_now = self.decay_now(now_ms);
         let class_index = self
             .profile
-            .resolve_class_index(pending.policy_class.as_deref());
+            .resolve_class_index(pending.policy_class.as_deref())?;
         let class = self.profile.class(class_index);
         let should_queue = class.queueing_enabled()
             && (self.pending.has_backlog(class_index)
@@ -1751,6 +1751,65 @@ mod tests {
         .unwrap();
         assert_eq!(policy.router.pending_count(), 0);
         assert!(policy.router.affinity_staged.is_empty());
+    }
+
+    #[test]
+    fn unknown_policy_class_fails_at_class_entry_and_releases_session_affinity() {
+        use super::KvRouterPlacement as Policy;
+        use aisimulate_core::replay::PlacementPolicy;
+        use dynamo_kv_router::scheduling::KvSchedulerError;
+        let mut policy = Policy::new_with_selector_seed(
+            &queueing_args(),
+            Some(queueing_router_config()),
+            None,
+            &topology(1, 1, false),
+            Some(0),
+        )
+        .unwrap()
+        .with_conversation_affinity(Some(Default::default()))
+        .unwrap();
+        let arrive = |policy: &mut Policy, id: u128, policy_class: Option<&str>| {
+            let mut request = request(id, id as u32);
+            request.policy_class = policy_class.map(str::to_string);
+            policy
+                .router
+                .on_request_arrival_for_session(&request, None, Some("a".into()), 0.0)
+        };
+        let is_unknown = |error: anyhow::Error| {
+            matches!(
+                error.downcast_ref::<KvSchedulerError>(),
+                Some(KvSchedulerError::UnknownPolicyClass(name)) if name == "unknown"
+            )
+        };
+
+        // Entering its class at arrival, the request fails and releases its session hold,
+        // so the next request for the session is not blocked by it.
+        assert!(is_unknown(
+            arrive(&mut policy, 1, Some("unknown")).unwrap_err()
+        ));
+        let first = arrive(&mut policy, 2, None).unwrap().admissions;
+        assert_eq!(first.len(), 1);
+        // Behind that uncommitted request it waits for the session, and fails only when it
+        // enters its class.
+        assert!(
+            arrive(&mut policy, 3, Some("unknown"))
+                .unwrap()
+                .admissions
+                .is_empty()
+        );
+        assert_eq!(policy.router.affinity_waiting.len(), 1);
+        <Policy as PlacementPolicy<DirectRequest>>::dispatch_committed(
+            &mut policy,
+            first[0].uuid,
+            0.0,
+        )
+        .unwrap();
+        assert!(is_unknown(
+            <Policy as PlacementPolicy<DirectRequest>>::advance_clock(&mut policy, 0.0)
+                .unwrap_err()
+        ));
+        assert!(policy.router.affinity_waiting.is_empty());
+        assert_eq!(policy.router.pending_count(), 0);
     }
 
     #[test]
@@ -2717,12 +2776,25 @@ models:
         let error = router
             .on_request_arrival(&root_class, None, 0.0)
             .unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<dynamo_kv_router::scheduling::KvSchedulerError>(),
+                Some(dynamo_kv_router::scheduling::KvSchedulerError::UnknownPolicyClass(name))
+                    if name == "root"
+            ),
+            "a root class name is unknown to the model profile: {error:?}"
+        );
+        assert_eq!(router.pending_count(), 2);
+
+        let error = router
+            .on_request_arrival(&request(7, 7), None, 0.0)
+            .unwrap_err();
         let rejection = error
             .downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
             .expect("worker removal should retain the typed queue rejection");
         assert_eq!(
             rejection.policy_class, "latency",
-            "a root class name is unknown to the model profile and uses its default"
+            "an omitted name uses the model's default class"
         );
         assert_eq!(rejection.current, 2);
         assert_eq!(rejection.limit, 1);

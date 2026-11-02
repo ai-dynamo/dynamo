@@ -917,7 +917,7 @@ impl<
 
         let queue_metadata = match classified_request {
             Some(classified) => self.validate_classification(&mut request, classified, ingress_at),
-            None => Ok(self.default_queue_metadata(&request, ingress_at)),
+            None => self.default_queue_metadata(&request, ingress_at),
         };
         let queue_metadata = match queue_metadata {
             Ok(metadata) => metadata,
@@ -1014,7 +1014,9 @@ impl<
         request: SchedulingRequest,
         due_at: Instant,
     ) {
-        let mut queue_metadata = self.default_queue_metadata(&request, Instant::now());
+        let mut queue_metadata = self
+            .default_queue_metadata(&request, Instant::now())
+            .expect("test request names a configured policy class");
         queue_metadata.due_at = Some(due_at);
         let (ack_tx, ack_rx) = oneshot::channel();
         let command = AdmissionCommand::Enqueue {
@@ -1037,6 +1039,18 @@ impl<
         &self,
         request: &SchedulingRequest,
         ingress_at: Instant,
+    ) -> Result<QueueMetadata, KvSchedulerError> {
+        let class_index = self
+            .profile
+            .resolve_class_index(request.policy_class.as_deref())?;
+        Ok(self.queue_metadata(request, class_index, ingress_at))
+    }
+
+    fn queue_metadata(
+        &self,
+        request: &SchedulingRequest,
+        class_index: usize,
+        ingress_at: Instant,
     ) -> QueueMetadata {
         let available = self
             .available_worker_provider
@@ -1049,9 +1063,6 @@ impl<
                 .with_available_workers(available.as_deref())
                 .best_cached_tokens(),
         );
-        let class_index = self
-            .profile
-            .resolve_class_index(request.policy_class.as_deref());
         QueueMetadata {
             class_index,
             snapshot,
@@ -1099,18 +1110,23 @@ impl<
 
         // Queue inputs are recomputed from the current workers, exactly as the
         // default path computes them: worker state may have changed while the
-        // classification was pending, and only explicit overrides survive.
-        let mut metadata = self.default_queue_metadata(request, ingress_at);
-        if let Some(policy_class) = policy_class {
-            metadata.class_index = self
+        // classification was pending, and only explicit overrides survive. The
+        // class entering the queue is the classifier's override, if it set one,
+        // otherwise the request's own class.
+        let class_index = match policy_class {
+            Some(policy_class) => self
                 .profile
                 .resolve_class_index_strict(&policy_class)
                 .ok_or_else(|| {
                     KvSchedulerError::InvalidClassificationMetadata(format!(
                         "unknown policy class {policy_class:?}"
                     ))
-                })?;
-        }
+                })?,
+            None => self
+                .profile
+                .resolve_class_index(request.policy_class.as_deref())?,
+        };
+        let mut metadata = self.queue_metadata(request, class_index, ingress_at);
         if let Some(cost) = scheduling_cost_tokens {
             metadata.snapshot.scheduling_cost_tokens = cost;
         }
@@ -3271,6 +3287,25 @@ policy_classes:
             queue.validate_classification(&mut request, zero_cost, ingress_at),
             Err(KvSchedulerError::InvalidClassificationMetadata(_))
         ));
+
+        // The override is the class entering the queue, so a configured override
+        // replaces an unknown requested class; without one, the unknown class fails.
+        request.policy_class = Some("unknown".to_string());
+        let mut replaced = queue
+            .build_classify_request(&request, ingress_at, WorkerInputs::NONE)
+            .0;
+        replaced.set_policy_class("bulk");
+        let metadata = queue
+            .validate_classification(&mut request, replaced, ingress_at)
+            .unwrap();
+        assert_eq!(queue.profile.class(metadata.class_index).name, "bulk");
+        let unreplaced = queue
+            .build_classify_request(&request, ingress_at, WorkerInputs::NONE)
+            .0;
+        assert!(matches!(
+            queue.validate_classification(&mut request, unreplaced, ingress_at),
+            Err(KvSchedulerError::UnknownPolicyClass(name)) if name == "unknown"
+        ));
     }
 
     #[tokio::test]
@@ -3424,7 +3459,9 @@ policy_classes:
         active_rx.await.unwrap().unwrap();
 
         let (request, response_rx) = make_request("expires-during-refresh", 64);
-        let mut queue_metadata = queue.default_queue_metadata(&request, Instant::now());
+        let mut queue_metadata = queue
+            .default_queue_metadata(&request, Instant::now())
+            .unwrap();
         queue_metadata.due_at = Some(Instant::now() + Duration::from_secs(30));
         let (ack_tx, ack_rx) = oneshot::channel();
         queue
@@ -3714,16 +3751,19 @@ policy_classes:
     prefill_busy_threshold: 32
 "#,
         );
-        for profile in [
-            PolicyProfile::synthetic(Some(0.5), RouterQueuePolicy::Fcfs),
-            mixed,
+        for (profile, active_class) in [
+            (
+                PolicyProfile::synthetic(Some(0.5), RouterQueuePolicy::Fcfs),
+                None,
+            ),
+            (mixed, Some("direct")),
         ] {
             for overflow in [false, true] {
                 let (queue, slots) = make_queue_with_profile(1, 16, 64, profile.clone());
                 let (mut active, active_rx) = make_request("active", 64);
                 // In the mixed profile, capacity released by a direct class
                 // must wake requests waiting in the queued class.
-                active.policy_class = Some("direct".into());
+                active.policy_class = active_class.map(str::to_string);
                 let (attempt_tx, attempt_rx) = oneshot::channel();
                 queue
                     .enqueue_admitted_with_block_hashes_and_lease(
@@ -3969,7 +4009,9 @@ policy_classes:
         request: SchedulingRequest,
         prepared: Option<Box<PreparedAdmission>>,
     ) {
-        let queue_metadata = queue.default_queue_metadata(&request, Instant::now());
+        let queue_metadata = queue
+            .default_queue_metadata(&request, Instant::now())
+            .unwrap();
         let (ack_tx, ack_rx) = oneshot::channel();
         queue
             .admission_tx
@@ -4108,14 +4150,18 @@ policy_classes:
             let worker = WorkerWithDpRank::new(0, 0);
 
             let (active, mut active_rx) = make_request("active", 64);
-            let metadata = queue.default_queue_metadata(&active, Instant::now());
+            let metadata = queue
+                .default_queue_metadata(&active, Instant::now())
+                .unwrap();
             assert!(actor.handle_enqueue(active, None, None, None, None, metadata));
             actor.handle_enqueued().await;
             assert_eq!(active_rx.try_recv().unwrap().unwrap().best_worker, worker);
 
             let (mut older, mut older_rx) = make_request("older-pinned", 64);
             older.pinned_worker = Some(worker);
-            let metadata = queue.default_queue_metadata(&older, Instant::now());
+            let metadata = queue
+                .default_queue_metadata(&older, Instant::now())
+                .unwrap();
             assert!(actor.handle_enqueue(older, None, None, None, None, metadata));
             actor.handle_enqueued().await;
             assert!(older_rx.try_recv().is_err());
@@ -4125,7 +4171,9 @@ policy_classes:
                 updates.record(Some(worker));
             }
             let (later, mut later_rx) = make_request("later-shared", 64);
-            let metadata = queue.default_queue_metadata(&later, Instant::now());
+            let metadata = queue
+                .default_queue_metadata(&later, Instant::now())
+                .unwrap();
             assert!(actor.handle_enqueue(later, None, None, None, None, metadata));
             // Force enqueue processing before the capacity select branch.
             actor.handle_enqueued().await;
@@ -5174,9 +5222,13 @@ policy_classes:
         // Cache state changes a request's token snapshot and cost, never its class.
         let (mut probe, _probe_rx) = make_request("probe", 64);
         probe.policy_class = Some("latency".to_string());
-        let uncached = queue.default_queue_metadata(&probe, Instant::now());
+        let uncached = queue
+            .default_queue_metadata(&probe, Instant::now())
+            .unwrap();
         probe.overlap.effective_cached_tokens.insert(worker, 48);
-        let cached = queue.default_queue_metadata(&probe, Instant::now());
+        let cached = queue
+            .default_queue_metadata(&probe, Instant::now())
+            .unwrap();
         assert_eq!((uncached.class_index, cached.class_index), (1, 1));
         assert_eq!(uncached.snapshot, QueueSnapshot::new(64, 0));
         assert_eq!(cached.snapshot, QueueSnapshot::new(64, 48));
@@ -5197,14 +5249,26 @@ policy_classes:
         latency_uncached.policy_class = Some("latency".to_string());
         queue.enqueue(latency_uncached).await;
 
-        // Unknown and missing names use the default class, cached or not.
-        let (mut unknown_cached, _unknown_cached_rx) = make_request("unknown-cached", 64);
+        // An unknown name fails before it is queued, cached or not.
+        let (mut unknown_cached, unknown_cached_rx) = make_request("unknown-cached", 64);
         unknown_cached.policy_class = Some("unknown".to_string());
         unknown_cached
             .overlap
             .effective_cached_tokens
             .insert(worker, 64);
         queue.enqueue(unknown_cached).await;
+        assert!(matches!(
+            unknown_cached_rx.await.unwrap(),
+            Err(KvSchedulerError::UnknownPolicyClass(name)) if name == "unknown"
+        ));
+
+        // Missing names use the default class, cached or not.
+        let (mut missing_cached, _missing_cached_rx) = make_request("missing-cached", 64);
+        missing_cached
+            .overlap
+            .effective_cached_tokens
+            .insert(worker, 64);
+        queue.enqueue(missing_cached).await;
 
         let (missing, _missing_rx) = make_request("missing", 64);
         queue.enqueue(missing).await;
@@ -5264,7 +5328,10 @@ policy_classes:
 
         let (long, mut long_rx) = make_request("long", 64);
         assert_eq!(
-            queue.default_queue_metadata(&long, Instant::now()).due_at,
+            queue
+                .default_queue_metadata(&long, Instant::now())
+                .unwrap()
+                .due_at,
             None
         );
         queue.enqueue(long).await;
@@ -5493,6 +5560,7 @@ policy_classes:
         assert_eq!(
             queue
                 .default_queue_metadata(&request, Instant::now())
+                .unwrap()
                 .snapshot
                 .cached_tokens,
             32
@@ -5509,6 +5577,7 @@ policy_classes:
         assert_eq!(
             queue
                 .default_queue_metadata(&request, Instant::now())
+                .unwrap()
                 .snapshot
                 .cached_tokens,
             0

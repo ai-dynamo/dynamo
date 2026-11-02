@@ -11,6 +11,7 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
 
+use super::KvSchedulerError;
 use super::config::RouterQueuePolicy;
 use crate::plugins::request_classifier::RawRequestClassifierConfig;
 use crate::plugins::request_classifier::RequestClassifierConfig;
@@ -235,13 +236,15 @@ impl PolicyProfile {
         &self.classes[self.default_class_index]
     }
 
-    /// Resolves a requested class name to its queue. A missing or unknown name selects the
-    /// default class.
-    pub fn resolve_class_index(&self, requested: Option<&str>) -> usize {
-        // TODO: Add bounded observability for unknown requested policy values.
-        requested
-            .and_then(|name| self.resolve_class_index_strict(name))
-            .unwrap_or(self.default_class_index)
+    /// Resolves a requested class name to its queue. An omitted name selects the default
+    /// class; a name that matches no configured class is an error.
+    pub fn resolve_class_index(&self, requested: Option<&str>) -> Result<usize, KvSchedulerError> {
+        match requested {
+            None => Ok(self.default_class_index),
+            Some(name) => self
+                .resolve_class_index_strict(name)
+                .ok_or_else(|| KvSchedulerError::UnknownPolicyClass(name.to_string())),
+        }
     }
 
     pub fn class(&self, index: usize) -> &PolicyClassConfig {
@@ -867,7 +870,7 @@ models:
         assert!(!exact.default_class().queueing_enabled());
         assert!(
             exact
-                .class(exact.resolve_class_index(Some("model-queued")))
+                .class(exact.resolve_class_index(Some("model-queued")).unwrap())
                 .queueing_enabled()
         );
         assert_eq!(exact.default_class().queue_policy, RouterQueuePolicy::Fcfs);
@@ -875,11 +878,14 @@ models:
             exact.default_class().request_queue_limit_per_worker,
             Some(0)
         );
-        for requested in [None, Some("unknown"), Some("root-default")] {
-            assert_eq!(
-                exact.class(exact.resolve_class_index(requested)).name,
-                "model-direct",
-                "{requested:?} must use the model's default class"
+        assert_eq!(
+            exact.class(exact.resolve_class_index(None).unwrap()).name,
+            "model-direct"
+        );
+        for requested in ["unknown", "root-default"] {
+            assert!(
+                exact.resolve_class_index(Some(requested)).is_err(),
+                "{requested:?} must not resolve in the model profile"
             );
         }
 
@@ -996,8 +1002,11 @@ models:
             fallback.default_class().queue_policy,
             RouterQueuePolicy::Wspt
         );
-        // The synthetic class serves every request; only its own name is a valid override.
-        assert_eq!(fallback.resolve_class_index(Some("absolute")), 0);
+        // Only an omitted name or the synthetic class's own name selects it.
+        for requested in [None, Some(SYNTHETIC_POLICY_CLASS)] {
+            assert_eq!(fallback.resolve_class_index(requested).ok(), Some(0));
+        }
+        assert!(fallback.resolve_class_index(Some("absolute")).is_err());
         assert_eq!(
             fallback.resolve_class_index_strict(SYNTHETIC_POLICY_CLASS),
             Some(0)
@@ -1006,7 +1015,7 @@ models:
     }
 
     #[test]
-    fn classes_resolve_by_name_and_fall_back_to_the_default() {
+    fn classes_resolve_by_name_and_only_omitted_names_use_the_default() {
         let profile = RouterPolicyConfig::from_yaml(
             r#"
 default_policy_class: standard
@@ -1025,14 +1034,20 @@ policy_classes:
         // Every configured class is its own queue, selected by its exact name.
         for (index, name) in ["priority", "standard", "batch"].into_iter().enumerate() {
             assert_eq!(profile.class(index).name, name);
-            assert_eq!(profile.resolve_class_index(Some(name)), index);
+            assert_eq!(profile.resolve_class_index(Some(name)).ok(), Some(index));
             assert_eq!(profile.resolve_class_index_strict(name), Some(index));
         }
-        // Missing and unknown names use the configured default, not the first class.
-        for requested in [None, Some(""), Some("unknown"), Some("Priority")] {
-            assert_eq!(profile.resolve_class_index(requested), 1, "{requested:?}");
-        }
+        // An omitted name uses the configured default, not the first class. Any other name
+        // must match a configured class exactly.
+        assert_eq!(profile.resolve_class_index(None).ok(), Some(1));
         for requested in ["", "unknown", "Priority"] {
+            assert!(
+                matches!(
+                    profile.resolve_class_index(Some(requested)),
+                    Err(KvSchedulerError::UnknownPolicyClass(name)) if name == requested
+                ),
+                "{requested:?}"
+            );
             assert_eq!(profile.resolve_class_index_strict(requested), None);
         }
 
@@ -1044,7 +1059,8 @@ policy_classes:
             .unwrap()
             .resolve_profile(None, None, RouterQueuePolicy::Fcfs);
             assert_eq!(single.default_class().name, "only");
-            assert_eq!(single.resolve_class_index(Some("unknown")), 0);
+            assert_eq!(single.resolve_class_index(Some("only")).ok(), Some(0));
+            assert!(single.resolve_class_index(Some("unknown")).is_err());
         }
     }
 
@@ -1221,16 +1237,15 @@ policy_classes:
             class.queue_policy == RouterQueuePolicy::Fcfs && class.queueing_enabled()
         }));
         assert_eq!(
-            root.class(root.resolve_class_index(Some("priority")))
+            root.class(root.resolve_class_index(Some("priority")).unwrap())
                 .quantum,
             800
         );
-        for requested in [None, Some("unknown")] {
-            assert_eq!(
-                root.class(root.resolve_class_index(requested)).name,
-                "standard"
-            );
-        }
+        assert_eq!(
+            root.class(root.resolve_class_index(None).unwrap()).name,
+            "standard"
+        );
+        assert!(root.resolve_class_index(Some("unknown")).is_err());
 
         let model = config.resolve_profile(
             Some("example/large-model"),
@@ -1240,11 +1255,8 @@ policy_classes:
         assert_eq!(model.classes().len(), 1);
         assert_eq!(model.default_class().name, "standard");
         assert_eq!(model.default_class().quantum, 1000);
-        assert_eq!(
-            model
-                .class(model.resolve_class_index(Some("priority")))
-                .quantum,
-            1000,
+        assert!(
+            model.resolve_class_index(Some("priority")).is_err(),
             "model profiles must completely replace root classes"
         );
     }

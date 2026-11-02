@@ -3032,8 +3032,9 @@ class KvRouter:
                            blocks. When provided, this is used in block hash computation
                            to enable MM-aware worker selection.
             cache_namespace: Optional cache namespace used in block hash computation.
-            policy_class: Requested policy class name. Missing and unknown
-                          names use the configured default class.
+            policy_class: Requested policy class name. An omitted name uses
+                          the configured default class; a name that matches no
+                          configured class raises an error.
 
         Returns:
             A tuple of (worker_id, dp_rank, overlap_blocks) where:

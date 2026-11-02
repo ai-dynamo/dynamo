@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Requests select a class by name with the x-dynamo-meta-policy-class header.
-# A missing or unknown name uses default_policy_class. While both queues are
-# backlogged, the 800:200 quanta split uncached-token scheduling credit 80/20.
+# A missing name uses default_policy_class; an unknown name fails the request.
+# While both queues are backlogged, the 800:200 quanta split uncached-token
+# scheduling credit 80/20.
 # slo_ttft_ms is validated and stored; queue ordering and expiry do not use it yet.
 default_policy_class: standard
 policy_classes:
