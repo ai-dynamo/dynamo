@@ -874,20 +874,39 @@ this check after changing an endpoint, dependency, image, or cluster configurati
 
 <Accordion title="Inspect the job in Harbor (optional)">
 
-In a separate workstation terminal, use a viewer environment so its version
-does not change the pinned execution environment. Keep the viewer running:
+In a separate workstation terminal, run these commands from
+`examples/agents/harbor-substrate`. Use a separate viewer environment to convert
+the copied Pi logs to Harbor's ATIF trajectory format, then start the viewer:
 
 ```bash title="Workstation"
 python3 -m venv .venv/viewer
 .venv/viewer/bin/pip install harbor==0.25.0
+.venv/viewer/bin/python pi_trajectory.py results
 .venv/viewer/bin/harbor view results --host 127.0.0.1 --port 8080
 ```
 
-Open `http://localhost:8080` to inspect the job and trial results. Read the
-collected `agent/pi.txt` and verifier files alongside those results. This
-example does not convert Pi events to ATIF, so it does not populate Harbor's
-structured trajectory view. Differences between raw event timestamps are not
-isolated inference durations.
+The converter finds each `agent/pi.txt` and writes `agent/trajectory.json`
+beside it. It leaves raw logs, verifier output, and scores unchanged. Runs
+without Pi logs, including oracle runs, are ignored when scanning `results`.
+Existing trajectories and logs with no complete messages are skipped.
+
+To convert only one run, pass its directory instead. A trial directory or an
+individual `agent/pi.txt` path also works. Add `--overwrite` to regenerate an
+existing trajectory:
+
+```bash title="Workstation"
+.venv/viewer/bin/python pi_trajectory.py results/swe-one --overwrite
+```
+
+Keep the viewer running and open `http://localhost:8080`. Select a trial under
+**Rollouts** to inspect its trajectory. If an Overview link opens an empty
+Rollouts list, select **Clear all** to remove the agent filter.
+
+The trajectory includes recorded messages, tool calls, and tool results.
+Interrupted recordings retain complete messages and flag unfinished calls;
+the converter does not reconstruct missing prompts or events. Read the raw
+`agent/pi.txt` and verifier files alongside the trajectory. Differences between
+event timestamps are not isolated inference durations.
 
 </Accordion>
 

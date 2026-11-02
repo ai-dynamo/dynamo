@@ -25,6 +25,8 @@ This directory contains the runnable files:
 - `harbor-runner-rbac.yaml`: runner ServiceAccount and trust-bundle permissions.
 - `harbor-results.yaml`: results PVC, retained when runner Jobs are deleted.
 - `results-reader.yaml`: read-only Pod for inspecting and exporting saved results.
+- `pi_trajectory.py`: local converter from copied Pi logs to Harbor ATIF trajectories;
+  see the tutorial's result inspection instructions.
 - `harbor-job.yaml`: editable Harbor configuration with task-to-template mappings.
 - `Dockerfile.pi`: reusable preparation recipe for one task instance image,
   adding pinned Pi, provider, and offline-verifier dependencies.
