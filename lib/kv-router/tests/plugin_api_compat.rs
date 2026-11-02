@@ -187,11 +187,7 @@ fn active_requests_pickers_select_through_the_public_hosted_api() {
     assert_eq!(picker.inputs(), WorkerInputs::ACTIVE_REQUESTS);
     let counts = |worker_id: u64| if worker_id == 4 { 0 } else { 3 };
     let selected = picker
-        .select(
-            &[2, 4, 6],
-            Some(&counts),
-            &HostedSelectionRequest::new(32, 16),
-        )
+        .select(&[2, 4, 6], Some(&counts), &HostedSelectionRequest::new(32))
         .unwrap();
     assert_eq!(selected.worker.worker_id, 4);
 }

@@ -251,7 +251,7 @@ impl WorkerSelectionPolicy {
                     picker_inputs,
                     ..
                 } = state.into_inner();
-                Ok(HostedWorkerPicker::new(Arc::from(picker), picker_inputs))
+                Ok(HostedWorkerPicker::new(picker, picker_inputs))
             }
         }
     }

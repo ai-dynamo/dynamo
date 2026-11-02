@@ -5,7 +5,6 @@
 
 use std::cell::OnceCell;
 use std::fmt;
-use std::sync::Arc;
 
 use crate::plugins::worker_selection::{
     ScoredWorkerCandidate, WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext,
@@ -16,85 +15,42 @@ use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelect
 /// Request metadata a routing host without the KV path supplies for one selection.
 ///
 /// The picker's [`WorkerSelectionContext`] reads it the way the KV router reads a
-/// scheduling request. Values the host does not set read as the KV router's defaults
-/// for a request without them: no expected output length or temperature override,
-/// zero priorities, and no session metadata.
+/// scheduling request. Only the prompt length is set; every other value reads as the
+/// KV router's default for a request without it: no expected output length or
+/// temperature override, zero priorities, a block size of 0, and no session metadata.
 pub struct HostedSelectionRequest {
     // Built once with every KV-only field empty; selection borrows it in place.
     request: SchedulingRequest,
-    block_size: u32,
-    router_temperature_override: Option<f64>,
 }
 
 impl HostedSelectionRequest {
     /// `isl_tokens` is the prompt length in tokens, zero when the request carries no
-    /// token IDs. `block_size` is the model's KV block size in tokens; 0 means the card
-    /// never declared one, and then [`WorkerSelectionContext::request_blocks`] is 0.
+    /// token IDs.
     #[inline]
-    pub fn new(isl_tokens: usize, block_size: u32) -> Self {
+    pub fn new(isl_tokens: usize) -> Self {
         Self {
             request: SchedulingRequest::hosted(isl_tokens),
-            block_size,
-            router_temperature_override: None,
         }
-    }
-
-    /// The request's expected output length in tokens, when it supplies one.
-    #[inline]
-    pub fn with_expected_output_tokens(mut self, expected_output_tokens: Option<u32>) -> Self {
-        self.request.expected_output_tokens = expected_output_tokens;
-        self
-    }
-
-    /// The request's scheduler priority boost and strict integer priority.
-    #[inline]
-    pub fn with_priority(mut self, priority_jump: f64, strict_priority: u32) -> Self {
-        self.request.priority_jump = priority_jump;
-        self.request.strict_priority = strict_priority;
-        self
-    }
-
-    /// The request-level router temperature override, when present.
-    #[inline]
-    pub fn with_router_temperature_override(mut self, temperature: Option<f64>) -> Self {
-        self.router_temperature_override = temperature;
-        self
     }
 
     fn context(&self) -> WorkerSelectionContext<'_> {
         WorkerSelectionContext {
             request: &self.request,
-            // `request_blocks` divides by the block size, so an undeclared one reads as 0.
-            request_blocks: if self.block_size == 0 {
-                0
-            } else {
-                self.request.request_blocks(self.block_size)
-            },
-            block_size: self.block_size,
+            request_blocks: 0,
+            block_size: 0,
             track_prefill_tokens: false,
             // The host applies pins and session affinity before selecting.
             pinned_worker: None,
-            router_temperature_override: self.router_temperature_override,
+            router_temperature_override: None,
         }
     }
 }
 
-// The scheduling request implements no `Debug`, so list only the host-set values.
+// The scheduling request implements no `Debug`, so list only the host-set value.
 impl fmt::Debug for HostedSelectionRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HostedSelectionRequest")
             .field("isl_tokens", &self.request.isl_tokens)
-            .field("block_size", &self.block_size)
-            .field(
-                "expected_output_tokens",
-                &self.request.expected_output_tokens,
-            )
-            .field("priority_jump", &self.request.priority_jump)
-            .field("strict_priority", &self.request.strict_priority)
-            .field(
-                "router_temperature_override",
-                &self.router_temperature_override,
-            )
             .finish()
     }
 }
@@ -105,12 +61,12 @@ impl fmt::Debug for HostedSelectionRequest {
 /// One instance serves every request for its role, called concurrently from the
 /// routing host's tasks. Selection builds no candidate table and takes no lock.
 pub struct HostedWorkerPicker {
-    picker: Arc<dyn WorkerPicker>,
+    picker: Box<dyn WorkerPicker>,
     inputs: WorkerInputs,
 }
 
 impl HostedWorkerPicker {
-    pub(super) fn new(picker: Arc<dyn WorkerPicker>, inputs: WorkerInputs) -> Self {
+    pub(super) fn new(picker: Box<dyn WorkerPicker>, inputs: WorkerInputs) -> Self {
         Self { picker, inputs }
     }
 
@@ -292,7 +248,7 @@ mod tests {
     }
 
     fn request() -> HostedSelectionRequest {
-        HostedSelectionRequest::new(64, 16)
+        HostedSelectionRequest::new(64)
     }
 
     #[test]
@@ -533,28 +489,6 @@ mod tests {
     }
 
     #[test]
-    fn hosted_select_tolerates_zero_block_size() {
-        struct BlockPicker;
-
-        impl WorkerPicker for BlockPicker {
-            fn pick(
-                &self,
-                context: &WorkerSelectionContext<'_>,
-                _input: WorkerInputView<'_>,
-            ) -> Result<usize, WorkerSelectionPolicyError> {
-                assert_eq!(context.block_size(), 0);
-                assert_eq!(context.request_blocks(), 0);
-                Ok(0)
-            }
-        }
-
-        let selected = hosted(BlockPicker)
-            .select(&[7], None, &HostedSelectionRequest::new(100, 0))
-            .unwrap();
-        assert_eq!(selected.worker, WorkerWithDpRank::from_worker_id(7));
-    }
-
-    #[test]
     fn hosted_select_context_exposes_request_metadata() {
         struct ContextPicker;
 
@@ -565,12 +499,12 @@ mod tests {
                 _input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
                 assert_eq!(context.isl_tokens(), 33);
-                assert_eq!(context.block_size(), 16);
-                assert_eq!(context.request_blocks(), 3);
-                assert_eq!(context.expected_output_tokens(), Some(7));
-                assert_eq!(context.priority_jump(), 1.5);
-                assert_eq!(context.strict_priority(), 2);
-                assert_eq!(context.router_temperature_override(), Some(0.4));
+                assert_eq!(context.block_size(), 0);
+                assert_eq!(context.request_blocks(), 0);
+                assert_eq!(context.expected_output_tokens(), None);
+                assert_eq!(context.priority_jump(), 0.0);
+                assert_eq!(context.strict_priority(), 0);
+                assert_eq!(context.router_temperature_override(), None);
                 assert!(context.pinned_worker().is_none());
                 assert!(context.affinity_target().is_none());
                 assert!(!context.tracks_prefill_tokens());
@@ -579,10 +513,8 @@ mod tests {
             }
         }
 
-        let request = HostedSelectionRequest::new(33, 16)
-            .with_expected_output_tokens(Some(7))
-            .with_priority(1.5, 2)
-            .with_router_temperature_override(Some(0.4));
-        hosted(ContextPicker).select(&[1], None, &request).unwrap();
+        hosted(ContextPicker)
+            .select(&[1], None, &HostedSelectionRequest::new(33))
+            .unwrap();
     }
 }
