@@ -28,8 +28,7 @@ server. See the [sidecar overview](../README.md) for installation.
 | Disaggregated | Yes |
 | KV routing | Yes |
 | Kubernetes multinode tensor parallelism (TP) and attention data parallelism (attention-DP) | Experimental |
-| Image and video input | Yes; disaggregated serving is untested |
-| Audio input | Untested |
+| Image, video, and audio input | Yes; disaggregated serving is untested |
 
 The sidecar sends a media kind only when the SGLang gRPC server lists it in
 `grpc_features` (`image_inputs`, `video_inputs`, or `audio_inputs`), and returns
