@@ -94,6 +94,7 @@ const MIGRATION_BLOCKING_REASONS: &[&str] = &[
     "backend.cancelled",
     "capacity.exhausted",
     "capacity.pool_exhausted",
+    "router.admission_rejected",
 ];
 
 fn blocks_migration(reason: &ErrorReason) -> bool {
@@ -114,6 +115,7 @@ fn is_migration_eligible(reason: &ErrorReason) -> bool {
             | "backend.stream_incomplete"
             | "backend.worker_unavailable"
             | "capacity.worker_overloaded"
+            | "router.pinned_worker_overloaded"
     )
 }
 
@@ -1739,6 +1741,16 @@ mod tests {
                 ErrorClass::CapacityExhausted,
                 "capacity.pool_exhausted",
                 false,
+            ),
+            (
+                ErrorClass::CapacityExhausted,
+                "router.admission_rejected",
+                false,
+            ),
+            (
+                ErrorClass::CapacityExhausted,
+                "router.pinned_worker_overloaded",
+                true,
             ),
             (ErrorClass::Unavailable, "transport.disconnected", true),
             (ErrorClass::Unavailable, "backend.unavailable", false),
