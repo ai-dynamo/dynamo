@@ -64,6 +64,7 @@ import (
 	nvidiacomv1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	internalcert "github.com/ai-dynamo/dynamo/deploy/operator/internal/cert"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
+	poolrelaycontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/poolrelay"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/crdmigrator"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
@@ -613,6 +614,9 @@ func registerControllers(
 		DockerSecretRetriever: dockerSecretRetriever,
 		SSHKeyManager:         sshKeyManager,
 	}); err != nil {
+		return err
+	}
+	if err := poolrelaycontroller.Setup(mgr, operatorCfg, runtimeConfig); err != nil {
 		return err
 	}
 	if err := controller.SetupDynamoGraphDeploymentScalingAdapter(mgr, setupOptions); err != nil {

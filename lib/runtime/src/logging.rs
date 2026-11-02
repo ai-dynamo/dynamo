@@ -1355,9 +1355,13 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
         opentelemetry::global::set_tracer_provider(tracer_provider.clone());
 
         let tracer = tracer_provider.tracer(service_name.to_string());
+        // Filter outside the `Option`: a bare `None` layer registers interest in every
+        // callsite, so each disabled `debug!`/`trace!` would run every per-layer filter
+        // on every call instead of being skipped at its callsite.
         let otel_logs_layer = logger_provider_opt
             .as_ref()
-            .map(|lp| OpenTelemetryTracingBridge::new(lp).with_filter(otel_logs_filter_layer));
+            .map(OpenTelemetryTracingBridge::new)
+            .with_filter(otel_logs_filter_layer);
 
         let l = console_layer(console_format, span_events, fmt_filter_layer);
         tracing_subscriber::registry()
@@ -3335,6 +3339,9 @@ pub mod tests {
         let file_name = tmp_file.path().to_str().unwrap();
         let guard = StderrOverride::from_file(file_name)?;
         init();
+
+        // Trace context without OTLP export must keep levels below `DYN_LOG` disabled.
+        assert!(!tracing::enabled!(tracing::Level::TRACE));
 
         // Run parent/child/grandchild spans (all INFO level by default)
         parent().await;

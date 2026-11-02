@@ -623,6 +623,9 @@ fn compute_index(endpoint: &Endpoint, request_type: &RequestType, status: &Statu
         Endpoint::Videos => todo!(),
         Endpoint::Audios => todo!(),
         Endpoint::Generate => todo!(),
+        Endpoint::SystemOne | Endpoint::Decisions => {
+            unreachable!("this fixture indexes only completion endpoints")
+        }
     };
 
     let request_type = match request_type {

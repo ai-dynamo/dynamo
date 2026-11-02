@@ -2414,6 +2414,18 @@ func applyDGDTemplateDefaults(
 	propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
 }
 
+// EffectiveDGDComponentTemplates applies the same defaults used when rendering
+// DGD component Pods. It leaves the stored DGD unchanged.
+func EffectiveDGDComponentTemplates(dgd *v1beta1.DynamoGraphDeployment, component *v1beta1.DynamoComponentDeploymentSharedSpec) ([]*corev1.PodTemplateSpec, error) {
+	var alpha v1alpha1.DynamoGraphDeployment
+	if err := alpha.ConvertFrom(dgd); err != nil {
+		return nil, fmt.Errorf("read preserved DGD service settings: %w", err)
+	}
+	effective := component.DeepCopy()
+	applyDGDTemplateDefaults(effective, dgd, nil, GetComponentDynamoSidecar(effective) != nil)
+	return ComponentPodTemplates(effective), nil
+}
+
 func shouldApplyKvTransferPolicyToWorkerComponent(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
