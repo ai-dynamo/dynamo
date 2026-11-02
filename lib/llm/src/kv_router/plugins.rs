@@ -5,26 +5,33 @@
 
 use std::sync::OnceLock;
 
+use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
 use dynamo_kv_router::plugins::{RouterPluginRegistry, RouterPlugins};
 
 use super::{KvRouter, SelectionPolicySource};
 
 static INSTALLED_PLUGINS: OnceLock<RouterPluginRegistry> = OnceLock::new();
 
+/// The worker-selection policy hosts run when no policy is configured, including for a
+/// `default` selection. Every host install path reads it from here, so changing the default
+/// policy is a change to this function alone.
+fn host_default_factory() -> WorkerSelectionPolicyFactory {
+    dynamo_custom_policy_builtin::default_factory()
+}
+
 /// Install the linked catalog once for frontend and embedded router construction.
 /// Returns `false` if a catalog has already been installed.
 pub fn install_router_plugin_registry(registry: RouterPluginRegistry) -> bool {
     INSTALLED_PLUGINS
-        .set(registry.with_default_factory(dynamo_custom_policy_builtin::default_factory()))
+        .set(registry.with_default_factory(host_default_factory()))
         .is_ok()
 }
 
 /// The installed catalog, or the required builtin default policy.
 pub fn router_plugin_registry() -> RouterPluginRegistry {
-    INSTALLED_PLUGINS
-        .get()
-        .cloned()
-        .unwrap_or_else(dynamo_custom_policy_builtin::default_registry)
+    INSTALLED_PLUGINS.get().cloned().unwrap_or_else(|| {
+        RouterPluginRegistry::default().with_default_factory(host_default_factory())
+    })
 }
 
 /// Carries configured plugins through the host's shared router construction.

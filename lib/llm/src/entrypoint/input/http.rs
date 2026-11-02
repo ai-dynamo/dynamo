@@ -108,6 +108,20 @@ impl HttpFrontend {
             anyhow::bail!("custom router plugins require a dynamic engine");
         }
 
+        if engine_config
+            .local_model()
+            .router_config()
+            .router_mode
+            .is_kv_routing()
+            && !self.plugins.has_custom_worker_selection()
+        {
+            tracing::warn!(
+                "Starting with Dynamo 1.8, --router-mode kv will default to the two-tier cost \
+                 function (dynamo-two-tier-cost-fn). To keep the current cost function, select a \
+                 dynamo-default-cost-fn instance in --router-policy-config."
+            );
+        }
+
         let plugins = RouterPluginBuilder::new(self.plugins);
         plugins.validate_config(&engine_config.local_model().router_config().kv_router_config)?;
 
