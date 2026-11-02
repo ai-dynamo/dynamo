@@ -86,9 +86,7 @@ pub const DEFAULT_EXPECTED_UNIQUE_BLOCKS: usize = 1_048_576;
 const DEFAULT_RECOVERY_FETCH_CONCURRENCY: usize = 16;
 const DEFAULT_PUBLICATION_THRESHOLD: usize = 16;
 const DEFAULT_PUBLICATION_DELAY: Duration = Duration::from_millis(1);
-/// How often the Relay reads the Global Router replicas from Global Discovery.
 const GLOBAL_ROUTERS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
-/// How long one Global Discovery request may take.
 const GLOBAL_DISCOVERY_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn validate_publication_capacity(expected_unique_blocks: usize) -> anyhow::Result<()> {

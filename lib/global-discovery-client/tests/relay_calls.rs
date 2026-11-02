@@ -30,7 +30,6 @@ struct FakeState {
     pools_body: String,
     /// How many `GET /pools` the service answered.
     pools_reads: usize,
-    /// The body served with a non-200 `routers_status` or `pools_status`.
     error_body: String,
     /// Registrations as the JSON the service received.
     registrations: Vec<Value>,
@@ -213,6 +212,36 @@ async fn keeps_only_the_start_of_a_long_error_body() {
 }
 
 #[tokio::test]
+async fn does_not_wait_for_the_rest_of_a_long_error_body() {
+    // The error body never ends, so the call returns only if it stops reading
+    // once it has enough.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        let _ = socket.read(&mut request).await.unwrap();
+        socket
+            .write_all(b"HTTP/1.1 502 Bad Gateway\r\nconnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        socket.write_all(&[b'a'; 4096]).await.unwrap();
+        std::future::pending::<()>().await;
+    });
+    let base_url = Url::parse(&format!("http://{address}/")).unwrap();
+    let client = GlobalDiscoveryClient::new(base_url, Duration::from_secs(60)).unwrap();
+
+    let error = tokio::time::timeout(Duration::from_secs(5), client.routers())
+        .await
+        .expect("the client waited for the whole error body")
+        .unwrap_err();
+    let DiscoveryClientError::Status { body, .. } = &error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(body, &"a".repeat(1024));
+}
+
+#[tokio::test]
 async fn a_cut_off_body_is_a_request_error() {
     // The body ends before its Content-Length. That is a transport failure,
     // not a change in the JSON shape, so it must not be reported as `Decode`.
@@ -360,7 +389,6 @@ async fn router_cache_follows_the_service() {
     );
     assert_eq!(cache.freshness(), Freshness::Current);
 
-    // A failing service keeps the routers and reports why.
     fake.0.lock().unwrap().routers_status = StatusCode::SERVICE_UNAVAILABLE;
     let reason = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
