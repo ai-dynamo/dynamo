@@ -17,8 +17,7 @@ code are in [`AGENTS.md`](AGENTS.md).
 | `unified_client.rs`, `tcp_client.rs`, `nats_client.rs` | `RequestPlaneClient` and its TCP and NATS implementations |
 | `route_span.rs` | The `router.route_request` tracing span for one routed attempt |
 
-Worker-selection policies (round-robin, random, power of two choices, least loaded,
-device-aware weighted) and per-worker occupancy counters live in
+The pickers and per-worker occupancy counters that `PushRouter` uses live in
 [`lib/runtime/src/routing_policy/`](../../../routing_policy/mod.rs), not here.
 
 ## Two uses of `PushRouter`
@@ -50,9 +49,9 @@ flowchart LR
    exists because `RoutingHost` is specific to the LLM types. It is less complete than
    `RoutingHost`; see [What the direct engine lacks](#what-the-direct-engine-lacks).
 
-Add new selection logic as a worker-selection policy that `RoutingHost` runs: a router plugin
-under `lib/router-plugins/`, or a first-party policy in `lib/runtime/src/routing_policy/`. Add
-a variant to `RoutingHost`'s `RoutingPolicy` enum (`routing_host.rs`) only when the request
+Add new selection logic as a worker-selection policy that `RoutingHost` runs; see
+[Write Custom Routing Strategies](../../../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx).
+Add a variant to `RoutingHost`'s `RoutingPolicy` enum (`routing_host.rs`) only when the request
 lifecycle itself differs. Do not add a `RouterMode` selection path to `PushRouter`.
 
 ## Occupancy modes

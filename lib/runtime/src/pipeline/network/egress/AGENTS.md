@@ -16,10 +16,9 @@ compared with `RoutingHost`.
   only dispatches: address lookup, transport fallback and fault detection. `RoutingHost` owns
   worker selection, occupancy booking, affinity, LoRA filtering, Direct mode and the request
   lifecycle (`RequestGuard`). Do not move any of these into `PushRouter`.
-- Add new selection logic as a worker-selection policy that `RoutingHost` runs: a router plugin
-  under `lib/router-plugins/`, or a first-party policy in `lib/runtime/src/routing_policy/`.
-  Add a variant to `RoutingHost`'s `RoutingPolicy` enum (`routing_host.rs`) only when the
-  request lifecycle itself differs. Do not add a `RouterMode` selection path to `PushRouter`,
+- Add new selection logic as a worker-selection policy that `RoutingHost` runs; the README
+  links the guide for writing one. Add a variant to `RoutingHost`'s `RoutingPolicy` enum
+  (`routing_host.rs`) only when the request lifecycle itself differs. Do not add a `RouterMode` selection path to `PushRouter`,
   and do not add selection logic to the direct engine's mode methods.
 - The direct engine (`AsyncEngine::generate`, `round_robin`, `random`, `power_of_two_choices`,
   `least_loaded`, `device_aware_weighted`) is for callers with generic `T`/`U` types. Keep its
