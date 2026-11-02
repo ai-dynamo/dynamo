@@ -145,6 +145,7 @@ async fn eager_lazy_and_retry_preparation_share_builder_and_load_cancellation() 
 
 #[tokio::test]
 async fn decision_resources_retain_teardown_once_for_prebuilt_and_lazy_commit() {
+    let (_runtime, load) = super::super::test_support::routing_load_for_test().await;
     for prebuilt in [false, true] {
         let mut token = Some(token_resources());
         let mut card = ModelDeploymentCard::with_name_only("teardown-fixture");
@@ -158,7 +159,7 @@ async fn decision_resources_retain_teardown_once_for_prebuilt_and_lazy_commit() 
                 token.as_ref().unwrap().engine.clone(),
                 TokenizerLoad::Card,
             )),
-            None,
+            Some(load.clone()),
             RouterMode::RoundRobin,
             teardown.clone(),
         );

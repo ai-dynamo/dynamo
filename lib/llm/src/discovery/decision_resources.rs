@@ -12,7 +12,8 @@ use tokio::sync::OnceCell;
 
 use super::{
     DecisionDispatch, DecisionEngine, SystemOneSelectionError, TokenExecutor,
-    allocator::AllocatorTrimOnDrop, worker_set::retain_teardown_until_requests_finish,
+    allocator::AllocatorTrimOnDrop, decision_policy::DecisionCapabilities,
+    worker_set::retain_teardown_until_requests_finish,
 };
 use crate::{
     decision_profile::{DecisionProfileKind, NativeExecutorKind},
@@ -37,8 +38,6 @@ use serde::{Serialize, de::DeserializeOwned};
 use tokio_util::sync::CancellationToken;
 
 type NativeEngine<T, U> = Arc<dyn AsyncEngine<SingleIn<T>, ManyOut<U>, Error>>;
-
-use crate::model_card::decision_profile::DecisionKinds;
 
 pub(crate) struct TokenResources {
     pub(crate) engine: GenerateStreamingEngine,
@@ -173,18 +172,11 @@ struct DecisionFactory {
     card: ModelDeploymentCard,
     score: Option<ScoreFactory>,
     load: Option<Arc<RoutingLoadContext>>,
-    mode: RouterMode,
 }
 
 impl DecisionFactory {
-    fn supported_kinds(&self) -> DecisionKinds {
-        super::decision_policy::supported_decision_kinds(&self.card, self.mode, true).intersection(
-            DecisionKinds {
-                token: self.score.is_some(),
-                head: self.load.is_some(),
-                read: self.load.is_some(),
-            },
-        )
+    fn has_inputs(&self) -> bool {
+        self.score.is_some() || self.load.is_some()
     }
 
     fn token(
@@ -213,6 +205,7 @@ impl DecisionFactory {
 }
 
 pub(crate) struct DecisionResources {
+    capabilities: DecisionCapabilities,
     token: TokenResourceCell,
     head: OnceCell<DecisionHeadStreamingEngine>,
     read: OnceCell<DecisionReadStreamingEngine>,
@@ -234,6 +227,20 @@ impl Default for DecisionResources {
 }
 
 impl DecisionResources {
+    pub(crate) fn planned(
+        card: &ModelDeploymentCard,
+        mode: RouterMode,
+        enabled: bool,
+        teardown: Arc<AllocatorTrimOnDrop>,
+    ) -> Option<Self> {
+        let capabilities = DecisionCapabilities::for_card(card, mode, enabled);
+        capabilities
+            .kinds
+            .any()
+            .then(|| Self::with_capabilities(card.clone(), capabilities, teardown))
+    }
+
+    #[cfg(test)]
     pub(crate) fn for_worker(
         card: ModelDeploymentCard,
         score: Option<ScoreFactory>,
@@ -241,12 +248,21 @@ impl DecisionResources {
         mode: RouterMode,
         teardown: Arc<AllocatorTrimOnDrop>,
     ) -> Self {
+        let capabilities = DecisionCapabilities::for_card(&card, mode, true);
+        Self::with_capabilities(card, capabilities, teardown).with_inputs(score, load)
+    }
+
+    fn with_capabilities(
+        card: ModelDeploymentCard,
+        capabilities: DecisionCapabilities,
+        teardown: Arc<AllocatorTrimOnDrop>,
+    ) -> Self {
         Self {
+            capabilities,
             factory: Some(DecisionFactory {
                 card,
-                score,
-                load,
-                mode,
+                score: None,
+                load: None,
             }),
             ..Self::new(teardown)
         }
@@ -254,12 +270,32 @@ impl DecisionResources {
 
     pub(crate) fn new(teardown: Arc<AllocatorTrimOnDrop>) -> Self {
         Self {
+            capabilities: Default::default(),
             token: Default::default(),
             head: OnceCell::new(),
             read: OnceCell::new(),
             factory: None,
             teardown,
         }
+    }
+
+    pub(crate) fn capabilities(&self) -> DecisionCapabilities {
+        self.capabilities
+    }
+
+    pub(crate) fn with_inputs(
+        mut self,
+        score: Option<ScoreFactory>,
+        load: Option<Arc<RoutingLoadContext>>,
+    ) -> Self {
+        self.capabilities = self
+            .capabilities
+            .with_inputs(score.is_some(), load.is_some());
+        if let Some(factory) = &mut self.factory {
+            factory.score = score;
+            factory.load = load;
+        }
+        self
     }
 
     #[cfg(test)]
@@ -300,7 +336,8 @@ impl DecisionResources {
             || self
                 .factory
                 .as_ref()
-                .is_some_and(|factory| factory.supported_kinds().supports(kind))
+                .is_some_and(|factory| factory.has_inputs())
+                && self.capabilities.kinds.supports(kind)
     }
 
     fn has_supported_kind(&self) -> bool {
@@ -308,7 +345,8 @@ impl DecisionResources {
             || self
                 .factory
                 .as_ref()
-                .is_some_and(|factory| factory.supported_kinds().any())
+                .is_some_and(|factory| factory.has_inputs())
+                && self.capabilities.kinds.any()
     }
 
     pub(crate) fn into_shared(self) -> Option<Arc<Self>> {
@@ -378,6 +416,9 @@ impl DecisionResources {
     }
 
     pub(crate) async fn prepare_native(&self, kind: DecisionProfileKind) -> anyhow::Result<()> {
+        if !self.supports(kind) {
+            return Err(SystemOneSelectionError::Unsupported.into());
+        }
         let DecisionProfileKind::Native(kind) = kind else {
             return Ok(());
         };
@@ -401,7 +442,7 @@ impl DecisionResources {
                 .client();
             let router = PushRouter::<T, U>::from_client_with_options(
                 client.clone(),
-                factory.mode,
+                self.capabilities.mode,
                 PushRouterOptions {
                     dispatch: Some(
                         DecisionDispatch::for_client(client, super::GuardPolicy::Required).await?,
@@ -420,6 +461,9 @@ impl DecisionResources {
     }
 
     pub(crate) fn prepare(&self, kind: DecisionProfileKind) -> anyhow::Result<DecisionEngine> {
+        if !self.supports(kind) {
+            return Err(SystemOneSelectionError::Unsupported.into());
+        }
         Ok(match kind {
             DecisionProfileKind::Token(backend) => {
                 DecisionEngine::Token(TokenExecutor::new(backend, self.prepare_token()?))

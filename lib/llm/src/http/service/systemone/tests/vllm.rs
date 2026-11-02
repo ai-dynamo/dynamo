@@ -36,8 +36,7 @@ fn prepared_causal_branch(index: usize) -> PreparedBranch {
             prompt_len: 2,
             label_ids: label_ids.clone(),
         },
-        wire: super::super::PreparedScoringRequest::vllm(vec![1, 2], &label_ids, "causal-fixture")
-            .unwrap(),
+        wire: super::super::PreparedScoringRequest::new(vec![1, 2], label_ids, "causal-fixture"),
     }
 }
 
@@ -58,6 +57,76 @@ pub(super) fn terminal_output(
         }))
         .unwrap(),
     )
+}
+
+#[tokio::test]
+async fn causal_dispatch_requires_terminal_measured_cache_usage() {
+    fn missing_cache_details(request: &PreprocessedRequest) -> (Value, Annotated<LLMEngineOutput>) {
+        let (native, frame) = vllm_frame(request);
+        let mut output = frame.into_data().unwrap().unwrap();
+        output
+            .completion_usage
+            .as_mut()
+            .unwrap()
+            .prompt_tokens_details = None;
+        (native, Annotated::from_data(output))
+    }
+    let engine = TestEngine::with_frame(EngineBehavior::Success, missing_cache_details);
+    let admission = Arc::new(Semaphore::new(1));
+    let response = dispatch(
+        causal_selection_for_test(engine).await,
+        vec![prepared_causal_branch(0)],
+        "missing-cache-details".into(),
+        Context::new(()).context(),
+        admission.clone().acquire_owned().await.unwrap(),
+        Arc::new(super::super::Metrics::new()),
+        canonical_request(1),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = response_body(response).await;
+    assert_eq!(body["code"], "invalid_executor_result");
+    assert!(body.get("answers").is_none());
+    assert_eq!(admission.available_permits(), 1);
+}
+
+#[tokio::test]
+async fn causal_dispatch_accepts_a_model_eos_argmax() {
+    fn eos_argmax(request: &PreprocessedRequest) -> (Value, Annotated<LLMEngineOutput>) {
+        let (native, frame) = vllm_frame(request);
+        let card = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let eos = card
+            .model_info
+            .as_ref()
+            .unwrap()
+            .get_model_info()
+            .unwrap()
+            .eos_token_ids()[0];
+        let mut output = frame.into_data().unwrap().unwrap();
+        output.token_ids = vec![eos];
+        output.top_logprobs.as_mut().unwrap()[0][2].token_id = eos;
+        output.finish_reason = Some(crate::protocols::common::FinishReason::EoS);
+        (native, Annotated::from_data(output))
+    }
+    let engine = TestEngine::with_frame(EngineBehavior::Success, eos_argmax);
+    let response = dispatch(
+        causal_selection_for_test(engine).await,
+        vec![prepared_causal_branch(0)],
+        "eos-argmax".into(),
+        Context::new(()).context(),
+        Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap(),
+        Arc::new(super::super::Metrics::new()),
+        canonical_request(1),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_body(response).await;
+    assert_eq!(body["usage"]["output_tokens"], 1);
+    assert!(body.get("answers").is_some());
 }
 
 #[tokio::test]
