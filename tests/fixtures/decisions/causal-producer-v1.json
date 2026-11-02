@@ -1,0 +1,93 @@
+{
+  "request": {
+    "token_ids": [1, 2, 3],
+    "stream": false,
+    "cache_salt": "tenant",
+    "sampling_params": {
+      "max_tokens": 1,
+      "min_tokens": 0,
+      "n": 1,
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "top_k": -1,
+      "min_p": 0.0,
+      "frequency_penalty": 0.0,
+      "presence_penalty": 0.0,
+      "repetition_penalty": 1.0,
+      "logprob_token_ids": [20, 10],
+      "logprobs": null,
+      "prompt_logprobs": null,
+      "detokenize": false,
+      "stop": [],
+      "stop_token_ids": [],
+      "ignore_eos": false,
+      "bad_words": [],
+      "logit_bias": {},
+      "allowed_token_ids": null,
+      "structured_outputs": null
+    }
+  },
+  "worker_request": {
+    "model": "test-model",
+    "token_ids": [1, 2, 3],
+    "output_options": {"logprobs": null},
+    "routing": {"cache_namespace": "tenant"},
+    "extra_args": {
+      "vllm_tito": {
+        "request_id": "causal-producer-1",
+        "priority": 0,
+        "stream": false,
+        "cache_salt": "tenant",
+        "sampling_params": {
+          "max_tokens": 1,
+          "min_tokens": 0,
+          "n": 1,
+          "temperature": 0.0,
+          "top_p": 1.0,
+          "top_k": -1,
+          "min_p": 0.0,
+          "frequency_penalty": 0.0,
+          "presence_penalty": 0.0,
+          "repetition_penalty": 1.0,
+          "logprob_token_ids": [20, 10],
+          "logprobs": null,
+          "prompt_logprobs": null,
+          "detokenize": false,
+          "stop": [],
+          "stop_token_ids": [],
+          "ignore_eos": false,
+          "bad_words": [],
+          "logit_bias": {},
+          "allowed_token_ids": null,
+          "structured_outputs": null
+        }
+      }
+    }
+  },
+  "frames": [
+    {
+      "index": 0,
+      "token_ids": [99],
+      "log_probs": [-0.5],
+      "top_logprobs": [[
+        {"rank": 2, "token_id": 20, "token": "twenty", "logprob": -2.0, "bytes": [116, 119, 101, 110, 116, 121]},
+        {"rank": 3, "token_id": 10, "token": "ten", "logprob": -3.0, "bytes": [116, 101, 110]},
+        {"rank": 1, "token_id": 99, "token": "sample", "logprob": -0.5, "bytes": [115, 97, 109, 112, 108, 101]}
+      ]],
+      "completion_usage": {
+        "prompt_tokens": 3,
+        "completion_tokens": 1,
+        "total_tokens": 4,
+        "prompt_tokens_details": {"cached_tokens": 0}
+      },
+      "finish_reason": "length",
+      "engine_data": {"kv_cache_hit": {"prompt_tokens": 3, "reused_tokens": 0}}
+    }
+  ],
+  "expected": {
+    "ids": [20, 10],
+    "scores": [-2.0, -3.0],
+    "input_tokens": 3,
+    "cached_tokens": 0
+  }
+}
