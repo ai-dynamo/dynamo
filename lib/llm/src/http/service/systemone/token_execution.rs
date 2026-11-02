@@ -3,7 +3,7 @@
 
 use super::backend_error::lifecycle_error;
 use super::*;
-#[path = "token_execution/backend.rs"]
+#[path = "token_execution/backend_legacy.rs"]
 pub(super) mod backend;
 use crate::discovery::{DecisionContext, TokenExecutor};
 use crate::local_model::runtime_config::TokenBackend;
