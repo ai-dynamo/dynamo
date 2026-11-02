@@ -2525,6 +2525,14 @@ class WorkerFactory:
         )
         lifecycle.handler = handler
         handler.add_temp_dir(prometheus_temp_dir)
+        handler.decision = await initialize_native_decisions(
+            "read",
+            engine_client,
+            handler.model_config,
+            config,
+            abort_monitor=handler._abort_monitor,
+            on_engine_dead=runtime.shutdown,
+        )
 
         # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
         consolidator_enabled = False
@@ -2625,6 +2633,7 @@ class WorkerFactory:
             vllm_config,
             worker_type=worker_type,
             needs=needs,
+            native_decision=handler.decision.publication,
         )
         # Serving now: a failover that got here succeeded. Gated on was_failover
         # (same as the attempt) so bootup isn't counted and success pairs with attempt.

@@ -11,18 +11,27 @@ from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, Mock, patch
 
 import pytest
+from vllm.config import ModelConfig, PoolerConfig, SchedulerConfig
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 
 from dynamo.llm import ModelInput, ModelType, WorkerType
+from dynamo.vllm import decision_heads as heads
+from dynamo.vllm import decision_native_errors as native_errors
+from dynamo.vllm import decision_native_lifecycle as native_lifecycle
+from dynamo.vllm import decision_native_registry as native_registry
 from dynamo.vllm.args import Config
 from dynamo.vllm.benchmark_worker_extension import FpmBenchmarkWorkerExtension
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.decision_reads import ReadExecutionAdapter
+from dynamo.vllm.decision_surface import NativeDecisionSurface
 from dynamo.vllm.instrumented_scheduler import (
     ENV_FPM_BENCHMARK_OUTPUT_PATH,
     ENV_FPM_WORKER_ID,
     InstrumentedScheduler,
     benchmark_content_point_key,
 )
+from dynamo.vllm.pooling_handlers import ClassifyWorkerHandler
+from dynamo.vllm.tests.decision_head_test_support import Engine, NativeApi, monitor
 from dynamo.vllm.worker_factory import (
     CUDAGRAPH_METRICS_RESTORE_TIMEOUT_SECONDS,
     ENGINE_PROBE_TIMEOUT_SECONDS,
@@ -56,6 +65,38 @@ pytestmark = [
 ]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chunked", [None, False])
+async def test_d3_qualification_accepts_the_resolved_pooling_scheduler_default(
+    monkeypatch, chunked
+):
+    engine = Engine()
+    engine.model_config.max_model_len = SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS
+    for attention in ("decoder", "hybrid"):
+        model = SimpleNamespace(
+            attn_type=attention, pooler_config=PoolerConfig(seq_pooling_type="LAST")
+        )
+        assert ModelConfig.is_chunked_prefill_supported.fget(model) is True
+    options = {} if chunked is None else {"enable_chunked_prefill": chunked}
+    engine.vllm_config.scheduler_config = SchedulerConfig(
+        max_model_len=engine.model_config.max_model_len,
+        is_encoder_decoder=False,
+        runner_type="pooling",
+        async_scheduling=False,
+        **options,
+    )
+    assert engine.vllm_config.scheduler_config.enable_chunked_prefill is (
+        chunked is not False
+    )
+    monkeypatch.setattr(native_lifecycle, "load_native", lambda: NativeApi())
+    adapter = await heads.HeadExecutionAdapter.create(
+        engine,
+        native_registry.PROFILES[native_registry.D3_PROFILE],
+        abort_monitor=monitor,
+    )
+    assert adapter.spec.name == native_registry.D3_PROFILE
+
+
 def _make_config(**overrides) -> Mock:
     """Create a mock Config with canonical worker settings."""
     defaults = {
@@ -72,6 +113,8 @@ def _make_config(**overrides) -> Mock:
         "gms_shadow_mode": False,
         "realtime": False,
         "classify_worker": False,
+        "enable_rl": False,
+        "custom_encoder_class": None,
     }
     defaults.update(overrides)
     return Mock(**defaults)
@@ -87,6 +130,16 @@ def _make_factory(**overrides) -> WorkerFactory:
     }
     defaults.update(overrides)
     return WorkerFactory(**defaults)
+
+
+def _make_decode_handler(**overrides) -> Mock:
+    return Mock(
+        **{
+            "embedding_cache_manager": None,
+            "decision": NativeDecisionSurface("read"),
+            **overrides,
+        }
+    )
 
 
 def test_register_request_cache_metrics_includes_multimodal_image_loader():
@@ -988,9 +1041,34 @@ class TestCreate:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ready_profile", "health_check_case"),
+    [
+        (None, "default"),
+        (native_registry.D3_PROFILE, "default"),
+        (native_registry.CLEF_FLASH_PROFILE, "default"),
+        (native_registry.CLEF_OMNI_PROFILE, "default"),
+        (None, "override"),
+        (native_registry.D3_PROFILE, "override"),
+        (native_registry.D3_PROFILE, "invalid-native"),
+        (native_registry.D3_PROFILE, "invalid-native-override"),
+        (native_registry.D3_PROFILE, "invalid-output"),
+    ],
+)
 async def test_classify_worker_registers_classify_and_pooling(
     monkeypatch: pytest.MonkeyPatch,
+    ready_profile: str | None,
+    health_check_case: str,
 ) -> None:
+    monkeypatch.delenv("DYN_HEALTH_CHECK_PAYLOAD", raising=False)
+    has_override = "override" in health_check_case
+    invalid_native = health_check_case.startswith("invalid-native")
+    invalid_output = health_check_case == "invalid-output"
+    expected_profile = None if invalid_native or invalid_output else ready_profile
+    if has_override:
+        monkeypatch.setenv(
+            "DYN_HEALTH_CHECK_PAYLOAD", json.dumps({"input": "operator-health"})
+        )
     endpoint = Mock()
     endpoint.connection_id.return_value = "worker-1"
     endpoint.serve_endpoint = AsyncMock()
@@ -998,7 +1076,43 @@ async def test_classify_worker_registers_classify_and_pooling(
     runtime.endpoint.return_value = endpoint
 
     engine_client = Mock()
-    vllm_config = Mock(model_config=Mock())
+    adapter = None
+    if ready_profile is not None:
+        architecture = {
+            native_registry.D3_PROFILE: "D3ForSequenceClassification",
+            native_registry.CLEF_FLASH_PROFILE: "ClefFlashForJointSchema",
+            native_registry.CLEF_OMNI_PROFILE: "ClefOmniForJointSchema",
+        }[ready_profile]
+        engine_client = Engine(architecture)
+        if ready_profile != native_registry.D3_PROFILE:
+            engine_client.values = [0.7, 0.3]
+            engine_client.get_supported_tasks = AsyncMock(
+                return_value=("token_classify",)
+            )
+        monkeypatch.setattr(native_lifecycle, "load_native", lambda: NativeApi())
+        adapter = await heads.HeadExecutionAdapter.create(
+            engine_client,
+            native_registry.PROFILES[ready_profile],
+            abort_monitor=monitor,
+        )
+        if invalid_native:
+            adapter._prepare = AsyncMock(
+                side_effect=heads.NativeValidationError("canary exceeds context")
+            )
+        if invalid_output:
+            adapter._decode = Mock(
+                side_effect=native_errors.NativeExecutionError("invalid canary scores")
+            )
+    if adapter is not None:
+        monkeypatch.setattr(
+            heads.HeadExecutionAdapter, "create", AsyncMock(return_value=adapter)
+        )
+    model_config = (
+        engine_client.model_config
+        if adapter is not None
+        else SimpleNamespace(architecture="OrdinaryClassifier")
+    )
+    vllm_config = Mock(model_config=model_config)
     engine_tuple: EngineSetupResult = (
         engine_client,
         vllm_config,
@@ -1007,7 +1121,29 @@ async def test_classify_worker_registers_classify_and_pooling(
         None,
     )
     register_model = AsyncMock()
-    handler = Mock()
+    handler = object.__new__(ClassifyWorkerHandler)
+    handler.decision = NativeDecisionSurface("head")
+    handler.model_config = model_config
+    handler.cleanup = Mock()
+    handler._abort_monitor = monitor
+    handler.engine_client = engine_client
+
+    async def serve_endpoint(generate, *, health_check_payload, **kwargs):
+        if handler.decision.health_payload("model") is None or has_override:
+            return
+        context = SimpleNamespace(
+            id=lambda: "factory-health-probe",
+            is_stopped=lambda: False,
+            is_killed=lambda: False,
+            trace_headers=lambda: None,
+            append=Mock(),
+            async_killed_or_stopped=asyncio.Event().wait,
+        )
+        response = [item async for item in generate(health_check_payload, context)]
+        assert response == [{"status": "ok"}]
+
+    endpoint.serve_endpoint = AsyncMock(side_effect=serve_endpoint)
+
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.ClassifyWorkerHandler",
         Mock(return_value=handler),
@@ -1042,6 +1178,35 @@ async def test_classify_worker_registers_classify_and_pooling(
     )
 
     register_model.assert_awaited_once()
+    if ready_profile is None:
+        assert handler.decision.publication is None
+    else:
+        assert handler.decision.spec == (adapter.spec if expected_profile else None)
+    served_probe = endpoint.serve_endpoint.call_args.kwargs["health_check_payload"]
+    if has_override:
+        assert served_probe["input"] == "operator-health"
+        assert "decision_head" not in served_probe
+        if ready_profile is not None:
+            assert len(engine_client.calls) == 2 * int(expected_profile is not None)
+    elif handler.decision.health_payload("model") is not None:
+        assert served_probe == {
+            "native_pooling_health": True,
+            "model": "model",
+            "_HEALTH_CHECK": True,
+        }
+        assert len(engine_client.calls) == 3
+        params = engine_client.calls[-1]["pooling_params"]
+        if ready_profile == native_registry.D3_PROFILE:
+            assert params.task == "classify"
+        else:
+            assert params.task == "token_classify"
+            assert params.extra_kwargs["joint_schema"]["option_counts"] == [2]
+    else:
+        assert served_probe == {
+            "input": "probe",
+            "model": "model",
+            "_HEALTH_CHECK": True,
+        }
     register_args = register_model.await_args.args
     registered_model_type = register_args[1]
     assert register_args[0] == ModelInput.Text
@@ -1057,6 +1222,15 @@ async def test_classify_worker_registers_classify_and_pooling(
     assert register_model.await_args.kwargs == {
         "worker_type": WorkerType.Aggregated,
         "needs": [],
+        "native_decision": (
+            native_registry.NativeReady(adapter.spec)
+            if expected_profile
+            else (
+                native_registry.NativeFailed(native_registry.PROFILES[ready_profile])
+                if ready_profile
+                else None
+            )
+        ),
     }
     assert shutdown_endpoints == [endpoint]
     handler.cleanup.assert_called_once()
@@ -1576,9 +1750,14 @@ def restore_path_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
         "RealtimeHandler",
         "RealtimeTranscriptionHandler",
     ):
+        handler = (
+            _make_decode_handler()
+            if handler_cls == "DecodeWorkerHandler"
+            else Mock(embedding_cache_manager=None)
+        )
         monkeypatch.setattr(
             f"dynamo.vllm.worker_factory.{handler_cls}",
-            Mock(return_value=Mock(embedding_cache_manager=None)),
+            Mock(return_value=handler),
         )
     for payload_cls in ("VllmHealthCheckPayload", "VllmPrefillHealthCheckPayload"):
         monkeypatch.setattr(
@@ -1620,7 +1799,8 @@ async def test_fpm_relay_starts_only_after_shadow_election(
         setup_fpm_relay_fn=relay,
         register_vllm_model_fn=register,
     )
-    handler = Mock(
+    handler_factory = _make_decode_handler if path == "decode" else Mock
+    handler = handler_factory(
         embedding_cache_manager=None,
         _pause_controller=SimpleNamespace(pause=AsyncMock()),
     )
@@ -2442,7 +2622,7 @@ def _decode_benchmark_factory(monkeypatch, tmp_path, register_fn):
     )
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.DecodeWorkerHandler",
-        Mock(return_value=Mock(embedding_cache_manager=None)),
+        Mock(return_value=_make_decode_handler()),
     )
     runtime = Mock()
     runtime.endpoint.return_value = Mock(connection_id=Mock(return_value="worker-id"))
@@ -2467,6 +2647,118 @@ def _decode_benchmark_factory(monkeypatch, tmp_path, register_fn):
         custom_jinja_template=None,
     )
     return factory, runtime, config, engine_client
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_vllm_tokenizer", [False, True])
+@pytest.mark.parametrize(
+    "ready_profile",
+    [None, "vllm_liquid_decision_v1", "vllm_diffusion_canvas_decision_v1"],
+)
+async def test_decode_initializes_native_read_before_registration(
+    monkeypatch, tmp_path, use_vllm_tokenizer, ready_profile
+):
+    register = AsyncMock(side_effect=_ReachedRegistration)
+    factory, runtime, config, engine_client = _decode_benchmark_factory(
+        monkeypatch, tmp_path, register
+    )
+    factory.setup_vllm_engine.return_value[1].additional_config.clear()
+    config.use_vllm_tokenizer = use_vllm_tokenizer
+    runtime.endpoint.return_value.first_token_source = AsyncMock()
+    handler = _make_decode_handler()
+    entered = asyncio.Event()
+    released = asyncio.Event()
+
+    handler.model_config = SimpleNamespace(
+        architecture=(
+            "DiffusionGemmaForBlockDiffusion"
+            if ready_profile == native_registry.DIFFUSION_PROFILE
+            else "Lfm2VlForConditionalGeneration"
+        )
+    )
+
+    async def create_adapter(*args, **kwargs):
+        entered.set()
+        await released.wait()
+        if ready_profile is None:
+            raise native_errors.NativeRuntimeError("source unavailable")
+        return SimpleNamespace(
+            spec=native_registry.PROFILES[ready_profile],
+            kind="read",
+            prepare_canary=AsyncMock(return_value=({}, None)),
+        )
+
+    initialize = AsyncMock(side_effect=create_adapter)
+    monkeypatch.setattr(ReadExecutionAdapter, "create", initialize)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.DecodeWorkerHandler", Mock(return_value=handler)
+    )
+    task = asyncio.create_task(
+        factory._create_decode_worker(runtime, config, asyncio.Event(), [])
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        register.assert_not_awaited()
+        assert handler.decision.spec is None
+        released.set()
+        with pytest.raises(_ReachedRegistration):
+            await task
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    initialize.assert_awaited_once()
+    register.assert_awaited_once()
+    assert register.await_args.args[0] == (
+        ModelInput.Text if use_vllm_tokenizer else ModelInput.Tokens
+    )
+    assert register.await_args.kwargs == {
+        "worker_type": WorkerType.Aggregated,
+        "needs": [],
+        "native_decision": (
+            native_registry.NativeReady(native_registry.PROFILES[ready_profile])
+            if ready_profile
+            else None
+        ),
+    }
+    runtime.endpoint.return_value.serve_endpoint.assert_not_called()
+    handler.cleanup.assert_called_once()
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_decode_native_read_initialization_error_preserves_registration(
+    monkeypatch, tmp_path
+):
+    register = AsyncMock(side_effect=_ReachedRegistration)
+    factory, runtime, config, engine_client = _decode_benchmark_factory(
+        monkeypatch, tmp_path, register
+    )
+    factory.setup_vllm_engine.return_value[1].additional_config.clear()
+    runtime.endpoint.return_value.first_token_source = AsyncMock()
+    error = ValueError("native read initialization bug")
+    handler = _make_decode_handler()
+    handler.model_config = SimpleNamespace(
+        architecture="Lfm2VlForConditionalGeneration"
+    )
+    monkeypatch.setattr(ReadExecutionAdapter, "create", AsyncMock(side_effect=error))
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.DecodeWorkerHandler", Mock(return_value=handler)
+    )
+
+    with pytest.raises(_ReachedRegistration):
+        await factory._create_decode_worker(runtime, config, asyncio.Event(), [])
+
+    assert handler.decision.spec is None
+    register.assert_awaited_once()
+    assert register.await_args.kwargs[
+        "native_decision"
+    ] == native_registry.NativeFailed(
+        native_registry.PROFILES[native_registry.LIQUID_PROFILE]
+    )
+    handler.cleanup.assert_called_once()
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
 
 
 @pytest.mark.asyncio

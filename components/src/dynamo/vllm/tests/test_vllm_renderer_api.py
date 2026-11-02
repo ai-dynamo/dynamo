@@ -351,7 +351,8 @@ class TestVllmRendererApi:
             "update cleanup logic in components/src/dynamo/frontend/vllm_processor.py"
         )
 
-    def test_engine_core_struct_contract(self):
+    @pytest.mark.parametrize("version_label", [None, "unversioned-test-build"])
+    def test_engine_core_struct_contract(self, monkeypatch, version_label):
         """Verify EngineCoreRequest and EngineCoreOutput field order.
 
         Both use msgspec array_like=True, so field ORDER determines wire
@@ -359,6 +360,8 @@ class TestVllmRendererApi:
         and reads EngineCoreRequest fields by name, but the request still
         crosses vLLM boundaries using array-like serialization.
         """
+        if version_label is not None:
+            monkeypatch.setattr(_vllm, "__version__", version_label)
         expected_request_fields = (
             "request_id",
             "prompt_token_ids",
@@ -404,6 +407,8 @@ class TestVllmRendererApi:
             "prompt_token_id_logprobs",
             "error",
         )
+        if "error" in inspect.signature(EngineCoreOutput).parameters:
+            expected_output_fields += ("error",)
 
         if EngineCoreRequest.__module__ == "vllm_omni.engine":
             expected_request_fields += (
