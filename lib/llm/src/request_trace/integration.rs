@@ -421,6 +421,7 @@ mod tests {
                 request_tracker: Some(tracker.clone()),
                 x_request_id: None,
                 finish_reason_metadata: Default::default(),
+                client_tool_call_ids: None,
             });
             if already_finished {
                 tracker.record_finish();

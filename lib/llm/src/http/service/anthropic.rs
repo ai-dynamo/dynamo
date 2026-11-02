@@ -730,6 +730,11 @@ async fn anthropic_messages(
         crate::preprocessor::REQUEST_PARSING_OPTIONS_CONTEXT_KEY,
         parsing_options.clone(),
     );
+    // Clients get `tool_use_id`s, not backend IDs; request traces record them.
+    request.insert(
+        crate::request_trace::CLIENT_TOOL_CALL_IDS_CONTEXT_KEY,
+        crate::request_trace::ClientToolCallIds(crate::protocols::anthropic::types::tool_use_id),
+    );
 
     // Computed before `request` moves into `generate`. Only a stream that can
     // withhold every data frame needs forced keep-alive frames.

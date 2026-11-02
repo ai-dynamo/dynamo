@@ -7,6 +7,8 @@
 //! `message_start` -> `content_block_start` -> N x `content_block_delta` ->
 //! `content_block_stop` -> `message_delta` -> `message_stop`
 
+use std::collections::HashSet;
+
 use axum::response::sse::Event;
 use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk, CompletionUsage,
@@ -16,7 +18,7 @@ use uuid::Uuid;
 use super::types::{
     AnthropicDelta, AnthropicErrorBody, AnthropicMessageDeltaBody, AnthropicMessageResponse,
     AnthropicResponseContentBlock, AnthropicStopReason, AnthropicStreamEvent, AnthropicUsage,
-    anthropic_stop_fields, completion_usage_to_anthropic, new_tool_use_id,
+    anthropic_stop_fields, completion_usage_to_anthropic, tool_use_id,
 };
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use crate::protocols::unified::AnthropicContext;
@@ -45,6 +47,10 @@ pub struct AnthropicStreamConverter {
     saw_backend_usage: bool,
     // Tool call tracking
     tool_call_states: Vec<ToolCallState>,
+    // The chat completion id, from the first chunk, and the `tool_use` ids
+    // emitted so far.
+    chat_id: String,
+    tool_use_ids: HashSet<String>,
     // Text that arrived after a tool call. Tool blocks stream only once their
     // call is complete, so this text waits and streams in arrival order.
     pending_text: Vec<PendingText>,
@@ -112,6 +118,8 @@ impl AnthropicStreamConverter {
             },
             saw_backend_usage: false,
             tool_call_states: Vec::new(),
+            chat_id: String::new(),
+            tool_use_ids: HashSet::new(),
             pending_text: Vec::new(),
             tool_blocks_flushed: false,
             tool_flush_requested: false,
@@ -316,7 +324,8 @@ impl AnthropicStreamConverter {
                 &mut block_index,
                 &mut events,
             );
-            let emitted_id = new_tool_use_id();
+            let emitted_id =
+                tool_use_id(&self.chat_id, &tool_call.backend_id, &mut self.tool_use_ids);
             tracing::debug!(
                 backend_id = %tool_call.backend_id,
                 emitted_id = %emitted_id,
@@ -500,6 +509,9 @@ impl AnthropicStreamConverter {
         events: &mut Vec<Result<Event, anyhow::Error>>,
     ) {
         let mut has_completed_tool = false;
+        if self.chat_id.is_empty() {
+            self.chat_id.clone_from(&chunk.inner.id);
+        }
         // Replace the initial estimate when the engine reports authoritative
         // usage (typically on the final chunk). This also applies Anthropic's
         // non-overlapping cached-token accounting.
@@ -910,6 +922,9 @@ impl AnthropicStreamConverter {
         &mut self,
         chunk: &NvCreateChatCompletionStreamResponse,
     ) -> Vec<TaggedEvent> {
+        if self.chat_id.is_empty() {
+            self.chat_id.clone_from(&chunk.inner.id);
+        }
         let mut events = Vec::new();
 
         if let Some(usage) = &chunk.inner.usage {

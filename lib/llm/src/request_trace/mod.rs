@@ -52,6 +52,17 @@ static BUS: TelemetryBus<RequestTraceRecord> = TelemetryBus::new();
 pub const DEFAULT_TOOL_EVENTS_TOPIC: &str = "agent-tool-events";
 pub(crate) const X_REQUEST_ID_CONTEXT_KEY: &str = "request_trace.x_request_id";
 
+/// Context key for an endpoint that gives clients other tool-call IDs than the
+/// backend's; its value is the endpoint's [`ClientToolCallIds`].
+pub const CLIENT_TOOL_CALL_IDS_CONTEXT_KEY: &str = "request_trace.client_tool_call_ids";
+
+/// How an endpoint turns a backend tool-call ID into the ID its client
+/// receives, so `request_end` records the client's ID. Called as
+/// `derive(chat_completion_id, backend_id, issued)` for each call in order,
+/// exactly as the endpoint does.
+#[derive(Clone, Copy)]
+pub struct ClientToolCallIds(pub fn(&str, &str, &mut std::collections::HashSet<String>) -> String);
+
 pub async fn init_from_env_with_shutdown(shutdown: CancellationToken) -> anyhow::Result<()> {
     let policy = policy();
     if !policy.enabled {

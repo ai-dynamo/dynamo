@@ -11,6 +11,8 @@
 // continues to work throughout dynamo-llm.
 pub use dynamo_protocols::types::anthropic::*;
 
+use std::collections::HashSet;
+
 use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
@@ -623,6 +625,26 @@ pub(super) fn new_tool_use_id() -> String {
     format!("toolu_{}", Uuid::new_v4().simple())
 }
 
+/// The `tool_use` id a client sees for a backend tool call, derived from the
+/// chat completion id and the backend id so request traces can record the same
+/// id. Backend ids such as `call-1` repeat across requests; the chat completion
+/// id keeps the result unique. A missing id, or a repeat within `issued`, gets
+/// a random id.
+pub fn tool_use_id(chat_id: &str, backend_id: &str, issued: &mut HashSet<String>) -> String {
+    let id = if chat_id.is_empty() || backend_id.is_empty() {
+        new_tool_use_id()
+    } else {
+        let digest = xxhash_rust::xxh3::xxh3_128(format!("{chat_id}\n{backend_id}").as_bytes());
+        format!("toolu_{digest:032x}")
+    };
+    if issued.insert(id.clone()) {
+        return id;
+    }
+    let id = new_tool_use_id();
+    issued.insert(id.clone());
+    id
+}
+
 /// Decide what an Anthropic `tool_use` block shows for a call whose `arguments` do not
 /// parse, which happens when generation was cut off mid-call at the token limit.
 ///
@@ -833,6 +855,7 @@ pub fn chat_completion_to_anthropic_response(
         // Extract tool calls
         if let Some(tool_calls) = choice.message.tool_calls {
             let last_call = tool_calls.len().saturating_sub(1);
+            let mut issued = HashSet::new();
             for (call_index, tc) in tool_calls.into_iter().enumerate() {
                 let Some(input) = tool_use_input(
                     &tc.function.name,
@@ -841,7 +864,7 @@ pub fn chat_completion_to_anthropic_response(
                 ) else {
                     continue;
                 };
-                let emitted_id = new_tool_use_id();
+                let emitted_id = tool_use_id(&chat_resp.inner.id, &tc.id, &mut issued);
                 tracing::debug!(
                     backend_id = %tc.id,
                     emitted_id = %emitted_id,
@@ -2845,6 +2868,34 @@ mod tests {
 #[cfg(test)]
 mod anthropic_types_tests {
     use super::*;
+
+    #[test]
+    fn tool_use_ids_derive_from_chat_and_backend_ids() {
+        let mut issued = HashSet::new();
+        let id = tool_use_id("chatcmpl-r1", "call_1", &mut issued);
+        assert!(id.starts_with("toolu_") && id.len() == "toolu_".len() + 32);
+        // A request trace derives the same id; another request does not.
+        assert_eq!(
+            id,
+            tool_use_id("chatcmpl-r1", "call_1", &mut HashSet::new())
+        );
+        assert_ne!(
+            id,
+            tool_use_id("chatcmpl-r2", "call_1", &mut HashSet::new())
+        );
+        // A backend id repeated within one response still gets its own id.
+        assert_ne!(id, tool_use_id("chatcmpl-r1", "call_1", &mut issued));
+
+        let response = converted_tool_use_response_for(
+            dynamo_protocols::types::FinishReason::ToolCalls,
+            &["{}"],
+        );
+        assert!(matches!(
+            &response.content[0],
+            AnthropicResponseContentBlock::ToolUse { id, .. }
+                if *id == tool_use_id("chatcmpl-wiring", "call_1", &mut HashSet::new())
+        ));
+    }
 
     #[allow(deprecated)]
     fn converted_tool_use_response_for(
