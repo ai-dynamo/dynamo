@@ -894,7 +894,11 @@ fn assert_http_completed(outputs: Outputs, request_id: &str) {
     assert_eq!(outputs.len(), 2);
     assert!(outputs[0].finish_reason.is_none());
     assert_eq!(outputs[1].finish_reason, Some(FinishReason::Length));
-    for (output, expected) in outputs.iter().zip(http::responses(request_id)) {
+    let native_id = outputs[0].engine_data.as_ref().unwrap()["sglang_response"]["meta_info"]["id"]
+        .as_str()
+        .unwrap();
+    assert_eq!(http::logical_request_id(native_id), request_id);
+    for (output, expected) in outputs.iter().zip(http::responses(native_id)) {
         assert_eq!(
             output.engine_data,
             Some(json!({"sglang_response": expected}))
@@ -951,6 +955,8 @@ async fn sglang_http_cancellation_and_drop_abort_only_the_target() {
                 } else {
                     http_checkpoint(&mut stream, &target).await
                 };
+                let native_id = target.native_request().unwrap()["rid"].as_str().unwrap().to_string();
+                assert_eq!(http::logical_request_id(&native_id), ctx.id());
                 let tokens = target.tokens();
                 let survivor_ctx = mock_context();
                 let survivor_id = survivor_ctx.id().to_string();
@@ -970,9 +976,9 @@ async fn sglang_http_cancellation_and_drop_abort_only_the_target() {
                     failure(outputs, &tokens, BackendError::Cancelled);
                 }
                 drop(stream);
-                http.wait_aborted(ctx.id()).await;
+                http.wait_aborted(&native_id).await;
                 bounded("HTTP target transport released", target.wait(Event::Dropped)).await;
-                aborted.push(ctx.id().to_string());
+                aborted.push(native_id.clone());
                 assert_eq!(http.aborted_requests(), aborted);
                 assert_eq!(target.tokens(), tokens);
                 assert!(!survivor.reached(Event::Dropped));
@@ -1168,6 +1174,8 @@ async fn sglang_http_decode_cancellation_waits_for_transfer() {
                     output = stream.next() => panic!("response arrived before headers: {output:?}"),
                 }
                 assert!(poll!(stream.next()).is_pending());
+                let native_id = target.native_request().unwrap()["rid"].as_str().unwrap().to_string();
+                assert_eq!(http::logical_request_id(&native_id), ctx.id());
                 if matches!(cancellation, Cancellation::Explicit) {
                     ctx.stop_generating();
                     failure(
@@ -1186,7 +1194,7 @@ async fn sglang_http_decode_cancellation_waits_for_transfer() {
                     assert!(
                         tokio::time::timeout(std::time::Duration::from_millis(100), async {
                             tokio::select! {
-                                _ = http.wait_aborted(ctx.id()) => panic!("decode aborted before transfer completed"),
+                                _ = http.wait_aborted(&native_id) => panic!("decode aborted before transfer completed"),
                                 _ = target.wait(Event::Dropped) => panic!("decode transport dropped before transfer completed"),
                             }
                         })
@@ -1197,17 +1205,17 @@ async fn sglang_http_decode_cancellation_waits_for_transfer() {
                 }
                 gate.release();
                 if !is_terminal_without_tokens {
-                    http.wait_aborted(ctx.id()).await;
+                    http.wait_aborted(&native_id).await;
                     assert!(*first_token.borrow());
                     assert_eq!(target.tokens(), vec![101]);
-                    aborted.push(ctx.id().to_string());
+                    aborted.push(native_id.clone());
                 }
                 bounded("HTTP decode transport released", target.wait(Event::Dropped)).await;
                 if is_terminal_without_tokens {
                     assert!(
                         tokio::time::timeout(
                             std::time::Duration::from_millis(100),
-                            http.wait_aborted(ctx.id()),
+                            http.wait_aborted(&native_id),
                         )
                         .await
                         .is_err()
@@ -1310,6 +1318,46 @@ async fn sglang_visible_stop_tokens_preserve_tool_delimiters() {
         let wire = handle.native_request().unwrap();
         assert_eq!(wire.sampling_params.unwrap().stop_token_ids, [2, 42]);
         assert_eq!(wire.return_text, None);
+        finish(&mut fixture, &engine).await;
+    })
+    .await;
+}
+
+// An LPX engine withholds the matched stop token, and the sidecar returns a
+// visible one.
+#[tokio::test]
+async fn lpx_visible_stop_tokens_preserve_tool_delimiters() {
+    bounded("visible tool delimiter", async {
+        use dynamo_mocker::live::deterministic_token_id;
+        use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
+        use dynamo_trtllm_mocker::MockerServerConfig;
+        use dynamo_trtllm_sidecar::proto as pb;
+        let control = Controller::<support::trtllm::Adapter>::default();
+        let mut fixture =
+            support::lpx::Fixture::start(control.clone(), FixtureConfig::default()).await;
+        let engine = fixture.engine().await;
+        engine.start(0).await.unwrap();
+        // The Mocker's output follows from the request ID; its second token
+        // is the visible stop.
+        let ctx =
+            Context::with_id_and_metadata((), "visible-stop".into(), Default::default()).context();
+        let seed = MockerServerConfig::default().seed;
+        let [first, stop] = [0, 1].map(|position| deterministic_token_id(seed, ctx.id(), position));
+        let handle = control.request(ctx.id(), RequestPlan::default());
+        let mut req = request("mocker-model", vec![11, 22, 33], 4);
+        req.stop_conditions.stop_token_ids_visible = Some(vec![stop]);
+        req.stop_conditions.stop_token_ids_hidden = Some(vec![2]);
+        let outputs = collect(&engine, req, GenerateContext::new(ctx, None)).await;
+        assert_eq!(handle.tokens(), [first], "the engine strips the match");
+        terminal(outputs, &[first, stop], 3, FinishReason::Stop);
+        let stopping = handle.native_request().unwrap().stopping.unwrap();
+        assert_eq!(
+            stopping.conditions,
+            [2, stop].map(|id| pb::StopCondition {
+                condition: Some(pb::stop_condition::Condition::StopTokenId(id)),
+            })
+        );
+        assert_eq!(stopping.include_stop_in_output, Some(false));
         finish(&mut fixture, &engine).await;
     })
     .await;
