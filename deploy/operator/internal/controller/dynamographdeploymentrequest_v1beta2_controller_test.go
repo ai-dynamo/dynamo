@@ -747,8 +747,8 @@ func TestV1beta2RequestControllerPreservesInputOverridesForRunLowering(t *testin
 func TestV1beta2RequestControllerReportsARunTheCRDRejectsInsteadOfRetryingIt(t *testing.T) {
 	invalid := apierrors.NewInvalid(
 		schema.GroupKind{Group: nvidiacomv1beta2.GroupVersion.Group, Kind: "DynamoGraphDeploymentRun"}, "search-1",
-		field.ErrorList{field.Invalid(field.NewPath("spec", "workload", "trace", "source", "pvc", "path"), "../escape.jsonl",
-			"path must be relative to the claim root without empty, '.' or '..' segments")},
+		field.ErrorList{field.Invalid(field.NewPath("spec", "workload", "trace", "source", "persistentVolumeClaim", "subPath"), "../escape.jsonl",
+			"subPath must be relative to the claim root without empty, '.' or '..' segments")},
 	)
 	tests := []struct {
 		name        string
