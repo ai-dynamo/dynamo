@@ -1084,21 +1084,19 @@ class StreamingChatPayload(BasePayload):
         return content
 
 
-def _validate_single_tool_call(
-    call: Dict[str, Any], name: Optional[str], arguments: Dict[str, Any]
-) -> None:
-    assert call.get("type") == "function", f"Tool call type is not function: {call}"
+def _validate_single_tool_call(call: Dict[str, Any], arguments: Dict[str, Any]) -> None:
+    assert call.get("type") == "function", f"Not a function call: {call}"
+    assert call.get("id"), f"Tool call has no id: {call}"
     assert (
-        isinstance(call.get("id"), str) and call["id"]
-    ), f"Tool call has no id: {call}"
-    function = call.get("function") or {}
-    if name is not None:
-        assert function.get("name") == name, f"Expected tool {name!r}, got {call}"
-    try:
-        parsed = json.loads(function.get("arguments") or "")
-    except json.JSONDecodeError as e:
-        raise AssertionError(f"Tool call arguments are not valid JSON: {call}") from e
-    assert parsed == arguments, f"Expected arguments {arguments!r}, got {parsed!r}"
+        json.loads(call["function"]["arguments"]) == arguments
+    ), f"Wrong arguments: {call}"
+
+
+def _one_value(values: List[Any]) -> Any:
+    # Later stream deltas may repeat a tool call's id, type, or name, but never change it.
+    distinct = {value for value in values if value is not None}
+    assert len(distinct) == 1, f"Expected one value, got {distinct}"
+    return distinct.pop()
 
 
 @dataclass
@@ -1174,31 +1172,19 @@ class ToolCallingChatPayload(ChatPayload):
             else:
                 logger.info(f"Found expected keywords in tool args: {found}")
 
-        # A forced call whose schema admits one argument object has one valid call.
         if self.expected_arguments is not None:
             assert len(tool_calls) == 1, f"Expected one tool call, got {tool_calls}"
-            content = message.get("content") or ""
-            assert not content.strip(), f"Unexpected content: {message}"
-            _validate_single_tool_call(
-                tool_calls[0], self.expected_tool_name, self.expected_arguments
-            )
+            assert not (message.get("content") or "").strip(), f"Content: {message}"
+            _validate_single_tool_call(tool_calls[0], self.expected_arguments)
 
 
 @dataclass
 class StreamingToolCallingChatPayload(BasePayload):
-    """Validate the one tool call that a chat SSE stream assembles from its deltas."""
-
     expected_tool_name: str = field(kw_only=True)
     expected_arguments: Dict[str, Any] = field(kw_only=True)
     expected_finish_reason: str = field(kw_only=True)
     endpoint: str = "/v1/chat/completions"
     http_stream: bool = True
-
-    def process_response(self, response: Any) -> str:
-        try:
-            return super().process_response(response)
-        finally:
-            response.close()
 
     def response_handler(self, response: Any) -> str:
         response.raise_for_status()
@@ -1206,53 +1192,30 @@ class StreamingToolCallingChatPayload(BasePayload):
         events = [
             line[5:].strip() for line in text.splitlines() if line.startswith("data:")
         ]
-        assert events and events[-1] == "[DONE]", "Stream did not end with [DONE]"
-        content_parts: List[str] = []
-        calls: Dict[int, Dict[str, Any]] = {}
-        finish_reason = None
-        for chunk in parse_sse_json_chunks(text):
-            assert "error" not in chunk, f"Stream error: {chunk!r}"
-            for choice in chunk["choices"]:
-                assert choice["index"] == 0, f"Unexpected choice: {chunk!r}"
-                assert finish_reason is None, "Received choices after terminal chunk"
-                delta = choice.get("delta") or {}
-                content_parts.append(delta.get("content") or "")
-                for part in delta.get("tool_calls") or []:
-                    # The first delta of a call carries its id, type, and name.
-                    # A later delta may repeat them, but must not change them.
-                    function = part.get("function") or {}
-                    call = calls.setdefault(
-                        part["index"],
-                        {
-                            "id": part.get("id"),
-                            "type": part.get("type"),
-                            "function": {"name": function.get("name"), "arguments": []},
-                        },
-                    )
-                    for key, value, first in (
-                        ("id", part.get("id"), call["id"]),
-                        ("type", part.get("type"), call["type"]),
-                        ("name", function.get("name"), call["function"]["name"]),
-                    ):
-                        assert (
-                            value is None or value == first
-                        ), f"Tool call {key} changed mid-stream: {chunk!r}"
-                    call["function"]["arguments"].append(
-                        function.get("arguments") or ""
-                    )
-                finish_reason = choice.get("finish_reason")
-
-        content = "".join(content_parts)
+        assert events[-1:] == ["[DONE]"], "Stream did not end with [DONE]"
+        chunks = parse_sse_json_chunks(text)
+        assert not any("error" in chunk for chunk in chunks), chunks
+        choices = [choice for chunk in chunks for choice in chunk["choices"]]
+        assert all(choice["index"] == 0 for choice in choices), choices
+        deltas = [choice.get("delta") or {} for choice in choices]
+        content = "".join(delta.get("content") or "" for delta in deltas)
         assert not content.strip(), f"Unexpected content: {content!r}"
-        assert list(calls) == [0], f"Expected one tool call at index 0, got {calls}"
-        call = calls[0]
-        call["function"]["arguments"] = "".join(call["function"]["arguments"])
-        _validate_single_tool_call(
-            call, self.expected_tool_name, self.expected_arguments
-        )
-        assert (
-            finish_reason == self.expected_finish_reason
-        ), f"Unexpected finish reason: {finish_reason!r}"
+        parts = [part for delta in deltas for part in delta.get("tool_calls") or []]
+        assert {part["index"] for part in parts} == {0}, f"Not one tool call: {parts}"
+        functions = [part.get("function") or {} for part in parts]
+        call = {
+            "id": _one_value([part.get("id") for part in parts]),
+            "type": _one_value([part.get("type") for part in parts]),
+            "function": {
+                "name": _one_value([function.get("name") for function in functions]),
+                "arguments": "".join(f.get("arguments") or "" for f in functions),
+            },
+        }
+        assert call["function"]["name"] == self.expected_tool_name, call
+        _validate_single_tool_call(call, self.expected_arguments)
+        finish_reasons = [choice.get("finish_reason") for choice in choices]
+        assert finish_reasons[-1:] == [self.expected_finish_reason], finish_reasons[-1:]
+        assert not any(finish_reasons[:-1]), f"Choices after the end: {finish_reasons}"
         return call["function"]["arguments"]
 
 

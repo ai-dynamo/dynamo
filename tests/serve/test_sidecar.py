@@ -181,7 +181,6 @@ sidecar_configs = {
             "DYN_REQUEST_PLANE": "tcp",
             "MAX_MODEL_LEN": str(CANCELLATION_CONTEXT_LEN),
             "VLLM_DATA_PARALLEL_SIZE": "1",
-            # The sidecar publishes this parser to the frontend in the model card.
             "DYN_TOOL_CALL_PARSER": "hermes",
         },
         request_payloads=[
@@ -211,7 +210,6 @@ sidecar_configs = {
             "DYN_REQUEST_PLANE": "tcp",
             "DYN_SGLANG_ENABLE_GENERATE": "1",
             "MAX_MODEL_LEN": str(CANCELLATION_CONTEXT_LEN),
-            # With a parser set, forced tool calls use SGLang's structural tags.
             "DYN_TOOL_CALL_PARSER": "hermes",
         },
         request_payloads=[

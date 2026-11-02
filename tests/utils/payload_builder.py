@@ -971,43 +971,24 @@ def chat_logprobs_and_structured_output_payloads(
 
 
 def forced_tool_call_payloads() -> list[BasePayload]:
-    """Forced tool calls whose grammar admits one argument object.
-
-    The frontend turns a forced tool_choice into a grammar for the engine. The
-    vLLM sidecar receives a JSON schema. The SGLang sidecar receives a hermes
-    structural tag, because it turns structural tags on by default. Each enum
-    has one value, and the question asks for other values, so only an enforced
-    grammar returns the expected arguments. The named call forces a tool that
-    the question does not ask for, so a named choice handled as "required"
-    also fails.
-    """
-
-    def tool(name: str, description: str, **values: str) -> Dict[str, Any]:
+    # The question asks for values that the one-value enums forbid, and the named call
+    # forces the tool the question does not need, so only the enforced grammar passes.
+    def tool(name: str, **arguments: str) -> Dict[str, Any]:
+        properties = {
+            key: {"type": "string", "enum": [value]} for key, value in arguments.items()
+        }
+        parameters = {
+            "type": "object",
+            "properties": properties,
+            "required": list(arguments),
+            "additionalProperties": False,
+        }
         return {
             "type": "function",
-            "function": {
-                "name": name,
-                "description": description,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        key: {"type": "string", "enum": [value]}
-                        for key, value in values.items()
-                    },
-                    "required": list(values),
-                    "additionalProperties": False,
-                },
-                "strict": True,
-            },
+            "function": {"name": name, "parameters": parameters},
         }
 
-    weather_tool = tool(
-        "get_weather",
-        "Get the current weather in a city.",
-        city="Paris",
-        unit="celsius",
-    )
-    time_tool = tool("get_time", "Get the current time in a time zone.", timezone="UTC")
+    weather = {"city": "Paris", "unit": "celsius"}
     common = {
         "messages": [
             {"role": "user", "content": "What is the weather in Tokyo, in fahrenheit?"}
@@ -1020,7 +1001,7 @@ def forced_tool_call_payloads() -> list[BasePayload]:
     named = ToolCallingChatPayload(
         body={
             **common,
-            "tools": [weather_tool, time_tool],
+            "tools": [tool("get_weather", **weather), tool("get_time", timezone="UTC")],
             "tool_choice": {"type": "function", "function": {"name": "get_time"}},
         },
         expected_response=[],
@@ -1031,14 +1012,14 @@ def forced_tool_call_payloads() -> list[BasePayload]:
     required = StreamingToolCallingChatPayload(
         body={
             **common,
-            "tools": [weather_tool],
+            "tools": [tool("get_weather", **weather)],
             "tool_choice": "required",
             "stream": True,
         },
         expected_response=[],
         expected_log=[],
         expected_tool_name="get_weather",
-        expected_arguments={"city": "Paris", "unit": "celsius"},
+        expected_arguments=weather,
         expected_finish_reason="tool_calls",
     )
     return [named, required]
