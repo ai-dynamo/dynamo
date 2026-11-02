@@ -2489,6 +2489,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-generate-format-catalog"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.8.4",
+ "dynamo-llm",
+ "dynamo-runtime",
+ "dynamo-sglang-generate",
+ "dynamo-vllm-generate",
+ "futures",
+ "prometheus",
+ "serde_json",
+ "tokio",
+ "tower 0.5.3",
+ "uuid",
+]
+
+[[package]]
 name = "dynamo-global-common"
 version = "1.7.0"
 dependencies = [
@@ -2520,10 +2539,17 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
+ "axum 0.8.4",
+ "clap",
  "dynamo-global-common",
+ "dynamo-global-discovery-client",
+ "dynamo-http-server",
+ "dynamo-runtime",
  "futures",
  "k8s-openapi",
  "kube",
+ "reqwest 0.12.28",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -2579,6 +2605,28 @@ name = "dynamo-global-view-receiver"
 version = "1.7.0"
 dependencies = [
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "dynamo-http-server"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "axum 0.8.4",
+ "dynamo-runtime",
+ "futures",
+ "hyper-util",
+ "parking_lot",
+ "prometheus",
+ "rand 0.9.4",
+ "rcgen",
+ "rustls",
+ "serde",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tower 0.5.3",
+ "tracing",
 ]
 
 [[package]]
@@ -3059,6 +3107,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-sglang-generate"
+version = "1.7.0"
+dependencies = [
+ "axum 0.8.4",
+ "base64 0.22.1",
+ "dynamo-llm",
+ "dynamo-protocols",
+ "dynamo-runtime",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-sglang-mocker"
 version = "1.7.0"
 dependencies = [
@@ -3093,6 +3156,7 @@ dependencies = [
  "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-runtime",
+ "dynamo-sglang-generate",
  "dynamo-sidecar-common",
  "futures",
  "prost 0.13.5",
@@ -3283,6 +3347,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-vllm-generate"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "axum 0.8.4",
+ "base64 0.22.1",
+ "dynamo-kv-router",
+ "dynamo-llm",
+ "dynamo-protocols",
+ "dynamo-runtime",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-vllm-mocker"
 version = "1.7.0"
 dependencies = [
@@ -3322,6 +3402,7 @@ dependencies = [
  "dynamo-llm",
  "dynamo-runtime",
  "dynamo-sidecar-common",
+ "dynamo-vllm-generate",
  "futures",
  "prost-types 0.14.3",
  "reqwest 0.12.28",

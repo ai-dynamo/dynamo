@@ -209,36 +209,55 @@ sequenceDiagram
     W->>KM: connect RW
     W->>KM: reallocate_all_handles, remap_all_vas
     Note over KS: fresh KV backing at preserved VAs
-    W->>WM: connect RO to configured socket
+    W->>WM: connect RO to its GPU's socket
     W->>WM: verify GPU and remap exact IDs
 ```
 
 Suspend order is weights then KV so the exclusive KV lease remains held until
 local weight memory is asleep. Resume order is KV then weights.
 
-Every connection verifies the physical GPU identity. The container-local device
-ordinal selects both the rank-local socket and the `device-<ordinal>` artifact
-directory; a predecessor server identity is not persisted. V1 does not
-reconstruct models, retain KV contents, scan raw mappings, validate
+Sockets are named by GPU UUID, and each connection reaches the sockets of the
+GPU the engine's device is on at that moment, so a restore onto other GPUs needs
+no configuration and engines may number GPUs in any order. Every connection
+verifies the physical GPU identity; a predecessor server identity is not
+persisted.
+
+GMS device N is the pod's N-th GPU in PCI bus order and names the
+`device-<N>` artifact directory. Restore relies on Dynamo Snapshot moving the
+process from the checkpoint's N-th GPU in bus order to the restoring pod's
+N-th, where GMS device N loads the `device-<N>` artifact. If a restore pairs
+GPUs differently, the engine fails to remap: the artifact holds another rank's
+allocation IDs.
+
+V1 does not reconstruct models, retain KV contents, scan raw mappings, validate
 model-specific layouts, or implement SGLang integration.
 
 ## Running V1
 
-Start one V1 child per visible device:
+Start one V1 process per GPU:
 
 ```text
 DYN_GMS_USE_V1=true python3 -m gpu_memory_service.cli.server
 ```
 
-The supervisor discovers the visible devices and monitors the children. To
-start one rank-local child directly:
+The supervisor reads the GPUs from `/proc/driver/nvidia/gpus` without starting
+CUDA, keeps those whose device node it can open, and serves GMS device N from
+the N-th of them in PCI bus order. Each device's process is pinned to its GPU
+with `CUDA_VISIBLE_DEVICES` and told its GPU's UUID. libcuda initializes every
+GPU whose device node it can open, so the supervisor also confines each process
+with Landlock to open only its own GPU's node, and the process brings up that
+GPU alone. This shortens start-up and keeps it from slowing other CUDA work on
+the node. It is not isolation between devices. On a kernel without Landlock the
+supervisor logs a warning and runs the processes unconfined. Pass
+`--no-isolation` to run them unconfined anyway. To start one device's server
+directly:
 
 ```text
 DYN_GMS_USE_V1=true gpu-memory-service --device 0
 ```
 
 Save or load every visible device (pass `--device N` for one GPU). Artifacts
-land under `<checkpoint-dir>/device-<ordinal>`:
+land under `<checkpoint-dir>/device-<N>`:
 
 ```text
 DYN_GMS_USE_V1=true python -m gpu_memory_service.cli.snapshot.saver \
@@ -250,6 +269,9 @@ DYN_GMS_USE_V1=true python3 -m gpu_memory_service.cli.server --enable-loader \
   --checkpoint-dir /checkpoints/run/versions/1 \
   --transfer-backend nixl-gds
 ```
+
+With `--enable-loader`, each device's server process loads its weights in a
+thread and keeps serving.
 
 The loader also accepts `nixl` and `sharded-ssd`, the existing sharded SSD root
 and queue flags, and repeatable `--posix-backend-param KEY=VALUE` overrides.
