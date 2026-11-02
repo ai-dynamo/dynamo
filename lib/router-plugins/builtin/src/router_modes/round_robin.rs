@@ -29,7 +29,6 @@ impl WorkerPicker for RoundRobinPicker {
         if input.is_empty() {
             return Err(no_candidates());
         }
-        // A preview reads the rotation without advancing it.
         let cursor = if context.is_preview() {
             self.cursor.load(Ordering::Relaxed)
         } else {

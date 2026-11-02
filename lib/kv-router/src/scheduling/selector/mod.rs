@@ -150,14 +150,14 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
         }
     }
 
-    pub fn into_configured(self) -> Result<ConfiguredSelectionInputs<'a, C>, KvSchedulerError> {
+    pub fn into_configured(self) -> ConfiguredSelectionInputs<'a, C> {
         let Self::Configured {
             workers,
             request,
             eligibility,
             block_size,
         } = self;
-        Ok((workers, request, eligibility, block_size))
+        (workers, request, eligibility, block_size)
     }
 }
 
@@ -610,7 +610,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
     trace: Option<SelectionTraceSpec>,
     prepared: Option<PreparedCandidates>,
 ) -> Result<(WorkerSelectionResult, Option<SelectionTrace>), KvSchedulerError> {
-    let (workers, request, eligibility, block_size) = input.into_configured()?;
+    let (workers, request, eligibility, block_size) = input.into_configured();
     eligibility.validate_pinned_worker_allowed()?;
 
     if let Some(worker) = eligibility.pinned_worker() {

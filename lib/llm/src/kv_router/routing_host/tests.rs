@@ -158,12 +158,7 @@ async fn builtin_host_constructs_only_declared_capabilities() {
         .hosted_occupancy
         .as_ref()
         .unwrap()
-        .select_and_reserve(
-            &host.inner,
-            picker,
-            &HostedSelectionRequest::new(0, 0),
-            Some(1),
-        )
+        .select_and_reserve(&host.inner, picker, &request(), Some(1))
         .unwrap();
     assert_eq!(selection.worker_id, 1);
     assert_eq!(selection.occupancy, 1);
@@ -283,20 +278,10 @@ async fn builtin_occupancy_selection_uses_all_selectable_workers() {
     };
     let occupancy = host.hosted_occupancy.as_ref().unwrap();
     let first = occupancy
-        .select_and_reserve(
-            &host.inner,
-            picker,
-            &HostedSelectionRequest::new(0, 0),
-            Some(1),
-        )
+        .select_and_reserve(&host.inner, picker, &request(), Some(1))
         .unwrap();
     let second = occupancy
-        .select_and_reserve(
-            &host.inner,
-            picker,
-            &HostedSelectionRequest::new(0, 0),
-            None,
-        )
+        .select_and_reserve(&host.inner, picker, &request(), None)
         .unwrap();
 
     assert_eq!(first.worker_id, 1);

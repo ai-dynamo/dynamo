@@ -425,7 +425,7 @@ impl CandidatePreparer {
         &self,
         input: WorkerSelectionInput<'_, C>,
     ) -> Option<PreparedCandidates> {
-        let (workers, request, eligibility, block_size) = input.into_configured().ok()?;
+        let (workers, request, eligibility, block_size) = input.into_configured();
         let input = MaterializedSelectionInput::new(request, block_size);
         let row_inputs = self.inputs.without(WorkerInputs::LOAD);
         let materialize_preferred_taint = self.inputs.contains(WorkerInputs::PREFERRED_TAINT);

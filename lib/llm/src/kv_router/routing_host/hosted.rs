@@ -5,7 +5,7 @@ use dynamo_kv_router::selector::HostedSelectionRequest;
 
 /// The request metadata a hosted picker reads. The routing host tracks no KV block size, so
 /// [`request_blocks`](dynamo_kv_router::WorkerSelectionContext::request_blocks) reads 0.
-fn hosted_request(request: &PreprocessedRequest) -> HostedSelectionRequest {
+pub(super) fn hosted_request(request: &PreprocessedRequest) -> HostedSelectionRequest {
     HostedSelectionRequest::new(request.token_ids.len(), 0)
 }
 
@@ -106,7 +106,6 @@ impl RoutingHost {
             }
             RoutingPolicy::Hosted(picker) => {
                 let preferred_worker = preferred_worker()?;
-                let hosted_request = hosted_request(request.content());
                 if picker.inputs().contains(WorkerInputs::ACTIVE_REQUESTS) {
                     let occupancy = self
                         .hosted_occupancy
@@ -115,7 +114,7 @@ impl RoutingHost {
                     let selection = occupancy.select_and_reserve(
                         &self.inner,
                         picker,
-                        &hosted_request,
+                        request.content(),
                         target_constraint
                             .map(|target| target.worker_id)
                             .or(preferred_worker),
@@ -139,7 +138,7 @@ impl RoutingHost {
                                 Ok(worker_id)
                             } else {
                                 picker
-                                    .select(ids, None, &hosted_request)
+                                    .select(ids, None, &hosted_request(request.content()))
                                     .map(|selection| selection.worker.worker_id)
                             }
                         })??,
