@@ -49,7 +49,7 @@ impl NativeOutcome for ReadOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local_model::runtime_config::DecisionExecutionProfile;
+    use crate::decision_profile::DecisionExecutionProfile;
     use dynamo_decisions::{CanonicalRequest, QuestionOutcome, Route, parse_request};
     use serde_json::json;
 
@@ -63,10 +63,27 @@ mod tests {
     }
 
     fn response() -> serde_json::Value {
-        json!({"protocol_version":1,"profile":"vllm_diffusion_canvas_decision_v1", "outcomes":[
+        json!({"protocol_version":1,"profile":"vllm_diffusion_canvas_decision_v1", "finish_reason":"stop", "outcomes":[
             {"ordinal":0,"probabilities":[0.2,0.8],"label_mass":0.4},
             {"ordinal":1,"probabilities":[0.6,0.4],"label_mass":0.9}
-        ], "usage":{"input_tokens":25,"output_tokens":4,"cached_tokens":null}})
+        ], "usage":{"input_tokens":25,"output_tokens":4,"cached_tokens":0}})
+    }
+
+    #[test]
+    fn native_response_requires_explicit_stop_marker() {
+        let mut missing = response();
+        missing.as_object_mut().unwrap().remove("finish_reason");
+        assert!(
+            serde_json::from_value::<DecisionReadResponse>(missing.clone()).is_err(),
+            "a native success must declare its terminal gate event"
+        );
+        let mut value = missing;
+        value["finish_reason"] = json!("stop");
+        assert!(serde_json::from_value::<DecisionReadResponse>(value.clone()).is_ok());
+        for marker in [json!("length"), json!("abort"), json!(null), json!(1)] {
+            value["finish_reason"] = marker;
+            assert!(serde_json::from_value::<DecisionReadResponse>(value.clone()).is_err());
+        }
     }
 
     #[test]
@@ -79,7 +96,8 @@ mod tests {
                 "salt".into(),
                 100,
                 400,
-            ),
+            )
+            .unwrap(),
         };
         let value = serde_json::to_value(wire).unwrap();
         assert_eq!(value["decision_read"]["profile"], "vllm_liquid_decision_v1");
@@ -103,7 +121,22 @@ mod tests {
         assert!(matches!(&answers[0], QuestionOutcome::Answer(d) if d.label_mass == Some(0.4)));
         assert_eq!(usage.input_tokens, 25);
         assert_eq!(usage.output_tokens, 4);
-        assert_eq!(usage.cached_tokens, None);
+        assert_eq!(usage.cached_tokens, Some(0));
+    }
+
+    #[test]
+    fn diffusion_read_usage_has_no_hybrid_prefix_allowance() {
+        for output_tokens in [4, 5] {
+            let mut value = response();
+            value["usage"]["output_tokens"] = json!(output_tokens);
+            let parsed: DecisionReadResponse = serde_json::from_value(value).unwrap();
+            assert_eq!(
+                parsed
+                    .validate(&request(), DecisionExecutionProfile::VllmDiffusionV1, 100)
+                    .is_ok(),
+                output_tokens == 4
+            );
+        }
     }
 
     #[test]
@@ -124,7 +157,7 @@ mod tests {
             ),
             (
                 "usage",
-                json!({"input_tokens":25,"output_tokens":6,"cached_tokens":null}),
+                json!({"input_tokens":25,"output_tokens":6,"cached_tokens":0}),
             ),
             (
                 "usage",
@@ -146,5 +179,8 @@ mod tests {
             .unwrap()
             .remove("label_mass");
         assert!(serde_json::from_value::<DecisionReadResponse>(missing_mass).is_err());
+        let mut missing_cache = response();
+        missing_cache["usage"]["cached_tokens"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<DecisionReadResponse>(missing_cache).is_err());
     }
 }
