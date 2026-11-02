@@ -60,8 +60,10 @@ fn insert_metadata_entry(
     raw_key: &str,
     raw_value: &str,
 ) -> Result<(), MetadataHeaderError> {
-    // Lifecycle capture is selected by the frontend, never by caller metadata.
-    if raw_key.eq_ignore_ascii_case(dynamo_runtime::telemetry::LIFECYCLE_ROOT_METADATA_KEY) {
+    // Internal dispatch and lifecycle capture are selected only by the frontend.
+    if raw_key.eq_ignore_ascii_case(dynamo_runtime::telemetry::LIFECYCLE_ROOT_METADATA_KEY)
+        || raw_key.eq_ignore_ascii_case(crate::protocols::systemone::DECISION_DISPATCH_METADATA_KEY)
+    {
         return Ok(());
     }
     if out.contains_key(raw_key) {
@@ -195,6 +197,29 @@ mod tests {
     use super::*;
     use axum::http::HeaderName;
     use tonic::metadata::{MetadataKey, MetadataValue};
+
+    #[test]
+    fn callers_cannot_select_native_decision_dispatch_through_metadata() {
+        let key = crate::protocols::systemone::DECISION_DISPATCH_METADATA_KEY;
+        for prefix in ["x-dynamo-meta-", "custom-meta-"] {
+            for supplied_key in [key.to_owned(), key.to_uppercase()] {
+                let metadata = extract_metadata_from_pairs(
+                    [(format!("{prefix}{supplied_key}"), "head")],
+                    prefix,
+                )
+                .unwrap();
+                assert!(metadata.is_empty());
+            }
+        }
+        let mut grpc = MetadataMap::new();
+        grpc.insert(
+            format!("x-dynamo-meta-{key}")
+                .parse::<MetadataKey<_>>()
+                .unwrap(),
+            "read".parse().unwrap(),
+        );
+        assert!(extract_metadata_from_grpc(&grpc).unwrap().is_empty());
+    }
 
     #[test]
     fn callers_cannot_enable_lifecycle_capture_through_metadata() {

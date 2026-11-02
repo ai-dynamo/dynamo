@@ -21,6 +21,7 @@ pub(super) fn classify(cause: &(dyn std::error::Error + 'static)) -> DispatchErr
     }
     if metrics::request_was_rejected(cause) {
         return DispatchError {
+            code: None,
             status: error::overload_status_code(),
             public_message: "decision scoring worker capacity is exhausted",
             detail: "backend capacity exhausted".to_string(),
@@ -29,6 +30,9 @@ pub(super) fn classify(cause: &(dyn std::error::Error + 'static)) -> DispatchErr
         };
     }
     if let Some(error) = error::find_canonical_error_in_chain(cause) {
+        if error.class().normalized() == ErrorClass::BackendProtocol {
+            return DispatchError::invalid_executor("invalid decision executor result");
+        }
         if error.reason().as_str() == "runtime.unclassified" {
             return DispatchError::unavailable("native scoring transport failed");
         }
@@ -39,6 +43,7 @@ pub(super) fn classify(cause: &(dyn std::error::Error + 'static)) -> DispatchErr
         {
             let class = error.class().normalized();
             return DispatchError {
+                code: None,
                 status: if class == ErrorClass::InvalidRequest {
                     axum::http::StatusCode::UNPROCESSABLE_ENTITY
                 } else {

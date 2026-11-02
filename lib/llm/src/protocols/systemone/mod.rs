@@ -8,6 +8,9 @@ pub mod vllm;
 
 pub use native::{build_native_score_request, parse_candidate_scores};
 
+/// Frontend-owned dispatch marker; public HTTP and gRPC metadata strip this key.
+pub(crate) const DECISION_DISPATCH_METADATA_KEY: &str = "dynamo.internal.decision";
+
 pub(crate) const MAX_DECISION_INPUT_TOKENS: usize = 1_048_576;
 pub(crate) const MAX_DECISION_ENCODING_BYTES: usize = 16 * 1024 * 1024;
 
