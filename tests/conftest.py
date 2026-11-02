@@ -796,15 +796,13 @@ def pytest_collection_modifyitems(config, items):
 
 
 class EtcdServer(ManagedProcess):
-    def __init__(self, request, port=2379, timeout=300):
+    def __init__(self, request, port=2379, timeout=300, peer_port=None):
         # Allocate free ports if port is 0
         use_random_port = port == 0
         if use_random_port:
             # Need two ports: client port and peer port for parallel execution
             # Start from 2380 (etcd default 2379 + 1)
             port, peer_port = allocate_ports(2, 2380)
-        else:
-            peer_port = None
 
         self.port = port
         self.peer_port = peer_port  # Store for cleanup
@@ -822,7 +820,7 @@ class EtcdServer(ManagedProcess):
             f"http://0.0.0.0:{port_string}",
         ]
 
-        # Add peer port configuration only for random ports (parallel execution)
+        # Configure every reserved peer port, including session-scoped servers.
         if peer_port is not None:
             peer_port_string = str(peer_port)
             command.extend(
@@ -857,11 +855,10 @@ class EtcdServer(ManagedProcess):
         """Release allocated ports when server exits."""
         try:
             # Only deallocate ports that were dynamically allocated (not default ports)
-            if self.use_random_port:
-                ports_to_release = [self.port]
-                if self.peer_port is not None:
-                    ports_to_release.append(self.peer_port)
-                deallocate_ports(ports_to_release)
+            ports_to_release = [self.port] if self.use_random_port else []
+            if self.peer_port is not None:
+                ports_to_release.append(self.peer_port)
+            deallocate_ports(ports_to_release)
         except Exception as e:
             logging.warning(f"Failed to release EtcdServer port: {e}")
 
@@ -1078,7 +1075,11 @@ class SharedEtcdServer(SharedManagedProcess):
 
     def _create_server(self, port: int) -> ManagedProcess:
         """Create EtcdServer instance."""
-        server = EtcdServer(self.request, port=port, timeout=self.timeout)
+        # The client may use etcd's default peer port, so reserve a distinct peer.
+        peer_port = allocate_port(self.start_port)
+        server = EtcdServer(
+            self.request, port=port, timeout=self.timeout, peer_port=peer_port
+        )
         # Override log_dir since request.node.name is empty in session scope
         server.log_dir = self._log_dir
         return server
