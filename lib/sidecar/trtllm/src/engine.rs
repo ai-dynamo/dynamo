@@ -24,7 +24,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
 use crate::client::{self, ModelInfo, TrtllmClient};
-use crate::convert::{ResponseState, build_generate_request_with_routing};
+use crate::convert::{
+    ResponseState, build_generate_request_with_routing, validate_remote_media_urls,
+};
 use crate::model::ConfiguredModel;
 use crate::proto as pb;
 
@@ -88,6 +90,7 @@ pub struct TrtllmSidecarEngine {
     /// `kv.session` divergence in `convert`.
     mode: DisaggregationMode,
     subagent_affinity_auth_key: Option<String>,
+    allow_remote_media_urls: bool,
     /// Connection and model information may be discovered in the cancellable sidecar bootstrap.
     connection: OnceCell<(TrtllmClient, ModelInfo)>,
     started: OnceCell<()>,
@@ -111,6 +114,7 @@ impl TrtllmSidecarEngine {
             model,
             mode,
             subagent_affinity_auth_key: None,
+            allow_remote_media_urls: true,
             connection: OnceCell::new(),
             started: OnceCell::new(),
             routing: OnceCell::new(),
@@ -206,6 +210,15 @@ impl TrtllmSidecarEngine {
                 "subagent-affinity-auth-key must not be empty",
             ));
         }
+        let remote_urls = std::env::var("DYN_MM_ALLOW_REMOTE_URLS")
+            .map(Some)
+            .or_else(|error| match error {
+                std::env::VarError::NotPresent => Ok(None),
+                _ => Err(client::invalid_argument(
+                    "DYN_MM_ALLOW_REMOTE_URLS must be valid UTF-8",
+                )),
+            })?;
+        let allow_remote_media_urls = crate::args::allow_remote_media_urls(remote_urls.as_deref())?;
         let mode = args.sidecar.common.disaggregation_mode;
         if mode.is_encode() {
             return Err(client::invalid_argument(
@@ -234,6 +247,7 @@ impl TrtllmSidecarEngine {
         };
         let mut engine = Self::new(endpoint, transport, model.clone(), mode);
         engine.subagent_affinity_auth_key = args.subagent_affinity_auth_key;
+        engine.allow_remote_media_urls = allow_remote_media_urls;
         // Off by default: TensorRT-LLM's xgrammar rejects several tag formats (NVIDIA/TensorRT-LLM#19913).
         let structural_tag = args.sidecar.common.structural_tag(false);
         let config = WorkerConfig {
@@ -270,7 +284,6 @@ impl TrtllmSidecarEngine {
         };
         Ok((engine, config))
     }
-
     pub(crate) async fn bootstrap(
         (engine, config): (Self, WorkerConfig),
     ) -> Result<(Self, WorkerConfig), DynamoError> {
@@ -303,7 +316,7 @@ impl TrtllmSidecarEngine {
             ));
         }
 
-        let limits = client
+        let info = client
             .wait_for_model_info(
                 &self.model.source,
                 self.model.context_length,
@@ -311,7 +324,7 @@ impl TrtllmSidecarEngine {
                 self.transport.retry_interval,
             )
             .await?;
-        Ok((client, limits))
+        Ok((client, info))
     }
 }
 
@@ -456,14 +469,6 @@ impl LLMEngine for TrtllmSidecarEngine {
             .routing
             .get()
             .is_some_and(|routing| routing.dp_targeting && routing.dp_size > 1);
-        let proto_request = build_generate_request_with_routing(
-            &request,
-            &request_id,
-            &self.model.source,
-            Some(info.limits),
-            self.mode,
-            use_dp_targeting,
-        )?;
         let target_dp_rank = request.routing.as_ref().and_then(|routing| {
             if self.mode.is_prefill() {
                 routing.prefill_dp_rank.or(routing.dp_rank)
@@ -488,6 +493,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                     .as_deref()
                     .map(str::trim)
                     .filter(|parent| !parent.is_empty() && *parent != agent.session_id.trim())
+                    .map(str::to_owned)
             })
         } else {
             None
@@ -531,11 +537,22 @@ impl LLMEngine for TrtllmSidecarEngine {
             biased;
             _ = &mut request_cancellation, if !needs_cancellation_deferral => None,
             _ = &mut shutdown_cancellation => None,
-            result = client.generate(
-                proto_request,
-                target_dp_rank,
-                parent_affinity.zip(self.subagent_affinity_auth_key.as_deref()),
-            ) => Some(result?),
+            result = async {
+                validate_remote_media_urls(&request, self.allow_remote_media_urls)?;
+                let proto_request = build_generate_request_with_routing(
+                    request,
+                    &request_id,
+                    &self.model.source,
+                    Some(info.limits),
+                    self.mode,
+                    use_dp_targeting,
+                )?;
+                client.generate(
+                    proto_request,
+                    target_dp_rank,
+                    parent_affinity.as_deref().zip(self.subagent_affinity_auth_key.as_deref()),
+                ).await
+            } => Some(result?),
         };
         let Some(mut stream) = stream else {
             let output = cancelled(&state);

@@ -444,6 +444,131 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{"spec.services[worker].extraPodSpec.mainContainer.image: Required value: is required"},
 		},
+		// Helper images do not describe Dynamo versions; selecting a Dynamo role restores the contract.
+		{
+			name: "beta untyped helper accepts a non-semver image without override",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := betaWorkerComponent(dgd)
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.PodTemplate.Spec.Containers[0].Image = "busybox:latest"
+			}),
+		},
+		{
+			name: "beta untyped helper image can change without override",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := betaWorkerComponent(dgd)
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.PodTemplate.Spec.Containers[0].Image = "busybox:latest"
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := betaWorkerComponent(dgd)
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.PodTemplate.Spec.Containers[0].Image = "busybox:stable"
+			}),
+		},
+		{
+			name: "beta assigning a Dynamo role requires a runtime version",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := betaWorkerComponent(dgd)
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.PodTemplate.Spec.Containers[0].Image = "busybox:latest"
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := betaWorkerComponent(dgd)
+				component.ComponentType = "worker"
+				component.RuntimeVersionOverride = ""
+				component.PodTemplate.Spec.Containers[0].Image = "busybox:latest"
+			}),
+			wantWebhookErrs: []string{"spec.components[1].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag"},
+		},
+		{
+			name: "beta untyped helper still requires an image",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := betaWorkerComponent(dgd)
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.PodTemplate.Spec.Containers[0].Image = ""
+			}),
+			wantWebhookErrs: []string{"spec.components[1].podTemplate.spec.containers[0].image: Required value: is required"},
+		},
+		{
+			name: "alpha untyped helper accepts a non-semver image without override",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = "busybox:latest"
+			}),
+		},
+		{
+			name: "alpha untyped helper image can change without override",
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = "busybox:latest"
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = "busybox:stable"
+			}),
+		},
+		{
+			name: "alpha assigning a Dynamo role requires a runtime version",
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = "busybox:latest"
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = "worker"
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = "busybox:latest"
+			}),
+			wantWebhookErrs: []string{"spec.services[worker].runtimeVersionOverride: Required value: is required when the specified Dynamo runtime container image has no parseable semantic-version tag"},
+		},
+		{
+			name: "alpha untyped helper still requires an image",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = ""
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = ""
+			}),
+			wantWebhookErrs: []string{"spec.services[worker].extraPodSpec.mainContainer.image: Required value: is required"},
+		},
+		{
+			name: "alpha custom-type helper accepts a non-semver image without override",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = "helper"
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = "busybox:latest"
+			}),
+		},
+		{
+			name: "alpha custom-type helper image can change without override",
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = "helper"
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = "busybox:latest"
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services[dgdAdmissionWorkerName]
+				component.ComponentType = "helper"
+				component.RuntimeVersionOverride = ""
+				component.ExtraPodSpec.MainContainer.Image = "busybox:stable"
+			}),
+		},
 		{
 			name: "component custom image requires runtime version override",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
