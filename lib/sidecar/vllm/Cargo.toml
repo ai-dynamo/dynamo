@@ -40,6 +40,8 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }
+reqwest = { workspace = true }
 
 prost-types-v14 = { workspace = true }
 tonic-v14 = { workspace = true }
@@ -48,7 +50,6 @@ vllm-proto = { workspace = true }
 
 [dev-dependencies]
 dynamo-vllm-generate = { workspace = true }
-reqwest = { workspace = true }
 dynamo-backend-common = { workspace = true, features = ["testing"] }
 tempfile = { workspace = true }
 tokio-stream = { workspace = true, features = ["net"] }

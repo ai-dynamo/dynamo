@@ -30,7 +30,7 @@ use tonic::{Request, Response, Status};
 use tonic_health::ServingStatus as HealthServingStatus;
 
 use crate::client::{CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
-use crate::engine::VllmSidecarEngine;
+use crate::engine::{MooncakeSetup, VllmSidecarEngine};
 use crate::model::DiscoveredModel;
 use crate::proto as pb;
 use crate::test_fixtures::*;
@@ -73,6 +73,7 @@ struct FakeVllm {
     release_unload: Arc<Notify>,
     encoder_response: Arc<AtomicBool>,
     omit_encoder_metadata: Arc<AtomicBool>,
+    omit_kv_handoff: Arc<AtomicBool>,
 }
 
 impl FakeVllm {
@@ -220,6 +221,7 @@ impl pb::inference_server::Inference for FakeVllm {
         );
         let encoder_response = self.encoder_response.load(Ordering::SeqCst);
         let omit_encoder_metadata = self.omit_encoder_metadata.load(Ordering::SeqCst);
+        let omit_kv_handoff = self.omit_kv_handoff.load(Ordering::SeqCst);
         let hang = self.hang.load(Ordering::SeqCst);
         let hold_before_first_token = self.hold_before_first_token.load(Ordering::SeqCst);
         let close_before_first_token = self.close_before_first_token.load(Ordering::SeqCst);
@@ -285,7 +287,7 @@ impl pb::inference_server::Inference for FakeVllm {
                     };
                 }
             } else {
-                let kv = is_prefill.then(|| {
+                let kv = (is_prefill && !omit_kv_handoff).then(|| {
                     json_to_struct_v14(handoff.clone(), "kv_transfer_params").expect("encode handoff")
                 });
                 yield sequence_response(true, wants_logprobs, kv);
@@ -1799,6 +1801,121 @@ async fn assert_encoder_cache_handoff(mut source_request: PreprocessedRequest) {
             assert_eq!(decode_ec, expected_ec);
         }
     }
+}
+
+async fn fake_mooncake_bootstrap(engine_id: &str) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("local addr").port();
+    let body = format!(
+        r#"{{"0":{{"engine_id":"{engine_id}","worker_addr":{{"0":{{"0":"tcp://127.0.0.1:38137"}}}}}}}}"#
+    );
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let body = body.clone();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buffer = [0u8; 1024];
+                let _ = socket.read(&mut buffer).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    port
+}
+
+#[tokio::test]
+async fn mooncake_prefill_publishes_sidecar_allocated_handoff() {
+    let bootstrap_port = fake_mooncake_bootstrap("prefill-engine-0").await;
+    let service = FakeVllm::default();
+    service.omit_kv_handoff.store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let prefill = engine(
+        &server.endpoint,
+        DisaggregationMode::Prefill,
+        1,
+        model_info(),
+    )
+    .with_mooncake_setup(MooncakeSetup {
+        host: "127.0.0.1".to_string(),
+        port: bootstrap_port,
+    });
+    prefill.start(0).await.expect("start");
+
+    let outputs = collect(&prefill, request()).await;
+    assert_eq!(outputs.len(), 1);
+    let handoff = outputs[0]
+        .disaggregated_params
+        .clone()
+        .expect("Mooncake handoff");
+    let transfer_id = handoff["transfer_id"].as_str().expect("transfer_id");
+    assert!(
+        uuid::Uuid::parse_str(transfer_id).is_ok(),
+        "transfer_id must be a UUID: {transfer_id}"
+    );
+    assert_eq!(
+        handoff,
+        json!({
+            "do_remote_decode": false,
+            "do_remote_prefill": true,
+            "transfer_id": transfer_id,
+            "remote_bootstrap_addr": format!("http://127.0.0.1:{bootstrap_port}"),
+            "remote_engine_id": "prefill-engine-0",
+        })
+    );
+
+    let requests = server.service.requests.lock().await;
+    let wire = requests.last().expect("recorded request");
+    let kv = struct_to_json_v14(
+        wire.kv
+            .as_ref()
+            .and_then(|kv| kv.kv_transfer_params.clone())
+            .expect("request kv_transfer_params"),
+        "vLLM",
+        "kv_transfer_params",
+    )
+    .unwrap();
+    assert_eq!(kv["do_remote_decode"], json!(true));
+    assert_eq!(kv["do_remote_prefill"], json!(false));
+    assert_eq!(kv["transfer_id"], json!(transfer_id));
+}
+
+#[tokio::test]
+async fn mooncake_prefill_startup_requires_the_bootstrap_server() {
+    let server = FakeServer::start(FakeVllm::default()).await;
+    let unused_port = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind")
+        .local_addr()
+        .expect("local addr")
+        .port();
+    let transport = GrpcTransportConfig {
+        connections: NonZeroUsize::MIN,
+        startup_deadline: std::time::Duration::from_secs(2),
+        retry_interval: std::time::Duration::from_millis(50),
+        ..Default::default()
+    };
+    let prefill = VllmSidecarEngine::new(
+        GrpcEndpoint::parse(&server.endpoint, "--grpc-endpoint").expect("valid endpoint"),
+        DiscoveredModel::from_proto(model_info(), server_info()).expect("valid discovery"),
+        DisaggregationMode::Prefill,
+        transport,
+    )
+    .with_mooncake_setup(MooncakeSetup {
+        host: "127.0.0.1".to_string(),
+        port: unused_port,
+    });
+    let error = prefill
+        .start(0)
+        .await
+        .expect_err("startup must fail without a Mooncake bootstrap server");
+    assert!(
+        error.to_string().contains("did not report an engine_id"),
+        "{error}"
+    );
 }
 
 #[tokio::test]
