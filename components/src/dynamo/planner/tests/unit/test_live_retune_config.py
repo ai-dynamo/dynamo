@@ -31,6 +31,7 @@ from dynamo.planner.config.planner_config import (
     PlannerConfig,
     balanced_shard_parts,
     dgdr_need_seconds,
+    dgdr_rounds,
     largest_shard_points,
 )
 from dynamo.planner.retune.domains import expand_router_domain
@@ -75,7 +76,7 @@ ENGINE_DISAGG = {
     "context_length": "max",
     "workers": {"prefill": _worker(), "decode": _worker()},
 }
-# Design §4.1 defaults: T = 6 h, timeout = T - 20 min.
+# The live retune defaults: T = 6 h, timeout = T - 20 min.
 INTERVAL = 21600.0
 TIMEOUT = 20400.0
 # The default router domain is 3 x 9 x 4 = 108 points; with max_shards 3 the
@@ -566,9 +567,8 @@ def test_balanced_shard_parts(sizes, max_shards, parts, largest):
 
 
 def test_balanced_shard_parts_minimizes_the_largest_shard_exhaustively():
-    for sizes in ((3, 9, 4), (5, 7), (2, 3, 5), (12,), (1, 1, 30)):
+    for sizes in ((3, 9, 4), (5, 7), (2, 3, 5), (12,), (1, 1, 30), (250,)):
         for max_shards in range(1, 17):
-            parts = balanced_shard_parts(sizes, max_shards)
             best = min(
                 largest_shard_points(sizes, (a, b, c)[: len(sizes)])
                 for a in range(1, max_shards + 1)
@@ -577,16 +577,45 @@ def test_balanced_shard_parts_minimizes_the_largest_shard_exhaustively():
                 if math.prod((a, b, c)[: len(sizes)]) <= max_shards
                 and all(p <= n for p, n in zip((a, b, c)[: len(sizes)], sizes))
             )
+            parts = balanced_shard_parts(sizes, max_shards)
             assert largest_shard_points(sizes, parts) == best
+            # With the Run parallelism, the split takes the fewest rounds, so
+            # its largest shard fits and finishes exactly when the smallest
+            # largest shard does: P13 and the executor agree.
+            for parallelism in (1, 8, 36):
+                parts = balanced_shard_parts(sizes, max_shards, parallelism=parallelism)
+                largest = largest_shard_points(sizes, parts)
+                if best > DGDR_MAX_SHARD_POINTS:
+                    assert largest == best
+                else:
+                    assert largest <= DGDR_MAX_SHARD_POINTS
+                    assert dgdr_rounds(largest, parallelism) == dgdr_rounds(
+                        best, parallelism
+                    )
 
 
 @pytest.mark.parametrize(
-    ("sizes", "max_shards"),
-    [((3, 0), 3), ((3,), 0)],
+    ("sizes", "max_shards", "parallelism", "parts"),
+    [
+        # A shard is added only when it saves an evaluation round; the first
+        # candidate runs alone, so single points save one.
+        ((2, 2, 2), 3, 8, (1, 1, 1)),
+        ((2, 2, 2), 16, 8, (2, 2, 2)),
+        ((2, 2, 2), 3, 1, (1, 1, 2)),
+        ((3, 9, 4), 3, 8, (1, 3, 1)),
+    ],
 )
-def test_balanced_shard_parts_rejects_bad_input(sizes, max_shards):
+def test_balanced_shard_parts_with_parallelism(sizes, max_shards, parallelism, parts):
+    assert balanced_shard_parts(sizes, max_shards, parallelism=parallelism) == parts
+
+
+@pytest.mark.parametrize(
+    ("sizes", "max_shards", "parallelism"),
+    [((3, 0), 3, None), ((3,), 0, None), ((3,), 3, 0)],
+)
+def test_balanced_shard_parts_rejects_bad_input(sizes, max_shards, parallelism):
     with pytest.raises(ValueError):
-        balanced_shard_parts(sizes, max_shards)
+        balanced_shard_parts(sizes, max_shards, parallelism=parallelism)
 
 
 def test_default_router_grid_splits_into_three_shards_of_36():
