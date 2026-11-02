@@ -308,63 +308,11 @@ class RetuneController:
     def _router_domain(self, retune: RetuneConfig) -> dict[str, list[float]]:
         if retune.router is None:
             return {}
-        engine = self._inputs.engine
-        startup = self._startup_router_json
-        # Only the builtin default policy is modelled identically.
-        if engine.router_mode != "kv_router":
+        if self._inputs.engine.router_mode != "kv_router":
             raise ValueError("retune.router requires engine router_mode='kv_router'")
-        if startup.get("router_policy_config") is not None:
-            raise ValueError(
-                "retune.router requires the builtin default router policy "
-                "(router_config.router_policy_config must be unset)"
-            )
-        if startup.get("overlap_score_weight") is not None:
-            raise ValueError(
-                "retune.router cannot be used with the deprecated "
-                "overlap_score_weight, which overrides prefill_load_scale"
-            )
-        if startup.get("conditional_disagg_enabled"):
-            raise ValueError(
-                "retune.router does not support conditional disaggregation: "
-                "replay and live resolve decode credit differently"
-            )
-
-        startup_maps = self._router_map({})
-        # A worker type that starts with no overlap credit can never get it.
-        zero_credit = {
-            worker_type
-            for worker_type, parameters in startup_maps.items()
-            if worker_type != "decode" and parameters[OVERLAP_SCORE_CREDIT] == 0
-        }
-        # The schema keeps prefill_load_model.type at its startup value; the
-        # serde form of the AIS load model is "aic".
-        startup_load_model = json.loads(
-            KvRouterConfig.from_json(json.dumps(startup)).to_json()
-        )["router_prefill_load_model"]
-        domain = expand_router_domain(
-            retune,
-            startup_load_model=startup_load_model,
-            zero_startup_credit=bool(zero_credit),
+        return startup_router_domain(
+            retune, self._startup_router_json, self._worker_types
         )
-        # The schema admits only PolicyParameters names, with the bounds
-        # KvRouterConfig checks; resolving every candidate also guards
-        # against the two drifting apart.
-        for point in grid_points(domain, {}):
-            try:
-                maps = self._router_map(point.router)
-            except ValueError as error:
-                raise ValueError(
-                    f"retune.router candidate {point.router} is not a valid "
-                    f"router configuration: {error}"
-                ) from None
-            for worker_type in zero_credit:
-                if maps[worker_type][OVERLAP_SCORE_CREDIT] != 0:
-                    raise ValueError(
-                        f"retune.router candidate {point.router} gives the "
-                        f"{worker_type} router overlap_score_credit > 0, but its "
-                        "startup credit is 0 (a live router rejects that update)"
-                    )
-        return domain
 
     def _feasible_grid(
         self,
@@ -844,6 +792,78 @@ def _check_inner_planner_isolation(config: PlannerConfig) -> None:
         raise ValueError(
             "retune with scaling enabled requires scheduling.gateway.enabled=false"
         )
+
+
+def startup_router_domain(
+    retune: RetuneConfig,
+    startup_router_json: Mapping[str, Any],
+    worker_types: Sequence[str],
+) -> dict[str, list[float]]:
+    """The ``retune.router`` domain on a startup ``KvRouterConfig`` JSON.
+
+    The startup-dependent router checks of the controller constructor, which
+    live retune's premise P4 runs on the frontend startup it parses, so that
+    a startup P4 accepts builds a controller. ``worker_types`` are the router
+    worker types of the planner mode. Raises ``ValueError`` when the startup
+    cannot be retuned or a candidate does not resolve on it.
+    """
+
+    # Only the builtin default policy is modelled identically.
+    if startup_router_json.get("router_policy_config") is not None:
+        raise ValueError(
+            "retune.router requires the builtin default router policy "
+            "(router_config.router_policy_config must be unset)"
+        )
+    if startup_router_json.get("overlap_score_weight") is not None:
+        raise ValueError(
+            "retune.router cannot be used with the deprecated "
+            "overlap_score_weight, which overrides prefill_load_scale"
+        )
+    if startup_router_json.get("conditional_disagg_enabled"):
+        raise ValueError(
+            "retune.router does not support conditional disaggregation: "
+            "replay and live resolve decode credit differently"
+        )
+
+    def router_maps(router: Mapping[str, float]) -> dict[str, dict[str, float]]:
+        config = KvRouterConfig.from_json(json.dumps({**startup_router_json, **router}))
+        return {wt: dict(config.policy_parameters(wt)) for wt in worker_types}
+
+    # A worker type that starts with no overlap credit can never get it.
+    zero_credit = {
+        worker_type
+        for worker_type, parameters in router_maps({}).items()
+        if worker_type != "decode" and parameters[OVERLAP_SCORE_CREDIT] == 0
+    }
+    # The schema keeps prefill_load_model.type at its startup value; the
+    # serde form of the AIS load model is "aic".
+    startup_load_model = json.loads(
+        KvRouterConfig.from_json(json.dumps(dict(startup_router_json))).to_json()
+    )["router_prefill_load_model"]
+    domain = expand_router_domain(
+        retune,
+        startup_load_model=startup_load_model,
+        zero_startup_credit=bool(zero_credit),
+    )
+    # The schema admits only PolicyParameters names, with the bounds
+    # KvRouterConfig checks; resolving every candidate also guards against
+    # the two drifting apart.
+    for point in grid_points(domain, {}):
+        try:
+            maps = router_maps(point.router)
+        except ValueError as error:
+            raise ValueError(
+                f"retune.router candidate {point.router} is not a valid "
+                f"router configuration: {error}"
+            ) from None
+        for worker_type in zero_credit:
+            if maps[worker_type][OVERLAP_SCORE_CREDIT] != 0:
+                raise ValueError(
+                    f"retune.router candidate {point.router} gives the "
+                    f"{worker_type} router overlap_score_credit > 0, but its "
+                    "startup credit is 0 (a live router rejects that update)"
+                )
+    return domain
 
 
 def _candidate_error(
