@@ -14,7 +14,7 @@ pub(super) struct PreparedExecution {
 }
 
 enum PreparedPayload {
-    Token(super::scoring::PreparedTokenExecution),
+    Token(super::token_execution::PreparedTokenExecution),
     Head(PreparedNativeExecution<DecisionHeadRequest>),
     Read(PreparedNativeExecution<DecisionReadRequest>),
 }
@@ -35,7 +35,7 @@ impl PreparedExecution {
             DecisionEngine::Token(executor) => Some(Self {
                 context,
                 payload: PreparedPayload::Token(
-                    super::scoring::PreparedTokenExecution::new(executor, branches).ok()?,
+                    super::token_execution::PreparedTokenExecution::new(executor, branches).ok()?,
                 ),
             }),
             DecisionEngine::Head(_) | DecisionEngine::Read(_) => None,
@@ -52,7 +52,7 @@ pub(super) fn prepare(
     let (context, engine) = selection.into_parts();
     let payload = match engine {
         DecisionEngine::Token(executor) => {
-            let branches = super::scoring::prepare_branches(
+            let branches = super::token_execution::prepare_branches(
                 request,
                 &context,
                 &executor,
@@ -60,12 +60,14 @@ pub(super) fn prepare(
                 &cache_salt,
             )?;
             PreparedPayload::Token(
-                super::scoring::PreparedTokenExecution::new(executor, branches).map_err(|_| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "invalid prepared scoring execution".into(),
-                    )
-                })?,
+                super::token_execution::PreparedTokenExecution::new(executor, branches).map_err(
+                    |_| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "invalid prepared scoring execution".into(),
+                        )
+                    },
+                )?,
             )
         }
         DecisionEngine::Head(engine) => PreparedPayload::Head(PreparedNativeExecution {
@@ -173,7 +175,7 @@ pub(super) async fn dispatch(
     let PreparedExecution { context, payload } = prepared;
     match payload {
         PreparedPayload::Token(prepared) => {
-            super::scoring::dispatch(
+            super::token_execution::dispatch(
                 &context,
                 prepared,
                 request_id,
