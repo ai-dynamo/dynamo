@@ -98,7 +98,7 @@ fn shared_authority(grpc: &GrpcEndpoint, http: &HttpEndpoint) -> Option<String> 
 #[derive(clap::Parser, Clone, Debug)]
 #[command(
     name = "dynamo-triton-sidecar",
-    about = "Run Dynamo tensor, classify, and embeddings workers against NVIDIA Triton Inference Server"
+    about = "Dynamo Sidecar for NVIDIA Triton Inference Server hosted tensor, classify, and embeddings models."
 )]
 pub(crate) struct Args {
     #[command(flatten)]
@@ -197,6 +197,14 @@ pub(crate) struct Args {
         value_delimiter = ','
     )]
     pub embeddings_models: Vec<String>,
+
+    /// Option or environment variable that set the gRPC endpoint, recorded by [`Args::validate`].
+    #[arg(skip)]
+    grpc_endpoint_source: Option<&'static str>,
+
+    /// Option or environment variable that set the HTTP endpoint, recorded by [`Args::validate`].
+    #[arg(skip)]
+    http_endpoint_source: Option<&'static str>,
 }
 
 /// Endpoint the sidecar registers for a Triton model.
@@ -205,6 +213,16 @@ pub(crate) enum Task {
     Tensor,
     Classify,
     Embeddings,
+}
+
+impl Task {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Task::Tensor => "tensor",
+            Task::Classify => "classify",
+            Task::Embeddings => "embeddings",
+        }
+    }
 }
 
 impl Args {
@@ -219,11 +237,15 @@ impl Args {
     fn validate_with_env(&mut self, env: impl Fn(&str) -> Option<String>) -> Result<(), String> {
         let env = |name: &str| env(name).filter(|value| !value.trim().is_empty());
         // A compat flag is set only when it came last on the command line.
+        self.grpc_endpoint_source = self.grpc_endpoint.as_ref().map(|_| "--grpc");
         if let Some(endpoint) = self.compat_grpc_endpoint.take() {
             self.grpc_endpoint = Some(endpoint);
+            self.grpc_endpoint_source = Some("--grpc-endpoint");
         }
+        self.http_endpoint_source = self.http_endpoint.as_ref().map(|_| "--http");
         if let Some(endpoint) = self.compat_http_endpoint.take() {
             self.http_endpoint = Some(endpoint);
+            self.http_endpoint_source = Some("--http-endpoint");
         }
         // A flag on the command line beats its environment variable.
         if self.grpc_endpoint.is_none()
@@ -233,6 +255,7 @@ impl Args {
                 parse_grpc_endpoint(&raw)
                     .map_err(|error| format!("{GRPC_ENDPOINT_ENV}: {error}"))?,
             );
+            self.grpc_endpoint_source = Some(GRPC_ENDPOINT_ENV);
         }
         if self.http_endpoint.is_none()
             && let Some(raw) = env(HTTP_ENDPOINT_ENV)
@@ -241,6 +264,7 @@ impl Args {
                 parse_http_endpoint(&raw)
                     .map_err(|error| format!("{HTTP_ENDPOINT_ENV}: {error}"))?,
             );
+            self.http_endpoint_source = Some(HTTP_ENDPOINT_ENV);
         }
         if self.grpc_endpoint.is_none() && self.http_endpoint.is_none() {
             return Err(format!(
@@ -291,6 +315,57 @@ impl Args {
             .as_ref()
             .map(|endpoint| (HTTP_ENDPOINT_ENV, complete_url(endpoint.as_str())));
         grpc.into_iter().chain(http).collect()
+    }
+
+    /// Each endpoint and model name the sidecar was given, with the option or environment variable that set it.
+    ///
+    /// `matches` tells a model flag from its environment variable; call this after [`Args::validate`], which records the endpoint sources and trims the model names.
+    pub(crate) fn parsed_values(&self, matches: &clap::ArgMatches) -> Vec<(&'static str, String)> {
+        let endpoints = [
+            (
+                self.grpc_endpoint_source,
+                self.grpc_endpoint
+                    .as_ref()
+                    .map(|endpoint| endpoint.to_string()),
+            ),
+            (
+                self.http_endpoint_source,
+                self.http_endpoint
+                    .as_ref()
+                    .map(|endpoint| endpoint.to_string()),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(source, endpoint)| Some((source?, endpoint?)));
+        let models = [
+            (
+                "model_names",
+                "--model-name",
+                "DYN_TRITON_MODEL_NAMES",
+                &self.model_names,
+            ),
+            (
+                "classify_models",
+                "--classify",
+                "DYN_TRITON_CLASSIFY_MODELS",
+                &self.classify_models,
+            ),
+            (
+                "embeddings_models",
+                "--embeddings",
+                "DYN_TRITON_EMBEDDINGS_MODELS",
+                &self.embeddings_models,
+            ),
+        ]
+        .into_iter()
+        .flat_map(|(id, flag, env, names)| {
+            let source = match matches.value_source(id) {
+                Some(clap::parser::ValueSource::EnvVariable) => env,
+                _ => flag,
+            };
+            names.iter().map(move |name| (source, name.clone()))
+        });
+        endpoints.chain(models).collect()
     }
 
     /// Endpoint `model` is served through.
@@ -580,6 +655,52 @@ mod tests {
             .unwrap();
         assert_eq!(reparsed.grpc_endpoint, args.grpc_endpoint);
         assert_eq!(reparsed.http_endpoint, args.http_endpoint);
+    }
+
+    #[test]
+    fn records_where_each_value_came_from() {
+        use clap::{CommandFactory, FromArgMatches};
+
+        let parsed = |argv: &[&str], env: &dyn Fn(&str) -> Option<String>| {
+            let matches = Args::command().try_get_matches_from(argv).unwrap();
+            let mut args = Args::from_arg_matches(&matches).unwrap();
+            args.validate_with_env(env).unwrap();
+            args.parsed_values(&matches)
+        };
+        assert_eq!(
+            parsed(
+                &[
+                    "dynamo-triton-sidecar",
+                    "--grpc-endpoint",
+                    "triton:8001",
+                    "--http",
+                    "--model-name",
+                    "a",
+                    "--classify",
+                    " b ,c",
+                    "--embeddings",
+                    "d",
+                ],
+                &no_env,
+            ),
+            [
+                ("--grpc-endpoint", "http://triton:8001".to_string()),
+                ("--http", "http://localhost:8000/".to_string()),
+                ("--model-name", "a".to_string()),
+                ("--classify", "b".to_string()),
+                ("--classify", "c".to_string()),
+                ("--embeddings", "d".to_string()),
+            ]
+        );
+        assert_eq!(
+            parsed(&["dynamo-triton-sidecar"], &|name| {
+                (name == "DYN_SIDECAR_GRPC_ENDPOINT").then(|| "9001".to_string())
+            }),
+            [(
+                "DYN_SIDECAR_GRPC_ENDPOINT",
+                "http://localhost:9001".to_string()
+            )]
+        );
     }
 
     #[test]

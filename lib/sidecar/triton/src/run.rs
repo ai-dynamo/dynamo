@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{Context, ensure};
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use dynamo_backend_common::{DisaggregationMode, ModelInput, RawEngine, Worker, WorkerConfig};
 use dynamo_llm::grpc::service::kserve::inference;
 use dynamo_llm::protocols::tensor::TensorModelConfig;
@@ -29,16 +29,40 @@ type RunFuture = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
 ///
 /// Call this before starting any other thread: it modifies the process environment.
 pub fn from_cli() -> anyhow::Result<impl FnOnce(Runtime, CancellationToken) -> RunFuture> {
-    let mut args = Args::parse();
+    let matches = Args::command().get_matches();
+    let mut args = Args::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     args.validate().map_err(anyhow::Error::msg)?;
+    // Logging starts with the runtime, after parsing, so `run` logs these.
+    let parsed_values = args.parsed_values(&matches);
     for (name, value) in args.endpoint_env() {
         // SAFETY: `main` calls `from_cli` before the Tokio runtime starts, while the process has one thread.
         unsafe { std::env::set_var(name, value) };
     }
-    Ok(move |runtime, shutdown| -> RunFuture { Box::pin(run(args, runtime, shutdown)) })
+    Ok(move |runtime, shutdown| -> RunFuture {
+        Box::pin(run(args, parsed_values, runtime, shutdown))
+    })
 }
 
-async fn run(args: Args, runtime: Runtime, shutdown: CancellationToken) -> anyhow::Result<()> {
+async fn run(
+    args: Args,
+    parsed_values: Vec<(&'static str, String)>,
+    runtime: Runtime,
+    shutdown: CancellationToken,
+) -> anyhow::Result<()> {
+    for (option, value) in parsed_values {
+        tracing::debug!(option, value, "Parsed");
+    }
+    tracing::info!(
+        grpc_endpoint = args
+            .grpc_endpoint
+            .as_ref()
+            .map_or("disabled", |endpoint| endpoint.as_str()),
+        http_endpoint = args
+            .http_endpoint
+            .as_ref()
+            .map_or("disabled", |endpoint| endpoint.as_str()),
+        "Registered Triton Server endpoints: "
+    );
     let distributed = args.runtime.to_distributed_config()?;
     let drt = dynamo_runtime::DistributedRuntime::new_with_probe_policy(
         runtime,
@@ -64,31 +88,47 @@ async fn run(args: Args, runtime: Runtime, shutdown: CancellationToken) -> anyho
     }
 
     let mut workers = JoinSet::new();
+    let (mut tensor_models, mut classify_models, mut embeddings_models) = (0usize, 0usize, 0usize);
     for (model, config) in configs {
-        let (engine, model_input, endpoint_types): (Arc<dyn RawEngine>, _, _) =
-            match args.task(&model) {
-                Task::Tensor => {
-                    let tensor_model_config = TensorModelConfig {
-                        name: model.clone(),
-                        inputs: Vec::new(),
-                        outputs: Vec::new(),
-                        triton_model_config: Some(config.encode_to_vec()),
-                    };
-                    let engine =
-                        TritonModelEngine::new(model.clone(), client.clone(), tensor_model_config);
-                    (Arc::new(engine), ModelInput::Tensor, "tensor")
-                }
-                Task::Classify => (
-                    text_engine(Classify::default(), &model, &config, &client)?,
-                    ModelInput::Text,
-                    "classify",
-                ),
-                Task::Embeddings => (
-                    text_engine(Embeddings, &model, &config, &client)?,
-                    ModelInput::Text,
-                    "embedding",
-                ),
-            };
+        let task = args.task(&model);
+        *match task {
+            Task::Tensor => &mut tensor_models,
+            Task::Classify => &mut classify_models,
+            Task::Embeddings => &mut embeddings_models,
+        } += 1;
+        tracing::info!(
+            model,
+            task = task.as_str(),
+            frontend_endpoint = match task {
+                Task::Tensor => "KServe tensor inference",
+                Task::Classify => Classify::ENDPOINT,
+                Task::Embeddings => Embeddings::ENDPOINT,
+            },
+            "Registering Triton model"
+        );
+        let (engine, model_input, endpoint_types): (Arc<dyn RawEngine>, _, _) = match task {
+            Task::Tensor => {
+                let tensor_model_config = TensorModelConfig {
+                    name: model.clone(),
+                    inputs: Vec::new(),
+                    outputs: Vec::new(),
+                    triton_model_config: Some(config.encode_to_vec()),
+                };
+                let engine =
+                    TritonModelEngine::new(model.clone(), client.clone(), tensor_model_config);
+                (Arc::new(engine), ModelInput::Tensor, "tensor")
+            }
+            Task::Classify => (
+                text_engine(Classify::default(), &model, &config, &client)?,
+                ModelInput::Text,
+                "classify",
+            ),
+            Task::Embeddings => (
+                text_engine(Embeddings, &model, &config, &client)?,
+                ModelInput::Text,
+                "embedding",
+            ),
+        };
         let worker_config = WorkerConfig {
             namespace: args.namespace.clone(),
             component: args.component.clone(),
@@ -116,7 +156,10 @@ async fn run(args: Args, runtime: Runtime, shutdown: CancellationToken) -> anyho
 
     tracing::info!(
         model_count = workers.len(),
-        "Triton sidecar models discovered"
+        tensor_models,
+        classify_models,
+        embeddings_models,
+        "Triton sidecar models registered"
     );
     let first = workers
         .join_next()
@@ -150,20 +193,26 @@ fn text_engine<T: TextTask>(
 /// Models to register: the explicit `--model-name` list plus every `--classify` and `--embeddings` model, or else every ready model in Triton.
 async fn discover_models(args: &Args, client: &TritonClient) -> anyhow::Result<Vec<String>> {
     if !args.model_names.is_empty() {
-        return Ok(args
+        let models: Vec<String> = args
             .model_names
             .iter()
             .chain(args.text_models())
             .cloned()
             .collect::<BTreeSet<_>>()
             .into_iter()
-            .collect());
+            .collect();
+        tracing::info!(
+            ?models,
+            "Using Triton models from --model-name, --classify, and --embeddings"
+        );
+        return Ok(models);
     }
 
     let models = client
         .ready_models()
         .await
         .context("query Triton repository index")?;
+    tracing::info!(?models, "Discovered ready Triton models");
     for model in args.text_models() {
         ensure!(
             models.contains(model),

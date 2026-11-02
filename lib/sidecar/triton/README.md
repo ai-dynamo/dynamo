@@ -57,6 +57,7 @@ The `--grpc-connect-attempt-timeout-secs`, `--grpc-retry-interval-secs`, and `--
 
 Ready models are discovered through Triton's `RepositoryIndex` API.
 Use one or more `--model-name <name>` options to skip repository auto-discovery.
+Repeat `--model-name`, or pass a comma-separated list, to serve several models.
 
 ## OpenAI classify and embeddings
 

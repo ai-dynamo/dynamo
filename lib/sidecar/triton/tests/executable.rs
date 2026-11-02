@@ -16,23 +16,24 @@ fn executable_exposes_triton_configuration() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).expect("help output is UTF-8");
-    for flag in [
+    assert!(stdout.starts_with("Dynamo Sidecar for NVIDIA Triton Inference Server"));
+    for term in [
         "--discovery-backend",
         "--request-plane",
         "--response-plane",
         "--event-plane",
-        "--grpc",
-        "--grpc-endpoint",
+        "--grpc [<ENDPOINT>]",
+        "--grpc-endpoint <ENDPOINT>",
         "--grpc-connections",
-        "--http",
-        "--http-endpoint",
-        "--classify",
-        "--embeddings",
-        "--model-name",
+        "--http [<ENDPOINT>]",
+        "--http-endpoint <ENDPOINT>",
+        "--classify <MODEL>",
+        "--embeddings <MODEL>",
+        "--model-name <MODEL>",
         "DYN_TRITON_MODEL_NAMES",
         "DYN_TRITON_CLASSIFY_MODELS",
         "DYN_TRITON_EMBEDDINGS_MODELS",
     ] {
-        assert!(stdout.contains(flag), "missing {flag} in help output");
+        assert!(stdout.contains(term), "missing {term} in help output");
     }
 }
