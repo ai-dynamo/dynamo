@@ -1,13 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+mod decision;
 pub(crate) mod image_edits;
 mod model;
 pub(crate) mod readiness;
-pub use model::Model;
-pub(crate) use model::{
-    GenerateEngineSelection, SystemOneExecutionSelection, SystemOneSelectionError,
+pub(crate) use decision::{
+    DecisionContext, DecisionEngine, DecisionRoute, SystemOneExecutionSelection, TokenExecutor,
 };
+pub use model::Model;
+pub(crate) use model::{GenerateEngineSelection, SystemOneSelectionError};
 
 pub mod kv_source_membership;
 pub use kv_source_membership::{

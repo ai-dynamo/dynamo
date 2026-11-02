@@ -63,12 +63,15 @@ use crate::{
     worker_type::WorkerType,
 };
 
+mod decision;
+
 use super::readiness::normalize_legacy_prefill_topology;
 use super::{
     ModelManager,
     controller::{ControllerHost, DesiredInstance, GroupKey, GroupSpec, ModelDiscoveryController},
 };
 use crate::namespace::{NamespaceFilter, NamespacePrefixMode};
+use decision::DecisionPlan;
 use tokio_util::sync::CancellationToken;
 
 /// Constructs a collision-free WorkerSet storage key from its exact endpoint,
@@ -553,6 +556,11 @@ impl ModelWatcher {
             return Ok(PreparedWorkerSet::new(worker_set, card.clone()));
         }
 
+        let decision_plan =
+            DecisionPlan::new(card, self.systemone_enabled, router_config.router_mode);
+        let mut token_execution = None;
+        let mut routing_load_context = None;
+
         if card.model_input == ModelInput::Tokens
             && (card.model_type.supports_chat() || card.model_type.supports_completions())
         {
@@ -569,13 +577,11 @@ impl ModelWatcher {
             let needs_local_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_none();
             let needs_local_completions_pipeline = card.model_type.supports_completions();
-            let needs_systemone_preprocessor =
-                self.systemone_enabled && card.decision_execution_profile() == Some(crate::local_model::runtime_config::DecisionExecutionProfile::SglangSerialV1);
             let needs_local_tokenizer =
                 needs_local_chat_pipeline || needs_local_completions_pipeline;
             let tokenizer = if needs_local_tokenizer && card.has_tokenizer() {
                 Some(card.tokenizer().context("tokenizer")?)
-            } else if needs_systemone_preprocessor && card.has_tokenizer() {
+            } else if decision_plan.needs_internal_generate() && card.has_tokenizer() {
                 match card.tokenizer().context("System One tokenizer") {
                     Ok(tokenizer) => Some(tokenizer),
                     Err(cause) => {
@@ -597,8 +603,10 @@ impl ModelWatcher {
                 card.model_type.supports_chat() && self.chat_engine_factory.is_some();
             let needs_generate_pipeline =
                 supports_enabled_engine_generate(card, &self.generate_engine_capabilities);
-            let needs_preprocessed_routing =
-                needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
+            let needs_preprocessed_routing = needs_factory_chat_pipeline
+                || tokenizer.is_some()
+                || needs_generate_pipeline
+                || decision_plan.needs_routing();
 
             let load_thresholds = load_threshold_handle(&router_config);
             let load_context = if needs_preprocessed_routing {
@@ -710,30 +718,8 @@ impl ModelWatcher {
             });
             worker_set.encoder_router = encoder_chooser.clone();
 
-            if needs_systemone_preprocessor {
-                worker_set.systemone_preprocessor = match tokenizer.clone() {
-                    Some(tokenizer) => {
-                        match worker_set_chat_preprocessor(card, tokenizer, &cancellation) {
-                            Ok(preprocessor) => Some(preprocessor),
-                            Err(error) => {
-                                tracing::warn!(
-                                    model = card.name(),
-                                    error = %format!("{error:#}"),
-                                    "System One preprocessor is unavailable"
-                                );
-                                None
-                            }
-                        }
-                    }
-                    None => {
-                        tracing::warn!(
-                            model = card.name(),
-                            "System One preprocessor is unavailable: model has no supported Rust tokenizer"
-                        );
-                        None
-                    }
-                };
-            }
+            let systemone_preprocessor =
+                decision_plan.preprocessor(card, tokenizer.as_ref(), &cancellation);
 
             let preprocessed_routing = if needs_preprocessed_routing {
                 Some(
@@ -779,7 +765,7 @@ impl ModelWatcher {
                     )
                 } else if let Some(tk) = tokenizer.clone() {
                     // Only chat pipelines use speculative prefill.
-                    let preprocessor = match worker_set.systemone_preprocessor.clone() {
+                    let preprocessor = match systemone_preprocessor.clone() {
                         Some(preprocessor) => preprocessor,
                         None => worker_set_chat_preprocessor(card, tk.clone(), &cancellation)?,
                     };
@@ -798,9 +784,9 @@ impl ModelWatcher {
                             )
                             .context("PreprocessedRouting::build_pipeline")?,
                         )
-                } else if needs_generate_pipeline {
+                } else if needs_generate_pipeline || decision_plan.has_native_route() {
                     tracing::warn!(
-                        "Skipping chat engine: no supported Rust tokenizer or chat_engine_factory; Generate remains available"
+                        "Skipping chat engine: no supported Rust tokenizer or chat_engine_factory; token-native serving remains available"
                     );
                     None
                 } else {
@@ -848,7 +834,7 @@ impl ModelWatcher {
             // Generate is a frontend-native token-in/token-out surface. It
             // reuses the raw routed pipeline so the complete request envelope
             // reaches the worker without passing through the OpenAI decoder.
-            if needs_generate_pipeline {
+            if needs_generate_pipeline || decision_plan.needs_internal_generate() {
                 let routing = preprocessed_routing.as_ref().ok_or_else(|| {
                     anyhow::anyhow!("generate pipeline requires preprocessed routing")
                 })?;
@@ -860,20 +846,15 @@ impl ModelWatcher {
                         self.metrics.clone(),
                     )
                     .context("build generate (preprocessed) pipeline")?;
-                worker_set.generate_engine = Some(generate_engine);
-                tracing::info!("Generate (token-in/token-out) is ready");
+                token_execution = systemone_preprocessor
+                    .map(|preprocessor| (generate_engine.clone(), preprocessor));
+                if needs_generate_pipeline {
+                    worker_set.generate_engine = Some(generate_engine);
+                    tracing::info!("Generate (token-in/token-out) is ready");
+                }
             }
 
-            // Verify we built at least one serving engine. Generate can be the
-            // sole engine because token-native requests need no frontend tokenizer.
-            if !worker_set.has_any_serving_engine() {
-                anyhow::bail!(
-                    "Model '{}' requires frontend tokenization/preprocessing (ModelInput::Tokens) \
-                     but no serving engine could be built. Provide a working tokenizer config or \
-                     perform tokenization in the backend (ModelInput::Text).",
-                    card.name()
-                );
-            }
+            routing_load_context = load_context;
         } else if card.model_input == ModelInput::Text {
             // Text workers tokenize in the backend and can advertise multiple
             // OpenAI surfaces. Build each declared surface independently:
@@ -1057,7 +1038,7 @@ impl ModelWatcher {
             }
 
             worker_set.load_thresholds = Some(load_thresholds);
-            worker_set.set_load_context(load_context);
+            routing_load_context = Some(load_context);
         } else if card.model_input == ModelInput::Tokens && card.model_type.supports_embedding() {
             // Case 4: Tokens + Embeddings
             // Create preprocessing pipeline similar to Backend
@@ -1128,6 +1109,25 @@ impl ModelWatcher {
                 Tokens+Embeddings, Tensor+TensorBased",
                 card.model_type,
                 card.model_input.as_str()
+            );
+        }
+
+        if let Some(load_context) = routing_load_context {
+            worker_set.set_load_context(load_context);
+        }
+        decision_plan
+            .attach(&mut worker_set, token_execution)
+            .await?;
+
+        if card.model_input == ModelInput::Tokens
+            && (card.model_type.supports_chat() || card.model_type.supports_completions())
+            && !worker_set.has_any_serving_engine()
+        {
+            anyhow::bail!(
+                "Model '{}' requires frontend tokenization/preprocessing (ModelInput::Tokens) \
+                 but no serving engine could be built. Provide a working tokenizer config or \
+                 perform tokenization in the backend (ModelInput::Text).",
+                card.name()
             );
         }
 

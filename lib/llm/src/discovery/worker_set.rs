@@ -18,10 +18,12 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    discovery::{LoadThresholdHandle, allocator::AllocatorTrimOnDrop},
+    discovery::{
+        DecisionEngine, DecisionRoute, LoadThresholdHandle, TokenExecutor,
+        allocator::AllocatorTrimOnDrop,
+    },
     kv_router::{EncoderRouter, RoutingLoadContext, prefill_router::PrefillRouterLifecycle},
     model_card::ModelDeploymentCard,
-    preprocessor::OpenAIPreprocessor,
     types::{
         RealtimeBidirectionalEngine,
         generic::tensor::TensorStreamingEngine,
@@ -127,19 +129,37 @@ where
 }
 
 fn retain_teardown_until_requests_finish<Req, Resp>(
-    engine: Option<Arc<dyn AsyncEngine<Req, Resp, Error>>>,
+    inner: Arc<dyn AsyncEngine<Req, Resp, Error>>,
     teardown: &Arc<AllocatorTrimOnDrop>,
-) -> Option<Arc<dyn AsyncEngine<Req, Resp, Error>>>
+) -> Arc<dyn AsyncEngine<Req, Resp, Error>>
 where
     Req: AsyncEngineContextProvider + Send + 'static,
     Resp: AsyncEngineContextProvider + 'static,
 {
-    engine.map(|inner| {
-        Arc::new(RequestLifetimeEngine {
-            inner,
-            teardown: teardown.clone(),
-        }) as Arc<dyn AsyncEngine<Req, Resp, Error>>
+    Arc::new(RequestLifetimeEngine {
+        inner,
+        teardown: teardown.clone(),
     })
+}
+
+impl DecisionRoute {
+    fn retain_for_requests(self, teardown: &Arc<AllocatorTrimOnDrop>) -> Self {
+        match self {
+            Self::Available(engine) => Self::Available(match engine {
+                DecisionEngine::Token(executor) => DecisionEngine::Token(TokenExecutor {
+                    engine: retain_teardown_until_requests_finish(executor.engine, teardown),
+                    ..executor
+                }),
+                DecisionEngine::Head(engine) => {
+                    DecisionEngine::Head(retain_teardown_until_requests_finish(engine, teardown))
+                }
+                DecisionEngine::Read(engine) => {
+                    DecisionEngine::Read(retain_teardown_until_requests_finish(engine, teardown))
+                }
+            }),
+            Self::UnsupportedRouting => Self::UnsupportedRouting,
+        }
+    }
 }
 
 struct LoraContextEngine<Req: Data, Resp: Data> {
@@ -230,9 +250,7 @@ pub struct WorkerSet {
     pub(crate) tensor_engine: Option<TensorStreamingEngine>,
     pub(crate) realtime_engine: Option<RealtimeBidirectionalEngine>,
     pub(crate) generate_engine: Option<GenerateStreamingEngine>,
-
-    /// Cached tokenizer and prompt formatter for the System One API.
-    pub(crate) systemone_preprocessor: Option<Arc<OpenAIPreprocessor>>,
+    pub(crate) decision: Option<DecisionRoute>,
 
     /// Owns load monitoring for routed surfaces that do not use `RoutingHost`.
     load_context: Option<Arc<RoutingLoadContext>>,
@@ -283,7 +301,7 @@ impl WorkerSet {
             tensor_engine: None,
             realtime_engine: None,
             generate_engine: None,
-            systemone_preprocessor: None,
+            decision: None,
             load_context: None,
             load_thresholds: None,
             prefill_router: None,
@@ -318,7 +336,6 @@ impl WorkerSet {
         self.load_context = Some(load_context);
     }
 
-    #[cfg(test)]
     pub(crate) fn load_context(&self) -> Option<&Arc<RoutingLoadContext>> {
         self.load_context.as_ref()
     }
@@ -417,6 +434,14 @@ impl WorkerSet {
             || self.has_transcriptions_engine()
             || self.has_realtime_engine()
             || self.has_generate_engine()
+            || self.has_decision_engine()
+    }
+
+    pub(crate) fn has_decision_engine(&self) -> bool {
+        self.decision
+            .as_ref()
+            .and_then(DecisionRoute::available)
+            .is_some()
     }
 
     /// Whether this set tracks an Encode worker. Encode WorkerSets carry
@@ -556,7 +581,10 @@ impl WorkerSet {
         let teardown = self.initialize_allocator_trim_on_teardown();
         macro_rules! retain_for_requests {
             ($field:ident) => {
-                self.$field = retain_teardown_until_requests_finish(self.$field.take(), &teardown);
+                self.$field = self
+                    .$field
+                    .take()
+                    .map(|engine| retain_teardown_until_requests_finish(engine, &teardown));
             };
         }
         retain_for_requests!(chat_engine);
@@ -572,6 +600,10 @@ impl WorkerSet {
         retain_for_requests!(tensor_engine);
         retain_for_requests!(realtime_engine);
         retain_for_requests!(generate_engine);
+        self.decision = self
+            .decision
+            .take()
+            .map(|route| route.retain_for_requests(&teardown));
         self.allocator_trim_wrapped = true;
     }
 
@@ -611,7 +643,7 @@ impl WorkerSet {
             // inject the adapter identity. Fail closed instead of serving the base weights.
             realtime_engine: None,
             generate_engine,
-            systemone_preprocessor: None,
+            decision: None,
             load_context: self.load_context.clone(),
             load_thresholds: self.load_thresholds.clone(),
             prefill_router: self.prefill_router.clone(),

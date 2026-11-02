@@ -13,11 +13,13 @@ use arc_swap::ArcSwap;
 use rand::Rng;
 use serde::Serialize;
 
-use super::ModelManagerError;
 use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
+#[cfg(test)]
+use super::{DecisionEngine, TokenExecutor};
+use super::{DecisionRoute, ModelManagerError, SystemOneExecutionSelection};
 use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
-use crate::model_card::ModelDeploymentCard;
+#[cfg(test)]
 use crate::preprocessor::OpenAIPreprocessor;
 use crate::protocols::openai::ParsingOptions;
 
@@ -34,9 +36,6 @@ use crate::types::{
         videos::OpenAIVideosStreamingEngine,
     },
 };
-
-const SYSTEMONE_MAX_QUESTIONS: usize = 128;
-const SYSTEMONE_MAX_CANDIDATES: usize = 255;
 
 /// Emit a one-time deprecation warning when serving-readiness falls back to
 /// the legacy path because a namespace still contains a legacy card (a
@@ -94,66 +93,13 @@ pub(crate) struct GenerateEngineSelection {
     pub(crate) tower_connector_lora_enabled: bool,
 }
 
-/// Aggregate SGLang engine and model assets selected from one WorkerSet snapshot.
-#[derive(Clone)]
-pub(crate) struct SystemOneExecutionSelection {
-    pub(crate) canonical_model: String,
-    pub(crate) engine: GenerateStreamingEngine,
-    pub(crate) card: ModelDeploymentCard,
-    pub(crate) preprocessor: Arc<OpenAIPreprocessor>,
-    pub(crate) admitted_ids: Option<tokio::sync::watch::Receiver<Vec<u64>>>,
-    pub(crate) lifecycle_cancellation: Option<tokio_util::sync::CancellationToken>,
-}
-
-impl SystemOneExecutionSelection {
-    pub(crate) fn validate_dispatch(
-        &self,
-        pinned_worker: Option<u64>,
-    ) -> Result<(), SystemOneSelectionError> {
-        if self
-            .lifecycle_cancellation
-            .as_ref()
-            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
-        {
-            return Err(SystemOneSelectionError::Unavailable);
-        }
-        let Some(admitted) = &self.admitted_ids else {
-            // In-process engines have one trusted local worker and no discovery watcher.
-            return Ok(());
-        };
-        if admitted.has_changed().is_err() {
-            return Err(SystemOneSelectionError::Unavailable);
-        }
-        let workers = admitted.borrow();
-        if workers.is_empty() || pinned_worker.is_some_and(|worker| !workers.contains(&worker)) {
-            return Err(SystemOneSelectionError::Unavailable);
-        }
-        Ok(())
-    }
-
-    pub(crate) fn decision_capabilities(&self) -> dynamo_decisions::Capabilities {
-        // The serialized SGLang capability pins the zero-decode requested-ID
-        // contract, including vocabulary logprobs and meta_info.cached_tokens.
-        // Tokenizer-specific candidate limits are checked during preflight.
-        dynamo_decisions::Capabilities {
-            max_questions: SYSTEMONE_MAX_QUESTIONS,
-            max_candidates: SYSTEMONE_MAX_CANDIDATES,
-            supports_predicate: true,
-            supports_choice: true,
-            supports_score: true,
-            measured_cache_reads: true,
-            prompt_format_version: 1,
-        }
-    }
-}
-
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub(crate) enum SystemOneSelectionError {
     #[error("model is not registered")]
     NotFound,
-    #[error("model does not support aggregate SGLang scoring")]
+    #[error("model does not support aggregate decision scoring")]
     Unsupported,
-    #[error("SGLang scoring worker is unavailable")]
+    #[error("decision scoring worker is unavailable")]
     Unavailable,
 }
 
@@ -810,12 +756,10 @@ impl Model {
             WorkerSet::decision_worker_count,
         )
         .ok_or_else(|| {
-            if self
-                .worker_sets
-                .load()
-                .values()
-                .any(|worker_set| worker_set.card().decision_execution_profile() == Some(crate::local_model::runtime_config::DecisionExecutionProfile::SglangSerialV1))
-            {
+            if self.worker_sets.load().values().any(|worker_set| {
+                !matches!(worker_set.decision, Some(DecisionRoute::UnsupportedRouting))
+                    && worker_set.card().decision_execution_profile().is_some()
+            }) {
                 SystemOneSelectionError::Unavailable
             } else {
                 SystemOneSelectionError::Unsupported
@@ -827,20 +771,22 @@ impl Model {
         &self,
         worker_set: &WorkerSet,
     ) -> Option<SystemOneExecutionSelection> {
-        let card = worker_set.card();
-        if card.decision_execution_profile()
-            != Some(crate::local_model::runtime_config::DecisionExecutionProfile::SglangSerialV1)
-        {
-            return None;
-        }
-        Some(SystemOneExecutionSelection {
-            canonical_model: self.name.clone(),
-            engine: worker_set.generate_engine.clone()?,
-            card: card.clone(),
-            preprocessor: worker_set.systemone_preprocessor.clone()?,
-            admitted_ids: worker_set.decision_admissions().cloned(),
-            lifecycle_cancellation: worker_set.lifecycle_cancellation(),
-        })
+        SystemOneExecutionSelection::from_worker_set(self.name.clone(), worker_set)
+    }
+
+    pub(crate) fn has_decision_engine(&self) -> bool {
+        self.select_worker_set_with_worker_count(
+            |workers| {
+                let profile = workers.card().decision_execution_profile()?;
+                workers
+                    .decision
+                    .as_ref()?
+                    .available_for(profile)
+                    .map(|_| ())
+            },
+            WorkerSet::decision_worker_count,
+        )
+        .is_some()
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
@@ -1027,6 +973,20 @@ impl Model {
 
 #[cfg(test)]
 mod tests {
+    fn worker_token_executor(workers: &super::WorkerSet) -> &super::TokenExecutor {
+        let Some(super::DecisionRoute::Available(super::DecisionEngine::Token(executor))) =
+            &workers.decision
+        else {
+            panic!("token worker fixture")
+        };
+        executor
+    }
+    fn token_executor(selection: &super::SystemOneExecutionSelection) -> &super::TokenExecutor {
+        let super::DecisionEngine::Token(executor) = selection.engine() else {
+            panic!("expected token executor")
+        };
+        executor
+    }
     use super::*;
     use crate::local_model::runtime_config::{
         VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
@@ -1379,11 +1339,42 @@ mod tests {
         configure(&mut card);
         let preprocessor = OpenAIPreprocessor::new(card.clone()).unwrap();
         let mut worker_set = WorkerSet::new(namespace.to_string(), namespace.to_string(), card);
-        worker_set.generate_engine = Some(Arc::new(StubGenerateEngine));
-        worker_set.systemone_preprocessor = Some(preprocessor);
+        let backend = match worker_set
+            .card()
+            .decision_execution_profile()
+            .map(|profile| profile.kind())
+        {
+            Some(crate::local_model::runtime_config::DecisionProfileKind::Token(backend)) => {
+                backend
+            }
+            _ => crate::local_model::runtime_config::TokenBackend::Sglang,
+        };
+        worker_set.decision = Some(DecisionRoute::Available(DecisionEngine::Token(
+            TokenExecutor::new(backend, Arc::new(StubGenerateEngine), preprocessor),
+        )));
         let (worker_tx, worker_rx) = watch::channel(vec![1]);
         worker_set.set_instance_watcher(worker_rx);
         (Arc::new(worker_set), worker_tx)
+    }
+
+    #[test]
+    fn systemone_selection_rejects_a_mismatched_token_backend() {
+        let model = Model::new("test-model".into());
+        let (mut workers, _admissions) = systemone_worker_set("mismatched", |_| {});
+        let executor = worker_token_executor(&workers);
+        let mismatched = TokenExecutor::new(
+            crate::local_model::runtime_config::TokenBackend::VllmCausal,
+            executor.engine().clone(),
+            executor.preprocessor().clone(),
+        );
+        Arc::get_mut(&mut workers).unwrap().decision =
+            Some(DecisionRoute::Available(DecisionEngine::Token(mismatched)));
+        assert!(
+            SystemOneExecutionSelection::from_worker_set("test-model".into(), &workers).is_none()
+        );
+        model.add_worker_set("mismatched".into(), workers);
+        assert!(!model.has_decision_engine());
+        assert!(model.get_systemone_execution_selection().is_err());
     }
 
     #[test]
@@ -1399,30 +1390,37 @@ mod tests {
         model.add_worker_set("ns-a".to_string(), worker_set_a.clone());
         model.add_worker_set("ns-b".to_string(), worker_set_b.clone());
         let selection_a = model.get_systemone_execution_selection().unwrap();
+        assert_eq!(
+            Some(selection_a.context.decision_capabilities().max_candidates),
+            selection_a
+                .context
+                .card
+                .decision_max_candidates(selection_a.context.profile())
+        );
         assert!(Arc::ptr_eq(
-            &selection_a.engine,
-            worker_set_a.generate_engine.as_ref().unwrap()
+            &token_executor(&selection_a).engine,
+            worker_token_executor(&worker_set_a).engine()
         ));
         assert!(Arc::ptr_eq(
-            &selection_a.preprocessor,
-            worker_set_a.systemone_preprocessor.as_ref().unwrap()
+            &token_executor(&selection_a).preprocessor,
+            worker_token_executor(&worker_set_a).preprocessor()
         ));
-        assert_eq!(selection_a.card.kv_cache_block_size, 16);
-        assert_eq!(selection_a.canonical_model, "scoring-model");
+        assert_eq!(selection_a.context.card.kv_cache_block_size, 16);
+        assert_eq!(selection_a.context.canonical_model, "scoring-model");
 
         workers_a.send(vec![]).unwrap();
         workers_b.send(vec![2]).unwrap();
         let selection_b = model.get_systemone_execution_selection().unwrap();
         assert!(Arc::ptr_eq(
-            &selection_b.engine,
-            worker_set_b.generate_engine.as_ref().unwrap()
+            &token_executor(&selection_b).engine,
+            worker_token_executor(&worker_set_b).engine()
         ));
         assert!(Arc::ptr_eq(
-            &selection_b.preprocessor,
-            worker_set_b.systemone_preprocessor.as_ref().unwrap()
+            &token_executor(&selection_b).preprocessor,
+            worker_token_executor(&worker_set_b).preprocessor()
         ));
-        assert_eq!(selection_b.card.kv_cache_block_size, 32);
-        assert_eq!(selection_a.card.kv_cache_block_size, 16);
+        assert_eq!(selection_b.context.card.kv_cache_block_size, 32);
+        assert_eq!(selection_a.context.card.kv_cache_block_size, 16);
     }
 
     #[test]
@@ -1476,9 +1474,7 @@ mod tests {
         }
         let model = Model::new("scoring-model".to_string());
         let (mut worker_set, _workers) = systemone_worker_set("ns", |_| {});
-        Arc::get_mut(&mut worker_set)
-            .unwrap()
-            .systemone_preprocessor = None;
+        Arc::get_mut(&mut worker_set).unwrap().decision = None;
         model.add_worker_set("ns".to_string(), worker_set);
         assert!(matches!(
             model.get_systemone_execution_selection(),
@@ -1486,8 +1482,11 @@ mod tests {
         ));
         let model = Model::new("scoring-model".to_string());
         let (mut worker_set, _workers) = systemone_worker_set("ns", |_| {});
-        Arc::get_mut(&mut worker_set).unwrap().generate_engine = None;
+        let worker = Arc::get_mut(&mut worker_set).unwrap();
+        worker.decision = None;
+        worker.generate_engine = Some(Arc::new(StubGenerateEngine));
         model.add_worker_set("ns".to_string(), worker_set);
+        assert!(model.get_generate_engine().is_ok());
         assert!(matches!(
             model.get_systemone_execution_selection(),
             Err(SystemOneSelectionError::Unavailable)
@@ -1522,10 +1521,10 @@ mod tests {
             .set_lifecycle_cancellation(cancellation.clone());
         model.add_worker_set("ns".to_string(), workers);
         let selection = model.get_systemone_execution_selection().unwrap();
-        assert_eq!(selection.validate_dispatch(Some(1)), Ok(()));
+        assert_eq!(selection.context.validate_dispatch(Some(1)), Ok(()));
         cancellation.cancel();
         assert_eq!(
-            selection.validate_dispatch(Some(1)),
+            selection.context.validate_dispatch(Some(1)),
             Err(SystemOneSelectionError::Unavailable)
         );
         assert!(matches!(
@@ -1543,18 +1542,17 @@ mod tests {
             "local".to_string(),
             registered.card().clone(),
         );
-        local.generate_engine = registered.generate_engine.clone();
-        local.systemone_preprocessor = registered.systemone_preprocessor.clone();
+        local.decision = registered.decision.clone();
         let cancellation = tokio_util::sync::CancellationToken::new();
         local.set_lifecycle_cancellation(cancellation.clone());
         assert_eq!(local.decision_worker_count(), 1);
         model.add_worker_set("local".to_string(), Arc::new(local));
         let selection = model.get_systemone_execution_selection().unwrap();
-        assert!(selection.admitted_ids.is_none());
-        assert_eq!(selection.validate_dispatch(None), Ok(()));
+        assert!(selection.context.admitted_ids.is_none());
+        assert_eq!(selection.context.validate_dispatch(None), Ok(()));
         cancellation.cancel();
         assert_eq!(
-            selection.validate_dispatch(None),
+            selection.context.validate_dispatch(None),
             Err(SystemOneSelectionError::Unavailable)
         );
     }
@@ -1595,8 +1593,8 @@ mod tests {
         model.add_worker_set("ns-b".to_string(), available.clone());
         let selection = model.get_systemone_execution_selection().unwrap();
         assert!(Arc::ptr_eq(
-            &selection.engine,
-            available.generate_engine.as_ref().unwrap()
+            &token_executor(&selection).engine,
+            worker_token_executor(&available).engine()
         ));
         admitted_tx.send(vec![1, 2]).unwrap();
         let workers = model.get_worker_set("ns-a").unwrap();
@@ -1612,8 +1610,8 @@ mod tests {
         assert_eq!(workers.decision_worker_count(), 0);
         let selection = model.get_systemone_execution_selection().unwrap();
         assert!(Arc::ptr_eq(
-            &selection.engine,
-            available.generate_engine.as_ref().unwrap()
+            &token_executor(&selection).engine,
+            worker_token_executor(&available).engine()
         ));
         runtime.shutdown();
     }

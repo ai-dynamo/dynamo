@@ -29,7 +29,6 @@ use super::worker_metrics::register_worker_metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{RoutingOverheadMetrics, register_router_queue_metrics};
-use crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY;
 use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 use anyhow::{Context, Result};
@@ -214,7 +213,6 @@ pub struct State {
     // Frontend API behavior read by request handlers after the service is built.
     frontend_api_config: FrontendApiConfig,
     responses_api_enabled: bool,
-    generate_api_enabled: bool,
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
     streaming_backend_error_check: BackendErrorCheck,
@@ -229,7 +227,7 @@ pub struct State {
 const DEFAULT_SYSTEMONE_MAX_INFLIGHT_BRANCHES: usize = 256;
 const DEFAULT_SYSTEMONE_MAX_INPUT_TOKENS: usize = 65_536;
 const MAX_SYSTEMONE_INFLIGHT_BRANCHES: usize = 4096;
-const MAX_SYSTEMONE_INPUT_TOKENS: usize = 1_048_576;
+const MAX_SYSTEMONE_INPUT_TOKENS: usize = crate::protocols::systemone::MAX_DECISION_INPUT_TOKENS;
 const MAX_SYSTEMONE_REQUEST_TIMEOUT_SECS: usize = 3600;
 const SYSTEMONE_MAX_CONCURRENT_PREFLIGHT: usize = 4;
 
@@ -280,7 +278,6 @@ struct StateConfig {
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
     responses_api_enabled: bool,
-    generate_api_enabled: bool,
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
     streaming_backend_error_check: BackendErrorCheck,
@@ -703,7 +700,6 @@ impl State {
             cancel_token,
             frontend_api_config: config.frontend_api_config,
             responses_api_enabled: config.responses_api_enabled,
-            generate_api_enabled: config.generate_api_enabled,
             sse_keep_alive: config.sse_keep_alive,
             streaming_backend_error_check: config.streaming_backend_error_check,
             migration_limit: config.migration_limit,
@@ -805,11 +801,8 @@ impl State {
                 EndpointType::Transcriptions,
             ),
             (model.has_realtime_engine(), EndpointType::Realtime),
-            (
-                model.has_generate_engine()
-                    && (self.generate_api_enabled || !self.systemone_enabled()),
-                EndpointType::Generate,
-            ),
+            (model.has_generate_engine(), EndpointType::Generate),
+            (model.has_decision_engine(), EndpointType::SystemOne),
         ];
         routes.iter().any(|(has_engine, _)| *has_engine)
             && routes
@@ -1601,15 +1594,10 @@ impl HttpServiceConfigBuilder {
         let anthropic_endpoints_enabled = frontend_api_config.anthropic().enabled();
         let systemone_enabled = frontend_api_config.systemone_enabled();
         let generate_routes = configured_generate_routes(config.enable_engine_apis)?;
-        let mut generate_engine_capabilities = generate_routes
+        let generate_engine_capabilities = generate_routes
             .iter()
             .map(|(_, format)| format.capability())
             .collect::<Vec<_>>();
-        // System One scores through SGLang's native format without mounting `/generate`.
-        if systemone_enabled && !generate_engine_capabilities.contains(&SGLANG_GENERATE_CAPABILITY)
-        {
-            generate_engine_capabilities.push(SGLANG_GENERATE_CAPABILITY);
-        }
 
         let model_manager = Arc::new(ModelManager::new());
         let cancel_token = config.cancel_token.unwrap_or_default().child_token();
@@ -1634,7 +1622,6 @@ impl HttpServiceConfigBuilder {
                 metrics_config,
                 frontend_api_config,
                 responses_api_enabled: config.enable_responses_endpoints,
-                generate_api_enabled: !generate_routes.is_empty(),
                 nvext_enabled,
                 sse_keep_alive: config.sse_keep_alive,
                 streaming_backend_error_check: config.streaming_backend_error_check,
@@ -4205,7 +4192,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn decisions_mount_both_routes_and_internal_sglang_capability() {
+    fn decisions_mount_both_routes_without_public_generate_capability() {
         temp_env::with_vars(
             [
                 (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, None::<&str>),
@@ -4221,10 +4208,7 @@ mod tests {
                     .build()
                     .unwrap();
 
-                assert_eq!(
-                    service.generate_engine_capabilities(),
-                    vec![SGLANG_GENERATE_CAPABILITY]
-                );
+                assert!(service.generate_engine_capabilities().is_empty());
                 assert!(service.model_endpoint_enabled(EndpointType::SystemOne));
                 assert!(!service.model_endpoint_enabled(EndpointType::Generate));
                 let routes = service
@@ -4246,17 +4230,9 @@ mod tests {
                         )),
                     )
                     .unwrap();
-                state
-                    .manager()
-                    .add_generate_model(
-                        "decision-model",
-                        "scoring-worker",
-                        Arc::new(ReadinessOnlyEngine),
-                    )
-                    .unwrap();
                 let model = state.manager().get_model("decision-model").unwrap();
                 assert!(model.has_chat_engine());
-                assert!(model.has_generate_engine());
+                assert!(!model.has_generate_engine());
                 assert!(state.model_http_routes_ready(&model));
                 assert!(
                     service
@@ -4445,6 +4421,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn systemone_does_not_bypass_disabled_public_generate_route() {
+        install_readiness_formats();
         let mut api = FrontendApiConfig::default();
         api.set_systemone_enabled(true);
         let service = HttpService::builder()

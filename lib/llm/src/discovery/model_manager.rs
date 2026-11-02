@@ -3123,8 +3123,13 @@ mod tests {
         card.runtime_config.max_num_seqs = Some(1);
         let preprocessor = crate::preprocessor::OpenAIPreprocessor::new(card.clone()).unwrap();
         let mut worker_set = WorkerSet::new(name.to_string(), name.to_string(), card);
-        worker_set.generate_engine = Some(Arc::new(SystemOneStubEngine));
-        worker_set.systemone_preprocessor = Some(preprocessor);
+        worker_set.decision = Some(crate::discovery::DecisionRoute::Available(
+            crate::discovery::DecisionEngine::Token(crate::discovery::TokenExecutor::new(
+                crate::local_model::runtime_config::TokenBackend::Sglang,
+                Arc::new(SystemOneStubEngine),
+                preprocessor,
+            )),
+        ));
         let (workers, receiver) = tokio::sync::watch::channel(vec![1]);
         worker_set.set_instance_watcher(receiver);
         assert!(manager.add_worker_set(name, name, worker_set));
@@ -3146,6 +3151,7 @@ mod tests {
             manager
                 .get_systemone_execution_selection("jev-latest")
                 .unwrap()
+                .context
                 .canonical_model,
             "model-a"
         );
@@ -3154,6 +3160,7 @@ mod tests {
             manager
                 .get_systemone_execution_selection("public-model")
                 .unwrap()
+                .context
                 .canonical_model,
             "model-a"
         );
@@ -3187,6 +3194,7 @@ mod tests {
             manager
                 .get_systemone_execution_selection("model-b")
                 .unwrap()
+                .context
                 .canonical_model,
             "model-b"
         );
@@ -3199,21 +3207,21 @@ mod tests {
         let selection = manager
             .get_systemone_execution_selection("model-a")
             .unwrap();
-        assert_eq!(selection.validate_dispatch(None), Ok(()));
-        assert_eq!(selection.validate_dispatch(Some(1)), Ok(()));
+        assert_eq!(selection.context.validate_dispatch(None), Ok(()));
+        assert_eq!(selection.context.validate_dispatch(Some(1)), Ok(()));
         assert_eq!(
-            selection.validate_dispatch(Some(2)),
+            selection.context.validate_dispatch(Some(2)),
             Err(SystemOneSelectionError::Unavailable)
         );
         workers.send(vec![]).unwrap();
         assert_eq!(
-            selection.validate_dispatch(None),
+            selection.context.validate_dispatch(None),
             Err(SystemOneSelectionError::Unavailable)
         );
         workers.send(vec![1]).unwrap();
         drop(workers);
         assert_eq!(
-            selection.validate_dispatch(Some(1)),
+            selection.context.validate_dispatch(Some(1)),
             Err(SystemOneSelectionError::Unavailable)
         );
     }

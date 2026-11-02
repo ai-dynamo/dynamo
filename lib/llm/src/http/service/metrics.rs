@@ -741,7 +741,7 @@ impl SystemOneMetrics {
             ),
             input_tokens: work_histogram(
                 frontend_service::SYSTEMONE_INPUT_TOKENS,
-                "Expanded prompt tokens per admitted System One request",
+                "Token-profile rendered input tokens at preflight for each admitted decision request",
                 65_536.0,
             ),
             candidate_ids: work_histogram(
@@ -1848,12 +1848,10 @@ impl Metrics {
         &self,
         model: &str,
         questions: usize,
-        input_tokens: usize,
         candidate_ids: usize,
     ) {
         for (histogram, count) in [
             (&self.systemone.questions, questions),
-            (&self.systemone.input_tokens, input_tokens),
             (&self.systemone.candidate_ids, candidate_ids),
         ] {
             histogram.with_label_values(&[model]).observe(count as f64);
@@ -1862,6 +1860,13 @@ impl Metrics {
             .admitted_branches
             .with_label_values(&[model])
             .inc_by(questions as u64);
+    }
+
+    pub(crate) fn observe_systemone_input_work(&self, model: &str, input_tokens: usize) {
+        self.systemone
+            .input_tokens
+            .with_label_values(&[model])
+            .observe(input_tokens as f64);
     }
 
     pub(crate) fn observe_systemone_branch(&self, model: &str, cached_tokens: usize) {
@@ -6315,11 +6320,36 @@ mod tests {
     }
 
     #[test]
+    fn systemone_unmeasured_native_work_does_not_fabricate_input_tokens() {
+        let metrics = Metrics::new_with_prefix(Some("native_work".to_string()));
+        let registry = Registry::new();
+        metrics.register(&registry).unwrap();
+        metrics.observe_systemone_work("native-model", 2, 4);
+        let families = registry.gather();
+        assert!(
+            !families
+                .iter()
+                .any(|family| family.name() == "native_work_systemone_input_tokens")
+        );
+        let questions = families
+            .iter()
+            .find(|family| family.name() == "native_work_systemone_questions")
+            .unwrap();
+        assert_eq!(questions.get_metric()[0].get_histogram().sample_sum(), 2.0);
+        let admitted = families
+            .iter()
+            .find(|family| family.name() == "native_work_systemone_admitted_branches_total")
+            .unwrap();
+        assert_eq!(admitted.get_metric()[0].get_counter().value(), 2.0);
+    }
+
+    #[test]
     fn systemone_metrics_use_configured_prefix_and_bounded_labels() {
         let metrics = Metrics::new_with_prefix(Some("custom_frontend".to_string()));
         let registry = Registry::new();
         metrics.register(&registry).unwrap();
-        metrics.observe_systemone_work("served-model", 3, 120, 7);
+        metrics.observe_systemone_work("served-model", 3, 7);
+        metrics.observe_systemone_input_work("served-model", 120);
         metrics.observe_systemone_branch("served-model", 80);
         for phase in [
             SystemOnePhase::Preflight,

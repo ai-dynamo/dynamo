@@ -30,11 +30,13 @@ mod http;
 
 use super::{
     Placement, PreparedBranch, ScoringBranch, StartedBranch, add_input_tokens, bind_native,
-    dispatch, pin_to_placement, prepare_branches, resolve_dp_rank,
+    pin_to_placement, resolve_dp_rank,
 };
 use crate::{
-    discovery::SystemOneExecutionSelection,
-    local_model::runtime_config::TokenBackend,
+    discovery::{
+        DecisionEngine, DecisionRoute, SystemOneExecutionSelection, TokenExecutor, WorkerSet,
+    },
+    local_model::runtime_config::{DecisionExecutionProfile as Profile, TokenBackend},
     model_card::ModelDeploymentCard,
     preprocessor::OpenAIPreprocessor,
     protocols::{
@@ -170,8 +172,8 @@ fn sglang_scoring_preprocessing_preserves_exact_tracker_isl() {
             .unwrap();
     let preprocessed = request
         .compile(
-            &selected.canonical_model,
-            selected.card.kv_cache_block_size,
+            &selected.context.canonical_model,
+            selected.context.card.kv_cache_block_size,
             "isl-regression",
         )
         .unwrap()
@@ -490,14 +492,66 @@ fn selection(engine: Arc<TestEngine>) -> SystemOneExecutionSelection {
     card.set_name("test-model");
     card.runtime_config.data_parallel_size = 4;
     let preprocessor = OpenAIPreprocessor::new(card.clone()).unwrap();
-    SystemOneExecutionSelection {
-        canonical_model: "test-model".to_string(),
-        engine,
-        card,
-        preprocessor,
-        admitted_ids: None,
-        lifecycle_cancellation: None,
-    }
+    token_selection(card, engine, preprocessor, Profile::SglangSerialV1)
+}
+
+fn token_selection(
+    card: ModelDeploymentCard,
+    engine: crate::types::openai::generate::GenerateStreamingEngine,
+    preprocessor: Arc<OpenAIPreprocessor>,
+    profile: Profile,
+) -> SystemOneExecutionSelection {
+    let mut workers = WorkerSet::new("test-workers".into(), card.mdcsum().into(), card);
+    let crate::local_model::runtime_config::DecisionProfileKind::Token(backend) = profile.kind()
+    else {
+        panic!("token fixture requires a token profile")
+    };
+    workers.decision = Some(DecisionRoute::Available(DecisionEngine::Token(
+        TokenExecutor::new(backend, engine, preprocessor),
+    )));
+    SystemOneExecutionSelection::for_test("test-model".into(), profile, &workers).unwrap()
+}
+
+fn token_executor(selection: &SystemOneExecutionSelection) -> &TokenExecutor {
+    let DecisionEngine::Token(executor) = selection.engine() else {
+        panic!("expected token executor")
+    };
+    executor
+}
+
+fn prepare_branches(
+    request: &dynamo_decisions::CanonicalRequest,
+    selection: &SystemOneExecutionSelection,
+    limit: usize,
+) -> Result<Vec<PreparedBranch>, (StatusCode, String)> {
+    super::scoring::prepare_branches(
+        request,
+        &selection.context,
+        token_executor(selection),
+        limit,
+        &super::fresh_cache_salt(),
+    )
+}
+
+async fn dispatch(
+    selection: SystemOneExecutionSelection,
+    branches: Vec<PreparedBranch>,
+    request_id: String,
+    parent: Arc<dyn AsyncEngineContext>,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    metrics: Arc<super::Metrics>,
+    request: Arc<dynamo_decisions::CanonicalRequest>,
+) -> Response {
+    super::execution::dispatch(
+        super::execution::PreparedExecution::token(selection, branches).unwrap(),
+        request_id,
+        parent,
+        permit,
+        metrics,
+        "test-model".into(),
+        request,
+    )
+    .await
 }
 
 async fn response_body(response: Response) -> Value {
@@ -688,7 +742,7 @@ async fn placement_mismatch_fails_with_unavailable_without_answers() {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = response_body(response).await;
     assert!(body.get("answers").is_none());
-    assert_eq!(body["detail"], "SGLang scoring worker is unavailable");
+    assert_eq!(body["detail"], "decision scoring worker is unavailable");
     assert!(parent.is_killed());
     assert_eq!(semaphore.available_permits(), 2);
 }
