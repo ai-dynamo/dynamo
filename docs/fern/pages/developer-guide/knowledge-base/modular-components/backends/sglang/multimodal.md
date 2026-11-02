@@ -91,15 +91,17 @@ SGLang supports EPD, EP/D, E/PD, and E/P/D patterns. See [Multimodal Model Servi
 
 Multimodal KV routing works with SGLang's aggregated worker topology. It is independent of the E/PD and E/P/D encoder-disaggregation patterns described later in this guide.
 
-On SGLang 0.5.22, which Dynamo currently pins, RadixAttention includes a per-media `pad_value` token in its prefix-cache key. Dynamo uses the same token in the routing view:
+SGLang builds before [sgl-project/sglang#43043](https://github.com/sgl-project/sglang/pull/43043) include a per-media `pad_value` token in the RadixAttention prefix-cache key. Dynamo uses the same token in the routing view:
 
 1. The Rust frontend hashes each image or sampled video and calculates its expanded token count.
 2. It derives `pad_value = MM_PAD_SHIFT_VALUE + (mm_hash % 2^30)`.
 3. It substitutes that value for the media placeholder in the routing-only token view.
 4. It forwards the original hash list through `GenerateReqInput.mm_hashes`.
-5. Dynamo's worker compatibility layer applies the router's scalar `pad_value`
-   to the caller-hashed item, keeping the router and RadixAttention cache keys
-   aligned across supported SGLang releases.
+5. SGLang builds before that change derive their own `pad_value` from the
+   supplied hash, so the router and RadixAttention cache keys match. Later
+   builds, including the pinned 0.5.23, use wide pads, and the router matches
+   only the text before the first media block. See
+   [Wide-Token SGLang Builds](#wide-token-sglang-builds).
 
 The frontend selects this behavior automatically when the worker's `ModelDeploymentCard` reports `backend_framework="sglang"`.
 
@@ -110,17 +112,10 @@ discovery cohort publishes the same compatible contract. Unsupported models,
 legacy workers, mixed contracts, or a processor override fall back to
 text-prefix routing without failing the request.
 
-Step 4 needs an SGLang build and processor that accept `mm_hashes`. Dynamo's
-SGLang image carries the upstream support. A custom build without hash forwarding
-is supported with text-prefix routing.
-
-Image-aware KV routing is unsupported for Kimi K2.5 and Kimi K3 on SGLang. Their
-processors generate their own image identifiers and reject caller-supplied
-`mm_hashes`, so Dynamo does not forward them. Requests still serve, but the router
-cannot match cached images. When a cache-event batch contains these image
-identifiers, Dynamo cannot decode the batch and discards all its events,
-including updates for text blocks. The router can therefore miss cached text as
-well as images, so a full text-prefix fallback is not guaranteed.
+Step 4 needs an SGLang build that accepts `mm_hashes` (0.5.13 or later). A build
+without it is still supported: Dynamo detects the missing argument when the
+worker starts and routes on the text prefix alone. On wide-token builds, media
+identity does not contribute to routing overlap either.
 
 ### Wide-Token SGLang Builds
 

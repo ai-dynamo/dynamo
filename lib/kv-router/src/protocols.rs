@@ -68,8 +68,9 @@ fn hash_block_no_mm(chunk: &[u32], seed: u64, scratch_bytes: &mut Vec<u8>) -> Lo
     }
 }
 
-/// Dynamo's SGLang routing compatibility constants. The worker compatibility
-/// layer applies this scalar protocol to caller-hashed multimodal items.
+/// Routing pad constants. SGLang builds before sgl-project/sglang#43043 derive
+/// the same pad from a caller hash; later builds use wide pads, which the KV
+/// event normalizer excludes.
 pub const MM_PAD_SHIFT_VALUE: u64 = 1_000_000;
 pub const MM_PAD_HASH_MASK: u64 = (1 << 30) - 1;
 
