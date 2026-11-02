@@ -221,6 +221,8 @@ navigation:
         contents:
           - page: Observability
             path: ../pages-dev/kubernetes/operations/observability.mdx
+          - page: Nsight Operator Profiling
+            path: ../pages-dev/kubernetes/operations/nsight-operator-profiling.mdx
           - page: Benchmarking with AIPerf
             path: ../pages-dev/kubernetes/operations/benchmarking-with-aiperf.mdx
           - page: Performance Tuning
