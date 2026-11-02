@@ -166,6 +166,11 @@ func TestClusterFrontendDependencyStartup(t *testing.T) {
 					component.PodTemplate.Spec.Containers[0].Command = []string{"python3"}
 					component.PodTemplate.Spec.Containers[0].Args = []string{"-m", "dynamo.mocker", "--model-path", modelPath, "--model-name", "mock-llama"}
 				}
+				// The runtime connects to NATS only for a plane that uses it, not for NATS_SERVER alone.
+				if dependency.name == "nats" {
+					component.PodTemplate.Spec.Containers[0].Env = append(component.PodTemplate.Spec.Containers[0].Env,
+						corev1.EnvVar{Name: "DYN_EVENT_PLANE", Value: "nats"})
+				}
 				dgd.Spec.Components = append(dgd.Spec.Components, component)
 			}
 			require.NoError(t, env.Client().Create(ctx, dgd))

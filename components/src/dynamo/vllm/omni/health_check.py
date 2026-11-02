@@ -10,6 +10,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 
 from dynamo.common.utils.output_modalities import RequestType, parse_request_type
 from dynamo.health_check import HEALTH_CHECK_KEY, load_health_check_from_env
+from dynamo.llm.exceptions import InvalidArgument
 
 
 def build_omni_health_check_payload(output_modalities: list[str]) -> dict[str, Any]:
@@ -45,7 +46,7 @@ def build_omni_health_check_payload(output_modalities: list[str]) -> dict[str, A
                         "A chat canary requires a nonempty user message with "
                         "string content"
                     )
-        except ValueError as error:
+        except (InvalidArgument, ValueError) as error:
             raise ValueError(
                 "Invalid DYN_HEALTH_CHECK_PAYLOAD for the configured Omni request "
                 "protocol; use a request verified with this model"

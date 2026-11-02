@@ -376,7 +376,7 @@ Routing cache resources start only if a component requests `CACHE` or a scorer r
 
 | Accessor | Meaning |
 |---|---|
-| `prompt_tokens()` | Exact incoming prompt token count; zero when the request has no token IDs, such as embeddings-only input |
+| `isl_tokens()` | Input sequence length in tokens, the same value a request classifier reads; zero when the request has no token IDs, such as embeddings-only input |
 | `request_blocks()` | Incoming prompt size in KV blocks, rounded up |
 | `block_size()` | Tokens in one KV block |
 | `tracks_prefill_tokens()` | Whether the request contributes to prefill-load tracking |
@@ -426,8 +426,12 @@ The [custom policy examples](https://github.com/ai-dynamo/dynamo/blob/main/examp
 | Accessor | Meaning |
 |---|---|
 | `WorkerCandidate::worker()` | Candidate worker ID and data-parallel rank |
+| `WorkerCandidate::info()` | Candidate `WorkerInfo` |
 | `ScoredWorkerCandidate::worker()` | Picker row worker ID and data-parallel rank |
 | `ScoredWorkerCandidate::cost()` | Sum of all scorer contributions for the picker row |
+| `WorkerInputView::info(row)` | Picker row `WorkerInfo`, or `None` for an out-of-range row |
+
+`WorkerInfo` holds static facts about a worker rank, so no component declares an input group to read it. `worker()` returns the worker ID and data-parallel rank. `max_num_batched_tokens()` and `total_kv_blocks()` return what the worker's runtime config advertises, or `None` when it is unreported or reported as zero (vLLM's Ray data-parallel backend registers a zero placeholder); `total_kv_blocks()` is capacity, not free blocks. The values change only when a worker registers again. For filters, scorers, and pickers Dynamo looks them up in its cached worker configs on each `info()` call, so a component that never calls it pays nothing. Classifier rows outlive that map, so they carry each rank's capacity (32 bytes per rank) whenever a classifier declares an input group.
 
 ### Optional Worker Inputs
 
@@ -443,6 +447,7 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `CACHE` | `shared_hits()` | `None` if no shared result was supplied; otherwise unweighted ranges with `total_hits` and `hits_beyond(prefix)` |
 | `LOAD` | `is_available()` | Whether the host supplied a load observation; distinguishes missing data from an observed idle worker |
 | `LOAD` | `active_prefill_tokens()` | Tokens currently active in the worker's prefill stage |
+| `LOAD` | `active_decode_blocks()` | KV blocks the worker's active requests hold; excludes this request. Prompt blocks by default, plus the blocks generation adds only with `--router-track-output-blocks`; zero with `--no-router-track-active-blocks` |
 | `LOAD` | `decode_cost_blocks()` | Projected active decode footprint, including this request's additional active blocks |
 | `LOAD` | `active_requests()` | Requests currently active on the worker |
 | `PREFERRED_TAINT` | `preferred_taint_multiplier()` | Optional cost multiplier from matching preferred routing taints |
@@ -450,6 +455,8 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `KV_TRANSFER` | `source_prefix_blocks()` | Prefix blocks held by the source this worker would fetch from, and so held by the worker after the fetch; `None` when no eligible source holds more than the worker's device-resident plus host-pinned prefix |
 
 The GPU, CPU, and disk overlap accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
+
+`BusyThresholds::has_room(load, info.capacity())` is the check Dynamo's router queue uses to decide whether a worker has room; a component that declares `LOAD` can run the same check.
 
 A filter or scorer reads groups through `WorkerCandidate::cache()` or `load()`. A picker reads index-aligned views through `WorkerInputView`; its cache view supports `get(row)` and `iter()`. Each component must declare every group it reads; another component requesting a group does not grant access.
 
@@ -604,11 +611,12 @@ For example, a classifier can inspect the sequence while retaining the request i
 use dynamo_kv_router::plugins::request_classifier::{
     ClassifyFuture, ClassifyRequest, RequestClassifier,
 };
+use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 
 struct InspectPrefixes;
 
 impl RequestClassifier for InspectPrefixes {
-    fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+    fn classify(&mut self, request: ClassifyRequest, _workers: WorkerCandidates<'_>) -> ClassifyFuture {
         Box::pin(async move {
             let _tracked_blocks = request.sequence_hashes().map(|hashes| hashes.len());
             Ok(request)

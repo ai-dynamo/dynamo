@@ -493,7 +493,7 @@ pub(crate) fn start_scheduler_load_publisher(
     replica_sync: bool,
     cancellation_token: CancellationToken,
 ) {
-    if !crate::kv_dc_relay::serving_load_publishing_enabled() {
+    if !crate::pool_relay::serving_load_publishing_enabled() {
         return;
     }
     let group = if replica_sync {
