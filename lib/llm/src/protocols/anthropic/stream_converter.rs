@@ -80,6 +80,7 @@ struct ToolCallState {
     has_emitted: bool,
     needs_flush: bool,
     is_complete: bool,
+    has_warned_late_arguments: bool,
 }
 
 impl ToolCallState {
@@ -165,11 +166,26 @@ impl AnthropicStreamConverter {
                 has_emitted: false,
                 needs_flush: false,
                 is_complete: false,
+                has_warned_late_arguments: false,
             });
         }
 
         let state = &mut self.tool_call_states[tool_call_index];
         if state.has_emitted || self.tool_blocks_flushed {
+            if !state.has_warned_late_arguments
+                && let Some(arguments) = tool_call
+                    .function
+                    .as_ref()
+                    .and_then(|function| function.arguments.as_deref())
+                && !arguments.is_empty()
+            {
+                state.has_warned_late_arguments = true;
+                tracing::warn!(
+                    tool_call_index,
+                    argument_bytes = arguments.len(),
+                    "ignoring tool arguments after the tool block was emitted or finalized"
+                );
+            }
             return false;
         }
         state.needs_flush = true;
@@ -259,8 +275,8 @@ impl AnthropicStreamConverter {
             // indistinguishable from a parameterless call. Emitting it now would close
             // the block and discard the fragments that follow, so leave it pending and
             // let the final drain decide.
-            if !is_final && raw.is_empty() && !tool_call.is_complete {
-                if single_tool {
+            if !is_final && raw.is_empty() {
+                if single_tool || only_completed {
                     break;
                 }
                 continue;
@@ -1297,6 +1313,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v2_parser_arguments_survive_anthropic_conversion_at_every_split() {
+        use dynamo_parsers::tool_calling::ToolDefinition;
+        use dynamo_parsers_v2::UnifiedParserStartingState;
+        use futures::StreamExt;
+
+        use crate::protocols::openai::chat_completions::unified_parser;
+        use dynamo_runtime::protocols::annotated::Annotated;
+
+        let expected = serde_json::json!({"count": 2, "content": "hello"});
+        let tools = vec![ToolDefinition {
+            name: "write_file".into(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"count": {"type": "integer"}, "content": {"type": "string"}},
+                "required": ["count", "content"]
+            })),
+            strict: None,
+        }];
+        let mut cases = unified_parser::tests::eight_family_calls("hello");
+        let qwen = cases
+            .iter()
+            .find(|(family, _)| *family == "qwen3")
+            .unwrap()
+            .1
+            .clone();
+        let muse = cases
+            .iter()
+            .find(|(family, _)| *family == "muse_glimmer")
+            .unwrap()
+            .1
+            .clone();
+        cases.extend([
+            ("nemotron_v3", format!("</think>{qwen}")),
+            ("muse_spark", muse),
+            ("gpt_oss", format!(" to=functions.write_file<|channel|>analysis<|message|>{expected}<|call|>")),
+            ("beam", "<|start|>assistant to=write_file<|channel|>analysis <|constrain|>xml<|message|><rfl:parameter name=\"count\">2</rfl:parameter><rfl:parameter name=\"content\">hello</rfl:parameter><|call|>".into()),
+        ]);
+        for (family, native) in cases {
+            for guided in [false, true] {
+                let input = if guided {
+                    expected.to_string()
+                } else {
+                    native.clone()
+                };
+                for split in input
+                    .char_indices()
+                    .map(|(offset, _)| offset)
+                    .chain(std::iter::once(input.len()))
+                {
+                    let tool_choice = guided.then(|| {
+                        serde_json::from_value(serde_json::json!({
+                            "type": "function", "function": {"name": "write_file"}
+                        }))
+                        .unwrap()
+                    });
+                    let source = futures::stream::iter([
+                        Annotated::from_data(text_chunk(&input[..split])),
+                        Annotated::from_data(text_chunk(&input[split..])),
+                        Annotated::from_data(finish_chunk(FinishReason::Stop)),
+                    ]);
+                    let output = unified_parser::apply_stream(
+                        source,
+                        Some(tools.clone()),
+                        tool_choice,
+                        false,
+                        if guided {
+                            UnifiedParserStartingState::Response
+                        } else {
+                            UnifiedParserStartingState::None
+                        },
+                        family,
+                    );
+                    futures::pin_mut!(output);
+                    let mut conv = AnthropicStreamConverter::new("test-model".into(), 5);
+                    let mut events = Vec::new();
+                    while let Some(response) = output.next().await {
+                        assert!(
+                            !response.is_error(),
+                            "{family}, guided={guided}, split={split}"
+                        );
+                        if let Some(data) = response.data {
+                            events.extend(conv.process_chunk(&data));
+                        }
+                    }
+                    events.extend(conv.emit_end_events());
+                    let values = sse_values(events).await;
+                    let names: Vec<_> = values
+                        .iter()
+                        .filter_map(|v| v["content_block"]["name"].as_str())
+                        .collect();
+                    assert_eq!(
+                        names,
+                        ["write_file"],
+                        "{family}, guided={guided}, split={split}"
+                    );
+                    let arguments: String = values
+                        .iter()
+                        .filter_map(|v| v["delta"]["partial_json"].as_str())
+                        .collect();
+                    assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(&arguments).unwrap_or_else(|error| {
+                            panic!("{family}, guided={guided}, split={split}: {error}; arguments={arguments:?}")
+                        }),
+                        expected,
+                        "{family}, guided={guided}, split={split}"
+                    );
+                    assert_eq!(
+                        values
+                            .iter()
+                            .filter(|v| v["type"] == "content_block_stop")
+                            .count(),
+                        1,
+                        "{family}, guided={guided}, split={split}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn parser_completion_keeps_legacy_fallback_and_single_tool_limit() {
         use crate::protocols::openai::chat_completions::ToolCallCompletion;
 
@@ -1322,8 +1458,10 @@ mod tests {
             assert!(conv.process_chunk(&completion).is_empty());
             completion.tool_call_completion[0].choice_index = 0;
             let values = sse_values(conv.process_chunk(&completion)).await;
-            assert_eq!(values.len(), if single { 2 } else { 3 });
-            assert_eq!(values[0]["content_block"]["name"], "read_a");
+            assert_eq!(values.len(), if single { 0 } else { 3 });
+            if !single {
+                assert_eq!(values[0]["content_block"]["name"], "read_a");
+            }
 
             let second = tool_call_chunk(1, Some("call_b"), Some("read_b"), Some("{}"));
             assert!(conv.process_chunk(&second).is_empty());
@@ -1331,12 +1469,21 @@ mod tests {
                 sse_values(conv.process_chunk(&finish_chunk(FinishReason::ToolCalls))).await;
             assert_eq!(values.len(), if single { 0 } else { 3 });
             let final_values = sse_values(conv.emit_end_events()).await;
+            assert_eq!(
+                final_values
+                    .iter()
+                    .filter(|v| v["type"] == "content_block_start")
+                    .count(),
+                usize::from(single)
+            );
+            if single {
+                assert_eq!(final_values[0]["content_block"]["name"], "read_a");
+            }
             assert!(
                 final_values
                     .iter()
-                    .all(|v| v["type"] != "content_block_start")
+                    .any(|v| v["delta"]["stop_reason"] == "tool_use")
             );
-            assert_eq!(final_values[0]["delta"]["stop_reason"], "tool_use");
         }
     }
 
