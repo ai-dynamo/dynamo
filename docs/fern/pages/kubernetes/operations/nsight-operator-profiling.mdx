@@ -117,15 +117,11 @@ metadata:
 spec:
   nsightToolConfigs:
   - name: my-dgd-cpu           # frontend and planner: OS runtime calls, Python stacks, NVTX
-    coordinator: true          # record only between profiler-start and its stop
-    nsightToolCommand: profile --start-later=true
     nsightToolArgs: "-t nvtx,osrt --python-sampling=true"
-    opentelemetryTrace: false  # no OpenTelemetry trace mirroring
+    opentelemetryTrace: true
   - name: my-dgd-gpu           # workers: adds CUDA API calls and every kernel
-    coordinator: true
-    nsightToolCommand: profile --start-later=true
     nsightToolArgs: "-t cuda,nvtx,osrt --cuda-graph-trace=node --python-sampling=true"
-    opentelemetryTrace: false
+    opentelemetryTrace: true
   injectionRules:              # rule names must be unique in the namespace
   - name: my-dgd-frontend
     nsightToolConfigRef: my-dgd-cpu
@@ -156,6 +152,8 @@ spec:
     processIncludePatterns: ['^(.*/)?python(3([.][0-9]+)?)? -m dynamo[.](vllm|sglang|trtllm)( .*)?$']
 ```
 
+- **OpenTelemetry.** Both tool configs enable
+  [OpenTelemetry trace mirroring](https://docs.nvidia.com/nsight-operator/AnalysisGuide/index.html#otlp-trace-mirroring).
 - **Tags.** Every rule uses the same literal tag, the DGD name, so one window profiles every selected component over
   the same period. A tag holds one profiling session at a time. For separate windows per component, give each rule its
   own tag.
