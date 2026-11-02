@@ -48,8 +48,7 @@ pub struct GenerateRequest {
     #[serde(default)]
     pub stream: bool,
 
-    /// Streaming usage options. The current Dynamo profile rejects streaming,
-    /// but typing this field keeps request validation aligned with vLLM Rust.
+    /// Streaming usage options.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<StreamOptions>,
 
@@ -139,8 +138,7 @@ impl GenerateRequest {
 }
 
 /// vLLM Rust streaming options. Unknown options are retained for forward
-/// compatibility even though the current unary Dynamo profile does not consume
-/// them.
+/// compatibility.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct StreamOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -383,24 +381,8 @@ struct GenerateChoiceAcc {
 
 impl GenerateChoiceAcc {
     fn apply(&mut self, output: &LLMEngineOutput, options: GenerateResponseOptions) -> Result<()> {
-        if let Some(finish_reason) = output.finish_reason.as_ref() {
-            match finish_reason {
-                dynamo_llm::protocols::common::FinishReason::Error(message) => {
-                    return Err(DynamoError::builder()
-                        .error_type(DynamoErrorType::Backend(BackendError::Unknown))
-                        .message(message)
-                        .build()
-                        .into());
-                }
-                dynamo_llm::protocols::common::FinishReason::Cancelled => {
-                    return Err(DynamoError::builder()
-                        .error_type(DynamoErrorType::Cancelled)
-                        .message("backend cancelled generation")
-                        .build()
-                        .into());
-                }
-                _ => self.finish_reason = Some(finish_reason.to_string()),
-            }
+        if let Some(finish_reason) = finish_reason(output)? {
+            self.finish_reason = Some(finish_reason);
         }
         if options.include_logprobs {
             let has_logprobs = append_completion_logprobs_from_output(output, &mut self.logprobs)?;
@@ -458,6 +440,50 @@ impl GenerateChoiceAcc {
             sampling_mask,
         })
     }
+}
+
+/// The client finish reason; a backend error or cancellation fails the request.
+fn finish_reason(output: &LLMEngineOutput) -> Result<Option<String>> {
+    match output.finish_reason.as_ref() {
+        Some(dynamo_llm::protocols::common::FinishReason::Error(message)) => {
+            Err(DynamoError::builder()
+                .error_type(DynamoErrorType::Backend(BackendError::Unknown))
+                .message(message)
+                .build()
+                .into())
+        }
+        Some(dynamo_llm::protocols::common::FinishReason::Cancelled) => Err(DynamoError::builder()
+            .error_type(DynamoErrorType::Cancelled)
+            .message("backend cancelled generation")
+            .build()
+            .into()),
+        Some(finish_reason) => Ok(Some(finish_reason.to_string())),
+        None => Ok(None),
+    }
+}
+
+fn take_routed_experts(
+    engine_data: &mut Map<String, Value>,
+) -> Result<Option<GenerateRoutedExperts>> {
+    let Some(routed_experts) = engine_data.remove("routed_experts") else {
+        return Ok(None);
+    };
+    let routed_experts: GenerateRoutedExperts = serde_json::from_value(routed_experts)
+        .map_err(|error| anyhow::anyhow!("invalid generate routed_experts payload: {error}"))?;
+    routed_experts
+        .validate()
+        .map_err(|error| anyhow::anyhow!("invalid generate routed_experts payload: {error}"))?;
+    Ok(Some(routed_experts))
+}
+
+fn take_sampling_mask(engine_data: &mut Map<String, Value>) -> Result<Option<Vec<Vec<u32>>>> {
+    engine_data
+        .remove("sampling_mask")
+        .map(|sampling_mask| {
+            serde_json::from_value(sampling_mask)
+                .map_err(|error| anyhow::anyhow!("invalid generate sampling_mask payload: {error}"))
+        })
+        .transpose()
 }
 
 fn clamp_vllm_logprob(logprob: f32) -> f32 {
@@ -584,21 +610,11 @@ impl GenerateAggregator {
             routed_experts: None,
             sampling_mask: None,
         });
-        if let Some(routed_experts) = engine_data.remove("routed_experts") {
-            let routed_experts: GenerateRoutedExperts = serde_json::from_value(routed_experts)
-                .map_err(|error| {
-                    anyhow::anyhow!("invalid generate routed_experts payload: {error}")
-                })?;
-            routed_experts.validate().map_err(|error| {
-                anyhow::anyhow!("invalid generate routed_experts payload: {error}")
-            })?;
+        if let Some(routed_experts) = take_routed_experts(&mut engine_data)? {
             choice.routed_experts = Some(routed_experts);
         }
-        if let Some(sampling_mask) = engine_data.remove("sampling_mask") {
-            choice.sampling_mask =
-                Some(serde_json::from_value(sampling_mask).map_err(|error| {
-                    anyhow::anyhow!("invalid generate sampling_mask payload: {error}")
-                })?);
+        if let Some(sampling_mask) = take_sampling_mask(&mut engine_data)? {
+            choice.sampling_mask = Some(sampling_mask);
         }
         if let Some(kv_transfer_params) = engine_data.remove("kv_transfer_params") {
             self.kv_transfer_params = Some(kv_transfer_params);
@@ -642,6 +658,143 @@ impl GenerateAggregator {
             prompt_logprobs,
             kv_transfer_params,
         })
+    }
+}
+
+/// Token counts for a streaming response, shaped like vLLM's `UsageInfo`.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenerateUsage {
+    pub prompt_tokens: usize,
+    pub completion_tokens: usize,
+    pub total_tokens: usize,
+}
+
+impl GenerateUsage {
+    fn new(prompt_tokens: usize, completion_tokens: usize) -> Self {
+        Self {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+        }
+    }
+}
+
+/// One choice delta in a streaming `GenerateStreamResponse`.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GenerateStreamChoice {
+    pub index: u32,
+
+    pub token_ids: Vec<u32>,
+
+    pub logprobs: Option<GenerateLogprobs>,
+
+    pub finish_reason: Option<String>,
+
+    pub routed_experts: Option<GenerateRoutedExperts>,
+
+    pub sampling_mask: Option<Vec<Vec<u32>>>,
+}
+
+/// One SSE event of a streaming response. As in vLLM, the optional final
+/// event has no choices and carries the request's usage.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GenerateStreamResponse {
+    pub request_id: String,
+
+    pub choices: Vec<GenerateStreamChoice>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<GenerateUsage>,
+}
+
+/// Turns each worker delta into one client event.
+pub(crate) struct GenerateStreamer {
+    request_id: String,
+    options: GenerateResponseOptions,
+    include_usage: bool,
+    include_continuous_usage: bool,
+    prompt_tokens: usize,
+    completion_tokens: usize,
+    finished: bool,
+}
+
+impl GenerateStreamer {
+    pub(crate) fn new(request: &GenerateRequest, request_id: String) -> Self {
+        let stream_options = request.stream_options.as_ref();
+        Self {
+            request_id,
+            options: request.response_options(),
+            include_usage: stream_options.and_then(|o| o.include_usage) == Some(true),
+            include_continuous_usage: stream_options.and_then(|o| o.continuous_usage_stats)
+                == Some(true),
+            prompt_tokens: request.token_ids.len(),
+            completion_tokens: 0,
+            finished: false,
+        }
+    }
+
+    pub(crate) fn chunk(
+        &mut self,
+        mut output: LLMEngineOutput,
+    ) -> Result<Option<GenerateStreamResponse>> {
+        let finish_reason = finish_reason(&output)?;
+        let mut engine_data = match output.engine_data.take() {
+            Some(Value::Object(engine_data)) => engine_data,
+            _ => Map::new(),
+        };
+        let routed_experts = take_routed_experts(&mut engine_data)?;
+        let sampling_mask = take_sampling_mask(&mut engine_data)?;
+        if output.token_ids.is_empty() && finish_reason.is_none() {
+            return Ok(None);
+        }
+        let logprobs = if self.options.include_logprobs && !output.token_ids.is_empty() {
+            let mut content = Vec::new();
+            anyhow::ensure!(
+                append_completion_logprobs_from_output(&output, &mut content)?,
+                "generate stream requested logprobs but a token-bearing delta returned none"
+            );
+            Some(GenerateLogprobs { content })
+        } else {
+            None
+        };
+        if let Some(rows) = sampling_mask.as_ref() {
+            anyhow::ensure!(
+                rows.len() == output.token_ids.len(),
+                "generate delta returned {} sampling-mask positions for {} tokens",
+                rows.len(),
+                output.token_ids.len()
+            );
+        }
+        self.completion_tokens += output.token_ids.len();
+        self.finished |= finish_reason.is_some();
+        Ok(Some(GenerateStreamResponse {
+            request_id: self.request_id.clone(),
+            choices: vec![GenerateStreamChoice {
+                index: output.index.unwrap_or(0),
+                token_ids: output.token_ids,
+                logprobs,
+                finish_reason,
+                routed_experts,
+                sampling_mask,
+            }],
+            usage: self.include_continuous_usage.then(|| self.usage()),
+        }))
+    }
+
+    pub(crate) fn finish(&mut self) -> Result<Option<GenerateStreamResponse>> {
+        anyhow::ensure!(
+            self.finished,
+            "generate stream ended without a finish reason"
+        );
+        Ok(self.include_usage.then(|| GenerateStreamResponse {
+            request_id: std::mem::take(&mut self.request_id),
+            choices: Vec::new(),
+            usage: Some(self.usage()),
+        }))
+    }
+
+    fn usage(&self) -> GenerateUsage {
+        GenerateUsage::new(self.prompt_tokens, self.completion_tokens)
     }
 }
 

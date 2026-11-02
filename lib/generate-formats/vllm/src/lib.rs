@@ -4,16 +4,18 @@
 //! vLLM's token-in/token-out `POST /inference/v1/generate`, as a generate format.
 //!
 //! The request stays opaque in `extra_args.vllm_tito` apart from the routing
-//! controls Dynamo projects, including multimodal KV routing hashes. The
-//! unary response is assembled from the worker's typed outputs. Streaming and
-//! migration are not supported yet.
+//! controls Dynamo projects, including multimodal KV routing hashes. Responses
+//! are built from the worker's typed outputs: one SSE event per delta when
+//! streaming, else one unary response. Migration is not supported yet.
 
 use axum::http::StatusCode;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use dynamo_runtime::error::DynamoError;
 use serde_json::{Value, json};
 
-use crate::generate::{GenerateAggregator, GenerateRequest, GenerateResponseOptions};
+use crate::generate::{
+    GenerateAggregator, GenerateRequest, GenerateResponseOptions, GenerateStreamer,
+};
 use dynamo_llm::generate_format::{
     Bound, ClientError, ClientRequest, GenerateExchange, GenerateFormat, Opened, Worker,
 };
@@ -481,19 +483,7 @@ impl GenerateFormat for VllmFormat {
 
     fn open(&self, client: ClientRequest<'_>) -> Result<Opened, ClientError> {
         let request: GenerateRequest = client.json()?;
-        let validation = request.validate().map_err(ClientError::new).and_then(|()| {
-            if request.stream {
-                Err(ClientError {
-                    status: StatusCode::NOT_IMPLEMENTED,
-                    message:
-                        "streaming (stream=true) is not implemented for /inference/v1/generate yet"
-                            .to_string(),
-                    response: None,
-                })
-            } else {
-                Ok(())
-            }
-        });
+        let validation = request.validate().map_err(ClientError::new);
         // vLLM keeps request metadata in headers first, then the body.
         let header = |name| client.headers.get(name).and_then(|v| v.to_str().ok());
         let request_id = header(X_REQUEST_ID_HEADER)
@@ -505,11 +495,18 @@ impl GenerateFormat for VllmFormat {
         Ok(Opened {
             model: request.model.clone(),
             request_id: request_id.clone(),
-            stream: false,
+            stream: request.stream,
             input_tokens: request.token_ids.len(),
             validation,
             bind: Box::new(move |worker| {
-                let options = request.response_options();
+                let exchange = if request.stream {
+                    VllmExchange::Stream(GenerateStreamer::new(&request, request_id.clone()))
+                } else {
+                    VllmExchange::Unary {
+                        options: request.response_options(),
+                        aggregator: GenerateAggregator::new(request_id.clone()),
+                    }
+                };
                 let request = preprocessed_from_generate(
                     request,
                     worker.model,
@@ -520,10 +517,7 @@ impl GenerateFormat for VllmFormat {
                 .map_err(|error| ClientError::new(error.to_string()))?;
                 Ok(Bound {
                     request,
-                    exchange: Box::new(VllmExchange {
-                        aggregator: GenerateAggregator::new(request_id),
-                        options,
-                    }),
+                    exchange: Box::new(exchange),
                 })
             }),
         })
@@ -534,9 +528,16 @@ impl GenerateFormat for VllmFormat {
     }
 }
 
-struct VllmExchange {
-    aggregator: GenerateAggregator,
-    options: GenerateResponseOptions,
+enum VllmExchange {
+    Unary {
+        aggregator: GenerateAggregator,
+        options: GenerateResponseOptions,
+    },
+    Stream(GenerateStreamer),
+}
+
+fn to_client(response: impl serde::Serialize) -> Result<Value, DynamoError> {
+    serde_json::to_value(response).map_err(|error| DynamoError::msg(error.to_string()))
 }
 
 impl GenerateExchange for VllmExchange {
@@ -544,22 +545,42 @@ impl GenerateExchange for VllmExchange {
         &mut self,
         output: LLMEngineOutput,
         _prefill: bool,
-        _emit: &mut dyn FnMut(&Value),
+        emit: &mut dyn FnMut(&Value),
     ) -> Result<(), DynamoError> {
-        self.aggregator
-            .apply_output(output, self.options)
-            .map_err(|error| DynamoError::from(error.as_ref()))
+        let error = |error: anyhow::Error| DynamoError::from(error.as_ref());
+        match self {
+            Self::Unary {
+                aggregator,
+                options,
+            } => aggregator.apply_output(output, *options).map_err(error),
+            Self::Stream(streamer) => {
+                if let Some(event) = streamer.chunk(output).map_err(error)? {
+                    emit(&to_client(event)?);
+                }
+                Ok(())
+            }
+        }
     }
 
     fn finish(&mut self) -> Result<Option<Value>, DynamoError> {
-        let aggregator =
-            std::mem::replace(&mut self.aggregator, GenerateAggregator::new(String::new()));
-        let response = aggregator
-            .finish(self.options)
-            .map_err(|error| DynamoError::from(error.as_ref()))?;
-        serde_json::to_value(response)
-            .map(Some)
-            .map_err(|error| DynamoError::msg(error.to_string()))
+        match self {
+            Self::Unary {
+                aggregator,
+                options,
+            } => {
+                let aggregator =
+                    std::mem::replace(aggregator, GenerateAggregator::new(String::new()));
+                let response = aggregator
+                    .finish(*options)
+                    .map_err(|error| DynamoError::from(error.as_ref()))?;
+                to_client(response).map(Some)
+            }
+            Self::Stream(streamer) => streamer
+                .finish()
+                .map_err(|error| DynamoError::from(error.as_ref()))?
+                .map(to_client)
+                .transpose(),
+        }
     }
 }
 
