@@ -99,7 +99,7 @@ HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 # Dynamo sends a required or named tool_choice as a JSON schema, which
 # TensorRT-LLM enforces only with a guided-decoding backend.
 TRTLLM_EXTRA_CONFIG=$(mktemp "${TMPDIR:-/tmp}/dynamo-trtllm-sidecar.XXXXXX.yaml")
-TRTLLM_REQUIRED_OVERRIDES='{"guided_decoding_backend": "xgrammar"}'
+TRTLLM_REQUIRED_OVERRIDES='{}'
 if [[ "${TRTLLM_DISABLE_GUIDED_DECODING:-0}" == "1" ]]; then
     TRTLLM_REQUIRED_OVERRIDES='{"guided_decoding_backend": null}'
 fi
@@ -109,7 +109,8 @@ trtllm_write_merged_config \
     "${AGG_ENGINE_ARGS:-}" \
     "$TRTLLM_OVERRIDES" \
     "$TRTLLM_EXTRA_CONFIG" \
-    "$TRTLLM_PYTHON"
+    "$TRTLLM_PYTHON" \
+    '{"guided_decoding_backend":"xgrammar"}'
 
 print_launch_banner "Launching TensorRT-LLM OpenEngine-gRPC Sidecar (1 GPU)" "$MODEL" "$HTTP_PORT" \
     "TensorRT-LLM gRPC: 127.0.0.1:${TRTLLM_GRPC_PORT}" \

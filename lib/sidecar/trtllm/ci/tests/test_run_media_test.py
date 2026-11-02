@@ -45,18 +45,19 @@ class MediaResponseTests(unittest.TestCase):
             ):
                 runner.validate_response("video", "A rotating triangle.", response, 21)
 
-    def test_audio_requires_expected_transcription_and_completion(self):
-        response = {"prompt_tokens": 0, "completion_tokens": 17}
+    def test_audio_requires_expected_transcription_and_authoritative_usage(self):
+        response = {"prompt_tokens": 4, "completion_tokens": 17}
         runner.validate_response("audio", "Thoughts affected Hester.", response, 0)
         with self.assertRaisesRegex(AssertionError, "transcription"):
             runner.validate_response("audio", "An unrelated sentence.", response, 0)
-        with self.assertRaisesRegex(AssertionError, "token usage"):
-            runner.validate_response(
-                "audio",
-                "Thoughts affected Hester.",
-                {"prompt_tokens": 0, "completion_tokens": 0},
-                0,
-            )
+        for usage in (
+            {"prompt_tokens": 0, "completion_tokens": 17},
+            {"prompt_tokens": 4, "completion_tokens": 0},
+        ):
+            with self.subTest(usage=usage), self.assertRaisesRegex(
+                AssertionError, "token usage"
+            ):
+                runner.validate_response("audio", "Thoughts affected Hester.", usage, 0)
 
     def test_audio_selects_whisper_without_changing_image_identity(self):
         config = {

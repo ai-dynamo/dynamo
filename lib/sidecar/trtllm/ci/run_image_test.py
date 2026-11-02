@@ -131,8 +131,9 @@ def validate_response(media, caption, response, input_token_count):
         raise AssertionError(
             f"Expected a triangle in the video description, got: {caption}"
         )
-    if response["completion_tokens"] <= 0 or (
-        media != "audio" and response["prompt_tokens"] <= input_token_count
+    if (
+        response["completion_tokens"] <= 0
+        or response["prompt_tokens"] <= input_token_count
     ):
         raise AssertionError(f"Missing authoritative {media} token usage: {response}")
 
