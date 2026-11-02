@@ -29,8 +29,9 @@ kv_cache_config:
   # See https://github.com/ai-dynamo/dynamo/issues/5086 for the measured impact.
   enable_block_reuse: true
 
-cache_transceiver_config:
-  backend: DEFAULT
+# No cache_transceiver_config: an aggregated worker transfers no KV cache, and
+# with one TensorRT-LLM requires the CPP transceiver for the KV cache manager v1
+# that multimodal KV events (agg_multimodal.sh --publish-kv-events) use.
 
 # Capture CUDA graphs for steady-state prefill/decode kernels. Required to
 # amortize per-launch overhead; without this, enabling `enable_block_reuse`

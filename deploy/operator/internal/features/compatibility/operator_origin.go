@@ -20,6 +20,8 @@ package compatibility
 import (
 	semver "github.com/Masterminds/semver/v3"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	runtimefeatures "github.com/ai-dynamo/dynamo/deploy/operator/internal/features/runtime"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -69,4 +71,19 @@ func (fg Gate) Enabled(annotations map[string]string) bool {
 		"enabled", enabled)
 
 	return enabled
+}
+
+// RuntimeGate requires both runtime support and an eligible resource origin.
+// Keeping both thresholds in one gate prevents callers from omitting either check.
+type RuntimeGate struct {
+	Name              string
+	MinOriginVersion  semver.Version
+	MinRuntimeVersion runtimeversion.Version
+}
+
+// Enabled reports whether the runtime and immutable operator origin meet both thresholds.
+// An unknown runtime or missing/invalid origin disables the feature.
+func (fg RuntimeGate) Enabled(version *runtimeversion.Version, annotations map[string]string) bool {
+	return (Gate{Name: fg.Name, MinOriginVersion: fg.MinOriginVersion}).Enabled(annotations) &&
+		(runtimefeatures.Gate{Name: fg.Name, MinRuntimeVersion: fg.MinRuntimeVersion}).Enabled(version)
 }

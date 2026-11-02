@@ -35,19 +35,21 @@ class InProcessTransport(PluginTransport):
     methods MUST NOT do blocking IO (HTTP, file, ``time.sleep > 100ms``);
     otherwise thread pool exhaustion will block the orchestrator. If
     your plugin needs IO, write it as ``async def``.
+
+    ``timeout_seconds=None`` runs every call to completion (replay).
     """
 
     def __init__(
         self,
         plugin_id: str,
         instance: Any,
-        timeout_seconds: float = 5.0,
+        timeout_seconds: float | None = 5.0,
     ) -> None:
         if instance is None:
             raise ValueError(
                 f"InProcessTransport(plugin_id={plugin_id!r}): instance must not be None"
             )
-        if timeout_seconds <= 0:
+        if timeout_seconds is not None and timeout_seconds <= 0:
             raise ValueError(
                 f"InProcessTransport(plugin_id={plugin_id!r}): "
                 f"timeout_seconds must be positive, got {timeout_seconds}"
@@ -89,6 +91,9 @@ class InProcessTransport(PluginTransport):
                 coro = asyncio.to_thread(fn, request)
             return await asyncio.wait_for(coro, self.timeout_seconds)
         except asyncio.TimeoutError as e:
+            if self.timeout_seconds is None:
+                # No deadline expired: the plugin raised it.
+                raise self._call_error(method, e) from e
             raise PluginTimeoutError(
                 f"plugin {self.plugin_id!r} method {method!r} exceeded "
                 f"timeout_seconds={self.timeout_seconds}",
@@ -100,13 +105,16 @@ class InProcessTransport(PluginTransport):
             # Plugin already raised a typed call error; propagate as-is
             raise
         except Exception as e:
-            raise PluginCallError(
-                f"plugin {self.plugin_id!r} method {method!r} raised "
-                f"{type(e).__name__}: {e}",
-                plugin_id=self.plugin_id,
-                method=method,
-                cause=e,
-            ) from e
+            raise self._call_error(method, e) from e
+
+    def _call_error(self, method: str, error: Exception) -> PluginCallError:
+        return PluginCallError(
+            f"plugin {self.plugin_id!r} method {method!r} raised "
+            f"{type(error).__name__}: {error}",
+            plugin_id=self.plugin_id,
+            method=method,
+            cause=error,
+        )
 
     async def close(self) -> None:
         # In-process plugin instance lifecycle is owned by orchestrator;

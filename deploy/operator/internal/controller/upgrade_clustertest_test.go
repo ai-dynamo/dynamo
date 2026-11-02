@@ -23,6 +23,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/clusterenv"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/golden"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -59,6 +60,7 @@ func prepareUpgradeHistory(ctx context.Context, c client.Client) (func(context.C
 	if len(inputs) == 0 {
 		return nil, fmt.Errorf("no historical inputs")
 	}
+	inputs = append(inputs, upgradeMissingOriginInput)
 	snapshots := map[string][]unstructured.Unstructured{}
 	for _, input := range inputs {
 		objects, err := golden.ReadManifests(input)
@@ -246,7 +248,7 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 			operatorConfig.MPI.SSHSecretNamespace = namespace
 			require.Empty(t, configvalidation.ValidateOperatorConfiguration(operatorConfig))
 			env.StartManager(func(mgr ctrl.Manager) error {
-				opts := SetupOptions{Config: operatorConfig, RuntimeConfig: &common.RuntimeConfig{Gate: features.Gates{Grove: true, LWS: true}}}
+				opts := SetupOptions{Config: operatorConfig, RuntimeConfig: &common.RuntimeConfig{Gate: features.Gates{Grove: true, LWS: true, DisaggregatedSet: true}}}
 				if err := SetupDynamoGraphDeployment(mgr, DynamoGraphDeploymentSetupOptions{SetupOptions: opts}); err != nil {
 					return err
 				}
@@ -262,17 +264,19 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 					return err == nil && live.Status.ObservedGeneration == live.Generation && live.Annotations[consts.AnnotationCurrentWorkerHashV2] == want
 				}, 90*time.Second, 200*time.Millisecond)
 			}
+			dgd = getOnlyClusterDGD(t, ctx, env.Client(), namespace)
 			var after []unstructured.Unstructured
 			if dgd.Annotations[consts.KubeAnnotationEnableGrove] == "false" {
 				t.Log("Wait for each DCD and its immediate workload without requiring serving Pods")
 				require.Eventually(t, func() bool {
 					var err error
-					after, err = captureUpgradeComponent(t, env, completed, len(dgd.Spec.Components))
+					after, err = captureUpgradeComponent(t, env, completed, upgradeExpectedDCDs(dgd))
 					return err == nil
 				}, 90*time.Second, 200*time.Millisecond, "component workload graph did not converge")
 			} else {
 				after = captureUpgrade(t, env)
 			}
+			checkUpgradeWorkloadMatrix(t, relative, dgd, after)
 			checkUpgradeGroveMatrix(t, relative, getOnlyClusterDGD(t, ctx, env.Client(), namespace), after)
 			if isHistory {
 				if err := upgradeSafetyError(transition.hashChanged, before, after); err != nil {
@@ -295,37 +299,24 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
 				require.NoError(t, golden.WriteManifests(path, after))
 			}
-			if !isHistory && !item.promote && strings.HasSuffix(relative, "/component") && !t.Failed() {
-				t.Log("An intentional worker edit must reach a newly rendered Deployment even while Pods are blocked")
+			if !isHistory && !item.promote && (strings.HasSuffix(relative, "/component") || strings.HasSuffix(relative, "/disaggregatedset")) && !t.Failed() {
+				t.Log("An intentional worker edit must reach every immediate worker template while Pods are blocked")
+				var workers []string
 				current := getOnlyClusterDGD(t, ctx, env.Client(), namespace)
 				for i := range current.Spec.Components {
 					if current.Spec.Components[i].ComponentType == api.ComponentTypeFrontend {
 						continue
 					}
+					workers = append(workers, current.Spec.Components[i].ComponentName)
 					container := &current.Spec.Components[i].PodTemplate.Spec.Containers[0]
 					container.Env = append(container.Env, corev1.EnvVar{Name: "WORKER_REVISION", Value: "2"})
 				}
+				desiredHash, err := dynamo.ComputeDGDWorkersSpecHash(current)
+				require.NoError(t, err)
 				require.NoError(t, env.Client().Update(ctx, current))
-				require.Eventually(t, func() bool {
-					for _, object := range captureUpgrade(t, env) {
-						if object.GetKind() != "Deployment" {
-							continue
-						}
-						containers, _, err := unstructured.NestedSlice(object.Object, "spec", "template", "spec", "containers")
-						if err != nil {
-							return false
-						}
-						for _, container := range containers {
-							for _, variable := range container.(map[string]any)["env"].([]any) {
-								v := variable.(map[string]any)
-								if v["name"] == "WORKER_REVISION" && v["value"] == "2" {
-									return true
-								}
-							}
-						}
-					}
-					return false
-				}, 60*time.Second, 200*time.Millisecond, "worker edit did not reach a Deployment")
+				require.EventuallyWithT(t, func(c *assert.CollectT) {
+					assert.NoError(c, upgradeWorkerEditError(captureUpgrade(t, env), workers, desiredHash))
+				}, 60*time.Second, 200*time.Millisecond, "worker edit did not reach every immediate template")
 				require.Error(t, upgradeSafetyError(false, after, captureUpgrade(t, env)))
 			}
 			if isHistory && strings.HasSuffix(relative, "/sglang-1.5") && !t.Failed() {
@@ -374,6 +365,8 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 		})
 	}
 	t.Run("component-history-barrier", testUpgradeComponentHistoryBarrier)
+	t.Run("disaggregatedset-replay", testUpgradeDisaggregatedSetReplay)
+	t.Run("missing-origin", testUpgradeMissingOrigin)
 }
 
 // Upgrade capture and replay use the same version source as production admission.

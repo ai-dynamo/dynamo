@@ -305,6 +305,8 @@ def test_build_dgd_config_vllm_disagg_preserves_explicit_kv_config() -> None:
         if component.get("type") == "decode"
     )
 
+    for args in (prefill_args, decode_args):
+        assert not any(arg.startswith("--disaggregation-mode=") for arg in args)
     assert prefill_args.count("--disaggregation-mode") == 1
     assert prefill_args[prefill_args.index("--disaggregation-mode") + 1] == "prefill"
     assert prefill_args.count("--kv-transfer-config") == 1
@@ -348,6 +350,136 @@ def test_build_dgd_config_vllm_disagg_removes_legacy_role_flags() -> None:
         assert "--is-decode-worker" not in args
         assert args.count("--disaggregation-mode") == 1
         assert args[args.index("--disaggregation-mode") + 1] == expected_mode
+
+
+@pytest.mark.parametrize("backend", ["sglang", "trtllm"])
+def test_build_dgd_config_disagg_sets_canonical_worker_roles(backend: str) -> None:
+    """AIC tuning args replace blueprint args, so the worker role is re-applied."""
+    modifier = CONFIG_MODIFIERS[backend]
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="test/model",
+        image=f"example/{backend}:test",
+        prefill_cli_args=["--tensor-parallel-size", "1"],
+        decode_cli_args=["--disaggregation-mode=prefill"],
+    )
+
+    for component_type in ("prefill", "decode"):
+        args = _main_container(_component_by_type(dgd_config, component_type))["args"]
+        assert not any(arg.startswith("--disaggregation-mode=") for arg in args)
+        assert args.count("--disaggregation-mode") == 1
+        assert args[args.index("--disaggregation-mode") + 1] == component_type
+
+
+def test_build_dgd_config_trtllm_disagg_restores_runtime_args() -> None:
+    modifier = CONFIG_MODIFIERS["trtllm"]
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="test/model",
+        image="example/trtllm:test",
+        prefill_cli_args=["--tensor-parallel-size", "1"],
+        decode_cli_args=["--tensor-parallel-size", "2"],
+    )
+
+    prefill_args = _main_container(_component_by_type(dgd_config, "prefill"))["args"]
+    decode_args = _main_container(_component_by_type(dgd_config, "decode"))["args"]
+
+    assert prefill_args.count("--publish-kv-events") == 1
+    assert "--publish-kv-events" not in decode_args
+
+
+@pytest.mark.parametrize(
+    "prefill_kv_event_flag",
+    [
+        "--no-publish-kv-events",
+        "--no-publish-events-and-metrics",
+        "--publish-events-and-metrics",
+    ],
+)
+def test_build_dgd_config_trtllm_disagg_preserves_explicit_kv_events(
+    prefill_kv_event_flag: str,
+) -> None:
+    modifier = CONFIG_MODIFIERS["trtllm"]
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="test/model",
+        image="example/trtllm:test",
+        prefill_cli_args=[prefill_kv_event_flag],
+        decode_cli_args=["--publish-kv-events"],
+    )
+
+    prefill_args = _main_container(_component_by_type(dgd_config, "prefill"))["args"]
+    decode_args = _main_container(_component_by_type(dgd_config, "decode"))["args"]
+
+    assert prefill_kv_event_flag in prefill_args
+    assert "--publish-kv-events" not in prefill_args
+    assert decode_args.count("--publish-kv-events") == 1
+
+
+def test_build_dgd_config_sglang_disagg_restores_runtime_args() -> None:
+    modifier = CONFIG_MODIFIERS["sglang"]
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="test/model",
+        image="example/sglang:test",
+        prefill_cli_args=["--tensor-parallel-size", "1"],
+        decode_cli_args=["--tensor-parallel-size", "2"],
+    )
+
+    prefill_args = _main_container(_component_by_type(dgd_config, "prefill"))["args"]
+    decode_args = _main_container(_component_by_type(dgd_config, "decode"))["args"]
+
+    blueprint_args = _main_container(
+        _component_by_type(modifier.load_default_config(mode="disagg"), "prefill")
+    )["args"]
+    blueprint_port = blueprint_args[
+        blueprint_args.index("--disaggregation-bootstrap-port") + 1
+    ]
+
+    for args in (prefill_args, decode_args):
+        assert args[args.index("--disaggregation-transfer-backend") + 1] == "nixl"
+        assert args.count("--disaggregation-bootstrap-port") == 1
+        assert args[args.index("--disaggregation-bootstrap-port") + 1] == blueprint_port
+        assert args[args.index("--host") + 1] == "0.0.0.0"
+
+
+def test_build_dgd_config_sglang_disagg_preserves_explicit_runtime_args() -> None:
+    modifier = CONFIG_MODIFIERS["sglang"]
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="test/model",
+        image="example/sglang:test",
+        prefill_cli_args=[
+            "--disaggregation-transfer-backend=mooncake",
+            "--disaggregation-bootstrap-port=30001",
+            "--host=::",
+        ],
+        decode_cli_args=[
+            "--disaggregation-transfer-backend",
+            "mooncake",
+            "--disaggregation-bootstrap-port",
+            "30001",
+        ],
+    )
+
+    prefill_args = _main_container(_component_by_type(dgd_config, "prefill"))["args"]
+    decode_args = _main_container(_component_by_type(dgd_config, "decode"))["args"]
+
+    assert "--disaggregation-transfer-backend" not in prefill_args
+    assert "--disaggregation-transfer-backend=mooncake" in prefill_args
+    assert "--disaggregation-bootstrap-port" not in prefill_args
+    assert "--disaggregation-bootstrap-port=30001" in prefill_args
+    assert "--host" not in prefill_args
+    assert "--host=::" in prefill_args
+    assert decode_args.count("--disaggregation-transfer-backend") == 1
+    assert (
+        decode_args[decode_args.index("--disaggregation-transfer-backend") + 1]
+        == "mooncake"
+    )
+    assert decode_args.count("--disaggregation-bootstrap-port") == 1
+    assert (
+        decode_args[decode_args.index("--disaggregation-bootstrap-port") + 1] == "30001"
+    )
 
 
 @pytest.mark.parametrize("mode", ["agg", "disagg"])

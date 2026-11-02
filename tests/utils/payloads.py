@@ -384,6 +384,47 @@ class ChatPayload(BasePayload):
         )
 
 
+@dataclass
+class StopStringChatPayload(ChatPayload):
+    """End a chat completion on its single stop string.
+
+    Checks the finish reason and that the output ends at the stop string,
+    keeping it only with include_stop_str_in_output. With metrics, also
+    requires the engine to stop at the match instead of running to max_tokens.
+    """
+
+    metrics: EngineMetrics | None = field(default=None, kw_only=True)
+    _before: float | None = field(default=None, init=False, repr=False)
+    _completion_progress: float = field(default=0, init=False, repr=False)
+
+    def bind_environment(self, env: dict[str, str]) -> None:
+        if self.metrics is not None:
+            self.metrics.bind_environment(env)
+
+    def before_request(self) -> None:
+        if self.metrics is not None:
+            self._completion_progress = self.metrics.completion_progress(
+                self.body["max_tokens"]
+            )
+            self.metrics.wait_for_scheduler()
+            self._before = self.metrics.progress()
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        (stop,) = self.body["stop"]
+        choice = response.json()["choices"][0]
+        assert choice["finish_reason"] == "stop", choice
+        if self.body.get("include_stop_str_in_output") is True:
+            assert content.endswith(stop), f"Expected output to end with {stop!r}"
+        else:
+            assert stop not in content, f"Expected {stop!r} trimmed from output"
+        if self.metrics is not None:
+            assert self._before is not None, "before_request must run first"
+            self.metrics.assert_cancelled(
+                before=self._before, completion_progress=self._completion_progress
+            )
+
+
 def _validate_chat_token_usage(result: Dict[str, Any]) -> None:
     usage = result.get("usage")
     assert isinstance(usage, dict), f"Missing usage: {result!r}"
