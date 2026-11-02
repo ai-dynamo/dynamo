@@ -108,12 +108,17 @@ impl HttpFrontend {
             anyhow::bail!("custom router plugins require a dynamic engine");
         }
 
-        if engine_config
-            .local_model()
-            .router_config()
-            .router_mode
-            .is_kv_routing()
+        // Hosts that pass no resolved plugins resolve the policy file later, so read its
+        // selection from the config as well.
+        let router_config = engine_config.local_model().router_config();
+        if router_config.router_mode.is_kv_routing()
             && !self.plugins.has_custom_worker_selection()
+            && matches!(
+                router_config
+                    .kv_router_config
+                    .selected_worker_selection_policy_instance(),
+                Ok(None)
+            )
         {
             tracing::warn!(
                 "Starting with Dynamo 1.8, --router-mode kv will default to the two-tier cost \
