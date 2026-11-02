@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Phase 2 in cluster a: a Service over the echo pods exported by a ServiceExport
+# of the multicluster.x-k8s.io/v1alpha1 version, not by a label.
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-alpha
+  labels:
+    app: echo
+spec:
+  selector:
+    app: echo
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: multicluster.x-k8s.io/v1alpha1
+kind: ServiceExport
+metadata:
+  name: echo-alpha

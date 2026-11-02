@@ -1,0 +1,97 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Phase 3: the Global Discovery Service in the hub with pools and routers from
+# the EndpointSlices that mcs-controller imports (--pool-discovery mcs). After
+# container/global-discovery-service.yaml: it needs only read access to
+# EndpointSlices, cluster-wide.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: global-discovery
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: global-discovery-service
+  namespace: global-discovery
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mcs-e2e-global-discovery-service
+rules:
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mcs-e2e-global-discovery-service
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mcs-e2e-global-discovery-service
+subjects:
+  - kind: ServiceAccount
+    name: global-discovery-service
+    namespace: global-discovery
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: global-discovery-service
+  namespace: global-discovery
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: global-discovery-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: global-discovery-service
+    spec:
+      serviceAccountName: global-discovery-service
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: global-discovery
+          image: __GDS_IMAGE__
+          imagePullPolicy: Never
+          args:
+            - --listen=0.0.0.0:8080
+            - --pool-discovery=mcs
+            - --router-namespace=gr
+            - --router-service=global-router
+            - --router-port-name=grpc
+          env:
+            - name: DYN_LOG
+              value: info
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: global-discovery-service
+  namespace: global-discovery
+spec:
+  selector:
+    app.kubernetes.io/name: global-discovery-service
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Phase 2 conflict test, cluster b: the same Service name with port 9090 under
+# the same port name, exported later, so its port conflicts with a's.
+apiVersion: v1
+kind: Service
+metadata:
+  name: shared
+  labels:
+    dynamo.nvidia.com/mcs-export: "true"
+spec:
+  selector:
+    app: shared
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090

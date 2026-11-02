@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Phase 3: the ServiceExports of the pool in cluster a, applied in namespace
+# demo. The PoolRelay Service is exported as multicluster.x-k8s.io/v1alpha1,
+# the frontend as v1beta1.
+apiVersion: multicluster.x-k8s.io/v1alpha1
+kind: ServiceExport
+metadata:
+  name: demo-pool-relay
+---
+apiVersion: multicluster.x-k8s.io/v1beta1
+kind: ServiceExport
+metadata:
+  name: demo-frontend
