@@ -24,6 +24,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -1428,6 +1429,70 @@ func TestDGDRRunInputResolvesRuntimeVersion(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDGDRRunInputIsParetoFollowsEffectiveTarget asserts that dgdr_run.is_pareto is derived
+// from the effective optimization.target after spec.aisimulate.inputOverrides are applied,
+// not from the typed spec.objective.mode. This covers both directions:
+//   - typed Optimize overridden to pareto → is_pareto must be true
+//   - typed Pareto overridden to a scalar target → is_pareto must be false
+func TestDGDRRunInputIsParetoFollowsEffectiveTarget(t *testing.T) {
+	tests := []struct {
+		name           string
+		objectiveMode  nvidiacomv1beta2.ObjectiveMode
+		metric         *nvidiacomv1beta2.ObjectiveMetric
+		overrides      map[string]any
+		wantIsPareto   bool
+		wantTarget     string
+	}{
+		{
+			name:          "typed Optimize overridden to pareto via inputOverrides",
+			objectiveMode: nvidiacomv1beta2.ObjectiveModeOptimize,
+			metric:        objectiveMetric("ThroughputPerGPU"),
+			overrides:     map[string]any{"optimization": map[string]any{"target": "pareto"}},
+			wantIsPareto:  true,
+			wantTarget:    "pareto",
+		},
+		{
+			name:          "typed Pareto overridden to scalar target via inputOverrides",
+			objectiveMode: nvidiacomv1beta2.ObjectiveModePareto,
+			overrides:     map[string]any{"optimization": map[string]any{"target": "throughput_per_gpu"}},
+			wantIsPareto:  false,
+			wantTarget:    "throughput_per_gpu",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw, err := json.Marshal(tt.overrides)
+			if err != nil {
+				t.Fatalf("marshal overrides: %v", err)
+			}
+			run := dgdrRunForTest(t, map[string]any{})
+			run.Spec.Objective = &nvidiacomv1beta2.ObjectiveSpec{Mode: tt.objectiveMode, Metric: tt.metric}
+			run.Spec.AISimulate = &nvidiacomv1beta2.AISimulateSpec{InputOverrides: &runtime.RawExtension{Raw: raw}}
+
+			t.Log("Lower the effective input through the real lowering/merge path")
+			input, err := dgdrRunInput(run, "example.com/dynamo-planner:1.7.0", "1.7.0")
+			if err != nil {
+				t.Fatalf("dgdrRunInput: %v", err)
+			}
+
+			t.Log("Assert optimization.target and dgdr_run.is_pareto agree")
+			effectiveTarget, _, _ := unstructured.NestedString(input, "optimization", "target")
+			if effectiveTarget != tt.wantTarget {
+				t.Errorf("optimization.target = %q, want %q", effectiveTarget, tt.wantTarget)
+			}
+			isPareto, _, _ := unstructured.NestedBool(input, "dgdr_run", "is_pareto")
+			if isPareto != tt.wantIsPareto {
+				t.Errorf("dgdr_run.is_pareto = %v, want %v", isPareto, tt.wantIsPareto)
+			}
+		})
+	}
+}
+
+func objectiveMetric(name string) *nvidiacomv1beta2.ObjectiveMetric {
+	m := nvidiacomv1beta2.ObjectiveMetric(name)
+	return &m
 }
 
 func assertDGDRRunSupportResources(

@@ -1082,6 +1082,40 @@ def test_pinned_aisimulate_dispatches_the_complete_lifecycle_to_dgdr_run(
     assert tags(terminal) == ["a"]
 
 
+def test_on_round_tolerates_upstream_candidate_objects(
+    tmp_path: Path,
+    renders: list[str],
+) -> None:
+    """on_round must not crash when AISimulate passes Candidate objects (not CandidateRecords).
+
+    Candidate has no .status or .candidate_id fields.  A prior version of this callback
+    iterated the list and called _is_feasible(record), which reads record.status; that
+    raised AttributeError on the first real non-empty Pareto round and broke the search
+    (AISimulate wraps callback exceptions as OutputAdapterExecutionError).  The regression
+    is detected by calling on_round with a real Candidate from the pinned SDK.
+    """
+    from aisimulate.sweeper.config import Candidate
+
+    pareto_candidate = Candidate(
+        config={"backend": "vllm", "backend_version": "0.1"},
+        used_gpus=1,
+        score=1000.0,
+        metrics={"output_throughput_tok_s": 1000.0},
+        objectives={"throughput_per_gpu": 1000.0, "throughput_per_user": 500.0},
+    )
+
+    adapter = DGDRRunOutputAdapter(
+        make_config(tmp_path, is_pareto=True),
+        workload=None,
+    )
+    # Must not raise — in particular, must not attempt pareto_candidate.status or
+    # pareto_candidate.candidate_id (which Candidate does not carry).
+    adapter.on_round(1, [pareto_candidate])
+
+    # The round counter must advance and the adapter must still be accepting.
+    assert adapter._round_no == 1
+
+
 def test_pinned_aisimulate_pareto_lifecycle_live_snapshot_reports_front(
     tmp_path: Path,
     renders: list[str],
@@ -1153,6 +1187,16 @@ def test_pinned_aisimulate_pareto_lifecycle_live_snapshot_reports_front(
         recommendation, "resolve_budget", lambda *args, **kwargs: {"cpu_limit": 1}
     )
 
+    from aisimulate.sweeper.config import Candidate as AISCandidate
+
+    pareto_candidate_obj = AISCandidate(
+        config={"backend": "vllm", "backend_version": "0.1"},
+        used_gpus=1,
+        score=9.0,
+        metrics={"output_throughput_tok_s": 9.0},
+        objectives={"throughput_per_gpu": 9.0, "throughput_per_user": 3.0},
+    )
+
     class ParetoLifecycleSweeper:
         def __init__(self, **kwargs: Any) -> None:
             del kwargs
@@ -1169,7 +1213,9 @@ def test_pinned_aisimulate_pareto_lifecycle_live_snapshot_reports_front(
             assert on_candidate is not None
             assert on_round is not None
             on_candidate(pareto_a)
-            on_round(1, [])
+            # Pass a real Candidate object (not a CandidateRecord) to verify that
+            # on_round does not attempt .status or .candidate_id on Pareto payloads.
+            on_round(1, [pareto_candidate_obj])
             return final_result
 
     monkeypatch.setattr(search, "Sweeper", ParetoLifecycleSweeper)
