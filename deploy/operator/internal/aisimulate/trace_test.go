@@ -26,7 +26,7 @@ import (
 func withTrace(spec *v1beta2.DynamoGraphDeploymentRequestSpec, speedup *float64) *v1beta2.DynamoGraphDeploymentRequestSpec {
 	spec.Workload = &v1beta2.WorkloadSpec{Trace: &v1beta2.TraceWorkloadSpec{
 		Format: v1beta2.TraceFormatDynamo,
-		Source: v1beta2.TraceSourceSpec{PVC: &v1beta2.TracePVCSource{ClaimName: "request-traces", Path: "retune/w-1.jsonl.gz"}},
+		Source: v1beta2.TraceSourceSpec{PersistentVolumeClaim: &v1beta2.TracePVCSource{ClaimName: "request-traces", SubPath: "retune/w-1.jsonl.gz"}},
 	}}
 	if speedup != nil {
 		spec.Workload.Trace.Replay = &v1beta2.TraceReplaySpec{ArrivalSpeedupRatio: speedup}
@@ -41,7 +41,7 @@ func TestLowerTraceWorkload(t *testing.T) {
 		wantTraffic string
 	}{
 		{
-			name: "recorded arrival times without a request stop",
+			name: "recorded arrival times in the native dynamo format without a request stop",
 			spec: withTrace(defaultedSpec(), nil),
 			wantTraffic: `{"load":{"type":"trace_timestamps"},` +
 				`"source":{"format":"dynamo","paths":["/var/run/aisimulate/trace/trace.jsonl.gz"],"type":"trace"}}`,
@@ -70,14 +70,26 @@ func TestLowerTraceWorkload(t *testing.T) {
 	}
 }
 
+func TestLowerTraceWorkloadRejectsAFormatWithoutANativeSpelling(t *testing.T) {
+	for _, format := range []v1beta2.TraceFormat{"", "dynamo", "mooncake"} {
+		t.Run(string(format), func(t *testing.T) {
+			spec := withTrace(defaultedSpec(), nil)
+			spec.Workload.Trace.Format = format
+			if _, err := Lower(&spec.NativeSearchInput); err == nil {
+				t.Fatalf("Lower accepted trace format %q", format)
+			}
+		})
+	}
+}
+
 func TestTracePathIsOneFixedFileUnderTheMount(t *testing.T) {
-	for claimPath, want := range map[string]string{
+	for subPath, want := range map[string]string{
 		"retune/w-1.jsonl.gz": "/var/run/aisimulate/trace/trace.jsonl.gz",
 		"retune/w-1.jsonl":    "/var/run/aisimulate/trace/trace.jsonl",
 		"../../etc/passwd":    "/var/run/aisimulate/trace/trace.jsonl",
 	} {
-		if got := TracePath(claimPath); got != want {
-			t.Errorf("TracePath(%q) = %q, want %q", claimPath, got, want)
+		if got := TracePath(subPath); got != want {
+			t.Errorf("TracePath(%q) = %q, want %q", subPath, got, want)
 		}
 	}
 }
