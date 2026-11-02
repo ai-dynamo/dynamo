@@ -916,13 +916,6 @@ class DgdrExecutorConfig(BaseModel):
         min_length=1,
         description="Claim-relative directory of window files: <windows_dir>/<dgd>/.",
     )
-    startup_router_config: dict[str, Any] | None = Field(
-        default=None,
-        description=(
-            "Optional startup KvRouterConfig JSON. It must equal what the planner "
-            "parses from the frontend's args and env; parsing is the source."
-        ),
-    )
     model: str = Field(
         min_length=1,
         description="HF repo id the workers serve (worker --model); AISimulate resolves it.",
@@ -987,9 +980,8 @@ DGDR_TIMEOUT_MARGIN_SECONDS = 600.0
 # DGDR v1beta2 ``spec.recommendation.maxCandidates`` maximum: one Request (a
 # grid shard) carries at most this many router points.
 DGDR_MAX_SHARD_POINTS = 100
-# Router knobs a DGDR v1beta2 Request can search, by public name
-# (``contracts.DGDR_ROUTER_KNOBS``); the Request's router section has no
-# place for the retune extension knobs.
+# Router knobs a DGDR v1beta2 Request can search, by public name; the
+# Request's router section has no place for the retune extension knobs.
 _DGDR_ROUTER_SECTION_KEYS = frozenset(
     {
         "overlap_score_credit",
@@ -1040,7 +1032,7 @@ def dgdr_need_seconds(
 
 
 def balanced_shard_parts(
-    sizes: Sequence[int], max_shards: int, *, parallelism: int | None = None
+    sizes: Sequence[int], max_shards: int, *, parallelism: int
 ) -> tuple[int, ...]:
     """How many chunks to cut each router grid dimension into for DGDR sharding.
 
@@ -1052,22 +1044,21 @@ def balanced_shard_parts(
 
     1. whether the largest shard exceeds ``DGDR_MAX_SHARD_POINTS``, and when
        every split does, its points (so the caller reports the smallest);
-    2. the largest shard's wall time: its ``dgdr_rounds`` with
-       ``parallelism``, its points without;
+    2. the largest shard's wall time, its ``dgdr_rounds`` with
+       ``parallelism``;
     3. the shard count, the largest shard's points, then the parts.
 
     P13 calls it with ``parallelism=run.parallelism``; the live executor
     must plan each window's shards with the same call, so that both see the
-    same largest shard. The default 3 x 9 x 4 grid with ``max_shards=3``
-    gives ``(1, 3, 1)``, three shards of 36 points, with or without
-    parallelism.
+    same largest shard. The default 3 x 9 x 4 grid with ``max_shards=3`` and
+    ``parallelism=8`` gives ``(1, 3, 1)``, three shards of 36 points.
     """
 
     if max_shards < 1:
         raise ValueError(f"max_shards must be at least 1, got {max_shards}")
     if any(size < 1 for size in sizes):
         raise ValueError(f"every grid dimension needs a value, got sizes {sizes}")
-    if parallelism is not None and parallelism < 1:
+    if parallelism < 1:
         raise ValueError(f"parallelism must be at least 1, got {parallelism}")
 
     def splits(index: int, budget: int):
@@ -1082,8 +1073,8 @@ def balanced_shard_parts(
         largest = largest_shard_points(sizes, parts)
         if largest > DGDR_MAX_SHARD_POINTS:
             return (True, largest, math.prod(parts), parts)
-        cost = largest if parallelism is None else dgdr_rounds(largest, parallelism)
-        return (False, cost, math.prod(parts), largest, parts)
+        rounds = dgdr_rounds(largest, parallelism)
+        return (False, rounds, math.prod(parts), largest, parts)
 
     return min(splits(0, max_shards), key=rank)
 

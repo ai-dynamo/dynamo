@@ -547,26 +547,7 @@ def test_p13_uses_the_configured_run_parallelism_and_timeouts():
 # --------------------------------------------------------------- helpers
 
 
-@pytest.mark.parametrize(
-    ("sizes", "max_shards", "parts", "largest"),
-    [
-        ((3, 9, 4), 3, (1, 3, 1), 36),
-        ((3, 9, 4), 2, (1, 1, 2), 54),
-        ((3, 9, 4), 1, (1, 1, 1), 108),
-        # 15 shards of 1 x 2 x 4 beat 12 of 1 x 9 x 1.
-        ((3, 9, 4), 16, (3, 5, 1), 8),
-        ((10,), 3, (3,), 4),
-        ((2, 2), 16, (2, 2), 1),
-        ((), 3, (), 1),
-    ],
-)
-def test_balanced_shard_parts(sizes, max_shards, parts, largest):
-    assert balanced_shard_parts(sizes, max_shards) == parts
-    assert largest_shard_points(sizes, parts) == largest
-    assert math.prod(parts) <= max_shards
-
-
-def test_balanced_shard_parts_minimizes_the_largest_shard_exhaustively():
+def test_balanced_shard_parts_minimizes_the_rounds_exhaustively():
     for sizes in ((3, 9, 4), (5, 7), (2, 3, 5), (12,), (1, 1, 30), (250,)):
         for max_shards in range(1, 17):
             best = min(
@@ -577,8 +558,6 @@ def test_balanced_shard_parts_minimizes_the_largest_shard_exhaustively():
                 if math.prod((a, b, c)[: len(sizes)]) <= max_shards
                 and all(p <= n for p, n in zip((a, b, c)[: len(sizes)], sizes))
             )
-            parts = balanced_shard_parts(sizes, max_shards)
-            assert largest_shard_points(sizes, parts) == best
             # With the Run parallelism, the split takes the fewest rounds, so
             # its largest shard fits and finishes exactly when the smallest
             # largest shard does: P13 and the executor agree.
@@ -611,7 +590,7 @@ def test_balanced_shard_parts_with_parallelism(sizes, max_shards, parallelism, p
 
 @pytest.mark.parametrize(
     ("sizes", "max_shards", "parallelism"),
-    [((3, 0), 3, None), ((3,), 0, None), ((3,), 3, 0)],
+    [((3, 0), 3, 8), ((3,), 0, 8), ((3,), 3, 0)],
 )
 def test_balanced_shard_parts_rejects_bad_input(sizes, max_shards, parallelism):
     with pytest.raises(ValueError):
@@ -623,7 +602,8 @@ def test_default_router_grid_splits_into_three_shards_of_36():
     assert retune is not None
     sizes = [len(values) for values in expand_router_domain(retune).values()]
     assert sizes == [3, 9, 4]
-    parts = balanced_shard_parts(sizes, 3)
+    assert retune.dgdr is not None
+    parts = balanced_shard_parts(sizes, 3, parallelism=retune.dgdr.run.parallelism)
     assert largest_shard_points(sizes, parts) == 36 <= DGDR_MAX_SHARD_POINTS
 
 

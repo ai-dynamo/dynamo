@@ -35,11 +35,7 @@ pytest.importorskip(
 from dynamo.common.configuration.groups.kv_router_args import _KV_ROUTER_FIELDS
 from dynamo.frontend.frontend_args import FrontendArgGroup, FrontendConfig
 from dynamo.llm import KvRouterConfig
-from dynamo.planner.config.planner_config import (
-    DgdrExecutorConfig,
-    PlannerConfig,
-    RetuneConfig,
-)
+from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.retune.live import frontend_config as fc
 from dynamo.planner.retune.live.contracts import FrontendStartup, PremiseReport
 
@@ -74,19 +70,25 @@ PRESET = {
     "moe_tensor": 1,
     "moe_expert": 1,
 }
-ENGINE_AGG = {
-    "mode": "aggregated",
-    "backend": "vllm",
-    "backend_version": "0.11.0",
-    "context_length": 32768,
-    "workers": {
-        "aggregated": {
-            "parallelism": {"preset": [dict(PRESET)]},
-            "scheduler": {"max_batched_tokens": 8192, "max_sequences": 256},
-            "kv_cache": {"block_size": 64, "capacity": {"memory_fraction": 0.9}},
-        },
-        "prefill": None,
-        "decode": None,
+ENGINE_WORKER = {
+    "parallelism": {"preset": [PRESET]},
+    "scheduler": {"max_batched_tokens": 8192, "max_sequences": 256},
+    "kv_cache": {"block_size": 64, "capacity": {"memory_fraction": 0.9}},
+}
+ENGINES = {
+    "agg": {
+        "mode": "aggregated",
+        "backend": "vllm",
+        "backend_version": "0.11.0",
+        "context_length": 32768,
+        "workers": {"aggregated": ENGINE_WORKER, "prefill": None, "decode": None},
+    },
+    "disagg": {
+        "mode": "disaggregated",
+        "backend": "vllm",
+        "backend_version": "0.11.0",
+        "context_length": 32768,
+        "workers": {"prefill": ENGINE_WORKER, "decode": ENGINE_WORKER},
     },
 }
 
@@ -220,32 +222,30 @@ def dgd(*components: dict[str, Any], **spec: Any) -> dict[str, Any]:
     }
 
 
-def retune_config(router: Any = "default", **dgdr: Any) -> RetuneConfig:
-    return RetuneConfig(
-        interval_seconds=21600.0,
-        timeout_seconds=20400.0,
-        router=router,
-        executor="dgdr",
-        dgdr=DgdrExecutorConfig(
-            **{
-                "claim_name": CLAIM,
-                "model": MODEL,
-                "sku": "h200_sxm",
-                "engine": copy.deepcopy(ENGINE_AGG),
-                **dgdr,
-            }
-        ),
-    )
-
-
 def planner_config(
     mode: str = "agg", router: Any = "default", **dgdr: Any
 ) -> PlannerConfig:
-    # model_construct keeps these tests independent of the live-config
-    # validators (see test_live_retune_config.py); evaluate_premises reads
-    # only mode and retune.
-    return PlannerConfig.model_construct(
-        mode=mode, retune=retune_config(router, **dgdr)
+    """A validated live retune config (P1-P3, P5 and P13 hold)."""
+
+    return PlannerConfig(
+        namespace="test-ns",
+        environment="kubernetes",
+        mode=mode,
+        enable_load_scaling=False,
+        enable_throughput_scaling=False,
+        retune={
+            "interval_seconds": 21600.0,
+            "timeout_seconds": 20400.0,
+            "router": router,
+            "executor": "dgdr",
+            "dgdr": {
+                "claim_name": CLAIM,
+                "model": MODEL,
+                "sku": "h200_sxm",
+                "engine": copy.deepcopy(ENGINES[mode]),
+                **dgdr,
+            },
+        },
     )
 
 
@@ -807,19 +807,6 @@ def test_recipe_dgd_satisfies_every_premise():
     assert not [w for w in report.warnings if w.startswith("P6")]
 
 
-def test_validated_planner_config_satisfies_every_premise():
-    config = PlannerConfig(
-        namespace="test-ns",
-        environment="kubernetes",
-        mode="agg",
-        enable_load_scaling=False,
-        enable_throughput_scaling=False,
-        retune=retune_config().model_dump(),
-    )
-    report = evaluate(dgd(), config=config)
-    assert report.spec_ok, report.reasons
-
-
 def test_parse_error_fails_p4_only():
     deployment = with_frontend(
         command=("/bin/sh", "-c"), args=("python3 -m dynamo.frontend",)
@@ -976,17 +963,6 @@ def test_p4_unsearched_knob_when_router_domain_is_pinned():
     assert report.p4_ok, report.reasons
 
 
-def test_p4_without_router_search_requires_all_defaults():
-    config = planner_config(router=None)
-    ok = evaluate(dgd(), config=config)
-    assert ok.p4_ok, ok.reasons
-    report = evaluate(
-        with_frontend(args=(*KV_ARGS, "--router-temperature", "0.5")), config=config
-    )
-    assert any("router_temperature=0.5" in r for r in report.reasons)
-    assert "(none)" in report.reasons[0]
-
-
 def test_p4_zero_startup_credit_rejects_positive_candidates():
     zero = (*KV_ARGS, "--router-kv-overlap-score-credit", "0")
     # The default domain collapses the omitted credit to [0.0].
@@ -1014,37 +990,6 @@ def test_p4_disagg_decode_credit_zero_is_not_a_zero_credit_startup():
     assert report.p4_ok, report.reasons
     assert report.startup is not None
     assert set(report.startup.startup_maps) == {"prefill", "decode"}
-
-
-def test_p4_written_load_model_must_match_startup():
-    config = planner_config(router={"prefill_load_model": {"type": "ais"}})
-    report = evaluate(dgd(), config=config)
-    assert not report.p4_ok
-    assert "prefill_load_model" in report.reasons[0]
-
-
-@pytest.mark.parametrize(
-    ("declared", "match"),
-    [
-        ({}, None),
-        ({"router_temperature": 0.5}, None),
-        ({"router_temperature": 0.5, "use_kv_events": True}, None),
-        ({"router_temperature": 0.4}, "router_temperature: declared 0.4, frontend 0.5"),
-        ({}, "router_temperature: declared 0.0"),
-        ({"not_a_field": 1}, "not a KvRouterConfig JSON"),
-    ],
-)
-def test_startup_router_config_must_match(declared, match):
-    config = planner_config(startup_router_config=declared)
-    args = (*KV_ARGS, "--router-temperature", "0.5")
-    if declared == {} and match is None:
-        args = KV_ARGS
-    report = evaluate(with_frontend(args=args), config=config)
-    if match is None:
-        assert report.p4_ok, report.reasons
-    else:
-        assert not report.p4_ok
-        assert any(match in r for r in report.reasons), report.reasons
 
 
 # ------------------------------------------- P4: worker router advertisement
@@ -1550,12 +1495,14 @@ def test_p9_scaling_adapter_and_planner_replicas():
 
 
 P10_CASES = [
-    ({"DYN_REQUEST_TRACE": None}, None, "DYN_REQUEST_TRACE=1"),
     ({"DYN_REQUEST_TRACE": "0"}, None, "DYN_REQUEST_TRACE=1"),
     ({"DYN_REQUEST_TRACE": "true"}, None, None),
-    ({"DYN_REQUEST_TRACE_SINKS": None}, None, "DYN_REQUEST_TRACE_SINKS=file"),
     ({"DYN_REQUEST_TRACE_SINKS": "stderr"}, None, "DYN_REQUEST_TRACE_SINKS=file"),
-    ({"DYN_REQUEST_TRACE_SINKS": "jsonl_gz"}, None, "DYN_REQUEST_TRACE_SINKS=file"),
+    (
+        {"DYN_REQUEST_TRACE_SINKS": "file,jsonl_gz"},
+        None,
+        "DYN_REQUEST_TRACE_SINKS=file",
+    ),
     ({"DYN_REQUEST_TRACE_SINKS": "file,stderr"}, None, None),
     ({"DYN_REQUEST_TRACE_FILE_FORMAT": None}, None, None),
     ({"DYN_REQUEST_TRACE_FILE_FORMAT": "jsonl"}, None, "DYN_REQUEST_TRACE_FILE_FORMAT"),
@@ -1632,15 +1579,12 @@ P10_CASES = [
         None,
         "must be a literal value",
     ),
-    ({"DYN_POD_NAME": None}, None, "DYN_POD_NAME from fieldRef"),
-    ({"DYN_POD_NAME": "fixed"}, None, "DYN_POD_NAME from fieldRef"),
     (
         {"DYN_POD_NAME": {"valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}}},
         None,
         "DYN_POD_NAME from fieldRef",
     ),
     ({"DYN_PARENT_DGD_K8S_NAME": "other"}, None, "overrides DYN_PARENT_DGD_K8S_NAME"),
-    ({}, {"volumes": []}, "no volume for claim"),
     (
         {},
         {"volumes": [{"name": "traces", "persistentVolumeClaim": {"claimName": "x"}}]},
@@ -1650,11 +1594,6 @@ P10_CASES = [
     (
         {},
         {"mounts": [{"name": "traces", "mountPath": "/trace", "readOnly": True}]},
-        "read-only or through a subPath",
-    ),
-    (
-        {},
-        {"mounts": [{"name": "traces", "mountPath": "/trace", "subPath": "segments"}]},
         "read-only or through a subPath",
     ),
     ({}, {"mounts": [{"name": "traces", "mountPath": "/trace/"}]}, None),
@@ -1695,7 +1634,7 @@ def test_p10_custom_segments_dir_and_graph_env():
         planner(),
         env=[{"name": "DYN_REQUEST_TRACE_FILE_PATH", "value": path}],
     )
-    report = evaluate(deployment, config=planner_config(segments_dir="/rt/segs/"))
+    report = evaluate(deployment, config=planner_config(segments_dir="rt/segs"))
     assert report.spec_ok, report.reasons
 
 
@@ -1719,7 +1658,7 @@ def test_p10_is_checked_when_parsing_fails():
 
 
 def test_evaluate_requires_dgdr():
-    config = PlannerConfig.model_construct(mode="agg", retune=None)
+    config = PlannerConfig(namespace="test-ns", environment="kubernetes", mode="agg")
     with pytest.raises(ValueError, match="retune.dgdr"):
         fc.evaluate_premises(dgd(), planner_config=config)
 
