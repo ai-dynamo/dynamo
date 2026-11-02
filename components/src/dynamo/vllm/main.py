@@ -981,7 +981,6 @@ async def register_vllm_model(
     if publish_vllm_decision_capability(
         runtime_config,
         model_input,
-        model_type,
         worker_type,
         vllm_config,
         config,

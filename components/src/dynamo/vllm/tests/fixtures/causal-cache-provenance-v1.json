@@ -1,0 +1,48 @@
+{
+  "_generated": "Do not edit; regenerate with python -m dynamo.vllm.tests.decision_cache_contract --source-repo <repo>",
+  "scope": "Cache-statistics source equivalence only; not full runtime or GPU/model qualification.",
+  "releases": {
+    "0.32.0": {
+      "commit": "5df63a7203cdb9328d824a27b682e77c7b9928be",
+      "blobs": {
+        "vllm/config/scheduler.py": "1dbe4b72eb7ce43deaf7cb1e9e93176b8219f028",
+        "vllm/outputs.py": "145b7d510f715fdbe32e04b96f4be941ba002826",
+        "vllm/v1/core/sched/async_scheduler.py": "290204d58c39cdec4c3cc1e58fe0697378aa5e98",
+        "vllm/v1/core/sched/scheduler.py": "cec96d2a49235fdade2768c427f1cff7868c6026",
+        "vllm/v1/engine/output_processor.py": "eb499f6cc78ba89b14fa862e4cb5801f0837323f",
+        "vllm/v1/metrics/stats.py": "87277f6545f01cb75c65426306111086f5feefaa",
+        "vllm/v1/request.py": "4b1b9ecc2eede6347d839ef52683f3d40a306af5"
+      },
+      "projection": {
+        "first_capture": "if request.prefill_stats and request.num_preemptions <= 0:\n    assert num_computed_tokens <= request.num_prompt_tokens\n    request.prefill_stats.set(num_prompt_tokens=request.num_prompt_tokens, num_local_cached_tokens=num_new_local_computed_tokens, num_external_cached_tokens=num_external_computed_tokens)",
+        "emit_condition": "bool(new_token_ids or pooler_output is not None or stopped)",
+        "emit_statistics": "if should_emit_output:\n    prefill_stats = request.take_prefill_stats()\n    if prefill_stats is not None:\n        prefill_stats.finalize(self.kv_cache_manager.estimate_cached_tokens(request))",
+        "initial_statistics": "self.prefill_stats: PrefillStats | None = PrefillStats()",
+        "take_statistics": "def take_prefill_stats(self) -> PrefillStats | None:\n    if self.prefill_stats is None:\n        return None\n    prefill_stats = self.prefill_stats\n    self.prefill_stats = None\n    return prefill_stats",
+        "cache_arithmetic": "@dataclass\nclass PrefillStats:\n    \"\"\"Breakdown of a scheduled prefill computation.\n\n    Fields:\n        num_prompt_tokens: Total number of tokens to be prefilled.\n        num_computed_tokens: Tokens to be prefilled locally (actual compute work).\n        num_cached_tokens: Tokens to be prefilled without actual compute work.\n        num_local_cached_tokens: Tokens to be prefilled from local prefix cache.\n        num_external_cached_tokens: Tokens to be prefilled from external KV transfer.\n        num_cache_creation_tokens: Tokens computed and written to the prefix cache.\n    \"\"\"\n    num_prompt_tokens: int = 0\n    num_computed_tokens: int = 0\n    num_cached_tokens: int = 0\n    num_local_cached_tokens: int = 0\n    num_external_cached_tokens: int = 0\n    num_cache_creation_tokens: int = 0\n\n    def set(self, num_prompt_tokens: int, num_local_cached_tokens: int, num_external_cached_tokens: int):\n        num_cached_tokens = num_local_cached_tokens + num_external_cached_tokens\n        assert num_cached_tokens <= num_prompt_tokens\n        self.num_prompt_tokens = num_prompt_tokens\n        self.num_computed_tokens = num_prompt_tokens - num_cached_tokens\n        self.num_cached_tokens = num_cached_tokens\n        self.num_local_cached_tokens = num_local_cached_tokens\n        self.num_external_cached_tokens = num_external_cached_tokens\n\n    def finalize(self, num_cached_tokens: int) -> None:\n        assert num_cached_tokens >= 0\n        self.num_cache_creation_tokens = max(0, min(num_cached_tokens, self.num_prompt_tokens) - self.num_cached_tokens)",
+        "project_statistics": "if req_state.is_prefilling:\n    if engine_core_output.prefill_stats is not None:\n        req_state.num_cached_tokens = engine_core_output.prefill_stats.num_cached_tokens\n        req_state.num_cache_creation_tokens = engine_core_output.prefill_stats.num_cache_creation_tokens\n    if req_state.remote_prefill_cached_tokens is not None:\n        req_state.num_cached_tokens = req_state.remote_prefill_cached_tokens\n    req_state.is_prefilling = False"
+      }
+    },
+    "0.33.0": {
+      "commit": "4ba787ec9959e566d3b587a796dff07673324da5",
+      "blobs": {
+        "vllm/config/scheduler.py": "5ad38c0a46f0446c9f4b43a7452eaa64483a33da",
+        "vllm/outputs.py": "2149cf7df5e5447270d08e0f1d0561899647de04",
+        "vllm/v1/core/sched/async_scheduler.py": "42906e2f19e51f301d8755218d20a71dcd7b6367",
+        "vllm/v1/core/sched/scheduler.py": "d35b7dfac42abd1335c827eff9f3c05728f3f248",
+        "vllm/v1/engine/output_processor.py": "a1f99ad9932f5d884ccdbe558bd017dbe846df69",
+        "vllm/v1/metrics/stats.py": "d30e857fa21b4833971d214c230d50782e571f30",
+        "vllm/v1/request.py": "4b1b9ecc2eede6347d839ef52683f3d40a306af5"
+      },
+      "projection": {
+        "first_capture": "if request.prefill_stats and request.num_preemptions <= 0:\n    assert num_computed_tokens <= request.num_prompt_tokens\n    request.prefill_stats.set(num_prompt_tokens=request.num_prompt_tokens, num_local_cached_tokens=num_new_local_computed_tokens, num_external_cached_tokens=num_external_computed_tokens)",
+        "emit_condition": "bool(new_token_ids or pooler_output is not None or stopped)",
+        "emit_statistics": "if should_emit_output:\n    prefill_stats = request.take_prefill_stats()\n    if prefill_stats is not None:\n        prefill_stats.finalize(self.kv_cache_manager.estimate_cached_tokens(request))",
+        "initial_statistics": "self.prefill_stats: PrefillStats | None = PrefillStats()",
+        "take_statistics": "def take_prefill_stats(self) -> PrefillStats | None:\n    if self.prefill_stats is None:\n        return None\n    prefill_stats = self.prefill_stats\n    self.prefill_stats = None\n    return prefill_stats",
+        "cache_arithmetic": "@dataclass\nclass PrefillStats:\n    \"\"\"Breakdown of a scheduled prefill computation.\n\n    Fields:\n        num_prompt_tokens: Total number of tokens to be prefilled.\n        num_computed_tokens: Tokens to be prefilled locally (actual compute work).\n        num_cached_tokens: Tokens to be prefilled without actual compute work.\n        num_local_cached_tokens: Tokens to be prefilled from local prefix cache.\n        num_external_cached_tokens: Tokens to be prefilled from external KV transfer.\n        num_cache_creation_tokens: Tokens computed and written to the prefix cache.\n    \"\"\"\n    num_prompt_tokens: int = 0\n    num_computed_tokens: int = 0\n    num_cached_tokens: int = 0\n    num_local_cached_tokens: int = 0\n    num_external_cached_tokens: int = 0\n    num_cache_creation_tokens: int = 0\n\n    def set(self, num_prompt_tokens: int, num_local_cached_tokens: int, num_external_cached_tokens: int):\n        num_cached_tokens = num_local_cached_tokens + num_external_cached_tokens\n        assert num_cached_tokens <= num_prompt_tokens\n        self.num_prompt_tokens = num_prompt_tokens\n        self.num_computed_tokens = num_prompt_tokens - num_cached_tokens\n        self.num_cached_tokens = num_cached_tokens\n        self.num_local_cached_tokens = num_local_cached_tokens\n        self.num_external_cached_tokens = num_external_cached_tokens\n\n    def finalize(self, num_cached_tokens: int) -> None:\n        assert num_cached_tokens >= 0\n        self.num_cache_creation_tokens = max(0, min(num_cached_tokens, self.num_prompt_tokens) - self.num_cached_tokens)",
+        "project_statistics": "if req_state.is_prefilling:\n    if engine_core_output.prefill_stats is not None:\n        req_state.num_cached_tokens = engine_core_output.prefill_stats.num_cached_tokens\n        req_state.num_cache_creation_tokens = engine_core_output.prefill_stats.num_cache_creation_tokens\n    if req_state.remote_prefill_cached_tokens is not None:\n        req_state.num_cached_tokens = req_state.remote_prefill_cached_tokens\n    req_state.is_prefilling = False"
+      }
+    }
+  }
+}

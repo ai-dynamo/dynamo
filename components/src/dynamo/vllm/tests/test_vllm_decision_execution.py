@@ -7,6 +7,7 @@ import builtins
 import importlib
 import json
 from importlib.metadata import PackageNotFoundError
+from inspect import signature
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -16,10 +17,10 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.vllm.decision_execution import (
     VLLM_CAUSAL_DECISION_CAPABILITY,
-    is_exact_vllm_release,
     publish_vllm_decision_capability,
-    qualified_runtime,
 )
+from dynamo.vllm.decision_runtime_policy import is_exact_vllm_release, qualified_runtime
+from dynamo.vllm.engine_generate import publish_engine_generate_capability
 
 pytestmark = [
     pytest.mark.unit,
@@ -68,6 +69,9 @@ class RequestOutputSchema:
 
 @pytest.fixture
 def profile(monkeypatch):
+    monkeypatch.setattr(
+        "dynamo.vllm.decision_execution.qualified_cache_runtime", lambda _: True
+    )
     monkeypatch.setattr("dynamo.vllm.decision_execution.version", lambda _: "0.32.0")
     schemas = {
         "vllm.sampling_params": SimpleNamespace(SamplingParams=SamplingParamsSchema),
@@ -79,7 +83,6 @@ def profile(monkeypatch):
     return {
         "runtime_config": SimpleNamespace(set_engine_specific=Mock()),
         "model_input": ModelInput.Tokens,
-        "model_type": ModelType.Chat,
         "worker_type": WorkerType.Aggregated,
         "config": SimpleNamespace(
             disaggregation_mode=DisaggregationMode.AGGREGATED,
@@ -101,7 +104,9 @@ def profile(monkeypatch):
                 convert_type="none",
                 max_model_len=2048,
             ),
-            scheduler_config=SimpleNamespace(max_num_seqs=1, scheduler_cls=None),
+            scheduler_config=SimpleNamespace(
+                max_num_seqs=1, scheduler_cls=None, async_scheduling=False
+            ),
             parallel_config=SimpleNamespace(data_parallel_size=1),
             lora_config=None,
             speculative_config=None,
@@ -150,6 +155,18 @@ def test_causal_scoring_rejects_unqualified_scheduling(profile, max_num_seqs):
     profile["runtime_config"].set_engine_specific.assert_not_called()
 
 
+@pytest.mark.parametrize("release", ["0.32.0", "0.33.0"])
+def test_modified_cache_source_never_publishes_causal_capability(
+    profile, monkeypatch, release
+):
+    monkeypatch.setattr("dynamo.vllm.decision_execution.version", lambda _: release)
+    monkeypatch.setattr(
+        "dynamo.vllm.decision_execution.qualified_cache_runtime", lambda _: False
+    )
+    assert not publish_vllm_decision_capability(**profile)
+    profile["runtime_config"].set_engine_specific.assert_not_called()
+
+
 @pytest.mark.parametrize("data_parallel_size", [0, 2, True])
 def test_causal_scoring_requires_single_rank(profile, data_parallel_size):
     profile["vllm_config"].parallel_config.data_parallel_size = data_parallel_size
@@ -193,7 +210,7 @@ def test_causal_scoring_rejects_replacement_implementations(profile, field, valu
         ModelType.Chat,
         ModelType.Completions,
         ModelType.Chat | ModelType.Completions,
-        ModelType.Completions | ModelType.Pooling,
+        ModelType.Chat | ModelType.Pooling,
     ],
 )
 @pytest.mark.parametrize("installed", ["0.32.0", "0.33.0"])
@@ -202,11 +219,49 @@ def test_publishes_only_boolean_capability(
 ):
     monkeypatch.setattr("dynamo.vllm.decision_execution.version", lambda _: installed)
     profile["vllm_config"].model_config.architecture = architecture
-    assert publish_vllm_decision_capability(**{**profile, "model_type": model_type})
+    supported = publish_engine_generate_capability(
+        profile["runtime_config"],
+        profile["model_input"],
+        model_type,
+        profile["worker_type"],
+        False,
+    )
+    profile["runtime_config"].set_engine_specific.reset_mock()
+    assert supported
+    assert publish_vllm_decision_capability(
+        **{**profile, "native_generate_supported": supported}
+    )
     profile["runtime_config"].set_engine_specific.assert_called_once_with(
         VLLM_CAUSAL_DECISION_CAPABILITY, json.dumps(True)
     )
     assert VLLM_CAUSAL_DECISION_CAPABILITY == "vllm_causal_decision_v1"
+
+
+@pytest.mark.parametrize(
+    "model_type",
+    [
+        ModelType.Completions | ModelType.Pooling,
+        ModelType.Completions | ModelType.Embedding,
+        ModelType.Embedding,
+        ModelType.Empty,
+    ],
+)
+def test_causal_model_eligibility_comes_from_real_generate_publisher(
+    profile, model_type
+):
+    assert "model_type" not in signature(publish_vllm_decision_capability).parameters
+    supported = publish_engine_generate_capability(
+        profile["runtime_config"],
+        profile["model_input"],
+        model_type,
+        profile["worker_type"],
+        False,
+    )
+    assert not supported
+    assert not publish_vllm_decision_capability(
+        **{**profile, "native_generate_supported": supported}
+    )
+    profile["runtime_config"].set_engine_specific.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -261,8 +316,6 @@ def test_qualified_version_family(profile, monkeypatch, vllm_version):
         ("worker_type", WorkerType.Decode),
         ("worker_type", WorkerType.Prefill),
         ("worker_type", WorkerType.Encode),
-        ("model_type", ModelType.Embedding),
-        ("model_type", ModelType.Empty),
         ("needs", [[WorkerType.Encode]]),
     ],
 )
@@ -380,12 +433,32 @@ def test_import_does_not_load_vllm(monkeypatch):
     def reject_engine_import(name, *args, **kwargs):
         if name == "vllm" or name.startswith("vllm."):
             raise AssertionError("vLLM must remain optional")
-        if name in {"dynamo.vllm.decision_heads", "dynamo.vllm.decision_reads"}:
+        if name.startswith("dynamo.vllm.decision_native") or name in {
+            "dynamo.vllm.decision_heads",
+            "dynamo.vllm.decision_reads",
+        }:
             raise AssertionError("Causal readiness must not require native adapters")
         return original_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", reject_engine_import)
     importlib.reload(module)
+
+
+def test_neutral_runtime_policy_import_does_not_load_an_optional_backend(monkeypatch):
+    original_import = builtins.__import__
+
+    def reject_backend_import(name, *args, **kwargs):
+        if (
+            name == "vllm"
+            or name.startswith("vllm.")
+            or name.startswith("dynamo.vllm.decision_native")
+        ):
+            raise AssertionError("Shared policy must not import an optional backend")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", reject_backend_import)
+    policy = importlib.import_module("dynamo.vllm.decision_runtime_policy")
+    importlib.reload(policy)
 
 
 def test_runtime_version_is_used_when_not_injected(profile, monkeypatch):

@@ -631,6 +631,21 @@ USAGE = {"prompt_tokens": 3, "completion_tokens": 0, "total_tokens": 3}
 # admission; its stream's end releases whatever it still holds.
 SCRIPTS = [
     (
+        "native decision: terminal result ends the wait before stream EOF",
+        WorkerType.Aggregated,
+        [
+            {"protocol_version": 1, "profile": "vllm_d3_decision_v1"},
+            {
+                "protocol_version": 1,
+                "profile": "vllm_d3_decision_v1",
+                "outcomes": [{"ordinal": 0, "probabilities": [0.25, 0.75]}],
+                "usage": {"input_tokens": 3, "output_tokens": 0, "cached_tokens": 0},
+                "finish_reason": "stop",
+            },
+        ],
+        [(1, 1), (1, 0)],
+    ),
+    (
         "decode: metadata, then its first token, then more",
         WorkerType.Aggregated,
         [
