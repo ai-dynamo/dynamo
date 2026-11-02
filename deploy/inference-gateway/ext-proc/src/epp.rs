@@ -37,9 +37,10 @@ use uuid::Uuid;
 use crate::epp_router::{endpoint_in_subset, requested_policy_class};
 use crate::metrics::{self, Stage};
 use crate::picker::{
-    CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, RequestInfo,
+    CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, PickTimings, RequestInfo,
     ResponseUsage, resolve_cache_namespace,
 };
+use crate::tokio_runtime::{self, TaskKind};
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
@@ -57,6 +58,22 @@ struct TokenizeResult {
     strict_priority: u32,
     routing_constraints: RoutingConstraints,
     tokens_safe_to_inject: bool,
+    timings: TokenizeTimings,
+}
+
+/// A request body parsed into its typed request.
+enum ParsedRequest {
+    Chat(Box<dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest>),
+    Completion(Box<NvCreateCompletionRequest>),
+}
+
+/// Where tokenizing one request spent its time; see [`PickTimings`].
+#[derive(Default)]
+struct TokenizeTimings {
+    parse: Duration,
+    blocking_wait: Option<Duration>,
+    template: Option<Duration>,
+    tokenize: Option<Duration>,
 }
 
 /// Validate `DYN_KUBE_DISCOVERY_MODE` and report whether *container* discovery
@@ -300,21 +317,31 @@ impl Router {
         // scope at the call site. That needs confirmation that Envoy's ext_proc
         // delivers pseudo-headers through to `ctx.request_headers` before being
         // relied on, which is why it is not done here.
+        //
+        // The parse scales with the body, so it runs off the async worker.
         let parse_started = Instant::now();
-        let value: serde_json::Value = serde_json::from_str(request_json)?;
-        let has_messages = value
-            .get("messages")
-            .and_then(|m| m.as_array())
-            .is_some_and(|messages| !messages.is_empty());
-        if !has_messages && value.get("prompt").is_some() {
-            let request: NvCreateCompletionRequest = serde_json::from_value(value)?;
-            metrics::observe_stage(Stage::Parse, parse_started.elapsed());
-            return self.tokenize_completion(request, headers).await;
-        }
-        let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
-            serde_json::from_value(value)?;
-        metrics::observe_stage(Stage::Parse, parse_started.elapsed());
-        self.tokenize_chat(request, headers).await
+        let parsed = tokio_runtime::off_runtime(|| -> Result<ParsedRequest> {
+            let value: serde_json::Value = serde_json::from_str(request_json)?;
+            let has_messages = value
+                .get("messages")
+                .and_then(|m| m.as_array())
+                .is_some_and(|messages| !messages.is_empty());
+            Ok(if !has_messages && value.get("prompt").is_some() {
+                ParsedRequest::Completion(Box::new(serde_json::from_value(value)?))
+            } else {
+                ParsedRequest::Chat(Box::new(serde_json::from_value(value)?))
+            })
+        })?;
+        let parse = parse_started.elapsed();
+        metrics::observe_stage(Stage::Parse, parse);
+        let mut result = match parsed {
+            ParsedRequest::Completion(request) => {
+                self.tokenize_completion(*request, headers).await?
+            }
+            ParsedRequest::Chat(request) => self.tokenize_chat(*request, headers).await?,
+        };
+        result.timings.parse = parse;
+        Ok(result)
     }
 
     /// Tokenize a `/v1/chat/completions` body via the chat template.
@@ -338,17 +365,28 @@ impl Router {
         let cache_namespace = cache_namespace_from_request(&request, headers);
 
         let preprocessor = Arc::clone(&self.preprocessor);
-        let encoding = tokio::task::spawn_blocking(move || {
+        let queued = Instant::now();
+        let (encoding, timings) = tokio::task::spawn_blocking(move || {
             let started = Instant::now();
+            let blocking_wait = started - queued;
+            metrics::observe_stage(Stage::BlockingWait, blocking_wait);
             let prompt = preprocessor.apply_template(&request)?;
             let rendered = Instant::now();
-            metrics::observe_stage(Stage::Template, rendered - started);
+            let template = rendered - started;
+            metrics::observe_stage(Stage::Template, template);
             let encoding = match prompt {
                 Some(prompt) => preprocessor.tokenize_rendered_prompt(&prompt),
                 None => preprocessor.tokenize(""),
             };
-            metrics::observe_stage(Stage::Tokenize, rendered.elapsed());
-            encoding
+            let tokenize = rendered.elapsed();
+            metrics::observe_stage(Stage::Tokenize, tokenize);
+            let timings = TokenizeTimings {
+                parse: Duration::ZERO,
+                blocking_wait: Some(blocking_wait),
+                template: Some(template),
+                tokenize: Some(tokenize),
+            };
+            encoding.map(|encoding| (encoding, timings))
         })
         .await
         .map_err(|e| match e.try_into_panic() {
@@ -364,6 +402,7 @@ impl Router {
             strict_priority,
             routing_constraints,
             tokens_safe_to_inject: true,
+            timings,
         })
     }
 
@@ -391,6 +430,7 @@ impl Router {
         let cache_namespace = cache_namespace_from_request(&request, headers);
 
         let pre_tokenized = completion_prompt_token_ids(&request.inner.prompt);
+        let mut timings = TokenizeTimings::default();
         let (tokens, tokens_safe_to_inject) = match pre_tokenized {
             Some(ids) => (ids, true),
             None => {
@@ -398,7 +438,9 @@ impl Router {
                 let safe = completion_text_tokens_safe_to_inject(&request.inner.prompt);
                 let started = Instant::now();
                 let tokens = self.tokenize_completion_text(request).await?;
-                metrics::observe_stage(Stage::Tokenize, started.elapsed());
+                let tokenize = started.elapsed();
+                metrics::observe_stage(Stage::Tokenize, tokenize);
+                timings.tokenize = Some(tokenize);
                 (tokens, safe)
             }
         };
@@ -410,6 +452,7 @@ impl Router {
             strict_priority,
             routing_constraints,
             tokens_safe_to_inject,
+            timings,
         })
     }
 
@@ -1283,7 +1326,7 @@ fn spawn_prefill_discovery_watcher(
     target_namespace: String,
     tx: tokio::sync::oneshot::Sender<dynamo_runtime::component::Endpoint>,
 ) {
-    tokio::spawn(async move {
+    tokio_runtime::spawn(TaskKind::PrefillWatcher, async move {
         let discovery = drt.discovery();
         tracing::info!(
             namespace = target_namespace,
@@ -1291,50 +1334,85 @@ fn spawn_prefill_discovery_watcher(
         );
 
         loop {
-            if let Ok(instances) = discovery.list(DiscoveryQuery::AllModels).await {
-                for instance in instances {
-                    if let DiscoveryInstance::Model {
-                        namespace,
-                        component,
-                        endpoint,
-                        ..
-                    } = &instance
+            // Listing clones every model instance, and each card is then
+            // deserialized: tens of milliseconds of CPU per pass at a thousand
+            // workers, every second for as long as no prefill worker exists.
+            // Run the pass on the blocking pool so it never holds an async
+            // worker that also drives gateway connections.
+            let pass = {
+                let discovery = Arc::clone(&discovery);
+                let target_namespace = target_namespace.clone();
+                let runtime = tokio::runtime::Handle::current();
+                tokio::task::spawn_blocking(move || {
+                    let instances = runtime
+                        .block_on(discovery.list(DiscoveryQuery::AllModels))
+                        .ok()?;
+                    find_prefill_worker(instances, &target_namespace)
+                })
+            };
+            match pass.await {
+                Ok(Some(found)) => {
+                    tracing::info!(
+                        model_name = found.model_name,
+                        namespace = found.namespace.as_str(),
+                        "Prefill worker discovered, activating PrefillRouter"
+                    );
+                    if let Ok(ns) = drt.namespace(&found.namespace)
+                        && let Ok(comp) = ns.component(&found.component)
                     {
-                        if namespace != &target_namespace {
-                            continue;
+                        let ep = comp.endpoint(&found.endpoint);
+                        if tx.send(ep).is_err() {
+                            tracing::debug!("PrefillRouter activation channel already closed");
                         }
-
-                        let card = match instance.deserialize_model::<ModelDeploymentCard>() {
-                            Ok(card) => card,
-                            Err(_) => continue,
-                        };
-
-                        if card.effective_worker_type() != WorkerType::Prefill {
-                            continue;
-                        }
-
-                        tracing::info!(
-                            model_name = card.name(),
-                            namespace = namespace.as_str(),
-                            "Prefill worker discovered, activating PrefillRouter"
-                        );
-
-                        if let Ok(ns) = drt.namespace(namespace)
-                            && let Ok(comp) = ns.component(component)
-                        {
-                            let ep = comp.endpoint(endpoint);
-                            if tx.send(ep).is_err() {
-                                tracing::debug!("PrefillRouter activation channel already closed");
-                            }
-                            return;
-                        }
+                        return;
                     }
                 }
+                Ok(None) => {}
+                Err(error) => tracing::warn!(%error, "Prefill worker discovery pass failed"),
             }
 
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     });
+}
+
+/// A prefill worker's model endpoint, as discovery lists it.
+struct PrefillWorker {
+    namespace: String,
+    component: String,
+    endpoint: String,
+    model_name: String,
+}
+
+/// The first prefill worker in `target_namespace`, if `instances` hold one.
+fn find_prefill_worker(
+    instances: Vec<DiscoveryInstance>,
+    target_namespace: &str,
+) -> Option<PrefillWorker> {
+    instances.into_iter().find_map(|instance| {
+        let DiscoveryInstance::Model {
+            namespace,
+            component,
+            endpoint,
+            ..
+        } = &instance
+        else {
+            return None;
+        };
+        if namespace != target_namespace {
+            return None;
+        }
+        let card = instance.deserialize_model::<ModelDeploymentCard>().ok()?;
+        if card.effective_worker_type() != WorkerType::Prefill {
+            return None;
+        }
+        Some(PrefillWorker {
+            namespace: namespace.clone(),
+            component: component.clone(),
+            endpoint: endpoint.clone(),
+            model_name: card.name().to_string(),
+        })
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1481,6 +1559,7 @@ impl EndpointPicker for Router {
             strict_priority,
             routing_constraints,
             tokens_safe_to_inject,
+            timings: tokenize_timings,
         } = self
             .tokenize(body_str, &req.headers)
             .await
@@ -1531,7 +1610,8 @@ impl EndpointPicker for Router {
             )
             .await
             .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
-        metrics::observe_stage(Stage::Select, select_started.elapsed());
+        let select = select_started.elapsed();
+        metrics::observe_stage(Stage::Select, select);
 
         // TODO(epp-endpoint-reconciliation): Reconcile Dynamo discovery with the
         // pod reflector and retry selection when the chosen worker has no endpoint.
@@ -1577,7 +1657,8 @@ impl EndpointPicker for Router {
                 "Failed to register request with router bookkeeping"
             );
         }
-        metrics::observe_stage(Stage::Book, book_started.elapsed());
+        let book = book_started.elapsed();
+        metrics::observe_stage(Stage::Book, book);
 
         let prefill_worker = prefill_booking
             .as_ref()
@@ -1624,6 +1705,7 @@ impl EndpointPicker for Router {
         }
 
         tracing::info!(
+            request_id = %req.request_id,
             worker_id = decode_worker.worker_id,
             worker_id_hex = format!("{:x}", decode_worker.worker_id),
             dp_rank = decode_worker.dp_rank,
@@ -1644,6 +1726,15 @@ impl EndpointPicker for Router {
         // backend applies nvext.token_data to every split (see
         // `TokenizeResult`), so omit it and let the backend tokenize each
         // prompt itself.
+        let timings = PickTimings {
+            prompt_tokens: tokens.len(),
+            parse: tokenize_timings.parse,
+            blocking_wait: tokenize_timings.blocking_wait,
+            template: tokenize_timings.template,
+            tokenize: tokenize_timings.tokenize,
+            select,
+            book,
+        };
         let token_ids = tokens_safe_to_inject.then_some(tokens);
 
         Ok(PickResult {
@@ -1659,6 +1750,7 @@ impl EndpointPicker for Router {
             cache_salt_forwarding: CacheSaltForwarding::Preserve,
             strip_nvext: false,
             reservation_id: Some(reservation_id),
+            timings: Some(timings),
         })
     }
 

@@ -56,7 +56,7 @@ Backend workers expose `dynamo_component_*` only when `DYN_SYSTEM_PORT` is set (
 
 Emitted by `python -m dynamo.frontend` at `/metrics` on the HTTP port (`--http-port`, default `8000`). The frontend serves its [router](#router-metrics) and [runtime](#every-process) metrics on the same port and does not use `DYN_SYSTEM_PORT`. Frontend metrics carry no automatic labels.
 
-- `--metrics-prefix` (`DYN_METRICS_PREFIX`) replaces the `dynamo_frontend` prefix of the `dynamo_frontend_*` metrics, except `dynamo_frontend_stage_*`, `dynamo_frontend_tokenize_seconds`, `dynamo_frontend_template_seconds`, `dynamo_frontend_detokenize_*`, `dynamo_frontend_tokenizer_cache_*`, `dynamo_frontend_worker_*`, `dynamo_frontend_router_*`, `dynamo_frontend_lora_*`, and `dynamo_frontend_event_loop_*`, which keep their names.
+- `--metrics-prefix` (`DYN_METRICS_PREFIX`) replaces the `dynamo_frontend` prefix of the `dynamo_frontend_*` metrics, except `dynamo_frontend_stage_*`, `dynamo_frontend_tokenize_seconds`, `dynamo_frontend_template_seconds`, `dynamo_frontend_request_body_seconds`, `dynamo_frontend_detokenize_*`, `dynamo_frontend_tokenizer_cache_*`, `dynamo_frontend_worker_*`, `dynamo_frontend_router_*`, `dynamo_frontend_lora_*`, and `dynamo_frontend_event_loop_*`, which keep their names.
 - With `--kserve-grpc-server`, the frontend serves metrics on `DYN_GRPC_METRICS_PORT` (default `8788`) instead. The model configuration, migration, router, and routing overhead metrics are not exposed in that mode.
 
 A detailed entry that does not name its labels carries only a `model` label. For endpoints that canonicalize aliases, that label holds the primary served model name — the first `--served-model-name` value — so a request sent to an alias is counted under the primary. A name the frontend has not registered is counted under `unknown_model`.
@@ -165,6 +165,7 @@ The frontend also records these request and pipeline metrics:
 | `dynamo_frontend_stage_duration_seconds` | histogram | `stage` | Time spent in each pipeline stage: `preprocess`, `route`, or `transport_roundtrip`. | Current |
 | `dynamo_frontend_tokenize_seconds` | histogram | — | Prompt tokenization time per request. | Current |
 | `dynamo_frontend_template_seconds` | histogram | — | Chat template rendering time per request. | Current |
+| `dynamo_frontend_request_body_seconds` | histogram | `phase` | Time to receive a chat or completions request body (`phase="read"`) and to parse it (`phase="parse"`). Behind a gateway that relays the body from an endpoint picker, `read` includes waiting for the relay. | Current |
 | `dynamo_frontend_tokenizer_latency_ms` | histogram | `operation` | Tokenizer latency in milliseconds, for `tokenize` and `detokenize`. | Current |
 | `dynamo_frontend_detokenize_total_us` | counter | — | Total detokenization time in microseconds. | Current |
 | `dynamo_frontend_detokenize_token_count` | counter | — | Tokens detokenized. | Current |
@@ -947,24 +948,88 @@ Requires the client to request usage accounting on streaming calls (`"stream_opt
 </ParamField>
 
 <ParamField path="dynamo_epp_runtime_global_queue_depth" type="gauge">
-  Ready tasks waiting in the async runtime's global queue, sampled at scrape time. A value that stays above zero means every worker thread is busy, so other requests' body and token chunks wait for one.
+  Ready tasks waiting in the async runtime's global queue, sampled at scrape time. A value that stays above zero means every worker thread is busy, so other requests' body and token chunks wait for one. A task waiting in a busy worker's LIFO slot does not show here; `dynamo_epp_task_schedule_delay_seconds` catches it.
 </ParamField>
+
+<ParamField path="dynamo_epp_runtime_blocking_threads" type="gauge">
+  Threads in the async runtime's blocking pool, busy or idle, sampled at scrape time. Chat template rendering and tokenization run there.
+</ParamField>
+
+<ParamField path="dynamo_epp_runtime_blocking_queue_depth" type="gauge">
+  Blocking-pool tasks waiting for a thread, sampled at scrape time.
+</ParamField>
+
+<ParamField path="dynamo_epp_runtime_busy_seconds_total" type="counter">
+  Time the async runtime's worker threads spent running tasks. Compare its rate with the container's CPU use to see how much of the EPP's CPU runs on the async workers rather than the blocking pool.
+</ParamField>
+
+<ParamField path="dynamo_epp_ext_proc_connections" type="gauge">
+  Gateway connections to the ext_proc TLS port. Not recorded with `DYN_SECURE_SERVING=false`.
+</ParamField>
+
+<ParamField path="dynamo_epp_ext_proc_streams" type="gauge">
+  Open ext_proc streams: requests the gateway is still relaying through the EPP, including requests whose client has gone away but whose gateway stream is still open.
+</ParamField>
+
+<ParamField path="dynamo_epp_ext_proc_connection_streams" type="histogram">
+  Streams open on a gateway connection when one more starts on it, that one included: how many requests share each request's connection. The gateway multiplexes many streams onto one HTTP/2 connection, so a stall of that connection holds all of them. Not recorded with `DYN_SECURE_SERVING=false`.
+</ParamField>
+
+<ParamField path="dynamo_epp_event_loop_delay_seconds" type="histogram">
+  How late a 10 ms sleep on the async runtime wakes. It runs late only when no worker thread services the runtime's timers, so it shows stalls of the whole runtime, not of a single task.
+</ParamField>
+
+<ParamField path="dynamo_epp_task_poll_seconds" type="histogram">
+  Task polls that held an async worker thread for at least `DYN_EPP_TASK_METRICS_MIN_US` microseconds (default 1000), labeled by `task` (see the table below). Recorded only with `DYN_EPP_TASK_METRICS=1`. A slow poll names the kind of task that kept a worker from everything else queued on it.
+</ParamField>
+
+<ParamField path="dynamo_epp_task_schedule_delay_seconds" type="histogram">
+  Waits of at least `DYN_EPP_TASK_METRICS_MIN_US` between a task being woken and being polled, labeled by `task`. Recorded only with `DYN_EPP_TASK_METRICS=1`. Long waits of `task="h2_connection"` mean a gateway connection, and every stream on it, stood still.
+</ParamField>
+
+The EPP also exports the tokenizer prefix-cache counters `dynamo_frontend_tokenizer_cache_hits_total`, `dynamo_frontend_tokenizer_cache_misses_total`, `dynamo_frontend_tokenizer_cache_cached_tokens_total` and `dynamo_frontend_tokenizer_cache_uncached_tokens_total`, which its tokenizer increments as the frontend's does.
 
 The `stage` label of `dynamo_epp_stage_duration_seconds`:
 
 | Stage | Measures |
 |---|---|
 | `receive_body` | From the request headers to the end of the request body: the gateway streaming the client's body to the EPP |
+| `model_probe` | Reading the `model` field out of the request body |
 | `parse` | Parsing the request body into the typed request |
+| `blocking_wait` | Waiting for a blocking-pool thread before rendering the chat template, for chat requests |
 | `template` | Rendering the chat template, for chat requests |
 | `tokenize` | Tokenizing the rendered prompt, or a text `/v1/completions` prompt |
 | `select` | Choosing the prefill and decode workers, including router queueing |
 | `book` | Registering the request with the router's load bookkeeping |
 | `pick` | The whole worker pick: `parse` through `book` and the waits between them |
 | `rewrite` | Rewriting the forwarded body: injecting `nvext.token_data`, stripping `nvext`, setting the cache salt |
+| `response_headers` | From the routing decision to the response headers: the gateway sending the body to the sidecar, and the sidecar reading it and answering |
 | `first_response` | From the routing decision to the first non-empty response chunk: the gateway, sidecar and worker producing the first token |
+| `epp_ttft` | From the request headers to the first non-empty response chunk: the time to first token as the EPP sees it. The client's time to first token minus this is the time spent outside the EPP's view, without comparing clocks across nodes |
 
-`parse` through `book` are recorded when the EPP discovers Dynamo workers. In standalone mode, which tokenizes through a render service, only `receive_body`, `pick`, `rewrite` and `first_response` are recorded. Every series carries the same `model` label as `dynamo_epp_cached_tokens`.
+`parse` through `book` are recorded when the EPP discovers Dynamo workers. In standalone mode, which tokenizes through a render service, only `receive_body`, `model_probe`, `pick`, `rewrite`, `response_headers`, `first_response` and `epp_ttft` are recorded. Every series carries the same `model` label as `dynamo_epp_cached_tokens`.
+
+The `task` label of `dynamo_epp_task_poll_seconds` and `dynamo_epp_task_schedule_delay_seconds`:
+
+| Task | Does |
+|---|---|
+| `ext_proc_stream` | One ext_proc stream: reads the gateway's messages, picks a worker and relays the response |
+| `h2_connection` | One gateway connection: TLS and every HTTP/2 frame of every stream on it |
+| `h2_stream` | hyper's task for each HTTP/2 request, which hands an ext_proc stream's responses to its connection; requests to the health and metrics servers run here too |
+| `prefill_watcher` | The once-a-second scan for prefill workers |
+| `other` | Any other task |
+
+### Endpoint Picker Diagnostics
+
+These settings add signals for tracing latency through the EPP. "EPP runtime stall" lines come from a watcher task, never from the task that stalled, at most 10 per second. Slow-stream summaries are capped at 20 per second.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `DYN_EPP_TASK_METRICS` | off | `1` records `dynamo_epp_task_poll_seconds` and `dynamo_epp_task_schedule_delay_seconds`, and logs an "EPP runtime stall" warning for each poll or wait of 20 ms or more, with the task's kind, spawn site and id. It adds two clock reads to every task poll. |
+| `DYN_EPP_TASK_METRICS_MIN_US` | `1000` | The shortest poll or wait the task metrics record, in microseconds. |
+| `DYN_EPP_STREAM_SUMMARY` | `slow` | Which ext_proc streams get an "ext_proc stream summary" line at INFO: `slow` for streams with a response-chunk gap or a routing-to-response-headers time of 100 ms or more, or a body receipt or pick of 1 s or more, at most 20 lines per second; `all` for every stream, as a benchmark wants; `off` for none. Other streams' summaries are logged at DEBUG. |
+
+The summary line carries the request's `x-request-id` as `request_id`, its gateway connection (`conn_id`, `conn_streams`), its outcome, its body sizes, and offsets in microseconds from the request headers' arrival to the end of the body, the routing decision, the response headers, the first response chunk and the end of the stream, plus its largest response-chunk gap. The "Request routed" line carries the same `request_id` and the time each step of the pick took. The "ext_proc connection opened" and "ext_proc connection closed" lines name each connection's `conn_id`, peer and `task_id`.
 
 ## Global Frontend Metrics
 

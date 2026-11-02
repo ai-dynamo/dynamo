@@ -19,6 +19,7 @@ use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 
+use crate::tokio_runtime::{self, TaskKind};
 use crate::{EppMode, EppStandaloneConfig, ExtProcServer, Router, metrics};
 
 const GRPC_PORT: u16 = 9002;
@@ -451,7 +452,7 @@ async fn serve<P: crate::EndpointPicker>(
             let tls_acceptor = tls_acceptor.clone();
             let svc = svc.clone();
 
-            tokio::spawn(async move {
+            tokio_runtime::spawn(TaskKind::H2Connection, async move {
                 let _permit = permit; // released when this task exits (incl. handshake timeout)
                 let tls_stream = match tokio::time::timeout(
                     TLS_HANDSHAKE_TIMEOUT,
@@ -474,16 +475,36 @@ async fn serve<P: crate::EndpointPicker>(
                     }
                 };
 
+                // `task_id` names this task in "EPP runtime stall" lines, and
+                // `conn_id` names the connection in each stream's log lines.
+                let connection = metrics::Connection::open();
+                let opened = std::time::Instant::now();
+                tracing::info!(
+                    conn_id = connection.id(),
+                    peer = %remote_addr,
+                    task_id = %tokio::task::id(),
+                    "ext_proc connection opened"
+                );
                 let io = hyper_util::rt::TokioIo::new(tls_stream);
-                let hyper_svc = hyper_util::service::TowerToHyperService::new(svc);
-                if let Err(e) = hyper_util::server::conn::auto::Builder::new(
+                let hyper_svc = hyper_util::service::TowerToHyperService::new(WithConnection {
+                    inner: svc,
+                    connection: Arc::clone(&connection),
+                });
+                let served = hyper_util::server::conn::auto::Builder::new(
                     hyper_util::rt::TokioExecutor::new(),
                 )
                 .serve_connection(io, hyper_svc)
-                .await
-                {
-                    tracing::debug!(%remote_addr, error = %e, "Connection ended");
-                }
+                .await;
+                let error = served.err().map(|error| error.to_string());
+                tracing::info!(
+                    conn_id = connection.id(),
+                    peer = %remote_addr,
+                    streams_served = connection.streams_served(),
+                    peak_streams = connection.peak_streams(),
+                    lifetime_s = opened.elapsed().as_secs_f64(),
+                    error = error.as_deref(),
+                    "ext_proc connection closed"
+                );
             });
         };
         readiness_task.abort();
@@ -498,6 +519,37 @@ async fn serve<P: crate::EndpointPicker>(
         readiness_task.abort();
         let _ = readiness_task.await;
         Ok(())
+    }
+}
+
+/// Puts the gateway connection into each request's extensions, where the
+/// ext_proc server finds it to count streams per connection.
+#[derive(Clone)]
+struct WithConnection<S> {
+    inner: S,
+    connection: Arc<metrics::Connection>,
+}
+
+impl<S, B> tonic::codegen::Service<tonic::codegen::http::Request<B>> for WithConnection<S>
+where
+    S: tonic::codegen::Service<tonic::codegen::http::Request<B>>,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = S::Future;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, mut request: tonic::codegen::http::Request<B>) -> Self::Future {
+        request
+            .extensions_mut()
+            .insert(Arc::clone(&self.connection));
+        self.inner.call(request)
     }
 }
 

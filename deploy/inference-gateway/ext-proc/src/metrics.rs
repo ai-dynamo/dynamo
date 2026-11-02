@@ -11,7 +11,8 @@
 //! [`DEFAULT_METRICS_PORT`] matches the port GAIE's Go endpoint picker uses,
 //! so existing endpoint-picker scrape configuration keeps working.
 
-use std::sync::{LazyLock, OnceLock};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use axum::{
@@ -19,10 +20,13 @@ use axum::{
     routing::get,
 };
 use dynamo_llm::http::service::metrics::generate_log_buckets;
+use prometheus::core::Collector;
 use prometheus::{
-    Encoder, HistogramOpts, HistogramVec, IntGauge, IntGaugeVec, Opts, Registry, TEXT_FORMAT,
-    TextEncoder,
+    Counter, Encoder, HistogramOpts, HistogramVec, IntGauge, IntGaugeVec, Opts, Registry,
+    TEXT_FORMAT, TextEncoder,
 };
+
+use crate::tokio_runtime::TaskKind;
 
 /// Port the `/metrics` endpoint binds to unless `DYN_EPP_METRICS_PORT` says
 /// otherwise. Distinct from the ext_proc gRPC port (9002) and the health port
@@ -105,8 +109,12 @@ pub enum Stage {
     /// Request headers received until the end of the request body: the
     /// gateway streaming the client's body to the EPP.
     ReceiveBody,
+    /// Reading the `model` field out of the request body.
+    ModelProbe,
     /// Parsing the request body into the typed request.
     Parse,
+    /// Waiting for a blocking-pool thread to start the chat template.
+    BlockingWait,
     /// Rendering the chat template.
     Template,
     /// Tokenizing the rendered prompt, excluding any wait for a thread.
@@ -120,36 +128,53 @@ pub enum Stage {
     /// Rewriting the forwarded body (`nvext.token_data`, `nvext` strip,
     /// cache salt).
     Rewrite,
+    /// Routing decision ready until the response headers reach the EPP: the
+    /// gateway sending the body to the sidecar, and the sidecar reading it
+    /// and answering with its headers.
+    ResponseHeaders,
     /// Routing decision ready until the first non-empty response body
     /// chunk: the gateway, sidecar and worker producing the first token.
     FirstResponse,
+    /// Request headers received until the first non-empty response body
+    /// chunk: the time to first token as the EPP sees it. Client time to
+    /// first token minus this is the time spent outside the EPP's view,
+    /// without comparing clocks across nodes.
+    EppTtft,
 }
 
 impl Stage {
     #[cfg(test)]
-    const ALL: [Stage; 9] = [
+    const ALL: [Stage; 13] = [
         Stage::ReceiveBody,
+        Stage::ModelProbe,
         Stage::Parse,
+        Stage::BlockingWait,
         Stage::Template,
         Stage::Tokenize,
         Stage::Select,
         Stage::Book,
         Stage::Pick,
         Stage::Rewrite,
+        Stage::ResponseHeaders,
         Stage::FirstResponse,
+        Stage::EppTtft,
     ];
 
     fn label(self) -> &'static str {
         match self {
             Stage::ReceiveBody => "receive_body",
+            Stage::ModelProbe => "model_probe",
             Stage::Parse => "parse",
+            Stage::BlockingWait => "blocking_wait",
             Stage::Template => "template",
             Stage::Tokenize => "tokenize",
             Stage::Select => "select",
             Stage::Book => "book",
             Stage::Pick => "pick",
             Stage::Rewrite => "rewrite",
+            Stage::ResponseHeaders => "response_headers",
             Stage::FirstResponse => "first_response",
+            Stage::EppTtft => "epp_ttft",
         }
     }
 }
@@ -292,11 +317,16 @@ fn pick_in_flight_for(model: &str) -> PickInFlight {
 
 /// Tokio runtime gauges, sampled at scrape time. A global queue that stays
 /// above zero means every worker thread is busy and ready tasks (other
-/// requests' body and token chunks) are waiting for one.
+/// requests' body and token chunks) are waiting for one. A task waiting in a
+/// busy worker's LIFO slot does not show here; the task metrics in
+/// [`crate::tokio_runtime`] catch that.
 struct RuntimeGauges {
     workers: IntGauge,
     alive_tasks: IntGauge,
     global_queue_depth: IntGauge,
+    blocking_threads: IntGauge,
+    blocking_queue_depth: IntGauge,
+    busy_seconds: Counter,
 }
 
 static RUNTIME: LazyLock<RuntimeGauges> = LazyLock::new(|| {
@@ -307,6 +337,14 @@ static RUNTIME: LazyLock<RuntimeGauges> = LazyLock::new(|| {
             .expect("runtime gauges are the only registrants of their names");
         gauge
     };
+    let busy_seconds = Counter::new(
+        "dynamo_epp_runtime_busy_seconds_total",
+        "Time the async runtime's worker threads spent running tasks",
+    )
+    .expect("runtime counter options are statically valid");
+    REGISTRY
+        .register(Box::new(busy_seconds.clone()))
+        .expect("runtime_busy_seconds_total is the only registrant of its name");
     RuntimeGauges {
         workers: gauge(
             "dynamo_epp_runtime_workers",
@@ -320,8 +358,20 @@ static RUNTIME: LazyLock<RuntimeGauges> = LazyLock::new(|| {
             "dynamo_epp_runtime_global_queue_depth",
             "Ready tasks waiting in the async runtime's global queue",
         ),
+        blocking_threads: gauge(
+            "dynamo_epp_runtime_blocking_threads",
+            "Threads in the async runtime's blocking pool, busy or idle",
+        ),
+        blocking_queue_depth: gauge(
+            "dynamo_epp_runtime_blocking_queue_depth",
+            "Blocking-pool tasks, such as chat template renders, waiting for a thread",
+        ),
+        busy_seconds,
     }
 });
+
+/// Worker busy time already added to `dynamo_epp_runtime_busy_seconds_total`.
+static BUSY_COUNTED: Mutex<Duration> = Mutex::new(Duration::ZERO);
 
 fn sample_runtime() {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
@@ -334,7 +384,281 @@ fn sample_runtime() {
     RUNTIME
         .global_queue_depth
         .set(to_i64(metrics.global_queue_depth()));
+    RUNTIME
+        .blocking_threads
+        .set(to_i64(metrics.num_blocking_threads()));
+    RUNTIME
+        .blocking_queue_depth
+        .set(to_i64(metrics.blocking_queue_depth()));
+
+    let busy: Duration = (0..metrics.num_workers())
+        .map(|worker| metrics.worker_total_busy_duration(worker))
+        .sum();
+    let mut counted = BUSY_COUNTED.lock().unwrap_or_else(PoisonError::into_inner);
+    if busy > *counted {
+        RUNTIME.busy_seconds.inc_by((busy - *counted).as_secs_f64());
+        *counted = busy;
+    }
 }
+
+static EXT_PROC_CONNECTIONS: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    let gauge = IntGaugeVec::new(
+        Opts::new(
+            "dynamo_epp_ext_proc_connections",
+            "Gateway connections to the ext_proc TLS port",
+        ),
+        &["model"],
+    )
+    .expect("ext_proc_connections options are statically valid");
+    REGISTRY
+        .register(Box::new(gauge.clone()))
+        .expect("ext_proc_connections is the only registrant of its name");
+    gauge
+});
+
+static EXT_PROC_STREAMS: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    let gauge = IntGaugeVec::new(
+        Opts::new(
+            "dynamo_epp_ext_proc_streams",
+            "Open ext_proc streams: requests the gateway is still relaying through the EPP",
+        ),
+        &["model"],
+    )
+    .expect("ext_proc_streams options are statically valid");
+    REGISTRY
+        .register(Box::new(gauge.clone()))
+        .expect("ext_proc_streams is the only registrant of its name");
+    gauge
+});
+
+static CONNECTION_STREAMS: LazyLock<HistogramVec> = LazyLock::new(|| {
+    let histogram = HistogramVec::new(
+        HistogramOpts::new(
+            "dynamo_epp_ext_proc_connection_streams",
+            "Streams open on a gateway connection when one more starts on it, \
+             that one included",
+        )
+        .buckets(vec![
+            1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 48.0, 64.0, 80.0, 96.0, 100.0, 128.0, 192.0, 256.0,
+        ]),
+        &["model"],
+    )
+    .expect("connection_streams histogram options are statically valid");
+    REGISTRY
+        .register(Box::new(histogram.clone()))
+        .expect("ext_proc_connection_streams is the only registrant of its name");
+    histogram
+});
+
+static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
+
+/// One gateway connection to the ext_proc TLS port, shared by the task that
+/// serves it and every ext_proc stream on it. Counted in
+/// `dynamo_epp_ext_proc_connections` until the last of them drops it.
+#[derive(Debug)]
+pub struct Connection {
+    id: u64,
+    open_streams: AtomicUsize,
+    streams_served: AtomicU64,
+    peak_streams: AtomicUsize,
+    gauge: IntGauge,
+}
+
+impl Connection {
+    pub fn open() -> Arc<Self> {
+        let gauge = EXT_PROC_CONNECTIONS.with_label_values(&[served_model_label()]);
+        gauge.inc();
+        Arc::new(Self {
+            id: NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed),
+            open_streams: AtomicUsize::new(0),
+            streams_served: AtomicU64::new(0),
+            peak_streams: AtomicUsize::new(0),
+            gauge,
+        })
+    }
+
+    /// Process-unique id, for joining a connection's log lines with its
+    /// streams' lines.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn streams_served(&self) -> u64 {
+        self.streams_served.load(Ordering::Relaxed)
+    }
+
+    pub fn peak_streams(&self) -> usize {
+        self.peak_streams.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        self.gauge.dec();
+    }
+}
+
+/// One ext_proc stream, counted in `dynamo_epp_ext_proc_streams` and on its
+/// connection until dropped.
+#[derive(Debug)]
+pub struct OpenStream {
+    connection: Option<Arc<Connection>>,
+    connection_streams: Option<usize>,
+    gauge: IntGauge,
+}
+
+impl OpenStream {
+    /// Start counting a stream. `connection` is `None` on the plaintext
+    /// listener, which does not track connections.
+    pub fn open(connection: Option<Arc<Connection>>) -> Self {
+        let model = served_model_label();
+        let gauge = EXT_PROC_STREAMS.with_label_values(&[model]);
+        gauge.inc();
+        let connection_streams = connection.as_ref().map(|connection| {
+            let open = connection.open_streams.fetch_add(1, Ordering::Relaxed) + 1;
+            connection.streams_served.fetch_add(1, Ordering::Relaxed);
+            connection.peak_streams.fetch_max(open, Ordering::Relaxed);
+            CONNECTION_STREAMS
+                .with_label_values(&[model])
+                .observe(open as f64);
+            open
+        });
+        Self {
+            connection,
+            connection_streams,
+            gauge,
+        }
+    }
+
+    pub fn connection_id(&self) -> Option<u64> {
+        self.connection.as_ref().map(|connection| connection.id())
+    }
+
+    /// Streams open on this stream's connection when it started, itself
+    /// included: how many requests one stall of that connection holds.
+    pub fn connection_streams(&self) -> Option<usize> {
+        self.connection_streams
+    }
+}
+
+impl Drop for OpenStream {
+    fn drop(&mut self) {
+        self.gauge.dec();
+        if let Some(connection) = &self.connection {
+            connection.open_streams.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Buckets for the stall histograms, in seconds: 0.1 ms to 10 s.
+fn stall_buckets() -> Vec<f64> {
+    vec![
+        0.000_1, 0.000_25, 0.000_5, 0.001, 0.002_5, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0,
+        2.5, 5.0, 10.0,
+    ]
+}
+
+static TASK_POLL_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| {
+    let histogram = HistogramVec::new(
+        HistogramOpts::new(
+            "dynamo_epp_task_poll_seconds",
+            "Task polls that held an async worker thread at least DYN_EPP_TASK_METRICS_MIN_US",
+        )
+        .buckets(stall_buckets()),
+        &["model", "task"],
+    )
+    .expect("task_poll histogram options are statically valid");
+    REGISTRY
+        .register(Box::new(histogram.clone()))
+        .expect("task_poll_seconds is the only registrant of its name");
+    histogram
+});
+
+static TASK_SCHEDULE_DELAY_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| {
+    let histogram = HistogramVec::new(
+        HistogramOpts::new(
+            "dynamo_epp_task_schedule_delay_seconds",
+            "Waits of at least DYN_EPP_TASK_METRICS_MIN_US between a task being \
+             woken and being polled",
+        )
+        .buckets(stall_buckets()),
+        &["model", "task"],
+    )
+    .expect("task_schedule_delay histogram options are statically valid");
+    REGISTRY
+        .register(Box::new(histogram.clone()))
+        .expect("task_schedule_delay_seconds is the only registrant of its name");
+    histogram
+});
+
+static EVENT_LOOP_DELAY_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| {
+    let histogram = HistogramVec::new(
+        HistogramOpts::new(
+            "dynamo_epp_event_loop_delay_seconds",
+            "How late a 10 ms sleep on the async runtime wakes",
+        )
+        .buckets(stall_buckets()),
+        &["model"],
+    )
+    .expect("event_loop_delay histogram options are statically valid");
+    REGISTRY
+        .register(Box::new(histogram.clone()))
+        .expect("event_loop_delay_seconds is the only registrant of its name");
+    histogram
+});
+
+pub(crate) fn observe_task_poll(task: TaskKind, elapsed: Duration) {
+    TASK_POLL_SECONDS
+        .with_label_values(&[served_model_label(), task.label()])
+        .observe(elapsed.as_secs_f64());
+}
+
+pub(crate) fn observe_task_schedule_delay(task: TaskKind, delay: Duration) {
+    TASK_SCHEDULE_DELAY_SECONDS
+        .with_label_values(&[served_model_label(), task.label()])
+        .observe(delay.as_secs_f64());
+}
+
+pub(crate) fn observe_event_loop_delay(delay: Duration) {
+    EVENT_LOOP_DELAY_SECONDS
+        .with_label_values(&[served_model_label()])
+        .observe(delay.as_secs_f64());
+}
+
+#[cfg(test)]
+pub(crate) fn task_polls_recorded(task: TaskKind) -> u64 {
+    TASK_POLL_SECONDS
+        .with_label_values(&[served_model_label(), task.label()])
+        .get_sample_count()
+}
+
+#[cfg(test)]
+pub(crate) fn event_loop_delays_recorded() -> u64 {
+    EVENT_LOOP_DELAY_SECONDS
+        .with_label_values(&[served_model_label()])
+        .get_sample_count()
+}
+
+/// The tokenizer's prefix-cache counters. The EPP's tokenizer increments
+/// them as the frontend's does; registering them here exports them, so the
+/// cache's hit rate can be compared between the two at each load.
+static TOKENIZER_CACHE: LazyLock<()> = LazyLock::new(|| {
+    use dynamo_runtime::metrics::frontend_perf::{
+        TOKENIZER_CACHE_CACHED_TOKENS_TOTAL, TOKENIZER_CACHE_HITS_TOTAL,
+        TOKENIZER_CACHE_MISSES_TOTAL, TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL,
+    };
+    let collectors: [Box<dyn Collector>; 4] = [
+        Box::new(TOKENIZER_CACHE_HITS_TOTAL.clone()),
+        Box::new(TOKENIZER_CACHE_MISSES_TOTAL.clone()),
+        Box::new(TOKENIZER_CACHE_CACHED_TOKENS_TOTAL.clone()),
+        Box::new(TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL.clone()),
+    ];
+    for collector in collectors {
+        REGISTRY
+            .register(collector)
+            .expect("the EPP registers the tokenizer cache counters once");
+    }
+});
 
 /// Register every family up front, so a scrape shows them before the first
 /// request.
@@ -345,11 +669,29 @@ fn register_all() {
     LazyLock::force(&PROMPT_TOKENS);
     LazyLock::force(&PICKS_IN_FLIGHT);
     LazyLock::force(&RUNTIME);
+    LazyLock::force(&EXT_PROC_CONNECTIONS);
+    LazyLock::force(&EXT_PROC_STREAMS);
+    LazyLock::force(&CONNECTION_STREAMS);
+    LazyLock::force(&TASK_POLL_SECONDS);
+    LazyLock::force(&TASK_SCHEDULE_DELAY_SECONDS);
+    LazyLock::force(&EVENT_LOOP_DELAY_SECONDS);
+    LazyLock::force(&TOKENIZER_CACHE);
 }
 
-/// Serve `/metrics` until the process exits.
+/// Aborts the event-loop watcher when the metrics server stops.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Serve `/metrics` until the process exits, and watch the async runtime for
+/// stalls (see [`crate::tokio_runtime`]) for as long as it does.
 pub async fn serve(port: u16) -> anyhow::Result<()> {
     register_all();
+    let _watcher = AbortOnDrop(tokio::spawn(crate::tokio_runtime::watch_event_loop()));
     let app = AxumRouter::new().route("/metrics", get(render));
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     tracing::info!(port, "Serving Prometheus metrics on /metrics");
@@ -548,7 +890,36 @@ mod tests {
 
         assert!(body.contains("dynamo_epp_runtime_workers 2"), "{body}");
         assert!(body.contains("# TYPE dynamo_epp_runtime_global_queue_depth gauge"));
+        assert!(body.contains("# TYPE dynamo_epp_runtime_blocking_threads gauge"));
+        assert!(body.contains("# TYPE dynamo_epp_runtime_blocking_queue_depth gauge"));
+        assert!(body.contains("# TYPE dynamo_epp_runtime_busy_seconds_total counter"));
         assert!(body.contains("# TYPE dynamo_epp_stage_duration_seconds histogram"));
         assert!(body.contains("# TYPE dynamo_epp_picks_in_flight gauge"));
+        assert!(body.contains("# TYPE dynamo_frontend_tokenizer_cache_hits_total counter"));
+    }
+
+    #[test]
+    fn streams_are_counted_on_their_connection_until_dropped() {
+        let _guard = bind_test_model();
+        let connection = Connection::open();
+        let first = OpenStream::open(Some(Arc::clone(&connection)));
+        let second = OpenStream::open(Some(Arc::clone(&connection)));
+        let plaintext = OpenStream::open(None);
+
+        assert_eq!(first.connection_id(), Some(connection.id()));
+        assert_eq!(first.connection_streams(), Some(1));
+        assert_eq!(second.connection_streams(), Some(2));
+        assert_eq!(plaintext.connection_id(), None);
+        assert_eq!(plaintext.connection_streams(), None);
+
+        drop(first);
+        let third = OpenStream::open(Some(Arc::clone(&connection)));
+        assert_eq!(
+            third.connection_streams(),
+            Some(2),
+            "a closed stream frees its slot"
+        );
+        assert_eq!(connection.streams_served(), 3);
+        assert_eq!(connection.peak_streams(), 2);
     }
 }

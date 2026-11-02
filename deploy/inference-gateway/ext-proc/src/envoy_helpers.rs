@@ -4,14 +4,14 @@
 //! Envoy ext_proc protocol helpers: header extraction, metadata handling,
 //! body chunking, and response construction.
 
-use std::collections::HashMap;
+use std::borrow::Cow;
 
 use crate::proto::envoy::config::core::v3::{
     HeaderMap, HeaderValue, HeaderValueOption, header_value_option::HeaderAppendAction,
 };
 use crate::proto::envoy::service::ext_proc::v3::{
     BodyMutation, BodyResponse, CommonResponse, HeaderMutation, HeadersResponse, ImmediateResponse,
-    ProcessingRequest, ProcessingResponse, StreamedBodyResponse, TrailersResponse,
+    ProcessingResponse, StreamedBodyResponse, TrailersResponse,
 };
 use crate::proto::envoy::r#type::v3::{HttpStatus, StatusCode};
 
@@ -103,13 +103,6 @@ pub fn extract_header_value(headers: &HeaderMap, key: &str) -> Option<String> {
         .iter()
         .find(|h| h.key.to_ascii_lowercase() == key_lower)
         .map(get_header_value)
-}
-
-pub fn extract_metadata_values(req: &ProcessingRequest) -> HashMap<String, prost_types::Struct> {
-    req.metadata_context
-        .as_ref()
-        .map(|m| m.filter_metadata.clone())
-        .unwrap_or_default()
 }
 
 /// Preserve the full header list from the incoming request, retaining
@@ -396,11 +389,17 @@ fn build_endpoint_metadata(endpoint: &str) -> prost_types::Struct {
 }
 
 /// Replace occurrences of the target (internal) model name with the incoming
-/// (client-facing) model name in the response body bytes. No-op when names
-/// match or either is empty.
-pub fn rewrite_model_name(body: &[u8], target_model: &str, incoming_model: &str) -> Vec<u8> {
+/// (client-facing) model name in the response body bytes. Borrows the body
+/// unchanged when the names match, when either is empty, or when the body
+/// does not name the target model, so a token chunk is copied once, into
+/// its ext_proc message, rather than twice.
+pub fn rewrite_model_name<'a>(
+    body: &'a [u8],
+    target_model: &str,
+    incoming_model: &str,
+) -> Cow<'a, [u8]> {
     if target_model.is_empty() || incoming_model.is_empty() || target_model == incoming_model {
-        return body.to_vec();
+        return Cow::Borrowed(body);
     }
 
     let old = format!("\"model\":\"{target_model}\"");
@@ -410,10 +409,49 @@ pub fn rewrite_model_name(body: &[u8], target_model: &str, incoming_model: &str)
     let replaced = body_str.replace(&old, &new);
 
     if replaced.as_bytes() != body {
-        return replaced.into_bytes();
+        return Cow::Owned(replaced.into_bytes());
     }
 
     let old_spaced = format!("\"model\": \"{target_model}\"");
     let new_spaced = format!("\"model\": \"{incoming_model}\"");
-    body_str.replace(&old_spaced, &new_spaced).into_bytes()
+    let replaced = body_str.replace(&old_spaced, &new_spaced);
+    if replaced.as_bytes() == body {
+        Cow::Borrowed(body)
+    } else {
+        Cow::Owned(replaced.into_bytes())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rewrite_model_name_borrows_unchanged_chunks() {
+        let chunk = br#"data: {"model":"served","choices":[]}"#;
+        assert!(matches!(
+            rewrite_model_name(chunk, "served", "served"),
+            Cow::Borrowed(_)
+        ));
+        assert!(matches!(
+            rewrite_model_name(chunk, "", "alias"),
+            Cow::Borrowed(_)
+        ));
+        assert!(matches!(
+            rewrite_model_name(chunk, "other", "alias"),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn rewrite_model_name_replaces_the_target_model() {
+        assert_eq!(
+            rewrite_model_name(br#"{"model":"served","id":1}"#, "served", "alias").as_ref(),
+            br#"{"model":"alias","id":1}"#
+        );
+        assert_eq!(
+            rewrite_model_name(br#"{"model": "served"}"#, "served", "alias").as_ref(),
+            br#"{"model": "alias"}"#
+        );
+    }
 }

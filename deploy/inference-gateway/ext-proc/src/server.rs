@@ -11,8 +11,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use tokio::sync::mpsc;
@@ -20,9 +20,11 @@ use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::envoy_helpers::{self, metadata};
-use crate::metrics::{self, Stage};
+use crate::log_budget::LogBudget;
+use crate::metrics::{self, Connection, OpenStream, Stage};
 use crate::picker::{
-    CacheSaltForwarding, Endpoint, EndpointPicker, PickError, RequestInfo, ResponseUsage,
+    CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickTimings, RequestInfo,
+    ResponseUsage,
 };
 use crate::proto::envoy::service::ext_proc::v3::{
     self as ext_proc, ProcessingRequest, ProcessingResponse,
@@ -30,6 +32,7 @@ use crate::proto::envoy::service::ext_proc::v3::{
     processing_request,
 };
 use crate::proto::envoy::r#type::v3::StatusCode;
+use crate::tokio_runtime::{self, TaskKind};
 use dynamo_kv_router::zmq_wire::DYNAMO_CACHE_SALT_PREFIX;
 use serde_json::value::RawValue;
 
@@ -91,6 +94,13 @@ struct RequestContext {
     headers_received_at: Option<Instant>,
     /// When the routing decision was ready, for [`Stage::FirstResponse`].
     routed_at: Option<Instant>,
+
+    /// The gateway connection this stream arrived on, and how many streams
+    /// it carried at the time, for the routing and summary log lines.
+    connection_id: Option<u64>,
+    connection_streams: Option<usize>,
+    /// What happened on this stream, for the stream summary log line.
+    trace: StreamTrace,
 }
 
 impl RequestContext {
@@ -122,7 +132,16 @@ impl RequestContext {
             sse_usage_buf: Vec::new(),
             headers_received_at: None,
             routed_at: None,
+            connection_id: None,
+            connection_streams: None,
+            trace: StreamTrace::default(),
         }
+    }
+
+    /// Time since the request headers arrived: the offsets in the stream
+    /// summary.
+    fn since_headers(&self) -> Option<Duration> {
+        self.headers_received_at.map(|received| received.elapsed())
     }
 
     /// Advance the state machine and collect responses that are ready to send.
@@ -200,6 +219,177 @@ impl RequestContext {
         }
 
         out
+    }
+}
+
+/// How each stream ended, in the stream summary log line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Outcome {
+    /// The response finished.
+    Complete,
+    /// The gateway ended the stream before the response finished.
+    ClosedEarly,
+    /// The gateway stopped reading the EPP's responses, so the request was
+    /// cancelled.
+    Cancelled,
+    /// No worker was picked; the EPP answered the request itself.
+    PickError,
+    /// A receive error or an unsupported protocol configuration.
+    StreamError,
+    /// The EPP evicted the request.
+    Evicted,
+}
+
+impl Outcome {
+    fn label(self) -> &'static str {
+        match self {
+            Outcome::Complete => "complete",
+            Outcome::ClosedEarly => "closed_early",
+            Outcome::Cancelled => "cancelled",
+            Outcome::PickError => "pick_error",
+            Outcome::StreamError => "stream_error",
+            Outcome::Evicted => "evicted",
+        }
+    }
+}
+
+/// A response chunk gap at least this long is counted in the stream summary.
+const NOTABLE_CHUNK_GAP: Duration = Duration::from_millis(40);
+/// A stream with a response chunk gap, or a routed-to-response-headers time,
+/// at least this long is slow.
+const SLOW_GAP: Duration = Duration::from_millis(100);
+/// A stream that took at least this long to receive its body, or to pick a
+/// worker, is slow.
+const SLOW_PHASE: Duration = Duration::from_secs(1);
+
+/// What happened on one ext_proc stream, on the EPP's clock, for the stream
+/// summary log line. Offsets are from the arrival of the request headers.
+#[derive(Default)]
+struct StreamTrace {
+    outcome: Option<Outcome>,
+    /// Request body messages received.
+    body_msgs: u32,
+    /// The end of the request body.
+    body_eos: Option<Duration>,
+    /// The routing decision and the forwarded body ready.
+    routed: Option<Duration>,
+    /// The response headers' arrival.
+    response_headers: Option<Duration>,
+    /// The first non-empty response chunk's arrival.
+    first_chunk: Option<Duration>,
+    rewrite: Option<Duration>,
+    body_bytes_out: usize,
+    timings: Option<PickTimings>,
+    /// Response body messages received, and the gaps between them.
+    chunks: u32,
+    last_chunk_at: Option<Instant>,
+    max_chunk_gap: Duration,
+    notable_chunk_gaps: u32,
+}
+
+impl StreamTrace {
+    fn record_chunk(&mut self, now: Instant) {
+        self.chunks += 1;
+        if let Some(last) = self.last_chunk_at.replace(now) {
+            let gap = now.saturating_duration_since(last);
+            self.max_chunk_gap = self.max_chunk_gap.max(gap);
+            if gap >= NOTABLE_CHUNK_GAP {
+                self.notable_chunk_gaps += 1;
+            }
+        }
+    }
+
+    /// Whether the stream stalled somewhere the EPP can see: a response chunk
+    /// held back, a slow trip from the routing decision to the response
+    /// headers, or a slow body or pick.
+    fn is_slow(&self) -> bool {
+        let elapsed = |from: Option<Duration>, to: Option<Duration>| {
+            from.zip(to).map(|(from, to)| to.saturating_sub(from))
+        };
+        self.max_chunk_gap >= SLOW_GAP
+            || elapsed(self.routed, self.response_headers).is_some_and(|d| d >= SLOW_GAP)
+            || self.body_eos.is_some_and(|d| d >= SLOW_PHASE)
+            || elapsed(self.body_eos, self.routed).is_some_and(|d| d >= SLOW_PHASE)
+    }
+}
+
+fn micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
+/// Environment variable choosing which streams get an INFO summary line:
+/// `slow` (default) for slow streams only, at most 20 lines per second;
+/// `all` for every stream, as a benchmark wants; `off` for none. Other
+/// streams' summaries are logged at DEBUG.
+pub const STREAM_SUMMARY_ENV: &str = "DYN_EPP_STREAM_SUMMARY";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SummaryMode {
+    All,
+    Slow,
+    Off,
+}
+
+static SUMMARY_MODE: LazyLock<SummaryMode> = LazyLock::new(|| {
+    match std::env::var(STREAM_SUMMARY_ENV)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "all" => SummaryMode::All,
+        "off" => SummaryMode::Off,
+        _ => SummaryMode::Slow,
+    }
+});
+
+/// Slow-stream summary lines per second, at most.
+static SLOW_SUMMARY_BUDGET: LogBudget = LogBudget::new(20);
+
+/// Log what happened on one stream, after its last response is queued.
+fn log_stream_summary(ctx: &RequestContext) {
+    let trace = &ctx.trace;
+    let outcome = trace.outcome.unwrap_or(if ctx.response_complete {
+        Outcome::Complete
+    } else {
+        Outcome::ClosedEarly
+    });
+    let slow = trace.is_slow();
+    let end = ctx.since_headers();
+    macro_rules! summary {
+        ($level:ident, $suppressed:expr) => {
+            tracing::$level!(
+                request_id = %ctx.request_id,
+                conn_id = ctx.connection_id,
+                conn_streams = ctx.connection_streams,
+                outcome = outcome.label(),
+                slow,
+                prompt_tokens = trace.timings.map(|t| t.prompt_tokens),
+                body_bytes_in = ctx.request_size,
+                body_bytes_out = trace.body_bytes_out,
+                body_msgs_in = trace.body_msgs,
+                body_eos_us = trace.body_eos.map(micros),
+                routed_us = trace.routed.map(micros),
+                resp_headers_us = trace.response_headers.map(micros),
+                first_chunk_us = trace.first_chunk.map(micros),
+                end_us = end.map(micros),
+                rewrite_us = trace.rewrite.map(micros),
+                chunks = trace.chunks,
+                max_chunk_gap_us = micros(trace.max_chunk_gap),
+                chunk_gaps_over_40ms = trace.notable_chunk_gaps,
+                suppressed = $suppressed,
+                "ext_proc stream summary"
+            )
+        };
+    }
+    match *SUMMARY_MODE {
+        SummaryMode::All => summary!(info, 0u64),
+        SummaryMode::Slow if slow => {
+            if let Some(suppressed) = SLOW_SUMMARY_BUDGET.take() {
+                summary!(info, suppressed);
+            }
+        }
+        _ => summary!(debug, 0u64),
     }
 }
 
@@ -296,7 +486,10 @@ impl<P: EndpointPicker> ExtProcServer<P> {
     ) -> Result<(), ExtProcError> {
         ctx.request_size = raw_body.len();
 
+        let probe_started = Instant::now();
         let model = extract_model_from_body(&raw_body);
+        let model_probe = probe_started.elapsed();
+        metrics::observe_stage(Stage::ModelProbe, model_probe);
         let candidate_subset = extract_candidate_subset(&ctx.request_metadata);
 
         let req_info = RequestInfo {
@@ -322,10 +515,27 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         ctx.target_endpoint = result.endpoint.clone();
         ctx.incoming_model_name = model;
         ctx.target_model_name = ctx.incoming_model_name.clone();
+        let timings = result.timings;
+        ctx.trace.timings = timings;
+        // One line per request, joinable with the client's records by
+        // `request_id`: which step of the pick took the time, and how many
+        // requests share this request's gateway connection.
         tracing::info!(
             request_id = %ctx.request_id,
             endpoint = %result.endpoint,
             picker_header_count = result.headers.len(),
+            conn_id = ctx.connection_id,
+            conn_streams = ctx.connection_streams,
+            prompt_tokens = timings.map(|t| t.prompt_tokens),
+            body_bytes_in = raw_body.len(),
+            receive_body_us = ctx.trace.body_eos.map(micros),
+            model_probe_us = micros(model_probe),
+            parse_us = timings.map(|t| micros(t.parse)),
+            blocking_wait_us = timings.and_then(|t| t.blocking_wait).map(micros),
+            template_us = timings.and_then(|t| t.template).map(micros),
+            tokenize_us = timings.and_then(|t| t.tokenize).map(micros),
+            select_us = timings.map(|t| micros(t.select)),
+            book_us = timings.map(|t| micros(t.book)),
             "Request routed"
         );
         for (k, v) in &result.headers {
@@ -354,13 +564,18 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             || cache_salt.is_some()
         {
             let started = Instant::now();
-            let rewritten = rewrite_forwarded_body(
-                &raw_body,
-                result.strip_nvext,
-                result.token_ids.as_deref(),
-                cache_salt,
-            );
-            metrics::observe_stage(Stage::Rewrite, started.elapsed());
+            // Scales with the prompt, so it runs off the async worker.
+            let rewritten = tokio_runtime::off_runtime(|| {
+                rewrite_forwarded_body(
+                    &raw_body,
+                    result.strip_nvext,
+                    result.token_ids.as_deref(),
+                    cache_salt,
+                )
+            });
+            let rewrite = started.elapsed();
+            metrics::observe_stage(Stage::Rewrite, rewrite);
+            ctx.trace.rewrite = Some(rewrite);
             match rewritten {
                 Ok(modified) => {
                     tracing::trace!(
@@ -383,6 +598,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
 
         metrics::observe_body_bytes(metrics::Body::Received, raw_body.len());
         metrics::observe_body_bytes(metrics::Body::Forwarded, forwarded_body.len());
+        ctx.trace.body_bytes_out = forwarded_body.len();
         ctx.req_body_resp = envoy_helpers::build_request_body_responses(&forwarded_body);
         tracing::debug!(
             has_header_resp = ctx.req_header_resp.is_some(),
@@ -390,6 +606,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             "[MUTATION] Responses prepared, waiting for drain"
         );
         ctx.routed_at = Some(Instant::now());
+        ctx.trace.routed = ctx.since_headers();
 
         Ok(())
     }
@@ -566,24 +783,44 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
         &self,
         request: Request<Streaming<ProcessingRequest>>,
     ) -> Result<Response<Self::ProcessStream>, Status> {
+        // Set by the TLS listener, which tracks gateway connections.
+        let connection = request.extensions().get::<Arc<Connection>>().cloned();
         let mut inbound = request.into_inner();
         let picker = self.picker.clone();
 
         let (tx, rx) = mpsc::channel::<Result<ProcessingResponse, Status>>(32);
         let output_stream = ReceiverStream::new(rx);
 
-        tokio::spawn(async move {
+        tokio_runtime::spawn(TaskKind::ExtProcStream, async move {
+            let stream = OpenStream::open(connection);
             let mut ctx = RequestContext::new();
+            ctx.connection_id = stream.connection_id();
+            ctx.connection_streams = stream.connection_streams();
             let mut body_buf: Vec<u8> = Vec::new();
             let mut resp_body_buf: Vec<u8> = Vec::new();
 
             let result: Result<(), Status> = async {
                 while let Some(req_result) = inbound.next().await {
-                    let req = req_result.map_err(|e| {
+                    let mut req = req_result.map_err(|e| {
                         Status::unknown(format!("Cannot receive stream request: {e}"))
                     })?;
 
-                    ctx.request_metadata = envoy_helpers::extract_metadata_values(&req);
+                    // Only the pick reads the routing metadata. The gateway can
+                    // resend it with every message, so take it from the request
+                    // phase only, by move, rather than copy it per token chunk.
+                    if matches!(
+                        req.request,
+                        Some(
+                            processing_request::Request::RequestHeaders(_)
+                                | processing_request::Request::RequestBody(_)
+                        )
+                    ) {
+                        ctx.request_metadata = req
+                            .metadata_context
+                            .take()
+                            .map(|metadata| metadata.filter_metadata)
+                            .unwrap_or_default();
+                    }
 
                     if let Some(ref pc) = req.protocol_config {
                         tracing::debug!(
@@ -618,6 +855,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                             request_id = %ctx.request_id,
                                             "ext_proc stream closed during selection; cancelling"
                                         );
+                                        ctx.trace.outcome = Some(Outcome::Cancelled);
                                         return Ok(());
                                     }
                                     result = ExtProcServer::handle_header_only_request(
@@ -627,6 +865,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                     ) => result,
                                 };
                                 if let Err(e) = routed {
+                                    ctx.trace.outcome = Some(Outcome::PickError);
                                     let resp = e.into_processing_response();
                                     let _ = tx.send(Ok(resp)).await;
                                     return Ok(());
@@ -640,11 +879,13 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                 "[MSG-ORDER] Received RequestBody from Envoy"
                             );
                             body_buf.extend_from_slice(&body.body);
+                            ctx.trace.body_msgs += 1;
 
                             if body.end_of_stream {
                                 if let Some(received) = ctx.headers_received_at {
                                     metrics::observe_stage(Stage::ReceiveBody, received.elapsed());
                                 }
+                                ctx.trace.body_eos = ctx.since_headers();
                                 // Freeze the accumulated body once into `Bytes`
                                 // (moves the Vec, no copy); downstream sharing is
                                 // by cheap refcount clone.
@@ -664,6 +905,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                             request_id = %ctx.request_id,
                                             "ext_proc stream closed during selection; cancelling"
                                         );
+                                        ctx.trace.outcome = Some(Outcome::Cancelled);
                                         return Ok(());
                                     }
                                     result = ExtProcServer::handle_request_body(
@@ -674,6 +916,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                     ) => result,
                                 };
                                 if let Err(e) = routed {
+                                    ctx.trace.outcome = Some(Outcome::PickError);
                                     let resp = e.into_processing_response();
                                     let _ = tx.send(Ok(resp)).await;
                                     return Ok(());
@@ -683,8 +926,13 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                         Some(processing_request::Request::RequestTrailers(_)) => {}
                         Some(processing_request::Request::ResponseHeaders(ref hdr)) => {
                             ExtProcServer::<P>::handle_response_headers(&mut ctx, hdr);
+                            if let Some(routed) = ctx.routed_at {
+                                metrics::observe_stage(Stage::ResponseHeaders, routed.elapsed());
+                            }
+                            ctx.trace.response_headers = ctx.since_headers();
                         }
                         Some(processing_request::Request::ResponseBody(ref body)) => {
+                            ctx.trace.record_chunk(Instant::now());
                             // Signal prefill completion on the first non-empty
                             // response body chunk (the first generated token).
                             // In streaming mode the upstream flushes HTTP
@@ -701,6 +949,10 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                 if let Some(routed) = ctx.routed_at.take() {
                                     metrics::observe_stage(Stage::FirstResponse, routed.elapsed());
                                 }
+                                if let Some(received) = ctx.headers_received_at {
+                                    metrics::observe_stage(Stage::EppTtft, received.elapsed());
+                                }
+                                ctx.trace.first_chunk = ctx.since_headers();
                                 // Hand back the picker's own booking id (falls
                                 // back to request_id if it booked nothing).
                                 let booking_id = ctx
@@ -759,11 +1011,13 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                     let responses = ctx.drain_pending_responses();
                     for resp in responses {
                         if tx.send(Ok(resp)).await.is_err() {
+                            ctx.trace.outcome = Some(Outcome::Cancelled);
                             return Ok(());
                         }
                     }
 
                     if ctx.state == StreamState::RequestEvicted {
+                        ctx.trace.outcome = Some(Outcome::Evicted);
                         break;
                     }
                 }
@@ -773,8 +1027,10 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
             .await;
 
             if let Err(e) = result {
+                ctx.trace.outcome = Some(Outcome::StreamError);
                 let _ = tx.send(Err(e)).await;
             }
+            log_stream_summary(&ctx);
 
             // TODO(epp-disconnect-semantics): Define how Envoy retries and backend
             // work continuing after an ext_proc disconnect affect booking ownership.
@@ -1911,5 +2167,40 @@ mod tests {
             assert!(rewrite_forwarded_body(body, true, None, None).is_err());
             assert!(rewrite_forwarded_body(body, false, Some(&[1]), None).is_err());
         }
+    }
+
+    #[test]
+    fn stream_trace_counts_response_chunk_gaps() {
+        let ms = Duration::from_millis;
+        let start = Instant::now();
+        let mut trace = StreamTrace::default();
+        for at in [0, 10, 60] {
+            trace.record_chunk(start + ms(at));
+        }
+        assert_eq!(trace.chunks, 3);
+        assert_eq!(trace.max_chunk_gap, ms(50));
+        assert_eq!(trace.notable_chunk_gaps, 1);
+        assert!(!trace.is_slow());
+
+        trace.record_chunk(start + ms(170));
+        assert!(trace.is_slow(), "a 110 ms hold between chunks is a stall");
+    }
+
+    #[test]
+    fn slow_forward_path_or_pick_marks_the_stream_slow() {
+        let ms = Duration::from_millis;
+        let trace = |body_eos, routed, response_headers| StreamTrace {
+            body_eos: Some(ms(body_eos)),
+            routed: Some(ms(routed)),
+            response_headers: Some(ms(response_headers)),
+            ..Default::default()
+        };
+        assert!(!trace(5, 20, 30).is_slow());
+        assert!(
+            trace(5, 20, 150).is_slow(),
+            "slow trip to the sidecar and back"
+        );
+        assert!(trace(5, 1_200, 1_210).is_slow(), "slow pick");
+        assert!(trace(1_100, 1_110, 1_120).is_slow(), "slow request body");
     }
 }
