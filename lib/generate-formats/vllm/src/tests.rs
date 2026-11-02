@@ -4,6 +4,86 @@
 use super::*;
 
 #[test]
+fn causal_token_producer_frames_roundtrip_through_native_format_and_collector() {
+    use dynamo_llm::protocols::systemone::{
+        SystemOneError,
+        vllm::{VllmScoreCollector, VllmScoreResult, causal_scoring_request},
+    };
+
+    fn collect(frames: &[Value]) -> Result<VllmScoreResult, SystemOneError> {
+        let mut collector = VllmScoreCollector::new(vec![20, 10], 3)?;
+        for frame in frames {
+            collector.observe(&serde_json::from_value(frame.clone()).unwrap())?;
+        }
+        collector.finish()
+    }
+
+    let fixture: Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../tests/fixtures/decisions/causal-producer-v1.json"
+    )))
+    .unwrap();
+    let request = causal_scoring_request(vec![1, 2, 3], &[20, 10], "tenant").unwrap();
+    assert_eq!(request, fixture["request"]);
+    let body = serde_json::to_vec(&request).unwrap();
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        "application/json".parse().unwrap(),
+    );
+    let opened = VllmFormat
+        .open(ClientRequest {
+            body: &body,
+            headers: &headers,
+            default_request_id: "causal-producer-1",
+        })
+        .unwrap();
+    opened.validation.unwrap();
+    let bound = (opened.bind)(&routing_metadata(16, false, None)).unwrap();
+    assert_eq!(bound.request.output_options.logprobs, None);
+    assert_eq!(
+        json!({
+            "model": bound.request.model,
+            "token_ids": bound.request.token_ids,
+            "output_options": {"logprobs": bound.request.output_options.logprobs},
+            "routing": {"cache_namespace": bound.request.routing.as_ref().unwrap().cache_namespace},
+            "extra_args": bound.request.extra_args,
+        }),
+        fixture["worker_request"]
+    );
+    let frames = fixture["frames"].as_array().unwrap();
+    let result = collect(frames).unwrap();
+    assert_eq!(
+        json!({
+            "ids": [20, 10], "scores": result.scores,
+            "input_tokens": result.input_tokens, "cached_tokens": result.cached_tokens,
+        }),
+        fixture["expected"]
+    );
+
+    let mut stripped = frames.clone();
+    for frame in &mut stripped {
+        if frame.get("top_logprobs").is_some() {
+            frame["top_logprobs"] = json!([[]]);
+        }
+    }
+    assert!(
+        collect(&stripped).is_err(),
+        "stripped requested-ID rows must fail"
+    );
+    let mut unmeasured = frames.clone();
+    for frame in &mut unmeasured {
+        if frame.get("finish_reason").is_some() {
+            frame.as_object_mut().unwrap().remove("completion_usage");
+        }
+    }
+    assert!(
+        collect(&unmeasured).is_err(),
+        "terminal usage cannot be omitted"
+    );
+}
+
+#[test]
 fn causal_decision_request_binds_through_native_format() {
     let raw = dynamo_llm::protocols::systemone::vllm::causal_scoring_request(
         vec![1, 2, 3],

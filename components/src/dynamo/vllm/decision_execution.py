@@ -19,10 +19,11 @@ from importlib.metadata import PackageNotFoundError, version
 from inspect import signature
 from typing import TYPE_CHECKING
 
-from packaging.version import InvalidVersion, Version
-
 from dynamo.common.constants import DisaggregationMode
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, WorkerType
+from dynamo.llm import ModelInput, ModelRuntimeConfig, WorkerType
+
+from .decision_cache_provenance import qualified_cache_runtime
+from .decision_runtime_policy import is_exact_vllm_release, qualified_runtime
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -41,15 +42,6 @@ _STABLE_GEMMA_ARCHITECTURES = frozenset(
     {"Gemma4ForCausalLM", "Gemma4ForConditionalGeneration"}
 )
 logger = logging.getLogger(__name__)
-
-
-def is_exact_vllm_release(installed: str, release: str) -> bool:
-    """Require the selected release, permitting only local wheel build metadata."""
-    try:
-        parsed = Version(installed)
-    except InvalidVersion:
-        return False
-    return parsed.public == release
 
 
 def _decision_api_available() -> bool:
@@ -75,38 +67,6 @@ def _decision_api_available() -> bool:
         "num_cached_tokens",
         "num_cache_creation_tokens",
     }.issubset(output_fields)
-
-
-def qualified_runtime(
-    vllm_config: VllmConfig, *, runner_type: str, diffusion: bool, min_model_len: int
-) -> bool:
-    """Share model and engine qualification without importing an optional runtime."""
-    try:
-        model = vllm_config.model_config
-        return (
-            model.runner_type == runner_type
-            and model.is_encoder_decoder is False
-            and model.model_impl in ("auto", "vllm")
-            and not model.model_class_overrides
-            and model.convert_type == "none"
-            and model.is_diffusion is diffusion
-            and type(model.max_model_len) is int
-            and model.max_model_len >= min_model_len
-            and type(vllm_config.parallel_config.data_parallel_size) is int
-            and vllm_config.parallel_config.data_parallel_size == 1
-            and all(
-                value is None
-                for value in (
-                    vllm_config.lora_config,
-                    vllm_config.speculative_config,
-                    vllm_config.kv_transfer_config,
-                    vllm_config.ec_transfer_config,
-                )
-            )
-        )
-    except AttributeError:
-        logger.warning("vLLM decision runtime metadata unavailable")
-        return False
 
 
 def _qualified_model(vllm_config: VllmConfig, installed: str) -> bool:
@@ -143,15 +103,9 @@ def decision_worker_eligible(config: Config) -> bool:
         return False
 
 
-def supports_decision_generation(model_type: ModelType) -> bool:
-    """Match Rust's Chat-or-Completions bitflag capability check."""
-    return model_type.supports_chat() or model_type.supports_completions()
-
-
 def publish_vllm_decision_capability(
     runtime_config: ModelRuntimeConfig,
     model_input: ModelInput,
-    model_type: ModelType,
     worker_type: WorkerType,
     vllm_config: VllmConfig,
     config: Config,
@@ -162,8 +116,9 @@ def publish_vllm_decision_capability(
     """Advertise only qualified aggregated token-mode causal scoring workers.
 
     A false result performs no runtime-metadata writes. Optional cache fields
-    establish API availability, not that any request has measured cache usage;
-    response handling must preserve missing measurements as unknown.
+    establish API availability, not measurement provenance. Source-qualified
+    schedulers establish provenance; the Rust collector validates all counters.
+    Model-type eligibility comes from the native Generate publisher's result.
     """
     try:
         installed = version("vllm")
@@ -173,7 +128,6 @@ def publish_vllm_decision_capability(
         native_generate_supported is not True
         or model_input != ModelInput.Tokens
         or worker_type != WorkerType.Aggregated
-        or not supports_decision_generation(model_type)
         or any(needs or ())
         or not any(
             is_exact_vllm_release(installed, release)
@@ -186,7 +140,6 @@ def publish_vllm_decision_capability(
             decision_worker_eligible(config)
             and type(vllm_config.scheduler_config.max_num_seqs) is int
             and vllm_config.scheduler_config.max_num_seqs == 1
-            and vllm_config.scheduler_config.scheduler_cls is None
             and _qualified_model(vllm_config, installed)
         )
     except AttributeError:
@@ -195,6 +148,8 @@ def publish_vllm_decision_capability(
     if not qualified:
         return False
     if not _decision_api_available():
+        return False
+    if not qualified_cache_runtime(installed):
         return False
     runtime_config.set_engine_specific(
         VLLM_CAUSAL_DECISION_CAPABILITY, json.dumps(True)
