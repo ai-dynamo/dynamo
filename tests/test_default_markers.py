@@ -93,12 +93,14 @@ def test_fully_marked_test_is_not_flagged_defaulted(root_conftest):
         ("examples/backends", False),
         ("deploy/helm/charts/platform/tests", False),
         ("deploy/helm/charts/platform/tests", True),
+        ("deploy/operator/hack", False),
+        ("deploy/operator/hack", True),
     ],
 )
 def test_demo_and_chart_trees_keep_authored_markers(
     pytester, monkeypatch, test_root, authored_markers
 ):
-    """Runtime defaults must not enroll demos or the separately gated Helm suite."""
+    """Runtime defaults must not enroll demos or separately gated suites."""
     root_conftest_path = Path(__file__).parents[1] / "conftest.py"
     pytester.makeconftest(root_conftest_path.read_text())
     demo_dir = pytester.path / test_root
@@ -127,6 +129,7 @@ def test_demo_and_chart_trees_keep_authored_markers(
         "deploy/utils/tests",
         "deploy/power-agent/tests",
         "deploy/helm-extra/tests",
+        "deploy/operator/hack-extra",
     ],
 )
 def test_managed_trees_are_still_defaulted(pytester, monkeypatch, test_root):
