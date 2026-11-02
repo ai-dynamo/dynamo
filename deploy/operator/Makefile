@@ -25,7 +25,7 @@ CLUSTERTEST_PLATFORM ?= linux/$(GOARCH)
 CLUSTERTEST_LWS_VERSION = $(shell go list -m -f '{{.Version}}' sigs.k8s.io/lws)
 CLUSTERTEST_LWS_CRD_DIR = $(shell go env GOMODCACHE)/sigs.k8s.io/lws@$(CLUSTERTEST_LWS_VERSION)/config/crd/bases
 CLUSTERTEST_GROVE_VERSION = $(shell go list -m -f '{{.Version}}' github.com/ai-dynamo/grove/operator/api)
-CLUSTERTEST_GROVE_CRD_DIR = $(shell go env GOMODCACHE)/github.com/ai-dynamo/grove/operator/api@$(CLUSTERTEST_GROVE_VERSION)/core/v1alpha1/crds
+CLUSTERTEST_GROVE_CRD_DIR = $(shell go env GOMODCACHE)/github.com/ai-dynamo/grove/operator/api@$(CLUSTERTEST_GROVE_VERSION)/core/crds
 CLUSTERTEST_VOLCANO_VERSION = $(shell go list -m -f '{{.Version}}' volcano.sh/apis)
 CLUSTERTEST_VOLCANO_PODGROUP_CRD_URL = https://raw.githubusercontent.com/volcano-sh/volcano/$(CLUSTERTEST_VOLCANO_VERSION)/config/crd/volcano/bases/scheduling.volcano.sh_podgroups.yaml
 

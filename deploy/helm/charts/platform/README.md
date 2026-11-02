@@ -173,6 +173,28 @@ sidecar guides.
 **Existing deployments:** No existing workload rolls. Components without a `runtime` init
 container keep running the engine and Dynamo together in `main`.
 
+#### Dependency compatibility
+
+##### Grove v0.2.0-beta1
+
+**Change:** The bundled Grove chart and Go API dependency are now `v0.2.0-beta1`.
+Grove stores resources as `grove.io/v1beta1` and continues serving the
+`grove.io/v1alpha1` API used by Dynamo. The external Grove preflight accepts beta
+release tags and requires the pinned version or later.
+
+**Affected:** All Grove-backed deployments upgrading to Dynamo 1.7.0.
+
+**Action:** Upgrade externally managed Grove and matching CRDs first, with
+`crdInstaller.upgradeCRDs=true`. The platform chart enables this setting for
+bundled Grove, replacing `grove.crdInstaller.enabled`. The API server must be able
+to reach Grove's conversion webhook. Read the
+[Grove upgrade and downgrade guide](https://github.com/ai-dynamo/grove/blob/v0.2.0-beta1/docs/user-guide/upgrading-to-v1beta1-v0.2.0-beta1.md)
+before upgrading; rollback requires migrating stored resources back to `v1alpha1`.
+
+**Existing deployments:** Grove converts existing alpha resources without requiring
+manifest changes. An unset clique or scaling-group `scaleConfig.minReplicas` now
+defaults to `minAvailable` rather than `replicas`; existing explicit minima are retained.
+
 ### v1.6.0
 
 #### Runtime Compatibility
@@ -522,7 +544,7 @@ Kubernetes: `>=1.30.0-0`
 | file://components/operator | dynamo-operator | 1.7.0 |
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
-| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.15 |
+| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.2.0-beta1 |
 | oci://ghcr.io/ai-dynamo/snapshot | snapshot | 0.2.0 |
 | oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.17.0 |
 
@@ -611,7 +633,7 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.checkpoint.enabled | bool | `false` | Whether to enable checkpoint/restore functionality |
 | grove.tolerations | list | `[]` | Node tolerations for Grove pods |
 | grove.affinity | object | `{}` | Affinity for Grove pods |
-| grove.crdInstaller.enabled | bool | `true` | Upgrade Grove CRDs before the bundled operator starts. |
+| grove.crdInstaller.upgradeCRDs | bool | `true` | Upgrade Grove CRDs before the bundled operator starts. |
 | grove.config.server.healthProbes.enable | bool | `true` | Enable Grove's webhook-aware liveness and readiness probes. The readiness endpoint stays false until certificates and the webhook server are ready. |
 | kai-scheduler.global.tolerations | list | `[]` | Node tolerations for kai-scheduler pods |
 | kai-scheduler.global.affinity | object | `{}` | Affinity for kai-scheduler pods |
@@ -685,6 +707,7 @@ For **production environments**, Kai Scheduler and Grove should be installed sep
 | 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.12-rc1 |
 | 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
 | 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.15 |
+| 1.7.x           | >= v0.17.0    | >= v0.2.0-beta1 |
 
 Upgrade Grove in lockstep with Dynamo while Grove APIs are not stable. See the
 [v1.4.0 upgrade notes](#v140) for the topology API transition and the
