@@ -59,7 +59,8 @@ RUN_UID_LABEL = "nvidia.com/dgdr-run-uid"
 
 # SweepResult.failure_reason values that mean "this process stopped working
 # on the window", not "the window failed": no decision is recorded and the
-# controller rewinds so the window can be adopted (§4.7.5).
+# controller rewinds so the window can be relaunched or adopted by the next
+# leader.
 NON_DECISION_FAILURES = frozenset({"shutdown", "lost_leadership"})
 
 GateReason = Literal["not_leader", "not_ready", "already_decided"]
@@ -305,8 +306,8 @@ class ActuationTarget:
     ``observe``: no writes; latch initials and check parity only.
     ``include_not_ready`` also targets NotReady, non-terminating pods.
     ``learn_unknown`` lets the actuator reset a router whose initial was
-    never latched (revision > 0) once to learn it; that is active mode only
-    (§4.8). With False (advisory) such a router is never written: rollback
+    never latched (revision > 0) once to learn it; that is active mode only.
+    With False (advisory) such a router is never written: rollback
     leaves it alone and does not wait for it to converge.
     """
 

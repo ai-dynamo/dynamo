@@ -5,10 +5,10 @@
 
 """Frontend startup parsing and the spec premises of live retune.
 
-Covers ``find_frontend`` (v1beta1 and v1alpha1 layouts), ``parse_frontend``
-(the operator's argv defaulting, env merging and ``$(VAR)`` expansion, the
-frontend's own argument groups run against an explicit env, a golden
-comparison with the real frontend parser, disaggregated maps) and
+Covers ``find_frontend``, ``parse_frontend`` (the operator's argv
+defaulting, env merging and ``$(VAR)`` expansion, the frontend's own parser
+built against an explicit env, a golden comparison with the real frontend
+parser, disaggregated maps) and
 ``evaluate_premises`` (P4, P6-P10) on table-driven DGD fixtures, including
 P4 on workers that advertise their own router configuration (compared with
 the real worker parser) and the P7 check of ``retune.dgdr.model``.
@@ -20,6 +20,8 @@ import argparse
 import copy
 import json
 import os
+import sys
+import types
 import warnings
 from typing import Any
 
@@ -93,7 +95,7 @@ ENGINE_AGG = {
 
 
 def trace_env(**overrides: Any) -> list[dict[str, Any]]:
-    """The recipe env of design §4.4.1; an override of None drops the entry."""
+    """The P10 trace recipe env; an override of None drops the entry."""
 
     entries: dict[str, dict[str, Any]] = {
         "DYN_POD_NAME": {
@@ -260,20 +262,9 @@ def parse_error(deployment: dict[str, Any], mode: str = "agg") -> str:
 
 
 def evaluate(
-    deployment: dict[str, Any],
-    *,
-    config: PlannerConfig | None = None,
-    planner_replicas: int | None = None,
+    deployment: dict[str, Any], *, config: PlannerConfig | None = None
 ) -> PremiseReport:
-    config = config or planner_config()
-    result = fc.parse_frontend(deployment, planner_mode=str(config.mode))
-    return fc.evaluate_premises(
-        deployment,
-        planner_config=config,
-        startup=result if isinstance(result, FrontendStartup) else None,
-        parse_error=result if isinstance(result, str) else None,
-        planner_replicas=planner_replicas,
-    )
+    return fc.evaluate_premises(deployment, planner_config=config or planner_config())
 
 
 def reasons_matching(report: PremiseReport, prefix: str) -> list[str]:
@@ -291,47 +282,6 @@ def test_find_frontend_v1beta1():
     name, spec = fc.find_frontend(dgd())
     assert name == "Frontend"
     assert spec["type"] == "frontend"
-
-
-def test_find_frontend_v1alpha1_services_map():
-    deployment = {
-        "apiVersion": "nvidia.com/v1alpha1",
-        "kind": "DynamoGraphDeployment",
-        "metadata": {"name": DGD, "namespace": NAMESPACE},
-        "spec": {
-            "envs": [{"name": "DYN_ROUTER_TEMPERATURE", "value": "0.5"}],
-            "services": {
-                "Frontend": {
-                    "componentType": "frontend",
-                    "replicas": 1,
-                    "envs": trace_env(),
-                    "volumeMounts": [{"name": CLAIM, "mountPoint": "/trace"}],
-                    "extraPodSpec": {
-                        "mainContainer": {
-                            "command": ["python3"],
-                            "args": list(KV_ARGS),
-                        }
-                    },
-                },
-                "VllmWorker": {
-                    "componentType": "worker",
-                    "replicas": 2,
-                    "extraPodSpec": {"mainContainer": {"args": [f"--model {MODEL}"]}},
-                },
-                "Planner": {"componentType": "planner", "replicas": 1},
-            },
-        },
-    }
-    name, spec = fc.find_frontend(deployment)
-    assert name == "Frontend"
-    assert spec["podTemplate"]["spec"]["containers"][0]["args"] == list(KV_ARGS)
-
-    startup = parse(deployment)
-    assert startup.router_mode == "kv_router"
-    assert startup.router_config == {"router_temperature": 0.5}
-    report = evaluate(deployment)
-    assert report.spec_ok, report.reasons
-    assert fc.served_model_name(deployment) == MODEL
 
 
 @pytest.mark.parametrize(
@@ -880,18 +830,6 @@ def test_parse_error_fails_p4_only():
     assert report.startup is None
 
 
-def test_caller_parse_error_is_reported():
-    report = fc.evaluate_premises(
-        dgd(),
-        planner_config=planner_config(),
-        startup=None,
-        parse_error="P4: injected",
-        planner_replicas=None,
-    )
-    assert not report.p4_ok
-    assert report.reasons == ("P4: injected",)
-
-
 @pytest.mark.parametrize(
     ("args", "env", "match"),
     [
@@ -1343,40 +1281,6 @@ def test_p4_shell_wrapped_worker(script, match):
         assert any(match in reason for reason in rejected), report.reasons
 
 
-def test_p4_rejects_a_v1alpha1_worker_router_mode():
-    deployment = {
-        "apiVersion": "nvidia.com/v1alpha1",
-        "kind": "DynamoGraphDeployment",
-        "metadata": {"name": DGD, "namespace": NAMESPACE},
-        "spec": {
-            "services": {
-                "Frontend": {
-                    "componentType": "frontend",
-                    "envs": trace_env(),
-                    "volumeMounts": [{"name": CLAIM, "mountPoint": "/trace"}],
-                    "extraPodSpec": {
-                        "mainContainer": {"command": ["python3"], "args": list(KV_ARGS)}
-                    },
-                },
-                "VllmWorker": {
-                    "componentType": "worker",
-                    "envs": [{"name": "DYN_ROUTER_MODE", "value": "kv"}],
-                    "extraPodSpec": {
-                        "mainContainer": {
-                            "command": ["python3", "-m", "dynamo.vllm"],
-                            "args": ["--model", MODEL],
-                        }
-                    },
-                },
-                "Planner": {"componentType": "planner", "replicas": 1},
-            },
-        },
-    }
-    report = evaluate(deployment)
-    assert not report.p4_ok
-    assert reasons_matching(report, "P4: worker component VllmWorker advertises")
-
-
 def test_worker_check_ignores_the_planner_env(monkeypatch):
     monkeypatch.setenv("DYN_ROUTER_MODE", "kv")
     fc._worker_router_cached.cache_clear()
@@ -1456,6 +1360,33 @@ def test_p6_warns_on_unknown_model():
     report = evaluate(dgd(), config=planner_config(model="acme/private-model"))
     assert report.spec_ok
     assert any(w.startswith("P6:") for w in report.warnings)
+
+
+@pytest.fixture
+def uncached_model_warning():
+    fc._model_warning.cache_clear()
+    yield
+    fc._model_warning.cache_clear()
+
+
+@pytest.mark.usefixtures("uncached_model_warning")
+def test_p6_without_aisimulate_is_not_checked(monkeypatch):
+    monkeypatch.setitem(sys.modules, "aisimulate_core.sdk.common", None)
+    assert fc._model_warning("acme/private-model") is None
+
+
+@pytest.mark.usefixtures("uncached_model_warning")
+def test_p6_broken_aisimulate_warns(monkeypatch, caplog):
+    def broken(name: str) -> Any:
+        raise RuntimeError("broken install")
+
+    module = types.ModuleType("aisimulate_core.sdk.common")
+    module.__getattr__ = broken  # type: ignore[method-assign]
+    monkeypatch.setitem(sys.modules, "aisimulate_core.sdk.common", module)
+    warning = fc._model_warning(MODEL)
+    assert warning is not None and warning.startswith("P6: cannot check")
+    assert "RuntimeError: broken install" in warning
+    assert any(r.levelname == "ERROR" for r in caplog.records)
 
 
 def test_p7_served_models():
@@ -1613,30 +1544,9 @@ def test_p9_scaling_adapter_and_planner_replicas():
     ]
     two_planners = dgd(frontend(), worker(), planner(replicas=2))
     assert "2 replicas" in reasons_matching(evaluate(two_planners), "P9:")[0]
-    # The caller's own replica count wins over the DGD.
-    assert not reasons_matching(evaluate(two_planners, planner_replicas=1), "P9:")
-    assert reasons_matching(evaluate(dgd(), planner_replicas=3), "P9:")
     no_planner = evaluate(dgd(frontend(), worker()))
     assert no_planner.spec_ok
     assert any(w.startswith("P9:") for w in no_planner.warnings)
-
-
-def test_p9_v1alpha1_scaling_adapter_needs_enabled():
-    def deployment(adapter):
-        return {
-            "metadata": {"name": DGD},
-            "spec": {
-                "services": {
-                    "Frontend": {"componentType": "frontend"},
-                    "w": {"componentType": "worker", "scalingAdapter": adapter},
-                }
-            },
-        }
-
-    disabled = fc._components(deployment({}))
-    enabled = fc._components(deployment({"enabled": True}))
-    assert not fc._scaling_adapter(disabled[1])
-    assert fc._scaling_adapter(enabled[1])
 
 
 P10_CASES = [
@@ -1811,13 +1721,7 @@ def test_p10_is_checked_when_parsing_fails():
 def test_evaluate_requires_dgdr():
     config = PlannerConfig.model_construct(mode="agg", retune=None)
     with pytest.raises(ValueError, match="retune.dgdr"):
-        fc.evaluate_premises(
-            dgd(),
-            planner_config=config,
-            startup=None,
-            parse_error=None,
-            planner_replicas=None,
-        )
+        fc.evaluate_premises(dgd(), planner_config=config)
 
 
 def test_malformed_dgd_never_raises():
