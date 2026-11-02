@@ -99,6 +99,12 @@ A worker-selection policy replaces the worker-ranking step of the routing pipeli
 eligible worker receives a request. Dynamo still owns discovery, eligibility, queueing, reservations,
 accounting, and metrics. The built-in selector and its cost model above remain the default.
 
+> [!NOTE]
+> Starting with Dynamo 1.8, `--router-mode kv` will default to the two-tier cost function
+> (`dynamo-two-tier-cost-fn`). Plain decode pools and the load-aware preset read no cache overlap,
+> so they will select the worker with the fewest active requests. To keep the cost model above,
+> select a `dynamo-default-cost-fn` instance.
+
 The Dynamo frontend ships a set of built-in worker-selection policies, so selecting one needs
 `--router-policy-config` only — no rebuild, no custom image. They come from the policy catalog the
 Python bindings link by default; a build that disables default features, and the standalone EPP,

@@ -29,7 +29,6 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::KvRouterConfig;
 use dynamo_kv_router::plugins::worker_selection::{
     WorkerCacheInputs, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker,
     WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
@@ -39,6 +38,7 @@ use dynamo_kv_router::plugins::{
     RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProviderError,
     WorkerSelectionPolicyRegistryError,
 };
+use dynamo_kv_router::{KvRouterConfig, WorkerType};
 
 /// Policy type selected by `worker_selection.instances[].type`.
 pub const POLICY_TYPE: &str = "dynamo-two-tier-cost-fn";
@@ -136,11 +136,17 @@ fn select_row(
 
 struct TwoTierCostFnPicker {
     parameters: Parameters,
+    /// Without cache inputs only the load tiers apply, so the host runs no indexer.
+    reads_cache: bool,
 }
 
 impl WorkerPicker for TwoTierCostFnPicker {
     fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::CACHE | WorkerInputs::LOAD
+        if self.reads_cache {
+            WorkerInputs::CACHE | WorkerInputs::LOAD
+        } else {
+            WorkerInputs::LOAD
+        }
     }
 
     fn pick(
@@ -148,6 +154,13 @@ impl WorkerPicker for TwoTierCostFnPicker {
         context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
+        if !self.reads_cache {
+            let load = input
+                .load()
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
+            return least_loaded(load, 0..load.len())
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"));
+        }
         let cache = input
             .cache()
             .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
@@ -164,17 +177,39 @@ fn provider(
 ) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyProviderError> {
     let parameters: Parameters = parameters.deserialize()?;
     parameters.validate()?;
-
     Ok(Arc::new(
         move |config: &KvRouterConfig, worker_type, _partition| {
             WorkerSelectionPolicy::new(
                 config.clone(),
                 worker_type.as_str(),
                 Vec::new(),
-                Box::new(TwoTierCostFnPicker { parameters }),
+                Box::new(TwoTierCostFnPicker {
+                    parameters,
+                    reads_cache: true,
+                }),
             )
         },
     ))
+}
+
+/// Factory routing hosts install as the default policy, using the upstream thresholds.
+///
+/// Like the previous default, it treats an eligible session-affinity target as exclusive and reads
+/// no cache inputs on plain decode pools or with zero overlap credit (the load-aware preset).
+pub fn default_factory() -> WorkerSelectionPolicyFactory {
+    Arc::new(|config: &KvRouterConfig, worker_type, _partition| {
+        let plain_decode = worker_type == WorkerType::Decode && !config.conditional_disagg_enabled;
+        WorkerSelectionPolicy::new(
+            config.clone(),
+            worker_type.as_str(),
+            Vec::new(),
+            Box::new(TwoTierCostFnPicker {
+                parameters: Parameters::default(),
+                reads_cache: !plain_decode && config.overlap_score_credit != 0.0,
+            }),
+        )
+        .with_exclusive_affinity(true)
+    })
 }
 
 pub fn register(
@@ -270,7 +305,10 @@ mod tests {
             KvRouterConfig::default(),
             "test",
             Vec::new(),
-            Box::new(TwoTierCostFnPicker { parameters }),
+            Box::new(TwoTierCostFnPicker {
+                parameters,
+                reads_cache: true,
+            }),
         )
         .select_worker(WorkerSelectionInput::configured(
             &configs,

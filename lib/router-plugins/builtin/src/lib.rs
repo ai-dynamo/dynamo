@@ -15,6 +15,7 @@ pub use default::{
     DefaultWorkerSelector, DefaultWorkerSelectorControl, default_factory, default_policy,
     startup_policy_parameters,
 };
+pub use two_tier_cost_fn::default_factory as two_tier_default_factory;
 
 /// Registry containing the required default only, without an optional policy catalog.
 pub fn default_registry() -> RouterPluginRegistry {
