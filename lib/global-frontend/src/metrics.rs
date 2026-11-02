@@ -16,8 +16,8 @@ use dynamo_global_router::{InFlightTracker, Pool, SelectionCoreSelector};
 use dynamo_llm::http::service::metrics::generate_log_buckets;
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
 use prometheus::{
-    Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGaugeVec, Opts, Registry,
-    TextEncoder,
+    Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
+    Registry, TextEncoder,
 };
 
 use crate::PoolSnapshot;
@@ -47,6 +47,9 @@ pub struct Metrics {
     /// Read at each scrape ([`Self::watch_core`]).
     selection_core: OnceLock<WatchedSelectionCore>,
     pin_bookings: IntCounter,
+    sync_peers: IntGauge,
+    sync_frames: IntCounterVec,
+    sync_dropped: IntCounterVec,
     /// A scrape resets and refills the gauges, so scrapes must not overlap.
     scrape: Mutex<()>,
 }
@@ -144,6 +147,35 @@ impl Metrics {
                 "Affinity pin bookings: a session's first request, a move or a refresh",
             )),
         );
+        let sync_peers = register(
+            &registry,
+            IntGauge::with_opts(Opts::new(
+                name("replica_sync_peers"),
+                "Peers whose replica-sync stream is open",
+            )),
+        );
+        let sync_frames = register(
+            &registry,
+            IntCounterVec::new(
+                Opts::new(
+                    name("replica_sync_frames_total"),
+                    "Replica-sync frames this replica published to its subscribers or \
+                     received from its peers",
+                ),
+                &["direction"],
+            ),
+        );
+        let sync_dropped = register(
+            &registry,
+            IntCounterVec::new(
+                Opts::new(
+                    name("replica_sync_dropped_total"),
+                    "Replica-sync items lost, by reason: inbound bindings refused, frames \
+                     a slow subscriber missed",
+                ),
+                &["reason"],
+            ),
+        );
         Self {
             registry,
             region,
@@ -157,6 +189,9 @@ impl Metrics {
             selection,
             selection_core: OnceLock::new(),
             pin_bookings,
+            sync_peers,
+            sync_frames,
+            sync_dropped,
             scrape: Mutex::new(()),
         }
     }
@@ -178,6 +213,24 @@ impl Metrics {
             return;
         };
         advance(&self.pin_bookings, selection_core.pin_bookings());
+        let Some(stats) = selection_core.replica_sync_stats() else {
+            return;
+        };
+        self.sync_peers.set(clamp_u64_to_i64(stats.connected_peers));
+        advance(
+            &self.sync_frames.with_label_values(&["published"]),
+            stats.frames_published,
+        );
+        advance(
+            &self.sync_frames.with_label_values(&["received"]),
+            stats.frames_received,
+        );
+        for (reason, count) in [
+            ("binding_rejected", stats.bindings_rejected),
+            ("subscriber_lagged", stats.subscribers_lagged),
+        ] {
+            advance(&self.sync_dropped.with_label_values(&[reason]), count);
+        }
     }
 
     /// Counts a request answered without a pool. `error_type` is one of

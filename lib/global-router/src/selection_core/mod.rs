@@ -7,6 +7,10 @@
 //! A least-in-flight pick is pending on its pool ([`FrontendSignals`]) until
 //! the request counts it, so concurrent picks see each other; a dropped
 //! select gives its pick back once the core answers ([`PendingSelect`]).
+//!
+//! With [`GrpcReplicaSync`], session bindings and requests in flight
+//! replicate to the other Global Frontends over the gRPC stream that
+//! [`replica_sync`] serves; bookings stay local.
 
 mod catalog;
 mod directory;
@@ -36,6 +40,7 @@ use dynamo_kv_router::{WorkerId, WorkerType};
 use parking_lot::Mutex;
 use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
+use url::Url;
 
 use crate::frontend_signals::FrontendSignals;
 use crate::load::{InFlightGuard, InFlightTracker};
@@ -47,6 +52,8 @@ use directory::PoolDirectory;
 
 /// The longest session id the core's session table accepts.
 pub use dynamo_kv_router::services::selection::affinity::MAX_SESSION_AFFINITY_ID_BYTES as MAX_SESSION_ID_BYTES;
+use replica_sync::GrpcTransport;
+pub use replica_sync::{GrpcReplicaSync, ReplicaHub, ReplicaSyncStats};
 
 /// How the core picks among a model's pools.
 #[derive(Clone, Debug)]
@@ -91,6 +98,7 @@ pub struct SelectionCoreSelector {
     counts: Arc<FrontendSignals>,
     pins: Option<PinRefresh>,
     pin_bookings: AtomicU64,
+    grpc: Option<GrpcTransport>,
 }
 
 /// When each session's pin was last booked. Only a booking sets or moves a
@@ -144,9 +152,14 @@ impl PinRefresh {
 }
 
 impl SelectionCoreSelector {
-    /// Nothing is selectable until [`Self::reconcile_catalog`] applies the
-    /// first pool snapshot.
-    pub async fn new(policy: SelectionCorePolicy, in_flight: Arc<InFlightTracker>) -> Result<Self> {
+    /// Replicates with peers over gRPC when `replica_sync` is given, once
+    /// the first pool snapshot is applied. Nothing is selectable until
+    /// [`Self::reconcile_catalog`] applies it.
+    pub async fn new(
+        policy: SelectionCorePolicy,
+        in_flight: Arc<InFlightTracker>,
+        replica_sync: Option<GrpcReplicaSync>,
+    ) -> Result<Self> {
         let directory = Arc::new(PoolDirectory::default());
         let counts = Arc::new(FrontendSignals::new(in_flight));
         let registry = policies::registry(&policy, directory.clone(), counts.clone())
@@ -155,6 +168,7 @@ impl SelectionCoreSelector {
             SelectionServiceBuilder::new(config(&policy)?, WorkerType::Aggregated, registry)
                 .indexer_threads(1);
         let mut pins = None;
+        let affinity = matches!(policy, SelectionCorePolicy::Affinity(_));
         if let SelectionCorePolicy::Affinity(affinity) = &policy {
             // Soft: the binding follows the pool picked.
             builder = builder
@@ -162,7 +176,36 @@ impl SelectionCoreSelector {
                 .session_affinity_mode(SessionAffinityMode::Soft);
             pins = Some(PinRefresh::new(affinity.idle));
         }
+        let mut grpc = None;
+        if let Some(sync) = replica_sync {
+            let cancel = CancellationToken::new();
+            let hub = ReplicaHub::new(cancel.clone());
+            for peer in sync.peers {
+                replica_sync::peer_url(peer.as_str())?;
+                hub.add_peer(peer);
+            }
+            if affinity {
+                builder = builder.session_binding_replication(hub.process_id());
+            }
+            if let SelectionCorePolicy::LeastInFlight(_) = &policy {
+                hub.carry_in_flight(counts.clone());
+            }
+            grpc = Some(GrpcTransport { hub, cancel });
+        }
         let service = Arc::new(builder.build().await.context("build the router core")?);
+        if let Some(GrpcTransport { hub, .. }) = &grpc {
+            if affinity {
+                let updates = service
+                    .session_binding_updates()
+                    .context("take the core's session binding updates")?;
+                tokio::spawn(hub.clone().publish_bindings(updates));
+            }
+            tracing::info!(
+                process_id = hub.process_id(),
+                peers = ?hub.peers().iter().map(Url::as_str).collect::<Vec<_>>(),
+                "replicating over the gRPC ReplicaSync stream"
+            );
+        }
         Ok(Self {
             policy,
             service,
@@ -171,6 +214,7 @@ impl SelectionCoreSelector {
             counts,
             pins,
             pin_bookings: AtomicU64::new(0),
+            grpc,
         })
     }
 
@@ -181,7 +225,8 @@ impl SelectionCoreSelector {
 
     /// Keeps the core's workers in sync with `pools`, as the local router's
     /// `CatalogReconciler` does. The receiver resolves once the first
-    /// snapshot is applied.
+    /// snapshot is applied. With gRPC replica sync the future then dials the
+    /// peers: an event naming a partition the core lacks would be dropped.
     pub fn reconcile_catalog<S>(
         &self,
         pools: watch::Receiver<Arc<S>>,
@@ -195,8 +240,37 @@ impl SelectionCoreSelector {
     {
         let reconciler = CatalogReconciler::new(self.service.core().clone());
         let (source, first_taken) = PoolCatalogSource::new(pools, self.directory.clone());
-        let reconcile = async move { reconciler.run(source, cancel).await };
-        (first_taken, reconcile)
+        let (ready, is_ready) = oneshot::channel();
+        let dialer = self
+            .grpc
+            .as_ref()
+            .map(|grpc| (grpc.hub.clone(), grpc.cancel.clone()));
+        let service = self.service.clone();
+        let stop = cancel.clone();
+        // Ends the peers when the catalog closes, as the reconciler does.
+        let catalog_closed = CancellationToken::new();
+        let closed = catalog_closed.clone();
+        let reconcile = async move {
+            let peers = async move {
+                if first_taken.await.is_err() {
+                    return;
+                }
+                let _ = ready.send(());
+                if let Some((hub, transport)) = dialer {
+                    tokio::select! {
+                        _ = stop.cancelled() => {}
+                        _ = closed.cancelled() => {}
+                        _ = replica_sync::dialer::run_peers(hub, service, transport) => {}
+                    }
+                }
+            };
+            let catalog = async {
+                reconciler.run(source, cancel).await;
+                catalog_closed.cancel();
+            };
+            tokio::join!(catalog, peers);
+        };
+        (is_ready, reconcile)
     }
 
     /// The chosen pool and frontend, with the request's in-flight count.
@@ -434,6 +508,8 @@ mod tests {
 
     use url::Url;
 
+    use axum::serve::ListenerExt;
+
     use crate::affinity::tests::{OHIO, fleet, set_occupancy};
     use crate::selector::{self, tests::pool};
     use crate::{PoolSelector, RoundRobinSelector};
@@ -446,7 +522,17 @@ mod tests {
         pools: &[Pool],
         in_flight: &Arc<InFlightTracker>,
     ) -> (SelectionCoreSelector, watch::Sender<Arc<Vec<Pool>>>) {
-        let selection_core = SelectionCoreSelector::new(policy, in_flight.clone())
+        synced_core(policy, pools, in_flight, None).await
+    }
+
+    /// [`selection_core`], replicating over `transport`.
+    async fn synced_core(
+        policy: SelectionCorePolicy,
+        pools: &[Pool],
+        in_flight: &Arc<InFlightTracker>,
+        transport: Option<GrpcReplicaSync>,
+    ) -> (SelectionCoreSelector, watch::Sender<Arc<Vec<Pool>>>) {
+        let selection_core = SelectionCoreSelector::new(policy, in_flight.clone(), transport)
             .await
             .unwrap();
         let (catalog, subscription) = watch::channel(Arc::new(pools.to_vec()));
@@ -708,4 +794,6 @@ mod tests {
         assert_eq!(session_s(&selection_core, &pools).await, "ohio-b");
         assert_eq!(selection_core.pin_bookings(), 2);
     }
+
+    mod replication;
 }

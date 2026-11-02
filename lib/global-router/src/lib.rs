@@ -25,8 +25,8 @@ pub use load::{InFlightGuard, InFlightTracker};
 pub use pool::Pool;
 pub use selection_core::replica_sync;
 pub use selection_core::{
-    AffinityConfig, LeastInFlightConfig, MAX_SESSION_ID_BYTES, SelectionCorePolicy,
-    SelectionCoreSelector,
+    AffinityConfig, GrpcReplicaSync, LeastInFlightConfig, MAX_SESSION_ID_BYTES, ReplicaSyncStats,
+    SelectionCorePolicy, SelectionCoreSelector,
 };
 pub use selector::{
     LeastInFlightSelector, PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest,
