@@ -29,14 +29,16 @@ async fn prepared_token_requests_isolate_salts_and_use_bounded_metric_labels() {
             )
             .unwrap(),
         );
-        let fixture = super::preflight::preflight_selection(None);
-        let selected = token_selection(
+        let fixture = super::preflight::preflight_selection_for_test(None).await;
+        let selected = token_selection_for_test(
             fixture.context.card.clone(),
             engine.clone(),
             token_executor(&fixture).preprocessor().clone(),
             Profile::SglangSerialV1,
-        );
-        let prepared = super::super::execution::prepare(&request, selected, 65536).unwrap();
+        )
+        .await;
+        let prepared =
+            super::super::execution::prepare(&request, selected.selection.clone(), 65536).unwrap();
         super::super::execution::observe_work(label, &prepared, &metrics);
         let response = super::super::execution::dispatch(
             prepared,
@@ -143,8 +145,8 @@ async fn dialect_errors_preserve_request_ids_and_validation_envelopes() {
     }
 }
 
-#[test]
-fn missing_cache_measurement_is_not_zero() {
+#[tokio::test]
+async fn missing_cache_measurement_is_not_zero() {
     assert_eq!(
         super::super::measured_cached_tokens(&json!({"meta_info":{}}), 4).unwrap(),
         None
@@ -169,7 +171,7 @@ async fn deadline_kills_stalled_dispatch_and_releases_local_admission() {
     let admission = Arc::new(Semaphore::new(1));
     let permit = admission.clone().acquire_owned().await.unwrap();
     let task = tokio::spawn(dispatch(
-        selection(engine.clone()),
+        selection_for_test(engine.clone()).await,
         vec![prepared_noul_branch(0)],
         "deadline".into(),
         parent.clone(),
@@ -242,8 +244,8 @@ async fn empty_and_closed_admission_are_not_capacity_rejections() {
     }
 }
 
-#[test]
-fn impossible_admission_is_not_retryable_but_busy_capacity_is() {
+#[tokio::test]
+async fn impossible_admission_is_not_retryable_but_busy_capacity_is() {
     let admission = Arc::new(Semaphore::new(2));
     let response =
         super::super::acquire_admission(admission.clone(), 3, 2, dynamo_decisions::Dialect::Jev)
