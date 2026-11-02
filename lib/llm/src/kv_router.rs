@@ -2641,11 +2641,12 @@ mod tests {
         let workers = (0..3)
             .map(|worker_id| (worker_id, ModelRuntimeConfig::default()))
             .collect();
+        // Pinned to the additive cost model so the frozen trace keeps covering it.
         make_router(
             name,
             workers,
             2,
-            SelectionPolicySource::Registry,
+            SelectionPolicySource::Factory(dynamo_custom_policy_builtin::default_factory()),
             None,
             None,
             "decode",

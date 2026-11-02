@@ -97,13 +97,10 @@ ordering applies within a tier.
 
 A worker-selection policy replaces the worker-ranking step of the routing pipeline: it decides which
 eligible worker receives a request. Dynamo still owns discovery, eligibility, queueing, reservations,
-accounting, and metrics. The built-in selector and its cost model above remain the default.
-
-> [!NOTE]
-> Starting with Dynamo 1.8, `--router-mode kv` will default to the two-tier cost function
-> (`dynamo-two-tier-cost-fn`). Plain decode pools and the load-aware preset read no cache overlap,
-> so they will select the worker with the fewest active requests. To keep the cost model above,
-> select a `dynamo-default-cost-fn` instance.
+accounting, and metrics. Starting with Dynamo 1.8, `--router-mode kv` defaults to the two-tier cost
+function (`dynamo-two-tier-cost-fn`). Plain decode pools and the load-aware preset read no cache
+overlap, so they select the worker with the fewest active requests. To keep the cost model above,
+select a `dynamo-default-cost-fn` instance.
 
 The Dynamo frontend ships a set of built-in worker-selection policies, so selecting one needs
 `--router-policy-config` only — no rebuild, no custom image. They come from the policy catalog the
@@ -112,8 +109,8 @@ link no catalog and reject a configured policy type at startup.
 
 | Policy type | Behavior |
 |---|---|
-| `default` | Dynamo's built-in selector and cost model. Reserved; always available. |
-| `dynamo-default-cost-fn` | The default cost model with configurable scoring and sampling parameters. |
+| `default` | The routing host's default policy: `dynamo-two-tier-cost-fn` with its default thresholds. Reserved; always available. |
+| `dynamo-default-cost-fn` | The additive cost model above, the default before Dynamo 1.8, with configurable scoring and sampling parameters. |
 | `thunderagent` | Honors the paired ThunderAgent classifier's worker/rank preference, then falls back to the least-loaded eligible worker. Enable both roles for program-aware admission and repacking; see [ThunderAgent Program Scheduler](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin). |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
 
@@ -130,7 +127,7 @@ worker_selection:
 ```
 
 `aggregated`, `prefill`, `decode`, and `encode` each select a named instance, so prefill and decode
-pools can run different policies. An omitted stage falls back to the built-in selector. `name` is
+pools can run different policies. An omitted stage falls back to the default policy. `name` is
 yours to choose; `type` must be one of the policy types above.
 
 ```bash

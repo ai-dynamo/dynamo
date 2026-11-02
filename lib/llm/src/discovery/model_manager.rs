@@ -3253,7 +3253,11 @@ mod tests {
         let registered = manager.router_policies.list(Some("test-model"));
         assert_eq!(registered.len(), 1);
         assert!(Arc::ptr_eq(&registered[0].1, router.policy_control()));
-        assert_eq!(registered[0].1.get().await.unwrap().revision(), 0);
+        // The two-tier default has no runtime parameters to report.
+        assert!(matches!(
+            registered[0].1.get().await,
+            Err(dynamo_kv_router::plugins::worker_selection::RuntimePolicyError::Unsupported)
+        ));
         drop(router);
         distributed.shutdown();
     }

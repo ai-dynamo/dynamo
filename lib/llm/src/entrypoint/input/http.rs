@@ -116,8 +116,8 @@ impl HttpFrontend {
             && !self.plugins.has_custom_worker_selection()
         {
             tracing::warn!(
-                "Starting with Dynamo 1.8, --router-mode kv will default to the two-tier cost \
-                 function (dynamo-two-tier-cost-fn). To keep the current cost function, select a \
+                "Starting with Dynamo 1.8, --router-mode kv defaults to the two-tier cost function \
+                 (dynamo-two-tier-cost-fn). To keep the previous cost function, select a \
                  dynamo-default-cost-fn instance in --router-policy-config."
             );
         }
