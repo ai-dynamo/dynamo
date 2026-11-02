@@ -419,7 +419,7 @@ impl
         // Fail before any routing work. The binding is reloaded and checked
         // again below, since a replaced target can change the mode.
         if let Some(binding) = self.binding.load_full() {
-            require_direct_prefill_worker(&binding, &req)?;
+            require_direct_prefill_worker(&binding, req.routing.as_ref())?;
         }
         ensure_tracker(&mut req);
         let session_affinity = session_affinity(&context)?;
@@ -444,7 +444,7 @@ impl
         let Some(binding) = self.resolve_binding()? else {
             return next.generate(context.map(|_| req)).await;
         };
-        require_direct_prefill_worker(&binding, &prefill_request)?;
+        require_direct_prefill_worker(&binding, prefill_request.routing.as_ref())?;
 
         let plan = self
             .select_prefill_worker(binding, &prefill_request)

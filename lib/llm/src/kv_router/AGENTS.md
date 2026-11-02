@@ -18,6 +18,8 @@ and the booking lifecycle these rules protect.
 - `sequence.rs`, `sequence/`: runtime glue for active-sequence tracking and its replica sync.
 - `request_lease.rs`: one request-liveness coordinator and reaper per `KvRouter`. Holds booking
   leases and releases them on completion or expiry.
+- `route_request.rs`: `RouteRequest`, what worker selection reads from a request. Planning takes
+  it, so the Runtime EPP selects without building a `PreprocessedRequest`.
 - `routing_load.rs`: the load context shared by a worker set's scheduler and its load metrics.
 - `routing_host.rs`: `RoutingHost`, the pipeline's terminal engine. Owns selection, dispatch,
   and response cleanup for one worker set.
@@ -60,8 +62,10 @@ and the booking lifecycle these rules protect.
   cleanup budget runs out.
 - Fail closed while the prefill target is `Pending`. Pass through only when `Untargeted`.
 - Do not let clients request a conditional bypass.
-- When you add a selection input, add it to the inputs table in `README.md` and decide whether
-  the Runtime EPP (`deploy/inference-gateway/ext-proc/src/epp.rs`) must supply it too.
+- Selection reads a request only through `RouteRequest`. When you add a selection input, add a
+  method to it, implement it for `SingleIn<PreprocessedRequest>`, add it to the inputs table in
+  `README.md`, and decide whether the Runtime EPP
+  (`deploy/inference-gateway/ext-proc/src/epp.rs`) must supply it too.
 - The Runtime EPP builds its own decode scoring override (`decode_router_config_override` in
   `epp.rs`). Change it together with `build_decode_router_override` in
   `prefill_router/mod.rs`, or the two hosts score decode differently.

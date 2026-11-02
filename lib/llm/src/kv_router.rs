@@ -66,6 +66,7 @@ pub mod plugins;
 pub mod prefill_router;
 pub mod publisher;
 mod request_lease;
+pub mod route_request;
 mod routing_host;
 pub(crate) mod routing_load;
 pub mod sequence;
@@ -82,6 +83,7 @@ pub use plugins::{
 };
 pub use prefill_router::PrefillRouter;
 pub(crate) use request_lease::RequestAttemptRelease;
+pub use route_request::RouteRequest;
 pub use routing_host::{
     KvPushRouter, LlmDispatch, MultimodalCache, RoutingHost, RoutingHostBuilder,
 };

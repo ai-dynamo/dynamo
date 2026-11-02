@@ -253,6 +253,7 @@ async fn builder_rejects_inputs_that_do_not_match_the_mode() {
 /// A built-in plan holds its occupancy reservation between selection and
 /// dispatch, and aborting it gives the reservation back.
 #[tokio::test]
+#[serial_test::serial]
 async fn builtin_route_plan_holds_its_reservation_until_aborted() {
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -274,6 +275,7 @@ async fn builtin_route_plan_holds_its_reservation_until_aborted() {
         .await
         .unwrap();
 
+    let started_before = host.request_metrics.requests_started_total.get();
     let request = Context::new(request());
     let plan = host
         .plan_route(&request, RequestPhase::Aggregated)
@@ -287,9 +289,18 @@ async fn builtin_route_plan_holds_its_reservation_until_aborted() {
         1,
         "the plan holds its occupancy reservation until dispatch"
     );
+    assert_eq!(
+        host.request_metrics.requests_started_total.get(),
+        started_before,
+        "a built-in request counts as started at dispatch, not at plan"
+    );
 
     plan.abort(None).await;
     assert_eq!(host.inner.occupancy_for_test(worker_id), 0);
+    assert_eq!(
+        host.request_metrics.requests_started_total.get(),
+        started_before
+    );
 
     drop(host);
     runtime.shutdown();
@@ -341,12 +352,17 @@ async fn builtin_route_plan_prepares_for_the_worker_it_is_sent_to() {
         .await
         .unwrap();
 
+    let started_before = host.request_metrics.requests_started_total.get();
     let request = Context::new(request());
     let plan = host
         .plan_route(&request, RequestPhase::Aggregated)
         .await
         .unwrap();
     assert_eq!(plan.target().worker_id, 101);
+    assert_eq!(
+        host.request_metrics.requests_started_total.get(),
+        started_before
+    );
 
     // The selection view still contains 101, but dispatch can only reach 202.
     source_tx.send(instances[1..].to_vec()).unwrap();
@@ -359,6 +375,11 @@ async fn builtin_route_plan_prepares_for_the_worker_it_is_sent_to() {
 
     assert_eq!(prepared_for, 202);
     assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[202]);
+    assert_eq!(
+        host.request_metrics.requests_started_total.get(),
+        started_before + 1,
+        "the request counts as started once, at dispatch"
+    );
 
     drop(host);
     runtime.shutdown();
@@ -2854,6 +2875,36 @@ async fn route_plan_from_preview_holds_and_releases_the_decode_reservation() {
     runtime.shutdown();
 }
 
+/// Planning reads only `RouteRequest`, so a host that never builds the
+/// frontend's request, such as the EPP, books the same KV route.
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_route_plans_from_a_route_request_alone() {
+    let (router, runtime) = router(None).await;
+    let started_before = router.request_metrics.requests_started_total.get();
+    let tokens: Vec<u32> = request().token_ids.iter().copied().collect();
+    let request = crate::kv_router::route_request::TestRouteRequest::new("route-only", &tokens);
+
+    let plan = router
+        .plan_route(&request, RequestPhase::Decode)
+        .await
+        .unwrap();
+    assert_eq!(plan.target().worker_id, 7);
+    let loads = potential_loads(&router).await;
+    assert_eq!(active_requests_for(&loads, 7, 0), 1);
+
+    plan.abort(None).await;
+    let loads = potential_loads(&router).await;
+    assert!(loads.iter().all(|load| load.active_requests == 0));
+    assert_eq!(
+        router.request_metrics.requests_started_total.get(),
+        started_before
+    );
+
+    drop(router);
+    runtime.shutdown();
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn route_preview_does_not_admit_a_request() {
@@ -4721,7 +4772,8 @@ async fn explicit_worker_validation_preserves_precedence_and_discovery_membershi
             serde_json::from_value(value.clone()).unwrap();
         let mut content = request();
         content.routing = Some(serde_json::from_value(value).unwrap());
-        host.validate_explicit_worker(&content, phase).unwrap();
+        host.validate_explicit_worker(content.routing.as_ref(), phase)
+            .unwrap();
     }
     for (field, phase) in [
         ("decode_worker_id", RequestPhase::Aggregated),
@@ -4734,7 +4786,9 @@ async fn explicit_worker_validation_preserves_precedence_and_discovery_membershi
             }))
             .unwrap(),
         );
-        let error = host.validate_explicit_worker(&content, phase).unwrap_err();
+        let error = host
+            .validate_explicit_worker(content.routing.as_ref(), phase)
+            .unwrap_err();
         assert_eq!(
             error.downcast_ref::<DynamoError>().unwrap().message(),
             format!("nvext.{field}=42 does not identify a known worker")

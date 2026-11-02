@@ -11,7 +11,7 @@ impl RoutingHost {
     #[allow(clippy::too_many_arguments)]
     async fn select_request_outcome(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         phase: RequestPhase,
         is_query_only: bool,
         affinity_target: Option<AffinityTarget>,
@@ -19,15 +19,14 @@ impl RoutingHost {
         admission: FindBestMatchAdmission,
         budget: &CleanupBudget,
     ) -> Result<SelectionOutcome, Error> {
-        let context_id = request.context().id().to_string();
-        let staged_kv = StagedKv::for_request(request.content());
-        let policy_class = request.metadata().get("policy-class").cloned();
+        let request_context = request.engine_context();
+        let context_id = request_context.id().to_string();
+        let staged_kv = StagedKv::for_route(request);
+        let policy_class = request.policy_class().map(str::to_owned);
         let session_context = request
-            .agent_context
-            .as_ref()
+            .agent_context()
             .map(to_worker_selection_session_context);
-        let routing_parts = RoutingRequestParts::new(request);
-        let request_context = request.context().clone();
+        let routing_parts = RoutingRequestParts::for_route(request);
         let selection_future = self
             .select_worker_outcome(
                 &context_id,
@@ -65,7 +64,7 @@ impl RoutingHost {
 
     async fn select_request(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         phase: RequestPhase,
         is_query_only: bool,
         affinity_target: Option<AffinityTarget>,
@@ -86,12 +85,12 @@ impl RoutingHost {
 
     pub(super) async fn select_with_affinity(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         phase: RequestPhase,
         is_query_only: bool,
         budget: &CleanupBudget,
     ) -> Result<(WorkerSelection, Option<Hold>), Error> {
-        self.validate_explicit_worker(request.content(), phase)?;
+        self.validate_explicit_worker(request.routing_hints(), phase)?;
         let select = || {
             self.select_with_session_affinity(request, phase, is_query_only, budget, |target| {
                 self.select_request(request, phase, is_query_only, target, budget)
@@ -115,7 +114,7 @@ impl RoutingHost {
     /// test-thread stack under `block_on`.
     async fn select_with_request_lifecycle<Fut>(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         phase: RequestPhase,
         select: impl FnOnce() -> Fut,
     ) -> Result<(WorkerSelection, Option<Hold>), Error>
@@ -129,15 +128,16 @@ impl RoutingHost {
             RequestPhase::Prefill => return select().await,
             RequestPhase::Decode | RequestPhase::Aggregated => {}
         }
+        let request_context = request.engine_context();
+        let request_id = request_context.id();
         let mut lifecycle = request
-            .migration_state
-            .as_ref()
+            .migration_state()
             .and_then(|state| state.take_request_lifecycle());
         if lifecycle.is_none() {
             lifecycle = self
                 .kv_router()
-                .begin_request_lifecycle(request.context().id())
-                .map_err(|error| classifier_failure_response(request.context().id(), &error))?
+                .begin_request_lifecycle(request_id)
+                .map_err(|error| classifier_failure_response(request_id, &error))?
                 .map(Box::new);
         }
 
@@ -147,13 +147,10 @@ impl RoutingHost {
                 if let Some(mut lifecycle) = lifecycle.take() {
                     if let Some(classifier_error) = classification_failure(&error) {
                         lifecycle.abort(Some(classifier_abort_error(classifier_error)));
-                        return Err(classifier_failure_response(
-                            request.context().id(),
-                            classifier_error,
-                        ));
+                        return Err(classifier_failure_response(request_id, classifier_error));
                     }
                     if crate::migration::is_migratable(error.as_ref())
-                        && let Some(state) = request.migration_state.as_ref()
+                        && let Some(state) = request.migration_state()
                     {
                         lifecycle.prepare_retry();
                         state.store_request_lifecycle(lifecycle);
@@ -198,7 +195,7 @@ impl RoutingHost {
 
     pub(crate) async fn preview_kv_route(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         phase: RequestPhase,
     ) -> Result<RoutePreview, Error> {
         // The conditional route's first stage. The budget travels with the
@@ -208,7 +205,7 @@ impl RoutingHost {
         if self.kv_router_if_enabled().is_none() {
             return Err(anyhow::anyhow!("KV route previews require KV routing"));
         }
-        self.validate_explicit_worker(request.content(), phase)?;
+        self.validate_explicit_worker(request.routing_hints(), phase)?;
 
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
@@ -229,7 +226,7 @@ impl RoutingHost {
         let signals = self.route_signals(&selection);
         drop(route_guard);
         Ok(RoutePreview {
-            request_id: request.context().id().to_string(),
+            request_id: request.engine_context().id().to_string(),
             phase,
             signals,
             budget,
@@ -246,7 +243,7 @@ impl RoutingHost {
     /// [`KvRoutePlan::abort`] releases it.
     pub(super) async fn plan_kv_route(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         phase: RequestPhase,
         planned_worker: Option<WorkerWithDpRank>,
         budget: CleanupBudget,
@@ -255,7 +252,7 @@ impl RoutingHost {
             return Err(anyhow::anyhow!("KV route plans require KV routing"));
         }
         if planned_worker.is_none() {
-            self.validate_explicit_worker(request.content(), phase)?;
+            self.validate_explicit_worker(request.routing_hints(), phase)?;
         }
 
         let phase_label = phase.to_string();
@@ -286,7 +283,7 @@ impl RoutingHost {
             phase,
             cleanup: KvRequestCleanup::new(
                 Arc::clone(self.kv_router()),
-                request.context().id().to_string(),
+                request.engine_context().id().to_string(),
                 selection.worker,
                 selection.booking.take(),
             ),
@@ -300,7 +297,7 @@ impl RoutingHost {
     /// is the route's first stage, so it starts the cleanup budget.
     pub(super) async fn plan_kv_route_without_preview(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         phase: RequestPhase,
     ) -> Result<KvRoutePlan, Error> {
         self.plan_kv_route(request, phase, None, CleanupBudget::default())
@@ -309,14 +306,15 @@ impl RoutingHost {
 
     pub(crate) async fn plan_kv_route_from_preview(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         preview: RoutePreview,
     ) -> Result<KvRoutePlan, Error> {
-        if request.context().id() != preview.request_id {
+        let request_context = request.engine_context();
+        if request_context.id() != preview.request_id {
             return Err(anyhow::anyhow!(
                 "KV route preview belongs to request {}, not {}",
                 preview.request_id,
-                request.context().id(),
+                request_context.id(),
             ));
         }
         // Inherited, not restarted: this stage continues the route the preview
@@ -352,7 +350,7 @@ impl RoutingHost {
 
     pub(crate) async fn prefill_worker_busy(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         threshold: f64,
     ) -> Result<bool, Error> {
         // A local budget is sound here and only here: the probe is pinned to

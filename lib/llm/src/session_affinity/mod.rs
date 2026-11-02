@@ -11,7 +11,7 @@ use dynamo_runtime::{component::Client, pipeline::Error};
 #[cfg(test)]
 pub(crate) use coordinator::to_table;
 pub use coordinator::{AffinityCoordinator, AffinityTarget, explicit_target};
-pub(crate) use coordinator::{affinity_id, from_table, invalid_argument};
+pub(crate) use coordinator::{affinity_id, explicit_routing_target, from_table, invalid_argument};
 pub(crate) use dynamo_kv_router::services::selection::affinity::{
     Hold, subagent_group_affinity_id,
 };

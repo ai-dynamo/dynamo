@@ -31,10 +31,13 @@ use super::{
     independent_prefill_context, prefill_activation_pending_error,
 };
 use crate::{
-    kv_router::{RequestAttemptRelease, routing_host::RoutePlan, stage_router::StageRouter},
+    kv_router::{
+        RequestAttemptRelease, RouteRequest, routing_host::RoutePlan, stage_router::StageRouter,
+    },
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
+        preprocessor::RoutingHints,
         timing::{RequestPhase, RequestTracker},
     },
 };
@@ -94,12 +97,12 @@ impl StageRouter for PrefillRouter {
     /// Fails closed while a prefill target is still activating. Returns
     /// [`PrefillPlan::Untargeted`] when there is no prefill target, so the
     /// caller can send the request to decode instead.
-    async fn schedule(&self, request: &SingleIn<PreprocessedRequest>) -> Result<PrefillPlan> {
+    async fn schedule(&self, request: &dyn RouteRequest) -> Result<PrefillPlan> {
         let Some(binding) = self.resolve_binding()? else {
             return Ok(PrefillPlan::Untargeted);
         };
 
-        require_direct_prefill_worker(&binding, request)?;
+        require_direct_prefill_worker(&binding, request.routing_hints())?;
         self.select_prefill_worker(binding, request).await
     }
 
@@ -108,11 +111,11 @@ impl StageRouter for PrefillRouter {
     ///
     /// Cancellation and invalid arguments fail the request. Any other planning
     /// error falls back to remote prefill.
-    async fn preview(&self, request: &SingleIn<PreprocessedRequest>) -> Result<PrefillPreview> {
+    async fn preview(&self, request: &dyn RouteRequest) -> Result<PrefillPreview> {
         if !self.conditional_disagg_policy.is_enabled() {
             return Ok(PrefillPreview::RemotePrefill);
         }
-        let request_id = request.id().to_string();
+        let request_id = request.engine_context().id().to_string();
         match self
             .plan_conditional_disagg_decode(request, &request_id)
             .await
@@ -226,7 +229,7 @@ impl PrefillRouter {
     pub(super) async fn select_prefill_worker(
         &self,
         binding: Arc<PrefillBinding>,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
     ) -> Result<PrefillPlan> {
         let route = binding
             .router
@@ -384,9 +387,9 @@ pub(super) fn prefill_request(
 /// the prefill mode lives.
 pub(super) fn require_direct_prefill_worker(
     binding: &PrefillBinding,
-    request: &PreprocessedRequest,
+    routing: Option<&RoutingHints>,
 ) -> Result<()> {
-    let preselected_worker = request.routing.as_ref().and_then(|r| r.prefill_worker_id);
+    let preselected_worker = routing.and_then(|r| r.prefill_worker_id);
     if binding.prefill_router_mode.is_direct_routing() && preselected_worker.is_none() {
         anyhow::bail!(
             "Prefill worker ID required in Direct routing mode but none found in request. \

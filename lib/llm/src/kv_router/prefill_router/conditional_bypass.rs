@@ -3,11 +3,13 @@
 
 use anyhow::Result;
 use dynamo_kv_router::conditional_disagg::ConditionalDisaggDecisionInput;
-use dynamo_runtime::pipeline::SingleIn;
 
 use super::PrefillRouter;
-use crate::kv_router::routing_host::{KvRoutePlan, RoutePlanSignals, is_cancelled};
-use crate::protocols::common::{llm_backend::PreprocessedRequest, timing::RequestPhase};
+use crate::kv_router::{
+    RouteRequest,
+    routing_host::{KvRoutePlan, RoutePlanSignals, is_cancelled},
+};
+use crate::protocols::common::timing::RequestPhase;
 
 /// An admitted decode route selected by `RoutingHost` together with the
 /// conditional-disagg policy's diagnostic signals.
@@ -30,7 +32,7 @@ impl PrefillRouter {
     /// chooses local decode.
     pub(super) async fn plan_conditional_disagg_decode(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         request_id: &str,
     ) -> Result<Option<ConditionalDisaggDecodeDecision>> {
         // Conditional disagg chooses a cache-hot decode worker, so it only
@@ -40,8 +42,7 @@ impl PrefillRouter {
         }
 
         if request
-            .routing
-            .as_ref()
+            .routing_hints()
             .is_some_and(|routing| routing.prefill_worker_id.is_some())
         {
             tracing::debug!(
@@ -59,7 +60,7 @@ impl PrefillRouter {
             return Ok(None);
         };
 
-        let (routing_token_ids, _) = request.block_mm_routing_info();
+        let (routing_token_ids, _) = request.routing_tokens();
         if routing_token_ids.is_empty() {
             return Ok(None);
         }
@@ -149,7 +150,7 @@ impl PrefillRouter {
 
     async fn peek_prefill_chosen_worker_busy(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
     ) -> Result<Option<bool>> {
         let Some(threshold) = self.conditional_disagg_prefill_busy_threshold else {
             return Ok(None);

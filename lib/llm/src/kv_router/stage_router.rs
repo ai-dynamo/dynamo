@@ -6,7 +6,7 @@
 use anyhow::Result;
 use dynamo_runtime::pipeline::{SingleIn, async_trait};
 
-use crate::protocols::common::llm_backend::PreprocessedRequest;
+use crate::{kv_router::RouteRequest, protocols::common::llm_backend::PreprocessedRequest};
 
 /// One routing stage of a disaggregated request.
 ///
@@ -38,10 +38,10 @@ pub(crate) trait StageRouter: Send + Sync {
     // No caller yet: `PrefillRouter::generate` runs schedule's steps one by
     // one to keep its error logging. The EPP is the intended first caller.
     #[allow(dead_code)]
-    async fn schedule(&self, request: &SingleIn<PreprocessedRequest>) -> Result<Self::Plan>;
+    async fn schedule(&self, request: &dyn RouteRequest) -> Result<Self::Plan>;
 
     /// Look at the next stage for this request without dispatching anything.
-    async fn preview(&self, request: &SingleIn<PreprocessedRequest>) -> Result<Self::Preview>;
+    async fn preview(&self, request: &dyn RouteRequest) -> Result<Self::Preview>;
 
     /// Send `request` as `plan` says.
     async fn dispatch(

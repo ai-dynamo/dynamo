@@ -30,8 +30,8 @@ use tracing::Instrument;
 
 use crate::{
     kv_router::{
-        KvRouter, metrics::RouterRequestMetrics, request_lease::RequestAttemptRelease,
-        to_worker_selection_session_context,
+        KvRouter, RouteRequest, metrics::RouterRequestMetrics,
+        request_lease::RequestAttemptRelease, to_worker_selection_session_context,
     },
     lora::{LoadEstimator, LoraFilter},
     preprocessor::PreprocessedRequest,
@@ -39,12 +39,12 @@ use crate::{
         FinishReason,
         extensions::SessionAffinityId,
         llm_backend::LLMEngineOutput,
-        preprocessor::owned_abort_error,
+        preprocessor::{RoutingHints, owned_abort_error},
         timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
     },
     session_affinity::{
-        AffinityCoordinator, AffinityTarget, Hold, SessionAffinityMode, affinity_id,
-        explicit_target, from_table, invalid_argument, subagent_group_affinity_id,
+        AffinityCoordinator, AffinityTarget, Hold, SessionAffinityMode, explicit_routing_target,
+        from_table, invalid_argument, subagent_group_affinity_id,
     },
 };
 
@@ -429,7 +429,9 @@ impl RoutePlan {
     pub(crate) async fn abort(self, error: Option<&Error>) {
         match self {
             Self::Kv(plan) => plan.abort(error).await,
-            Self::Builtin(plan) => plan.abort(error).await,
+            // Built-in modes have no classifier lifecycle to tell; dropping
+            // the plan releases its reservations.
+            Self::Builtin(plan) => drop(plan),
         }
     }
 }
@@ -504,14 +506,14 @@ impl RoutingHost {
     /// it cannot be rejected against, or rebind, the group.
     fn group_binding_id(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         explicit: Option<AffinityTarget>,
         phase: RequestPhase,
     ) -> Option<Arc<SessionAffinityId>> {
         if explicit.is_some() {
             return None;
         }
-        let agent = request.content().agent_context.as_ref()?;
+        let agent = request.agent_context()?;
         let parent_session_id = agent.parent_session_id.as_deref()?;
         let binding_id = if phase == RequestPhase::Prefill {
             let parent = parent_session_id.trim();
@@ -560,10 +562,10 @@ impl RoutingHost {
     /// or when dispatching: a worker disappearing later is a service failure.
     fn validate_explicit_worker(
         &self,
-        request: &PreprocessedRequest,
+        routing: Option<&RoutingHints>,
         phase: RequestPhase,
     ) -> Result<(), Error> {
-        let Some(routing) = request.routing.as_ref() else {
+        let Some(routing) = routing else {
             return Ok(());
         };
         let target = match phase {
@@ -650,7 +652,7 @@ impl RoutingHost {
 
     async fn select_with_session_affinity<T, Select, SelectionFuture>(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         phase: RequestPhase,
         is_query_only: bool,
         budget: &CleanupBudget,
@@ -660,14 +662,14 @@ impl RoutingHost {
         Select: FnMut(Option<AffinityTarget>) -> SelectionFuture,
         SelectionFuture: Future<Output = Result<T, Error>>,
     {
-        let staged_kv = StagedKv::for_request(request.content());
+        let staged_kv = StagedKv::for_route(request);
         let Some(affinity) = self.affinity.as_ref() else {
             return Ok((select(None).await?, None));
         };
-        let Some(session_id) = affinity_id(request)? else {
+        let Some(session_id) = request.session_affinity_id()? else {
             return Ok((select(None).await?, None));
         };
-        let explicit = explicit_target(request.content(), phase)?;
+        let explicit = explicit_routing_target(request.routing_hints(), phase)?;
         let session_id = self
             .group_binding_id(request, explicit, phase)
             .unwrap_or(session_id);
@@ -676,7 +678,7 @@ impl RoutingHost {
             return Ok((select(target).await?, None));
         }
 
-        let request_context = request.context();
+        let request_context = request.engine_context();
         let reacquire = || {
             self.acquire_affinity_slot(
                 affinity,
@@ -735,7 +737,7 @@ impl RoutingHost {
     /// pick it and take their occupancy reservation and affinity hold.
     pub(crate) async fn plan_route(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         phase: RequestPhase,
     ) -> Result<RoutePlan, Error> {
         match &self.policy {

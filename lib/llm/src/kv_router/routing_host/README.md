@@ -78,7 +78,7 @@ How a KV route runs:
 |---|---|---|
 | `generate` | The pipeline's terminal engine: select, send. | The response stream releases the reservation when it ends. |
 | `generate` with `query_instance_id` | Nothing different: the built-in plane has no query path. The request is selected and **sent**. The session-affinity lookup does not acquire a hold, so the session is not bound. | As above. |
-| `plan_route`, then `dispatch_route` | A stage router that selects before it sends, such as the prefill hop. | The `RoutePlan` owns the guard and the affinity hold until dispatch, or until `abort`. |
+| `plan_route`, then `dispatch_route` | A stage router that selects before it sends, such as the prefill hop. | The `RoutePlan` owns the occupancy reservation, LoRA load, and affinity hold until `dispatch_route` moves them into the request guard, or until `abort` or a drop. |
 | `peek_next_worker` | An advisory pick, such as the EPP's built-in prefill reservation. | Nothing: it does not advance the round-robin cursor or reserve occupancy. |
 
 How a built-in route runs:
@@ -86,10 +86,10 @@ How a built-in route runs:
 1. **Plan.** In Direct mode, require an explicit worker or a session-affinity target. Pick a
    LoRA-filtered target when LoRA routing applies. Otherwise validate request-supplied worker
    pins, acquire the session-affinity hold, and select: round-robin advances its cursor, and
-   the load-based modes reserve occupancy on the chosen worker. The request guard is created
-   here, so the request counts as started at plan time. The `BuiltinRoutePlan` owns the guard,
-   with its occupancy reservation and LoRA load, and the affinity hold.
-2. **Dispatch.** One of four send arms runs:
+   the load-based modes reserve occupancy on the chosen worker. The `BuiltinRoutePlan` owns the
+   occupancy reservation, the LoRA load, and the affinity hold. Nothing is counted yet.
+2. **Dispatch.** The request guard is created from the plan, taking over its occupancy
+   reservation and LoRA load, and the request counts as started. One of four send arms runs:
    - Direct mode with no affinity session sends to the explicit target, with fallback.
    - A pinned target is sent exactly.
    - A load-based mode sends to its preselected worker, with fallback.
@@ -119,6 +119,9 @@ How a built-in route runs:
 - **Session affinity.** Hard mode pins the session's worker; soft mode prefers it. The session
   is bound to the worker once the response stream starts. If dispatch fails under hard affinity
   and the target is no longer valid, the binding is invalidated.
+- **Counting.** A request counts as started (`requests_started_total`, and its input tokens)
+  at dispatch, when the request guard is created. A plan that is aborted or dropped counts
+  nothing.
 - **Sending and tracking.** Both planes use the same cleanup budget and staged-KV rule for a
   client that disconnects mid-route, and the same response monitoring. Both record the failed
   worker for Migration, and accept the dispatch the same way.
@@ -130,8 +133,7 @@ How a built-in route runs:
 | | KV plane | Built-in plane |
 |---|---|---|
 | Selection reads | KV block overlap, scheduler load, and the request's selection profile | Discovery membership, and occupancy for the load-based modes |
-| Held between plan and dispatch | A scheduler booking (`KvRoutePlan`) | A request guard with any occupancy reservation and LoRA load (`BuiltinRoutePlan`) |
-| Request counts as started | At dispatch | At plan |
+| Held between plan and dispatch | A scheduler booking (`KvRoutePlan`) | Any occupancy reservation and LoRA load (`BuiltinRoutePlan`) |
 | Send | Exactly to the booked worker | May move to another instance; `prepare` sees the final worker |
 | `RoutePlan::target()` | The worker the request will reach | The planned worker, which the send may change |
 | `query_instance_id` | Returns the selection without booking or sending | No effect on sending |

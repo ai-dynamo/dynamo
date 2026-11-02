@@ -18,7 +18,9 @@ use dynamo_kv_router::{
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
 
 use crate::{
-    kv_router::{FindBestMatchAdmission, FindBestMatchOutcome, routing_host::RoutingHost},
+    kv_router::{
+        FindBestMatchAdmission, FindBestMatchOutcome, RouteRequest, routing_host::RoutingHost,
+    },
     preprocessor::PreprocessedRequest,
     protocols::{
         TokenIdType,
@@ -68,7 +70,16 @@ pub(super) struct RoutingRequestParts<'a> {
 
 impl<'a> RoutingRequestParts<'a> {
     pub(super) fn new(request: &'a PreprocessedRequest) -> Self {
-        let (token_ids, block_mm_infos) = request.block_mm_routing_info();
+        Self::from_parts(request.block_mm_routing_info())
+    }
+
+    pub(super) fn for_route(request: &'a dyn RouteRequest) -> Self {
+        Self::from_parts(request.routing_tokens())
+    }
+
+    fn from_parts(
+        (token_ids, block_mm_infos): (&'a [TokenIdType], Option<&'a [Option<BlockExtraInfo>]>),
+    ) -> Self {
         Self {
             token_ids,
             block_mm_infos,
@@ -165,14 +176,14 @@ impl RoutingHost {
     pub(super) async fn select_worker_outcome(
         &self,
         context_id: &str,
-        request: &PreprocessedRequest,
+        request: &dyn RouteRequest,
         routing_parts: RoutingRequestParts<'_>,
         phase: RequestPhase,
         is_query_only: bool,
         options: SelectionOptions,
     ) -> Result<SelectionOutcome, Error> {
         let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
-        let routing = request.routing.as_ref();
+        let routing = request.routing_hints();
         let explicit_pin = pinned_worker_hint(phase, routing);
         let lora_name = routing.and_then(|routing| routing.lora_name.clone());
         let cache_namespace = routing.and_then(|routing| routing.cache_namespace.clone());
@@ -188,8 +199,7 @@ impl RoutingHost {
             .unwrap_or_default();
         let mut allowed_worker_ids = routing.and_then(|routing| routing.allowed_worker_ids.clone());
         let migration_excluded_worker_ids = request
-            .migration_state
-            .as_ref()
+            .migration_state()
             .map(|state| state.excluded_worker_ids())
             .unwrap_or_default();
         if explicit_pin.is_none() && !migration_excluded_worker_ids.is_empty() {
@@ -203,8 +213,7 @@ impl RoutingHost {
             });
             if eligible.is_empty()
                 && let Some(error) = request
-                    .migration_state
-                    .as_ref()
+                    .migration_state()
                     .and_then(|state| state.exhausted_error())
             {
                 return Err(anyhow::anyhow!(error));
@@ -279,7 +288,7 @@ impl RoutingHost {
                 .select_best_match(BestMatchArgs {
                     context_id,
                     routing_parts,
-                    router_config_override: request.router_config_override.as_ref(),
+                    router_config_override: request.router_config_override(),
                     update_states: !is_query_only,
                     return_routing_hashes,
                     lora_name,
@@ -347,7 +356,7 @@ impl RoutingHost {
         self.select_best_match(BestMatchArgs {
             context_id,
             routing_parts,
-            router_config_override: request.router_config_override.as_ref(),
+            router_config_override: request.router_config_override(),
             update_states: !is_query_only,
             return_routing_hashes,
             lora_name,
