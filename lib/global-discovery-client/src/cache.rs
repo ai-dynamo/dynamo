@@ -238,12 +238,18 @@ mod tests {
     fn error_chain_joins_every_cause() {
         #[derive(Debug, thiserror::Error)]
         #[error("request failed")]
-        struct Outer(#[source] std::io::Error);
-        let error = Outer(std::io::Error::new(
+        struct Outer(#[source] Middle);
+        #[derive(Debug, thiserror::Error)]
+        #[error("connect failed")]
+        struct Middle(#[source] std::io::Error);
+        let error = Outer(Middle(std::io::Error::new(
             std::io::ErrorKind::ConnectionRefused,
             "connection refused",
-        ));
-        assert_eq!(error_chain(&error), "request failed: connection refused");
+        )));
+        assert_eq!(
+            error_chain(&error),
+            "request failed: connect failed: connection refused"
+        );
     }
 
     async fn next_set(routers: &mut watch::Receiver<HashSet<RouterReplica>>) -> Vec<String> {
@@ -268,7 +274,6 @@ mod tests {
         source.answer(Some(&["a", "b"]));
         assert_eq!(next_set(&mut routers).await, ["a", "b"]);
 
-        // An outage keeps the routers and marks them stale.
         source.answer(None);
         tokio::time::sleep(Duration::from_secs(3)).await;
         assert_eq!(ids(routers.borrow().iter()), ["a", "b"]);
@@ -280,7 +285,6 @@ mod tests {
             )
         );
 
-        // Recovery clears it, and an unchanged list publishes nothing.
         source.answer(Some(&["b", "a"]));
         tokio::time::sleep(Duration::from_secs(3)).await;
         assert_eq!(cache.freshness(), Freshness::Current);

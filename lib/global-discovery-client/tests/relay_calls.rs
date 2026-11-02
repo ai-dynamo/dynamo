@@ -26,7 +26,6 @@ struct FakeService(Arc<Mutex<FakeState>>);
 struct FakeState {
     routers_status: StatusCode,
     routers_body: String,
-    /// The body served with a non-200 `routers_status`.
     error_body: String,
     /// Registrations as the JSON the service received.
     registrations: Vec<Value>,
@@ -301,7 +300,6 @@ async fn router_cache_follows_the_service() {
     );
     assert_eq!(cache.freshness(), Freshness::Current);
 
-    // A failing service keeps the routers and reports why.
     fake.0.lock().unwrap().routers_status = StatusCode::SERVICE_UNAVAILABLE;
     let reason = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
