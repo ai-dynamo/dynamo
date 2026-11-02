@@ -111,7 +111,7 @@ def _openmetrics(*samples: str, active_requests: int | float = 0) -> str:
     return (
         "\n".join(
             (
-                "process_start_time_seconds 1",
+                "dynamo_frontend_metrics_start_time_seconds 1",
                 f"dynamo_frontend_active_requests {active_requests}",
                 *samples,
             )
@@ -232,7 +232,7 @@ async def test_openmetrics_online_traffic_rejects_invalid_active_request_gauge(
         metrics_url="http://frontend.example/metrics",
         session=_FakeOpenMetricsSession(  # type: ignore[arg-type]
             [
-                "process_start_time_seconds 1\n"
+                "dynamo_frontend_metrics_start_time_seconds 1\n"
                 "dynamo_frontend_requests_started_total 100\n"
                 f"{active_sample}\n"
             ]
@@ -252,7 +252,7 @@ async def test_openmetrics_online_traffic_rejects_duplicate_active_request_gauge
 ):
     payload = "\n".join(
         (
-            "process_start_time_seconds 1",
+            "dynamo_frontend_metrics_start_time_seconds 1",
             "dynamo_frontend_requests_started_total 100",
             "dynamo_frontend_active_requests 1",
             "dynamo_frontend_active_requests 2",
@@ -287,10 +287,10 @@ async def test_openmetrics_online_traffic_lazily_absent_gauge_keeps_rate(
 ) -> None:
     session = _FakeOpenMetricsSession(
         [
-            "process_start_time_seconds 1\n"
+            "dynamo_frontend_metrics_start_time_seconds 1\n"
             'dynamo_frontend_requests_started_total{model="model-a"} 100\n'
             f"{active_samples}",
-            "process_start_time_seconds 1\n"
+            "dynamo_frontend_metrics_start_time_seconds 1\n"
             'dynamo_frontend_requests_started_total{model="model-a"} 150\n'
             f"{active_samples}",
         ]
@@ -330,7 +330,7 @@ async def test_openmetrics_online_traffic_rejects_wrong_active_request_labels(
         metrics_url="http://frontend.example/metrics",
         session=_FakeOpenMetricsSession(  # type: ignore[arg-type]
             [
-                "process_start_time_seconds 1\n"
+                "dynamo_frontend_metrics_start_time_seconds 1\n"
                 'dynamo_frontend_requests_started_total{model="model-a"} 100\n'
                 f"{active_sample}\n"
             ]
@@ -351,11 +351,11 @@ async def test_openmetrics_online_traffic_uses_model_for_active_request_gauge() 
         metrics_url="http://frontend.example/metrics",
         session=_FakeOpenMetricsSession(  # type: ignore[arg-type]
             [
-                "process_start_time_seconds 1\n"
+                "dynamo_frontend_metrics_start_time_seconds 1\n"
                 'dynamo_frontend_requests_started_total{model="model-a",request_type="stream"} 100\n'
                 'dynamo_frontend_active_requests{model="model-a"} 0\n'
                 'dynamo_frontend_active_requests{model="model-b"} 9\n',
-                "process_start_time_seconds 1\n"
+                "dynamo_frontend_metrics_start_time_seconds 1\n"
                 'dynamo_frontend_requests_started_total{model="model-a",request_type="stream"} 110\n'
                 'dynamo_frontend_active_requests{model="model-a"} 3\n'
                 'dynamo_frontend_active_requests{model="model-b"} 8\n',
@@ -415,7 +415,7 @@ async def test_openmetrics_online_traffic_requires_exporter_anchor() -> None:
         wall_clock=_SequenceClock([10.0]),
     )
 
-    with pytest.raises(ValueError, match="process_start_time_seconds"):
+    with pytest.raises(ValueError, match="dynamo_frontend_metrics_start_time_seconds"):
         await source.collect_online_traffic(observed_at_s=10.0)
 
 
@@ -482,7 +482,7 @@ async def test_openmetrics_online_traffic_rejects_repeated_gap_for_same_exporter
 @pytest.mark.asyncio
 async def test_openmetrics_online_traffic_restart_allows_new_absent_baseline() -> None:
     absent_after_restart = (
-        "process_start_time_seconds 2\n"
+        "dynamo_frontend_metrics_start_time_seconds 2\n"
         "dynamo_frontend_active_requests 0\n"
         "unrelated_counter_total 1\n"
     )
@@ -554,13 +554,13 @@ async def test_openmetrics_online_exporter_restart_rewarms_overtaken_counter() -
         metrics_url="http://frontend.example/metrics",
         session=_FakeOpenMetricsSession(  # type: ignore[arg-type]
             [
-                "process_start_time_seconds 1\n"
+                "dynamo_frontend_metrics_start_time_seconds 1\n"
                 "dynamo_frontend_requests_started_total 100\n"
                 "dynamo_frontend_active_requests 4\n",
-                "process_start_time_seconds 2\n"
+                "dynamo_frontend_metrics_start_time_seconds 2\n"
                 "dynamo_frontend_requests_started_total 150\n"
                 "dynamo_frontend_active_requests 2\n",
-                "process_start_time_seconds 2\n"
+                "dynamo_frontend_metrics_start_time_seconds 2\n"
                 "dynamo_frontend_requests_started_total 170\n"
                 "dynamo_frontend_active_requests 1\n",
             ]
@@ -911,7 +911,7 @@ async def test_batch_gateway_paginates_and_refreshes_nonterminal_jobs() -> None:
         ): {"data": [listed_active, listed_terminal], "has_more": True},
         (
             f"{base_url}/v1/batches",
-            (("after", "2"), ("limit", "2")),
+            (("after", "batch-done"), ("limit", "2")),
         ): {"data": [listed_validating], "has_more": False},
         (f"{base_url}/v1/batches/batch%2Fa%20b", ()): detailed_active,
         (f"{base_url}/v1/batches/batch-new", ()): detailed_validating,
@@ -930,22 +930,128 @@ async def test_batch_gateway_paginates_and_refreshes_nonterminal_jobs() -> None:
 
     assert [job.job_id for job in jobs] == [
         "batch/a b",
-        "batch-done",
         "batch-new",
     ]
     assert jobs[0].completed_requests == 7
     assert jobs[0].failed_requests == 1
     assert jobs[0].remaining_requests == 2
     assert jobs[0].deadline_at_s == 2_100.0
-    assert jobs[1].completed_requests == 4
-    assert jobs[2].pool_id == "pool-b"
-    assert jobs[2].work_class == "responses-large"
-    assert jobs[2].total_requests == 8
+    assert jobs[1].pool_id == "pool-b"
+    assert jobs[1].work_class == "responses-large"
+    assert jobs[1].total_requests == 8
     requested_urls = [call[0] for call in session.calls]
     assert requested_urls.count(f"{base_url}/v1/batches/batch-done") == 0
     assert all(
         headers == {"Authorization": "Bearer test-only"}
         for _url, _params, headers in session.calls
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["insert", "delete"])
+async def test_batch_gateway_cursor_survives_history_mutation(mutation: str) -> None:
+    jobs = {
+        f"batch_{suffix}": _batch(
+            f"batch_{suffix}",
+            "in_progress",
+            total=10,
+            completed=0,
+            failed=0,
+            expires_at=2_000,
+        )
+        for suffix in ("b", "c", "d")
+    }
+    cursors: list[str] = []
+
+    class MutatingSession:
+        def get(self, url, *, params, headers):
+            if params is None:
+                return _FakeResponse(jobs[url.rsplit("/", 1)[-1]])
+            cursor = params["after"]
+            cursors.append(cursor)
+            if len(cursors) == 2:
+                if mutation == "insert":
+                    jobs["batch_a"] = {"id": "batch_a", "status": "completed"}
+                else:
+                    # Delete the cursor itself, as Gateway GC can do.
+                    del jobs["batch_c"]
+            ordered = sorted(jobs)
+            remaining = (
+                ordered[int(cursor) :]
+                if cursor.isdigit()
+                else [job_id for job_id in ordered if job_id > cursor]
+            )
+            return _FakeResponse(
+                {
+                    "data": [jobs[job_id] for job_id in remaining[:2]],
+                    "has_more": len(remaining) > 2,
+                }
+            )
+
+    source = BatchGatewayJobSource(
+        base_url="http://batch.example",
+        session=MutatingSession(),
+        pool_resolver=lambda _job: "pool-a",
+        work_class_resolver=lambda _job: "chat",
+        page_size=2,
+    )
+    listed = await source._list_all_batches()
+
+    assert [job["id"] for job in listed] == ["batch_b", "batch_c", "batch_d"]
+    assert cursors == ["0", "batch_c"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["completed", "cancelled", "failed", "expired"])
+@pytest.mark.parametrize("terminal_on_refresh", [False, True])
+async def test_batch_gateway_ignores_invalid_demand_once_terminal(
+    status: str,
+    terminal_on_refresh: bool,
+) -> None:
+    active = _batch(
+        "batch-active",
+        "in_progress",
+        total=10,
+        completed=1,
+        failed=0,
+        expires_at=2_000,
+    )
+    history = _batch(
+        "batch-history",
+        status,
+        total=36,
+        completed=1,
+        failed=0,
+        expires_at=2_000,
+    )
+    history["metadata"]["planner_request_count"] = "37"
+    listed_history = dict(history)
+    if terminal_on_refresh:
+        listed_history["status"] = "in_progress"
+    session = _FakeSession(
+        {
+            ("http://batch.example/v1/batches", (("after", "0"), ("limit", "100"))): {
+                "data": [listed_history, active],
+                "has_more": False,
+            },
+            ("http://batch.example/v1/batches/batch-active", ()): active,
+            ("http://batch.example/v1/batches/batch-history", ()): history,
+        }
+    )
+    source = BatchGatewayJobSource(
+        base_url="http://batch.example",
+        session=session,
+        pool_resolver=lambda job: job["metadata"]["pool"],
+        work_class_resolver=lambda job: job["metadata"]["work_class"],
+    )
+
+    demands = await source.collect_batch_jobs(observed_at_s=1.0)
+
+    assert [job.job_id for job in demands] == ["batch-active"]
+    assert demands[0].remaining_requests == 9
+    assert (
+        any("batch-history" in url for url, _, _ in session.calls)
+        == terminal_on_refresh
     )
 
 
@@ -1005,7 +1111,7 @@ async def test_batch_gateway_rejects_unknown_status_before_using_stale_counts() 
 async def test_batch_gateway_prefers_explicit_expiry_over_derivation_fields() -> None:
     job = _batch(
         "batch-explicit",
-        "completed",
+        "in_progress",
         total=1,
         completed=1,
         failed=0,
@@ -1039,7 +1145,7 @@ async def test_batch_gateway_derives_expiry_from_go_duration(
     created_at = 1
     job = _batch(
         "batch-derived",
-        "completed",
+        "in_progress",
         total=1,
         completed=1,
         failed=0,
@@ -1076,7 +1182,7 @@ async def test_batch_gateway_rejects_invalid_or_nonpositive_completion_window(
 ) -> None:
     job = _batch(
         "batch-invalid-window",
-        "completed",
+        "in_progress",
         total=1,
         completed=1,
         failed=0,
@@ -1093,7 +1199,7 @@ async def test_batch_gateway_rejects_invalid_or_nonpositive_completion_window(
 async def test_batch_gateway_rejects_invalid_created_at(created_at: object) -> None:
     job = _batch(
         "batch-invalid-created",
-        "completed",
+        "in_progress",
         total=1,
         completed=1,
         failed=0,
@@ -1113,7 +1219,7 @@ async def test_batch_gateway_rejects_invalid_explicit_expiry_without_fallback(
 ) -> None:
     job = _batch(
         "batch-invalid-explicit",
-        "completed",
+        "in_progress",
         total=1,
         completed=1,
         failed=0,
@@ -1130,7 +1236,7 @@ async def test_batch_gateway_rejects_invalid_explicit_expiry_without_fallback(
 async def test_batch_gateway_requires_completion_window_for_derived_expiry() -> None:
     job = _batch(
         "batch-missing-window",
-        "completed",
+        "in_progress",
         total=1,
         completed=1,
         failed=0,
@@ -1146,7 +1252,7 @@ async def test_batch_gateway_requires_completion_window_for_derived_expiry() -> 
 async def test_batch_gateway_rejects_derived_deadline_timestamp_overflow() -> None:
     job = _batch(
         "batch-overflow",
-        "completed",
+        "in_progress",
         total=1,
         completed=1,
         failed=0,
@@ -1614,10 +1720,13 @@ async def test_llmd_async_prometheus_source_collects_and_escapes_pool() -> None:
     assert "or vector(0)" not in availability_query
     sample_age_query = next(promql for promql in queries if "timestamp(" in promql)
     assert "time() - min(timestamp(" in sample_age_query
-    assert all(
-        "or vector(0)" in promql
-        for promql in queries
-        if "inflight_requests" in promql or "dispatched_requests_total" in promql
+    rate_query = next(
+        promql for promql in queries if "dispatched_requests_total" in promql
+    )
+    assert rate_query == (
+        "(sum(rate(llm_d_async_async_dispatched_requests_total"
+        f"{{{escaped_selector}}}[45s])) or "
+        f"(absent(llm_d_async_async_dispatched_requests_total{{{escaped_selector}}}) - 1))"
     )
     expiry_query = next(
         promql for promql in queries if "drain_limit_valid_until_seconds" in promql
@@ -1628,6 +1737,29 @@ async def test_llmd_async_prometheus_source_collects_and_escapes_pool() -> None:
         promql for promql in queries if "drain_limit_lease_valid" in promql
     )
     assert "or vector(0)" in lease_query
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rate_result", [[], _prometheus_vector("0")])
+async def test_llmd_async_prometheus_rate_keeps_insufficient_samples_unknown(
+    rate_result: object,
+) -> None:
+    async def query(promql: str) -> object:
+        if "dispatched_requests_total" in promql:
+            return rate_result
+        if "timestamp(" in promql:
+            return 0.0
+        if "broker_backlog_source_available" in promql:
+            return 1.0
+        return 0.0
+
+    source = LlmdAsyncPrometheusSource(pools=["pool-a"], query=query)
+    if rate_result == []:
+        with pytest.raises(ValueError, match="exactly one"):
+            await source.collect_dispatcher_feedback(observed_at_s=1.0)
+    else:
+        feedback = await source.collect_dispatcher_feedback(observed_at_s=1.0)
+        assert feedback[0].actual_dispatch_rps == 0.0
 
 
 @pytest.mark.asyncio

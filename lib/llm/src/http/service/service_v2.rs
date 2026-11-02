@@ -22,8 +22,8 @@ use super::frontend_extension::{
 };
 use super::metrics;
 use super::metrics::{
-    register_lora_allocation_metrics, register_model_ready_metric,
-    register_process_start_time_metric,
+    register_frontend_metrics_start_time_metric, register_lora_allocation_metrics,
+    register_model_ready_metric,
 };
 use super::worker_metrics::register_worker_metrics;
 use crate::discovery::ModelManager;
@@ -1629,7 +1629,7 @@ impl HttpServiceConfigBuilder {
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
-        register_process_start_time_metric(&registry)?;
+        register_frontend_metrics_start_time_metric(&registry)?;
         state
             .metrics_clone()
             .register_with_model_manager(&registry, Some(state.manager_clone()))?;

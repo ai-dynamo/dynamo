@@ -160,7 +160,7 @@ class OpenMetricsOnlineTrafficSource:
         match_labels: Mapping[str, str],
         metric_name: str = "dynamo_frontend_requests_started_total",
         active_metric_name: str = "dynamo_frontend_active_requests",
-        readiness_metric_name: str = "process_start_time_seconds",
+        readiness_metric_name: str = "dynamo_frontend_metrics_start_time_seconds",
         request_timeout_seconds: Optional[float] = None,
         monotonic_clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
@@ -271,7 +271,7 @@ class OpenMetricsOnlineTrafficSource:
             # A failed scrape invalidates the rate window, but must not erase
             # the fact that the counter already existed for this exporter. A
             # continuing gap is unknown, not a trustworthy zero. A later
-            # process-start identity establishes independent history below.
+            # exporter initialization identity establishes independent history below.
             self._previous_counter = None
             self._previous_request_end_mono_s = None
             raise
@@ -618,11 +618,13 @@ class BatchGatewayJobSource:
     status is nonterminal, this source retrieves ``/v1/batches/{id}`` so the
     Gateway can merge its live progress counters before Planner sees the job.
 
-    The current public Gateway list API exposes offset pagination over all
-    tenant history, not a stable nonterminal snapshot. Bounds and an aggregate
-    deadline therefore fail the entire observation closed rather than silently
-    returning a partial view. This is suitable only while tenant history is
-    bounded and quiescent enough to fit those limits.
+    Requires Gateway v1.0.0+ ID cursor pagination, or a build containing
+    llm-d/llm-d-batch-gateway#730.
+    Scanning all tenant history by ID avoids offset shifts during inserts and
+    garbage collection, but is not a transactional snapshot: new IDs behind the
+    cursor are discovered on the next collection. Bounds and an aggregate
+    deadline fail closed rather than truncating the scan. Only active jobs are
+    converted to demand; terminal records need only a valid ID and status.
     """
 
     def __init__(
@@ -742,23 +744,24 @@ class BatchGatewayJobSource:
                 raise
 
         jobs: list[BatchJobDemand] = []
-        for listed_job in listed_jobs:
+        for listed_job in active_jobs:
             job_id = _required_string(listed_job, "id")
-            job = refreshed_jobs.get(job_id, listed_job)
-            jobs.append(self._to_job_demand(job, observed_at_s))
+            job = refreshed_jobs[job_id]
+            if _batch_status(job) not in _TERMINAL_BATCH_STATUSES:
+                jobs.append(self._to_job_demand(job, observed_at_s))
 
         _validate_job_demands(jobs)
         return jobs
 
     async def _list_all_batches(self) -> list[Mapping[str, Any]]:
-        after = 0
+        after = "0"
         listed_jobs: list[Mapping[str, Any]] = []
         seen_ids: set[str] = set()
 
         for _page_number in range(self._max_pages):
             payload = await self._get_json(
                 "/v1/batches",
-                params={"limit": str(self._page_size), "after": str(after)},
+                params={"limit": str(self._page_size), "after": after},
             )
             if not isinstance(payload, Mapping):
                 raise ValueError("batch list response must be an object")
@@ -793,7 +796,7 @@ class BatchGatewayJobSource:
                 )
             if not raw_jobs:
                 raise ValueError("batch list returned has_more=true with an empty page")
-            after += len(raw_jobs)
+            after = _required_string(raw_jobs[-1], "id")
 
         raise ValueError(f"batch list exceeded max_pages={self._max_pages}")
 
@@ -949,7 +952,8 @@ class LlmdAsyncPrometheusSource:
         )
         rate_query = (
             "(sum(rate(llm_d_async_async_dispatched_requests_total"
-            f"{{{selector}}}[{window}])) or vector(0))"
+            f"{{{selector}}}[{window}])) or "
+            f"(absent(llm_d_async_async_dispatched_requests_total{{{selector}}}) - 1))"
         )
         cap_query = f"min(llm_d_async_async_drain_limit_rps{{{selector}}})"
         lease_query = (

@@ -158,13 +158,13 @@ const UNSET_DP_RANK_LABEL: &str = "none";
 const LOCAL_FLUSH_TOKENS: u64 = 64;
 
 const MODEL_READY_HELP: &str = "Whether the frontend can route at least one inference request for the model (1 = ready, 0 = not ready)";
-const PROCESS_START_TIME_HELP: &str =
-    "Start time of the frontend process since the Unix epoch in seconds";
+const FRONTEND_METRICS_START_TIME_HELP: &str =
+    "Time when frontend metrics were first initialized in this process, in Unix seconds";
 
-static PROCESS_START_TIME_SECONDS: LazyLock<f64> = LazyLock::new(|| {
+static FRONTEND_METRICS_START_TIME_SECONDS: LazyLock<f64> = LazyLock::new(|| {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("frontend process start time predates the Unix epoch")
+        .expect("frontend metrics initialization predates the Unix epoch")
         .as_secs_f64()
 });
 
@@ -172,10 +172,15 @@ static PROCESS_START_TIME_SECONDS: LazyLock<f64> = LazyLock::new(|| {
 ///
 /// The frontend creates a custom registry per service instance, so each
 /// registry receives its own collector while all collectors expose the same
-/// process-global start value.
-pub fn register_process_start_time_metric(registry: &Registry) -> Result<(), prometheus::Error> {
-    let gauge = prometheus::Gauge::new("process_start_time_seconds", PROCESS_START_TIME_HELP)?;
-    gauge.set(*PROCESS_START_TIME_SECONDS);
+/// process-global initialization value, not the OS process start time.
+pub fn register_frontend_metrics_start_time_metric(
+    registry: &Registry,
+) -> Result<(), prometheus::Error> {
+    let gauge = prometheus::Gauge::new(
+        "dynamo_frontend_metrics_start_time_seconds",
+        FRONTEND_METRICS_START_TIME_HELP,
+    )?;
+    gauge.set(*FRONTEND_METRICS_START_TIME_SECONDS);
     registry.register(Box::new(gauge))
 }
 
@@ -3202,16 +3207,23 @@ mod tests {
     }
 
     #[test]
-    fn process_start_time_metric_is_stable_across_registries() {
+    fn frontend_metrics_start_time_is_stable_across_registries() {
         let registries = [Registry::new(), Registry::new()];
         let mut values = Vec::new();
 
         for registry in &registries {
-            register_process_start_time_metric(registry).unwrap();
+            // A standard process collector must be able to coexist with ours.
+            registry
+                .register(Box::new(
+                    prometheus::Gauge::new("process_start_time_seconds", "OS process start time")
+                        .unwrap(),
+                ))
+                .unwrap();
+            register_frontend_metrics_start_time_metric(registry).unwrap();
             let families: Vec<_> = registry
                 .gather()
                 .into_iter()
-                .filter(|family| family.name() == "process_start_time_seconds")
+                .filter(|family| family.name() == "dynamo_frontend_metrics_start_time_seconds")
                 .collect();
             assert_eq!(families.len(), 1);
             assert_eq!(families[0].get_metric().len(), 1);
