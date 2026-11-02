@@ -9,6 +9,7 @@
 pub mod admission_gate;
 pub mod backend;
 pub mod common;
+pub(crate) mod decision_profile;
 mod direct_zmq_fan_in;
 mod direct_zmq_sub_pool;
 pub mod discovery;

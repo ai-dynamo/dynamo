@@ -25,8 +25,14 @@ mod native_abort;
 #[path = "tests/preflight.rs"]
 mod preflight;
 
+#[path = "tests/vllm.rs"]
+mod vllm;
+
 #[path = "tests/http.rs"]
 mod http;
+
+#[path = "tests/metrics.rs"]
+mod metrics;
 
 use super::{
     Placement, PreparedBranch, ScoringBranch, StartedBranch, add_input_tokens, bind_native,
