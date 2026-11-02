@@ -255,9 +255,6 @@ xfail_strict = true
 log_cli_level = "INFO"
 filterwarnings = [
     "error",
-    # pytest 9.2.0 started raising errors for warnings from pytest_configure hooks.
-    # pytest-asyncio warns there while asyncio_default_fixture_loop_scope is unset.
-    'ignore:The configuration option "asyncio_default_fixture_loop_scope" is unset:pytest.PytestDeprecationWarning',
     # kr8s 0.20.13 predates Kubernetes 1.36; keep its version warning visible
     # without aborting deploy tests. Remove when the pinned release supports 1.36.
     # Upstream coverage: https://github.com/kr8s-org/kr8s/pull/744
@@ -338,6 +335,7 @@ filterwarnings = [
 
 # NOTE: Can also manually mark tests with @pytest.mark.asyncio
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 markers = [
     "pre_merge: marks tests to run before merging",
     "post_merge: marks tests to run after merge",
