@@ -41,6 +41,10 @@ def get_reasoning_parser_names() -> list[str]:
     """Get list of available reasoning parser names."""
     ...
 
+def get_structural_tag_parser_names() -> list[str]:
+    """Get selectable parser names with registered structural-tag builders."""
+    ...
+
 def run_kv_indexer(args: List[str]) -> None:
     """Run the KV indexer with the given arguments."""
     ...
