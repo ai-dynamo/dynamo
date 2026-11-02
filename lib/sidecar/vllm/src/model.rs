@@ -17,6 +17,9 @@ const SUPPORTED_API_VERSION: &str = "vllm";
 /// generation controls: the reasoning gate, thinking budgets, forbidden token
 /// sequences, and explicit sampling zeros.
 const PROTO_0_6: (u64, u64, u64) = (0, 6, 0);
+/// First vLLM release whose gRPC server compiles structural tags with xgrammar
+/// (vllm-project/vllm#61892); earlier servers use guidance, which rejects them.
+const STRUCTURAL_TAG_MIN_VLLM: (u64, u64, u64) = (0, 33, 0);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ModelIdentity {
@@ -131,6 +134,12 @@ impl DiscoveredModel {
     /// Whether vLLM confirms it reads the vllm-proto 0.5 generation controls.
     pub(crate) fn reports_proto_0_6(&self) -> bool {
         parse_proto_version(&self.server.proto_version).is_some_and(|version| version >= PROTO_0_6)
+    }
+
+    /// Whether vLLM reports release 0.33.0 or later; its pre- and dev releases do not count.
+    pub(crate) fn compiles_structural_tags(&self) -> bool {
+        parse_engine_version(&self.server.engine_version)
+            .is_some_and(|version| version >= (STRUCTURAL_TAG_MIN_VLLM, true))
     }
 
     pub(crate) fn rl_capabilities(&self) -> Option<&pb::RlCapabilities> {
@@ -363,6 +372,20 @@ fn parse_proto_version(version: &str) -> Option<(u64, u64, u64)> {
     let mut next = || parts.next()?.parse::<u64>().ok();
     let version = (next()?, next()?, next()?);
     parts.next().is_none().then_some(version)
+}
+
+/// Parse a PEP 440 vLLM version into its first three release numbers and whether
+/// it is a final or post release rather than a pre- or dev release.
+fn parse_engine_version(version: &str) -> Option<((u64, u64, u64), bool)> {
+    let public = version.split('+').next()?;
+    let end = public
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(public.len());
+    let (release, suffix) = public.split_at(end);
+    let mut parts = release.split('.');
+    let mut next = || parts.next()?.parse::<u64>().ok();
+    let release = (next()?, next()?, next()?);
+    Some((release, suffix.is_empty() || suffix.starts_with("post")))
 }
 
 fn nonzero<T>(value: T) -> Option<T>

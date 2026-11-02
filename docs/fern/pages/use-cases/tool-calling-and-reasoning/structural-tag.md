@@ -169,10 +169,11 @@ environment variables remain accepted with a deprecation warning.
 The native Rust sidecars accept `--dyn-structural-tag` and `DYN_STRUCTURAL_TAG`
 as described in [CLI Flags](#cli-flags), but not the legacy flags or their
 environment variables. The SGLang sidecar uses the same default-on policy. The
-vLLM sidecar uses it on vLLM 0.33.0 or later, the first release whose gRPC
-server reports `vllm-proto` 0.6 and compiles these tags with xgrammar. Against
-older vLLM it defaults to `false`, because that gRPC server compiles them with
-guidance, which rejects them. The TensorRT-LLM sidecar defaults to `false`: the
+vLLM sidecar uses it when vLLM reports release 0.33.0 or later, the first
+release whose gRPC server compiles these tags with xgrammar. Against older vLLM,
+including 0.33.0 release candidates and development builds, it defaults to
+`false`, because that gRPC server may compile them with guidance, which rejects
+them. The TensorRT-LLM sidecar defaults to `false`: the
 xgrammar version TensorRT-LLM pins rejects several tool-call tag formats.
 
 Setting `strict: false` on a tool relaxes its argument schema. On vLLM

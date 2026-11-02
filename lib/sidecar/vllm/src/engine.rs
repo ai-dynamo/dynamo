@@ -241,11 +241,10 @@ impl VllmSidecarEngine {
         let mut engine = Self::new(endpoint, model.clone(), mode, transport);
         engine.engine_gates_reasoning =
             model.reports_proto_0_6() && model.reasoning_parser().is_some();
-        // vLLM 0.33.0, the first to report vllm-proto 0.6, compiles these tags with xgrammar (vllm-project/vllm#61892).
         let structural_tag = args
             .sidecar
             .common
-            .structural_tag(model.reports_proto_0_6());
+            .structural_tag(model.compiles_structural_tags());
         let config = WorkerConfig {
             runtime: args.sidecar.common.runtime,
             namespace: args.sidecar.common.namespace,
@@ -1675,13 +1674,17 @@ mod tests {
     }
 
     #[test]
-    fn structural_tags_default_on_when_vllm_reports_proto_0_6() {
-        let mut old_server = server_info();
-        old_server.proto_version.clear();
-        for (flags, server, expected) in [
-            (&[][..], server_info(), true),
-            (&[][..], old_server.clone(), false),
-            (&["--dyn-structural-tag"][..], old_server, true),
+    fn structural_tags_default_on_from_vllm_0_33_0() {
+        for (flags, engine_version, expected) in [
+            (&[][..], "0.33.0", true),
+            (&[][..], "0.33.0.post1", true),
+            (&[][..], "0.34.1.dev3+g4ba787ec", true),
+            (&[][..], "0.32.0", false),
+            // Builds before the 0.33.0 release may predate vllm-project/vllm#61892.
+            (&[][..], "0.33.0rc1", false),
+            (&[][..], "0.33.0.dev12+gabcdef0", false),
+            (&[][..], "", false),
+            (&["--dyn-structural-tag"][..], "0.32.0", true),
         ] {
             let args = Args::try_parse_from(
                 ["sidecar", "--grpc-endpoint", "127.0.0.1:12345"]
@@ -1689,9 +1692,15 @@ mod tests {
                     .chain(flags),
             )
             .unwrap();
+            let mut server = server_info();
+            server.engine_version = engine_version.to_string();
             let model = DiscoveredModel::from_proto(model_info(), server).unwrap();
             let (_, config) = VllmSidecarEngine::from_discovered(args, model, None).unwrap();
-            assert_eq!(config.structural_tag.is_some(), expected, "{flags:?}");
+            assert_eq!(
+                config.structural_tag.is_some(),
+                expected,
+                "{flags:?} {engine_version:?}"
+            );
         }
     }
 
