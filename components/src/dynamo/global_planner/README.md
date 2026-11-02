@@ -229,10 +229,13 @@ ordering inverts with the direction of the transfer:
 | Scale-up (needs GPUs) | donors giving GPUs up | the **least** important pool (lowest number) |
 | Scale-down below the floor (frees GPUs) | recipients taking GPUs on | the **most** important pool (highest number) |
 
-Priority is the leading term, ahead of the preference for keeping a transfer
-inside one DGD. When every pool resolves to the same priority the term is
-constant, so an unconfigured Global Planner arbitrates exactly as it did before
-priorities existed.
+Priority is the leading term. Among equal-priority pools, partners inside the
+requesting DGD are preferred, followed by smaller absolute GPU changes. This
+locality preference also applies when no priorities are configured, since every
+pool then resolves to the same priority. It intentionally changes the previous
+ordering, which preferred smaller absolute GPU changes and used locality only
+to break ties: a same-DGD partner can now precede a cross-DGD partner with a
+smaller GPU change.
 
 Priority does **not** add new denials. Pairing only ever consumes a scale
 *intent a pool already published*, so a high-priority pool never has capacity
