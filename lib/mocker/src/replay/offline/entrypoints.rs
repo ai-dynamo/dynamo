@@ -1136,10 +1136,11 @@ mod agentic_host_offload_tests {
 #[cfg(test)]
 mod agentic_multi_replica_g2_tests {
     use super::*;
-    use crate::common::protocols::NativeHostOffloadConfig;
+    use crate::common::protocols::{G2Scope, NativeHostOffloadConfig};
     use crate::loadgen::{
         AGENTIC_MOONCAKE_SCHEMA, AGENTIC_MOONCAKE_VERSION, AgenticHashIdScope,
-        AgenticMooncakeHeader, AgenticMooncakeRow, AgenticSnapshotOptions, AgenticSourceProvenance,
+        AgenticMooncakeHeader, AgenticMooncakeRow, AgenticSnapshotOptions,
+        AgenticSnapshotSelection, AgenticSourceProvenance,
     };
     use crate::replay::{AgenticReplayOptions, ReplayDeterminism, ReplayScope, with_replay_scope};
     use aisimulate_core::replay::{PerRequestRecord, PerRequestRoutingRecord, ReplayRequestPool};
@@ -1509,5 +1510,240 @@ mod agentic_multi_replica_g2_tests {
             serde_json::to_value(&report.per_request).unwrap()
         };
         assert_eq!(replay(), replay());
+    }
+
+    /// Shared-G2 qualification: one deployment-owned pool whose residency every
+    /// replica discovers through native `HostPinned` events.
+    fn shared_g2_with(num_host_blocks: usize, h2d_gbps: f64) -> NativeHostOffloadConfig {
+        let mut config = NativeHostOffloadConfig::new(num_host_blocks)
+            .with_bandwidths(0.0, h2d_gbps)
+            .cluster_shared("agentic-multi-replica-g2");
+        config.shared_h2d_bandwidth_gbps = h2d_gbps;
+        config
+    }
+
+    fn snapshot_driver(rows: Vec<AgenticMooncakeRow>, lanes: usize) -> ReplayRuntimeInput {
+        let trace = AgenticTrace::from_agentic_mooncake_rows(header(), rows).unwrap();
+        let driver = AgenticReplayOptions {
+            snapshot: Some(AgenticSnapshotOptions {
+                initial_selections: Some(
+                    (0..lanes)
+                        .map(|_| AgenticSnapshotSelection {
+                            source_play_id: "play".to_string(),
+                            t_star_ms: 0.0,
+                        })
+                        .collect(),
+                ),
+                corpus_cursor: Some(lanes as u64),
+                ..AgenticSnapshotOptions::seeded(5)
+            }),
+            ..Default::default()
+        }
+        .into_driver(trace, BLOCK_SIZE, true, Some(lanes), None)
+        .unwrap();
+        ReplayRuntimeInput::Workload(driver)
+    }
+
+    /// `seed`, `pin` and `pressure` from [`evicted_prefix_play`], then a
+    /// sibling conversation of the same play that shares `seed`'s prefix.
+    fn sibling_play() -> Vec<AgenticMooncakeRow> {
+        let mut play = evicted_prefix_play();
+        play.pop();
+        play.push(row("sibling", "play", 50.0, vec![1, 2, 3], 10, 1));
+        play
+    }
+
+    fn lane_records<'a>(
+        report: &'a TraceSimulationReport,
+        lane: &str,
+    ) -> Vec<&'a PerRequestRecord> {
+        report
+            .per_request
+            .iter()
+            .filter(|record| record.agentic.as_ref().unwrap().lane_id.as_deref() == Some(lane))
+            .collect()
+    }
+
+    fn source<'a>(records: &[&'a PerRequestRecord], source: &str) -> &'a PerRequestRecord {
+        let suffix = format!(":request:{source}");
+        records
+            .iter()
+            .find(|record| {
+                record
+                    .agentic
+                    .as_ref()
+                    .unwrap()
+                    .request_id
+                    .ends_with(&suffix)
+            })
+            .unwrap_or_else(|| panic!("no record for {source}"))
+    }
+
+    #[test]
+    fn shared_g2_hits_stay_within_the_authorized_play() {
+        let g2 = Some(shared_g2_with(64, 0.0));
+        let one = run_agg(args(g2.clone()), snapshot_driver(sibling_play(), 1), 2, 0.0);
+        let two = run_agg(args(g2), snapshot_driver(sibling_play(), 2), 2, 0.0);
+        assert_router_and_engine_residency_reconcile(&two, ReplayRequestPool::Agg);
+        let mut cache_ids = std::collections::BTreeSet::new();
+        for lane in ["lane:0", "lane:1"] {
+            let records = lane_records(&two, lane);
+            assert_eq!(records.len(), 4);
+            let lane_cache = records
+                .iter()
+                .map(|record| record.agentic.as_ref().unwrap().cache_id.clone().unwrap())
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(lane_cache.len(), 1, "one cache identity per play");
+            cache_ids.extend(lane_cache);
+            // The sibling conversation restores its play's shared prefix.
+            let sibling = source(&records, "sibling");
+            assert_eq!(sibling.first_admission_host_reused_input_tokens, Some(8));
+            assert_eq!(sibling.first_admission_g1_reused_input_tokens, Some(0));
+            for name in ["seed", "pin", "pressure"] {
+                let record = source(&records, name);
+                assert_eq!(record.first_admission_host_reused_input_tokens, Some(0));
+                assert_eq!(record.first_admission_g1_reused_input_tokens, Some(0));
+            }
+        }
+        assert_eq!(cache_ids.len(), 2);
+        // Equal source prompts in two recycled plays occupy separate entries.
+        assert_eq!(
+            two.g2_domains[0].resident_blocks,
+            2 * one.g2_domains[0].resident_blocks
+        );
+    }
+
+    /// `seed` is evicted from G1 on both replicas; two consumers then restore
+    /// its shared G2 prefix at the same time, one per replica.
+    fn concurrent_restore_play(consumers: usize) -> Vec<AgenticMooncakeRow> {
+        let mut play = vec![
+            row("seed", "play", 0.0, vec![1, 2, 3], 10, 1),
+            row("pin", "play", 0.5, vec![100, 101], 5, 2),
+            row("pressure", "play", 20.0, vec![200, 201, 202], 10, 2),
+            row("pressure-b", "play", 20.0, vec![300, 301, 302], 10, 2),
+        ];
+        for consumer in ["resume-a", "resume-b"].into_iter().take(consumers) {
+            play.push(row(consumer, "play", 250.0, vec![1, 2, 3], 10, 1));
+        }
+        play
+    }
+
+    #[test]
+    fn concurrent_shared_consumers_have_deterministic_transfer_accounting() {
+        let agg = ReplayRequestPool::Agg;
+        let replay = |consumers: usize| {
+            run_agg(
+                args(Some(shared_g2_with(64, 1.0))),
+                input(concurrent_restore_play(consumers), None),
+                2,
+                0.0,
+            )
+        };
+        let solo = replay(1);
+        let concurrent = replay(2);
+        assert_eq!(
+            serde_json::to_value(&concurrent.per_request).unwrap(),
+            serde_json::to_value(&replay(2).per_request).unwrap()
+        );
+        assert_router_and_engine_residency_reconcile(&concurrent, agg);
+        let wait =
+            |record: &PerRequestRecord| record.first_admit_ms.unwrap() - record.arrival_time_ms;
+        let solo_wait = wait(record(&solo, "resume-a"));
+        assert!(solo_wait > 0.0);
+        let (a, b) = (
+            record(&concurrent, "resume-a"),
+            record(&concurrent, "resume-b"),
+        );
+        assert_ne!(worker(a, agg), worker(b, agg));
+        for consumer in [a, b] {
+            assert_eq!(consumer.first_admission_host_reused_input_tokens, Some(8));
+            // Two consumers split the pool's 1 GB/s H2D cap evenly.
+            assert!((wait(consumer) - 2.0 * solo_wait).abs() < 1e-9);
+        }
+        // Both consumers read the same entries: pool residency is counted once.
+        assert_eq!(concurrent.g2_domains, solo.g2_domains);
+        assert_eq!(concurrent.g2_domains[0].capacity_blocks, 64);
+    }
+
+    #[test]
+    fn stale_shared_residency_falls_back_to_recompute() {
+        let agg = ReplayRequestPool::Agg;
+        let mut play = evicted_prefix_play();
+        // Resume queues behind the decoding requests; meanwhile the two-block
+        // pool evicts seed's prefix to admit pressure's blocks.
+        play[3].not_before_ms = 40.0;
+        let report = run_agg(
+            args(Some(shared_g2_with(2, 0.0))),
+            input(play, None),
+            2,
+            0.0,
+        );
+        assert_eq!(report.request_counts.completed_requests, 4);
+        let resume = record(&report, "resume");
+        assert!(resume.first_admit_ms.unwrap() > resume.arrival_time_ms);
+        // Placement scored the residency visible at arrival...
+        assert_eq!(route(resume, agg).reported_overlap_tokens, Some(8));
+        // ...and admission found it gone, so the prefix was recomputed.
+        assert_eq!(resume.first_admission_host_reused_input_tokens, Some(0));
+        assert_eq!(resume.first_admission_g1_reused_input_tokens, Some(0));
+        assert_eq!(report.g2_domains[0].resident_blocks, 2);
+    }
+
+    #[test]
+    fn disabling_shared_g2_reproduces_the_private_baseline() {
+        let private = local_g2().with_bandwidths(0.0, 1.0);
+        let mut disabled = shared_g2_with(64, 1.0);
+        disabled.scope = G2Scope::DpRankLocal;
+        let per_request =
+            |report: &TraceSimulationReport| serde_json::to_value(&report.per_request).unwrap();
+        for workers in [1, 2] {
+            let baseline = run_agg(
+                args(Some(private.clone())),
+                input(evicted_prefix_play(), None),
+                workers,
+                0.0,
+            );
+            let report = run_agg(
+                args(Some(disabled.clone())),
+                input(evicted_prefix_play(), None),
+                workers,
+                0.0,
+            );
+            assert!(report.g2_domains.is_empty());
+            assert_eq!(per_request(&report), per_request(&baseline));
+            assert_eq!(
+                report.committed_prefill_tokens,
+                baseline.committed_prefill_tokens
+            );
+        }
+        // One consumer gains nothing from sharing: placement and reuse match the
+        // private pool; only shared-pool transfer service timing differs.
+        let shared = run_agg(
+            args(Some(shared_g2_with(64, 1.0))),
+            input(evicted_prefix_play(), None),
+            1,
+            0.0,
+        );
+        let baseline = run_agg(
+            args(Some(private)),
+            input(evicted_prefix_play(), None),
+            1,
+            0.0,
+        );
+        assert_eq!(
+            shared.committed_prefill_tokens,
+            baseline.committed_prefill_tokens
+        );
+        for name in ["seed", "pin", "pressure", "resume"] {
+            let (shared, baseline) = (record(&shared, name), record(&baseline, name));
+            assert_eq!(
+                shared.first_admission_host_reused_input_tokens,
+                baseline.first_admission_host_reused_input_tokens
+            );
+            assert_eq!(
+                shared.first_admission_g1_reused_input_tokens,
+                baseline.first_admission_g1_reused_input_tokens
+            );
+        }
     }
 }

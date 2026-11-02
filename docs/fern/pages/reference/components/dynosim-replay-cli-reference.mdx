@@ -318,6 +318,24 @@ Snapshot and profile plays use play-local token namespaces and carry a distinct
 `cluster_shared` pool. In finite replay, equal source `hash_ids` in different plays
 are the corpus's own shared prefixes.
 
+A `cluster_shared` G2 pool is owned by the replay deployment, not by a worker:
+every participating rank joins one pool and the first participant fixes its
+layout, capacity, and shared bandwidth contract. A block becomes discoverable
+when its D2H store completes, at which point the pool publishes a `HostPinned`
+store event to every subscribed rank; eviction is pool-wide LRU and publishes
+the matching removal to every rank. Any replica may therefore restore a shared
+prefix, and the Router scores it equally on all of them, so load decides among
+replicas that see the same shared residency. Shared hits are limited to the
+play that stored the blocks: conversations of one play share prefixes, while
+recycled snapshot and profile plays never do. Concurrent restores of the same
+entries count residency once and split the pool's directional bandwidth
+max-min fairly, deterministically from the replay clock. If the scored residency
+is evicted before a queued request is admitted, the request recomputes the
+missing prefix; its `routing_history` overlap then exceeds its realized G2 reuse.
+AgentX G2 requires static pools, so worker failure and ownership handoff are
+outside its support boundary. Setting `scope: dp_rank_local` disables sharing and
+reproduces the private-G2 result exactly, even when shared-pool fields remain set.
+
 Each role can omit offload or select `dp_rank_local` or `cluster_shared`.
 Shared roles must agree on layout, total capacity, and shared directional
 bandwidths. `num_host_blocks` is the capacity of one shared pool and is counted
