@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sys
 import types
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -59,8 +60,8 @@ class StubController:
             StubController.construct_error = None
             raise error
         self.args = (config, inputs, capabilities, clock, scale_interval_s)
-        # Live hooks (sweep_fn, launch_gate, harvest_allowed, generation);
-        # empty when the host built the controller the replay way.
+        # Live hooks (sweep_fn, launch_gate, harvest_allowed, generation,
+        # executor); empty when the host built the controller the replay way.
         self.hooks = hooks
         self.config = config
         self.started: list[float] = []
@@ -72,9 +73,7 @@ class StubController:
         self.results: list[StubTickResult] = []
         self.closed = 0
         self.close_error: Exception | None = None
-        self.dropped = 0
-        self.rewinds: list[int] = []
-        # Ordered lifecycle calls: "start", "rewind", "drop_pending", "close".
+        # Ordered lifecycle calls: "start", "drop_pending", "close".
         self.calls: list[str] = []
         StubController.instances.append(self)
 
@@ -88,16 +87,7 @@ class StubController:
         self.calls.append("start")
 
     def drop_pending(self) -> None:
-        self.dropped += 1
         self.calls.append("drop_pending")
-
-    def rewind(self, last_decided_k: int) -> None:
-        self.rewinds.append(last_decided_k)
-        self.calls.append("rewind")
-
-    def running_future(self):
-        """No sweep thread: nothing for a successor to queue behind."""
-        return None
 
     async def on_tick(self, now_s, worker_counts):
         self.ticks.append((now_s, worker_counts))
@@ -116,11 +106,22 @@ class StubController:
             raise self.close_error
 
 
+class StubSweepExecutor(ThreadPoolExecutor):
+    """The live sweep thread a host hands the stub (which never sweeps)."""
+
+    def __init__(self) -> None:
+        super().__init__(max_workers=1)
+
+    def busy(self) -> bool:
+        return False
+
+
 def install_stub_controller(monkeypatch) -> type[StubController]:
     """Install ``StubController`` as ``dynamo.planner.retune.controller``."""
 
     module = types.ModuleType(CONTROLLER_MODULE)
     module.RetuneController = StubController  # type: ignore[attr-defined]
+    module.SweepExecutor = StubSweepExecutor  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, CONTROLLER_MODULE, module)
     StubController.instances = []
     StubController.construct_error = None

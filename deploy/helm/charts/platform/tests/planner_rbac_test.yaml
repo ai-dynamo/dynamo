@@ -115,24 +115,10 @@ tests:
               - patch
         documentIndex: 1
 
-  # ── EXPERIMENTAL live retune (dgdrV1Beta2.enabled) ────────────────────────────
+  # ── EXPERIMENTAL live retune (dgdrV1Beta2.plannerLiveRetune) ────────────────
 
-  - it: omits live retune rules from the ClusterRole when dgdrV1Beta2 is disabled (default)
+  - it: omits live retune rules from the ClusterRole by default
     asserts:
-      - notContains:
-          path: rules
-          content:
-            apiGroups:
-              - nvidia.com
-            resources:
-              - dynamographdeploymentrequests
-            verbs:
-              - create
-              - get
-              - list
-              - watch
-              - delete
-        documentIndex: 0
       - notContains:
           path: rules
           content:
@@ -146,10 +132,86 @@ tests:
               - update
               - delete
         documentIndex: 0
+      - notContains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamographdeploymentrequests
+            verbs:
+              - create
+              - get
+              - list
+              - delete
+        documentIndex: 0
 
-  - it: grants DGDR v1beta2 and Lease access in the ClusterRole when dgdrV1Beta2 is enabled
+  - it: omits live retune rules from the ClusterRole with dgdrV1Beta2 alone
     set:
       dynamo-operator.dgdrV1Beta2.enabled: true
+    asserts:
+      - notContains:
+          path: rules
+          content:
+            apiGroups:
+              - coordination.k8s.io
+            resources:
+              - leases
+            verbs:
+              - get
+              - create
+              - update
+              - delete
+        documentIndex: 0
+      - notContains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamographdeploymentrequests
+            verbs:
+              - create
+              - get
+              - list
+              - delete
+        documentIndex: 0
+
+  - it: omits live retune rules from the ClusterRole with plannerLiveRetune alone
+    set:
+      dynamo-operator.dgdrV1Beta2.plannerLiveRetune: true
+    asserts:
+      - notContains:
+          path: rules
+          content:
+            apiGroups:
+              - coordination.k8s.io
+            resources:
+              - leases
+            verbs:
+              - get
+              - create
+              - update
+              - delete
+        documentIndex: 0
+      - notContains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamographdeploymentrequests
+            verbs:
+              - create
+              - get
+              - list
+              - delete
+        documentIndex: 0
+
+  - it: grants DGDR v1beta2 and Lease access in the ClusterRole with plannerLiveRetune
+    set:
+      dynamo-operator.dgdrV1Beta2.enabled: true
+      dynamo-operator.dgdrV1Beta2.plannerLiveRetune: true
     asserts:
       - contains:
           path: rules
@@ -162,7 +224,6 @@ tests:
               - create
               - get
               - list
-              - watch
               - delete
         documentIndex: 0
       - contains:
@@ -172,11 +233,18 @@ tests:
               - nvidia.com
             resources:
               - dynamographdeploymentruns
-              - dynamographdeploymentcandidates
             verbs:
               - get
+        documentIndex: 0
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamographdeploymentcandidates
+            verbs:
               - list
-              - watch
         documentIndex: 0
       - contains:
           path: rules
@@ -201,26 +269,12 @@ tests:
             verbs:
               - list
         documentIndex: 0
-      # The planner reads, creates, replaces and deletes Leases; it never patches them.
-      - notContains:
-          path: rules
-          content:
-            apiGroups:
-              - coordination.k8s.io
-            resources:
-              - leases
-            verbs:
-              - get
-              - create
-              - update
-              - patch
-              - delete
-        documentIndex: 0
 
-  - it: omits live retune rules from the Role when dgdrV1Beta2 is disabled in namespace-restricted mode
+  - it: omits live retune rules from the Role with dgdrV1Beta2 alone in namespace-restricted mode
     set:
       dynamo-operator.namespaceRestriction.enabled: true
       dynamo-operator.upgradeCRD: false
+      dynamo-operator.dgdrV1Beta2.enabled: true
     asserts:
       - notContains:
           path: rules
@@ -235,12 +289,26 @@ tests:
               - update
               - delete
         documentIndex: 1
+      - notContains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamographdeploymentrequests
+            verbs:
+              - create
+              - get
+              - list
+              - delete
+        documentIndex: 1
 
-  - it: grants DGDR v1beta2 and Lease access in the Role when dgdrV1Beta2 is enabled in namespace-restricted mode
+  - it: grants DGDR v1beta2 and Lease access in the Role with plannerLiveRetune in namespace-restricted mode
     set:
       dynamo-operator.namespaceRestriction.enabled: true
       dynamo-operator.upgradeCRD: false
       dynamo-operator.dgdrV1Beta2.enabled: true
+      dynamo-operator.dgdrV1Beta2.plannerLiveRetune: true
     asserts:
       - contains:
           path: rules
@@ -253,7 +321,6 @@ tests:
               - create
               - get
               - list
-              - watch
               - delete
         documentIndex: 1
       - contains:
@@ -263,11 +330,18 @@ tests:
               - nvidia.com
             resources:
               - dynamographdeploymentruns
-              - dynamographdeploymentcandidates
             verbs:
               - get
+        documentIndex: 1
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamographdeploymentcandidates
+            verbs:
               - list
-              - watch
         documentIndex: 1
       - contains:
           path: rules
@@ -282,18 +356,13 @@ tests:
               - update
               - delete
         documentIndex: 1
-      # The planner reads, creates, replaces and deletes Leases; it never patches them.
-      - notContains:
+      - contains:
           path: rules
           content:
             apiGroups:
-              - coordination.k8s.io
+              - ""
             resources:
-              - leases
+              - pods
             verbs:
-              - get
-              - create
-              - update
-              - patch
-              - delete
+              - list
         documentIndex: 1

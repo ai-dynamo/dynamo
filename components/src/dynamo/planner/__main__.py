@@ -53,7 +53,7 @@ async def start_planner(runtime: DistributedRuntime, config: PlannerConfig):
         generate,  # type: ignore[arg-type]
         health_check_payload={"text": "health"},
     )
-    if config.retune is None:
+    if not planner.may_hold_retune_lease:
         await asyncio.gather(serve, planner.run())
         return
     await _run_until_sigterm(runtime, serve, planner.run())
@@ -64,10 +64,10 @@ async def _run_until_sigterm(
 ) -> None:
     """Serve and run the planner; SIGTERM stops the planner cleanly.
 
-    Live retune holds a leadership Lease and may have a sweep in flight.
-    Without a handler SIGTERM kills the process before ``run()``'s
-    ``finally`` closes the retune controller and releases the Lease, so the
-    next leader would wait out the Lease. The handler cancels only the run
+    Live retune, and the clean-up of a removed one, hold a leadership Lease,
+    and live retune may have a sweep in flight. Without a handler SIGTERM
+    kills the process before ``run()``'s ``finally`` stops the sweep and
+    releases the Lease, so the next leader would wait out the Lease. The handler cancels only the run
     task; once its shutdown finished, the runtime is shut down to stop
     serving the endpoint and the call returns normally.
     """

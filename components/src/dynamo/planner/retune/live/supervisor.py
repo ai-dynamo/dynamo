@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``LiveRetuneSupervisor``: leadership, persisted state and actuation (design §4.7).
+"""``LiveRetuneSupervisor``: leadership, persisted state and actuation.
 
 The retune controller decides exactly as in replay; the supervisor decides
 when it may launch and harvest, persists every decision before anything is
@@ -26,19 +26,21 @@ thread with a timeout):
 
 - lease: renew or acquire ``<dgd>-planner-retune`` every third of the lease
   duration. Becoming leader, re-acquiring after losing track, or a re-init
-  request enters initialization (§4.7.3) with ``term_seq + 1``; losing
-  leadership runs the local loss (§4.7.5).
-- control: re-validate the spec premises (§4.7.7, rebuilding the controller
-  through ``host.replace_live_retune`` when the startup, ``spec_ok`` or P4
-  change), then, as an initialized leader, the P11 canary and one actuator
-  round (§4.8), and it starts one reconciler round (§4.4.5).
+  request enters initialization (claim the state with ``term_seq + 1``, then
+  apply the first matching row of ``plan_initialization``); losing
+  leadership runs the local loss.
+- control: re-read the DGD and re-validate the spec premises (rebuilding the
+  controller through ``host.replace_live_retune`` when the startup,
+  ``spec_ok`` or P4 change), then, as an initialized leader, the P11 canary
+  and one actuator round, and it starts one reconciler round.
 - reconciler: one round at a time in its own task, never awaited by the
   control loop, within ``reconcile_budget_s``. A round still running (a hung
   filesystem or slow API calls) skips the next ones; the reconciler stops
   before its next delete once this process is no longer the initialized
   leader of the round's epoch or the budget has passed.
-- outbox: write each decision with the term and resourceVersion
-  preconditions (§4.7.4); N consecutive failures re-initialize.
+- outbox: write each decision, conditional on the state's ``leader_term``
+  being this process's term and on the resourceVersion read; N consecutive
+  failures re-initialize.
 
 Local leadership loss, a failed outbox, and a controller rebuild share one
 path: clear ``initialized``, stop the outbox writer and the in-flight
@@ -48,8 +50,11 @@ so a due window can be relaunched or adopted before its deadline.
 
 The actuation target follows the state: ``rollback`` while
 ``rollback_pending`` (an advisory planner resets only routers whose initial
-it latched, §4.8); ``observe`` (never write) in advisory; ``rollback`` when a
-spec premise fails; otherwise ``apply`` the state's ``by_wt``.
+it latched); ``observe`` (never write) in advisory; ``rollback`` when a spec
+premise fails; otherwise ``apply`` the state's ``by_wt``. Like a decision, a
+router's latched initial is persisted before the router is moved off it, so
+a process stopped at any point leaves only routers whose initial the state
+records.
 """
 
 from __future__ import annotations
@@ -65,9 +70,11 @@ import threading
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Optional, Protocol, Union
 
+from dynamo.planner.plugins.orchestrator.engine_adapter import RetuneHooks
 from dynamo.planner.retune.live.contracts import (
     LABEL_DGD_UID,
     ActuationReport,
@@ -85,12 +92,14 @@ from dynamo.planner.retune.live.contracts import (
     RetuneMetricsSink,
     SweepRegistry,
 )
+from dynamo.planner.retune.live.dgdr import run_dgdr_sweep
 from dynamo.planner.retune.live.state import (
     LeaseLeadership,
     RetuneMode,
     RetuneState,
     StateSnapshot,
     StateStore,
+    StateVersionError,
     append_history,
     claim,
     deploy,
@@ -103,11 +112,11 @@ from dynamo.planner.retune.live.state import (
     rollback_complete,
     rollback_start,
 )
+from dynamo.planner.retune.sweep import SweepRequest, SweepResult
 
 if TYPE_CHECKING:
     from dynamo.planner.config.planner_config import PlannerConfig
     from dynamo.planner.core.types import PlannerEffects, RetuneDecision, RetuneInputs
-    from dynamo.planner.retune.sweep import SweepRequest, SweepResult
 
 logger = logging.getLogger(__name__)
 
@@ -184,7 +193,7 @@ class ActuatorLike(Protocol):
 
 # (DgdRef, startup maps per worker type) -> actuator
 ActuatorFactory = Callable[[DgdRef, dict[str, dict[str, float]]], ActuatorLike]
-SweepRunner = Callable[..., "SweepResult"]
+SweepRunner = Callable[..., SweepResult]
 
 
 class LiveRetuneHost(Protocol):
@@ -193,15 +202,12 @@ class LiveRetuneHost(Protocol):
     ``replace_live_retune`` takes the planner's config lock and calls the
     engine adapter's ``replace_retune``. The supervisor reaches the current
     controller through ``host._engine.retune_controller`` and serializes its
-    calls on it with ``host._config_lock``.
+    calls on it with ``host._config_lock``; ``host._engine.retune_sweeps_done``
+    tells it when the engine's sweep thread is idle.
     """
 
     async def replace_live_retune(
-        self,
-        inputs: Optional[RetuneInputs],
-        *,
-        generation: int,
-        last_decided_k: Optional[int],
+        self, inputs: Optional[RetuneInputs], *, generation: int
     ) -> None:
         ...
 
@@ -229,8 +235,8 @@ class SupervisorSettings:
     # stop (a blocked filesystem call cannot be interrupted; later rounds
     # wait for it instead of piling up threads).
     reconcile_budget_s: float = 120.0
-    # Legacy clean-up (§4.11): roll back what an earlier retune deployed,
-    # then delete the Requests and both Leases.
+    # Legacy clean-up of a removed retune: roll back what it deployed, then
+    # delete the Requests and both Leases.
     decommission: bool = False
 
     def __post_init__(self) -> None:
@@ -311,7 +317,7 @@ def window_index(window_end_ms: int, *, phase_s: float, interval_s: float) -> in
     return int(round((window_end_ms / 1000.0 - phase_s) / interval_s)) - 1
 
 
-# ----------------------------------------------------- initialization (§4.7.3)
+# ---------------------------------------------------------- initialization
 
 InitRow = Literal[
     "spec_not_ok",
@@ -352,7 +358,18 @@ def plan_initialization(
     interval_ms: int,
     first_window_end_ms: int,
 ) -> InitPlan:
-    """The initialization table of design §4.7.3, first matching row wins.
+    """What a new term writes and restores; the first matching row wins.
+
+    1. ``spec_not_ok``: a spec premise fails. Start a rollback if the routers
+       may be off their startup (``deployed_off``), else record the startup.
+    2. ``advisory_rollback``/``advisory_observe``: advisory. Roll back what
+       an active planner deployed, else only observe.
+    3. ``active_restore``: an active, current (same mode and fingerprint),
+       complete deployment without a pending rollback is restored as is.
+    4. ``promote``: with ``promote_last_advisory``, the last advisory
+       recommendation, if recent and of the same fingerprint, is deployed.
+    5. ``active_reset``: otherwise deploy the startup point, with a rollback
+       pending when the routers may be off it.
 
     ``state`` is the snapshot after the claim write. A state without a
     deployment record is "no state". The first initialization of a DGD also
@@ -469,7 +486,11 @@ def _promotable(
     now_ms: int,
     interval_ms: int,
 ) -> Optional[Mapping[str, Any]]:
-    """The last advisory recommendation, if §4.7.6 lets it be promoted."""
+    """The last advisory recommendation, if it may be promoted.
+
+    It must be the newest history entry, an ``advisory`` outcome of the same
+    fingerprint, at most one interval old, and cover every searched key.
+    """
 
     if not state.history:
         return None
@@ -633,10 +654,7 @@ class LiveRetuneSupervisor:
         # (deploy_seq, monotonic since) of a converged rollback.
         self._rollback_since: Optional[tuple[int, float]] = None
 
-        # Sweeps.
-        self._aborts: list[threading.Event] = []
-        self._aborts_lock = threading.Lock()
-        self._sweeps_in_flight = 0
+        # Skipped launches already counted.
         self._skips_seen: deque[tuple[int, str]] = deque(maxlen=_SKIP_MEMORY)
 
         # Tasks and locks.
@@ -750,10 +768,8 @@ class LiveRetuneSupervisor:
 
         return self._evaluation.inputs
 
-    def hooks(self) -> Any:
+    def hooks(self) -> RetuneHooks:
         """``RetuneHooks`` for ``OrchestratorEngineAdapter``."""
-
-        from dynamo.planner.plugins.orchestrator.engine_adapter import RetuneHooks
 
         return RetuneHooks(
             sweep_fn=self.sweep_fn,
@@ -769,7 +785,7 @@ class LiveRetuneSupervisor:
         if not self._initialized or state is None:
             return None
         if state.rollback_pending:
-            # §4.8: only an active planner resets a router it never latched
+            # Only an active planner resets a router it never latched
             # (revision > 0) to learn its initial; an advisory planner leaves
             # it alone.
             return ActuationTarget(
@@ -815,14 +831,11 @@ class LiveRetuneSupervisor:
                 self._metrics.skipped(reason)
                 logger.info("retune gate: window %d %s", k, reason)
             return GateResult(reason=reason)
-        abort = threading.Event()
-        with self._aborts_lock:
-            self._aborts = [event for event in self._aborts if not event.is_set()][-8:]
-            self._aborts.append(abort)
+        # Set by the controller's drop_pending (local loss, rebuild, stop).
         return GateResult(
             reason=None,
             spec_replicas=dict(self._evaluation.spec_replicas or {}),
-            abort=abort,
+            abort=threading.Event(),
         )
 
     def harvest_allowed(self, generation: int) -> bool:
@@ -843,35 +856,24 @@ class LiveRetuneSupervisor:
     ) -> SweepResult:
         """Run one DGDR sweep on the controller's sweep thread; never raises."""
 
-        with self._aborts_lock:
-            self._sweeps_in_flight += 1
         try:
-            runner = self._sweep_runner
-            if runner is None:
-                from dynamo.planner.retune.live.dgdr import run_dgdr_sweep
-
-                runner = run_dgdr_sweep
+            runner = self._sweep_runner or run_dgdr_sweep
             if self._context_factory is None:
                 raise RuntimeError("no DGDR sweep context factory is configured")
             context = self._context_factory(self)
             return runner(request, cancel=cancel, abort=abort, context=context)
         except Exception as error:  # the sweep contract: never raise
             logger.exception("retune sweep of window %s failed", request.window_index)
-            from dynamo.planner.retune.sweep import SweepResult
-
             return SweepResult(
                 status="failed",
                 error=f"{type(error).__name__}: {error}",
                 failure_reason="sweep_error",
             )
-        finally:
-            with self._aborts_lock:
-                self._sweeps_in_flight -= 1
 
     def on_effects(self, effects: PlannerEffects) -> None:
         """Enqueue the tick's decisions; never raises into the tick."""
 
-        decisions = list(getattr(effects, "retune_decisions", None) or ())
+        decisions = list(effects.retune_decisions or ())
         if not decisions:
             return
         if not (self.is_leader() and self._initialized):
@@ -882,7 +884,7 @@ class LiveRetuneSupervisor:
             )
             self._rewind_now()
             return
-        router_parameters = getattr(effects, "router_parameters", None)
+        router_parameters = effects.router_parameters
         for decision in decisions:
             self._outbox.append(
                 OutboxEntry(
@@ -914,7 +916,7 @@ class LiveRetuneSupervisor:
         self._host = host
         controller = self._controller()
         if controller is not None:
-            self._generation = int(getattr(controller, "generation", self._generation))
+            self._generation = int(controller.generation)
         self._controller_ok = controller is not None
         self._background = background
         self._publish()
@@ -926,7 +928,14 @@ class LiveRetuneSupervisor:
         ]
 
     async def stop(self) -> None:
-        """Abort sweeps, wait for them briefly and release the Lease (§4.7.8)."""
+        """Abort the sweep, wait for it briefly and release the Lease.
+
+        Runs before the engine shuts down. The local loss drops the
+        controller's sweep (``drop_pending`` sets its abort event); then the
+        engine's sweep thread is waited for, at most ``stop_timeout_s``, so
+        no sweep of this process creates a Request after the next leader
+        took over.
+        """
 
         if self._stopped:
             return
@@ -942,15 +951,16 @@ class LiveRetuneSupervisor:
                 await self._local_loss_locked("shutdown")
         except Exception:
             logger.exception("retune supervisor: shutdown clean-up failed")
-        self._abort_all()
-        deadline = self._monotonic() + self._settings.stop_timeout_s
-        while self._sweeps_in_flight > 0 and self._monotonic() < deadline:
-            await self._sleep(0.1)
-        if self._sweeps_in_flight > 0:
-            logger.warning(
-                "retune supervisor: %d sweep(s) still running at shutdown",
-                self._sweeps_in_flight,
-            )
+        done = self._sweeps_done()
+        if done is not None:
+            try:
+                await asyncio.wait_for(
+                    asyncio.wrap_future(done), timeout=self._settings.stop_timeout_s
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "retune supervisor: a sweep is still running at shutdown"
+                )
         try:
             await self._io(self._leadership.release)
         except Exception:
@@ -1045,7 +1055,7 @@ class LiveRetuneSupervisor:
             return
 
     async def revalidate(self) -> None:
-        """§4.7.7: re-read the DGD and rebuild on a spec-class change."""
+        """Re-read the DGD and rebuild on a spec-class change."""
 
         try:
             dgd_obj = await self._io(self._kube.get_dgd, self._dgd.name)
@@ -1105,9 +1115,7 @@ class LiveRetuneSupervisor:
             if host is not None:
                 try:
                     await host.replace_live_retune(
-                        evaluation.inputs,
-                        generation=self._generation,
-                        last_decided_k=self._last_decided_k(),
+                        evaluation.inputs, generation=self._generation
                     )
                     self._controller_ok = evaluation.inputs is not None
                 except Exception:
@@ -1125,7 +1133,12 @@ class LiveRetuneSupervisor:
     # ------------------------------------------------- init and local loss
 
     async def _initialize_locked(self) -> bool:
-        """§4.7.3 under ``_init_lock``; ``True`` once initialized."""
+        """Claim a new term and initialize under ``_init_lock``.
+
+        Confirms leadership, claims the state (only ``leader_term``), writes
+        what ``plan_initialization`` decides, restores the controller and
+        rewinds it to the last persisted window. ``True`` once initialized.
+        """
 
         await self._local_loss_locked("initialize")
         # Confirm on the API server right before the claim: a holder change
@@ -1180,7 +1193,7 @@ class LiveRetuneSupervisor:
                 promote=settings.promote_last_advisory,
                 now_ms=int(round(now_s * 1000.0)),
                 interval_ms=int(round(settings.interval_s * 1000.0)),
-                # §4.7.2 first enable: skip the due window and the window in
+                # First enable: skip the due window and the window in
                 # progress, whose trace may have begun mid-way.
                 first_window_end_ms=current_window_end_ms(
                     now_s, phase_s=settings.phase_s, interval_s=settings.interval_s
@@ -1229,7 +1242,12 @@ class LiveRetuneSupervisor:
         return True
 
     async def _read_own_snapshot(self) -> Optional[StateSnapshot]:
-        """Read the state; drop a snapshot of another DGD uid (§4.7.3 step 2)."""
+        """Read the state; drop a snapshot of another DGD uid.
+
+        A recreated DGD of the same name finds the old uid's state: it is
+        deleted with that uid's Requests. A snapshot of an unknown format
+        version is never overwritten: the read fails (``None``).
+        """
 
         try:
             snapshot = await self._io(self._store.read)
@@ -1246,6 +1264,16 @@ class LiveRetuneSupervisor:
                 # Replaced by the claim (conditional on its resourceVersion).
                 snapshot = dataclasses.replace(snapshot, state=None)
             return snapshot
+        except StateVersionError as error:
+            logger.error(
+                "retune init: the state Lease %s was written by another planner "
+                "version (%s); not initializing until a planner that reads it "
+                "leads or the Lease is deleted",
+                self._store.name,
+                error,
+            )
+            self._metrics.failure("state_version")
+            return None
         except (KubeError, asyncio.TimeoutError) as error:
             logger.warning("retune init: reading the state failed: %s", error)
             return None
@@ -1264,7 +1292,12 @@ class LiveRetuneSupervisor:
         self.registry.enqueue_delete([name for name in names if name])
 
     async def _local_loss_locked(self, reason: str) -> None:
-        """§4.7.5 under ``_init_lock``."""
+        """Local leadership loss under ``_init_lock``.
+
+        Clears ``initialized``, stops the outbox writer and the in-flight
+        actuator/reconciler round, drops the queued decisions and the sweep,
+        and rewinds the controller to the last persisted window.
+        """
 
         was = self._initialized or bool(self._outbox) or self._term is not None
         self._initialized = False
@@ -1283,7 +1316,6 @@ class LiveRetuneSupervisor:
         dropped = len(self._outbox)
         self._outbox.clear()
         self._write_failures = 0
-        self._abort_all()
         controller = self._controller()
         if controller is not None:
             async with self._host_lock():
@@ -1369,7 +1401,7 @@ class LiveRetuneSupervisor:
     async def _reread(self) -> Optional[StateSnapshot]:
         try:
             snapshot = await self._io(self._store.read)
-        except (KubeError, asyncio.TimeoutError) as error:
+        except (KubeError, asyncio.TimeoutError, StateVersionError) as error:
             logger.warning("retune: re-reading the state failed: %s", error)
             return None
         if snapshot.state is not None and snapshot.state.dgd_uid != self._dgd.uid:
@@ -1419,10 +1451,9 @@ class LiveRetuneSupervisor:
 
     def _count_decision(self, decision: RetuneDecision) -> None:
         self._metrics.decision(decision.outcome)
-        failure_reason = getattr(decision, "failure_reason", None)
         if decision.outcome in ("failed", "timeout"):
-            self._metrics.failure(failure_reason or decision.outcome)
-        details = getattr(decision, "details", None) or {}
+            self._metrics.failure(decision.failure_reason or decision.outcome)
+        details = decision.details
         # The DGDR executor reports the window cut under details["window"].
         window = details.get("window")
         dropped = (
@@ -1448,7 +1479,7 @@ class LiveRetuneSupervisor:
             "decision_id": decision.decision_id,
             "window_end_ms": int(round(decision.window_end_s * 1000.0)),
             "outcome": decision.outcome,
-            "failure_reason": getattr(decision, "failure_reason", None),
+            "failure_reason": decision.failure_reason,
             "reason": decision.reason,
             "fingerprint": entry.fingerprint,
             "baseline": _finite(decision.baseline_score),
@@ -1460,7 +1491,7 @@ class LiveRetuneSupervisor:
             item["by_wt"] = entry.router_parameters
         elif decision.outcome == "advisory":
             item["by_wt"] = self._resolve_by_wt(flat)
-        details = getattr(decision, "details", None) or {}
+        details = decision.details
         image = {
             key: details[key]
             for key in ("runtime_image", "runtime_version", "runtime_version_override")
@@ -1486,7 +1517,7 @@ class LiveRetuneSupervisor:
         epoch = self._epoch
         if self._settings.decommission:
             await self._actuate()
-            await self._finish_decommission()
+            await self._finish_decommission(epoch)
             return
         await self._check_canary()
         await self._actuate()
@@ -1496,9 +1527,41 @@ class LiveRetuneSupervisor:
 
     async def _actuate(self) -> None:
         target = self.target()
-        state = self.state
-        if target is None or state is None:
+        if target is None:
             return
+        epoch = self._epoch
+        report = await self._reconcile_routers(target)
+        if report is None:
+            return
+        outcome = await self._persist_initials(report)
+        if (
+            outcome == "ok"
+            and target.mode == "apply"
+            and report.new_initials
+            and not report.converged
+            and epoch == self._epoch
+        ):
+            # The actuator moves a router off its initial only once the state
+            # records that initial: a process stopped between the write and
+            # the state write would leave a router whose initial nobody
+            # knows, which an advisory or clean-up rollback never resets.
+            # The initials learned this round are persisted now, so the
+            # writes held for them go out in this round, not the next.
+            report = await self._reconcile_routers(target)
+            if report is None:
+                return
+            await self._persist_initials(report)
+        await self._track_rollback(target, report)
+
+    async def _reconcile_routers(
+        self, target: ActuationTarget
+    ) -> Optional[ActuationReport]:
+        """One actuator pass against the persisted initials; ``None`` when
+        there is no state or a local loss overtook it."""
+
+        state = self.state
+        if state is None:
+            return None
         epoch = self._epoch
         startup = self._evaluation.startup
         report = await self._actuator.reconcile(
@@ -1507,7 +1570,7 @@ class LiveRetuneSupervisor:
             expected_frontends=max(1, startup.replicas if startup is not None else 1),
         )
         if epoch != self._epoch:
-            return
+            return None
         self._last_report = report
         if startup is not None and report.parity_ok is not None:
             if report.parity_ok != self._p14_ok:
@@ -1515,16 +1578,20 @@ class LiveRetuneSupervisor:
                     "retune: P14 parity %s -> %s", self._p14_ok, report.parity_ok
                 )
             self._p14_ok = report.parity_ok
-        await self._persist_initials(report)
-        await self._track_rollback(target, report)
+        return report
 
-    async def _persist_initials(self, report: ActuationReport) -> None:
+    async def _persist_initials(
+        self, report: ActuationReport
+    ) -> Optional[WriteOutcome]:
+        """Merge the newly latched initials into the state and drop those of
+        routers that are gone; ``None`` when nothing changes."""
+
         state = self.state
         if state is None:
-            return
+            return None
         merged = merge_initials(state, report.new_initials, keep=report.seen_router_ids)
         if maps_equal(merged.initials, state.initials):
-            return
+            return None
         latched = dict(report.new_initials)
         keep = frozenset(report.seen_router_ids)
 
@@ -1535,6 +1602,7 @@ class LiveRetuneSupervisor:
         outcome = await self._write_state(mutate, "initials")
         if outcome == "lost_term":
             self._request_reinit("the state's leader_term is not ours")
+        return outcome
 
     async def _track_rollback(
         self, target: ActuationTarget, report: ActuationReport
@@ -1599,7 +1667,7 @@ class LiveRetuneSupervisor:
         self._canary_at = now
 
     def _reconcile_allowed(self, epoch: int) -> bool:
-        """§4.4.5: only the initialized leader of ``epoch`` cleans up.
+        """Only the initialized leader of ``epoch`` deletes anything.
 
         Called from the reconciler's thread too (``is_leader`` is
         thread-safe, the rest are single reads).
@@ -1697,11 +1765,18 @@ class LiveRetuneSupervisor:
         settings = self._settings
         return window_end_ms / 1000.0 + settings.grace_s + settings.timeout_s
 
-    async def _finish_decommission(self) -> None:
-        """§4.11: once nothing is left to roll back, delete Requests and Leases."""
+    async def _finish_decommission(self, epoch: int) -> None:
+        """Once nothing is left to roll back, delete Requests and Leases.
+
+        Only as the initialized leader of ``epoch``, checked again before
+        every delete: a lost term (a failed state write of this round) or
+        lost leadership stops it, so it never deletes under another leader.
+        """
 
         state = self.state
         if self.decommissioned or state is None or state.rollback_pending:
+            return
+        if not self._reconcile_allowed(epoch):
             return
         dgd = self._dgd
         try:
@@ -1710,11 +1785,18 @@ class LiveRetuneSupervisor:
             )
             for request in requests:
                 name = (request.get("metadata") or {}).get("name")
-                if name:
-                    await self._io(self._kube.delete_request, name)
+                if not name:
+                    continue
+                if not self._reconcile_allowed(epoch):
+                    return
+                await self._io(self._kube.delete_request, name)
+            if not self._reconcile_allowed(epoch):
+                return
             await self._io(self._store.delete)
         except (KubeError, asyncio.TimeoutError) as error:
             logger.warning("retune clean-up: deleting Requests/state failed: %s", error)
+            return
+        if not self._reconcile_allowed(epoch):
             return
         try:
             await self._io(self._kube.delete_lease, self._leadership.name)
@@ -1800,9 +1882,7 @@ class LiveRetuneSupervisor:
 
     def _router_keys(self) -> tuple[str, ...]:
         controller = self._controller()
-        keys = (
-            getattr(controller, "router_keys", None) if controller is not None else None
-        )
+        keys = controller.router_keys if controller is not None else None
         return tuple(keys) if keys else self._settings.router_keys
 
     def _startup_by_wt(self) -> Optional[dict[str, dict[str, float]]]:
@@ -1870,18 +1950,18 @@ class LiveRetuneSupervisor:
         if controller is not None:
             self._rewind(controller)
 
-    def _abort_all(self) -> None:
-        with self._aborts_lock:
-            aborts, self._aborts = self._aborts, []
-        for event in aborts:
-            event.set()
+    def _engine(self) -> Any:
+        """The host's engine adapter; ``None`` before ``start`` or without one."""
+
+        return getattr(self._host, "_engine", None)
 
     def _controller(self) -> Any:
-        host = self._host
-        if host is None:
-            return None
-        engine = getattr(host, "_engine", None)
-        return getattr(engine, "retune_controller", None)
+        engine = self._engine()
+        return None if engine is None else engine.retune_controller
+
+    def _sweeps_done(self) -> Optional[Future[None]]:
+        engine = self._engine()
+        return None if engine is None else engine.retune_sweeps_done()
 
     @contextlib.asynccontextmanager
     async def _host_lock(self) -> AsyncIterator[None]:

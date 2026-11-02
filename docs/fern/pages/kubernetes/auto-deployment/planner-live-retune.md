@@ -54,7 +54,8 @@ This applies to all DGDR trace Runs, not only those the Planner creates.
 
 - **Operator with DGDR v1beta2 traces.** Install the platform chart with
   `dynamo-operator.dgdrV1Beta2.enabled=true` and an operator that accepts `spec.workload.trace`.
-  The same Helm value grants the Planner ServiceAccount the access it needs (see [RBAC](#rbac)).
+  Also set `dynamo-operator.dgdrV1Beta2.plannerLiveRetune=true` to grant the Planner
+  ServiceAccount the access it needs (see [RBAC](#rbac)).
   In a cluster-wide install, the operator must also hold the DGDR v1beta2 Run and Candidate
   permissions of [ai-dynamo/dynamo#17308](https://github.com/ai-dynamo/dynamo/pull/17308); see
   [RBAC](#rbac).
@@ -192,7 +193,6 @@ retune:
 | `promote_last_advisory` | `false` | On switching to active, apply the last advisory recommendation if it is at most one interval old and the configuration is unchanged |
 | `lease_duration_seconds` | `60` | Leadership Lease duration, renewed every third of it |
 | `actuator_interval_seconds` | `15` | Period of the router and clean-up rounds |
-| `trace_incomplete_threshold` | `0.05` | With `metric_pulling_prometheus_endpoint`, a window with this fraction fewer requests than the frontend served fails with `trace_incomplete` |
 
 For the other `retune` fields and the limits that `executor: dgdr` adds to them, see the
 [Retune field reference](../../reference/components/planner-configuration.mdx#retune-experimental).
@@ -293,13 +293,19 @@ The Planner only warns when AISimulate does not list the model among its default
    parameters. The mode stored in the state alone does not show that.
 2. Remove `retune` from the Planner configuration.
 3. Remove the trace environment from the frontend.
-4. Delete the Planner's Requests and both Leases:
+4. Delete the Planner's Requests and both Leases. Select the Requests by the DGD's
+   `metadata.uid`: the `nvidia.com/planner-retune-dgd` label holds a hash instead of the name
+   when the name is longer than 63 characters.
 
    ```bash
    kubectl delete dynamographdeploymentrequests.nvidia.com -n <namespace> \
-     -l nvidia.com/planner-retune-dgd=<dgd>
+     -l nvidia.com/planner-retune-dgd-uid=$(kubectl get dgd <dgd> -n <namespace> -o jsonpath='{.metadata.uid}')
    kubectl delete lease -n <namespace> <dgd>-planner-retune <dgd>-planner-retune-state
    ```
+
+   While the chart still grants the live retune RBAC, a Planner without `retune` does this on
+   its own: it finds the Leases in the background after it starts, resets any router the
+   removed retune changed, then deletes the Requests and both Leases.
 
 5. Delete `<segments_dir>/<dgd>` and `<windows_dir>/<dgd>` from the claim.
 
@@ -319,16 +325,20 @@ retune Requests.
 
 ### RBAC
 
-With `dynamo-operator.dgdrV1Beta2.enabled=true`, the platform chart adds these rules to the Planner Role
-(namespace-restricted installs) and ClusterRole (cluster-wide installs):
+With `dynamo-operator.dgdrV1Beta2.enabled=true` and
+`dynamo-operator.dgdrV1Beta2.plannerLiveRetune=true`, the platform chart adds these rules to the
+Planner Role (namespace-restricted installs) and ClusterRole (cluster-wide installs). Both values
+default to `false`; `dgdrV1Beta2.enabled` alone grants the Planner nothing new.
 
 | API group | Resources | Verbs |
 |---|---|---|
-| `nvidia.com` | `dynamographdeploymentrequests` | create, get, list, watch, delete |
-| `nvidia.com` | `dynamographdeploymentruns`, `dynamographdeploymentcandidates` | get, list, watch |
+| `nvidia.com` | `dynamographdeploymentrequests` | create, get, list, delete |
+| `nvidia.com` | `dynamographdeploymentruns` | get |
+| `nvidia.com` | `dynamographdeploymentcandidates` | list |
 | `coordination.k8s.io` | `leases` | get, create, update, delete |
 
-The Planner also lists pods with its existing permission. These rules are namespace-wide: a
+The chart has one Planner role for the whole install, so Planners without `retune` get these
+rules too. The Planner also lists pods with its existing permission. These rules are namespace-wide: a
 Role or a RoleBinding of the ClusterRole has no `resourceNames`, because the Planner creates its
 Leases and Requests under per-DGD names. As a result, any workload that runs as the Planner
 ServiceAccount can:
@@ -341,8 +351,8 @@ ServiceAccount can:
 
 In a cluster-wide install, the operator binds the Planner ClusterRole into each DGD namespace with
 a RoleBinding, and Kubernetes lets it bind only permissions it holds itself. Set
-`dynamo-operator.dgdrV1Beta2.enabled=true` there only with an operator whose own role grants
-`get`, `list` and `watch` on `dynamographdeploymentruns` and `dynamographdeploymentcandidates`,
+`dynamo-operator.dgdrV1Beta2.plannerLiveRetune=true` there only with an operator whose own role
+grants `get` on `dynamographdeploymentruns` and `list` on `dynamographdeploymentcandidates`,
 which the DGDR v1beta2 operator change in
 [ai-dynamo/dynamo#17308](https://github.com/ai-dynamo/dynamo/pull/17308) adds.
 Without it, the API server rejects the Planner RoleBinding in every namespace that does not have

@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``dynamo_planner_retune_*`` metrics: names, labels and values per design
-§4.10, collectors shared per registry, and methods that never raise."""
+"""``dynamo_planner_retune_*`` metrics: names, labels and values as the live
+retune guide lists them, collectors shared per registry, and methods that
+never raise."""
 
 from __future__ import annotations
 

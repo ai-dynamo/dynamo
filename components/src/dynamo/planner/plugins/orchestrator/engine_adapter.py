@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable
+from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Sequence
 
@@ -69,11 +70,9 @@ from dynamo.planner.config.planner_config import PlannerConfig, resolve_min_endp
 from dynamo.planner.monitoring.signal_health import PlannerSignalHealth
 
 if TYPE_CHECKING:
-    from concurrent.futures import Future
-
     import grpc.aio
 
-    from dynamo.planner.retune.controller import RetuneController
+    from dynamo.planner.retune.controller import RetuneController, SweepExecutor
     from dynamo.planner.retune.live.contracts import HarvestAllowed, LaunchGate
 
 from dynamo.planner.core.budget import (
@@ -148,6 +147,10 @@ class RetuneHooks:
     launch_gate: LaunchGate
     harvest_allowed: HarvestAllowed
     phase_s: float = 0.0
+
+
+def _no_sweep() -> None:
+    """Queued behind the live sweeps by ``retune_sweeps_done``."""
 
 
 class OrchestratorEngineAdapter:
@@ -355,9 +358,10 @@ class OrchestratorEngineAdapter:
         self._register_builtin_plugins()
         self._retune_hooks = retune_hooks
         self._retune: Optional[RetuneController] = None
-        # A replaced controller's sweep that may still be running while
-        # retune is disabled; the next generation's first launch waits for it.
-        self._retune_predecessor: Optional[Future[Any]] = None
+        # Live: the one sweep thread every controller generation submits to,
+        # so a rebuilt controller's sweep queues behind a dropped one and two
+        # generations never sweep at once.
+        self._retune_executor: Optional[SweepExecutor] = None
         if retune_hooks is None or self._config.retune is None:
             self._retune = self._build_retune_controller(retune_inputs)
         elif retune_inputs is None:
@@ -385,15 +389,13 @@ class OrchestratorEngineAdapter:
         retune_inputs: Optional[RetuneInputs],
         *,
         generation: int = 0,
-        predecessor: Optional[Future[Any]] = None,
     ) -> Optional[RetuneController]:
         """Build the retune controller iff ``config.retune`` is set.
 
         The controller validates the retune setup in its constructor, so an
         invalid one fails here, at engine construction. With live hooks the
-        controller gets them, ``generation`` and ``predecessor`` (the sweep
-        its first launch waits for); without (replay) it is built exactly as
-        before.
+        controller gets them, ``generation`` and the adapter's shared sweep
+        executor; without (replay) it is built exactly as before.
         """
         if self._config.retune is None:
             return None
@@ -406,7 +408,7 @@ class OrchestratorEngineAdapter:
         # of the import chain of planners that never enable retune, and avoids
         # an import cycle through dynamo.replay, whose planner host imports
         # this module.
-        from dynamo.planner.retune.controller import RetuneController
+        from dynamo.planner.retune.controller import RetuneController, SweepExecutor
 
         hooks = self._retune_hooks
         if hooks is None:
@@ -417,6 +419,8 @@ class OrchestratorEngineAdapter:
                 self._clock,
                 self._scale_interval,
             )
+        if self._retune_executor is None:
+            self._retune_executor = SweepExecutor()
         return RetuneController(
             self._config,
             retune_inputs,
@@ -427,7 +431,7 @@ class OrchestratorEngineAdapter:
             launch_gate=hooks.launch_gate,
             harvest_allowed=hooks.harvest_allowed,
             generation=generation,
-            predecessor=predecessor,
+            executor=self._retune_executor,
         )
 
     @property
@@ -443,21 +447,18 @@ class OrchestratorEngineAdapter:
         *,
         generation: int,
         now_s: float,
-        last_decided_k: Optional[int],
     ) -> None:
         """Swap the live retune controller without rebuilding the engine.
 
         The old controller's sweep is aborted (``drop_pending``) and the
         controller closed. With ``retune_inputs`` a new controller of
-        ``generation`` is built with the same hooks, anchored at ``now_s``
-        and the hooks' phase, and rewound to ``last_decided_k`` when given;
-        with ``None`` the adapter stays disabled. The new controller's first
-        launch queues behind the old controller's sweep while that is still
-        running (``running_future``), also across disabled generations, so
-        two generations never sweep at once. A construction error is
-        raised after the old controller is gone, leaving the adapter
-        disabled. Callers serialize this with ticks (the planner's config
-        lock).
+        ``generation`` is built with the same hooks and anchored at ``now_s``
+        and the hooks' phase; with ``None`` the adapter stays disabled. Every
+        generation submits to the adapter's one sweep thread, so the new
+        controller's first sweep queues behind the old one while that still
+        runs. A construction error is raised after the old controller is
+        gone, leaving the adapter disabled. Callers serialize this with
+        ticks (the planner's config lock).
         """
         hooks = self._retune_hooks
         if self._config.retune is None or hooks is None:
@@ -473,32 +474,33 @@ class OrchestratorEngineAdapter:
                 old.close()
             except Exception:
                 log.exception("retune controller close failed")
-            # After drop_pending and close: the sweep that still holds the
-            # old controller's thread (and, transitively, older ones).
-            running = old.running_future()
-            if running is not None:
-                self._retune_predecessor = running
-        if self._retune_predecessor is not None and self._retune_predecessor.done():
-            self._retune_predecessor = None
         if retune_inputs is None:
             log.info(
                 "retune controller generation %d: disabled (premises do not hold)",
                 generation,
             )
             return
-        controller = self._build_retune_controller(
-            retune_inputs,
-            generation=generation,
-            predecessor=self._retune_predecessor,
-        )
-        assert controller is not None
-        # The new controller now carries it (and hands it on when replaced).
-        self._retune_predecessor = None
+        controller = self._build_retune_controller(retune_inputs, generation=generation)
+        if controller is None:
+            raise RuntimeError("replace_retune requires a live retune configuration")
         controller.start(now_s, hooks.phase_s)
-        if last_decided_k is not None:
-            controller.rewind(last_decided_k)
         self._retune = controller
         log.info("retune controller generation %d installed", generation)
+
+    def retune_sweeps_done(self) -> Optional[Future[None]]:
+        """A future done once every live sweep submitted so far returned.
+
+        The sweep thread runs one sweep at a time in submission order, so a
+        no-op queued behind them completes after the last one. ``None``
+        without live retune or once the engine is shut down.
+        """
+        executor = self._retune_executor
+        if executor is None:
+            return None
+        try:
+            return executor.submit(_no_sweep)
+        except RuntimeError:  # shut down
+            return None
 
     @property
     def plugins_bootstrapped(self) -> bool:
@@ -966,6 +968,8 @@ class OrchestratorEngineAdapter:
                     type(exc).__name__,
                     exc,
                 )
+        if self._retune_executor is not None:
+            self._retune_executor.shutdown(wait=False, cancel_futures=True)
         await self._orchestrator.shutdown()
 
     # ------------------------------------------------------------------

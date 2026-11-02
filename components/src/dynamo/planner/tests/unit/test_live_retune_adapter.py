@@ -17,7 +17,7 @@ import logging
 import os
 import signal
 import threading
-from concurrent.futures import Future
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 import pytest
@@ -75,18 +75,9 @@ def _hooks(**overrides) -> RetuneHooks:
     return RetuneHooks(**values)
 
 
-def _stub_running_future(self):
-    """``running_future`` for the stub: ``self.running``, recorded in calls."""
-
-    self.calls.append("running_future")
-    return getattr(self, "running", None)
-
-
 @pytest.fixture
 def stub_controller(monkeypatch):
-    stub = install_stub_controller(monkeypatch)
-    monkeypatch.setattr(stub, "running_future", _stub_running_future, raising=False)
-    return stub
+    return install_stub_controller(monkeypatch)
 
 
 def _adapter(*, inputs=None, hooks=None, clock=None, **overrides):
@@ -130,12 +121,13 @@ def test_live_controller_gets_the_hooks_and_the_phase(stub_controller):
 
     (controller,) = stub_controller.instances
     assert engine.retune_controller is controller
+    executor = controller.hooks.pop("executor")
+    assert isinstance(executor, ThreadPoolExecutor)
     assert controller.hooks == {
         "sweep_fn": hooks.sweep_fn,
         "launch_gate": hooks.launch_gate,
         "harvest_allowed": hooks.harvest_allowed,
         "generation": 0,
-        "predecessor": None,
     }
     engine.initial_tick(1_000.0)
     assert (controller.started, controller.phases) == ([1_000.0], [PHASE])
@@ -232,19 +224,19 @@ async def test_replace_retune_swaps_the_controller(stub_controller):
     (old,) = stub_controller.instances
     inputs = RetuneInputs(engine=retune_inputs().engine, trace_paths=("/trace/b",))
 
-    engine.replace_retune(inputs, generation=4, now_s=500.0, last_decided_k=41)
+    engine.replace_retune(inputs, generation=4, now_s=500.0)
 
     old_, new = stub_controller.instances
     assert old_ is old
-    # Abort the old sweep first, close the old controller, then read the
-    # sweep still holding its thread (none here) for the new one to wait on.
-    assert old.calls == ["start", "drop_pending", "close", "running_future"]
+    # Abort the old sweep first, then close the old controller.
+    assert old.calls == ["start", "drop_pending", "close"]
     assert new.args[1] is inputs
     assert new.generation == 4
-    assert new.hooks["predecessor"] is None
+    # Every generation submits to the adapter's one sweep thread.
+    assert new.hooks["executor"] is old.hooks["executor"]
     assert new.hooks["launch_gate"] is old.hooks["launch_gate"]
-    assert new.calls == ["start", "rewind"]
-    assert (new.started, new.phases, new.rewinds) == ([500.0], [PHASE], [41])
+    assert new.calls == ["start"]
+    assert (new.started, new.phases) == ([500.0], [PHASE])
     assert engine.retune_controller is new
 
     # The next tick runs the new controller only.
@@ -264,81 +256,15 @@ async def test_replace_retune_swaps_the_controller(stub_controller):
     assert (old.closed, new.closed) == (1, 1)
 
 
-def test_replace_retune_without_last_decided_k_does_not_rewind(stub_controller):
-    engine = _adapter(inputs=None)
-
-    engine.replace_retune(
-        retune_inputs(), generation=1, now_s=10.0, last_decided_k=None
-    )
-
-    (controller,) = stub_controller.instances
-    assert controller.calls == ["start"]
-    assert engine.retune_controller is controller
-
-
 def test_replace_retune_with_no_inputs_disables_retune(stub_controller):
     engine = _adapter(inputs=retune_inputs())
     (old,) = stub_controller.instances
 
-    engine.replace_retune(None, generation=2, now_s=10.0, last_decided_k=7)
+    engine.replace_retune(None, generation=2, now_s=10.0)
 
     assert engine.retune_controller is None
-    assert old.calls == ["drop_pending", "close", "running_future"]
+    assert old.calls == ["drop_pending", "close"]
     assert len(stub_controller.instances) == 1
-
-
-def test_replace_retune_queues_the_new_controller_behind_the_old_sweep(
-    stub_controller,
-):
-    engine = _adapter(inputs=retune_inputs())
-    (old,) = stub_controller.instances
-    old.running = Future()
-
-    engine.replace_retune(
-        retune_inputs(), generation=1, now_s=10.0, last_decided_k=None
-    )
-
-    new = stub_controller.instances[1]
-    assert new.hooks["predecessor"] is old.running
-    # The new controller carries it on: replacing it asks it, not the adapter.
-    engine.replace_retune(
-        retune_inputs(), generation=2, now_s=20.0, last_decided_k=None
-    )
-    assert stub_controller.instances[2].hooks["predecessor"] is None
-
-
-def test_replace_retune_keeps_the_old_sweep_across_a_disabled_generation(
-    stub_controller,
-):
-    engine = _adapter(inputs=retune_inputs())
-    (old,) = stub_controller.instances
-    old.running = Future()
-
-    engine.replace_retune(None, generation=1, now_s=10.0, last_decided_k=None)
-    stub_controller.construct_error = ValueError("zero startup credit")
-    with pytest.raises(ValueError, match="zero startup credit"):
-        engine.replace_retune(
-            retune_inputs(), generation=2, now_s=20.0, last_decided_k=None
-        )
-    engine.replace_retune(
-        retune_inputs(), generation=3, now_s=30.0, last_decided_k=None
-    )
-
-    assert stub_controller.instances[1].hooks["predecessor"] is old.running
-
-
-def test_replace_retune_forgets_an_old_sweep_that_has_finished(stub_controller):
-    engine = _adapter(inputs=retune_inputs())
-    (old,) = stub_controller.instances
-    old.running = Future()
-
-    engine.replace_retune(None, generation=1, now_s=10.0, last_decided_k=None)
-    old.running.set_result(None)
-    engine.replace_retune(
-        retune_inputs(), generation=2, now_s=20.0, last_decided_k=None
-    )
-
-    assert stub_controller.instances[1].hooks["predecessor"] is None
 
 
 def test_replace_retune_construction_failure_leaves_retune_disabled(
@@ -349,9 +275,7 @@ def test_replace_retune_construction_failure_leaves_retune_disabled(
     stub_controller.construct_error = ValueError("zero startup credit")
 
     with pytest.raises(ValueError, match="zero startup credit"):
-        engine.replace_retune(
-            retune_inputs(), generation=3, now_s=10.0, last_decided_k=None
-        )
+        engine.replace_retune(retune_inputs(), generation=3, now_s=10.0)
 
     assert old.closed == 1
     assert engine.retune_controller is None
@@ -364,9 +288,7 @@ def test_replace_retune_survives_an_old_controller_that_fails_to_close(
     (old,) = stub_controller.instances
     old.close_error = RuntimeError("worker stuck")
 
-    engine.replace_retune(
-        retune_inputs(), generation=1, now_s=10.0, last_decided_k=None
-    )
+    engine.replace_retune(retune_inputs(), generation=1, now_s=10.0)
 
     assert engine.retune_controller is stub_controller.instances[1]
 
@@ -380,7 +302,7 @@ def test_replace_retune_requires_live_hooks(stub_controller):
     )
 
     with pytest.raises(RuntimeError, match="live retune"):
-        engine.replace_retune(None, generation=1, now_s=0.0, last_decided_k=None)
+        engine.replace_retune(None, generation=1, now_s=0.0)
 
 
 async def test_real_controller_with_live_hooks_anchors_at_the_phase():
@@ -431,6 +353,7 @@ async def test_real_controller_with_live_hooks_anchors_at_the_phase():
     assert [d.decision_id for d in decisions][:2] == ["retune-w60000", "retune-w120000"]
 
 
+@pytest.mark.timeout(10)
 async def test_rebuilt_real_controllers_never_sweep_at_once():
     """Two generations of one window never run their sweeps concurrently.
 
@@ -495,9 +418,7 @@ async def test_rebuilt_real_controllers_never_sweep_at_once():
         await engine.tick(scheduled, TickInput(now_s=now, worker_counts=counts))
         assert gen0_started.wait(30)
 
-        engine.replace_retune(
-            retune_inputs(), generation=1, now_s=now, last_decided_k=None
-        )
+        engine.replace_retune(retune_inputs(), generation=1, now_s=now)
         await engine.tick(scheduled, TickInput(now_s=now + 1.0, worker_counts=counts))
         controller = engine.retune_controller
         assert controller is not None and controller.generation == 1
@@ -558,6 +479,8 @@ class FakeLiveRetune:
         self.host = None
         self.on_effects_error: Exception | None = None
         self.stop_error: Exception | None = None
+        # The host's engine when stop ran (it must still be up).
+        self.engine_at_stop = None
 
     def retune_inputs(self):
         self.calls.append("live.retune_inputs")
@@ -572,6 +495,8 @@ class FakeLiveRetune:
 
     async def stop(self):
         self.calls.append("live.stop")
+        if self.host is not None:
+            self.engine_at_stop = self.host._engine
         if self.stop_error is not None:
             raise self.stop_error
 
@@ -671,7 +596,9 @@ async def test_async_init_builds_the_engine_with_live_retune_and_starts_it(
     finally:
         await planner._shutdown_runtime()
 
-    # Engine (and controller) first, then the supervisor, then the environment.
+    # The supervisor stops while the engine is up (it waits for the engine's
+    # sweep thread), then the engine closes the controller.
+    assert live.engine_at_stop is engine
     assert controller.closed == 1
     assert environment.calls[-2:] == ["live.stop", "environment.shutdown"]
     assert planner._live_retune is None
@@ -754,15 +681,17 @@ async def test_each_tick_hands_its_effects_to_live_retune(caplog):
     assert len(applied) == 2
 
 
+@pytest.mark.timeout(10)
 async def test_replace_live_retune_holds_the_config_lock(stub_controller):
     planner, _, _ = _planner(inputs=None)
     await planner._async_init()
     try:
         await planner._config_lock.acquire()
         task = asyncio.create_task(
-            planner.replace_live_retune(retune_inputs(), generation=2, last_decided_k=9)
+            planner.replace_live_retune(retune_inputs(), generation=2)
         )
-        await asyncio.sleep(0.05)
+        for _ in range(5):  # let the task run until it waits for the lock
+            await asyncio.sleep(0)
         assert not task.done() and stub_controller.instances == []
         planner._config_lock.release()
         await asyncio.wait_for(task, timeout=5)
@@ -770,7 +699,6 @@ async def test_replace_live_retune_holds_the_config_lock(stub_controller):
         (controller,) = stub_controller.instances
         assert planner._engine.retune_controller is controller  # type: ignore[union-attr]
         assert controller.generation == 2
-        assert controller.rewinds == [9]
         assert controller.phases == [PHASE]
     finally:
         await planner._shutdown_runtime()
@@ -780,7 +708,7 @@ async def test_replace_live_retune_needs_the_orchestrator_engine():
     planner, _, _ = _planner()
 
     with pytest.raises(RuntimeError, match="orchestrator engine"):
-        await planner.replace_live_retune(None, generation=1, last_decided_k=None)
+        await planner.replace_live_retune(None, generation=1)
 
 
 # ---------------------------------------------------------------------------
@@ -885,10 +813,18 @@ async def test_platforms_without_signal_handlers_still_run(monkeypatch, caplog):
     assert "Cannot install a planner SIGTERM handler" in caplog.text
 
 
-async def test_start_planner_installs_sigterm_only_with_retune(monkeypatch):
-    seen: list[tuple[bool, str]] = []
+async def test_start_planner_installs_sigterm_only_when_a_retune_lease_may_be_held(
+    monkeypatch,
+):
+    # With live retune, or the clean-up check of a removed one (every
+    # Kubernetes planner without retune config), the planner may hold the
+    # retune leadership Lease.
+    seen: list[bool] = []
 
     class _Planner:
+        def __init__(self, may_hold: bool) -> None:
+            self.may_hold_retune_lease = may_hold
+
         async def _async_init(self):
             pass
 
@@ -904,16 +840,27 @@ async def test_start_planner_installs_sigterm_only_with_retune(monkeypatch):
             return _Endpoint()
 
     async def fake_run_until_sigterm(runtime, serve, run):
-        seen.append((True, type(runtime).__name__))
+        seen.append(isinstance(runtime, _StartRuntime))
         await asyncio.gather(serve, run)
 
-    monkeypatch.setattr(planner_main, "construct_planner", lambda **_: _Planner())
+    planners = iter([_Planner(False), _Planner(True)])
+    monkeypatch.setattr(planner_main, "construct_planner", lambda **_: next(planners))
     monkeypatch.setattr(planner_main, "_run_until_sigterm", fake_run_until_sigterm)
 
     await planner_main.start_planner(_StartRuntime(), PlannerConfig(mode="agg"))
     assert seen == []
-    await planner_main.start_planner(_StartRuntime(), _live_config())
-    assert seen == [(True, "_StartRuntime")]
+    await planner_main.start_planner(_StartRuntime(), PlannerConfig(mode="agg"))
+    assert seen == [True]
+
+
+async def test_may_hold_retune_lease(stub_controller):
+    planner, _, _ = _planner(inputs=None)
+    assert not planner.may_hold_retune_lease
+    await planner._async_init()
+    try:
+        assert planner.may_hold_retune_lease
+    finally:
+        await planner._shutdown_runtime()
 
 
 def test_hooks_are_frozen():

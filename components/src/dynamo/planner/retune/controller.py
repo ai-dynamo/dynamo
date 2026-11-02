@@ -39,10 +39,10 @@ behaviour is unchanged:
 - ``drop_pending``/``rewind`` let the host abandon an in-flight sweep
   without consuming its window; ``restore_desired`` re-installs persisted
   router values.
-- ``predecessor``/``running_future`` carry the single sweep thread across
-  controller generations: a rebuilt controller's first launch queues behind
-  the previous generation's still-running sweep, as a relaunch queues
-  behind a dropped sweep within one controller.
+- ``executor`` is the live host's single sweep thread, shared by every
+  controller generation it builds, so two generations never sweep at once:
+  a launch queues behind a dropped sweep that still runs, and its launch
+  time moves to when the sweep really started.
 """
 
 from __future__ import annotations
@@ -55,7 +55,6 @@ import threading
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from concurrent.futures import wait as wait_futures
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -110,6 +109,35 @@ _GATE_RETRY_REASONS = frozenset({"not_leader", "not_ready"})
 SweepFn = Callable[..., SweepResult]
 
 
+class SweepExecutor(ThreadPoolExecutor):
+    """The single sweep thread; ``busy`` while a submitted call is unfinished.
+
+    A live host shares one across the controller generations it builds, so
+    their sweeps run one at a time in submission order.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(max_workers=1, thread_name_prefix="planner-retune")
+        self._lock = threading.Lock()
+        self._unfinished = 0
+
+    def busy(self) -> bool:
+        with self._lock:
+            return self._unfinished > 0
+
+    def submit(self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Future:
+        future = super().submit(fn, *args, **kwargs)
+        with self._lock:
+            self._unfinished += 1
+        # Runs at once if the call already finished (or was cancelled).
+        future.add_done_callback(self._finished)
+        return future
+
+    def _finished(self, _future: Future) -> None:
+        with self._lock:
+            self._unfinished -= 1
+
+
 @dataclass(frozen=True)
 class RetuneTickResult:
     """What one ``on_tick`` call hands back to the engine.
@@ -139,9 +167,10 @@ class _PendingSweep:
     ready_at_s: float | None
     # Set by the supervisor to stop this sweep (lost leadership, rebuild).
     abort: threading.Event | None = None
-    # When submitted behind a dropped (or predecessor generation's) sweep
-    # that was still running: ``(submitted_monotonic, [started_monotonic])``.
-    # ``launched_at_s`` then moves to the moment the sweep really started.
+    # Submitted while the sweep thread was still busy with a dropped sweep
+    # (of this or an earlier controller generation):
+    # ``(submitted_monotonic, [started_monotonic])``. ``launched_at_s`` then
+    # moves to the moment the sweep really started.
     queued: tuple[float, list[float]] | None = None
 
 
@@ -162,10 +191,9 @@ class RetuneController:
     ``abort=`` when ``launch_gate`` is set), ``launch_gate`` and
     ``harvest_allowed`` are the supervisor's predicates (module docstring),
     and ``generation`` identifies this controller among the ones a live host
-    builds over its lifetime; every sweep request carries it.
-    ``predecessor`` is the previous generation's ``running_future()``: this
-    controller's first launch waits for it, so two generations never sweep
-    at once.
+    builds over its lifetime; every sweep request carries it. ``executor``
+    is the host's single-thread sweep executor, shared across generations;
+    without one (replay) the controller owns its sweep thread.
     """
 
     def __init__(
@@ -180,7 +208,7 @@ class RetuneController:
         launch_gate: LaunchGate | None = None,
         harvest_allowed: HarvestAllowed | None = None,
         generation: int = 0,
-        predecessor: Future[SweepResult] | None = None,
+        executor: SweepExecutor | None = None,
     ) -> None:
         retune = config.retune
         if retune is None:
@@ -192,8 +220,6 @@ class RetuneController:
             raise ValueError("RetuneController launch_gate requires a sweep_fn")
         if isinstance(generation, bool) or not isinstance(generation, int):
             raise ValueError("generation must be an integer")
-        if predecessor is not None and not isinstance(predecessor, Future):
-            raise ValueError("predecessor must be a concurrent.futures.Future")
         self._sweep_fn = sweep_fn
         self._launch_gate = launch_gate
         self._harvest_allowed = harvest_allowed
@@ -265,15 +291,9 @@ class RetuneController:
         self._last_k = -1
         self._history: deque[tuple[float, dict[str, int]]] = deque()
         self._pending: _PendingSweep | None = None
-        # A dropped sweep that may still hold the single sweep thread, or
-        # the previous generation's sweep that a first launch waits for.
-        self._dropped: Future[SweepResult] | None = (
-            predecessor if predecessor is not None and not predecessor.done() else None
-        )
         self._cancel = threading.Event()
-        self._executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="planner-retune"
-        )
+        self._owns_executor = executor is None
+        self._executor = executor or SweepExecutor()
         logger.info(
             "retune enabled: interval=%ss grace=%ss %d grid points, router keys %s, "
             "planner keys %s, predictor candidates %s, objective %s, "
@@ -338,8 +358,7 @@ class RetuneController:
 
         pending = self._pending
         if pending is not None and pending.future.done():
-            if pending.queued is not None:
-                self._settle_queue_delay(pending)
+            self._settle_queue_delay(pending)
             if pending.ready_at_s is None:
                 pending.decision_latency_s = self._decision_latency_s(pending.future)
                 pending.ready_at_s = pending.launched_at_s + pending.decision_latency_s
@@ -385,10 +404,17 @@ class RetuneController:
         )
 
     def close(self) -> None:
-        """Kill the sweep workers and release the sweep thread."""
+        """Kill the sweep workers and release the sweep thread.
+
+        A shared (host-owned) executor stays up: only this controller's
+        sweep is cancelled, or told to stop if it already runs.
+        """
 
         self._cancel.set()
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        if self._owns_executor:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+        elif self._pending is not None:
+            self._pending.future.cancel()
 
     def drop_pending(self) -> None:
         """Abandon the in-flight sweep without deciding its window.
@@ -406,12 +432,7 @@ class RetuneController:
         self._pending = None
         if pending.abort is not None:
             pending.abort.set()
-        if not pending.future.cancel() and not pending.future.done():
-            # Running, so any earlier dropped sweep has finished, or a
-            # predecessor generation's sweep is still running and this one
-            # waits for it: either way this one is now what a new launch
-            # would queue behind.
-            self._dropped = pending.future
+        pending.future.cancel()
         logger.info(
             "retune dropped the in-flight sweep of window %d",
             pending.request.window_index,
@@ -448,24 +469,6 @@ class RetuneController:
         if self._router_searched:
             self._router_map(router)
         self._desired_router = router
-
-    def running_future(self) -> Future[SweepResult] | None:
-        """The sweep that holds or will hold the sweep thread, if any.
-
-        The pending sweep while it runs, else a dropped (or predecessor
-        generation's) sweep that is still running, else a pending sweep
-        that has not started; ``None`` once all of them are done. A host
-        replacing this controller calls it after ``drop_pending`` and
-        ``close`` and passes it as the successor's ``predecessor``.
-        """
-
-        pending = self._pending.future if self._pending is not None else None
-        if pending is not None and pending.running():
-            return pending
-        for future in (self._dropped, pending):
-            if future is not None and not future.done():
-                return future
-        return None
 
     @property
     def generation(self) -> int:
@@ -758,7 +761,8 @@ class RetuneController:
     def _settle_queue_delay(self, pending: _PendingSweep) -> None:
         """Move a queued sweep's launch time to when it actually started."""
 
-        assert pending.queued is not None
+        if pending.queued is None:
+            return
         submitted, started = pending.queued
         pending.queued = None
         if not started:
@@ -928,32 +932,29 @@ class RetuneController:
         """Submit the sweep to the single sweep thread.
 
         ``run_sweep`` is looked up at call time so tests can substitute it.
-        A gated launch also passes the gate's abort event. Behind a dropped
-        sweep that still holds the thread, or a predecessor generation's
-        sweep that still runs on its own controller's thread, the call waits
-        for it and records when it really starts (``_settle_queue_delay``).
+        A gated (live) launch also passes the gate's abort event. While the
+        sweep thread still runs a dropped sweep, of this or an earlier
+        controller generation, the launch queues behind it and records when
+        it really starts (``_settle_queue_delay``).
         """
 
         sweep_fn: SweepFn = self._sweep_fn if self._sweep_fn is not None else run_sweep
-        kwargs: dict[str, Any] = {"cancel": self._cancel}
-        if gated:
-            kwargs["abort"] = abort
-        if self._dropped is not None and self._dropped.done():
-            self._dropped = None
-        if self._dropped is None:
-            return self._executor.submit(sweep_fn, request, **kwargs), None
+        if not gated:
+            return self._executor.submit(sweep_fn, request, cancel=self._cancel), None
+        cancel = self._cancel
+        if not self._executor.busy():
+            future = self._executor.submit(
+                sweep_fn, request, cancel=cancel, abort=abort
+            )
+            return future, None
         clock = self._clock
-        blocker = self._dropped
         started: list[float] = []
 
-        def queued_sweep() -> SweepResult:
-            # A dropped sweep of this controller has already finished (one
-            # sweep thread); a predecessor generation's may still be running.
-            wait_futures((blocker,))
+        def timed_sweep() -> SweepResult:
             started.append(clock.monotonic())
-            return sweep_fn(request, **kwargs)
+            return sweep_fn(request, cancel=cancel, abort=abort)
 
-        future = self._executor.submit(queued_sweep)
+        future = self._executor.submit(timed_sweep)
         return future, (clock.monotonic(), started)
 
     def _decision_latency_s(self, future: Future[SweepResult]) -> float:

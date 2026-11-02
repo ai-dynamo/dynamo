@@ -7,9 +7,9 @@
 
 Covers what a live host adds on top of the replay loop: epoch-phase
 anchoring, the launch gate, harvest gating and abandoned sweeps,
-``drop_pending``/``rewind``, the predecessor generation's sweep, the DGD
-spec replicas check, ``restore_desired`` and the structured failure reason
-of a decision.
+``drop_pending``/``rewind``, the sweep thread shared across generations,
+the DGD spec replicas check, ``restore_desired`` and the structured failure
+reason of a decision.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 import threading
 from collections import deque
-from concurrent.futures import Future
 
 import pytest
 
@@ -37,7 +36,7 @@ from dynamo.planner.core.types import (
     WorkerCounts,
 )
 from dynamo.planner.plugins.clock import VirtualClock, WallClock
-from dynamo.planner.retune.controller import RetuneController
+from dynamo.planner.retune.controller import RetuneController, SweepExecutor
 from dynamo.planner.retune.live.contracts import NON_DECISION_FAILURES, GateResult
 from dynamo.planner.retune.sweep import SweepResult
 
@@ -192,7 +191,7 @@ def _live(
     start=T0,
     phase=0.0,
     config=None,
-    predecessor=None,
+    executor=None,
 ):
     controller = RetuneController(
         config or _config(),
@@ -206,7 +205,7 @@ def _live(
         ),
         harvest_allowed=harvest,
         generation=generation,
-        predecessor=predecessor,
+        executor=executor,
     )
     controller.start(start, phase)
     return controller
@@ -670,8 +669,6 @@ async def test_drop_pending_cancels_a_sweep_that_has_not_started():
         queued = controller._pending.future
         controller.drop_pending()
         assert queued.cancelled()
-        # Nothing holds the thread on its behalf: no queue delay to track.
-        assert controller._dropped is None
         release.set()
         blocker.result(timeout=30)
     finally:
@@ -764,178 +761,14 @@ async def test_repeated_drops_keep_tracking_the_sweep_holding_the_thread():
 
 
 # ---------------------------------------------------------------------------
-# Predecessor generation and running_future
+# The sweep thread shared across generations
 # ---------------------------------------------------------------------------
 
 
-def _blocking_sweeps(release, started=None):
-    """``FakeSweeps`` whose first sweep runs until ``release`` is set."""
-
-    sweeps = FakeSweeps()
-
-    def blocking(request):
-        if started is not None:
-            started.set()
-        release.wait(30)
-        return _flat()(request)
-
-    sweeps.results.append(blocking)
-    sweeps.default = _flat()
-    return sweeps
-
-
-async def test_a_first_launch_queues_behind_the_predecessor_generation():
-    # The previous generation's sweep, still running on its own thread.
-    predecessor: Future = Future()
-    assert predecessor.set_running_or_notify_cancel()
-    ran = threading.Event()
-    sweeps = FakeSweeps()
-
-    def record(request):
-        ran.set()
-        return _flat()(request)
-
-    sweeps.default = record
-    clock = ManualClock()
-    controller = _live(sweeps, clock=clock, predecessor=predecessor)
-    try:
-        assert controller.running_future() is predecessor
-        clock.mono = 100.0
-        launch = await _tick(controller, L_K)
-        assert launch.audit_events == [f"retune:launch w={K}"]
-        queued = controller._pending.future
-        # Waits for the predecessor; it holds no other thread, so it runs.
-        assert controller.running_future() is queued
-        assert not ran.wait(0.2)
-        assert sweeps.requests == []
-
-        clock.mono = 106.0  # the predecessor returns 6 s later
-        predecessor.set_result(SweepResult(status="failed"))
-        queued.result(timeout=30)
-        assert controller.running_future() is None
-        (decision,) = (await _tick(controller, L_K + 4 * STEP)).decisions
-    finally:
-        if not predecessor.done():
-            predecessor.cancel()
-        controller.close()
-
-    assert [r.window_index for r in sweeps.requests] == [K]
-    assert decision.launched_at_s == L_K + 6.0
-
-
-async def test_a_done_predecessor_does_not_delay_the_first_launch():
-    predecessor: Future = Future()
-    predecessor.set_result(SweepResult(status="failed"))
-    sweeps = FakeSweeps()
-    sweeps.default = _flat()
-    controller = _live(sweeps, clock=WallClock(), predecessor=predecessor)
-    try:
-        assert controller.running_future() is None
-        await _tick(controller, L_K)
-        assert controller._pending.queued is None
-        controller._pending.future.result(timeout=30)
-        (decision,) = (await _tick(controller, L_K + 2 * STEP)).decisions
-    finally:
-        controller.close()
-
-    assert decision.launched_at_s == L_K
-
-
-async def test_a_dropped_launch_hands_the_predecessor_wait_on():
-    # A launch dropped while it waits for the predecessor still holds this
-    # controller's thread: the relaunch, and a successor, queue behind it.
-    predecessor: Future = Future()
-    assert predecessor.set_running_or_notify_cancel()
-    sweeps = FakeSweeps()
-    sweeps.default = _flat()
-    controller = _live(sweeps, clock=WallClock(), predecessor=predecessor)
-    try:
-        await _tick(controller, L_K)
-        waiting = controller._pending.future
-        controller.drop_pending()
-        assert controller._dropped is waiting
-        assert controller.running_future() is waiting
-        controller.rewind(K - 1)
-        await _tick(controller, L_K + STEP)
-        relaunch = controller._pending.future
-        assert relaunch.running() is False
-        # The relaunch has not started: the waiting launch holds the thread.
-        assert controller.running_future() is waiting
-
-        predecessor.set_result(SweepResult(status="failed"))
-        waiting.result(timeout=30)
-        relaunch.result(timeout=30)
-        assert controller.running_future() is None
-    finally:
-        if not predecessor.done():
-            predecessor.cancel()
-        controller.close()
-
-    assert [r.window_index for r in sweeps.requests] == [K, K]
-
-
-async def test_running_future_tracks_the_sweep_holding_the_thread():
-    release = threading.Event()
-    started = threading.Event()
-    sweeps = _blocking_sweeps(release, started)
-    controller = _live(sweeps, clock=WallClock())
-    try:
-        assert controller.running_future() is None
-        await _tick(controller, L_K)
-        running = controller._pending.future
-        assert started.wait(30)
-        assert controller.running_future() is running
-
-        controller.drop_pending()
-        assert controller.running_future() is running
-        controller.rewind(K - 1)
-        await _tick(controller, L_K + STEP)  # queued behind the dropped one
-        queued = controller._pending.future
-        assert controller.running_future() is running
-
-        release.set()
-        running.result(timeout=30)
-        queued.result(timeout=30)
-        assert controller.running_future() is None
-    finally:
-        release.set()
-        controller.close()
-
-
-async def test_running_future_after_close_skips_a_cancelled_queued_sweep():
-    # The host reads running_future after close: a queued sweep that close
-    # cancelled never runs, so only the running one is waited on.
-    release = threading.Event()
-    started = threading.Event()
-    sweeps = _blocking_sweeps(release, started)
-    controller = _live(sweeps, clock=WallClock())
-    try:
-        await _tick(controller, L_K)
-        running = controller._pending.future
-        assert started.wait(30)
-        controller.drop_pending()
-        controller.rewind(K - 1)
-        await _tick(controller, L_K + STEP)
-        queued = controller._pending.future
-        controller.close()
-        assert queued.cancelled()
-        assert controller.running_future() is running
-    finally:
-        release.set()
-        controller.close()
-    running.result(timeout=30)
-    assert controller.running_future() is None
-
-
-def test_predecessor_must_be_a_future():
-    with pytest.raises(ValueError, match="predecessor must be"):
-        _live(FakeSweeps(), predecessor=object())
-
-
-async def test_generations_chained_by_predecessor_never_sweep_at_once():
-    # Reviewer scenario: generation 0 is slow to see its abort while
-    # generation 1 relaunches the same window. Replacing generation 1 before
-    # it launched hands generation 0's sweep on to generation 2 as well.
+async def test_generations_sharing_the_sweep_thread_never_sweep_at_once():
+    # Generation 0 is slow to see its abort while generation 2 relaunches the
+    # same window; generation 1 was replaced before it launched. All three
+    # submit to the host's one sweep thread, which close() leaves running.
     lock = threading.Lock()
     running: list[int] = []
     overlaps: list[list[int]] = []
@@ -959,35 +792,39 @@ async def test_generations_chained_by_predecessor_never_sweep_at_once():
             with lock:
                 running.remove(request.generation)
 
-    old = _live(sweep, clock=WallClock(), generation=0)
-    middle = new = None
+    executor = SweepExecutor()
+    clock = ManualClock()
+    controllers = []
     try:
+        old = _live(sweep, clock=clock, generation=0, executor=executor)
+        controllers.append(old)
+        clock.mono = 100.0
         await _tick(old, L_K)
         assert started.wait(30)
         old.drop_pending()
         old.close()
-        middle = _live(
-            sweep, clock=WallClock(), generation=1, predecessor=old.running_future()
-        )
+        middle = _live(sweep, clock=clock, generation=1, executor=executor)
+        controllers.append(middle)
         middle.close()
-        new = _live(
-            sweep, clock=WallClock(), generation=2, predecessor=middle.running_future()
-        )
+        new = _live(sweep, clock=clock, generation=2, executor=executor)
+        controllers.append(new)
         launched = await _tick(new, L_K + STEP)
         assert launched.audit_events == [f"retune:launch w={K}"]
-        assert new._pending.queued is not None
         relaunch = new._pending.future
         assert not relaunch.done()
+        clock.mono = 105.0  # generation 0 returns 5 s later
         release.set()
         relaunch.result(timeout=30)
+        (decision,) = (await _tick(new, L_K + 4 * STEP)).decisions
     finally:
         release.set()
-        for controller in (old, middle, new):
-            if controller is not None:
-                controller.close()
+        for controller in controllers:
+            controller.close()
+        executor.shutdown(wait=True)
 
     assert overlaps == []
     assert order == [(0, K), (2, K)]
+    assert decision.launched_at_s == L_K + STEP + 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -1204,6 +1041,8 @@ def test_decision_record_carries_failure_reason_and_a_private_details_copy():
         failure_reason="crn_mismatch",
         details=details,
     )
+    # A deep copy: neither the details nor a value nested in them is shared.
+    details["shards"][0]["state"] = "Failed"
     details["shards"] = []
 
     record = decision.to_dict()

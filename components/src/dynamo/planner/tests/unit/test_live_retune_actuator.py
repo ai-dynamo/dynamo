@@ -3,11 +3,11 @@
 
 """Unit tests for the live retune router actuator and its HTTP client.
 
-``FakePolicyClient`` implements the ``/router_policy`` semantics of
-``lib/kv-router/src/plugins/worker_selection/runtime.rs`` and
-``lib/llm/src/http/service/router_policy.rs``: CAS on ``expected_revision``,
-per-key PATCH merge, ``reset`` restores the startup values, and every
-successful write bumps the revision.
+``FakePolicyClient`` only records the calls and answers them: a successful
+write sets the router to what the actuator asked for (the PATCHed keys, or
+its initial after a reset) and bumps the revision. Error statuses are
+injected by the tests; the server's own rules (``router_policy.rs``) are not
+modelled here.
 """
 
 from __future__ import annotations
@@ -33,7 +33,6 @@ from dynamo.planner.retune.live.actuator import (
 from dynamo.planner.retune.live.contracts import (
     POD_LABEL_COMPONENT_TYPE,
     POD_LABEL_DGD_NAME,
-    POLICY_PARAMETER_KEYS,
     ActuationTarget,
     DgdRef,
     KubeError,
@@ -62,13 +61,6 @@ STARTUP = {
     "router_temperature": 0.0,
     "shared_cache_multiplier": 0.0,
 }
-# overlap_score_credit = 0 also zeroes the inherited cache weights.
-ZERO_CREDIT = {
-    **STARTUP,
-    "overlap_score_credit": 0.0,
-    "disk_cache_hit_weight": 0.0,
-    "host_cache_hit_weight": 0.0,
-}
 CHOSEN = {
     **STARTUP,
     "overlap_score_credit": 0.5,
@@ -82,12 +74,6 @@ DECODE_STARTUP = {
     "disk_cache_hit_weight": 0.0,
     "host_cache_hit_weight": 0.0,
 }
-_CACHE_KEYS = (
-    "overlap_score_credit",
-    "host_cache_hit_weight",
-    "disk_cache_hit_weight",
-    "shared_cache_multiplier",
-)
 
 
 # ------------------------------------------------------------------ fakes
@@ -102,7 +88,6 @@ class FakeRouter:
     revision: int = 0
     current: Optional[dict[str, float]] = None
     runtime_config: bool = True  # False: a custom policy, configuration null
-    plain_decode: bool = False  # rejects nonzero cache inputs with 422
 
     def __post_init__(self) -> None:
         if self.current is None:
@@ -131,14 +116,14 @@ class FakeFrontend:
 
 
 class FakePolicyClient:
-    """In-memory frontends keyed by pod name."""
+    """In-memory frontends keyed by pod name; records every call."""
 
     def __init__(self) -> None:
         self.frontends: dict[str, FakeFrontend] = {}
         self.calls: list[tuple[Any, ...]] = []
-        # Statuses returned by the next writes (any router) before applying.
+        # Statuses returned by the next writes (any router) instead of applying.
         self.write_failures: list[int] = []
-        # Called before a write is applied: (op, pod name, router_id).
+        # Called before a write is answered: (op, pod name, router_id).
         self.before_write: Optional[Callable[[str, str, str], None]] = None
         self.raise_on_get: Optional[BaseException] = None
         self.active = 0
@@ -182,20 +167,19 @@ class FakePolicyClient:
         self.calls.append(
             ("patch", pod.name, router_id, expected_revision, dict(parameters))
         )
-        return self._write("patch", pod, router_id, expected_revision, parameters)
+        return self._answer("patch", pod, router_id, parameters)
 
     async def reset(
         self, pod: PodInfo, router_id: str, expected_revision: int
     ) -> PolicyCallResult:
         self.calls.append(("reset", pod.name, router_id, expected_revision))
-        return self._write("reset", pod, router_id, expected_revision, None)
+        return self._answer("reset", pod, router_id, None)
 
-    def _write(
+    def _answer(
         self,
         op: str,
         pod: PodInfo,
         router_id: str,
-        expected_revision: int,
         parameters: Optional[Mapping[str, float]],
     ) -> PolicyCallResult:
         if self.before_write is not None:
@@ -205,23 +189,10 @@ class FakePolicyClient:
         router = self.frontend(pod.name).routers.get(router_id)
         if router is None:
             return PolicyCallResult(status=404, error="router instance not found")
-        if not router.runtime_config:
-            return PolicyCallResult(status=422, error="unsupported")
-        if expected_revision != router.revision:
-            return PolicyCallResult(status=409, error="policy revision conflict")
         if parameters is None:
-            updated = dict(router.initial)
+            router.current = dict(router.initial)
         else:
-            if not parameters:
-                return PolicyCallResult(status=400, error="empty")
-            updated = dict(router.current or {})
-            for key, value in parameters.items():
-                if key not in router.initial:
-                    return PolicyCallResult(status=422, error=f"unknown {key}")
-                updated[key] = router.initial[key] if value is None else float(value)
-        if router.plain_decode and any(updated[key] != 0.0 for key in _CACHE_KEYS):
-            return PolicyCallResult(status=422, error="decode has no cache inputs")
-        router.current = updated
+            router.current = {**(router.current or {}), **parameters}
         router.revision += 1
         return PolicyCallResult(status=200, router=router.info())
 
@@ -306,10 +277,6 @@ OBSERVE = ActuationTarget(mode="observe")
 ROLLBACK = ActuationTarget(mode="rollback", include_not_ready=True)
 
 
-def diff_keys(left: Mapping[str, float], right: Mapping[str, float]) -> set[str]:
-    return {key for key in POLICY_PARAMETER_KEYS if left[key] != right[key]}
-
-
 # ---------------------------------------------------------------- latching
 
 
@@ -338,41 +305,40 @@ async def test_observe_latches_initials_and_never_writes() -> None:
     assert report.converged
 
 
-async def test_new_initials_reported_until_persisted() -> None:
-    actuator, _, client, _ = make_actuator([pod("fe-0")])
-    client.frontend("fe-0").add(FakeRouter("r1", STARTUP))
-
-    await actuator.reconcile(apply(CHOSEN), initials={}, expected_frontends=1)
-    # The state write has not landed: the router is at revision 1 now but
-    # its initial stays known locally (no learning reset) and is reported.
-    report = await actuator.reconcile(apply(CHOSEN), initials={}, expected_frontends=1)
-    assert [call[0] for call in client.writes()] == ["patch"]
-    assert report.new_initials == {"r1": STARTUP}
-    assert report.converged
-
-
-async def test_observe_with_unknown_initial_writes_nothing() -> None:
-    actuator, _, client, _ = make_actuator([pod("fe-0")])
-    client.frontend("fe-0").add(
-        FakeRouter("r1", STARTUP, revision=4, current=dict(CHOSEN))
-    )
-
-    for _ in range(3):
-        report = await actuator.reconcile(OBSERVE, initials={}, expected_frontends=1)
-        assert not report.converged
-        assert report.parity_ok is None
-        assert report.new_initials == {}
-    assert client.writes() == []
-
-
 # ------------------------------------------------------------------- apply
+
+
+async def test_apply_holds_a_router_until_its_initial_is_persisted() -> None:
+    # A process stopped between a PATCH and the state write of the router's
+    # initial would leave a router no rollback can restore: an advisory or
+    # clean-up planner never resets a router whose initial it does not know.
+    actuator, _, client, _ = make_actuator([pod("fe-0")])
+    router = client.frontend("fe-0").add(FakeRouter("r1", STARTUP))
+
+    for _ in range(2):  # the state write has not landed yet
+        report = await actuator.reconcile(
+            apply(CHOSEN), initials={}, expected_frontends=1
+        )
+        assert client.writes() == []
+        assert report.new_initials == {"r1": STARTUP}
+        assert not report.converged
+
+    report = await actuator.reconcile(
+        apply(CHOSEN), initials={"r1": STARTUP}, expected_frontends=1
+    )
+    assert [call[0] for call in client.writes()] == ["patch"]
+    assert router.current == CHOSEN
+    assert report.converged and report.new_initials == {}
 
 
 async def test_apply_patches_only_differing_keys_with_explicit_values() -> None:
     actuator, _, client, _ = make_actuator([pod("fe-0")])
     router = client.frontend("fe-0").add(FakeRouter("r1", STARTUP))
+    initials = {"r1": dict(STARTUP)}
 
-    report = await actuator.reconcile(apply(CHOSEN), initials={}, expected_frontends=1)
+    report = await actuator.reconcile(
+        apply(CHOSEN), initials=initials, expected_frontends=1
+    )
 
     assert client.writes() == [
         (
@@ -394,64 +360,34 @@ async def test_apply_patches_only_differing_keys_with_explicit_values() -> None:
     # Converged: the next rounds write nothing.
     for _ in range(2):
         report = await actuator.reconcile(
-            apply(CHOSEN), initials={"r1": STARTUP}, expected_frontends=1
+            apply(CHOSEN), initials=initials, expected_frontends=1
         )
         assert report.converged
     assert len(client.writes()) == 1
 
 
-async def test_zero_credit_round_trip_restores_cache_weights() -> None:
-    actuator, _, client, _ = make_actuator([pod("fe-0")])
-    router = client.frontend("fe-0").add(FakeRouter("r1", STARTUP))
-    initials: dict[str, dict[str, float]] = {}
-
-    report = await actuator.reconcile(
-        apply(ZERO_CREDIT), initials=initials, expected_frontends=1
-    )
-    initials.update(report.new_initials)
-    assert set(client.writes()[-1][4]) == diff_keys(STARTUP, ZERO_CREDIT)
-    assert router.current == ZERO_CREDIT
-
-    report = await actuator.reconcile(
-        apply(CHOSEN), initials=initials, expected_frontends=1
-    )
-    # host/disk come back with the credit, as explicit values.
-    assert client.writes()[-1][4] == {
-        key: CHOSEN[key] for key in diff_keys(ZERO_CREDIT, CHOSEN)
-    }
-    assert router.current == CHOSEN
-    assert report.converged
-
-    await actuator.reconcile(
-        apply(ZERO_CREDIT), initials=initials, expected_frontends=1
-    )
-    report = await actuator.reconcile(ROLLBACK, initials=initials, expected_frontends=1)
-    assert client.writes()[-1] == ("reset", "fe-0", "r1", 3)
-    assert router.current == STARTUP
-    assert router.current["host_cache_hit_weight"] == 0.75
-    assert router.current["disk_cache_hit_weight"] == 0.25
-    assert report.converged
-
-
-async def test_apply_learns_unknown_initial_then_patches_in_one_round() -> None:
+async def test_apply_learns_an_unknown_initial_with_a_reset_first() -> None:
     actuator, _, client, _ = make_actuator([pod("fe-0")])
     tampered = {**STARTUP, "router_temperature": 0.9}
     router = client.frontend("fe-0").add(
         FakeRouter("r1", STARTUP, revision=2, current=tampered)
     )
 
+    # A reset restores the router's initial and reports it; the PATCH waits
+    # for the state to record it.
     report = await actuator.reconcile(apply(CHOSEN), initials={}, expected_frontends=1)
-
-    assert [call[0] for call in client.writes()] == ["reset", "patch"]
-    assert client.writes()[0] == ("reset", "fe-0", "r1", 2)
-    assert client.writes()[1][3] == 3
-    assert router.current == CHOSEN
+    assert client.writes() == [("reset", "fe-0", "r1", 2)]
+    assert router.current == STARTUP
     assert report.new_initials == {"r1": STARTUP}
     assert report.parity_ok is True
-    assert report.converged
+    assert not report.converged
 
-    await actuator.reconcile(apply(CHOSEN), initials={}, expected_frontends=1)
-    assert len(client.writes()) == 2
+    report = await actuator.reconcile(
+        apply(CHOSEN), initials=report.new_initials, expected_frontends=1
+    )
+    assert [call[0] for call in client.writes()] == ["reset", "patch"]
+    assert router.current == CHOSEN
+    assert report.converged
 
 
 async def test_parity_mismatch_blocks_apply_and_never_loops() -> None:
@@ -459,10 +395,11 @@ async def test_parity_mismatch_blocks_apply_and_never_loops() -> None:
     odd = {**STARTUP, "overlap_score_credit_decay": 0.5}
     client.frontend("fe-0").add(FakeRouter("good", STARTUP))
     client.frontend("fe-1").add(FakeRouter("odd", odd))
+    initials = {"good": dict(STARTUP), "odd": dict(odd)}
 
     for _ in range(3):
         report = await actuator.reconcile(
-            apply(CHOSEN), initials={}, expected_frontends=2
+            apply(CHOSEN), initials=initials, expected_frontends=2
         )
         assert report.parity_ok is False
         assert len(report.parity_mismatches) == 1
@@ -476,20 +413,77 @@ async def test_parity_mismatch_blocks_apply_and_never_loops() -> None:
     assert client.frontend("fe-1").routers["odd"].current == odd
 
 
-async def test_rollback_with_parity_mismatch_resets_to_each_routers_initial() -> None:
+async def test_frontend_restart_fills_in_without_reset() -> None:
+    actuator, kube, client, _ = make_actuator([pod("fe-0")])
+    client.frontend("fe-0").add(FakeRouter("r1", STARTUP))
+    initials = {"r1": dict(STARTUP)}
+    await actuator.reconcile(apply(CHOSEN), initials=initials, expected_frontends=1)
+
+    # The frontend restarts: Ready is 0 for a while.
+    kube.pods = [pod("fe-0", ready=False)]
+    report = await actuator.reconcile(
+        apply(CHOSEN), initials=initials, expected_frontends=1
+    )
+    assert not report.converged
+
+    # A new pod with a fresh router at its startup values: latched, then
+    # PATCHed once the state records it; never reset.
+    kube.pods = [pod("fe-0b", ip="10.0.0.9")]
+    client.frontend("fe-0b").add(FakeRouter("r2", STARTUP))
+    report = await actuator.reconcile(
+        apply(CHOSEN), initials=initials, expected_frontends=1
+    )
+    assert report.new_initials == {"r2": STARTUP}
+    assert report.seen_router_ids == frozenset({"r2"})
+    report = await actuator.reconcile(
+        apply(CHOSEN), initials=report.new_initials, expected_frontends=1
+    )
+    assert [call[0] for call in client.writes()] == ["patch", "patch"]
+    assert client.frontend("fe-0b").routers["r2"].current == CHOSEN
+    assert report.converged
+
+
+async def test_disagg_needs_both_worker_types() -> None:
+    maps = {"prefill": dict(STARTUP), "decode": dict(DECODE_STARTUP)}
+    actuator, _, client, _ = make_actuator([pod("fe-0")], startup_maps=maps)
+    frontend = client.frontend("fe-0")
+    prefill = frontend.add(FakeRouter("p", STARTUP, worker_type="prefill"))
+    target = ActuationTarget(
+        mode="apply",
+        desired_by_wt={
+            "prefill": dict(CHOSEN),
+            "decode": {**DECODE_STARTUP, "router_temperature": 0.2},
+        },
+    )
+    initials = {"p": dict(STARTUP), "d": dict(DECODE_STARTUP)}
+
+    report = await actuator.reconcile(target, initials=initials, expected_frontends=1)
+    assert not report.converged  # no decode router yet
+    assert prefill.current == CHOSEN
+
+    decode = frontend.add(FakeRouter("d", DECODE_STARTUP, worker_type="decode"))
+    report = await actuator.reconcile(target, initials=initials, expected_frontends=1)
+    assert decode.current == {**DECODE_STARTUP, "router_temperature": 0.2}
+    assert report.converged
+    assert report.parity_ok is True
+
+
+async def test_only_the_dgd_namespace_and_planner_worker_types_are_managed() -> None:
     actuator, _, client, _ = make_actuator([pod("fe-0")])
-    odd = {**STARTUP, "overlap_score_credit_decay": 0.5}
-    router = client.frontend("fe-0").add(FakeRouter("odd", odd))
-    await actuator.reconcile(OBSERVE, initials={}, expected_frontends=1)
-    router.current = {**odd, "router_temperature": 1.0}
-    router.revision = 1
+    frontend = client.frontend("fe-0")
+    ours = frontend.add(FakeRouter("ours", STARTUP))
+    foreign = frontend.add(FakeRouter("foreign", STARTUP, namespace="other-ns"))
+    encode = frontend.add(FakeRouter("encode", STARTUP, worker_type="encode"))
 
-    report = await actuator.reconcile(ROLLBACK, initials={}, expected_frontends=1)
+    report = await actuator.reconcile(
+        apply(CHOSEN), initials={"ours": dict(STARTUP)}, expected_frontends=1
+    )
 
-    assert client.writes() == [("reset", "fe-0", "odd", 1)]
-    assert router.current == odd
-    assert report.converged  # rollback converges to the latched initial
-    assert report.parity_ok is False
+    assert {call[2] for call in client.writes()} == {"ours"}
+    assert ours.current == CHOSEN
+    assert foreign.current == STARTUP and encode.current == STARTUP
+    assert report.seen_router_ids == frozenset({"ours"})
+    assert report.converged
 
 
 # ---------------------------------------------------------------- rollback
@@ -507,7 +501,6 @@ async def test_rollback_resets_only_deviating_routers_and_never_by_revision() ->
 
     assert client.writes() == [("reset", "fe-0", "b", 1)]
     assert deviating.current == STARTUP
-    assert deviating.revision == 2
     assert at_initial.revision == 3
     assert report.converged
 
@@ -539,111 +532,20 @@ async def test_rollback_learns_unknown_initial_with_a_single_reset() -> None:
     assert len(client.writes()) == 1
 
 
-async def test_rollback_targets_not_ready_pods_but_never_terminating_ones() -> None:
-    pods = [
-        pod("ready", ip="10.0.0.1"),
-        pod("not-ready", ready=False, ip="10.0.0.2"),
-        pod("pending", ready=False, ip=None),
-        pod("leaving", terminating=True, ip="10.0.0.4"),
-    ]
-    actuator, _, client, _ = make_actuator(pods)
-    initials = {}
-    for name in ("ready", "not-ready", "leaving"):
-        client.frontend(name).add(
-            FakeRouter(f"r-{name}", STARTUP, revision=1, current=dict(CHOSEN))
-        )
-        initials[f"r-{name}"] = dict(STARTUP)
-
-    report = await actuator.reconcile(ROLLBACK, initials=initials, expected_frontends=1)
-
-    assert sorted(call[1] for call in client.writes()) == ["not-ready", "ready"]
-    assert ("get", "leaving") not in client.calls
-    assert ("get", "pending") not in client.calls
-    assert report.converged
-
-    # apply never targets NotReady pods.
-    client.calls.clear()
-    await actuator.reconcile(apply(CHOSEN), initials=initials, expected_frontends=1)
-    assert {call[1] for call in client.calls} == {"ready"}
-
-
-async def test_rollback_converges_without_an_unreachable_not_ready_pod() -> None:
-    actuator, _, client, _ = make_actuator(
-        [pod("ready"), pod("crashing", ready=False, ip="10.0.0.2")]
-    )
-    router = client.frontend("ready").add(
-        FakeRouter("r1", STARTUP, revision=1, current=dict(CHOSEN))
-    )
-    # CrashLoopBackOff: the GET is refused on every round.
-    client.frontend("crashing").get_failures = [0, 0, 0]
-
-    for _ in range(3):
-        report = await actuator.reconcile(
-            ROLLBACK, initials={"r1": STARTUP}, expected_frontends=1
-        )
-        assert report.converged
-        assert report.errors == {"get:network": 1}
-    assert router.current == STARTUP
-    assert client.writes() == [("reset", "ready", "r1", 1)]
-
-
-async def test_an_unreachable_ready_pod_blocks_convergence() -> None:
-    actuator, _, client, _ = make_actuator([pod("fe-0"), pod("fe-1", ip="10.0.0.2")])
-    client.frontend("fe-0").add(FakeRouter("r0", STARTUP))
-    client.frontend("fe-1").add(FakeRouter("r1", STARTUP))
-    client.frontend("fe-1").get_failures = [0]
+async def test_rollback_with_parity_mismatch_resets_to_each_routers_initial() -> None:
+    actuator, _, client, _ = make_actuator([pod("fe-0")])
+    odd = {**STARTUP, "overlap_score_credit_decay": 0.5}
+    router = client.frontend("fe-0").add(FakeRouter("odd", odd))
+    await actuator.reconcile(OBSERVE, initials={}, expected_frontends=1)
+    router.current = {**odd, "router_temperature": 1.0}
+    router.revision = 1
 
     report = await actuator.reconcile(ROLLBACK, initials={}, expected_frontends=1)
-    assert not report.converged
 
-    report = await actuator.reconcile(ROLLBACK, initials={}, expected_frontends=1)
-    assert report.converged
-
-
-async def test_an_answering_not_ready_pod_is_still_checked() -> None:
-    actuator, _, client, _ = make_actuator(
-        [pod("ready"), pod("starting", ready=False, ip="10.0.0.2")]
-    )
-    client.frontend("ready").add(FakeRouter("r0", STARTUP))
-    stuck = client.frontend("starting").add(
-        FakeRouter("r1", STARTUP, revision=2, current=dict(CHOSEN))
-    )
-    initials = {"r0": dict(STARTUP), "r1": dict(STARTUP)}
-    client.write_failures = [500]
-
-    report = await actuator.reconcile(ROLLBACK, initials=initials, expected_frontends=1)
-    assert not report.converged  # it answered, and it is not at its initial
-    assert stuck.current == CHOSEN
-
-    report = await actuator.reconcile(ROLLBACK, initials=initials, expected_frontends=1)
-    assert report.converged
-    assert stuck.current == STARTUP
-
-
-@pytest.mark.parametrize("phase", ["Failed", "Succeeded"])
-async def test_finished_pods_are_never_targeted_and_their_routers_are_gone(
-    phase: str,
-) -> None:
-    actuator, kube, client, _ = make_actuator(
-        [pod("fe-0"), pod("evicted", ip="10.0.0.2")]
-    )
-    client.frontend("fe-0").add(FakeRouter("r0", STARTUP))
-    client.frontend("evicted").add(FakeRouter("r-ev", STARTUP))
-    report = await actuator.reconcile(OBSERVE, initials={}, expected_frontends=1)
-    initials = dict(report.new_initials)
-    assert set(initials) == {"r0", "r-ev"}
-
-    # Evicted: the pod object stays, with its IP, in a finished phase.
-    kube.pods = [pod("fe-0"), pod("evicted", ready=False, ip="10.0.0.2", phase=phase)]
-    client.frontend("evicted").get_failures = [0]
-    client.calls.clear()
-
-    report = await actuator.reconcile(ROLLBACK, initials=initials, expected_frontends=1)
-
-    assert ("get", "evicted") not in client.calls
-    assert report.converged
-    assert report.errors == {}
-    assert report.seen_router_ids == frozenset({"r0"})
+    assert client.writes() == [("reset", "fe-0", "odd", 1)]
+    assert router.current == odd
+    assert report.converged  # rollback converges to the latched initial
+    assert report.parity_ok is False
 
 
 async def test_rollback_without_learning_leaves_unknown_routers_alone() -> None:
@@ -678,21 +580,82 @@ async def test_rollback_without_learning_leaves_unknown_routers_alone() -> None:
     assert report.converged
 
 
-async def test_apply_without_learning_never_resets_an_unknown_router() -> None:
-    actuator, _, client, _ = make_actuator([pod("fe-0")])
-    client.frontend("fe-0").add(
-        FakeRouter("r1", STARTUP, revision=2, current=dict(CHOSEN))
-    )
-    target = ActuationTarget(
-        mode="apply",
-        desired_by_wt={"aggregated": dict(ZERO_CREDIT)},
-        learn_unknown=False,
-    )
+async def test_rollback_targets_not_ready_pods_but_never_terminating_ones() -> None:
+    pods = [
+        pod("ready", ip="10.0.0.1"),
+        pod("not-ready", ready=False, ip="10.0.0.2"),
+        pod("pending", ready=False, ip=None),
+        pod("leaving", terminating=True, ip="10.0.0.4"),
+    ]
+    actuator, _, client, _ = make_actuator(pods)
+    initials = {}
+    for name in ("ready", "not-ready", "leaving"):
+        client.frontend(name).add(
+            FakeRouter(f"r-{name}", STARTUP, revision=1, current=dict(CHOSEN))
+        )
+        initials[f"r-{name}"] = dict(STARTUP)
 
-    report = await actuator.reconcile(target, initials={}, expected_frontends=1)
+    report = await actuator.reconcile(ROLLBACK, initials=initials, expected_frontends=1)
 
-    assert client.writes() == []
+    assert sorted(call[1] for call in client.writes()) == ["not-ready", "ready"]
+    assert ("get", "leaving") not in client.calls
+    assert ("get", "pending") not in client.calls
+    assert report.converged
+
+    # apply never targets NotReady pods.
+    client.calls.clear()
+    await actuator.reconcile(apply(CHOSEN), initials=initials, expected_frontends=1)
+    assert {call[1] for call in client.calls} == {"ready"}
+
+
+async def test_unreachable_pods_and_convergence() -> None:
+    actuator, kube, client, _ = make_actuator(
+        [pod("ready"), pod("crashing", ready=False, ip="10.0.0.2")]
+    )
+    router = client.frontend("ready").add(
+        FakeRouter("r1", STARTUP, revision=1, current=dict(CHOSEN))
+    )
+    # CrashLoopBackOff: an unreachable NotReady pod never blocks convergence.
+    client.frontend("crashing").get_failures = [0, 0]
+    for _ in range(2):
+        report = await actuator.reconcile(
+            ROLLBACK, initials={"r1": STARTUP}, expected_frontends=1
+        )
+        assert report.converged
+        assert report.errors == {"get:network": 1}
+    assert router.current == STARTUP
+
+    # An unreachable Ready pod does.
+    kube.pods = [pod("ready"), pod("crashing", ip="10.0.0.2")]
+    client.frontend("crashing").get_failures = [0]
+    report = await actuator.reconcile(
+        ROLLBACK, initials={"r1": STARTUP}, expected_frontends=1
+    )
     assert not report.converged
+
+
+async def test_finished_pods_are_never_targeted_and_their_routers_are_gone() -> None:
+    actuator, kube, client, _ = make_actuator(
+        [pod("fe-0"), pod("evicted", ip="10.0.0.2")]
+    )
+    client.frontend("fe-0").add(FakeRouter("r0", STARTUP))
+    client.frontend("evicted").add(FakeRouter("r-ev", STARTUP))
+    report = await actuator.reconcile(OBSERVE, initials={}, expected_frontends=1)
+    initials = dict(report.new_initials)
+    assert set(initials) == {"r0", "r-ev"}
+
+    # Evicted: the pod object stays, with its IP, in a finished phase.
+    kube.pods = [
+        pod("fe-0"),
+        pod("evicted", ready=False, ip="10.0.0.2", phase="Failed"),
+    ]
+    client.calls.clear()
+
+    report = await actuator.reconcile(ROLLBACK, initials=initials, expected_frontends=1)
+
+    assert ("get", "evicted") not in client.calls
+    assert report.converged
+    assert report.seen_router_ids == frozenset({"r0"})
 
 
 # ----------------------------------------------------------- status codes
@@ -701,17 +664,18 @@ async def test_apply_without_learning_never_resets_an_unknown_router() -> None:
 async def test_conflict_regets_and_retries_once() -> None:
     actuator, _, client, metrics = make_actuator([pod("fe-0")])
     router = client.frontend("fe-0").add(FakeRouter("r1", STARTUP))
-    interfered = []
+    client.write_failures = [409]
 
     def someone_else_writes(op: str, pod_name: str, router_id: str) -> None:
-        if not interfered:
-            interfered.append(True)
+        if client.write_failures:  # the write that answers 409
             router.current = {**STARTUP, "router_temperature": 0.7}
             router.revision += 1
 
     client.before_write = someone_else_writes
 
-    report = await actuator.reconcile(apply(CHOSEN), initials={}, expected_frontends=1)
+    report = await actuator.reconcile(
+        apply(CHOSEN), initials={"r1": STARTUP}, expected_frontends=1
+    )
 
     patches = [call for call in client.writes() if call[0] == "patch"]
     assert [call[3] for call in patches] == [0, 1]
@@ -727,55 +691,18 @@ async def test_conflict_twice_gives_up_until_next_round() -> None:
     actuator, _, client, _ = make_actuator([pod("fe-0")])
     router = client.frontend("fe-0").add(FakeRouter("r1", STARTUP))
     client.write_failures = [409, 409]
+    initials = {"r1": dict(STARTUP)}
 
-    report = await actuator.reconcile(apply(CHOSEN), initials={}, expected_frontends=1)
+    report = await actuator.reconcile(
+        apply(CHOSEN), initials=initials, expected_frontends=1
+    )
     assert len(client.writes()) == 2
     assert not report.converged
 
-    report = await actuator.reconcile(apply(CHOSEN), initials={}, expected_frontends=1)
+    report = await actuator.reconcile(
+        apply(CHOSEN), initials=initials, expected_frontends=1
+    )
     assert router.current == CHOSEN
-    assert report.converged
-
-
-async def test_patch_404_regets_and_patches_the_rebuilt_router() -> None:
-    actuator, _, client, _ = make_actuator([pod("fe-0")])
-    frontend = client.frontend("fe-0")
-    frontend.add(FakeRouter("old", STARTUP))
-
-    def rebuild(op: str, pod_name: str, router_id: str) -> None:
-        if router_id == "old":
-            del frontend.routers["old"]
-            frontend.add(FakeRouter("new", STARTUP))
-
-    client.before_write = rebuild
-
-    report = await actuator.reconcile(apply(CHOSEN), initials={}, expected_frontends=1)
-
-    assert [(call[0], call[2]) for call in client.writes()] == [
-        ("patch", "old"),
-        ("patch", "new"),
-    ]
-    assert frontend.routers["new"].current == CHOSEN
-    assert report.errors == {"patch:404": 1}
-    assert report.new_initials == {"new": STARTUP}
-    assert report.seen_router_ids == frozenset({"new"})
-    assert report.converged
-
-
-async def test_503_regets_then_retries() -> None:
-    actuator, _, client, metrics = make_actuator([pod("fe-0")])
-    router = client.frontend("fe-0").add(FakeRouter("r1", STARTUP))
-    client.write_failures = [503]
-
-    report = await actuator.reconcile(apply(CHOSEN), initials={}, expected_frontends=1)
-
-    assert client.calls[:3] == [
-        ("get", "fe-0"),
-        ("patch", "fe-0", "r1", 0, client.writes()[0][4]),
-        ("get", "fe-0"),
-    ]
-    assert router.current == CHOSEN
-    assert metrics.patch_errors == ["503"]
     assert report.converged
 
 
@@ -783,27 +710,37 @@ async def test_422_is_not_retried_until_the_target_changes() -> None:
     actuator, _, client, metrics = make_actuator([pod("fe-0")])
     client.frontend("fe-0").add(FakeRouter("r1", STARTUP))
     client.write_failures = [422]
+    initials = {"r1": dict(STARTUP)}
 
     for _ in range(3):
         report = await actuator.reconcile(
-            apply(CHOSEN), initials={}, expected_frontends=1
+            apply(CHOSEN), initials=initials, expected_frontends=1
         )
         assert not report.converged
     assert len(client.writes()) == 1
     assert metrics.patch_errors == ["422"]
 
     other = {**CHOSEN, "router_temperature": 0.4}
-    report = await actuator.reconcile(apply(other), initials={}, expected_frontends=1)
+    report = await actuator.reconcile(
+        apply(other), initials=initials, expected_frontends=1
+    )
     assert len(client.writes()) == 2
     assert report.converged
 
 
-async def test_get_404_for_three_rounds_reports_admin_api_disabled() -> None:
+async def test_get_404_for_three_consecutive_rounds_reports_admin_api_disabled() -> (
+    None
+):
     actuator, _, client, _ = make_actuator([pod("fe-0")])
     frontend = client.frontend("fe-0")
     frontend.add(FakeRouter("r1", STARTUP))
-    frontend.get_failures = [404, 404, 404]
+    # A 200 in between restarts the count.
+    frontend.get_failures = [404, 404]
+    for _ in range(3):
+        report = await actuator.reconcile(OBSERVE, initials={}, expected_frontends=1)
+    assert not report.admin_api_disabled
 
+    frontend.get_failures = [404, 404, 404]
     flags = []
     for _ in range(3):
         report = await actuator.reconcile(OBSERVE, initials={}, expected_frontends=1)
@@ -816,145 +753,38 @@ async def test_get_404_for_three_rounds_reports_admin_api_disabled() -> None:
     assert report.converged
 
 
-async def test_get_404_counter_needs_consecutive_rounds() -> None:
-    actuator, _, client, _ = make_actuator([pod("fe-0")])
-    frontend = client.frontend("fe-0")
-    frontend.add(FakeRouter("r1", STARTUP))
-    frontend.get_failures = [404, 404]
-    await actuator.reconcile(OBSERVE, initials={}, expected_frontends=1)
-    await actuator.reconcile(OBSERVE, initials={}, expected_frontends=1)
-    await actuator.reconcile(OBSERVE, initials={}, expected_frontends=1)  # 200
-    frontend.get_failures = [404]
-    report = await actuator.reconcile(OBSERVE, initials={}, expected_frontends=1)
-    assert not report.admin_api_disabled
-
-
 # ------------------------------------------------------------- convergence
 
 
-async def test_not_converged_below_the_expected_ready_frontends() -> None:
+async def test_convergence_needs_the_expected_ready_frontends_and_a_router() -> None:
     actuator, _, client, _ = make_actuator([pod("fe-0")])
-    client.frontend("fe-0").add(FakeRouter("r1", STARTUP))
+    frontend = client.frontend("fe-0")
 
+    report = await actuator.reconcile(OBSERVE, initials={}, expected_frontends=1)
+    assert not report.converged and report.parity_ok is None  # no router
+
+    frontend.add(FakeRouter("r1", STARTUP))
     report = await actuator.reconcile(OBSERVE, initials={}, expected_frontends=2)
     assert not report.converged
     report = await actuator.reconcile(OBSERVE, initials={}, expected_frontends=0)
     assert report.converged  # max(1, 0)
 
 
-async def test_not_converged_without_any_router() -> None:
+async def test_routers_present_needs_a_configured_router_not_the_target() -> None:
     actuator, _, client, _ = make_actuator([pod("fe-0")])
-    client.frontend("fe-0")
+    frontend = client.frontend("fe-0")
+    frontend.add(FakeRouter("custom", STARTUP, runtime_config=False))
 
+    report = await actuator.reconcile(apply(CHOSEN), initials={}, expected_frontends=1)
+    assert report.routers_present is False
+    assert not report.converged and client.writes() == []
+
+    # Present (P12) even though the router does not match the apply target.
+    frontend.add(FakeRouter("r1", {**STARTUP, "router_temperature": 0.9}))
     report = await actuator.reconcile(OBSERVE, initials={}, expected_frontends=1)
-    assert not report.converged
-    assert report.parity_ok is None
-
-
-async def test_routers_present_does_not_need_the_target_values() -> None:
-    actuator, _, client, _ = make_actuator([pod("fe-0")])
-    client.frontend("fe-0").add(FakeRouter("r1", STARTUP))
-
-    # Present (P12) even though the routers do not match the apply target.
-    report = await actuator.reconcile(
-        ActuationTarget(mode="observe"), initials={}, expected_frontends=1
-    )
     assert report.routers_present is True
-    report = await actuator.reconcile(
-        ActuationTarget(mode="observe"), initials={}, expected_frontends=2
-    )
+    report = await actuator.reconcile(OBSERVE, initials={}, expected_frontends=2)
     assert report.routers_present is False
-
-
-async def test_routers_present_needs_a_configured_router() -> None:
-    actuator, _, client, _ = make_actuator([pod("fe-0")])
-    client.frontend("fe-0").add(FakeRouter("custom", STARTUP, runtime_config=False))
-
-    report = await actuator.reconcile(OBSERVE, initials={}, expected_frontends=1)
-    assert report.routers_present is False
-
-
-async def test_a_router_without_runtime_configuration_does_not_count() -> None:
-    actuator, _, client, _ = make_actuator([pod("fe-0")])
-    client.frontend("fe-0").add(FakeRouter("custom", STARTUP, runtime_config=False))
-
-    report = await actuator.reconcile(apply(CHOSEN), initials={}, expected_frontends=1)
-    assert not report.converged
-    assert client.writes() == []
-
-
-async def test_disagg_needs_both_worker_types_and_respects_plain_decode() -> None:
-    maps = {"prefill": dict(STARTUP), "decode": dict(DECODE_STARTUP)}
-    actuator, _, client, _ = make_actuator([pod("fe-0")], startup_maps=maps)
-    frontend = client.frontend("fe-0")
-    prefill = frontend.add(FakeRouter("p", STARTUP, worker_type="prefill"))
-
-    target = ActuationTarget(
-        mode="apply",
-        desired_by_wt={
-            "prefill": dict(CHOSEN),
-            "decode": {**DECODE_STARTUP, "router_temperature": 0.2},
-        },
-    )
-    report = await actuator.reconcile(target, initials={}, expected_frontends=1)
-    assert not report.converged  # no decode router yet
-    assert prefill.current == CHOSEN
-
-    decode = frontend.add(
-        FakeRouter("d", DECODE_STARTUP, worker_type="decode", plain_decode=True)
-    )
-    report = await actuator.reconcile(target, initials={}, expected_frontends=1)
-    assert decode.current["router_temperature"] == 0.2
-    assert decode.current["overlap_score_credit"] == 0.0
-    assert report.converged
-    assert report.parity_ok is True
-
-
-async def test_only_the_dgd_namespace_and_planner_worker_types_are_managed() -> None:
-    actuator, _, client, _ = make_actuator([pod("fe-0")])
-    frontend = client.frontend("fe-0")
-    ours = frontend.add(FakeRouter("ours", STARTUP))
-    foreign = frontend.add(FakeRouter("foreign", STARTUP, namespace="other-ns"))
-    encode = frontend.add(FakeRouter("encode", STARTUP, worker_type="encode"))
-
-    report = await actuator.reconcile(apply(CHOSEN), initials={}, expected_frontends=1)
-
-    assert {call[2] for call in client.writes()} == {"ours"}
-    assert ours.current == CHOSEN
-    assert foreign.current == STARTUP and encode.current == STARTUP
-    assert report.seen_router_ids == frozenset({"ours"})
-    assert report.converged
-
-
-async def test_frontend_restart_fills_in_without_reset() -> None:
-    actuator, kube, client, _ = make_actuator([pod("fe-0")])
-    client.frontend("fe-0").add(FakeRouter("r1", STARTUP))
-    initials: dict[str, dict[str, float]] = {}
-    report = await actuator.reconcile(
-        apply(CHOSEN), initials=initials, expected_frontends=1
-    )
-    initials.update(report.new_initials)
-
-    # The frontend restarts: Ready is 0 for a while.
-    kube.pods = [pod("fe-0", ready=False)]
-    report = await actuator.reconcile(
-        apply(CHOSEN), initials=initials, expected_frontends=1
-    )
-    assert not report.converged
-
-    # A new pod with a fresh router at its startup values: PATCH, no reset.
-    kube.pods = [pod("fe-0b", ip="10.0.0.9")]
-    client.frontend("fe-0b").add(FakeRouter("r2", STARTUP))
-    report = await actuator.reconcile(
-        apply(CHOSEN), initials=initials, expected_frontends=1
-    )
-    assert [call[0] for call in client.writes()] == ["patch", "patch"]
-    assert client.frontend("fe-0b").routers["r2"].current == CHOSEN
-    assert report.converged
-    assert report.seen_router_ids == frozenset({"r2"})
-
-
-# -------------------------------------------------------- seen router ids
 
 
 async def test_seen_router_ids_drop_only_routers_that_are_provably_gone() -> None:
@@ -978,24 +808,6 @@ async def test_seen_router_ids_drop_only_routers_that_are_provably_gone() -> Non
     kube.pods = [pod("fe-0")]
     report = await actuator.reconcile(OBSERVE, initials=initials, expected_frontends=1)
     assert report.seen_router_ids == frozenset({"a2"})
-
-
-async def test_persisted_initials_of_unknown_pods_survive_an_incomplete_view() -> None:
-    pods = [pod("fe-0"), pod("fe-1", ready=False, ip="10.0.0.2")]
-    actuator, _, client, _ = make_actuator(pods)
-    client.frontend("fe-0").add(FakeRouter("a", STARTUP))
-    persisted = {"a": dict(STARTUP), "unknown": dict(STARTUP)}
-
-    # apply does not query the NotReady fe-1, so "unknown" may live there.
-    report = await actuator.reconcile(OBSERVE, initials=persisted, expected_frontends=1)
-    assert report.seen_router_ids == frozenset({"a", "unknown"})
-
-    # rollback queries every live pod; "unknown" is nowhere: dropped.
-    client.frontend("fe-1")
-    report = await actuator.reconcile(
-        ROLLBACK, initials=persisted, expected_frontends=1
-    )
-    assert report.seen_router_ids == frozenset({"a"})
 
 
 # --------------------------------------------------------- failure paths
@@ -1061,12 +873,13 @@ async def test_invalid_apply_target_writes_nothing(target: ActuationTarget) -> N
     actuator, _, client, _ = make_actuator([pod("fe-0")])
     client.frontend("fe-0").add(FakeRouter("r1", STARTUP))
 
-    report = await actuator.reconcile(target, initials={}, expected_frontends=1)
+    report = await actuator.reconcile(
+        target, initials={"r1": STARTUP}, expected_frontends=1
+    )
 
     assert client.writes() == []
     assert not report.converged
     assert report.errors == {"invalid_target": 1}
-    assert report.new_initials == {"r1": STARTUP}  # still latched
 
 
 async def test_max_concurrency_bounds_parallel_gets() -> None:

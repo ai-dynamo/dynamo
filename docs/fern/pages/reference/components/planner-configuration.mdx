@@ -768,9 +768,6 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
     <ParamField path="actuator_interval_seconds" type="number" default="15.0">
       Period of the router and clean-up rounds. Must be greater than 0.
     </ParamField>
-    <ParamField path="trace_incomplete_threshold" type="number" default="0.05">
-      With `metric_pulling_prometheus_endpoint`, a window whose request count is below the frontend's by more than this fraction fails with `trace_incomplete`. Must be in [0, 1].
-    </ParamField>
   </Indent>
 </Indent>
 

@@ -5,7 +5,8 @@
 
 ``RetuneMetrics`` implements ``contracts.RetuneMetricsSink``: decision,
 failure and skip counters, the supervisor's state, the scores of the latest
-decision, router convergence, PATCH errors and trace health (design §4.10).
+decision, router convergence, PATCH errors and trace health (the table in
+the live retune guide's Metrics section).
 Every method is cheap and never raises, so callers on the event loop, in the
 sweep thread or in the actuator need no guard.
 

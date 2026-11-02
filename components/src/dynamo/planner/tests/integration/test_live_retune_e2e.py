@@ -591,13 +591,10 @@ class PlannerHost:
         self._config_lock = asyncio.Lock()
         self._clock = clock
 
-    async def replace_live_retune(self, inputs, *, generation, last_decided_k):
+    async def replace_live_retune(self, inputs, *, generation):
         async with self._config_lock:
             self._engine.replace_retune(
-                inputs,
-                generation=generation,
-                now_s=self._clock.time(),
-                last_decided_k=last_decided_k,
+                inputs, generation=generation, now_s=self._clock.time()
             )
 
 
@@ -704,16 +701,17 @@ class Planner:
         # Live, the sweep runs on the controller's thread while ticks go on;
         # finishing it here keeps the interleaving deterministic.
         controller = self.engine.retune_controller
-        pending = getattr(controller, "_pending", None)
+        pending = None if controller is None else controller._pending
         if pending is not None and not pending.future.done():
             await asyncio.wait_for(asyncio.wrap_future(pending.future), timeout=60)
 
     async def stop(self) -> None:
-        """SIGTERM: ``_shutdown_runtime`` stops the engine, then the supervisor."""
+        """SIGTERM: ``_shutdown_runtime`` stops the supervisor (it aborts the
+        sweep and waits for the sweep thread), then the engine."""
 
         self.world.planners.remove(self)
-        await self.engine.shutdown()
         await self.supervisor.stop()
+        await self.engine.shutdown()
 
     def crash(self) -> None:
         """SIGKILL: nothing of this process runs again; its Lease stays."""

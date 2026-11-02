@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Build the live retune supervisor of a Kubernetes planner (design §4.2, §4.3).
+"""Build the live retune supervisor of a Kubernetes planner.
 
 ``build_live_retune(host)`` runs in ``NativePlannerBase._async_init`` after
 ``environment.initialize()`` and before the engine is built. It reads the
@@ -11,17 +11,17 @@ pure function of the DGD spec, evaluates the spec premises, and returns a
 controller is built from (``None`` while P4 fails: the adapter then starts
 with retune disabled) and whose ``hooks()`` every controller gets.
 
-Every collaborator (Kubernetes client, router actuator, reconciler, DGDR
-executor, window cutter) is imported on use, so planners without live retune
-never load them. ``build_supervisor`` takes them injectable for tests.
+This module imports the whole live retune stack (Kubernetes client, router
+actuator, reconciler, DGDR executor, window cutter).
+``NativePlannerBase`` imports it only when the planner runs live retune or
+must clean up after a removed one; ``build_supervisor`` takes the
+collaborators injectable for tests.
 
-``build_legacy_cleanup(host)`` is the §4.11 clean-up for a planner whose
-retune was removed: if a previous live retune left its Leases behind, it
-returns a supervisor in decommission mode that rolls back what that retune
-deployed, then deletes its Requests and Leases. ``NativePlannerBase``
-builds it in ``_async_init`` for a Kubernetes planner without retune config,
-starts it after the engine and stops it in ``_shutdown_runtime``; a failure
-to build it never fails startup.
+``build_legacy_cleanup(host, kube)`` is the clean-up for a planner whose
+retune was removed. ``NativePlannerBase`` calls it in the background, only
+after finding that a previous live retune left its Leases behind; it returns
+a supervisor in decommission mode that rolls back what that retune deployed,
+then deletes its Requests and Leases.
 """
 
 from __future__ import annotations
@@ -34,24 +34,40 @@ import posixpath
 import socket
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Any, Optional
 
+from dynamo.llm import KvRouterConfig
+from dynamo.planner.config.defaults import SubComponentType
+from dynamo.planner.config.planner_config import (
+    DgdrExecutorConfig,
+    PlannerConfig,
+    RetuneConfig,
+    RetuneEngineSpec,
+)
+from dynamo.planner.core.types import RetuneInputs
+from dynamo.planner.errors import ComponentError
+from dynamo.planner.monitoring.dgd_services import get_component_from_type_or_name
+from dynamo.planner.retune.domains import expand_router_domain
+from dynamo.planner.retune.live import frontend_config, window_cut
+from dynamo.planner.retune.live.actuator import (
+    AiohttpRouterPolicyClient,
+    RouterActuator,
+)
 from dynamo.planner.retune.live.contracts import (
     DgdRef,
     FrontendStartup,
     KubeAlreadyExists,
-    KubeError,
     KubeInvalid,
     PremiseReport,
     RetuneKube,
     RetuneMetricsSink,
     WindowCutter,
 )
-from dynamo.planner.retune.live.state import (
-    fingerprint,
-    leadership_lease_name,
-    state_lease_name,
-)
+from dynamo.planner.retune.live.dgdr import DgdrContext, Shard, build_request
+from dynamo.planner.retune.live.kube import KubernetesRetuneKube
+from dynamo.planner.retune.live.metrics import RetuneMetrics
+from dynamo.planner.retune.live.reconciler import Reconciler
+from dynamo.planner.retune.live.state import fingerprint
 from dynamo.planner.retune.live.supervisor import (
     ActuatorFactory,
     LiveRetuneSupervisor,
@@ -59,10 +75,6 @@ from dynamo.planner.retune.live.supervisor import (
     SupervisorSettings,
     worker_types_for,
 )
-
-if TYPE_CHECKING:
-    from dynamo.planner.config.planner_config import PlannerConfig
-    from dynamo.planner.core.types import RetuneInputs
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +102,6 @@ class KvRouterResolver:
         self._worker_types = tuple(worker_types)
 
     def startup_flat(self, keys: Sequence[str]) -> dict[str, float]:
-        from dynamo.llm import KvRouterConfig
-
         startup = KvRouterConfig.from_json(json.dumps(self._router_config))
         serialized = json.loads(startup.to_json())
         resolved = startup.policy_parameters("aggregated")
@@ -102,8 +112,6 @@ class KvRouterResolver:
         return values
 
     def by_wt(self, flat: Mapping[str, float]) -> dict[str, dict[str, float]]:
-        from dynamo.llm import KvRouterConfig
-
         config = KvRouterConfig.from_json(json.dumps({**self._router_config, **flat}))
         return {
             worker_type: {
@@ -126,9 +134,6 @@ def worker_spec_replicas(
     An omitted ``replicas`` is the workload default of 1.
     """
 
-    from dynamo.planner.config.defaults import SubComponentType
-    from dynamo.planner.monitoring.dgd_services import get_component_from_type_or_name
-
     roles = (
         (("prefill", SubComponentType.PREFILL), ("decode", SubComponentType.DECODE))
         if planner_mode == "disagg"
@@ -138,7 +143,7 @@ def worker_spec_replicas(
     for worker_type, role in roles:
         try:
             service = get_component_from_type_or_name(dict(dgd), role)
-        except Exception as error:
+        except ComponentError as error:
             logger.warning(
                 "retune: cannot resolve the %s workers: %s", worker_type, error
             )
@@ -169,13 +174,7 @@ def build_retune_inputs(
     epoch milliseconds (origin 0, speedup 1).
     """
 
-    from dynamo.planner.config.planner_config import RetuneEngineSpec
-    from dynamo.planner.core.types import RetuneInputs
-
-    retune = config.retune
-    if retune is None or retune.dgdr is None:
-        raise ValueError("live retune requires retune.executor 'dgdr'")
-    dgdr = retune.dgdr
+    _, dgdr = _dgdr_retune(config)
     disagg = config.mode == "disagg"
     engine = RetuneEngineSpec(
         router_mode=startup.router_mode,  # type: ignore[arg-type]
@@ -208,8 +207,7 @@ def evaluate_spec(
     """
 
     if frontend is None:
-        from dynamo.planner.retune.live import frontend_config as frontend
-
+        frontend = frontend_config
     metadata = dgd.get("metadata") or {}
     name = str(metadata.get("name") or "")
     uid = metadata.get("uid")
@@ -223,14 +221,7 @@ def evaluate_spec(
     )
     parsed = frontend.parse_frontend(dgd, planner_mode=config.mode)
     startup = parsed if isinstance(parsed, FrontendStartup) else None
-    parse_error = None if startup is not None else str(parsed)
-    report: PremiseReport = frontend.evaluate_premises(
-        dgd,
-        planner_config=config,
-        startup=startup,
-        parse_error=parse_error,
-        planner_replicas=None,
-    )
+    report: PremiseReport = frontend.evaluate_premises(dgd, planner_config=config)
     inputs = None
     if report.p4_ok and startup is not None:
         try:
@@ -238,7 +229,7 @@ def evaluate_spec(
                 config,
                 startup,
                 dgd_name=name,
-                model_name=_served_model(frontend, dgd),
+                model_name=frontend.served_model_name(dgd),
             )
         except ValueError as error:
             logger.error("retune: building the live retune inputs failed: %s", error)
@@ -260,16 +251,6 @@ def evaluate_spec(
     )
 
 
-def _served_model(frontend: Any, dgd: Mapping[str, Any]) -> Optional[str]:
-    served = getattr(frontend, "served_model_name", None)
-    if served is None:
-        return None
-    try:
-        return served(dgd)
-    except Exception:
-        return None
-
-
 # --------------------------------------------------------- DGDR pieces
 
 
@@ -278,26 +259,16 @@ def dgdr_context_factory(
 ) -> Callable[[LiveRetuneSupervisor], Any]:
     """Bind a ``dgdr.DgdrContext`` to the supervisor's current DGD."""
 
-    def factory(supervisor: LiveRetuneSupervisor) -> Any:
-        from dynamo.planner.retune.live.dgdr import DgdrContext
-
-        retune = config.retune
-        assert retune is not None and retune.dgdr is not None
-        cutter: WindowCutter
-        if cut_window is not None:
-            cutter = cut_window
-        else:
-            from dynamo.planner.retune.live import window_cut
-
-            cutter = window_cut.cut_window
+    def factory(supervisor: LiveRetuneSupervisor) -> DgdrContext:
+        retune, dgdr = _dgdr_retune(config)
         return DgdrContext(
             dgd=supervisor.dgd,
-            cfg=retune.dgdr,
+            cfg=dgdr,
             retune=retune,
             backend=str(config.backend),
             kube=supervisor.kube,
             registry=supervisor.registry,
-            cut_window=cutter,
+            cut_window=cut_window or window_cut.cut_window,
             is_leader=supervisor.is_leader,
         )
 
@@ -317,10 +288,7 @@ def dgdr_canary(
     """
 
     def canary(supervisor: LiveRetuneSupervisor) -> bool:
-        from dynamo.planner.retune.live.dgdr import Shard, build_request
-
-        retune = config.retune
-        assert retune is not None and retune.dgdr is not None
+        retune, dgdr = _dgdr_retune(config)
         replicas = supervisor.evaluation.spec_replicas
         point = supervisor.startup_flat()
         if not replicas or not point:
@@ -334,7 +302,7 @@ def dgdr_canary(
         )
         body = build_request(
             dgd=supervisor.dgd,
-            cfg=retune.dgdr,
+            cfg=dgdr,
             retune=retune,
             sla_ttft_ms=sla_ttft_ms,
             sla_itl_ms=sla_itl_ms,
@@ -361,12 +329,9 @@ def dgdr_canary(
 def default_actuator_factory(
     kube: RetuneKube, metrics: RetuneMetricsSink
 ) -> ActuatorFactory:
-    def factory(dgd: DgdRef, startup_maps: dict[str, dict[str, float]]) -> Any:
-        from dynamo.planner.retune.live.actuator import (
-            AiohttpRouterPolicyClient,
-            RouterActuator,
-        )
-
+    def factory(
+        dgd: DgdRef, startup_maps: dict[str, dict[str, float]]
+    ) -> RouterActuator:
         return RouterActuator(
             kube, AiohttpRouterPolicyClient(), dgd, startup_maps, metrics
         )
@@ -375,7 +340,11 @@ def default_actuator_factory(
 
 
 def planner_identity() -> str:
-    """``<pod>/<process nonce>`` (§4.7.1)."""
+    """``<pod>/<process nonce>``: the Lease holder identity of this process.
+
+    The nonce makes a restarted container a new holder, so it never renews
+    the Lease of its previous incarnation.
+    """
 
     pod = (
         os.environ.get("POD_NAME")
@@ -392,26 +361,23 @@ def searched_router_keys(config: PlannerConfig) -> tuple[str, ...]:
     retune = config.retune
     if retune is None:
         return ()
-    try:
-        from dynamo.planner.retune.domains import expand_router_domain
+    return tuple(sorted(expand_router_domain(retune)))
 
-        return tuple(sorted(expand_router_domain(retune)))
-    except Exception:
-        logger.exception("retune: expanding the router domain failed")
-        return ()
+
+def _dgdr_retune(config: PlannerConfig) -> tuple[RetuneConfig, DgdrExecutorConfig]:
+    """``config.retune`` and its DGDR executor section, which must be set."""
+
+    retune = config.retune
+    if retune is None or retune.dgdr is None:
+        raise ValueError("live retune requires retune.executor 'dgdr'")
+    return retune, retune.dgdr
 
 
 def _runtime_namespace(host: Any) -> str:
-    environment = getattr(host, "environment", None)
-    getter = getattr(environment, "runtime_namespace", None)
-    if callable(getter):
-        try:
-            value = getter()
-            if value:
-                return str(value)
-        except Exception:
-            logger.debug("retune: runtime namespace unavailable", exc_info=True)
-    return str(host.config.namespace)
+    """The routers' dynamo namespace, else the planner's configured one."""
+
+    value = host.environment.runtime_namespace()
+    return str(value) if value else str(host.config.namespace)
 
 
 # --------------------------------------------------------------- build
@@ -443,8 +409,6 @@ async def build_supervisor(
         )
     dgdr = retune.dgdr
     if metrics is None:
-        from dynamo.planner.retune.live.metrics import RetuneMetrics
-
         metrics = RetuneMetrics()
     dgd_obj = await asyncio.to_thread(kube.get_dgd, dgd_name)
 
@@ -459,8 +423,6 @@ async def build_supervisor(
 
     evaluation = evaluate(dgd_obj)
     if reconciler is None:
-        from dynamo.planner.retune.live.reconciler import Reconciler
-
         reconciler = Reconciler(
             kube, evaluation.dgd, dgdr, retune, dgdr.mount_path, metrics
         )
@@ -520,8 +482,6 @@ async def build_live_retune(host: Any) -> LiveRetuneSupervisor:
             f"{None if retune is None else retune.executor!r} is replay-only"
         )
     connector = host.environment.controller
-    from dynamo.planner.retune.live.kube import KubernetesRetuneKube
-
     kube = KubernetesRetuneKube.from_kube_api(connector.kube_api)
     return await build_supervisor(
         config,
@@ -531,46 +491,28 @@ async def build_live_retune(host: Any) -> LiveRetuneSupervisor:
     )
 
 
-async def build_legacy_cleanup(host: Any) -> Optional[LiveRetuneSupervisor]:
-    """§4.11: a decommission supervisor if a removed retune left Leases.
+async def build_legacy_cleanup(
+    host: Any, kube: RetuneKube, *, timeout_s: float = 10.0
+) -> LiveRetuneSupervisor:
+    """A decommission supervisor for the Leases a removed retune left.
 
-    ``None`` when there is nothing to clean up or the planner cannot read
-    Leases or the DGD (403/404: logged at info, never fatal). Run it like the
-    live supervisor (``start``/``stop``); it rolls back what the old retune
-    deployed, then deletes the DGD's retune Requests and both Leases and
-    stops itself (``decommissioned``).
+    ``NativePlannerBase`` calls it once it found a Lease of the DGD. Run it
+    like the live supervisor (``start``/``stop``): it rolls back what the
+    old retune deployed, then deletes the DGD's retune Requests and both
+    Leases and stops itself (``decommissioned``). Reading the DGD may raise
+    ``KubeError``.
     """
 
-    config = host.config
-    if config.retune is not None:
-        return None
-    try:
-        connector = host.environment.controller
-        kube_api = connector.kube_api
-        dgd_name = connector.parent_dgd_name
-    except AttributeError:
-        return None
-    from dynamo.planner.retune.live.kube import KubernetesRetuneKube
-
-    kube = KubernetesRetuneKube.from_kube_api(kube_api)
-    try:
-        leftovers = [
-            await asyncio.to_thread(kube.get_lease, name)
-            for name in (leadership_lease_name(dgd_name), state_lease_name(dgd_name))
-        ]
-        if not any(lease is not None for lease in leftovers):
-            return None
-        dgd_obj = await asyncio.to_thread(kube.get_dgd, dgd_name)
-    except KubeError as error:
-        logger.info("retune legacy clean-up skipped: %s", error)
-        return None
+    connector = host.environment.controller
+    dgd_name = connector.parent_dgd_name
+    dgd_obj = await asyncio.to_thread(kube.get_dgd, dgd_name, timeout_s=timeout_s)
     logger.info(
         "retune legacy clean-up: DGD %s has Leases of a removed live retune; "
         "rolling back what it deployed, then deleting its Requests and Leases",
         dgd_name,
     )
     return build_decommission_supervisor(
-        config,
+        host.config,
         kube=kube,
         dgd=dgd_obj,
         dynamo_namespace=_runtime_namespace(host),
@@ -592,10 +534,8 @@ def build_decommission_supervisor(
     """A supervisor that only rolls back and deletes (no retune config)."""
 
     if frontend is None:
-        from dynamo.planner.retune.live import frontend_config as frontend
+        frontend = frontend_config
     if metrics is None:
-        from dynamo.planner.retune.live.metrics import RetuneMetrics
-
         metrics = RetuneMetrics()
     metadata = dgd.get("metadata") or {}
     ref = DgdRef(

@@ -11,6 +11,7 @@ based on the previous tick's ``ScheduledTick`` requirements.
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 from dataclasses import dataclass, field
@@ -400,8 +401,9 @@ class RetuneDecision:
             object.__setattr__(self, "predictor_warmup", tuple(self.predictor_warmup))
         if self.failure_reason is not None:
             _require_non_empty_string("failure_reason", self.failure_reason)
-        # A private copy: the record must not change with the sweep result.
-        object.__setattr__(self, "details", dict(self.details))
+        # A private deep copy: the record must not change with the sweep
+        # result, whose details may nest mutable values.
+        object.__setattr__(self, "details", copy.deepcopy(self.details))
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-shaped record; ``predictor_warmup`` becomes its length."""

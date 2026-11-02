@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Persisted live retune state and the leadership Lease (design §4.7.1-§4.7.2).
+"""Persisted live retune state and the leadership Lease.
 
 Two ``coordination.k8s.io/v1`` Leases per DGD, both owned by the DGD so the
 garbage collector removes them with it:
@@ -72,6 +72,22 @@ def leadership_lease_name(dgd_name: str) -> str:
 
 def state_lease_name(dgd_name: str) -> str:
     return f"{dgd_name}-planner-retune-state"
+
+
+def find_retune_leases(
+    kube: RetuneKube, dgd_name: str, *, timeout_s: float
+) -> tuple[str, ...]:
+    """Names of the DGD's live retune Leases that exist.
+
+    A planner without retune config calls it to find what a removed live
+    retune left behind. Raises ``KubeError`` (403 without Lease RBAC).
+    """
+
+    return tuple(
+        name
+        for name in (leadership_lease_name(dgd_name), state_lease_name(dgd_name))
+        if kube.get_lease(name, timeout_s=timeout_s) is not None
+    )
 
 
 def owner_reference(dgd: DgdRef) -> dict[str, Any]:
@@ -172,7 +188,25 @@ def fingerprint(config: PlannerConfig, startup: Optional[FrontendStartup]) -> st
 
 
 class StateFormatError(ValueError):
-    """The state annotations do not hold a readable snapshot."""
+    """The state annotations do not hold a readable snapshot.
+
+    The snapshot is treated as corrupt: the next claim write replaces it.
+    """
+
+
+class StateVersionError(Exception):
+    """The snapshot has a format version this planner does not know.
+
+    Not a ``StateFormatError``: a newer planner's state is never treated as
+    corrupt and overwritten. Initialization refuses to proceed until a
+    planner that reads the version leads, or the state Lease is deleted.
+    """
+
+
+def _finite_number(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value)
 
 
 def _float_map(value: Any, what: str) -> dict[str, float]:
@@ -180,8 +214,8 @@ def _float_map(value: Any, what: str) -> dict[str, float]:
         raise StateFormatError(f"{what} must be an object")
     out: dict[str, float] = {}
     for key, item in value.items():
-        if isinstance(item, bool) or not isinstance(item, (int, float)):
-            raise StateFormatError(f"{what}.{key} must be a number")
+        if not _finite_number(item):
+            raise StateFormatError(f"{what}.{key} must be a finite number")
         out[str(key)] = float(item)
     return out
 
@@ -194,7 +228,7 @@ def _nested_map(value: Any, what: str) -> dict[str, dict[str, float]]:
 
 @dataclass(frozen=True)
 class RetuneState:
-    """The state snapshot of design §4.7.2.
+    """The persisted live retune state of one DGD.
 
     ``mode is None`` is "no state": only the claim (``dgd_uid`` and
     ``leader_term``) has been written. ``by_wt`` is the deployed per worker
@@ -248,7 +282,9 @@ class RetuneState:
     ) -> Optional[RetuneState]:
         """Parse the snapshot; ``None`` when the lease holds none.
 
-        Raises ``StateFormatError`` for a snapshot that cannot be read.
+        Raises ``StateVersionError`` for a snapshot of another format version
+        (checked first, so nothing else of it is judged) and
+        ``StateFormatError`` for a snapshot that cannot be read.
         """
 
         raw = (annotations or {}).get(STATE_ANNOTATION)
@@ -260,6 +296,13 @@ class RetuneState:
             raise StateFormatError(f"state annotation is not JSON: {error}") from None
         if not isinstance(body, Mapping):
             raise StateFormatError("state annotation must be a JSON object")
+        version = body.get("version")
+        if isinstance(version, bool) or not isinstance(version, int):
+            raise StateFormatError("state.version must be an integer")
+        if version != STATE_FORMAT_VERSION:
+            raise StateVersionError(
+                f"state format version {version} is not {STATE_FORMAT_VERSION}"
+            )
         dgd_uid = body.get("dgd_uid")
         if not isinstance(dgd_uid, str) or not dgd_uid:
             raise StateFormatError("state.dgd_uid must be a non-empty string")
@@ -270,10 +313,11 @@ class RetuneState:
         if isinstance(deploy_seq, bool) or not isinstance(deploy_seq, int):
             raise StateFormatError("state.deploy_seq must be an integer")
         last = body.get("last_window_end_ms")
-        if last is not None and (
-            isinstance(last, bool) or not isinstance(last, (int, float))
-        ):
-            raise StateFormatError("state.last_window_end_ms must be a number")
+        if last is not None and not _finite_number(last):
+            raise StateFormatError("state.last_window_end_ms must be a finite number")
+        updated = body.get("updated_ms")
+        if updated is not None and not _finite_number(updated):
+            raise StateFormatError("state.updated_ms must be a finite number")
         history_raw = (annotations or {}).get(HISTORY_ANNOTATION)
         history: list[dict[str, Any]] = []
         if history_raw:
@@ -296,7 +340,7 @@ class RetuneState:
             by_wt=_nested_map(body.get("by_wt") or {}, "state.by_wt"),
             initials=_nested_map(body.get("initials") or {}, "state.initials"),
             last_window_end_ms=None if last is None else int(last),
-            updated_ms=int(body.get("updated_ms") or 0),
+            updated_ms=0 if updated is None else int(updated),
             history=tuple(history[-HISTORY_LIMIT:]),
         )
 
@@ -305,7 +349,7 @@ def deployed_off(
     state: Optional[RetuneState],
     startup_by_wt: Optional[Mapping[str, Mapping[str, float]]],
 ) -> bool:
-    """Whether the routers may be off their startup values (§4.7.3 step 4).
+    """Whether the routers may be off their startup values.
 
     ``rollback_pending ∨ by_wt ≠ startup``, false without a state, with one
     refinement: only an ``active`` record can have deployed anything. An
@@ -328,7 +372,7 @@ def deployed_off(
     return not maps_equal(state.by_wt, startup_by_wt)
 
 
-# -------------------------------------------------------- write rules (§4.7.2)
+# ------------------------------------------------------------ write rules
 
 
 def claim(state: Optional[RetuneState], *, dgd_uid: str, term: str) -> RetuneState:
@@ -529,6 +573,11 @@ class StateStore:
         return self._dgd
 
     def read(self) -> StateSnapshot:
+        """Read the snapshot; an unreadable one comes back ``corrupt``.
+
+        A snapshot of another format version raises ``StateVersionError``.
+        """
+
         lease = self._kube.get_lease(self.name, timeout_s=self._timeout_s)
         if lease is None:
             return StateSnapshot(state=None, resource_version=None, lease=None)
@@ -606,7 +655,7 @@ LeaseStep = Literal["acquired", "renewed", "standby", "lost", "error"]
 
 
 class LeaseLeadership:
-    """Leadership over ``<dgd>-planner-retune`` (design §4.7.1).
+    """Leadership over ``<dgd>-planner-retune``.
 
     ``step`` runs one renewal/acquisition attempt and returns what happened:
 

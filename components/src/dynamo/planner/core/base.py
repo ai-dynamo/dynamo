@@ -17,13 +17,14 @@ import logging
 import time
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Optional, Protocol
 
 import aiohttp.web
 from prometheus_client import start_http_server
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.connectors.kubernetes import KubernetesConnector
 from dynamo.planner.control_api import (
     _MinimumEndpointUnavailableError,
     _MinimumEndpointValidationError,
@@ -57,6 +58,9 @@ from dynamo.planner.reconfiguration import (
     runtime_candidate_errors,
     runtime_configuration_errors,
 )
+from dynamo.planner.retune.live.contracts import KubeError
+from dynamo.planner.retune.live.kube import KubernetesRetuneKube
+from dynamo.planner.retune.live.state import find_retune_leases
 from dynamo.runtime import DistributedRuntime
 
 if TYPE_CHECKING:
@@ -68,6 +72,24 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _live_retune_bootstrap() -> Any:
+    """The live retune stack, loaded only by a planner that runs it.
+
+    It pulls in the DGDR sweep executor and the replay stack behind it;
+    a planner with retune config loads it at startup, one without only
+    when a removed live retune left its Leases behind.
+    """
+
+    return importlib.import_module("dynamo.planner.retune.live.bootstrap")
+
+
+def _log_legacy_retune_failure(task: asyncio.Task[None]) -> None:
+    if not task.cancelled() and task.exception() is not None:
+        logger.error(
+            "Live retune legacy clean-up check failed", exc_info=task.exception()
+        )
+
+
 class LiveRetuneHandle(Protocol):
     """What ``retune.live.bootstrap.build_live_retune`` returns to the base.
 
@@ -75,7 +97,9 @@ class LiveRetuneHandle(Protocol):
     does not satisfy the retune premises (the engine then starts with retune
     disabled). ``start`` runs after the engine is bootstrapped and may call
     back ``replace_live_retune``; ``on_effects`` sees every tick's effects
-    (it must be cheap and never block); ``stop`` releases leadership.
+    (it must be cheap and never block); ``stop`` runs before the engine shuts
+    down: it aborts the sweep, waits for the sweep thread and releases
+    leadership.
     """
 
     def retune_inputs(self) -> Optional[RetuneInputs]:
@@ -95,11 +119,12 @@ class LiveRetuneHandle(Protocol):
 
 
 class RetuneCleanupHandle(Protocol):
-    """What ``retune.live.bootstrap.build_legacy_cleanup`` returns (§4.11).
+    """What ``retune.live.bootstrap.build_legacy_cleanup`` returns.
 
-    A planner without retune config rolls back what a removed live retune
-    deployed, then deletes its Requests and Leases; ``start`` runs after the
-    engine is bootstrapped and ``stop`` releases leadership.
+    A planner without retune config whose DGD still has the Leases of a
+    removed live retune rolls back the routers that retune deployed, then
+    deletes its Requests and Leases; ``start`` begins that clean-up and
+    ``stop`` releases leadership.
     """
 
     async def start(self, host: NativePlannerBase) -> None:
@@ -110,9 +135,9 @@ class RetuneCleanupHandle(Protocol):
 
 
 _CONFIG_LOCK_TIMEOUT_SECONDS = 10.0
-# Building the legacy retune clean-up reads two Leases and the DGD; startup
-# never waits longer than this for it.
-_LEGACY_RETUNE_CLEANUP_TIMEOUT_SECONDS = 30.0
+# The background check for a removed live retune reads two Leases, then,
+# only if one exists, the DGD; each Kubernetes call is bounded by this.
+_LEGACY_RETUNE_CALL_TIMEOUT_SECONDS = 10.0
 # A tick waits briefly for the common fast submission path, then leaves the
 # task running. It is deliberately not cancelled: a remote request may have
 # been accepted even when its response has not arrived, so retrying could
@@ -229,7 +254,9 @@ class NativePlannerBase:
         self._last_worker_counts: Optional[WorkerCounts] = None
         # Live retune (``retune.executor: dgdr``): built in _async_init.
         self._live_retune: Optional[LiveRetuneHandle] = None
-        # §4.11 legacy clean-up of a removed live retune (no retune config).
+        # Without retune config, a Kubernetes planner checks in the background
+        # whether a removed live retune left its Leases, and cleans up after it.
+        self._legacy_retune_task: Optional[asyncio.Task[None]] = None
         self._legacy_retune_cleanup: Optional[RetuneCleanupHandle] = None
 
     async def _async_init(self) -> None:
@@ -244,15 +271,13 @@ class NativePlannerBase:
                 # Before the first _ensure_engine (regression bootstrap builds
                 # the engine): the engine takes the live retune inputs/hooks.
                 self._live_retune = await self._build_live_retune()
-            else:
-                self._legacy_retune_cleanup = await self._build_legacy_retune_cleanup()
 
             await self._bootstrap_regression()
             await self._bootstrap_engine_plugins_if_needed()
 
             if self._live_retune is not None:
                 await self._live_retune.start(self)
-            await self._start_legacy_retune_cleanup()
+            self._start_legacy_retune_check()
 
             if self.config.enable_runtime_reconfiguration:
                 if self.runtime is None:
@@ -289,64 +314,74 @@ class NativePlannerBase:
             await self._shutdown_runtime()
             raise
 
+    @property
+    def may_hold_retune_lease(self) -> bool:
+        """Whether live retune, or the clean-up of a removed one, may hold
+        the retune leadership Lease (known once ``_async_init`` returned)."""
+
+        return self._live_retune is not None or self._legacy_retune_task is not None
+
     async def _build_live_retune(self) -> LiveRetuneHandle:
-        # Imported on use: the live retune stack talks to Kubernetes, and
-        # planners without retune never load it.
-        bootstrap = importlib.import_module("dynamo.planner.retune.live.bootstrap")
-        return await bootstrap.build_live_retune(self)
+        return await _live_retune_bootstrap().build_live_retune(self)
 
-    def _uses_kubernetes_connector(self) -> bool:
+    def _kubernetes_connector(self) -> Optional[KubernetesConnector]:
+        # Only some environments have a deployment controller.
         controller = getattr(self.environment, "controller", None)
-        if controller is None:
-            return False
-        try:
-            from dynamo.planner.connectors.kubernetes import KubernetesConnector
-        except ImportError:
-            return False
-        return isinstance(controller, KubernetesConnector)
+        return controller if isinstance(controller, KubernetesConnector) else None
 
-    async def _build_legacy_retune_cleanup(self) -> Optional[RetuneCleanupHandle]:
-        """§4.11 clean-up of a live retune whose config was removed.
+    def _start_legacy_retune_check(self) -> None:
+        """Look for a removed live retune in the background.
 
-        Only for a Kubernetes planner. ``None`` when nothing was left over;
-        it never fails startup: missing RBAC (403), a missing DGD or Lease
-        (404) and any other error are logged and skipped.
+        Only a Kubernetes planner without retune config. Startup never waits
+        for it, and it never fails the planner.
         """
 
-        if not self._uses_kubernetes_connector():
-            return None
-        try:
-            bootstrap = importlib.import_module("dynamo.planner.retune.live.bootstrap")
-            return await asyncio.wait_for(
-                bootstrap.build_legacy_cleanup(self),
-                timeout=_LEGACY_RETUNE_CLEANUP_TIMEOUT_SECONDS,
-            )
-        except Exception as exc:
-            logger.info("Live retune legacy clean-up skipped: %r", exc)
-            logger.debug("Live retune legacy clean-up setup failed", exc_info=True)
-            return None
-
-    async def _start_legacy_retune_cleanup(self) -> None:
-        cleanup = self._legacy_retune_cleanup
-        if cleanup is None:
+        connector = self._kubernetes_connector()
+        if self.config.retune is not None or connector is None:
             return
+        task = asyncio.create_task(
+            self._legacy_retune_check(connector), name="planner-retune-legacy-check"
+        )
+        task.add_done_callback(_log_legacy_retune_failure)
+        self._legacy_retune_task = task
+
+    async def _legacy_retune_check(self, connector: KubernetesConnector) -> None:
+        """Clean up after a live retune whose config was removed.
+
+        Reads the DGD's two retune Leases; only when one exists does it load
+        the live retune stack, which rolls back the routers that retune
+        deployed and then deletes its Requests and Leases. Without Lease RBAC
+        (the default chart) the read answers 403, logged at debug.
+        """
+
+        kube = KubernetesRetuneKube.from_kube_api(connector.kube_api)
         try:
-            await cleanup.start(self)
-        except Exception as exc:
-            logger.info("Live retune legacy clean-up did not start: %r", exc)
-            logger.debug("Live retune legacy clean-up start failed", exc_info=True)
-            self._legacy_retune_cleanup = None
-            try:
-                await cleanup.stop()
-            except Exception:
-                logger.debug("Stopping the legacy clean-up failed", exc_info=True)
+            leases = await asyncio.to_thread(
+                find_retune_leases,
+                kube,
+                connector.parent_dgd_name,
+                timeout_s=_LEGACY_RETUNE_CALL_TIMEOUT_SECONDS,
+            )
+            if not leases:
+                return
+            cleanup = await _live_retune_bootstrap().build_legacy_cleanup(
+                self, kube, timeout_s=_LEGACY_RETUNE_CALL_TIMEOUT_SECONDS
+            )
+        except KubeError as error:
+            # ``status`` is set by the Kubernetes client wrapper only.
+            if getattr(error, "status", None) == 403:
+                logger.debug("Live retune legacy clean-up check skipped: %s", error)
+            else:
+                logger.info("Live retune legacy clean-up skipped: %s", error)
+            return
+        self._legacy_retune_cleanup = cleanup
+        await cleanup.start(self)
 
     async def replace_live_retune(
         self,
         inputs: Optional[RetuneInputs],
         *,
         generation: int,
-        last_decided_k: Optional[int],
     ) -> None:
         """Swap the engine's live retune controller (supervisor callback).
 
@@ -363,12 +398,7 @@ class NativePlannerBase:
             engine = self._engine
             if not isinstance(engine, OrchestratorEngineAdapter):
                 raise RuntimeError("live retune requires the orchestrator engine")
-            engine.replace_retune(
-                inputs,
-                generation=generation,
-                now_s=time.time(),
-                last_decided_k=last_decided_k,
-            )
+            engine.replace_retune(inputs, generation=generation, now_s=time.time())
 
     async def _shutdown_runtime(self) -> None:
         """Release initialized planner resources after normal or failed startup."""
@@ -398,16 +428,8 @@ class NativePlannerBase:
             except Exception:
                 logger.exception("Failed to stop planner live dashboard")
 
-        engine = self._engine
-        self._engine = None
-        if engine is not None:
-            try:
-                await engine.shutdown()
-            except Exception:
-                logger.exception("Failed to stop planner engine")
-
-        # After the engine: its shutdown closed the retune controller (and
-        # stopped its sweep), so the supervisor can release leadership.
+        # Before the engine: the supervisor aborts the retune sweep, waits
+        # for the engine's sweep thread and then releases leadership.
         live_retune = self._live_retune
         self._live_retune = None
         if live_retune is not None:
@@ -416,6 +438,11 @@ class NativePlannerBase:
             except Exception:
                 logger.exception("Failed to stop planner live retune")
 
+        legacy_retune_task = self._legacy_retune_task
+        self._legacy_retune_task = None
+        if legacy_retune_task is not None:
+            legacy_retune_task.cancel()
+            await asyncio.wait([legacy_retune_task])
         legacy_retune_cleanup = self._legacy_retune_cleanup
         self._legacy_retune_cleanup = None
         if legacy_retune_cleanup is not None:
@@ -423,6 +450,14 @@ class NativePlannerBase:
                 await legacy_retune_cleanup.stop()
             except Exception:
                 logger.exception("Failed to stop the live retune legacy clean-up")
+
+        engine = self._engine
+        self._engine = None
+        if engine is not None:
+            try:
+                await engine.shutdown()
+            except Exception:
+                logger.exception("Failed to stop planner engine")
 
         effect_submission_task = self._effect_submission_task
         self._effect_submission_task = None

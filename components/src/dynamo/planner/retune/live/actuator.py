@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Apply the retune router parameters to every frontend router (design §4.8).
+"""Apply the retune router parameters to every frontend router.
 
 ``RouterActuator.reconcile`` runs one round: list the DGD's frontend pods,
 ``GET /router_policy`` on each, keep the routers of the DGD's dynamo
@@ -32,6 +32,10 @@ Modes (``ActuationTarget.mode``):
   unknown (revision > 0, never latched) is reset once first to learn it; a
   router whose initial differs from the startup map (P14) is never written,
   so planner-parsed values cannot leak into keys the sweep did not search.
+  A router is PATCHed only once the ``initials`` passed in (the persisted
+  ones) hold its initial: a router latched in this round is held, reported
+  in ``new_initials`` and not converged, so a process stopped before the
+  state write never leaves a router off an initial nobody recorded.
 - ``rollback``: reset only routers whose configuration differs from their
   latched initial. Never by revision: a reset itself bumps the revision.
 - ``observe``: no writes; latch initials and check parity only.
@@ -678,6 +682,9 @@ class RouterActuator:
         if initial is None:
             # Revision > 0 and never latched: learn the initial first.
             return ("reset", {})
+        if not _same_map(state.initials.get(router.router_id), initial):
+            # Latched but not persisted yet: hold until the state records it.
+            return None
         if not _same_map(initial, self._startup_maps[router.worker_type]):
             # P14 failed for this router; writing explicit values would put
             # planner-parsed values into keys the sweep never searched.

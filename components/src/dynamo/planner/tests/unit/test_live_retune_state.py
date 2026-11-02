@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 
 import pytest
 
@@ -23,15 +24,18 @@ from dynamo.planner.retune.live.state import (
     HISTORY_ANNOTATION,
     HISTORY_LIMIT,
     STATE_ANNOTATION,
+    STATE_FORMAT_VERSION,
     LeaseLeadership,
     RetuneState,
     StateFormatError,
     StateSnapshot,
     StateStore,
+    StateVersionError,
     append_history,
     claim,
     deploy,
     deployed_off,
+    find_retune_leases,
     fingerprint,
     has_decision,
     leader_term,
@@ -212,32 +216,71 @@ def test_state_round_trips_through_annotations() -> None:
     assert RetuneState.from_annotations(annotations) == state
 
 
+def _body(**fields) -> str:
+    return json.dumps({"version": STATE_FORMAT_VERSION, **fields})
+
+
 def test_state_parsing_edge_cases() -> None:
     assert RetuneState.from_annotations(None) is None
     assert RetuneState.from_annotations({"other": "x"}) is None
     claimed = RetuneState.from_annotations(
-        {STATE_ANNOTATION: json.dumps({"dgd_uid": "u", "leader_term": "t"})}
+        {STATE_ANNOTATION: _body(dgd_uid="u", leader_term="t")}
     )
     assert claimed == RetuneState(dgd_uid="u", leader_term="t")
     assert not claimed.has_deployment
     for bad in (
         "{",
         "[]",
-        json.dumps({"leader_term": "t"}),
-        json.dumps({"dgd_uid": "u", "mode": "bogus"}),
-        json.dumps({"dgd_uid": "u", "flat": {"a": "x"}}),
-        json.dumps({"dgd_uid": "u", "deploy_seq": "3"}),
+        json.dumps({"dgd_uid": "u"}),  # no version
+        _body(leader_term="t"),
+        _body(dgd_uid="u", mode="bogus"),
+        _body(dgd_uid="u", flat={"a": "x"}),
+        _body(dgd_uid="u", deploy_seq="3"),
+        # json.loads accepts NaN and Infinity; they are not numbers here.
+        _body(dgd_uid="u", flat={"a": math.nan}),
+        _body(dgd_uid="u", last_window_end_ms=math.nan),
+        _body(dgd_uid="u", last_window_end_ms=math.inf),
+        _body(dgd_uid="u", updated_ms="x"),
+        _body(dgd_uid="u", updated_ms=[1]),
     ):
         with pytest.raises(StateFormatError):
             RetuneState.from_annotations({STATE_ANNOTATION: bad})
     # A damaged history never blocks the state.
     parsed = RetuneState.from_annotations(
-        {
-            STATE_ANNOTATION: json.dumps({"dgd_uid": "u"}),
-            HISTORY_ANNOTATION: "not json",
-        }
+        {STATE_ANNOTATION: _body(dgd_uid="u"), HISTORY_ANNOTATION: "not json"}
     )
     assert parsed is not None and parsed.history == ()
+
+
+def test_another_format_version_is_rejected_not_corrupt() -> None:
+    # Checked first: a newer planner's state is never judged by this
+    # planner's field rules (which would make it corrupt, then overwritten).
+    newer = json.dumps(
+        {"version": STATE_FORMAT_VERSION + 1, "dgd_uid": "u", "flat": {"a": "x"}}
+    )
+    with pytest.raises(StateVersionError):
+        RetuneState.from_annotations({STATE_ANNOTATION: newer})
+    assert not issubclass(StateVersionError, StateFormatError)
+
+    kube = FakeRetuneKube()
+    store = StateStore(kube, DGD)
+    kube.create_lease(
+        {
+            "metadata": {"name": store.name, "annotations": {STATE_ANNOTATION: newer}},
+            "spec": {},
+        }
+    )
+    with pytest.raises(StateVersionError):
+        store.read()
+
+
+def test_find_retune_leases() -> None:
+    kube = FakeRetuneKube()
+    assert find_retune_leases(kube, "graph", timeout_s=1.0) == ()
+    kube.create_lease({"metadata": {"name": state_lease_name("graph")}, "spec": {}})
+    assert find_retune_leases(kube, "graph", timeout_s=1.0) == (
+        state_lease_name("graph"),
+    )
 
 
 def test_deployed_off() -> None:

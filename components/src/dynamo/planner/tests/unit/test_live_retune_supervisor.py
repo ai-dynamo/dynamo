@@ -1,14 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
+# Optional-dependency preflight must run before the supervisor imports the sweep.
 
-"""Unit tests for ``LiveRetuneSupervisor`` and its bootstrap, plus the §6
-interleaving harness that guards the §4.7 invariants.
+"""Unit tests for ``LiveRetuneSupervisor`` and its bootstrap, plus a seeded
+interleaving harness that checks its invariants: at most one leader writes,
+a decision is persisted before any router changes, no window is wasted, and
+the routers settle on the persisted state.
 
-Everything runs on fakes: ``FakeRetuneKube`` (shared Leases), a fake frontend
-whose routers follow the ``/router_policy`` PATCH/reset/revision semantics,
-a fake actuator over it, a fake controller that drives the supervisor's
-hooks as ``RetuneController.on_tick`` does, a fake planner host and clocks
-the tests advance by hand. Blocking calls run inline.
+The supervisor drives the real engine adapter and ``RetuneController``; their
+sweeps run on the adapter's sweep thread, in ``StubSweeps``, until the test
+finishes them. Kubernetes is ``FakeRetuneKube`` (shared Leases), the routers
+are ``FakeFrontend`` (PATCH merges and bumps the revision, reset restores
+the initial) behind ``FakeActuator``, and clocks are advanced by hand.
+Kubernetes calls run inline.
 """
 
 from __future__ import annotations
@@ -22,15 +27,35 @@ import logging
 import math
 import random
 import threading
-import time
 from collections import deque
 from types import SimpleNamespace
 from typing import Any, Optional
 
 import pytest
 
-from dynamo.planner.core.types import RetuneDecision, RetuneParams
+pytest.importorskip(
+    "aisimulate.sweeper",
+    reason="AI Simulate is an optional Dynamo simulation dependency",
+)
+
+from dynamo.planner.config.planner_config import PlannerConfig, RetuneEngineSpec
+from dynamo.planner.core.types import (
+    EngineCapabilities,
+    RetuneDecision,
+    RetuneInputs,
+    RetuneParams,
+    WorkerCapabilities,
+    WorkerCounts,
+)
+from dynamo.planner.plugins.clock import WallClock
+from dynamo.planner.plugins.orchestrator.engine_adapter import (
+    OrchestratorEngineAdapter,
+    RetuneHooks,
+)
+from dynamo.planner.retune import controller as controller_module
+from dynamo.planner.retune.controller import RetuneController
 from dynamo.planner.retune.live import bootstrap
+from dynamo.planner.retune.live.actuator import RouterActuator
 from dynamo.planner.retune.live.contracts import (
     LABEL_DGD_UID,
     ActuationReport,
@@ -40,7 +65,9 @@ from dynamo.planner.retune.live.contracts import (
     KubeConflict,
     KubeError,
     NullMetrics,
+    PolicyCallResult,
     PremiseReport,
+    RouterInfo,
 )
 from dynamo.planner.retune.live.state import (
     STATE_ANNOTATION,
@@ -59,6 +86,7 @@ from dynamo.planner.retune.live.supervisor import (
     plan_initialization,
     window_index,
 )
+from dynamo.planner.retune.sweep import SweepResult
 from dynamo.planner.tests.live_retune_fakes import FakeRetuneKube
 from dynamo.planner.tests.unit.test_live_retune_state import live_config
 
@@ -81,11 +109,17 @@ CREDIT = "overlap_score_credit"
 SCALE = "prefill_load_scale"
 TEMP = "router_temperature"
 KEYS = (CREDIT, SCALE, TEMP)
-DOMAIN = {CREDIT: [0.5, 1.0], SCALE: [1.0], TEMP: [0.0, 0.2]}
-VARIANTS = {
-    "a": {"aggregated": {CREDIT: 1.0, SCALE: 1.0, TEMP: 0.0, "host": 0.75}},
-    "b": {"aggregated": {CREDIT: 0.5, SCALE: 1.0, TEMP: 0.0, "host": 0.75}},
+# The searched router domain of live_config(), by AISimulate knob name.
+ROUTER = {
+    "overlap_score_credit": {"choices": [0.5, 1.0]},
+    "prefill_load_scale": 1.0,
+    "temperature": {"choices": [0.0, 0.2]},
 }
+# The same domain by live knob name.
+DOMAIN = {CREDIT: [0.5, 1.0], SCALE: [1.0], TEMP: [0.0, 0.2]}
+# Two frontend startups: the KvRouterConfig JSON the frontend parses to.
+ROUTER_CONFIG = {"a": {CREDIT: 1.0}, "b": {CREDIT: 0.5}}
+SPEC_COUNTS = WorkerCounts(ready_num_decode=2)
 # The due window at START_WALL.
 DUE0 = math.floor((START_WALL - GRACE) / INTERVAL) - 1
 # The window in progress at START_WALL (the one after DUE0). First enable
@@ -95,6 +129,35 @@ K0 = math.floor(START_WALL / INTERVAL)
 assert K0 == DUE0 + 1
 
 
+def resolver(variant: str) -> bootstrap.KvRouterResolver:
+    return bootstrap.KvRouterResolver(ROUTER_CONFIG[variant], ("aggregated",))
+
+
+def by_wt(variant: str, flat: dict[str, float]) -> dict[str, dict[str, float]]:
+    return resolver(variant).by_wt(flat)
+
+
+def startup_flat(variant: str) -> dict[str, float]:
+    return resolver(variant).startup_flat(KEYS)
+
+
+# policy_parameters("aggregated") of each startup: its routers' 8 parameters.
+_DEFAULT_POLICY = {
+    "decode_active_request_weight": 0.0,
+    "disk_cache_hit_weight": 0.25,
+    "host_cache_hit_weight": 0.75,
+    "overlap_score_credit": 1.0,
+    "overlap_score_credit_decay": 0.0,
+    "prefill_load_scale": 1.0,
+    "router_temperature": 0.0,
+    "shared_cache_multiplier": 0.0,
+}
+VARIANTS = {
+    variant: {"aggregated": {**_DEFAULT_POLICY, **config}}
+    for variant, config in ROUTER_CONFIG.items()
+}
+
+
 def window(k: int) -> tuple[float, float, float]:
     start = k * INTERVAL
     return start, start + INTERVAL, start + INTERVAL + GRACE
@@ -102,14 +165,6 @@ def window(k: int) -> tuple[float, float, float]:
 
 def end_ms(k: int) -> int:
     return int(round(window(k)[1] * 1000))
-
-
-def by_wt(variant: str, flat: dict[str, float]) -> dict[str, dict[str, float]]:
-    return {wt: {**params, **flat} for wt, params in VARIANTS[variant].items()}
-
-
-def startup_flat(variant: str) -> dict[str, float]:
-    return {key: VARIANTS[variant]["aggregated"][key] for key in KEYS}
 
 
 # ------------------------------------------------------------------ fakes
@@ -129,6 +184,19 @@ class Clock:
     def advance(self, seconds: float) -> None:
         self.wall += seconds
         self.mono += seconds
+
+
+class AdapterClock(WallClock):
+    """The engine adapter's clock: monotonic time is the test's."""
+
+    def __init__(self, clock: Clock) -> None:
+        self._clock = clock
+
+    def now(self) -> float:
+        return self._clock.time()
+
+    def monotonic(self) -> float:
+        return self._clock.monotonic()
 
 
 async def inline(call):
@@ -218,7 +286,9 @@ class FakeFrontend:
 
 
 class FakeActuator:
-    """§4.8 over a ``FakeFrontend``: latch, apply/rollback/observe, parity."""
+    """The router actuator's rules over a ``FakeFrontend``: latch, apply,
+    rollback, observe and parity. Like ``RouterActuator`` it PATCHes a router
+    only once the persisted ``initials`` hold its initial."""
 
     def __init__(
         self, frontend: FakeFrontend, owner: str, advisory: bool, maps
@@ -264,6 +334,8 @@ class FakeActuator:
                     frontend.reset(router, self.owner, self.advisory, target.mode)
                     self.latched[router.router_id] = dict(router.config)
                     known = router.config
+                if initials.get(router.router_id) != known:
+                    continue  # held until the state records the initial
                 if known != self.startup_maps.get(router.worker_type):
                     continue
                 desired = target.desired_by_wt[router.worker_type]
@@ -312,122 +384,176 @@ class FakeActuator:
         )
 
 
-class FakeResolver:
-    def __init__(self, maps) -> None:
-        self.maps = maps
+class StubSweeps:
+    """The ``sweep_runner`` of every process: a sweep runs on its adapter's
+    sweep thread until the test finishes it, or until its abort or cancel
+    event is set. Results are made on the test's thread, so a seeded run
+    is deterministic."""
 
-    def startup_flat(self, keys):
-        return {key: float(self.maps["aggregated"][key]) for key in keys}
+    @dataclasses.dataclass
+    class Running:
+        cancel: threading.Event
+        abort: Optional[threading.Event]
+        done: threading.Event = dataclasses.field(default_factory=threading.Event)
+        result: Optional[SweepResult] = None
 
-    def by_wt(self, flat):
-        return {wt: {**params, **flat} for wt, params in self.maps.items()}
+        def stopping(self) -> bool:
+            return self.cancel.is_set() or (
+                self.abort is not None and self.abort.is_set()
+            )
 
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._running: dict[int, StubSweeps.Running] = {}
+        self._closed = False
+        self.requests: list[Any] = []
 
-class FakeController:
-    """The hook-facing surface of ``RetuneController`` plus a tick model."""
+    def __call__(self, request, *, cancel, abort, context):
+        running = StubSweeps.Running(cancel, abort)
+        with self._cond:
+            self._running[id(request)] = running
+            self.requests.append(request)
+            self._cond.notify_all()
+        try:
+            while not running.done.wait(0.002):
+                if self._closed or cancel.is_set():
+                    return SweepResult(status="failed", failure_reason="shutdown")
+                if abort is not None and abort.is_set():
+                    return SweepResult(
+                        status="failed", failure_reason="lost_leadership"
+                    )
+            assert running.result is not None
+            return running.result
+        finally:
+            with self._cond:
+                del self._running[id(request)]
+                self._cond.notify_all()
 
-    def __init__(self, *, generation: int, variant: str) -> None:
-        self.generation = generation
-        self.variant = variant
-        self.router_keys = KEYS
-        self.router_domain = {key: list(values) for key, values in DOMAIN.items()}
-        self.desired = startup_flat(variant)
-        self.last_k = -1
-        self.pending: Optional[dict[str, Any]] = None
-        self.closed = False
-        self.dropped: list[int] = []
-        self.rewinds: list[int] = []
-        self.restored: list[dict[str, float]] = []
-        self.started: list[tuple[float, Optional[float]]] = []
+    def finish(self, controller: RetuneController, result_for) -> bool:
+        """Finish the controller's pending sweep with ``result_for(request)``
+        and wait until it returned; ``False`` when none is pending."""
 
-    def start(self, start_s: float, phase_s: Optional[float] = None) -> None:
-        self.started.append((start_s, phase_s))
-        self.last_k = -1
+        pending = controller._pending
+        if pending is None or pending.future.done():
+            return False
+        with self._cond:
+            assert self._cond.wait_for(
+                lambda: id(pending.request) in self._running or pending.future.done(),
+                timeout=10,
+            )
+            running = self._running.get(id(pending.request))
+            if running is None:
+                return False
+            running.result = result_for(pending.request)
+            running.done.set()
+        pending.future.result(timeout=10)
+        return True
 
-    def drop_pending(self) -> None:
-        if self.pending is not None:
-            if self.pending["abort"] is not None:
-                self.pending["abort"].set()
-            self.dropped.append(self.pending["k"])
-            self.pending = None
+    def quiesce(self, controllers) -> None:
+        """Wait until every stopped sweep returned and every pending sweep
+        runs, so no sweep starts after the test's clock moved on."""
 
-    def rewind(self, last_decided_k: int) -> None:
-        self.rewinds.append(last_decided_k)
-        if self.pending is None:
-            self.last_k = min(self.last_k, last_decided_k)
+        def quiet() -> bool:
+            if any(running.stopping() for running in self._running.values()):
+                return False
+            for controller in controllers:
+                pending = controller._pending
+                if (
+                    pending is not None
+                    and not pending.future.done()
+                    and id(pending.request) not in self._running
+                ):
+                    return False
+            return True
 
-    def restore_desired(self, flat) -> None:
-        missing = set(self.router_keys) - set(flat)
-        if missing:
-            raise ValueError(f"missing {missing}")
-        self.desired = {key: float(flat[key]) for key in self.router_keys}
-        self.restored.append(dict(self.desired))
+        with self._cond:
+            assert self._cond.wait_for(quiet, timeout=10)
 
     def close(self) -> None:
-        self.closed = True
+        with self._cond:
+            self._closed = True
 
-    def current(self) -> RetuneParams:
-        return RetuneParams(router=dict(self.desired))
 
-    # -- tick model (what on_tick does with the hooks) --
+def failed(request) -> SweepResult:
+    return SweepResult(status="failed", error="injected", failure_reason="crn_mismatch")
 
-    def tick(self, sup: LiveRetuneSupervisor, now_s: float, rng, advisory: bool):
-        decisions: list[RetuneDecision] = []
-        pending = self.pending
-        if pending is not None and pending["done"]:
-            self.pending = None
-            k = pending["k"]
-            if pending["abort"] is not None and pending["abort"].is_set():
-                # failed(lost_leadership): no decision, rewind.
-                self.dropped.append(k)
-                self.last_k = min(self.last_k, k - 1)
-            elif not sup.harvest_allowed(pending["generation"]):
-                self.dropped.append(k)
-                self.last_k = min(self.last_k, k - 1)
-            else:
-                decisions.append(self._decide(k, now_s, rng, advisory))
-        due = math.floor((now_s - GRACE) / INTERVAL + 1e-9) - 1
-        if due > self.last_k:
-            gate = sup.launch_gate(due, window(due))
-            if gate.reason == "already_decided":
-                self.last_k = due
-            elif gate.reason is None:
-                assert gate.spec_replicas and gate.abort is not None
-                self.last_k = due
-                if self.pending is not None:
-                    abort = self.pending["abort"]
-                    # A busy behind a sweep the supervisor abandoned (abort
-                    # set, not dropped) consumes the window for nothing.
-                    assert (
-                        abort is None or not abort.is_set()
-                    ), "busy behind an aborted sweep"
-                    decisions.append(make_decision(due, "busy", self.current()))
-                else:
-                    self.pending = {
-                        "k": due,
-                        "generation": self.generation,
-                        "abort": gate.abort,
-                        "done": False,
-                    }
-        return SimpleNamespace(
-            retune_decisions=decisions,
-            router_parameters=by_wt(self.variant, self.desired),
+
+def scored(best=None):
+    """A sweep result whose ``best`` candidate (else none) beats the rest."""
+
+    def result_for(request) -> SweepResult:
+        return SweepResult(
+            status="ok",
+            num_requests=10,
+            scores={
+                candidate.key(): (2.0 if candidate.router == best else 1.0)
+                for candidate in request.candidates
+            },
+            wall_s=1.0,
         )
 
-    def _decide(self, k, now_s, rng, advisory) -> RetuneDecision:
-        previous = self.current()
-        chosen = {key: rng.choice(values) for key, values in DOMAIN.items()}
-        roll = rng.random()
-        if roll < 0.15:
-            return make_decision(
-                k, "failed", previous, failure_reason="replicas_changed"
-            )
-        if roll < 0.35 or chosen == self.desired:
-            return make_decision(k, "kept", previous)
-        if advisory:
-            return make_decision(k, "advisory", previous, chosen=chosen)
-        self.desired = dict(chosen)
-        return make_decision(k, "applied", previous, chosen=chosen)
+    return result_for
+
+
+class TracedController(RetuneController):
+    """The real controller, remembering the windows the supervisor dropped."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.dropped: list[int] = []
+
+    def drop_pending(self) -> None:
+        if self._pending is not None:
+            self.dropped.append(self._pending.request.window_index)
+        super().drop_pending()
+
+
+@pytest.fixture(autouse=True)
+def traced_controllers(monkeypatch):
+    # The engine adapter looks the controller class up when it builds one.
+    monkeypatch.setattr(controller_module, "RetuneController", TracedController)
+    yield
+    while WORLDS:
+        WORLDS.pop().close()
+
+
+def controller_config(*, advisory: bool = False) -> PlannerConfig:
+    """The real controller's config, with this file's windows.
+
+    Built with the replay executor: the live config's timeout must leave
+    600 s before the next window, which 600 s windows cannot, and the
+    controller never reads the executor.
+    """
+
+    return PlannerConfig(
+        namespace="test-ns",
+        mode="agg",
+        advisory=advisory,
+        enable_load_scaling=False,
+        enable_throughput_scaling=False,
+        retune={
+            "interval_seconds": INTERVAL,
+            "grace_seconds": GRACE,
+            "timeout_seconds": TIMEOUT,
+            "router": ROUTER,
+        },
+    )
+
+
+def retune_inputs(variant: str) -> RetuneInputs:
+    return RetuneInputs(
+        engine=RetuneEngineSpec(
+            router_mode="kv_router", router_config=dict(ROUTER_CONFIG[variant])
+        ),
+        trace_paths=("/trace/segments/graph",),
+    )
+
+
+def variant_of(inputs: RetuneInputs) -> str:
+    (variant,) = [
+        v for v, c in ROUTER_CONFIG.items() if c == inputs.engine.router_config
+    ]
+    return variant
 
 
 def make_decision(
@@ -463,41 +589,59 @@ def make_decision(
 
 
 class FakeHost:
-    """``NativePlannerBase`` as the supervisor sees it."""
+    """``NativePlannerBase`` as the supervisor sees it: the config lock and
+    the real engine adapter, whose controllers share one sweep thread."""
 
-    def __init__(self, spec: Spec, clock: Clock, controller: Optional[FakeController]):
-        self.spec = spec
-        self.clock = clock
-        self._engine = SimpleNamespace(retune_controller=controller)
+    def __init__(
+        self,
+        world: World,
+        hooks: RetuneHooks,
+        inputs: Optional[RetuneInputs],
+        *,
+        advisory: bool,
+    ) -> None:
+        self.clock = world.clock
         self._config_lock = asyncio.Lock()
-        self.replacements: list[tuple[Any, int, Optional[int]]] = []
-        self.fail_replace = False
-        self.controllers: list[FakeController] = (
-            [] if controller is None else [controller]
+        self._engine = OrchestratorEngineAdapter(
+            controller_config(advisory=advisory),
+            WorkerCapabilities(
+                decode=EngineCapabilities(
+                    num_gpu=1, max_num_batched_tokens=2048, max_kv_tokens=16384
+                )
+            ),
+            clock=AdapterClock(world.clock),
+            retune_inputs=inputs,
+            retune_hooks=hooks,
         )
+        if self.controller is not None:
+            # What the adapter's initial_tick does.
+            self.controller.start(world.clock.time(), hooks.phase_s)
+        # The frontend startup the current controller was built for.
+        self.variant = "a" if inputs is None else variant_of(inputs)
+        self.replacements: list[tuple[Any, int]] = []
+        self.fail_replace = False
 
     @property
-    def controller(self) -> Optional[FakeController]:
+    def controller(self) -> Optional[TracedController]:
         return self._engine.retune_controller
 
-    async def replace_live_retune(self, inputs, *, generation, last_decided_k):
+    async def replace_live_retune(self, inputs, *, generation):
         async with self._config_lock:
-            self.replacements.append((inputs, generation, last_decided_k))
-            old = self._engine.retune_controller
-            self._engine.retune_controller = None
-            if old is not None:
-                old.drop_pending()
-                old.close()
-            if inputs is None:
-                return
+            self.replacements.append((inputs, generation))
+            now = self.clock.time()
             if self.fail_replace:
+                self._engine.replace_retune(None, generation=generation, now_s=now)
                 raise ValueError("controller construction failed")
-            new = FakeController(generation=generation, variant=inputs.variant)
-            new.start(self.clock.time(), 0.0)
-            if last_decided_k is not None:
-                new.rewind(last_decided_k)
-            self._engine.retune_controller = new
-            self.controllers.append(new)
+            self._engine.replace_retune(inputs, generation=generation, now_s=now)
+            if inputs is not None:
+                self.variant = variant_of(inputs)
+
+    def close(self) -> None:
+        if self.controller is not None:
+            self.controller.close()
+        executor = self._engine._retune_executor
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
 
 
 class Spec:
@@ -515,7 +659,7 @@ class Spec:
     def startup(self) -> FrontendStartup:
         return FrontendStartup(
             router_mode="kv_router",
-            router_config={},
+            router_config=dict(ROUTER_CONFIG[self.variant]),
             startup_maps=copy.deepcopy(VARIANTS[self.variant]),
             frontend_component="Frontend",
             replicas=self.frontend_replicas,
@@ -534,23 +678,30 @@ class Spec:
                 reasons=tuple(reasons),
             ),
             startup=self.startup(),
-            inputs=SimpleNamespace(variant=self.variant) if self.p4_ok else None,
+            inputs=retune_inputs(self.variant) if self.p4_ok else None,
             spec_replicas=None if self.replicas is None else dict(self.replicas),
             dgd=DgdRef(DGD_NAME, "test-ns", self.uid, self.dynamo_namespace),
         )
 
 
+# Worlds of the running test, closed after it (sweep threads end).
+WORLDS: list[World] = []
+
+
 class World:
-    """Shared kube, frontend, spec and clock of one test."""
+    """Shared kube, frontend, spec, clock and sweeps of one test."""
 
     def __init__(self, kube: Optional[FakeRetuneKube] = None) -> None:
         self.clock = Clock()
         self.kube = kube or FakeRetuneKube(now=self.clock.time)
         self.spec = Spec()
         self.frontend = FakeFrontend(VARIANTS["a"])
+        self.sweeps = StubSweeps()
+        self.hosts: list[FakeHost] = []
         self.kube.put_dgd(
             {"metadata": {"name": DGD_NAME, "uid": "uid-1"}, "spec": {"components": []}}
         )
+        WORLDS.append(self)
 
     def shared_state(self) -> Optional[RetuneState]:
         lease = self.kube.leases.get(STATE_NAME)
@@ -561,6 +712,11 @@ class World:
     def holder(self) -> Optional[str]:
         lease = self.kube.leases.get(LEADER_NAME)
         return None if lease is None else lease["spec"].get("holderIdentity")
+
+    def close(self) -> None:
+        self.sweeps.close()
+        for host in self.hosts:
+            host.close()
 
 
 @dataclasses.dataclass
@@ -574,7 +730,7 @@ class Process:
     alive: bool = True
 
     @property
-    def controller(self) -> Optional[FakeController]:
+    def controller(self) -> Optional[TracedController]:
         return self.host.controller
 
 
@@ -607,19 +763,14 @@ def make_process(
     canary=None,
     reconciler=None,
     sweep_runner=None,
-    context_factory=None,
+    context_factory=lambda supervisor: None,
     settings: Optional[SupervisorSettings] = None,
     blocking=None,
+    actuator_factory=None,
 ) -> Process:
     kube = kube or world.kube
     metrics = RecordingMetrics()
     evaluation = world.spec.evaluation()
-    controller = (
-        FakeController(generation=0, variant=world.spec.variant)
-        if evaluation.inputs is not None
-        else None
-    )
-    host = FakeHost(world.spec, world.clock, controller)
     settings = settings or settings_for(advisory=advisory, promote=promote)
     sup = LiveRetuneSupervisor(
         settings=settings,
@@ -627,21 +778,24 @@ def make_process(
         evaluation=evaluation,
         identity=f"{name}/{len(world.kube.calls)}",
         premise_evaluator=world.spec.evaluation,
-        actuator_factory=lambda dgd, maps: FakeActuator(
-            world.frontend, name, advisory, maps
-        ),
+        actuator_factory=actuator_factory
+        or (lambda dgd, maps: FakeActuator(world.frontend, name, advisory, maps)),
         fingerprint_fn=lambda startup: f"fp-{None if startup is None else startup.fingerprint_source}",
-        resolver_factory=lambda startup: FakeResolver(startup.startup_maps),
+        resolver_factory=lambda startup: bootstrap.KvRouterResolver(
+            startup.router_config, ("aggregated",)
+        ),
         reconciler=reconciler,
         metrics=metrics,
         canary=canary,
-        sweep_runner=sweep_runner,
+        sweep_runner=sweep_runner or world.sweeps,
         context_factory=context_factory,
         clock=world.clock.time,
         monotonic=world.clock.monotonic,
         sleep=no_sleep,
         blocking=blocking or inline,
     )
+    host = FakeHost(world, sup.hooks(), evaluation.inputs, advisory=advisory)
+    world.hosts.append(host)
     return Process(name, sup, host, metrics, advisory, kube)
 
 
@@ -672,13 +826,18 @@ async def settle(processes: list[Process], world: World, rounds: int = 6) -> Non
 
 
 def enqueue(process: Process, *decisions: RetuneDecision) -> None:
+    """Hand the supervisor a tick's decisions with the controller's routers."""
+
     controller = process.controller
-    variant = controller.variant if controller is not None else "a"
-    desired = controller.desired if controller is not None else startup_flat("a")
+    desired = (
+        controller.current_point().router
+        if controller is not None
+        else startup_flat("a")
+    )
     process.sup.on_effects(
         SimpleNamespace(
             retune_decisions=list(decisions),
-            router_parameters=by_wt(variant, desired),
+            router_parameters=by_wt(process.host.variant, desired),
         )
     )
 
@@ -916,7 +1075,7 @@ async def test_applied_decision_is_persisted_then_deployed() -> None:
     process = await leading(world)
     sup, controller = process.sup, process.controller
     chosen = {CREDIT: 0.5, SCALE: 1.0, TEMP: 0.2}
-    controller.desired = dict(chosen)
+    controller.restore_desired(chosen)
     enqueue(process, make_decision(K0 + 1, "applied", chosen=chosen))
     assert sup.outbox_size == 1
     assert process.metrics.of("decision") == []  # counted only once persisted
@@ -1017,14 +1176,16 @@ async def test_consecutive_write_failures_reinitialize_and_rewind() -> None:
     process = await leading(world)
     sup, controller = process.sup, process.controller
     term_seq = sup.term_seq
+    # Window K0 + 2 launches (K0 + 1 is skipped: K0 + 2 is due already).
+    world.clock.wall = window(K0 + 2)[2]
+    await controller.on_tick(world.clock.time(), SPEC_COUNTS)
+    assert controller._pending.request.window_index == K0 + 2
     world.kube.fail(
         "replace_lease",
         KubeError("timeout"),
         times=3,
         match=lambda target: target[0] == STATE_NAME,
     )
-    controller.pending = {"k": K0 + 2, "generation": 0, "abort": None, "done": False}
-    controller.last_k = K0 + 2
     enqueue(process, make_decision(K0 + 1, "kept"))
     for _ in range(3):
         await sup.outbox_round()
@@ -1035,8 +1196,8 @@ async def test_consecutive_write_failures_reinitialize_and_rewind() -> None:
     assert sup.outbox_size == 0
     # The sweep was dropped and the controller rewound to the last decided
     # window, so both windows can still run.
-    assert controller.pending is None and controller.dropped == [K0 + 2]
-    assert controller.last_k == K0
+    assert controller._pending is None and controller.dropped == [K0 + 2]
+    assert controller._last_k == K0
     assert world.shared_state().leader_term == sup.term
 
 
@@ -1084,10 +1245,10 @@ async def test_decisions_are_dropped_and_rewound_without_leadership() -> None:
     world = World()
     process = await started(world)
     controller = process.controller
-    controller.last_k = K0 + 1
+    controller._last_k = K0 + 1
     enqueue(process, make_decision(K0 + 1, "kept"))
     assert process.sup.outbox_size == 0
-    assert controller.rewinds and controller.last_k == -1
+    assert controller._last_k == -1  # no state: every window is due again
 
 
 async def test_a_foreign_term_forces_reinitialization() -> None:
@@ -1120,7 +1281,8 @@ async def test_a_late_write_of_an_earlier_term_fails() -> None:
 
 
 def steal_lease(world: World, identity: str) -> None:
-    """The leadership Lease changes hands without expiring (§4.7.9)."""
+    """The leadership Lease changes hands without expiring (an admin edit,
+    or a contender whose clock runs fast)."""
 
     lease = world.kube.leases[LEADER_NAME]
     lease["spec"]["holderIdentity"] = identity
@@ -1169,14 +1331,16 @@ async def test_restart_restores_the_persisted_point() -> None:
     world = World()
     first = await leading(world)
     chosen = {CREDIT: 0.5, SCALE: 1.0, TEMP: 0.2}
-    first.controller.desired = dict(chosen)
+    first.controller.restore_desired(chosen)
     enqueue(first, make_decision(K0 + 1, "applied", chosen=chosen))
     await first.sup.outbox_round()
     await first.sup.stop()
     assert world.holder() is None  # released
     second = await leading(world, "p2")
-    assert second.controller.restored == [chosen]
-    assert second.controller.rewinds[-1] == K0 + 1
+    assert second.controller.current_point().router == chosen
+    # The persisted window is decided: the gate skips it, the next launches.
+    assert second.sup.launch_gate(K0 + 1, window(K0 + 1)).reason == "already_decided"
+    assert second.sup.launch_gate(K0 + 2, window(K0 + 2)).reason is None
     state = world.shared_state()
     assert state.leader_term == second.sup.term and state.deploy_seq == 2
     assert second.sup.target().desired_by_wt == by_wt("a", chosen)
@@ -1186,7 +1350,7 @@ async def test_fingerprint_change_resets_with_a_two_phase_rollback() -> None:
     world = World()
     first = await leading(world)
     chosen = {CREDIT: 0.5, SCALE: 1.0, TEMP: 0.2}
-    first.controller.desired = dict(chosen)
+    first.controller.restore_desired(chosen)
     enqueue(first, make_decision(K0 + 1, "applied", chosen=chosen))
     await first.sup.outbox_round()
     await first.sup.control_round()
@@ -1200,7 +1364,7 @@ async def test_fingerprint_change_resets_with_a_two_phase_rollback() -> None:
     state = world.shared_state()
     assert state.rollback_pending and state.by_wt == VARIANTS["b"]
     assert state.fingerprint == "fp-b" and state.deploy_seq == 3
-    assert second.controller.restored == [startup_flat("b")]
+    assert second.controller.current_point().router == startup_flat("b")
     assert second.sup.target().mode == "rollback"
     # Reset once, then converged: completes after a lease duration.
     resets = len(world.frontend.writes)
@@ -1222,7 +1386,7 @@ async def test_applied_during_a_pending_rollback_wins() -> None:
     world = World()
     first = await leading(world)
     chosen = {CREDIT: 0.5, SCALE: 1.0, TEMP: 0.2}
-    first.controller.desired = dict(chosen)
+    first.controller.restore_desired(chosen)
     enqueue(first, make_decision(K0 + 1, "applied", chosen=chosen))
     await first.sup.outbox_round()
     await first.sup.stop()
@@ -1232,8 +1396,9 @@ async def test_applied_during_a_pending_rollback_wins() -> None:
     assert world.shared_state().rollback_pending
     seq = world.shared_state().deploy_seq
     # An applied decision lands while the rollback is pending.
-    second.controller.desired = {CREDIT: 1.0, SCALE: 1.0, TEMP: 0.2}
-    enqueue(second, make_decision(K0 + 2, "applied", chosen=second.controller.desired))
+    applied = {CREDIT: 1.0, SCALE: 1.0, TEMP: 0.2}
+    second.controller.restore_desired(applied)
+    enqueue(second, make_decision(K0 + 2, "applied", chosen=applied))
     await second.sup.outbox_round()
     state = world.shared_state()
     assert not state.rollback_pending and state.deploy_seq == seq + 1
@@ -1256,7 +1421,7 @@ async def test_a_stale_rollback_complete_is_discarded(racing: str) -> None:
     world = World()
     first = await leading(world)
     chosen = {CREDIT: 0.5, SCALE: 1.0, TEMP: 0.2}
-    first.controller.desired = dict(chosen)
+    first.controller.restore_desired(chosen)
     enqueue(first, make_decision(K0 + 1, "applied", chosen=chosen))
     await first.sup.outbox_round()
     await first.sup.stop()
@@ -1309,7 +1474,7 @@ async def test_advisory_switch_rolls_back_only_what_was_deployed() -> None:
     world = World()
     first = await leading(world)
     chosen = {CREDIT: 0.5, SCALE: 1.0, TEMP: 0.2}
-    first.controller.desired = dict(chosen)
+    first.controller.restore_desired(chosen)
     enqueue(first, make_decision(K0 + 1, "applied", chosen=chosen))
     await first.sup.outbox_round()
     await first.sup.control_round()
@@ -1317,7 +1482,8 @@ async def test_advisory_switch_rolls_back_only_what_was_deployed() -> None:
     second = await leading(world, "p2", advisory=True)
     state = world.shared_state()
     assert state.mode == "advisory" and state.rollback_pending
-    assert second.controller.restored == []  # advisory never restores
+    # Advisory never restores a deployed point into the controller.
+    assert second.controller.current_point().router == startup_flat("a")
     await settle([second], world, rounds=5)
     state = world.shared_state()
     assert not state.rollback_pending
@@ -1332,13 +1498,13 @@ async def test_advisory_switch_rolls_back_only_what_was_deployed() -> None:
 
 
 async def test_advisory_rollback_leaves_unlatched_routers_alone() -> None:
-    """§4.8: a router changed at revision > 0 before anyone latched it is
-    reset to learn its initial only in active mode."""
+    """A router changed at revision > 0 before anyone latched it is reset to
+    learn its initial only in active mode."""
 
     world = World()
     first = await leading(world)
     chosen = {CREDIT: 0.5, SCALE: 1.0, TEMP: 0.2}
-    first.controller.desired = dict(chosen)
+    first.controller.restore_desired(chosen)
     enqueue(first, make_decision(K0 + 1, "applied", chosen=chosen))
     await first.sup.outbox_round()
     await first.sup.control_round()
@@ -1399,7 +1565,7 @@ async def test_promote_applies_the_last_advisory_recommendation() -> None:
     state = world.shared_state()
     assert state.mode == "active" and state.by_wt == by_wt("a", chosen)
     assert state.history[-1]["outcome"] == "promoted"
-    assert second.controller.restored == [chosen]
+    assert second.controller.current_point().router == chosen
     assert frontend_configs(world) == [by_wt("a", chosen)["aggregated"]]
 
 
@@ -1444,7 +1610,7 @@ async def test_spec_flip_rebuilds_rolls_back_and_recovers() -> None:
     process = await leading(world)
     sup, host = process.sup, process.host
     chosen = {CREDIT: 0.5, SCALE: 1.0, TEMP: 0.2}
-    process.controller.desired = dict(chosen)
+    process.controller.restore_desired(chosen)
     enqueue(process, make_decision(K0 + 1, "applied", chosen=chosen))
     await sup.outbox_round()
     await sup.control_round()
@@ -1452,8 +1618,9 @@ async def test_spec_flip_rebuilds_rolls_back_and_recovers() -> None:
     # P8 breaks (a second frontend without replica sync).
     world.spec.spec_ok = False
     await sup.control_round()
-    assert host.replacements[-1][1:] == (1, K0 + 1)
-    assert old_controller.closed and sup.generation == 1
+    assert host.replacements[-1][1] == 1 and sup.generation == 1
+    assert process.controller is not old_controller
+    assert old_controller._cancel.is_set()  # closed
     state = world.shared_state()
     assert state.rollback_pending and state.by_wt == VARIANTS["a"]
     assert sup.target().mode == "rollback" and not sup.ready()
@@ -1476,7 +1643,7 @@ async def test_p4_failure_disables_until_it_recovers() -> None:
     assert not sup.ready()
     world.spec.p4_ok = True
     await sup.control_round()
-    assert host.replacements[-1][0].variant == "a"
+    assert variant_of(host.replacements[-1][0]) == "a"
     assert process.controller is not None and sup.generation == 1
     await sup.control_round()
     assert sup.ready()
@@ -1645,7 +1812,7 @@ async def test_a_hung_reconciler_never_blocks_revalidation_or_actuation() -> Non
         # The round runs in its own task; the control loop goes on and never
         # starts a second round while the first one's call still runs.
         chosen = {CREDIT: 0.5, SCALE: 1.0, TEMP: 0.2}
-        process.controller.desired = dict(chosen)
+        process.controller.restore_desired(chosen)
         enqueue(process, make_decision(K0 + 1, "applied", chosen=chosen))
         await sup.outbox_round()
         await asyncio.wait_for(sup.control_round(), 5)
@@ -1753,39 +1920,51 @@ async def test_sweep_fn_binds_the_context_and_never_raises() -> None:
     result = process.sup.sweep_fn(request, cancel=cancel, abort=abort)
     assert result.status == "failed" and result.failure_reason == "sweep_error"
     assert "boom" in result.error
-    no_context = await started(world, "p2", sweep_runner=runner)
+    no_context = await started(world, "p2", sweep_runner=runner, context_factory=None)
     result = no_context.sup.sweep_fn(request, cancel=cancel, abort=abort)
     assert result.status == "failed"
 
 
-async def test_stop_aborts_waits_for_the_sweep_and_releases() -> None:
+async def test_stop_aborts_the_sweep_and_waits_for_the_sweep_thread() -> None:
     world = World()
-    entered = threading.Event()
+    process = await leading(world)
+    sup, controller = process.sup, process.controller
+    world.clock.wall = window(K0 + 1)[2]
+    await controller.on_tick(world.clock.time(), SPEC_COUNTS)
+    pending = controller._pending
+    world.sweeps.quiesce([controller])  # running on the sweep thread
+    abort = pending.abort
 
-    def runner(request, *, cancel, abort, context):
-        entered.set()
-        assert abort.wait(5.0)
-        return "aborted"
-
-    process = await leading(
-        world, sweep_runner=runner, context_factory=lambda sup: None
-    )
-    sup = process.sup
-    gate = sup.launch_gate(K0 + 1, window(K0 + 1))
-    thread = threading.Thread(
-        target=sup.sweep_fn,
-        args=(SimpleNamespace(window_index=K0 + 1),),
-        kwargs={"cancel": threading.Event(), "abort": gate.abort},
-    )
-    thread.start()
-    assert entered.wait(5.0)
-    process.sup._sleep = lambda s: asyncio.sleep(0.01)
-    process.sup._monotonic = time.monotonic
     await sup.stop()
-    thread.join(5.0)
-    assert gate.abort.is_set() and sup._sweeps_in_flight == 0
+
+    # drop_pending set the sweep's abort; stop waited for the sweep thread.
+    assert abort.is_set() and pending.future.done()
+    assert pending.future.result().failure_reason == "lost_leadership"
     assert world.holder() is None and not sup.is_leader()
     await sup.stop()  # idempotent
+
+
+async def test_stop_gives_up_on_a_sweep_that_never_returns(caplog) -> None:
+    world = World()
+    release = threading.Event()
+
+    def stuck(request, *, cancel, abort, context):
+        release.wait(10)  # ignores its abort
+        return SweepResult(status="failed")
+
+    process = await leading(
+        world, sweep_runner=stuck, settings=settings_for(stop_timeout_s=0.05)
+    )
+    sup, controller = process.sup, process.controller
+    world.clock.wall = window(K0 + 1)[2]
+    await controller.on_tick(world.clock.time(), SPEC_COUNTS)
+    try:
+        with caplog.at_level(logging.WARNING):
+            await sup.stop()
+        assert "a sweep is still running at shutdown" in caplog.text
+        assert world.holder() is None
+    finally:
+        release.set()
 
 
 async def test_background_loops_run_and_stop() -> None:
@@ -1814,30 +1993,19 @@ async def test_hooks_are_the_adapter_hooks() -> None:
     world = World()
     process = await started(world)
     hooks = process.sup.hooks()
-    from dynamo.planner.plugins.orchestrator.engine_adapter import RetuneHooks
-
     assert isinstance(hooks, RetuneHooks)
     assert hooks.launch_gate == process.sup.launch_gate
     assert hooks.harvest_allowed == process.sup.harvest_allowed
     assert hooks.sweep_fn == process.sup.sweep_fn and hooks.phase_s == 0.0
 
 
-async def test_decommission_rolls_back_then_deletes_everything() -> None:
-    world = World()
-    first = await leading(world)
-    chosen = {CREDIT: 0.5, SCALE: 1.0, TEMP: 0.2}
-    first.controller.desired = dict(chosen)
-    enqueue(first, make_decision(K0 + 1, "applied", chosen=chosen))
-    await first.sup.outbox_round()
-    await first.sup.control_round()
-    await first.sup.stop()
-    world.kube.create_request(
-        {"metadata": {"name": "rt-1", "labels": {LABEL_DGD_UID: "uid-1"}}}
-    )
+def decommission_supervisor(world: World) -> LiveRetuneSupervisor:
+    """The clean-up supervisor of a planner whose retune was removed."""
+
     frontend = SimpleNamespace(
         parse_frontend=lambda dgd, planner_mode: world.spec.startup()
     )
-    sup = bootstrap.build_decommission_supervisor(
+    return bootstrap.build_decommission_supervisor(
         live_config(),
         kube=world.kube,
         dgd=world.kube.get_dgd(DGD_NAME),
@@ -1852,6 +2020,21 @@ async def test_decommission_rolls_back_then_deletes_everything() -> None:
         sleep=no_sleep,
         blocking=inline,
     )
+
+
+async def test_decommission_rolls_back_then_deletes_everything() -> None:
+    world = World()
+    first = await leading(world)
+    chosen = {CREDIT: 0.5, SCALE: 1.0, TEMP: 0.2}
+    first.controller.restore_desired(chosen)
+    enqueue(first, make_decision(K0 + 1, "applied", chosen=chosen))
+    await first.sup.outbox_round()
+    await first.sup.control_round()
+    await first.sup.stop()
+    world.kube.create_request(
+        {"metadata": {"name": "rt-1", "labels": {LABEL_DGD_UID: "uid-1"}}}
+    )
+    sup = decommission_supervisor(world)
     await sup.start(SimpleNamespace(), background=False)
     for _ in range(6):
         if sup.decommissioned:
@@ -1863,6 +2046,30 @@ async def test_decommission_rolls_back_then_deletes_everything() -> None:
     assert frontend_configs(world) == [VARIANTS["a"]["aggregated"]]
     assert world.kube.requests == {} and world.kube.leases == {}
     assert sup.launch_gate(K0 + 1, window(K0 + 1)).reason == "not_leader"
+    await sup.stop()
+
+
+async def test_decommission_never_deletes_after_losing_its_term() -> None:
+    world = World()
+    first = await leading(world, advisory=True)  # nothing deployed
+    await first.sup.stop()
+    world.kube.create_request(
+        {"metadata": {"name": "rt-1", "labels": {LABEL_DGD_UID: "uid-1"}}}
+    )
+    sup = decommission_supervisor(world)
+    await sup.start(SimpleNamespace(), background=False)
+    await sup.lease_round()
+    assert sup.initialized and not world.shared_state().rollback_pending
+    # Another replica claims the state; this round's initials write (a
+    # restarted frontend) finds out before the clean-up would delete.
+    store = StateStore(world.kube, sup.dgd)
+    snapshot = store.read()
+    store.write(dataclasses.replace(snapshot.state, leader_term="9/x/1"), snapshot)
+    world.frontend.restart(VARIANTS["a"])
+    await sup.control_round()
+    assert not sup.decommissioned and not sup.initialized
+    assert set(world.kube.requests) == {"rt-1"}
+    assert set(world.kube.leases) == {STATE_NAME, LEADER_NAME}
     await sup.stop()
 
 
@@ -1923,6 +2130,7 @@ def test_build_retune_inputs_agg_and_disagg() -> None:
 
 def test_kv_router_resolver_matches_the_router_config() -> None:
     llm = pytest.importorskip("dynamo.llm")
+    assert VARIANTS == {variant: by_wt(variant, {}) for variant in ROUTER_CONFIG}
     resolver = bootstrap.KvRouterResolver({}, ("prefill", "decode"))
     flat = resolver.startup_flat(KEYS)
     default = llm.KvRouterConfig.from_json("{}")
@@ -1945,19 +2153,17 @@ class FakeFrontendModule:
         self.startup = startup
         self.p4_ok = p4_ok
         self.spec_ok = spec_ok
-        self.calls: list[dict] = []
 
     def parse_frontend(self, dgd, *, planner_mode):
         return self.startup if self.startup is not None else "P4: shell-wrapped"
 
-    def evaluate_premises(
-        self, dgd, *, planner_config, startup, parse_error, planner_replicas
-    ):
-        self.calls.append({"startup": startup, "parse_error": parse_error})
+    def evaluate_premises(self, dgd, *, planner_config):
+        parsed = self.startup is not None
         return PremiseReport(
-            p4_ok=self.p4_ok and startup is not None,
-            spec_ok=self.spec_ok and self.p4_ok and startup is not None,
-            reasons=() if startup is not None else (parse_error,),
+            p4_ok=self.p4_ok and parsed,
+            spec_ok=self.spec_ok and self.p4_ok and parsed,
+            reasons=() if parsed else ("P4: shell-wrapped",),
+            startup=self.startup,
         )
 
     def served_model_name(self, dgd):
@@ -1988,7 +2194,7 @@ def test_evaluate_spec() -> None:
         frontend=unparsed,
     )
     assert evaluation.inputs is None and evaluation.startup is None
-    assert unparsed.calls[0]["parse_error"] == "P4: shell-wrapped"
+    assert evaluation.report.reasons == ("P4: shell-wrapped",)
     with pytest.raises(ValueError):
         bootstrap.evaluate_spec(
             {"metadata": {"name": "x"}},
@@ -2072,38 +2278,27 @@ async def test_build_live_retune_uses_the_connector(monkeypatch) -> None:
 
 async def test_build_legacy_cleanup(monkeypatch) -> None:
     world = World()
-    from dynamo.planner.retune.live import kube as kube_module
-
+    world.kube.put_dgd(dgd_object(replicas=2))
     monkeypatch.setattr(
-        kube_module.KubernetesRetuneKube,
-        "from_kube_api",
-        classmethod(lambda cls, api: world.kube),
-    )
-    config = live_config().model_copy(update={"retune": None})
-    host = SimpleNamespace(
-        config=config,
-        environment=SimpleNamespace(
-            controller=SimpleNamespace(kube_api=object(), parent_dgd_name=DGD_NAME),
-        ),
-    )
-    assert await bootstrap.build_legacy_cleanup(host) is None  # nothing left over
-    StateStore(world.kube, DgdRef(DGD_NAME, "test-ns", "uid-1", "dyn")).write(
-        RetuneState(dgd_uid="uid-1"),
-        StateStore(world.kube, DgdRef(DGD_NAME, "test-ns", "uid-1", "dyn")).read(),
-    )
-    monkeypatch.setattr(
-        "dynamo.planner.retune.live.frontend_config.parse_frontend",
+        bootstrap.frontend_config,
+        "parse_frontend",
         lambda dgd, planner_mode: "P4: no frontend",
     )
-    monkeypatch.setattr(
-        "dynamo.planner.retune.live.metrics.RetuneMetrics", lambda: NullMetrics()
+    monkeypatch.setattr(bootstrap, "RetuneMetrics", NullMetrics)
+    host = SimpleNamespace(
+        config=live_config().model_copy(update={"retune": None}),
+        environment=SimpleNamespace(
+            controller=SimpleNamespace(parent_dgd_name=DGD_NAME),
+            runtime_namespace=lambda: "",
+        ),
     )
-    sup = await bootstrap.build_legacy_cleanup(host)
-    assert sup is not None and sup._settings.decommission
-    world.kube.fail("get_lease", KubeError("forbidden"))
-    assert await bootstrap.build_legacy_cleanup(host) is None
-    host.config = live_config()
-    assert await bootstrap.build_legacy_cleanup(host) is None
+    sup = await bootstrap.build_legacy_cleanup(host, world.kube)
+    assert sup._settings.decommission and sup.retune_inputs() is None
+    # The planner's configured namespace when the runtime has none.
+    assert sup.dgd == DgdRef(DGD_NAME, "test-ns", "uid-1", host.config.namespace)
+    world.kube.fail("get_dgd", KubeError("forbidden"))
+    with pytest.raises(KubeError):
+        await bootstrap.build_legacy_cleanup(host, world.kube)
 
 
 class PlannerEnvironment:
@@ -2131,41 +2326,60 @@ class PlannerEnvironment:
 
 
 class FakeCleanup:
-    def __init__(self, calls: list[str], start_error: Optional[Exception] = None):
+    def __init__(self, calls: list[str]):
         self.calls = calls
-        self.start_error = start_error
         self.host = None
 
     async def start(self, host) -> None:
         self.calls.append("cleanup.start")
         self.host = host
-        if self.start_error is not None:
-            raise self.start_error
 
     async def stop(self) -> None:
         self.calls.append("cleanup.stop")
 
 
-def planner_without_retune(monkeypatch, controller: Any, build):
-    """A ``NativePlannerBase`` without retune config whose legacy clean-up
-    is built by ``build(host)``; the engine bootstrap is a no-op."""
+def forbidden() -> KubeError:
+    error = KubeError("read leases/graph-planner-retune: HTTP 403: forbidden")
+    error.status = 403  # type: ignore[attr-defined]
+    return error
+
+
+def planner_without_retune(monkeypatch, controller: Any, *, leases=(), build=None):
+    """A ``NativePlannerBase`` without retune config; the engine bootstrap
+    is a no-op. ``leases`` is what the Lease check finds (or raises) and
+    ``build(host, kube)`` builds the clean-up."""
 
     from unittest.mock import patch
 
-    from dynamo.planner.core.base import NativePlannerBase
+    from dynamo.planner.core import base as base_module
 
     config = live_config(
         metric_reporting_prometheus_port=0, live_dashboard_port=0, control_api_port=0
     ).model_copy(update={"retune": None})
     environment = PlannerEnvironment(controller)
+    kube = object()
 
-    async def build_legacy_cleanup(host):
+    def find_retune_leases(found_kube, dgd_name, *, timeout_s):
+        assert found_kube is kube and dgd_name == DGD_NAME
+        environment.calls.append("leases.check")
+        if isinstance(leases, Exception):
+            raise leases
+        return tuple(leases)
+
+    async def build_legacy_cleanup(host, found_kube, *, timeout_s):
+        assert found_kube is kube
         environment.calls.append("cleanup.build")
         return await build(host)
 
+    monkeypatch.setattr(base_module, "find_retune_leases", find_retune_leases)
+    monkeypatch.setattr(
+        base_module.KubernetesRetuneKube,
+        "from_kube_api",
+        classmethod(lambda cls, api: kube),
+    )
     monkeypatch.setattr(bootstrap, "build_legacy_cleanup", build_legacy_cleanup)
     with patch("dynamo.planner.core.base.PlannerPrometheusMetrics"):
-        planner = NativePlannerBase(None, config, environment)
+        planner = base_module.NativePlannerBase(None, config, environment)
 
     async def bootstrap_engine():
         environment.calls.append("engine")
@@ -2183,10 +2397,15 @@ def kubernetes_connector() -> Any:
 
     from dynamo.planner.connectors.kubernetes import KubernetesConnector
 
-    return MagicMock(spec=KubernetesConnector)
+    connector = MagicMock(spec=KubernetesConnector)
+    connector.kube_api = object()
+    connector.parent_dgd_name = DGD_NAME
+    return connector
 
 
-async def test_a_planner_without_retune_runs_the_legacy_cleanup(monkeypatch) -> None:
+async def test_a_planner_without_retune_cleans_up_in_the_background(
+    monkeypatch,
+) -> None:
     cleanups: list[FakeCleanup] = []
 
     async def build(host):
@@ -2194,15 +2413,17 @@ async def test_a_planner_without_retune_runs_the_legacy_cleanup(monkeypatch) -> 
         return cleanups[-1]
 
     planner, environment = planner_without_retune(
-        monkeypatch, kubernetes_connector(), build
+        monkeypatch, kubernetes_connector(), leases=(STATE_NAME,), build=build
     )
     await planner._async_init()
     try:
-        # Built before the engine, started after it.
-        assert environment.calls == [
-            "environment.initialize",
+        # Startup never waits for the check.
+        assert environment.calls == ["environment.initialize", "engine"]
+        assert planner.may_hold_retune_lease
+        await planner._legacy_retune_task
+        assert environment.calls[2:] == [
+            "leases.check",
             "cleanup.build",
-            "engine",
             "cleanup.start",
         ]
         assert cleanups[0].host is planner and planner._live_retune is None
@@ -2212,57 +2433,60 @@ async def test_a_planner_without_retune_runs_the_legacy_cleanup(monkeypatch) -> 
     assert planner._legacy_retune_cleanup is None
 
 
-@pytest.mark.parametrize(
-    "outcome",
-    ["nothing_left", "forbidden", "not_found", "setup_error", "start_error"],
-)
-async def test_the_legacy_cleanup_never_fails_startup(
+@pytest.mark.parametrize("outcome", ["nothing_left", "forbidden", "not_found", "bug"])
+async def test_the_legacy_check_never_fails_the_planner(
     monkeypatch, caplog, outcome
 ) -> None:
+    from dynamo.planner.core import base as base_module
     from dynamo.planner.retune.live.contracts import KubeNotFound
 
+    leases: Any = (LEADER_NAME,)
+    if outcome == "nothing_left":
+        leases = ()
+    elif outcome == "forbidden":
+        leases = forbidden()
+
     async def build(host):
-        if outcome == "nothing_left":
-            return None
-        if outcome == "forbidden":
-            raise KubeError("403 Forbidden: leases is forbidden")
         if outcome == "not_found":
-            raise KubeNotFound("404 Not Found")
-        if outcome == "setup_error":
-            raise RuntimeError("no kube config")
-        return FakeCleanup(environment.calls, start_error=RuntimeError("boom"))
+            raise KubeNotFound("read dynamographdeployments/graph: HTTP 404")
+        raise RuntimeError("a bug")
 
+    if outcome in ("nothing_left", "forbidden"):
+        # The live retune stack is never loaded.
+        monkeypatch.setattr(base_module, "_live_retune_bootstrap", None)
     planner, environment = planner_without_retune(
-        monkeypatch, kubernetes_connector(), build
+        monkeypatch, kubernetes_connector(), leases=leases, build=build
     )
-    with caplog.at_level("INFO", logger="dynamo.planner.core.base"):
-        await planner._async_init()
-    try:
-        assert "engine" in environment.calls
-        assert planner._legacy_retune_cleanup is None
-        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
-        if outcome == "start_error":
-            assert environment.calls[-2:] == ["cleanup.start", "cleanup.stop"]
-            assert "legacy clean-up did not start" in caplog.text
-        elif outcome != "nothing_left":
-            assert "legacy clean-up skipped" in caplog.text
-    finally:
-        await planner._shutdown_runtime()
-    assert environment.calls.count("cleanup.stop") == (outcome == "start_error")
-
-
-async def test_the_legacy_cleanup_is_kubernetes_only(monkeypatch) -> None:
-    async def build(host):
-        raise AssertionError("not a Kubernetes planner")
-
-    for controller in (None, SimpleNamespace(kube_api=object())):
-        planner, environment = planner_without_retune(monkeypatch, controller, build)
+    with caplog.at_level(logging.DEBUG, logger="dynamo.planner.core.base"):
         await planner._async_init()
         try:
-            assert "cleanup.build" not in environment.calls
+            await asyncio.wait([planner._legacy_retune_task])
             assert planner._legacy_retune_cleanup is None
+            records = [r for r in caplog.records if "legacy clean-up" in r.message]
+            levels = {r.levelname for r in records}
+            if outcome == "nothing_left":
+                assert records == []
+            elif outcome == "forbidden":
+                assert levels == {"DEBUG"}  # the default chart: no Lease RBAC
+            elif outcome == "not_found":
+                assert levels == {"INFO"} and "skipped" in caplog.text
+            else:
+                assert levels == {"ERROR"} and "a bug" in caplog.text
         finally:
             await planner._shutdown_runtime()
+    assert "cleanup.stop" not in environment.calls
+
+
+async def test_the_legacy_check_is_kubernetes_only(monkeypatch) -> None:
+    for controller in (None, SimpleNamespace(kube_api=object())):
+        planner, environment = planner_without_retune(monkeypatch, controller)
+        await planner._async_init()
+        try:
+            assert planner._legacy_retune_task is None
+            assert not planner.may_hold_retune_lease
+        finally:
+            await planner._shutdown_runtime()
+        assert "leases.check" not in environment.calls
 
 
 async def test_dgdr_canary_and_context() -> None:
@@ -2288,6 +2512,133 @@ async def test_dgdr_canary_and_context() -> None:
     assert context.is_leader() is True
 
 
+# ------------------------------------------- initials before router writes
+
+
+class FrontendPolicyClient:
+    """``RouterPolicyClient`` of the real ``RouterActuator`` over the
+    world's ``FakeFrontend`` (every pod answers with all of its routers)."""
+
+    def __init__(self, world: World, writer: str) -> None:
+        self.frontend = world.frontend
+        self.dynamo_namespace = world.spec.dynamo_namespace
+        self.writer = writer
+
+    def _info(self, router: Router) -> RouterInfo:
+        return RouterInfo(
+            router_id=router.router_id,
+            namespace=self.dynamo_namespace,
+            worker_type=router.worker_type,
+            revision=router.revision,
+            configuration=dict(router.config),
+            model="model",
+        )
+
+    async def get(self, pod) -> PolicyCallResult:
+        routers = tuple(self._info(r) for r in self.frontend.routers.values())
+        return PolicyCallResult(status=200, routers=routers)
+
+    async def patch(self, pod, router_id, expected_revision, parameters):
+        router = self.frontend.routers[router_id]
+        self.frontend.patch(router, dict(parameters), self.writer, False, "apply")
+        return PolicyCallResult(status=200, router=self._info(router))
+
+    async def reset(self, pod, router_id, expected_revision):
+        router = self.frontend.routers[router_id]
+        self.frontend.reset(router, self.writer, False, "rollback")
+        return PolicyCallResult(status=200, router=self._info(router))
+
+
+def real_actuators(world: World, writer: str):
+    world.kube.add_pod("frontend-0", dgd=DGD_NAME)
+    return lambda dgd, maps: RouterActuator(
+        world.kube, FrontendPolicyClient(world, writer), dgd, maps, NullMetrics()
+    )
+
+
+async def test_a_stop_before_the_initials_write_leaves_no_router_retuned() -> None:
+    """A router seen at revision 0 is latched and would be PATCHed in the same
+    round. Stopped (SIGTERM) before the state records its initial, the next
+    planner rolls back with an advisory target, which never resets a router
+    whose initial it does not know: so no router may be PATCHed before its
+    initial is persisted."""
+
+    world = World()
+    chosen = {CREDIT: 0.5, SCALE: 1.0, TEMP: 0.2}
+    first = await started(world, actuator_factory=real_actuators(world, "p1"))
+    store = StateStore(world.kube, first.sup.dgd)
+    await first.sup.lease_round()
+    snapshot = store.read()
+    # An active deployment is persisted, and the routers restart before the
+    # actuator has latched them (revision 0, initials unknown).
+    store.write(
+        dataclasses.replace(
+            snapshot.state, flat=chosen, by_wt=by_wt("a", chosen), deploy_seq=2
+        ),
+        snapshot,
+    )
+    first.sup._snapshot = store.read()
+    world.kube.fail(
+        "replace_lease",
+        KubeError("timeout"),
+        match=lambda target: target[0] == STATE_NAME,
+    )
+    await first.sup.control_round()
+    assert world.frontend.writes == []  # held: the initial is not persisted
+    assert world.shared_state().initials == {}
+    await first.sup.stop()
+
+    second = await leading(
+        world, "p2", advisory=True, actuator_factory=real_actuators(world, "p2")
+    )
+    await settle([second], world, rounds=4)
+    assert frontend_configs(world) == [VARIANTS["a"]["aggregated"]]
+    assert not world.shared_state().rollback_pending
+    assert world.frontend.writes == []
+
+
+async def test_initials_are_persisted_before_the_routers_are_patched() -> None:
+    world = World()
+    process = await leading(world, actuator_factory=real_actuators(world, "p1"))
+    chosen = {CREDIT: 0.5, SCALE: 1.0, TEMP: 0.2}
+    process.controller.restore_desired(chosen)
+    enqueue(process, make_decision(K0 + 1, "applied", chosen=chosen))
+    await process.sup.outbox_round()
+    world.frontend.restart(VARIANTS["a"])  # new routers at revision 0
+    (router_id,) = world.frontend.routers
+    patched_with: list[dict] = []
+    original = world.frontend.patch
+
+    def patch(router, params, *args):
+        patched_with.append(dict(world.shared_state().initials))
+        original(router, params, *args)
+
+    world.frontend.patch = patch  # type: ignore[method-assign]
+    # One round: latch, persist the initial, then PATCH.
+    await process.sup.control_round()
+    assert patched_with and all(router_id in seen for seen in patched_with)
+    assert frontend_configs(world) == [by_wt("a", chosen)["aggregated"]]
+    assert process.sup.last_report.converged
+
+
+async def test_a_state_of_an_unknown_format_version_is_never_overwritten() -> None:
+    world = World()
+    newer = json.dumps({"version": 99, "dgd_uid": "uid-1", "anything": "new"})
+    world.kube.create_lease(
+        {
+            "metadata": {"name": STATE_NAME, "annotations": {STATE_ANNOTATION: newer}},
+            "spec": {},
+        }
+    )
+    process = await started(world)
+    for _ in range(2):
+        await process.sup.lease_round()
+        assert process.sup.is_leader() and not process.sup.initialized
+    lease = world.kube.leases[STATE_NAME]
+    assert lease["metadata"]["annotations"][STATE_ANNOTATION] == newer
+    assert process.metrics.of("failure") == ["state_version", "state_version"]
+
+
 # ------------------------------------------- with the real retune controller
 
 
@@ -2296,164 +2647,54 @@ async def test_real_controller_launches_harvests_and_persists() -> None:
     launch with the spec replicas and the abort event, sweep_fn, harvest
     gating, on_effects, outbox and the persisted deployment."""
 
-    pytest.importorskip("aisimulate.sweeper")
-    from dynamo.planner.core.types import EngineCapabilities, WorkerCapabilities
-    from dynamo.planner.plugins.clock import WallClock
-    from dynamo.planner.retune.controller import RetuneController
-    from dynamo.planner.retune.sweep import SweepResult
-
-    config = live_config()
-    retune = config.retune
-    interval = float(retune.interval_seconds)
-    grace = float(retune.grace_seconds)
     world = World()
-    startup = FrontendStartup(
-        router_mode="kv_router",
-        router_config={},
-        startup_maps={},
-        frontend_component="Frontend",
-        replicas=1,
-        replica_sync=False,
-        fingerprint_source="real",
-    )
-    inputs = bootstrap.build_retune_inputs(
-        config, startup, dgd_name=DGD_NAME, model_name=None
-    )
-    resolver = bootstrap.KvRouterResolver({}, ("aggregated",))
-    keys = bootstrap.searched_router_keys(config)
-    startup = dataclasses.replace(
-        startup, startup_maps=resolver.by_wt(resolver.startup_flat(keys))
-    )
-    world.frontend.restart(startup.startup_maps)
-    evaluation = SpecEvaluation(
-        report=PremiseReport(p4_ok=True, spec_ok=True),
-        startup=startup,
-        inputs=inputs,
-        spec_replicas={"aggregated": 2},
-        dgd=DgdRef(DGD_NAME, "test-ns", "uid-1", "dyn"),
-    )
-    requests = []
+    process = await leading(world)
+    sup, controller = process.sup, process.controller
+    assert sup.ready() and controller.router_keys == KEYS
     best = {CREDIT: 0.5, SCALE: 1.0, TEMP: 0.2}
 
-    def runner(request, *, cancel, abort, context):
-        requests.append((request, abort))
-        return SweepResult(
-            status="ok",
-            num_requests=100,
-            scores={
-                candidate.key(): (2.0 if candidate.router == best else 1.0)
-                for candidate in request.candidates
-            },
-            wall_s=1.0,
-            details={"runtime_image": "img:1"},
+    async def tick(now_s):
+        world.clock.wall = now_s
+        result = await controller.on_tick(now_s, SPEC_COUNTS)
+        sup.on_effects(
+            SimpleNamespace(
+                retune_decisions=result.decisions,
+                router_parameters=result.router_parameters,
+            )
         )
+        await sup.outbox_round()
+        return result
 
-    settings = SupervisorSettings.from_config(config, router_keys=keys)
-    sup = LiveRetuneSupervisor(
-        settings=settings,
-        kube=world.kube,
-        evaluation=evaluation,
-        identity="p1/1",
-        premise_evaluator=lambda dgd: evaluation,
-        actuator_factory=lambda dgd, maps: FakeActuator(
-            world.frontend, "p1", False, maps
-        ),
-        fingerprint_fn=lambda s: "fp-real",
-        resolver_factory=lambda s: resolver,
-        metrics=RecordingMetrics(),
-        sweep_runner=runner,
-        context_factory=lambda supervisor: None,
-        clock=world.clock.time,
-        monotonic=world.clock.monotonic,
-        sleep=no_sleep,
-        blocking=inline,
-    )
-    hooks = sup.hooks()
-    controller = RetuneController(
-        config,
-        inputs,
-        WorkerCapabilities(
-            decode=EngineCapabilities(
-                num_gpu=1, max_num_batched_tokens=2048, max_kv_tokens=16384
-            )
-        ),
-        WallClock(),
-        float(config.scheduling.scale_interval_seconds),
-        sweep_fn=hooks.sweep_fn,
-        launch_gate=hooks.launch_gate,
-        harvest_allowed=hooks.harvest_allowed,
-        generation=0,
-    )
-    host = SimpleNamespace(
-        _engine=SimpleNamespace(retune_controller=controller),
-        _config_lock=asyncio.Lock(),
-    )
-    try:
-        await sup.start(host, background=False)
-        controller.start(world.clock.time(), hooks.phase_s)
-        await sup.lease_round()
-        await sup.control_round()
-        assert sup.ready() and controller.router_keys == keys
-
-        async def tick(now_s):
-            result = await controller.on_tick(now_s, None)
-            sup.on_effects(
-                SimpleNamespace(
-                    retune_decisions=result.decisions,
-                    router_parameters=result.router_parameters,
-                )
-            )
-            await sup.outbox_round()
-            return result
-
-        # First enable recorded the window in progress at start as decided:
-        # neither it (its trace began mid-way) nor the due window launches.
-        now = world.clock.time()
-        first_due = math.floor((now - grace) / interval + 1e-9) - 1
-        in_progress = math.floor(now / interval)
-        assert in_progress == first_due + 1
-        await tick(now)
-        assert requests == []
-        world.clock.wall = (in_progress + 1) * interval + grace
-        await tick(world.clock.wall)
-        assert requests == []
-        # The next window launches at its L_k with the spec replicas.
-        launch_at = (in_progress + 2) * interval + grace
-        world.clock.wall = launch_at
-        await tick(launch_at)
-        for _ in range(200):
-            if requests:
-                break
-            await asyncio.sleep(0.01)
-        request, abort = requests[0]
-        assert request.window_index == in_progress + 1
-        assert request.spec_replicas == {"aggregated": 2} and abort is not None
-        assert request.generation == 0
-        # Harvested once done: applied, persisted, then deployed.
-        decided = None
-        for step in range(1, 200):
-            result = await tick(launch_at + step * 0.05 + 1000.0)
-            if result.decisions:
-                decided = result.decisions[0]
-                break
-            await asyncio.sleep(0.01)
-        assert decided is not None and decided.outcome == "applied"
-        assert decided.decision_id == f"retune-w{int(request.window_end_ms)}"
-        state = world.shared_state()
-        assert state.flat == best and state.deploy_seq == 2
-        assert state.last_window_end_ms == int(request.window_end_ms)
-        assert state.by_wt == resolver.by_wt(best)
-        assert state.history[-1]["image"] == {"runtime_image": "img:1"}
-        await sup.control_round()
-        assert frontend_configs(world) == [resolver.by_wt(best)["aggregated"]]
-        # A restart restores the persisted point into a fresh controller.
-        controller.restore_desired(resolver.startup_flat(keys))
-        sup._request_reinit("test")
-        await sup.lease_round()
-        assert controller.current_point().router == best
-    finally:
-        controller.close()
-        await sup.stop()
+    # First enable recorded the window in progress at start as decided:
+    # neither it (its trace began mid-way) nor the due window launches.
+    await tick(START_WALL)
+    await tick(window(K0)[2])
+    assert controller._pending is None and world.sweeps.requests == []
+    # The next window launches at its L_k with the spec replicas.
+    await tick(window(K0 + 1)[2])
+    pending = controller._pending
+    assert pending is not None and pending.abort is not None
+    assert world.sweeps.finish(controller, scored(best))
+    (request,) = world.sweeps.requests
+    assert request.window_index == K0 + 1 and request.generation == 0
+    assert request.spec_replicas == {"aggregated": 2} and request.replicas_verified
+    # Harvested on the first tick at least a scale interval after the launch:
+    # applied, persisted, then deployed.
+    result = await tick(window(K0 + 1)[2] + 5.0)
+    (decided,) = result.decisions
+    assert decided.outcome == "applied"
+    assert decided.decision_id == f"retune-w{end_ms(K0 + 1)}"
+    state = world.shared_state()
+    assert state.flat == best and state.deploy_seq == 2
+    assert state.last_window_end_ms == end_ms(K0 + 1)
+    assert state.by_wt == by_wt("a", best)
+    await sup.control_round()
+    assert frontend_configs(world) == [by_wt("a", best)["aggregated"]]
+    # A re-initialization restores the persisted point into the controller.
+    controller.restore_desired(startup_flat("a"))
+    sup._request_reinit("test")
+    await sup.lease_round()
+    assert controller.current_point().router == best
 
 
 # =================================================== interleaving harness
@@ -2461,10 +2702,11 @@ async def test_real_controller_launches_harvests_and_persists() -> None:
 # Two planner processes share a FakeRetuneKube, a frontend and a clock. A
 # seeded random schedule interleaves lease renewals and failures, takeovers,
 # state writes that succeed, conflict, time out, time out but land, or land
-# late, ticks that launch and harvest sweeps, frontend restarts and manual
-# patches, spec changes (startup, spec_ok, P4), advisory switches, SIGTERM
-# and SIGKILL. After every step the §6 invariants are asserted; at the end
-# the system settles with no infinite resets or PATCHes.
+# late, ticks of the real controllers that launch and harvest sweeps,
+# frontend restarts and manual patches, spec changes (startup, spec_ok, P4),
+# advisory switches, SIGTERM and SIGKILL. After every step the invariants
+# are asserted; at the end the system settles with no infinite resets or
+# PATCHes.
 
 
 class CheckedKube(FakeRetuneKube):
@@ -2598,8 +2840,10 @@ class Harness:
         self.steps = 0
         self.transients: dict[str, int] = {}
         # Monotonic time until which two processes may both believe they
-        # lead (the lease was taken over without expiring, §4.7.9).
+        # lead (the lease was taken over without expiring).
         self.stolen_until = -math.inf
+        self.launched = 0
+        self.decided: list[str] = []
 
     # -- processes --
 
@@ -2621,6 +2865,47 @@ class Harness:
 
     def live(self) -> list[Process]:
         return [p for p in self.processes.values() if p.alive]
+
+    # -- the real controllers --
+
+    async def tick(self, process: Process) -> None:
+        controller = process.controller
+        if controller is None:
+            return
+        had = controller._pending
+        result = await controller.on_tick(self.world.clock.time(), SPEC_COUNTS)
+        if controller._pending is not None and controller._pending is not had:
+            self.launched += 1
+        for event in result.audit_events:
+            if event.startswith("retune:dropped w="):
+                controller.dropped.append(int(event.split("=", 1)[1]))
+        self.decided.extend(decision.outcome for decision in result.decisions)
+        process.sup.on_effects(
+            SimpleNamespace(
+                retune_decisions=result.decisions,
+                router_parameters=result.router_parameters,
+            )
+        )
+
+    def finish_sweep(self, process: Process) -> None:
+        """The process's sweep returns: failed, flat (kept) or with a best
+        candidate (applied, or advisory)."""
+
+        controller = process.controller
+        if controller is None:
+            return
+        roll = self.rng.random()
+        if roll < 0.15:
+            self.world.sweeps.finish(controller, failed)
+            return
+        best = None
+        if roll >= 0.35:
+            best = {key: self.rng.choice(values) for key, values in DOMAIN.items()}
+        self.world.sweeps.finish(controller, scored(best))
+
+    def quiesce(self) -> None:
+        controllers = [p.controller for p in self.live() if p.controller is not None]
+        self.world.sweeps.quiesce(controllers)
 
     # -- events --
 
@@ -2670,17 +2955,10 @@ class Harness:
             await sup.outbox_round()
             return f"outbox {slot}"
         if roll < 0.56:
-            controller = process.controller
-            if controller is not None and not controller.closed:
-                effects = controller.tick(
-                    sup, self.world.clock.time(), rng, process.advisory
-                )
-                sup.on_effects(effects)
+            await self.tick(process)
             return f"tick {slot}"
         if roll < 0.64:
-            controller = process.controller
-            if controller is not None and controller.pending is not None:
-                controller.pending["done"] = True
+            self.finish_sweep(process)
             return f"sweep_done {slot}"
         if roll < 0.78:
             await self.advance(rng.choice([5, 20, 20, 40, 60, 120, 240]))
@@ -2716,10 +2994,10 @@ class Harness:
             self._transient("p4_broken", self.world.spec, "p4_ok", False)
             return "p4_break"
         if roll < 0.945:
-            controller = process.controller
-            if controller is not None:
-                controller.close()
+            # SIGTERM: the supervisor stops while the engine is up, then the
+            # engine closes the controller.
             await sup.stop()
+            process.host.close()
             process.alive = False
             return f"sigterm {slot}"
         if roll < 0.951:
@@ -2758,6 +3036,7 @@ class Harness:
         while remaining > 0:
             chunk = min(20.0, remaining)
             remaining -= chunk
+            self.quiesce()
             self.world.clock.advance(chunk)
             self._restore_transients()
             for process in self.live():
@@ -2768,16 +3047,11 @@ class Harness:
                     await sup.outbox_round()
                 if rng.random() < 0.6:
                     await sup.control_round()
-                controller = process.controller
-                if controller is not None and not controller.closed:
-                    if controller.pending is not None and rng.random() < 0.3:
-                        controller.pending["done"] = True
-                    if rng.random() < 0.6:
-                        sup.on_effects(
-                            controller.tick(
-                                sup, self.world.clock.time(), rng, process.advisory
-                            )
-                        )
+                if rng.random() < 0.3:
+                    self.finish_sweep(process)
+                if rng.random() < 0.6:
+                    await self.tick(process)
+                self.quiesce()
                 self.check("advance")
 
     # -- invariants --
@@ -2809,10 +3083,10 @@ class Harness:
                 )
                 for k in controller.dropped:
                     assert (
-                        controller.last_k < k
-                        or controller.pending is not None
+                        controller._last_k < k
+                        or controller._pending is not None
                         or k <= decided
-                    ), (event, process.name, k, controller.last_k)
+                    ), (event, process.name, k, controller._last_k)
                 controller.dropped.clear()
             # An advisory planner never PATCHes, and resets only to finish a
             # rollback of what was deployed.
@@ -2828,16 +3102,16 @@ class Harness:
             if snapshot.resource_version != lease["metadata"]["resourceVersion"]:
                 continue  # a late write landed; the next write re-reads
             assert shared.leader_term == sup.term, event
-            # State, controller baseline and target agree.
+            # State, controller point and target agree.
             if (
                 shared.mode == "active"
                 and not shared.rollback_pending
                 and sup.spec_ok
                 and controller is not None
             ):
-                assert controller.desired == shared.flat, (
+                assert controller.current_point().router == shared.flat, (
                     event,
-                    controller.desired,
+                    controller.current_point().router,
                     shared.flat,
                 )
             target = sup.target()
@@ -2864,6 +3138,7 @@ class Harness:
             await self.spawn("p1")
         live = self.live()
         for _ in range(12):
+            self.quiesce()
             world.clock.advance(20)
             for process in live:
                 await process.sup.lease_round()
@@ -2897,10 +3172,12 @@ class Harness:
         await self.spawn("p2")
         for _ in range(steps):
             event = await self.step()
+            self.quiesce()
             self.check(event)
         await self.settle()
 
 
+@pytest.mark.timeout(120)
 @pytest.mark.parametrize("seed", range(24))
 async def test_interleavings_keep_the_invariants(seed: int) -> None:
     harness = Harness(seed)
@@ -2908,8 +3185,17 @@ async def test_interleavings_keep_the_invariants(seed: int) -> None:
     assert harness.world.kube.state_writes > 0
 
 
+@pytest.mark.timeout(120)
 @pytest.mark.parametrize("seed", range(6))
 async def test_advisory_only_never_writes_to_routers(seed: int) -> None:
     harness = Harness(1000 + seed, advisory_only=True)
     await harness.run(steps=250)
     assert harness.world.frontend.writes == []
+
+
+async def test_the_interleavings_launch_and_decide_windows() -> None:
+    # The schedule reaches the real controller's launch and harvest paths.
+    harness = Harness(0)
+    await harness.run(steps=300)
+    assert harness.launched > 0
+    assert {"applied", "kept", "failed"} <= set(harness.decided)
