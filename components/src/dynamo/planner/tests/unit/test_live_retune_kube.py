@@ -20,8 +20,10 @@ from kubernetes.client import ApiException
 
 from dynamo.planner.retune.live.contracts import (
     KubeAlreadyExists,
+    KubeConflict,
     KubeError,
     KubeInvalid,
+    KubeNotFound,
     PodInfo,
     RetuneKube,
 )
@@ -127,6 +129,25 @@ def test_satisfies_the_protocol(kube):
     assert retune_kube.namespace == NS
     with pytest.raises(ValueError):
         KubernetesRetuneKube("", api_client=retune_kube.api_client)
+
+
+def test_get_dgd(kube):
+    retune_kube, transport = kube
+    dgd = {"metadata": {"name": "llm", "uid": "u1"}, "spec": {"services": {}}}
+    transport.reply(dgd)
+    assert retune_kube.get_dgd("llm", timeout_s=4) == dgd
+    (call,) = transport.calls
+    assert call["method"] == "GET"
+    assert (
+        path(call)
+        == f"apis/nvidia.com/v1beta1/namespaces/{NS}/dynamographdeployments/llm"
+    )
+    assert call["timeout"] == (4, 4)
+
+    transport.reply(api_error(404))
+    with pytest.raises(KubeNotFound) as raised:
+        retune_kube.get_dgd("gone")
+    assert raised.value.status == 404
 
 
 def test_create_request_is_strict_and_dry_run_on_request(kube):
@@ -308,6 +329,64 @@ def test_list_pods_builds_pod_info(kube):
     assert (pods[1].ready, pods[1].terminating, pods[1].ip) == (False, True, None)
     assert pods[2].http_port == 8080
     assert pods[3].http_port is None
+
+
+def test_leases_round_trip_raw_json(kube):
+    retune_kube, transport = kube
+    lease = {
+        "apiVersion": "coordination.k8s.io/v1",
+        "kind": "Lease",
+        "metadata": {"name": "llm-planner-retune", "resourceVersion": "5"},
+        "spec": {
+            "holderIdentity": "pod/abc",
+            "leaseDurationSeconds": 60,
+            "renewTime": "2026-10-28T12:00:00.000000Z",
+        },
+    }
+    transport.reply(FakeResponse(json.dumps(lease).encode()))
+    # MicroTime strings come back verbatim, not re-serialized datetimes.
+    assert retune_kube.get_lease("llm-planner-retune") == lease
+    call = transport.calls[-1]
+    assert call["preload"] is False
+    assert (
+        path(call)
+        == f"apis/coordination.k8s.io/v1/namespaces/{NS}/leases/llm-planner-retune"
+    )
+    transport.reply(api_error(404))
+    assert retune_kube.get_lease("gone") is None
+
+    body = {"metadata": {"name": "l2"}, "spec": {"holderIdentity": "me"}}
+    transport.reply({**body, "metadata": {"name": "l2", "resourceVersion": "1"}})
+    created = retune_kube.create_lease(body)
+    assert created["metadata"]["resourceVersion"] == "1"
+    call = transport.calls[-1]
+    assert call["method"] == "POST"
+    assert call["body"]["apiVersion"] == "coordination.k8s.io/v1"
+    assert call["body"]["kind"] == "Lease"
+    assert "apiVersion" not in body  # the caller's dict is not mutated
+    transport.reply(api_error(409))
+    with pytest.raises(KubeAlreadyExists):
+        retune_kube.create_lease(body)
+
+    transport.reply(lease)
+    retune_kube.replace_lease("llm-planner-retune", lease, timeout_s=2)
+    call = transport.calls[-1]
+    assert call["method"] == "PUT"
+    assert call["body"]["metadata"]["resourceVersion"] == "5"
+    assert call["timeout"] == (2, 2)
+    transport.reply(api_error(409, "the object has been modified"))
+    with pytest.raises(KubeConflict) as raised:
+        retune_kube.replace_lease("llm-planner-retune", lease)
+    assert raised.value.status == 409
+    transport.reply(api_error(404))
+    with pytest.raises(KubeNotFound):
+        retune_kube.replace_lease("gone", lease)
+
+    transport.reply({"kind": "Status", "status": "Success"})
+    retune_kube.delete_lease("l2")
+    assert transport.calls[-1]["method"] == "DELETE"
+    transport.reply(api_error(404))
+    retune_kube.delete_lease("l2")
 
 
 def test_from_kube_api_shares_the_connector_client():

@@ -4,14 +4,15 @@
 """In-memory fakes of the Kubernetes side of live retune.
 
 ``FakeRetuneKube`` implements ``contracts.RetuneKube`` over plain dicts with
-the API-server behaviour the live modules depend on: ``AlreadyExists`` on
-create, Strict field validation and silent pruning on Request create, label
-selectors, cascading Request deletion, and injectable faults (including
-writes that time out but land). ``FakeDgdrOperator`` drives the Requests in
-a ``FakeRetuneKube`` through the DGDR v1beta2 lifecycle (Accepted -> Run ->
-Completed with Candidates) the way the operator at #17483 does, lowering
-each Request into ``Run.status.aisimulate.input`` with the same merge-patch
-rules. The operator's golden
+the API-server behaviour the live modules depend on: ``resourceVersion``
+compare-and-swap on Lease replace, ``AlreadyExists`` on create, Strict field
+validation and silent pruning on Request create, label selectors, cascading
+Request deletion, and injectable faults (including writes that time out but
+land). ``FakeDgdrOperator`` drives the Requests in a ``FakeRetuneKube``
+through the DGDR v1beta2 lifecycle (Accepted -> Run -> Completed with
+Candidates) the way the operator at #17483 does, lowering each Request into
+``Run.status.aisimulate.input`` with the same merge-patch rules. The
+operator's golden
 ``deploy/operator/internal/aisimulate/testdata/trace_request_lowering.golden.json``
 is the oracle for that lowering; ``test_live_retune_dgdr`` checks
 ``lower_request_input`` against it.
@@ -40,8 +41,10 @@ from dynamo.planner.retune.live.contracts import (
     POD_LABEL_DGD_NAME,
     RUN_UID_LABEL,
     KubeAlreadyExists,
+    KubeConflict,
     KubeError,
     KubeInvalid,
+    KubeNotFound,
     PodInfo,
 )
 
@@ -68,6 +71,7 @@ _METRIC_TARGETS = {
 }
 
 KubeMethod = Literal[
+    "get_dgd",
     "list_pods",
     "create_request",
     "get_request",
@@ -75,6 +79,10 @@ KubeMethod = Literal[
     "delete_request",
     "get_run",
     "list_candidates",
+    "get_lease",
+    "create_lease",
+    "replace_lease",
+    "delete_lease",
 ]
 
 
@@ -371,8 +379,8 @@ class KubeCall:
 class FakeRetuneKube:
     """In-memory ``contracts.RetuneKube`` (thread-safe).
 
-    Stores pods (``PodInfo``), Requests, Runs and Candidates as plain
-    dicts. Objects come back as deep copies, so callers can never
+    Stores DGDs, pods (``PodInfo``), Requests, Runs, Candidates and Leases
+    as plain dicts. Objects come back as deep copies, so callers can never
     alias the store. ``now`` stamps ``creationTimestamp``.
 
     Request create honours ``field_validation='Strict'``: a path listed in
@@ -392,12 +400,14 @@ class FakeRetuneKube:
     ) -> None:
         self.namespace = namespace
         self.now = now
+        self.dgds: dict[str, dict] = {}
         self.pods: dict[str, PodInfo] = {}
         self.requests: dict[str, dict] = {}
         self.runs: dict[str, dict] = {}
         # Each Run's lowered input, recorded in its status by ``create_job``.
         self.run_inputs: dict[str, dict] = {}
         self.candidates: dict[str, dict] = {}
+        self.leases: dict[str, dict] = {}
         self.calls: list[KubeCall] = []
         self.deleted_requests: list[tuple[str, str]] = []
         self.unknown_fields: set[str] = set()
@@ -484,6 +494,25 @@ class FakeRetuneKube:
         """Give a stored object a new ``resourceVersion``."""
 
         obj["metadata"]["resourceVersion"] = str(next(self._rv))
+
+    # --------------------------------------------------------------- DGD
+
+    def put_dgd(self, dgd: dict) -> dict:
+        with self._lock:
+            stored = copy.deepcopy(dgd)
+            self._stamp(
+                stored, kind="DynamoGraphDeployment", api_version="nvidia.com/v1beta1"
+            )
+            self.dgds[stored["metadata"]["name"]] = stored
+            return copy.deepcopy(stored)
+
+    def get_dgd(self, name: str, *, timeout_s: float = 10.0) -> dict:
+        def operation() -> dict:
+            if name not in self.dgds:
+                raise KubeNotFound(f"DynamoGraphDeployment {name!r} not found")
+            return copy.deepcopy(self.dgds[name])
+
+        return self._call("get_dgd", name, {"timeout_s": timeout_s}, operation)
 
     # -------------------------------------------------------------- pods
 
@@ -663,6 +692,62 @@ class FakeRetuneKube:
         return self._call(
             "list_candidates", label_selector, {"timeout_s": timeout_s}, operation
         )
+
+    # ------------------------------------------------------------- Leases
+
+    def get_lease(self, name: str, *, timeout_s: float = 10.0) -> Optional[dict]:
+        def operation() -> Optional[dict]:
+            found = self.leases.get(name)
+            return None if found is None else copy.deepcopy(found)
+
+        return self._call("get_lease", name, {"timeout_s": timeout_s}, operation)
+
+    def create_lease(self, body: dict, *, timeout_s: float = 10.0) -> dict:
+        def operation() -> dict:
+            stored = copy.deepcopy(body)
+            name = nested_get(stored, "metadata", "name")
+            if not name:
+                raise KubeInvalid("metadata.name is required")
+            if name in self.leases:
+                raise KubeAlreadyExists(f"leases {name!r} already exists")
+            stored["metadata"].pop("resourceVersion", None)
+            self._stamp(stored, kind="Lease", api_version="coordination.k8s.io/v1")
+            self.leases[name] = stored
+            return copy.deepcopy(stored)
+
+        return self._call("create_lease", body, {"timeout_s": timeout_s}, operation)
+
+    def replace_lease(self, name: str, body: dict, *, timeout_s: float = 10.0) -> dict:
+        def operation() -> dict:
+            current = self.leases.get(name)
+            if current is None:
+                raise KubeNotFound(f"leases {name!r} not found")
+            sent = nested_get(body, "metadata", "resourceVersion")
+            if sent != current["metadata"]["resourceVersion"]:
+                raise KubeConflict(
+                    f"leases {name!r}: resourceVersion {sent!r} is stale "
+                    f"(current {current['metadata']['resourceVersion']!r})"
+                )
+            stored = copy.deepcopy(body)
+            metadata = stored.setdefault("metadata", {})
+            for key in ("uid", "creationTimestamp", "namespace", "generation"):
+                metadata[key] = current["metadata"].get(key)
+            metadata["name"] = name
+            stored.setdefault("apiVersion", current.get("apiVersion"))
+            stored.setdefault("kind", current.get("kind"))
+            self.bump(stored)
+            self.leases[name] = stored
+            return copy.deepcopy(stored)
+
+        return self._call(
+            "replace_lease", (name, body), {"timeout_s": timeout_s}, operation
+        )
+
+    def delete_lease(self, name: str, *, timeout_s: float = 10.0) -> None:
+        def operation() -> None:
+            self.leases.pop(name, None)
+
+        return self._call("delete_lease", name, {"timeout_s": timeout_s}, operation)
 
     # ------------------------------------------------- operator simulation
 
