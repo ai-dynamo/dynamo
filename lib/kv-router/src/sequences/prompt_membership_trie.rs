@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use dynamo_tokens::SequenceHash;
 use parking_lot::RwLock;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
-use crate::cleanup::{self, CleanableNode, CleanupGuard, CleanupState};
+use crate::cleanup::{CleanupGuard, CleanupState};
 use crate::protocols::WorkerWithDpRank;
 
 type SharedNode = Arc<RwLock<PromptTrieNode>>;
@@ -90,6 +90,11 @@ impl PromptTrieNode {
         }
     }
 
+    /// True if this node still carries worker state that pins it in the tree.
+    fn has_any_workers(&self) -> bool {
+        !self.full_edge_workers.is_empty() || !self.worker_cutoffs.is_empty()
+    }
+
     #[cfg(any(test, feature = "bench"))]
     fn live_children(&self) -> Vec<SharedNode> {
         self.children
@@ -103,19 +108,64 @@ impl PromptTrieNode {
     }
 }
 
-impl CleanableNode for PromptTrieNode {
-    type ChildKey = SequenceHash;
+struct CleanupEdge {
+    parent: Weak<RwLock<PromptTrieNode>>,
+    key: SequenceHash,
+    child: Weak<RwLock<PromptTrieNode>>,
+}
 
-    fn has_any_workers(&self) -> bool {
-        !self.full_edge_workers.is_empty() || !self.worker_cutoffs.is_empty()
+/// Reverse-BFS sweep that unlinks empty, unreferenced leaf nodes from the tree.
+///
+/// - BFS from the root under read locks, collecting `(parent_weak, key, child_weak)` edges.
+/// - Iterate edges deepest-first so children are swept before parents.
+/// - For each edge: upgrade weaks, take the parent write lock, verify the
+///   child pointer still matches, `try_write` the child, and unlink only when
+///   the child has no workers, no children, and `Arc::strong_count == 2`
+///   (parent map ref + our local upgrade). The strong-count gate is what
+///   prevents reclaiming a node that a concurrent `find_matches` is currently
+///   traversing — such edges are skipped and retried on the next sweep.
+fn sweep_stale_children(root: &SharedNode) {
+    let mut queue: VecDeque<SharedNode> = VecDeque::from([root.clone()]);
+    let mut edges: Vec<CleanupEdge> = Vec::new();
+
+    while let Some(parent) = queue.pop_front() {
+        let guard = parent.read();
+        for (&key, child) in &guard.children {
+            queue.push_back(child.clone());
+            edges.push(CleanupEdge {
+                parent: Arc::downgrade(&parent),
+                key,
+                child: Arc::downgrade(child),
+            });
+        }
     }
 
-    fn children(&self) -> &FxHashMap<SequenceHash, SharedNode> {
-        &self.children
-    }
+    for edge in edges.into_iter().rev() {
+        let (Some(parent), Some(child)) = (edge.parent.upgrade(), edge.child.upgrade()) else {
+            continue;
+        };
 
-    fn remove_child(&mut self, key: &SequenceHash) {
-        self.children.remove(key);
+        let mut parent_guard = parent.write();
+        let still_attached = parent_guard
+            .children
+            .get(&edge.key)
+            .is_some_and(|current| Arc::ptr_eq(current, &child));
+        if !still_attached {
+            continue;
+        }
+
+        let Some(child_guard) = child.try_write() else {
+            continue;
+        };
+        if child_guard.has_any_workers() || !child_guard.children.is_empty() {
+            continue;
+        }
+        if Arc::strong_count(&child) != 2 {
+            continue;
+        }
+
+        parent_guard.children.remove(&edge.key);
+        drop(child_guard);
     }
 }
 
@@ -153,7 +203,7 @@ impl PromptMembershipTrie {
             return;
         }
         let mut guard = CleanupGuard::new(&self.cleanup);
-        cleanup::sweep_stale_children(&self.root);
+        sweep_stale_children(&self.root);
         guard.mark_completed();
     }
 
@@ -936,11 +986,11 @@ mod tests {
             .expect("root child");
 
         trie.remove_worker(worker);
-        cleanup::sweep_stale_children(&trie.root);
+        sweep_stale_children(&trie.root);
         assert!(trie.root.read().children.contains_key(&1));
 
         drop(pinned);
-        cleanup::sweep_stale_children(&trie.root);
+        sweep_stale_children(&trie.root);
         assert!(!trie.root.read().children.contains_key(&1));
     }
 }
