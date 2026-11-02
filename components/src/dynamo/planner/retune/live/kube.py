@@ -9,12 +9,8 @@ raises the ``contracts.Kube*`` errors instead of client exceptions. The
 error carries the HTTP status as ``error.status`` (``None`` for a network
 error or timeout), so a caller can tell 403 from the rest.
 
-Custom resources (the DGD at v1beta1, DGDR v1beta2 Requests, Runs and
-Candidates) come back as the API server's JSON. Leases are read without the
-client's model deserialization (``_preload_content=False``) so a Lease dict
-round-trips unchanged: deserializing turns ``renewTime`` into a ``datetime``
-whose ``isoformat`` drops a zero fraction, which a later replace would send
-back in a form the ``MicroTime`` parser rejects.
+Custom resources (DGDR v1beta2 Requests, Runs and Candidates) come back as
+the API server's JSON.
 """
 
 from __future__ import annotations
@@ -22,7 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from typing import Any, Literal, Optional, TypeVar
 
 from kubernetes import client
@@ -44,8 +40,6 @@ from dynamo.planner.retune.live.contracts import (
 
 logger = logging.getLogger(__name__)
 
-DGD_VERSION = "v1beta1"
-DGD_PLURAL = "dynamographdeployments"
 # The frontend's container and HTTP port names (deploy/operator/internal/consts).
 MAIN_CONTAINER_NAME = "main"
 HTTP_PORT_NAME = "http"
@@ -139,15 +133,6 @@ def _http_port(spec: Any) -> Optional[int]:
     return None
 
 
-def _decode(response: Any) -> dict:
-    """The JSON body of a ``_preload_content=False`` response."""
-
-    data = response.data
-    if isinstance(data, bytes):
-        data = data.decode("utf-8")
-    return json.loads(data) if data else {}
-
-
 class KubernetesRetuneKube:
     """``contracts.RetuneKube`` for one namespace over ``api_client``.
 
@@ -163,7 +148,6 @@ class KubernetesRetuneKube:
         self.api_client = api_client
         self._custom = client.CustomObjectsApi(self.api_client)
         self._core = client.CoreV1Api(self.api_client)
-        self._coordination = client.CoordinationV1Api(self.api_client)
 
     @classmethod
     def from_kube_api(cls, kube_api: Any) -> KubernetesRetuneKube:
@@ -219,18 +203,6 @@ class KubernetesRetuneKube:
             ),
         )
         return list(result.get("items") or [])
-
-    # ----------------------------------------------------------------- DGD
-
-    def get_dgd(self, name: str, *, timeout_s: float = 10.0) -> dict:
-        found = self._get_custom(DGD_VERSION, DGD_PLURAL, name, timeout_s)
-        if found is None:
-            error = KubeNotFound(
-                f"DynamoGraphDeployment {self.namespace}/{name} not found"
-            )
-            error.status = 404  # type: ignore[attr-defined]
-            raise error
-        return found
 
     # ---------------------------------------------------------------- pods
 
@@ -319,79 +291,3 @@ class KubernetesRetuneKube:
         return self._list_custom(
             DGDR_VERSION, DGDR_CANDIDATES, label_selector, timeout_s
         )
-
-    # -------------------------------------------------------------- Leases
-
-    def get_lease(self, name: str, *, timeout_s: float = 10.0) -> Optional[dict]:
-        try:
-            return self._call(
-                "read",
-                f"leases/{name}",
-                lambda: _decode(
-                    self._coordination.read_namespaced_lease(
-                        name=name,
-                        namespace=self.namespace,
-                        _preload_content=False,
-                        _request_timeout=request_timeout(timeout_s),
-                    )
-                ),
-            )
-        except KubeNotFound:
-            return None
-
-    def create_lease(self, body: dict, *, timeout_s: float = 10.0) -> dict:
-        name = (body.get("metadata") or {}).get("name", "")
-        return self._call(
-            "create",
-            f"leases/{name}",
-            lambda: _decode(
-                self._coordination.create_namespaced_lease(
-                    namespace=self.namespace,
-                    body=_lease_body(body),
-                    field_manager=FIELD_MANAGER,
-                    _preload_content=False,
-                    _request_timeout=request_timeout(timeout_s),
-                )
-            ),
-        )
-
-    def replace_lease(self, name: str, body: dict, *, timeout_s: float = 10.0) -> dict:
-        return self._call(
-            "update",
-            f"leases/{name}",
-            lambda: _decode(
-                self._coordination.replace_namespaced_lease(
-                    name=name,
-                    namespace=self.namespace,
-                    body=_lease_body(body),
-                    field_manager=FIELD_MANAGER,
-                    _preload_content=False,
-                    _request_timeout=request_timeout(timeout_s),
-                )
-            ),
-        )
-
-    def delete_lease(self, name: str, *, timeout_s: float = 10.0) -> None:
-        """Missing Leases are not an error."""
-
-        try:
-            self._call(
-                "delete",
-                f"leases/{name}",
-                lambda: self._coordination.delete_namespaced_lease(
-                    name=name,
-                    namespace=self.namespace,
-                    _request_timeout=request_timeout(timeout_s),
-                ),
-            )
-        except KubeNotFound:
-            pass
-
-
-def _lease_body(body: Mapping[str, Any]) -> dict:
-    """A Lease body with its type fields set (the API server requires them)."""
-
-    lease = dict(body)
-    lease.setdefault("apiVersion", "coordination.k8s.io/v1")
-    lease.setdefault("kind", "Lease")
-    return lease

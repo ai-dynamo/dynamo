@@ -980,8 +980,9 @@ DGDR_TIMEOUT_MARGIN_SECONDS = 600.0
 # DGDR v1beta2 ``spec.recommendation.maxCandidates`` maximum: one Request (a
 # grid shard) carries at most this many router points.
 DGDR_MAX_SHARD_POINTS = 100
-# Router knobs a DGDR v1beta2 Request can search, by public name; the
-# Request's router section has no place for the retune extension knobs.
+# Router knobs a DGDR v1beta2 Request can search, by public name
+# (``contracts.DGDR_ROUTER_KNOBS``); the Request's router section has no
+# place for the retune extension knobs.
 _DGDR_ROUTER_SECTION_KEYS = frozenset(
     {
         "overlap_score_credit",

@@ -28,10 +28,10 @@ runs on the controller's single sweep thread and never raises:
 The executor never deletes anything itself: Requests to remove go to the
 ``SweepRegistry`` deletion queue, which the reconciler drains while this
 process leads. Shutdown (``cancel``) and loss of leadership (``abort``)
-return at once with ``failure_reason`` ``shutdown``/``lost_leadership`` and
-leave every Request in place for the next leader to adopt: the wait between
-polls ends as soon as either is set. Every mutating call first checks
-``abort`` and ``context.is_leader()``.
+return with ``failure_reason`` ``shutdown``/``lost_leadership`` and leave
+every Request in place for the next leader to adopt. Shutdown ends the wait
+between polls at once; ``abort`` is checked when it ends. Every mutating
+call first checks ``abort`` and ``context.is_leader()``.
 
 A shard that holds the baseline, or the probe, is critical: when it fails
 the window fails. Any other failed shard only leaves its points unscored.
@@ -162,8 +162,8 @@ def plan_shards(
     baseline: Mapping[str, float],
     startup: Mapping[str, float],
     max_shards: int,
+    parallelism: int,
     probe: bool = True,
-    parallelism: int | None = None,
 ) -> list[Shard]:
     """Split ``router_domain`` (live knob -> values) into Request shards.
 
@@ -171,9 +171,9 @@ def plan_shards(
     ``DGDR_MAX_SHARD_POINTS`` points: each knob's sorted values are cut into
     contiguous, near-equal chunks by ``balanced_shard_parts``, the split
     the configuration check (P13) uses. It minimizes the largest shard's
-    wall time, then the shard count: with the Run ``parallelism`` the time
-    is its evaluation rounds (``dgdr_rounds``), so a shard that would not
-    shorten the window is not added; without it, the largest shard's size.
+    evaluation rounds at the Run ``parallelism`` (``dgdr_rounds``), then
+    the shard count, so a shard that would not shorten the window is not
+    added.
     ``baseline`` and ``startup`` (live knob -> value) each get a
     single-point shard when off the grid.
     With ``probe``, a ``probe`` shard repeats one fixed grid point (the
@@ -343,8 +343,10 @@ def build_request(
     (unused roles are deleted with ``null``); the GPU budget is the sum of
     replicas times GPUs per worker (tensor x pipeline x attention_data).
     Router knobs use their AISimulate public names: ``{choices: [...]}``
-    for a grid shard, a scalar for a point or probe shard. Raises
-    ``ValueError`` for an engine or shard the Request cannot express.
+    for a grid shard, a scalar for a point or probe shard. ``cfg.engine``
+    is the one the configuration check (P5) accepted. Raises
+    ``ValueError`` for ``spec_replicas`` or a shard the Request cannot
+    express.
     """
 
     engine = _pinned_engine(cfg.engine, spec_replicas, backend)
@@ -388,6 +390,11 @@ def build_request(
                     "candidate_timeout_seconds": cfg.run.candidate_timeout_seconds,
                 },
                 "optimization": {"strict_sla": False},
+                # The planner reads only each Candidate's parameters and
+                # score, never its DGD. The direct generator keeps retune
+                # Runs independent of the AIC generator, whose rendering can
+                # reject a Candidate (ai-dynamo/dynamo#17581: no explicit
+                # block size) and so fail the Run and the window.
                 "dgdr_run": {"generator": "direct"},
             }
         },
@@ -424,49 +431,33 @@ def build_request(
 def _pinned_engine(
     engine: Mapping[str, Any], spec_replicas: Mapping[str, int], backend: str
 ) -> dict[str, Any]:
-    pinned = copy.deepcopy(dict(engine))
+    """``engine`` with the deployed backend and the DGD spec replicas.
+
+    The configuration check (P5) has already pinned ``engine``: its backend,
+    if written, is ``backend``, and each worker role of the planner mode has
+    one parallelism preset entry of positive integers. ``spec_replicas``
+    comes from the live DGD, so its roles and counts are checked here.
+    """
+
     roles = set(spec_replicas)
     if roles not in ({"aggregated"}, {"prefill", "decode"}):
         raise ValueError(
             "spec_replicas must name 'aggregated', or 'prefill' and 'decode'; "
             f"got {sorted(roles)}"
         )
-    written = pinned.get("backend")
-    if written is None:
-        pinned["backend"] = backend
-    elif written != backend:
-        raise ValueError(
-            f"retune.dgdr.engine.backend {written!r} differs from the deployed "
-            f"backend {backend!r}"
-        )
-    workers = pinned.get("workers")
-    if not isinstance(workers, dict):
-        raise ValueError("retune.dgdr.engine.workers must be a mapping")
+    pinned = copy.deepcopy(dict(engine))
+    pinned["backend"] = backend
+    workers = pinned["workers"]
     for role in _ROLES:
         if role not in roles:
             workers[role] = None
             continue
-        worker = workers.get(role)
-        preset = (
-            worker.get("parallelism", {}).get("preset")
-            if isinstance(worker, dict) and isinstance(worker.get("parallelism"), dict)
-            else None
-        )
-        if (
-            not isinstance(preset, list)
-            or len(preset) != 1
-            or not isinstance(preset[0], dict)
-        ):
-            raise ValueError(
-                f"retune.dgdr.engine.workers.{role}.parallelism.preset must be a "
-                "list of exactly one entry"
-            )
         replicas = int(spec_replicas[role])
         if replicas < 1:
             raise ValueError(
                 f"{role} has {replicas} spec replicas; at least 1 is needed"
             )
-        preset[0]["replicas"] = replicas
+        workers[role]["parallelism"]["preset"][0]["replicas"] = replicas
     return pinned
 
 
@@ -474,15 +465,7 @@ def _gpu_budget(engine: Mapping[str, Any], spec_replicas: Mapping[str, int]) -> 
     budget = 0
     for role, replicas in spec_replicas.items():
         entry = engine["workers"][role]["parallelism"]["preset"][0]
-        per_worker = 1
-        for knob in ("tensor", "pipeline", "attention_data"):
-            value = entry.get(knob, 1)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-                raise ValueError(
-                    f"retune.dgdr.engine.workers.{role}.parallelism.preset[0]."
-                    f"{knob} must be a positive integer, got {value!r}"
-                )
-            per_worker *= value
+        per_worker = entry["tensor"] * entry["pipeline"] * entry["attention_data"]
         budget += int(replicas) * per_worker
     return budget
 
@@ -660,8 +643,8 @@ class DgdrContext:
     ``backend`` is the deployed backend (``vllm``, ``sglang``, ``trtllm``).
     ``is_leader`` is checked before every mutating call. ``now`` is the
     wall clock (``deadline_s`` is epoch seconds). Between polls the sweep
-    waits on ``cancel`` and ``abort``, so either ends the wait at once;
-    ``sleep``, when set, replaces that wait (a test's simulated clock).
+    waits on ``cancel``, so shutdown ends the wait at once; ``sleep``, when
+    set, replaces that wait (a test's simulated clock).
     """
 
     dgd: DgdRef
@@ -726,11 +709,8 @@ class _WindowFailed(Exception):
 
 
 class _Stop:
-    """Shutdown (``cancel``) or loss of leadership (``abort``), as one flag.
-
-    The window cutter only asks ``is_set()``. ``wait`` is the sweep's pause
-    between polls and returns as soon as either event is set.
-    """
+    """Shutdown (``cancel``) or loss of leadership (``abort``) as the one
+    ``is_set()`` flag the window cutter polls."""
 
     def __init__(
         self, cancel: threading.Event, abort: Optional[threading.Event]
@@ -739,31 +719,6 @@ class _Stop:
 
     def is_set(self) -> bool:
         return any(event.is_set() for event in self._events)
-
-    def wait(self, timeout: float) -> bool:
-        """Block up to ``timeout`` seconds; True once either event is set.
-
-        A ``threading.Event`` is waited on alone, so with two events each
-        gets a helper thread that waits on it for the same ``timeout`` and
-        wakes this call; no thread outlives the timeout.
-        """
-
-        if len(self._events) == 1:
-            return self._events[0].wait(timeout)
-        if self.is_set():
-            return True
-        woken = threading.Event()
-
-        def watch(event: threading.Event) -> None:
-            if event.wait(timeout):
-                woken.set()
-
-        for event in self._events:
-            threading.Thread(
-                target=watch, args=(event,), name="retune-dgdr-wait", daemon=True
-            ).start()
-        woken.wait(timeout)
-        return self.is_set()
 
 
 ShardState = Literal["create", "unknown", "wait", "done", "missing"]
@@ -786,8 +741,10 @@ class _ShardRun:
     created: bool = False
     reason: Optional[str] = None
     message: Optional[str] = None
-    # The open Run's Completed reason and message (JobRunning, or why it
-    # waits: ContainerWaiting, TraceSourceMissing); None once it ends.
+    # Why the shard waits: the Request's Accepted reason and message while
+    # it has no Run (RunNameConflict, RunCreating, CancelingSupersededRun),
+    # then the open Run's Completed reason and message (JobRunning,
+    # ContainerWaiting, TraceSourceMissing); None once the Run ends.
     run_status: Optional[str] = None
     run_name: Optional[str] = None
     run_uid: Optional[str] = None
@@ -812,8 +769,8 @@ class _ShardRun:
         return self.name
 
     def status(self) -> Optional[str]:
-        """The open Run's status, else why the shard ended or its last
-        attempt was replaced."""
+        """Why the open Request or Run waits, else why the shard ended or
+        its last attempt was replaced."""
 
         return self.run_status or self.message
 
@@ -964,12 +921,15 @@ class _DgdrSweep:
         return max(_MIN_K8S_TIMEOUT_S, min(_K8S_TIMEOUT_S, self.deadline - self._now()))
 
     def _pause(self, seconds: float) -> None:
-        """Wait between polls; shutdown or abort ends the wait at once."""
+        """Wait between polls. Shutdown ends the wait at once; loss of
+        leadership is seen when it ends, and every mutating call checks
+        ``is_leader()`` first anyway."""
 
         if self.ctx.sleep is not None:
             self.ctx.sleep(seconds)
         else:
-            self.stop.wait(seconds)
+            self.cancel.wait(seconds)
+        self._check_interrupt()
 
     def _check_interrupt(self) -> None:
         if self.cancel.is_set():
@@ -1495,7 +1455,12 @@ class _DgdrSweep:
                     "invalid_spec",
                     f"Request {run.name}: {accepted.get('message', '')}",
                 )
-            # RunCreating, RunNameConflict, CancelingSupersededRun: wait.
+            # RunCreating, RunNameConflict, CancelingSupersededRun: wait, and
+            # keep why, so a deadline that passes here reports it.
+            run.run_status = (
+                f"Request {run.name} {accepted.get('reason')}: "
+                f"{accepted.get('message', '')}"
+            )
             return
         try:
             found = self._find_run(obj)
@@ -1503,6 +1468,7 @@ class _DgdrSweep:
             self._read_failed(f"get the Run of Request {run.name}", error)
             return
         if found is None:
+            run.run_status = None
             return  # created, not yet visible
         run.run_name = found["metadata"]["name"]
         run_uid = found["metadata"].get("uid")

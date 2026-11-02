@@ -10,15 +10,44 @@ each can be built and tested with fakes.
 
 from __future__ import annotations
 
-import threading
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional, Protocol
+
+# Router knobs a DGDR v1beta2 Request can search, AISimulate public name ->
+# live name. ``dynamo.router.simulation.config.ROUTER_PUBLIC_TO_LIVE`` is the
+# source of truth; this mirrors it for modules that must not import the
+# router simulation stack.
+DGDR_ROUTER_KNOBS: dict[str, str] = {
+    "overlap_score_credit": "overlap_score_credit",
+    "prefill_load_scale": "prefill_load_scale",
+    "temperature": "router_temperature",
+}
 
 LABEL_PREFIX = "nvidia.com/planner-retune-"
 LABEL_DGD = LABEL_PREFIX + "dgd"
 LABEL_DGD_UID = LABEL_PREFIX + "dgd-uid"
 LABEL_WINDOW = LABEL_PREFIX + "window"
+LABEL_SHARD = LABEL_PREFIX + "shard"
+LABEL_SPEC = LABEL_PREFIX + "spec"
+LABEL_ATTEMPT = LABEL_PREFIX + "attempt"
+
+# Pod labels the operator sets (deploy/operator/internal/consts/consts.go).
+POD_LABEL_DGD_NAME = "nvidia.com/dynamo-graph-deployment-name"
+POD_LABEL_COMPONENT_TYPE = "nvidia.com/dynamo-component-type"
+
+DGDR_GROUP = "nvidia.com"
+DGDR_VERSION = "v1beta2"
+DGDR_REQUESTS = "dynamographdeploymentrequests"
+DGDR_RUNS = "dynamographdeploymentruns"
+DGDR_CANDIDATES = "dynamographdeploymentcandidates"
+RUN_UID_LABEL = "nvidia.com/dgdr-run-uid"
+
+# SweepResult.failure_reason values that mean "this process stopped working
+# on the window", not "the window failed": no decision is recorded and the
+# controller rewinds so the window can be relaunched or adopted by the next
+# leader.
+NON_DECISION_FAILURES = frozenset({"shutdown", "lost_leadership"})
 
 
 # ------------------------------------------------------------ kubernetes
@@ -26,6 +55,22 @@ LABEL_WINDOW = LABEL_PREFIX + "window"
 
 class KubeError(Exception):
     """A Kubernetes call failed (network, timeout, 5xx, unexpected status)."""
+
+
+class KubeNotFound(KubeError):
+    pass
+
+
+class KubeConflict(KubeError):
+    """409 on update (stale resourceVersion)."""
+
+
+class KubeAlreadyExists(KubeError):
+    """409 on create (the name is taken)."""
+
+
+class KubeInvalid(KubeError):
+    """422 / 400: the API server rejected the object (e.g. Strict pruning)."""
 
 
 @dataclass(frozen=True)
@@ -62,9 +107,6 @@ class RetuneKube(Protocol):
     """
 
     namespace: str
-
-    def get_dgd(self, name: str, *, timeout_s: float = 10.0) -> dict:
-        ...
 
     def list_pods(
         self, label_selector: str, *, timeout_s: float = 10.0
@@ -105,19 +147,6 @@ class RetuneKube(Protocol):
     def list_candidates(
         self, label_selector: str, *, timeout_s: float = 10.0
     ) -> list[dict]:
-        ...
-
-    def get_lease(self, name: str, *, timeout_s: float = 10.0) -> Optional[dict]:
-        ...
-
-    def create_lease(self, body: dict, *, timeout_s: float = 10.0) -> dict:
-        ...
-
-    def replace_lease(self, name: str, body: dict, *, timeout_s: float = 10.0) -> dict:
-        """Update with ``body['metadata']['resourceVersion']``; 409 -> KubeConflict."""
-        ...
-
-    def delete_lease(self, name: str, *, timeout_s: float = 10.0) -> None:
         ...
 
 

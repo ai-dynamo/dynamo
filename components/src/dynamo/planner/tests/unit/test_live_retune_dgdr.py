@@ -478,7 +478,11 @@ def test_plan_shards_default_grid_is_three_balanced_shards_and_a_probe():
     points = grid(DEFAULT_DOMAIN)
     baseline = points[0]
     shards = plan_shards(
-        DEFAULT_DOMAIN, baseline=baseline, startup=baseline, max_shards=3
+        DEFAULT_DOMAIN,
+        baseline=baseline,
+        startup=baseline,
+        max_shards=3,
+        parallelism=8,
     )
     grid_shards = [shard for shard in shards if shard.kind == "grid"]
     assert [shard.size for shard in grid_shards] == [36, 36, 36]
@@ -533,18 +537,21 @@ def test_plan_shards_adds_off_grid_baseline_and_startup_points():
 def test_plan_shards_splits_uneven_dimension_and_rejects_impossible_grids():
     domain = {CREDIT: tuple(float(v) for v in range(250))}
     zero = {CREDIT: 0.0}
-    shards = plan_shards(domain, baseline=zero, startup=zero, max_shards=3, probe=False)
+    shards = plan_shards(
+        domain, baseline=zero, startup=zero, max_shards=3, parallelism=8, probe=False
+    )
     assert [shard.size for shard in shards] == [84, 83, 83]
     assert shards[0].choices[CREDIT][0] == 0.0
     assert shards[-1].choices[CREDIT][-1] == 249.0
     with pytest.raises(ValueError, match="cannot be split"):
-        plan_shards(domain, baseline=zero, startup=zero, max_shards=2)
+        plan_shards(domain, baseline=zero, startup=zero, max_shards=2, parallelism=8)
     with pytest.raises(ValueError, match="cannot be split"):
         plan_shards(
             DEFAULT_DOMAIN,
             baseline=grid(DEFAULT_DOMAIN)[0],
             startup=grid(DEFAULT_DOMAIN)[0],
             max_shards=1,
+            parallelism=8,
         )
     point = grid(SMALL_DOMAIN)[0]
 
@@ -554,15 +561,12 @@ def test_plan_shards_splits_uneven_dimension_and_rejects_impossible_grids():
         )
         return [shard.size for shard in shards]
 
-    # Without the Run parallelism the largest shard is minimized.
-    assert sizes(max_shards=16) == [1] * 8
-    assert sizes(max_shards=3) == [4, 4]
-    # With it, a shard is added only when it saves an evaluation round
-    # (AISimulate runs the first candidate alone, so single points save one).
+    # A shard is added only when it saves an evaluation round (AISimulate
+    # runs the first candidate alone, so single points save one).
     assert sizes(max_shards=3, parallelism=8) == [8]
     assert sizes(max_shards=16, parallelism=8) == [1] * 8
     assert sizes(max_shards=3, parallelism=1) == [4, 4]
-    # The default grid is three shards of 36 either way.
+    # The default grid is three shards of 36.
     default = plan_shards(
         DEFAULT_DOMAIN,
         baseline=grid(DEFAULT_DOMAIN)[0],
@@ -576,12 +580,18 @@ def test_plan_shards_splits_uneven_dimension_and_rejects_impossible_grids():
 def test_plan_shards_validates_inputs_and_probe_falls_back_to_zero_temperature():
     point = {CREDIT: 0.5, SCALE: 1.0}
     with pytest.raises(ValueError, match="do not match"):
-        plan_shards(SMALL_DOMAIN, baseline=point, startup=point, max_shards=3)
+        plan_shards(
+            SMALL_DOMAIN, baseline=point, startup=point, max_shards=3, parallelism=8
+        )
     with pytest.raises(ValueError, match="empty"):
-        plan_shards({}, baseline={}, startup={}, max_shards=3)
+        plan_shards({}, baseline={}, startup={}, max_shards=3, parallelism=8)
     domain = {CREDIT: (0.0, 1.0), SCALE: (1.0,), TEMP: (0.0,)}
     shards = plan_shards(
-        domain, baseline=grid(domain)[0], startup=grid(domain)[0], max_shards=3
+        domain,
+        baseline=grid(domain)[0],
+        startup=grid(domain)[0],
+        max_shards=3,
+        parallelism=8,
     )
     assert shards[-1].points == ({CREDIT: 1.0, SCALE: 1.0, TEMP: 0.0},)
 
@@ -727,21 +737,11 @@ def test_build_request_point_shard_uses_scalars_and_disagg_budget():
 
 
 @pytest.mark.parametrize(
-    "engine, replicas, backend, match",
-    [
-        ({**AGG_ENGINE, "backend": "sglang"}, {"aggregated": 1}, "vllm", "differs"),
-        (
-            {**AGG_ENGINE, "workers": {"aggregated": {}}},
-            {"aggregated": 1},
-            "vllm",
-            "preset",
-        ),
-        (AGG_ENGINE, {"prefill": 1}, "vllm", "spec_replicas"),
-        (AGG_ENGINE, {"aggregated": 0}, "vllm", "at least 1"),
-    ],
+    "replicas, match",
+    [({"prefill": 1}, "spec_replicas"), ({"aggregated": 0}, "at least 1")],
 )
-def test_build_request_rejects_engines_it_cannot_pin(engine, replicas, backend, match):
-    cfg = make_cfg(engine=engine)
+def test_build_request_rejects_spec_replicas_it_cannot_pin(replicas, match):
+    cfg = make_cfg()
     with pytest.raises(ValueError, match=match):
         build_request(
             dgd=DGD,
@@ -752,7 +752,7 @@ def test_build_request_rejects_engines_it_cannot_pin(engine, replicas, backend, 
             window_end_ms=WINDOW_END_MS,
             shard=_shards()[0],
             spec_replicas=replicas,
-            backend=backend,
+            backend="vllm",
             attempt=1,
         )
 
@@ -1056,22 +1056,19 @@ def test_shutdown_returns_at_once_without_deleting(tmp_path):
     assert len(h.kube.requests) == 2
 
 
-@pytest.mark.parametrize(
-    "event, reason", [("cancel", "shutdown"), ("abort", "lost_leadership")]
-)
-def test_the_wait_between_polls_ends_when_the_sweep_is_stopped(tmp_path, event, reason):
+def test_shutdown_ends_the_wait_between_polls(tmp_path):
     # Wall-clock time and the sweep's own wait: the poll interval is far
-    # longer than the test, so only the event can end the wait.
+    # longer than the test, so only shutdown can end the wait.
     h = Harness(tmp_path, operator=False)
     request = make_request(deadline_s=time.time() + TIMEOUT_S)
-    timer = threading.Timer(0.2, getattr(h, event).set)
+    timer = threading.Timer(0.2, h.cancel.set)
     timer.start()
     started = time.monotonic()
     try:
         result = h.sweep(request, now=time.time, sleep=None, poll_interval_s=600.0)
     finally:
         timer.cancel()
-    assert result.failure_reason == reason
+    assert result.failure_reason == "shutdown"
     assert time.monotonic() - started < 60.0
     assert len(h.kube.requests) == 2
 
@@ -1353,6 +1350,33 @@ def test_run_name_conflict_keeps_waiting(tmp_path):
     assert result.status == "ok", result.error
     assert h.clock.now - LAUNCH_S > dgdr.ACCEPT_TIMEOUT_S
     assert_scores(result, request)
+
+
+def test_a_run_name_conflict_until_the_deadline_reports_why(tmp_path):
+    # A recreated Request whose old Run still waits for garbage collection.
+    h = Harness(tmp_path, operator=False)
+    message = (
+        'Run "llm-rt-0123456789-1" exists and is not the Run of generation 1 '
+        "of this Request; trying again once it is gone"
+    )
+
+    def operator():
+        for name in list(h.kube.requests):
+            h.kube.set_request_condition(
+                name, status="False", reason="RunNameConflict", message=message
+            )
+
+    h.clock.hooks.append(operator)
+    result = h.sweep(make_request(deadline_s=LAUNCH_S + 900.0))
+    assert result.status == "timeout"
+    assert result.failure_reason == "timeout"
+    for shard_id in ("grid-0", "probe"):
+        shard = result.details["shards"][shard_id]
+        assert shard["state"] == "wait"
+        assert shard["message"] == (
+            f"Request {shard['request']} RunNameConflict: {message}"
+        )
+        assert f"{shard_id}: {shard['message']}" in result.error
 
 
 def test_run_pending_until_the_deadline_times_out(tmp_path):
@@ -1933,14 +1957,10 @@ def test_invalid_requests_fail_cleanly(tmp_path, kwargs, reason):
 
 
 def test_invalid_engine_fails_cleanly(tmp_path):
-    h = Harness(
-        tmp_path,
-        cfg=make_cfg(
-            engine={**AGG_ENGINE, "backend": "sglang"}, mount_path=str(tmp_path)
-        ),
-    )
-    result = h.sweep(make_request())
+    h = Harness(tmp_path)
+    result = h.sweep(make_request(spec_replicas={"aggregated": 0}))
     assert result.failure_reason == "invalid_engine"
+    assert h.created() == []
 
 
 def test_deadline_defaults_to_the_request_timeout(tmp_path):
