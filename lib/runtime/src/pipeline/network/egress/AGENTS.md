@@ -23,8 +23,9 @@ compared with `RoutingHost`.
 - The direct engine (`AsyncEngine::generate`, `round_robin`, `random`, `power_of_two_choices`,
   `least_loaded`, `device_aware_weighted`) is for callers with generic `T`/`U` types. Keep its
   behavior stable. The Python bindings call these methods by name.
-- A `*_prepared` callback receives the worker that survived transport resolution. A caller that
-  owns an occupancy booking must move the booking to that worker in the callback.
+- A `*_prepared` callback receives the worker that will receive the request. Move everything
+  the caller tied to the selected worker (occupancy booking, DP rank, request fields) in that
+  callback. The README's "The `prepare` callback" section gives the full contract.
 - When you add, remove or repurpose a public function, update the use-case tables in
   `README.md`.
 

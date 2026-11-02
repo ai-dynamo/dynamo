@@ -65,7 +65,8 @@ worker. The added 1 is an `OccupancyReservation`, released when the request ends
 - On the direct engine, the response stream (`OccupancyTrackedStream`) holds it.
 - Under `RoutingHost`, the `RequestGuard` holds it.
 
-If transport fallback switches workers, the holder moves the reservation to the new worker.
+If transport fallback switches workers, the holder moves the reservation to the new worker (see
+[The `prepare` callback](#the-prepare-callback)).
 RoundRobin, Random and Direct do not count requests.
 
 ## Public API by use case
@@ -86,10 +87,9 @@ DeviceAwareWeighted, a replacement final hop (`dispatch`), and `fault_detection`
 
 ### Transport for `RoutingHost`
 
-These send to a worker that `RoutingHost` already selected. Each `*_prepared` variant runs the
-caller's `prepare(request, worker_id)` after transport resolution, with the worker that will
-actually receive the request. `RoutingHost` uses that callback to move its `RequestGuard`
-booking (`retarget_worker`) and set the DP rank.
+These send to a worker that `RoutingHost` already selected. Each `*_prepared` variant takes a
+[`prepare` callback](#the-prepare-callback), which `RoutingHost` uses to keep its booking on the
+worker that receives the request.
 
 | Function | Fallback | Called by |
 |----------|----------|-----------|
@@ -153,9 +153,30 @@ discovery, the caller's `TransportFallback` decides what happens:
 | `Within(set)` | Send to another free worker, but only one in `set` | `RoutingHost` LoRA routing |
 | `Deny` | Fail with `CannotConnect` | `direct`, `dispatch_exact`, `dispatch_kv_admitted` |
 
-When fallback picks a new worker, the `prepare` callback receives it, so the owner of an
-occupancy booking can move the booking to that worker. When no permitted worker is free, the
-error is `Unavailable`.
+When fallback picks a new worker, the [`prepare` callback](#the-prepare-callback) receives it.
+When no permitted worker is free, the error is `Unavailable`.
+
+## The `prepare` callback
+
+A caller that keeps state for the selected worker must move that state to the worker that
+actually receives the request. `prepare(request, worker_id)` reports that worker:
+
+- It runs once, after transport resolution and the overload check, before the request is
+  addressed. Compare `worker_id` with your selection to detect a fallback; nothing else reports
+  one.
+- Move everything you tied to the selected worker: an occupancy reservation, a DP rank, request
+  fields prepared for that worker. `RoutingHost` calls `RequestGuard::retarget_worker` and keeps
+  the planned DP rank only for the planned worker. `image_edits.rs` validates the request against
+  the final worker.
+- If it returns an error, nothing is sent and that error is returned. Release what you hold.
+- It does not run when transport resolution or the overload check fails (`CannotConnect`,
+  `Unavailable`, `WorkerOverloaded`), so your state still names the original worker.
+- The fallback worker is the first free instance that the fallback policy allows. It does not
+  follow your selection policy.
+
+`dispatch_exact` and `dispatch_kv_admitted` take no callback, because the worker cannot change.
+The direct engine moves its own occupancy permit (`dispatch_selected`), so callers of
+`select_and_dispatch` use `prepare` only to change the request.
 
 ## Fault detection
 
