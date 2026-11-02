@@ -40,7 +40,7 @@ spec:
 The DCD spec is `backendFramework` plus the [shared component spec](#shared-component-spec) inlined at the same level.
 
 <ParamField path="backendFramework" type="string">
-  Inference backend framework for this component. Drives backend-specific defaults the operator injects into the `spec.podTemplate.spec.containers[name=main]` container.
+  Inference backend framework for this component. Drives backend-specific defaults the operator injects into the `spec.podTemplate.spec.containers[name=main]` container. When set, it must match the framework the operator detects from the `main` container command; admission resolves the backend with the same logic used at render time and rejects the request when resolution fails.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
 

@@ -3488,6 +3488,25 @@ func GetBackendFrameworkFromDynamoComponent(dynComponent *v1beta1.DynamoComponen
 	)
 }
 
+// ValidateBackendFrameworkResolution resolves the component's backend
+// framework exactly as rendering does and reports a resolution failure as a
+// field error on backendFramework. Admission calls it so a spec the renderer
+// would reject is refused at create or update time instead of failing later
+// in the deployment status. component and fldPath must not be nil; fldPath is
+// the path of the component that owns the pod templates being resolved.
+func ValidateBackendFrameworkResolution(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+	explicitBackendFramework string,
+) field.ErrorList {
+	// Resolution is the renderer's own logic, so admission and rendering
+	// cannot disagree about which specs are valid.
+	if _, err := determineBackendFrameworkForComponent(component, explicitBackendFramework); err != nil {
+		return field.ErrorList{field.Invalid(fldPath.Child("backendFramework"), explicitBackendFramework, err.Error())}
+	}
+	return nil
+}
+
 type GenerateBasePodSpecForControllerOptions struct {
 	// WorkloadComponentType overrides the component type used for pod workload
 	// defaults and env vars. Empty means use dynComponent.Spec.ComponentType.
