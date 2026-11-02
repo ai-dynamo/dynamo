@@ -83,14 +83,17 @@ def test_third_party_suffixed_codec_lib_is_denied(tmp_path: Path):
 
 
 def test_dali_bundled_ffmpeg_is_a_logged_exception(tmp_path: Path):
-    # DALI's whole vendored .libs/ is waived — both libavcodec and the libsw*
+    # DALI's vendored ffmpeg families are waived — libavcodec and the libsw*
     # companions (the latter regressed the trtllm build when the glob was libav* only).
+    # Any other codec library in the same .libs/ must still fail.
     dali = "usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs"
     _touch(tmp_path, f"{dali}/libavcodec-73c99a8b.so.62")
     _touch(tmp_path, f"{dali}/libswscale-8cfd67c4.so.9")
+    _touch(tmp_path, f"{dali}/libpostproc-0123abcd.so.58")
+    _touch(tmp_path, f"{dali}/libx264-0123abcd.so.164")
     violations, exceptions, _allowed = scan_filesystem(tmp_path, _POLICY)
-    assert violations == []
-    assert len(exceptions) == 2
+    assert [v["path"] for v in violations] == [f"/{dali}/libx264-0123abcd.so.164"]
+    assert len(exceptions) == 3
     assert all("DALI" in (e["detail"] or "") for e in exceptions)
 
 

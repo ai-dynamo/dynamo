@@ -11,18 +11,24 @@ use std::time::Instant;
 
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::indexer::{
-    KvIndexerInterface, ObservationError, SyncIndexer, ThreadPoolIndexer, ThreadPoolObservationPlan,
+    KvIndexerInterface, LowerTierIndexers, LowerTierMatchDetails, ObservationError, SyncIndexer,
+    ThreadPoolIndexer, ThreadPoolObservationPlan, query_lower_tiers_with_options,
 };
-use dynamo_kv_router::protocols::{KvCacheEventData, RouterEvent};
+use dynamo_kv_router::protocols::{KvCacheEventData, RouterEvent, StorageTier};
 use serde::Serialize;
 use tokio::sync::{Notify, oneshot};
 
 pub use dynamo_bench::kv_router_common::issuer::parse_cpu_list;
 use dynamo_bench::kv_router_common::issuer::{contiguous_worker_issuer, pin_current_thread};
 
-use super::mooncake_shared::{MooncakeTraceTotals, PreparedMooncakeBenchmark, WorkerTraceEntry};
+use super::mooncake_lower_tier::{
+    Allocator, Footprint, LowerTierRun, cache_owner, footprint, routing_snapshot,
+};
+use super::mooncake_shared::{
+    HostTierTotals, MooncakeTraceTotals, PreparedMooncakeBenchmark, WorkerTraceEntry,
+};
 
-const RESULT_SCHEMA_VERSION: u32 = 3;
+const RESULT_SCHEMA_VERSION: u32 = 4;
 const EMPTY_OPERATION_ID: u32 = u32::MAX;
 
 #[derive(Clone, Debug)]
@@ -43,6 +49,8 @@ enum OperationKind {
     #[default]
     Query,
     Event,
+    /// A host-tier event, enqueued as the router enqueues it, with no per-event completion.
+    LowerTierEvent,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -253,21 +261,23 @@ pub(crate) fn prepare_mooncake_corpus(
                     WorkerTraceEntry::Event {
                         event,
                         storage_tier,
+                        cache_owner: owned,
                     } => {
-                        if !storage_tier.is_gpu() {
-                            anyhow::bail!(
-                                "open-loop replay encountered non-GPU event for worker {worker_id}"
-                            );
+                        // Only device events are observed; host events have no completions.
+                        if storage_tier.is_gpu() {
+                            *events_by_worker.entry(worker_id).or_default() += 1;
                         }
-                        *events_by_worker.entry(worker_id).or_default() += 1;
-                        (
-                            MooncakeOperationPayload::Event(RouterEvent::with_storage_tier(
+                        let event = if *owned {
+                            RouterEvent::with_cache_owner(
                                 worker_id,
                                 event.clone(),
                                 *storage_tier,
-                            )),
-                            QuerySpec::default(),
-                        )
+                                cache_owner(worker_id),
+                            )
+                        } else {
+                            RouterEvent::with_storage_tier(worker_id, event.clone(), *storage_tier)
+                        };
+                        (MooncakeOperationPayload::Event(event), QuerySpec::default())
                     }
                 };
                 operations.push((
@@ -430,6 +440,9 @@ struct QueryCompletion {
     started_ns: u64,
     finished_ns: u64,
     success: bool,
+    /// The lower-tier part of the lookup, and whether it found blocks past the device prefix.
+    lower_tier_ns: u64,
+    lower_tier_hit: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -448,8 +461,35 @@ struct QueryLaneResult {
     failure: QueryLaneFailure,
 }
 
+/// One routing lookup, as the router makes it: CRTC alone, or the device match seeding the
+/// lower-tier walk (`LookupPipeline::find_matches_by_tier`). With a lower tier, returns when its
+/// walk started and what it found.
+fn lookup<T: SyncIndexer>(
+    indexer: &ThreadPoolIndexer<T>,
+    lower_tier: Option<&LowerTierRun<T>>,
+    hashes: &[LocalBlockHash],
+    epoch: Instant,
+) -> Option<(
+    u64,
+    std::collections::HashMap<StorageTier, LowerTierMatchDetails>,
+)> {
+    let Some(lower) = lower_tier else {
+        black_box(indexer.backend().find_matches(hashes, false));
+        return None;
+    };
+    let device = (lower.device_details)(
+        indexer.backend(),
+        hashes,
+        lower.options.retain_kv_transfer_chain,
+    );
+    let started_ns = elapsed_ns(epoch);
+    let tiers = query_lower_tiers_with_options(&lower.indexers, hashes, &device, lower.options);
+    Some((started_ns, black_box(tiers)))
+}
+
 async fn query_lane_worker<T: SyncIndexer>(
     indexer: Arc<ThreadPoolIndexer<T>>,
+    lower_tier: Option<Arc<LowerTierRun<T>>>,
     lane: Arc<QueryLane>,
     corpus: Arc<QueryCorpus>,
     epoch: Instant,
@@ -482,14 +522,22 @@ async fn query_lane_worker<T: SyncIndexer>(
                 break;
             };
             let started_ns = elapsed_ns(epoch);
-            let output = indexer.backend().find_matches(hashes, false);
-            black_box(output);
+            let lower = lookup(&indexer, lower_tier.as_deref(), hashes, epoch);
             let finished_ns = elapsed_ns(epoch);
+            let (lower_tier_ns, lower_tier_hit) =
+                lower.map_or((0, false), |(lower_started, tiers)| {
+                    let hit = tiers
+                        .values()
+                        .any(|details| details.hits.values().any(|&hits| hits > 0));
+                    (finished_ns.saturating_sub(lower_started), hit)
+                });
             *slot = QueryCompletion {
                 id,
                 started_ns,
                 finished_ns,
                 success: true,
+                lower_tier_ns,
+                lower_tier_hit,
             };
             consumed += 1;
         }
@@ -603,6 +651,7 @@ struct QueryIssuerContext<'a> {
 
 struct EventIssuerContext<'a, T: SyncIndexer> {
     indexer: &'a ThreadPoolIndexer<T>,
+    lower_tier: Option<&'a LowerTierIndexers>,
     deadline_ready: &'a [AtomicBool],
     peer_failed: &'a AtomicBool,
     clock: &'a BenchmarkClock,
@@ -739,12 +788,12 @@ fn issue_events<T: SyncIndexer>(
                 DispatchPayload::Event(event) => {
                     let enqueue_result = enqueue_event(&context, event, entry.id);
                     match enqueue_result {
-                        Ok((event_worker, accepted_ns)) => {
+                        Ok((event_worker, accepted_ns, kind)) => {
                             let record = IssueRecord {
                                 scheduled_ns,
                                 accepted_ns,
                                 queue_id: event_worker as u16,
-                                kind: OperationKind::Event,
+                                kind,
                                 accepted: true,
                             };
                             if let Err(error) = storage.record(entry.id, record) {
@@ -773,15 +822,31 @@ fn issue_events<T: SyncIndexer>(
     }
 }
 
+/// Device events take the observed path; host events go to the lower tier as the router sends
+/// them (`Indexer::try_apply_event`), which routes a cache owner's events by its digest.
 fn enqueue_event<T: SyncIndexer>(
     context: &EventIssuerContext<'_, T>,
     event: RouterEvent,
     id: u32,
-) -> Result<(usize, u64), ()> {
+) -> Result<(usize, u64, OperationKind), ()> {
+    if !event.storage_tier.is_gpu() {
+        let lower_tier = context.lower_tier.ok_or(())?;
+        lower_tier
+            .get_or_create(event.storage_tier)
+            .enqueue_event(event)
+            .map_err(|_| ())?;
+        return Ok((0, context.clock.now_ns(), OperationKind::LowerTierEvent));
+    }
     context
         .indexer
         .enqueue_active_observation_owned(event, id, context.clock.epoch())
-        .map(|receipt| (receipt.event_worker, receipt.accepted_ns))
+        .map(|receipt| {
+            (
+                receipt.event_worker,
+                receipt.accepted_ns,
+                OperationKind::Event,
+            )
+        })
         .map_err(|_| ())
 }
 
@@ -841,6 +906,31 @@ pub struct RunProvenance {
     pub jump_size: Option<usize>,
     pub issuer_spin_us: u64,
     pub issue_lag_diagnostic_threshold_us: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_host_blocks: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kvcr_blocks: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_cache_bytes_per_token: Option<usize>,
+}
+
+/// The lower tier in a run with host tiers. Its events have no per-event completions: the run's
+/// end waits for the lower tier to drain, and its memberships must match the host-tier streams.
+#[derive(Debug, Serialize)]
+pub struct LowerTierResult {
+    pub cpu_tier: HostTierTotals,
+    pub kvcr: HostTierTotals,
+    pub cpu_tier_indexed_memberships: usize,
+    pub kvcr_indexed_memberships: usize,
+    /// The lower-tier part of each lookup.
+    pub query_service: Distribution,
+    /// Lookups whose lower-tier walk found blocks past the device prefix.
+    pub hit_queries: usize,
+    /// From producer stop until the lower tier drained.
+    pub drain_ns: u64,
+    pub allocator: Option<Allocator>,
+    pub heap_bytes: Option<u64>,
+    pub bytes_per_membership: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -896,6 +986,8 @@ pub struct OpenLoopResult {
     pub kept_up: bool,
     pub failure_reasons: Vec<String>,
     pub backend_timing_report: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lower_tier: Option<LowerTierResult>,
     pub provenance: Option<RunProvenance>,
 }
 
@@ -980,9 +1072,25 @@ fn deadline_readiness(query_counts: Vec<u32>) -> Box<[AtomicBool]> {
 pub async fn run_open_loop<T: SyncIndexer>(
     backend_name: &str,
     indexer: Arc<ThreadPoolIndexer<T>>,
+    lower_tier: Option<LowerTierRun<T>>,
     trial: PreparedOpenLoopTrial,
     config: OpenLoopConfig,
 ) -> anyhow::Result<OpenLoopResult> {
+    if trial.totals.host_events() > 0 && lower_tier.is_none() {
+        anyhow::bail!("the corpus has host-tier events but the run has no lower tier");
+    }
+    if let Some(lower) = &lower_tier
+        && trial.totals.kvcr.stored_events > 0
+    {
+        let workers = trial
+            .expected_events_by_worker
+            .iter()
+            .map(|&(worker, _)| worker);
+        lower
+            .indexers
+            .set_residency_routing_snapshot(routing_snapshot(workers)?);
+    }
+    let lower_tier = lower_tier.map(Arc::new);
     trial.page_touch_untimed();
     let clock = BenchmarkClock::new(config.spin_us.saturating_mul(1_000))?;
     let epoch = clock.epoch();
@@ -996,11 +1104,12 @@ pub async fn run_open_loop<T: SyncIndexer>(
     {
         let start = spec.start as usize;
         let end = start + spec.len as usize;
-        black_box(
-            indexer
-                .backend()
-                .find_matches(&trial.query_corpus.hashes[start..end], false),
-        );
+        black_box(lookup(
+            &indexer,
+            lower_tier.as_deref(),
+            &trial.query_corpus.hashes[start..end],
+            epoch,
+        ));
     }
 
     let lanes = trial
@@ -1015,6 +1124,7 @@ pub async fn run_open_loop<T: SyncIndexer>(
         ready_receivers.push(ready_rx);
         query_tasks.push(tokio::spawn(query_lane_worker(
             Arc::clone(&indexer),
+            lower_tier.clone(),
             Arc::clone(lane),
             Arc::clone(&trial.query_corpus),
             epoch,
@@ -1041,6 +1151,7 @@ pub async fn run_open_loop<T: SyncIndexer>(
         })
         .await?;
     let peer_failed = AtomicBool::new(false);
+    let lower_indexers = lower_tier.as_deref().map(|lower| &lower.indexers);
     let start_signal = AtomicU64::new(0);
     let ready_barrier = Barrier::new(issuer_count + 2);
     let start_barrier = Barrier::new(issuer_count + 2);
@@ -1107,6 +1218,7 @@ pub async fn run_open_loop<T: SyncIndexer>(
                 issue_events(
                     EventIssuerContext {
                         indexer: issuer_indexer,
+                        lower_tier: lower_indexers,
                         deadline_ready: issuer_deadline_ready,
                         peer_failed: issuer_peer_failed,
                         clock: issuer_clock,
@@ -1147,18 +1259,43 @@ pub async fn run_open_loop<T: SyncIndexer>(
         }
         Ok::<_, tokio::task::JoinError>(results)
     };
-    let (sealed, query_results) = tokio::join!(seal_future, query_future);
+    // Host events have no completions; the lower tier has drained once a flush returns.
+    let lower_flush = async {
+        let Some(lower) = &lower_tier else {
+            return Ok(None);
+        };
+        let tier = lower.indexers.get_or_create(StorageTier::HostPinned);
+        tier.flush_and_wait().await?;
+        Ok::<_, anyhow::Error>(Some(clock.now_ns()))
+    };
+    let (sealed, query_results, lower_done_ns) =
+        tokio::join!(seal_future, query_future, lower_flush);
     let sealed = sealed?;
     let query_results = query_results?;
+    let lower_done_ns = lower_done_ns?;
     let snapshot = sealed.harvest().await?;
     KvIndexerInterface::flush(indexer.as_ref()).await;
-    // Timing ends at the last completed operation. Closing lanes, sealing and
-    // harvesting completion buffers, and aggregating issue records are bookkeeping.
-    // A run with no completions (a failed issuer) ends at producer stop.
-    let end_ns = last_completion_ns(&query_results, &snapshot).unwrap_or(producer_stop_ns);
+    // Timing ends at the last completed operation, or when the lower tier drained. Closing
+    // lanes, sealing and harvesting completion buffers, and aggregating issue records are
+    // bookkeeping. A run with no completions (a failed issuer) ends at producer stop.
+    let end_ns = last_completion_ns(&query_results, &snapshot)
+        .max(lower_done_ns)
+        .unwrap_or(producer_stop_ns);
     let issuer_analysis =
         aggregate_issuer_outputs(issuer_outputs, operation_count, producer_stop_ns);
     let backend_timing_report = KvIndexerInterface::timing_report(indexer.as_ref());
+    // The lower tier's footprint, measured with CRTC already dropped.
+    drop(indexer);
+    let lower_tier = match lower_tier.map(Arc::into_inner) {
+        Some(Some(lower)) => {
+            let drain_ns = lower_done_ns
+                .unwrap_or(producer_stop_ns)
+                .saturating_sub(producer_stop_ns);
+            Some((footprint(lower).await?, drain_ns))
+        }
+        Some(None) => anyhow::bail!("the lower tier is still shared after the run"),
+        None => None,
+    };
 
     Ok(analyze_result(
         backend_name,
@@ -1174,6 +1311,7 @@ pub async fn run_open_loop<T: SyncIndexer>(
         query_results,
         snapshot,
         backend_timing_report,
+        lower_tier,
     ))
 }
 
@@ -1210,6 +1348,7 @@ fn analyze_result(
     query_results: Vec<QueryLaneResult>,
     snapshot: dynamo_kv_router::indexer::ThreadPoolObservationSnapshot,
     backend_timing_report: String,
+    lower_tier: Option<(Footprint, u64)>,
 ) -> OpenLoopResult {
     let IssuerAnalysisInput {
         records,
@@ -1242,6 +1381,7 @@ fn analyze_result(
                     .or_default()
                     .push(id as u32);
             }
+            OperationKind::LowerTierEvent => {}
         }
     }
 
@@ -1364,8 +1504,49 @@ fn analyze_result(
                 accepted_update_edges.push((record.accepted_ns, 1i8));
                 accepted_update_edges.push((completion.finished_ns.max(record.accepted_ns), -1i8));
             }
+            OperationKind::LowerTierEvent => {
+                update_issue_lag.push(issue_lag);
+                delayed_updates += usize::from(issue_lag > tolerance_ns);
+            }
         }
     }
+
+    let lower_tier = lower_tier.map(|(footprint, drain_ns)| {
+        for (tier, expected, indexed) in [
+            (
+                "cpu_tier",
+                totals.cpu_tier.live_memberships,
+                footprint.cpu_tier_memberships,
+            ),
+            (
+                "kvcr",
+                totals.kvcr.live_memberships,
+                footprint.kvcr_memberships,
+            ),
+        ] {
+            if indexed != expected {
+                failure_reasons.push(format!(
+                    "lower_tier_{tier}_memberships_{indexed}_of_{expected}"
+                ));
+            }
+        }
+        let completions = query_completions.iter().flatten();
+        let memberships = footprint.cpu_tier_memberships + footprint.kvcr_memberships;
+        LowerTierResult {
+            cpu_tier: totals.cpu_tier,
+            kvcr: totals.kvcr,
+            cpu_tier_indexed_memberships: footprint.cpu_tier_memberships,
+            kvcr_indexed_memberships: footprint.kvcr_memberships,
+            query_service: distribution(completions.clone().map(|c| c.lower_tier_ns).collect()),
+            hit_queries: completions.filter(|c| c.lower_tier_hit).count(),
+            drain_ns,
+            allocator: footprint.heap.map(|(allocator, _)| allocator),
+            heap_bytes: footprint.heap.map(|(_, bytes)| bytes),
+            bytes_per_membership: footprint
+                .heap
+                .map(|(_, bytes)| bytes as f64 / memberships.max(1) as f64),
+        }
+    });
 
     let maximum_query_queue_depth = maximum_depth(&mut accepted_query_edges);
     let maximum_outstanding = maximum_depth(&mut accepted_update_edges);
@@ -1456,6 +1637,7 @@ fn analyze_result(
         kept_up,
         failure_reasons,
         backend_timing_report,
+        lower_tier,
         provenance: None,
     }
 }

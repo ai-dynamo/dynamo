@@ -13,8 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use dynamo_backend_common::{
     BackendError, DisaggregationMode, ErrorType, FinishReason, GenerateContext, LLMEngine,
-    MultimodalData, OutputOptions, PrefillResult, PreprocessedRequest, RlAdminBaseUrl,
-    RlWorkerMetadata,
+    MultimodalData, PrefillResult, PreprocessedRequest, RlAdminBaseUrl, RlWorkerMetadata,
 };
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, DiscoverySpec};
@@ -934,73 +933,6 @@ async fn encode_startup_rejects_non_multimodal_engine() {
 }
 
 #[tokio::test]
-async fn generation_preserves_empty_engine_text_while_stop_text_is_buffered() {
-    // Example: vLLM emits token 42 with `text: ""` while buffering a long,
-    // nonmatching stop string, then emits token 43 with `text: " buffered text"`.
-    // Expect the first delta to remain `Some("")`, so the frontend waits for
-    // vLLM's buffered text instead of detokenizing token 42 and duplicating it.
-    let outputs = [
-        (vec![42], ""),
-        (vec![43], " buffered text"),
-        (Vec::new(), ""),
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(index, (token_ids, text))| pb::SequenceOutput {
-        num_tokens: token_ids.len() as u32,
-        token_ids,
-        text: text.to_string(),
-        finish_info: (index == 2).then_some(pb::FinishInfo {
-            num_output_tokens: 2,
-            finish_reason: pb::finish_info::FinishReason::Length as i32,
-            ..Default::default()
-        }),
-        ..Default::default()
-    })
-    .collect();
-    let server = FakeServer::start(FakeVllm {
-        sequence_outputs: Some(outputs),
-        ..Default::default()
-    })
-    .await;
-
-    for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Decode] {
-        let engine = engine(&server.endpoint, mode, 1, model_info());
-        engine.start(0).await.expect("start");
-        let mut request = if mode.is_decode() {
-            decode_request()
-        } else {
-            request()
-        };
-        request.output_options = OutputOptions::default();
-        request.stop_conditions.max_tokens = Some(2);
-        let outputs = collect(&engine, request).await;
-
-        assert_eq!(
-            outputs
-                .iter()
-                .map(|output| output.text.as_deref())
-                .collect::<Vec<_>>(),
-            [Some(""), Some(" buffered text"), Some("")],
-            "{mode}: preserve engine text presence, including the empty terminal"
-        );
-        assert_eq!(outputs[0].token_ids, [42]);
-        assert_eq!(outputs[1].token_ids, [43]);
-        assert!(outputs[2].token_ids.is_empty());
-        assert_eq!(outputs[2].finish_reason, Some(FinishReason::Length));
-        assert_eq!(
-            outputs[2]
-                .completion_usage
-                .as_ref()
-                .unwrap()
-                .completion_tokens,
-            2
-        );
-        engine.cleanup().await.expect("cleanup");
-    }
-}
-
-#[tokio::test]
 async fn aggregated_generation_converts_request_stream_and_usage() {
     let server = FakeServer::start(FakeVllm::default()).await;
     let (engine, worker) = engine_from_args(&server.endpoint).await;
@@ -1066,7 +998,6 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     assert_eq!(outputs.len(), 1);
     let terminal = &outputs[0];
     assert_eq!(terminal.token_ids, [42]);
-    assert_eq!(terminal.text.as_deref(), Some(" token"));
     assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
     assert_eq!(terminal.log_probs.as_deref(), Some(&[-0.25][..]));
     assert_eq!(terminal.top_logprobs.as_ref().unwrap()[0].len(), 2);

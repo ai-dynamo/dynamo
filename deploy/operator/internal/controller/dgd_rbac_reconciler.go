@@ -24,21 +24,23 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/rbac"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // dgdRBACReconciler owns the cluster-wide planner and EPP service-account
 // bindings required before workload resources are created.
 type dgdRBACReconciler struct {
-	config  *configv1alpha1.OperatorConfiguration
-	manager rbacManager
+	config *configv1alpha1.OperatorConfiguration
+	client client.Client
 }
 
 func newDGDRBACReconciler(
 	config *configv1alpha1.OperatorConfiguration,
-	manager rbacManager,
+	kubeClient client.Client,
 ) *dgdRBACReconciler {
-	return &dgdRBACReconciler{config: config, manager: manager}
+	return &dgdRBACReconciler{config: config, client: kubeClient}
 }
 
 func (r *dgdRBACReconciler) Reconcile(
@@ -48,16 +50,14 @@ func (r *dgdRBACReconciler) Reconcile(
 	if r.config.Namespace.Restricted != "" {
 		return nil
 	}
-	if r.manager == nil {
-		return fmt.Errorf("RBAC manager not initialized in cluster-wide mode")
-	}
 	if r.config.RBAC.PlannerClusterRoleName == "" {
 		return fmt.Errorf("planner ClusterRole name is required in cluster-wide mode")
 	}
 
 	logger := log.FromContext(ctx)
-	if err := r.manager.EnsureServiceAccountWithRBAC(
+	if err := rbac.EnsureServiceAccountWithRBAC(
 		ctx,
+		r.client,
 		dgd.Namespace,
 		consts.PlannerServiceAccountName,
 		r.config.RBAC.PlannerClusterRoleName,
@@ -72,8 +72,9 @@ func (r *dgdRBACReconciler) Reconcile(
 	if r.config.RBAC.EPPClusterRoleName == "" {
 		return fmt.Errorf("EPP ClusterRole name is required in cluster-wide mode when EPP service is present")
 	}
-	if err := r.manager.EnsureServiceAccountWithRBAC(
+	if err := rbac.EnsureServiceAccountWithRBAC(
 		ctx,
+		r.client,
 		dgd.Namespace,
 		consts.EPPServiceAccountName,
 		r.config.RBAC.EPPClusterRoleName,

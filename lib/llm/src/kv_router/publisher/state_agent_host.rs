@@ -60,6 +60,7 @@ struct HostSockets {
     slots_per_socket: usize,
     /// Brokered and NATS transports have no per-publisher socket to share.
     share_publishers: bool,
+    // Entries stay in place so hosted slots can retain their publisher index.
     publishers: Vec<(SharedZmqPublisherSocket, usize)>,
     raw_pool: Option<DirectZmqSubPool>,
 }
@@ -82,8 +83,8 @@ impl HostSockets {
         })
     }
 
-    fn for_new_slot(&mut self) -> Result<KvStateAgentSockets> {
-        let event_socket = if self.share_publishers {
+    fn for_new_slot(&mut self) -> Result<(KvStateAgentSockets, Option<usize>)> {
+        let publisher_index = if self.share_publishers {
             let index = match self
                 .publishers
                 .iter()
@@ -97,27 +98,28 @@ impl HostSockets {
                     self.publishers.len() - 1
                 }
             };
-            let (socket, slots) = &mut self.publishers[index];
-            *slots += 1;
-            Some(socket.clone())
+            self.publishers[index].1 += 1;
+            Some(index)
         } else {
             None
         };
-        Ok(KvStateAgentSockets {
-            event_socket,
-            raw_pool: self.raw_pool.clone(),
-        })
+        Ok((
+            KvStateAgentSockets {
+                event_socket: publisher_index.map(|index| self.publishers[index].0.clone()),
+                raw_pool: self.raw_pool.clone(),
+            },
+            publisher_index,
+        ))
+    }
+    fn release(&mut self, publisher_index: Option<usize>) {
+        if let Some(index) = publisher_index {
+            self.publishers[index].1 -= 1;
+        }
     }
 
-    /// Returns the share of a slot that failed to start.
-    fn release(&mut self, sockets: &KvStateAgentSockets) {
-        if let Some(socket) = &sockets.event_socket
-            && let Some((_, slots)) = self
-                .publishers
-                .iter_mut()
-                .find(|(shared, _)| shared.endpoint() == socket.endpoint())
-        {
-            *slots -= 1;
+    fn remove_slot(&mut self, owner: CacheOwnerId, slots: &mut HashMap<CacheOwnerId, HostedSlot>) {
+        if let Some(slot) = slots.remove(&owner) {
+            self.release(slot.publisher_index);
         }
     }
 }
@@ -134,6 +136,7 @@ struct HostedSlot {
     producer_instance: Option<dynamo_runtime::component::Instance>,
     lifecycle: SlotLifecycle,
     agent: Option<Arc<KvStateAgent>>,
+    publisher_index: Option<usize>,
     global_dp_rank: u32,
     kv_state_endpoint: dynamo_runtime::protocols::EndpointId,
     indexer_domain_id: dynamo_kv_router::identity::IndexerDomainId,
@@ -582,7 +585,7 @@ fn validate_intent(
     if intent.cache_owner_id.pool().indexer_domain() != intent.indexer_domain_id {
         anyhow::bail!("attachment intent indexer domain disagrees with CacheOwnerId");
     }
-    if intent.ingress_protocol != KvStateIngressProtocol::VllmResidencyV1 {
+    if !intent.ingress_protocol.supports_owned_residency() {
         anyhow::bail!("unsupported state-agent raw ingress protocol");
     }
     if intent.raw_zmq_endpoint.is_empty() {
@@ -601,7 +604,7 @@ fn slot_endpoint_name(owner: CacheOwnerId) -> String {
         "slot_{}_{}_{}_{}",
         domain.cache_semantics(),
         domain.routing_scope(),
-        pool.dc_id(),
+        pool.cluster_id(),
         owner.slot()
     )
 }
@@ -621,9 +624,20 @@ async fn reconcile_owner(
     let intent = match matching.map(HashMap::len).unwrap_or(0) {
         0 => {
             if let Some(slot) = slots.get_mut(&owner) {
-                detach_slot(slot).await?;
+                if slot.ingress_protocol.has_process_local_inventory() {
+                    if let Err(error) = detach_slot(slot).await {
+                        tracing::warn!(%owner, %error, "Failed to detach engine-local KV state-agent slot");
+                    }
+                    if let Some(agent) = slot.agent.take()
+                        && let Err(error) = agent.shutdown().await
+                    {
+                        tracing::warn!(%owner, %error, "Failed to stop engine-local KV state agent");
+                    }
+                } else {
+                    detach_slot(slot).await?;
+                }
                 if slot.agent.is_none() {
-                    slots.remove(&owner);
+                    sockets.remove_slot(owner, slots);
                 }
             }
             return Ok(());
@@ -641,10 +655,10 @@ async fn reconcile_owner(
     let intent = intent.expect("one intent was counted");
 
     if !slots.contains_key(&owner) {
-        // NOTE: Detached agents deliberately retain CacheOwner/index/recovery
-        // state and count against max_slots. This is a durable-slot resource
-        // budget, not an active-attachment count. Failed construction remains
-        // reserved only until its matching intent disappears.
+        // NOTE: Detached persistent agents retain CacheOwner/index/recovery state
+        // and count against max_slots. Engine-local slots release their capacity
+        // when their last intent disappears. Failed construction remains reserved
+        // only until its matching intent disappears.
         // TODO(#13044): require explicit decommission/migration authority
         // before reclaiming a durable owner from a long-lived host.
         if slots.len() >= max_slots {
@@ -658,6 +672,7 @@ async fn reconcile_owner(
             producer_instance: Some(intent.producer_instance.clone()),
             lifecycle: SlotLifecycle::Failed,
             agent: None,
+            publisher_index: None,
             global_dp_rank: intent.worker.dp_rank,
             kv_state_endpoint: intent.kv_state_endpoint.clone(),
             indexer_domain_id: intent.indexer_domain_id,
@@ -665,7 +680,7 @@ async fn reconcile_owner(
             ingress_protocol: intent.ingress_protocol,
         };
         slots.insert(owner, slot_shape);
-        let slot_sockets = sockets.for_new_slot()?;
+        let (slot_sockets, publisher_index) = sockets.for_new_slot()?;
         let agent = match KvStateAgent::start(KvStateAgentConfig {
             endpoint: component.endpoint(slot_endpoint_name(owner)),
             kv_state_endpoint: intent.kv_state_endpoint.clone(),
@@ -686,11 +701,13 @@ async fn reconcile_owner(
                 // It remains capacity-accounted and avoids implicit construction
                 // retries under an unchanged lease-owned request. Its socket share
                 // is returned now; the slot never published on it.
-                sockets.release(&slot_sockets);
+                sockets.release(publisher_index);
                 return Err(error).context("failed to construct stable state-agent slot");
             }
         };
-        slots.get_mut(&owner).expect("inserted above").agent = Some(agent);
+        let slot = slots.get_mut(&owner).expect("inserted above");
+        slot.agent = Some(agent);
+        slot.publisher_index = publisher_index;
     }
 
     let slot = slots.get_mut(&owner).expect("slot exists");
@@ -795,18 +812,19 @@ fn host_discovery_id(instance_id: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use dynamo_kv_router::identity::{
-        CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
+        CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
     };
     use dynamo_kv_router::protocols::{RouterHintSourceMetadata, WorkerWithDpRank};
     use dynamo_runtime::component::{Instance, TransportType};
     use dynamo_runtime::discovery::DiscoveryInstanceId;
     use dynamo_runtime::protocols::EndpointId;
+    use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
 
     use super::*;
 
-    #[tokio::test]
-    async fn failed_slot_returns_its_shared_socket_share() {
+    #[test]
+    fn failed_slot_returns_its_shared_socket_share() {
         let mut sockets = HostSockets {
             slots_per_socket: 2,
             share_publishers: true,
@@ -814,11 +832,205 @@ mod tests {
             raw_pool: None,
         };
         sockets.for_new_slot().unwrap();
-        let failed = sockets.for_new_slot().unwrap();
-        sockets.release(&failed);
-        sockets.for_new_slot().unwrap();
+        let (_, failed) = sockets.for_new_slot().unwrap();
+        sockets.release(failed);
+        assert_eq!(sockets.for_new_slot().unwrap().1, failed);
 
         assert_eq!(sockets.publishers.len(), 1);
+        assert_eq!(sockets.publishers[0].1, 2);
+    }
+
+    #[test]
+    fn removed_slots_reuse_their_shared_publisher() {
+        let mut sockets = HostSockets {
+            slots_per_socket: 2,
+            share_publishers: true,
+            publishers: Vec::new(),
+            raw_pool: None,
+        };
+        let mut slots = HashMap::new();
+        for _ in 0..4 {
+            for id in [1, 2] {
+                let owner = owner(id);
+                slots.insert(
+                    owner,
+                    HostedSlot {
+                        intent_incarnation: None,
+                        producer_instance: None,
+                        lifecycle: SlotLifecycle::Detached,
+                        agent: None,
+                        publisher_index: sockets.for_new_slot().unwrap().1,
+                        global_dp_rank: 0,
+                        kv_state_endpoint: EndpointId::from("ns.backend.generate"),
+                        indexer_domain_id: owner.pool().indexer_domain(),
+                        kv_block_size: 64,
+                        ingress_protocol: KvStateIngressProtocol::SglangHiCacheV1,
+                    },
+                );
+            }
+            assert_eq!(sockets.publishers.len(), 1);
+            assert_eq!(sockets.publishers[0].1, 2);
+            sockets.remove_slot(owner(1), &mut slots);
+            assert_eq!(sockets.publishers[0].1, 1);
+            sockets.remove_slot(owner(2), &mut slots);
+            assert!(slots.is_empty());
+            assert_eq!(sockets.publishers[0].1, 0);
+        }
+    }
+
+    async fn test_component() -> Component {
+        DistributedRuntime::new(
+            Runtime::from_current().unwrap(),
+            DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap()
+        .namespace("state-agent-host-test")
+        .unwrap()
+        .component("host")
+        .unwrap()
+    }
+
+    #[test]
+    fn missing_intent_releases_failed_engine_local_slot_but_retains_durable_slot() {
+        for (protocol, has_process_local_inventory) in [
+            (KvStateIngressProtocol::SglangHiCacheV1, true),
+            (KvStateIngressProtocol::VllmResidencyV1, false),
+        ] {
+            let agent_runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let (mut slots, mut sockets, mut request) = agent_runtime.block_on(async {
+                let component = test_component().await;
+                let raw = SharedZmqPublisherSocket::bind("raw-kv").unwrap();
+                let mut request = intent(
+                    &instance("kv_state_agent", 1),
+                    instance("producer", 11),
+                    owner(4),
+                    WorkerWithDpRank::new(17, 4),
+                    101,
+                );
+                request.ingress_protocol = protocol;
+                request.raw_zmq_endpoint = raw.endpoint().to_string();
+                let mut slots = HashMap::new();
+                let mut sockets = HostSockets {
+                    slots_per_socket: 2,
+                    share_publishers: true,
+                    publishers: Vec::new(),
+                    raw_pool: None,
+                };
+                reconcile_owner(
+                    &component,
+                    request.cache_owner_id,
+                    &HashMap::from([(
+                        request.cache_owner_id,
+                        HashMap::from([(request.intent_incarnation, request.clone())]),
+                    )]),
+                    &mut slots,
+                    1,
+                    &mut sockets,
+                    &mut 0,
+                    &HostMetrics::new(&component).unwrap(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    slots[&request.cache_owner_id].lifecycle,
+                    SlotLifecycle::Active
+                );
+                (slots, sockets, request)
+            });
+            let agent = slots[&request.cache_owner_id]
+                .agent
+                .as_ref()
+                .unwrap()
+                .clone();
+            let generation = agent.status().attachment.as_ref().unwrap().generation;
+            let publisher_index = slots[&request.cache_owner_id].publisher_index;
+            // Abort the real coordinator and recovery endpoint: detach encounters
+            // a closed channel, and shutdown encounters the endpoint's JoinError.
+            drop(agent_runtime);
+
+            let host_runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            host_runtime.block_on(async {
+                let component = test_component().await;
+                let metrics = HostMetrics::new(&component).unwrap();
+                let mut rejected = 0;
+                assert!(agent.detach(generation).await.is_err());
+                let result = reconcile_owner(
+                    &component,
+                    request.cache_owner_id,
+                    &HashMap::new(),
+                    &mut slots,
+                    1,
+                    &mut sockets,
+                    &mut rejected,
+                    &metrics,
+                )
+                .await;
+                if has_process_local_inventory {
+                    result.unwrap();
+                    assert!(slots.is_empty());
+                    assert_eq!(Arc::strong_count(&agent), 1);
+                    assert_eq!(sockets.publishers[0].1, 0);
+                    // Shutdown must already have consumed the aborted endpoint.
+                    agent.shutdown().await.unwrap();
+                } else {
+                    assert!(result.is_err());
+                    assert_eq!(
+                        slots[&request.cache_owner_id].lifecycle,
+                        SlotLifecycle::Failed
+                    );
+                    assert!(Arc::ptr_eq(
+                        slots[&request.cache_owner_id].agent.as_ref().unwrap(),
+                        &agent
+                    ));
+                    assert_eq!(sockets.publishers[0].1, 1);
+                }
+
+                let raw = SharedZmqPublisherSocket::bind("replacement-kv").unwrap();
+                request.cache_owner_id = owner(5);
+                request.raw_zmq_endpoint = raw.endpoint().to_string();
+                reconcile_owner(
+                    &component,
+                    request.cache_owner_id,
+                    &HashMap::from([(
+                        request.cache_owner_id,
+                        HashMap::from([(request.intent_incarnation, request.clone())]),
+                    )]),
+                    &mut slots,
+                    1,
+                    &mut sockets,
+                    &mut rejected,
+                    &metrics,
+                )
+                .await
+                .unwrap();
+                assert_eq!(slots.len(), 1);
+                assert_eq!(sockets.publishers.len(), 1);
+                assert_eq!(sockets.publishers[0].1, 1);
+                if has_process_local_inventory {
+                    let replacement = &slots[&request.cache_owner_id];
+                    assert_eq!(replacement.lifecycle, SlotLifecycle::Active);
+                    assert_eq!(replacement.publisher_index, publisher_index);
+                    assert_eq!(rejected, 0);
+                    replacement
+                        .agent
+                        .as_ref()
+                        .unwrap()
+                        .shutdown()
+                        .await
+                        .unwrap();
+                } else {
+                    assert!(!slots.contains_key(&request.cache_owner_id));
+                    assert_eq!(rejected, 1);
+                }
+            });
+        }
     }
 
     fn instance(component: &str, instance_id: u64) -> Instance {
@@ -840,7 +1052,7 @@ mod tests {
                     CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
                     RoutingScopeId::new([2; 16], IdentitySource::Explicit),
                 ),
-                DcId::new(3),
+                ClusterId::new(3),
             ),
             StableDpSlotId::new([slot; 16], IdentitySource::Explicit),
         )
@@ -887,6 +1099,7 @@ mod tests {
             producer_instance: None,
             lifecycle: SlotLifecycle::Detached,
             agent: None,
+            publisher_index: None,
             global_dp_rank: original.worker.dp_rank,
             kv_state_endpoint: original.kv_state_endpoint.clone(),
             indexer_domain_id: original.indexer_domain_id,
@@ -1057,7 +1270,7 @@ mod tests {
     fn slot_endpoint_name_includes_pool_identity() {
         let first = owner(4);
         let second = CacheOwnerId::new(
-            PoolId::new(first.pool().indexer_domain(), DcId::new(4)),
+            PoolId::new(first.pool().indexer_domain(), ClusterId::new(4)),
             first.slot(),
         );
 

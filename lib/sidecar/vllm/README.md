@@ -27,6 +27,7 @@ you to.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
+| Kubernetes multinode tensor parallelism (TP) and hybrid load balancing (hybrid-LB) data parallelism (DP) | Experimental |
 
 ## Run locally
 
@@ -57,6 +58,10 @@ See [`deploy/`](deploy/) for all manifests. For example, aggregated serving:
 kubectl apply -f lib/sidecar/vllm/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/vllm-sidecar-agg-frontend 8000:8000
 ```
+
+Multinode deployments use complete `leader` and `worker` role PodTemplates. See
+[`multinode_tp.yaml`](deploy/multinode_tp.yaml), [`multinode_dp.yaml`](deploy/multinode_dp.yaml),
+and the [vLLM sidecar guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/sidecar.md#deploy-on-kubernetes).
 
 ## Topologies
 

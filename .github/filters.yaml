@@ -80,6 +80,7 @@ api_docs:
   - '**/Cargo.toml'
 
 examples:
+  - '.github/workflows/pre-merge.yml'
   - 'recipes/**'
   - 'recipes/**/.kustomize-matrix.yaml'
   - 'examples/**'
@@ -147,6 +148,10 @@ ignore:
   - 'scripts/validate_agent_instructions.py'
   - 'scripts/validate_skills.py'
   - 'scripts/check_action_pins.py'
+  # Pre-commit generator for the Python media protocol models. Its outputs are
+  # covered by `core` and `frontend`; the generate-media-protocols hook
+  # validates the script itself.
+  - 'scripts/generate_media_protocols.py'
   # CODEOWNERS generation tooling (data + scripts). Validated by its own
   # codeowners.yml workflow (triggers on '**'); no backend CI needed here.
   - '.github/codeowners/**'
@@ -180,7 +185,7 @@ core:
   - '.cargo/config.toml'
   - 'lib/**'
   - 'tests/**'
-  - 'components/src/dynamo/kv_dc_relay/**'
+  - 'components/src/dynamo/pool_relay/**'
   - 'components/src/dynamo/kv_state_agent/**'
   - 'components/src/dynamo/router/**'
   - 'components/src/dynamo/thunderagent_router/**'
@@ -358,6 +363,10 @@ planner:
   - 'components/src/dynamo/profiler/**'
   - 'components/src/dynamo/aisimulate/**'
   - 'components/src/dynamo/global_router/**'
+  # Re-run the SKU contract when either compared operator input changes.
+  - 'deploy/operator/hack/test_aisimulate_hardware_catalog.py'
+  - 'deploy/operator/internal/aisimulate/hardware_skus.txt'
+  - 'deploy/operator/api/v1beta2/dynamographdeploymentrequest_types.go'
   # Keep this tombstone until the vendored-tree deletion has merged so the
   # deleted paths in that PR remain covered by the Planner CI filter.
   - 'aisimulate/**'
@@ -367,11 +376,21 @@ planner:
   - '!**/*.md'
   - '!**/*.rst'
 
+sidecar_trtllm_image:
+  # PR CI runs resolver CPU tests; the GPU test runs independently in nightly CI.
+  - 'lib/sidecar/trtllm/ci/**'
+  - '.github/actions/changed-files/**'
+  - '.github/filters.yaml'
+  - '.github/workflows/pr.yaml'
+  - '!**/*.md'
+  - '!**/*.rst'
+
 sidecar:
   # TODO: Expand this to every Dockerfile and composite-action input after the
   # acceptable CI fan-out is agreed. Keep the remaining scope narrow for now.
   - 'lib/sidecar/**'
   - '.github/workflows/shared-build-sidecar.yml'
+  - '.github/workflows/shared-test-trtllm-nightly-image.yml'
   - 'tests/serve/test_sidecar.py'
   - 'tests/router/common.py'
   - 'tests/router/helper.py'
@@ -396,6 +415,7 @@ vllm:
   - 'components/src/dynamo/vllm/**'
   - 'components/src/dynamo/artifacts/vllm/**'
   - 'container/templates/vllm_*'
+  - 'container/templates/ffmpeg_encoder_guard.Dockerfile'
   - '!**/*.md'
   - '!**/*.rst'
 
@@ -404,6 +424,7 @@ sglang:
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang*/**'
   - 'container/templates/sglang_*'
+  - 'container/templates/ffmpeg_encoder_guard.Dockerfile'
   - 'container/deps/sglang/**'
   - '!**/*.md'
   - '!**/*.rst'
@@ -413,6 +434,7 @@ trtllm:
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
   - 'container/templates/trtllm_*'
+  - 'container/templates/ffmpeg_encoder_guard.Dockerfile'
   - '!**/*.md'
   - '!**/*.rst'
 
@@ -440,7 +462,7 @@ frontend:
   - '*.lock'
   - 'container/deps/*'
   - 'container/compliance/**'
-  - 'components/src/dynamo/kv_dc_relay/**'
+  - 'components/src/dynamo/pool_relay/**'
   - 'components/src/dynamo/kv_state_agent/**'
   - 'components/src/dynamo/router/**'
   - 'components/src/dynamo/thunderagent_router/**'
