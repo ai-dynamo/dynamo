@@ -3,6 +3,68 @@
 
 use super::*;
 
+#[tokio::test]
+async fn sglang_dispatch_rejects_mismatched_scoring_transport_before_starting() {
+    for mismatched in [0, 1] {
+        let engine = TestEngine::new(EngineBehavior::Success);
+        let mut branches: Vec<_> = (0..2).map(prepared_noul_branch).collect();
+        branches[mismatched].wire =
+            super::super::PreparedScoringRequest::vllm(vec![1, 2], &[13, 14], "salt").unwrap();
+        let parent = Context::new(()).context();
+        let admission = Arc::new(Semaphore::new(2));
+        let permit = admission.clone().acquire_many_owned(2).await.unwrap();
+        let response = dispatch(
+            selection(engine.clone()),
+            branches,
+            "mismatched-transport".into(),
+            parent.clone(),
+            permit,
+            Arc::new(super::super::super::metrics::Metrics::new()),
+            canonical_request(2),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(response_body(response).await.get("answers").is_none());
+        assert!(engine.observations.lock().unwrap().is_empty());
+        assert!(parent.is_killed());
+        assert_eq!(admission.available_permits(), 2);
+    }
+}
+
+#[tokio::test]
+async fn token_backend_validation_errors_preserve_dialect_specific_status() {
+    use dynamo_runtime::error::ErrorClass;
+    for class in [ErrorClass::InvalidRequest, ErrorClass::InvalidArgument] {
+        for (dialect, expected) in [
+            (dynamo_decisions::Dialect::OpenAi, StatusCode::BAD_REQUEST),
+            (
+                dynamo_decisions::Dialect::Jev,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+        ] {
+            let engine = TestEngine::new(EngineBehavior::RejectRequest {
+                class,
+                branch: 0,
+                in_stream: false,
+            });
+            let mut request = canonical_request(1);
+            Arc::make_mut(&mut request).dialect = dialect;
+            let response = dispatch(
+                selection(engine),
+                vec![prepared_noul_branch(0)],
+                "invalid".into(),
+                Context::new(()).context(),
+                Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap(),
+                Arc::new(super::super::Metrics::new()),
+                request,
+            )
+            .await;
+            assert_eq!(response.status(), expected);
+            assert!(response_body(response).await.get("answers").is_none());
+        }
+    }
+}
+
 #[test]
 fn derives_only_a_proven_single_data_parallel_rank() {
     assert_eq!(resolve_dp_rank(None, 7, 1), Some(7));
@@ -38,7 +100,7 @@ async fn backend_overload_preserves_retry_status_and_releases_admission() {
 async fn deterministic_worker_rejections_match_for_first_and_pinned_branches() {
     use dynamo_runtime::error::ErrorClass;
     for (class, status) in [
-        (ErrorClass::InvalidRequest, StatusCode::BAD_REQUEST),
+        (ErrorClass::InvalidRequest, StatusCode::UNPROCESSABLE_ENTITY),
         (ErrorClass::NotFound, StatusCode::NOT_FOUND),
     ] {
         for branch in [0, 1] {
@@ -94,6 +156,7 @@ async fn admitted_worker_removal_during_fanout_does_not_reroute_siblings() {
         started: Notify::new(),
         sibling_started: Notify::new(),
         admissions: Some(admissions),
+        frame: sglang_frame,
     });
     let selection = SystemOneExecutionSelection {
         admitted_ids: Some(receiver),
@@ -125,7 +188,7 @@ async fn admitted_worker_removal_during_fanout_does_not_reroute_siblings() {
 fn canonical_backend_errors_preserve_client_error_classification() {
     use dynamo_runtime::error::{DynamoError, ErrorClass};
     for (class, expected) in [
-        (ErrorClass::InvalidRequest, StatusCode::BAD_REQUEST),
+        (ErrorClass::InvalidRequest, StatusCode::UNPROCESSABLE_ENTITY),
         (ErrorClass::NotFound, StatusCode::NOT_FOUND),
     ] {
         let cause = DynamoError::builder().class(class).build();

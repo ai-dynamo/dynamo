@@ -3,7 +3,12 @@
 
 use std::sync::Arc;
 
-use dynamo_runtime::engine::AsyncEngineContext;
+use dynamo_runtime::{
+    engine::{AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Data},
+    pipeline::{Context, Error, ManyOut, SingleIn},
+    protocols::annotated::Annotated,
+};
+use futures::StreamExt;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use tracing::Instrument;
 
@@ -46,6 +51,55 @@ pub(crate) async fn run_until_killed<T>(
         biased;
         result = &mut operation => Some(result),
         _ = context.killed() => None,
+    }
+}
+
+pub(crate) enum OperationError {
+    Cancelled,
+    Backend(Error),
+}
+
+pub(crate) async fn start_linked<Req: Data, Resp: Data>(
+    parent: &dyn AsyncEngineContext,
+    context: Context<Req>,
+    engine: &dyn AsyncEngine<SingleIn<Req>, ManyOut<Resp>, Error>,
+) -> Result<ManyOut<Resp>, OperationError> {
+    let child = context.context();
+    parent.link_child(child.clone());
+    if parent.is_killed() {
+        child.kill();
+        return Err(OperationError::Cancelled);
+    }
+    let stream = run_until_killed(parent, engine.generate(context))
+        .await
+        .ok_or(OperationError::Cancelled)?
+        .map_err(OperationError::Backend)?;
+    let child = stream.context();
+    parent.link_child(child.clone());
+    if parent.is_killed() {
+        child.kill();
+        return Err(OperationError::Cancelled);
+    }
+    Ok(stream)
+}
+
+pub(crate) async fn next_frame<Resp: Data>(
+    parent: &dyn AsyncEngineContext,
+    stream: &mut ManyOut<Annotated<Resp>>,
+) -> Result<Option<Resp>, OperationError> {
+    loop {
+        let Some(frame) = run_until_killed(parent, stream.next())
+            .await
+            .ok_or(OperationError::Cancelled)?
+        else {
+            return Ok(None);
+        };
+        if let Some(data) = frame
+            .into_data()
+            .map_err(|cause| OperationError::Backend(cause.into()))?
+        {
+            return Ok(Some(data));
+        }
     }
 }
 

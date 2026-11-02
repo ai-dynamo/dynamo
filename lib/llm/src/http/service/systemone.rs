@@ -12,13 +12,12 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use dynamo_decisions::{
     CanonicalRequest, DecisionError, Dialect, QuestionOutcome, Usage, project_response,
-    reduce_vocab_logprobs, render_question_prompt,
+    render_question_prompt,
 };
 use dynamo_runtime::{
     engine::{AsyncEngineContext, AsyncEngineContextProvider},
     pipeline::{Context, ManyOut},
 };
-use futures::{StreamExt, stream};
 use rand::Rng;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -36,8 +35,6 @@ use crate::{
         common::{
             llm_backend::LLMEngineOutput, preprocessor::PreprocessedRequest, timing::RequestTracker,
         },
-        response_merge::PREFILL_OUTPUT_ANNOTATION,
-        systemone::{build_native_score_request, parse_candidate_scores},
     },
 };
 
@@ -48,8 +45,11 @@ mod backend_error;
 #[path = "systemone/scoring.rs"]
 mod scoring;
 use scoring::{dispatch, prepare_branches};
+#[path = "systemone/token_scorer.rs"]
+mod token_scorer;
+use token_scorer::PreparedScoringRequest;
 #[cfg(test)]
-use scoring::{finish_branch, measured_cached_tokens};
+use token_scorer::measured_cached_tokens;
 #[path = "systemone/response.rs"]
 mod response;
 pub(super) use response::attach_request_ids;
@@ -79,15 +79,19 @@ fn metric_endpoint(dialect: Dialect) -> Endpoint {
 }
 
 struct PreparedBranch {
+    scoring: ScoringBranch,
+    wire: PreparedScoringRequest,
+}
+
+struct ScoringBranch {
     index: usize,
     temperature: f64,
-    prompt_ids: Vec<u32>,
+    prompt_len: usize,
     label_ids: Vec<u32>,
-    native: Option<serde_json::Value>,
 }
 
 struct StartedBranch {
-    prepared: PreparedBranch,
+    prepared: ScoringBranch,
     tracker: Arc<RequestTracker>,
     stream: ManyOut<Annotated<LLMEngineOutput>>,
     exchange: Box<dyn GenerateExchange>,
@@ -97,6 +101,7 @@ struct BranchResult {
     index: usize,
     answer: QuestionOutcome,
     input_tokens: usize,
+    output_tokens: usize,
     cached_tokens: Option<usize>,
     placement: Placement,
 }
@@ -331,8 +336,14 @@ async fn handle_request(
     metrics.observe_systemone_work(
         metric_model,
         branches.len(),
-        branches.iter().map(|branch| branch.prompt_ids.len()).sum(),
-        branches.iter().map(|branch| branch.label_ids.len()).sum(),
+        branches
+            .iter()
+            .map(|branch| branch.scoring.prompt_len)
+            .sum(),
+        branches
+            .iter()
+            .map(|branch| branch.scoring.label_ids.len())
+            .sum(),
     );
 
     let parent = Context::with_id_and_metadata((), request_id.clone(), Default::default());
@@ -419,12 +430,13 @@ fn dispatch_error(
 
 /// Build a scoring branch through SGLang's native `/generate` format.
 fn bind_native(
+    backend: &str,
     model: &str,
     kv_cache_block_size: u32,
     native: &serde_json::Value,
     request_id: &str,
 ) -> anyhow::Result<Bound> {
-    let format = crate::generate_format::named("sglang")?;
+    let format = crate::generate_format::named(backend)?;
     let body = serde_json::to_vec(native)?;
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(
