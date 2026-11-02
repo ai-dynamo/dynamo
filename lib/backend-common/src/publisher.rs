@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use dynamo_llm::first_token::FirstTokenSource;
 use dynamo_llm::kv_router::publisher::{
@@ -29,10 +30,11 @@ use crate::error::{BackendError, DynamoError, ErrorType};
 use crate::metrics::{ComponentGauges, EngineMetrics};
 use crate::snapshot_publisher::SnapshotPublisher;
 
+/// Bounds KV teardown so a stalled publisher cannot block recovery or exit.
+const KV_STOP_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Live publisher handles owned by `Worker` for the lifetime of serving.
-/// They keep the underlying publishers alive; there is no task to join during cleanup.
 pub(crate) struct PublisherHandles {
-    #[allow(dead_code)]
     kv_publishers: Vec<Arc<KvEventPublisher>>,
     /// Stashed so the engine's `Arc<SnapshotPublisher>` reference stays
     /// valid for the worker's lifetime. Engines drop their copy when
@@ -44,6 +46,43 @@ pub(crate) struct PublisherHandles {
 }
 
 impl PublisherHandles {
+    /// Stop every KV publisher and report the first failure, giving up after `KV_STOP_TIMEOUT`.
+    pub(crate) async fn stop_kv(&mut self) -> Result<(), DynamoError> {
+        let publishers = std::mem::take(&mut self.kv_publishers);
+        tokio::time::timeout(KV_STOP_TIMEOUT, async {
+            let mut result = Ok(());
+            for publisher in publishers {
+                if let Err(e) = publisher.stop_and_wait().await
+                    && result.is_ok()
+                {
+                    result = Err(publisher_err(format!("KV publisher shutdown: {e}")));
+                }
+            }
+            result
+        })
+        .await
+        .unwrap_or_else(|_| Err(publisher_err("KV publisher shutdown timed out".into())))
+    }
+
+    pub(crate) fn replace_kv(
+        &mut self,
+        endpoint: &Endpoint,
+        kv_state_endpoint: &EndpointId,
+        sources: Vec<KvEventSource>,
+        block_size: Option<u32>,
+        enable_local_indexer: bool,
+    ) -> Result<(), DynamoError> {
+        debug_assert!(self.kv_publishers.is_empty());
+        self.kv_publishers = setup_kv_publishers(
+            endpoint,
+            kv_state_endpoint,
+            sources,
+            block_size,
+            enable_local_indexer,
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn first_token_source(&self) -> Option<FirstTokenSource> {
         self.first_token_source.clone()
     }
@@ -64,9 +103,19 @@ fn setup_kv_publishers(
     endpoint: &Endpoint,
     kv_state_endpoint: &EndpointId,
     sources: Vec<KvEventSource>,
-    kv_cache_block_size: u32,
+    kv_cache_block_size: Option<u32>,
     enable_local_indexer: bool,
 ) -> Result<Vec<Arc<KvEventPublisher>>, DynamoError> {
+    // Without the engine's block size the router can't translate token IDs into cache blocks.
+    let Some(kv_cache_block_size) = kv_cache_block_size else {
+        if !sources.is_empty() {
+            tracing::warn!(
+                "engine declared {} kv_event_sources but kv_cache_block_size is None; skipping KV event publishers",
+                sources.len()
+            );
+        }
+        return Ok(Vec::new());
+    };
     let mut publishers = Vec::with_capacity(sources.len());
     for source in sources {
         let dp_rank = source.dp_rank();
@@ -162,26 +211,14 @@ pub(crate) async fn setup_publishers(
     enable_local_indexer: bool,
     first_token_source: Option<FirstTokenSource>,
 ) -> Result<PublisherHandles, DynamoError> {
-    // KV event publishers require the engine's block size; without it, the
-    // router can't translate token IDs into cache blocks. Snapshot publisher
-    // is independent — load reporting works regardless of cache structure.
-    let kv_publishers = if let Some(block_size) = kv_cache_block_size {
-        setup_kv_publishers(
-            endpoint,
-            kv_state_endpoint,
-            kv_sources,
-            block_size,
-            enable_local_indexer,
-        )?
-    } else {
-        if !kv_sources.is_empty() {
-            tracing::warn!(
-                "engine declared {} kv_event_sources but kv_cache_block_size is None; skipping KV event publishers",
-                kv_sources.len()
-            );
-        }
-        Vec::new()
-    };
+    // Snapshot publisher is independent — load reporting works regardless of cache structure.
+    let kv_publishers = setup_kv_publishers(
+        endpoint,
+        kv_state_endpoint,
+        kv_sources,
+        kv_cache_block_size,
+        enable_local_indexer,
+    )?;
 
     let snapshot_publisher = if dp_ranks.is_empty() {
         None
