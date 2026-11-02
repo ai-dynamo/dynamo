@@ -123,6 +123,13 @@ fn decision_preparation_spec(card: ModelDeploymentCard) -> GroupSpec {
         group_key: key.clone(),
     };
     GroupSpec {
+        decision_kinds: crate::model_card::decision_profile::DecisionKinds::default(),
+        decision_fleet: crate::discovery::DecisionFleet {
+            state: tokio::sync::watch::channel(
+                crate::discovery::DecisionAvailability::Unadvertised,
+            )
+            .1,
+        },
         key,
         mdc_checksum: desired.mdc_checksum.clone(),
         fingerprint: desired.mdc_checksum.clone(),
@@ -188,6 +195,13 @@ async fn text_routes_retain_graph_and_preserve_declared_surfaces() {
         group_key: key.clone(),
     };
     let spec = GroupSpec {
+        decision_kinds: crate::model_card::decision_profile::DecisionKinds::default(),
+        decision_fleet: crate::discovery::DecisionFleet {
+            state: tokio::sync::watch::channel(
+                crate::discovery::DecisionAvailability::Unadvertised,
+            )
+            .1,
+        },
         key,
         mdc_checksum: desired.mdc_checksum.clone(),
         fingerprint: desired.mdc_checksum.clone(),

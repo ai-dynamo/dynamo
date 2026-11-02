@@ -46,11 +46,11 @@ mod backend_error;
 
 #[path = "systemone/execution.rs"]
 mod execution;
-#[path = "systemone/token_execution_legacy.rs"]
+#[path = "systemone/token_execution.rs"]
 mod token_execution;
-use token_execution::backend::PreparedScoringRequest;
+use token_execution::PreparedScoringRequest;
 #[cfg(test)]
-use token_execution::backend::measured_cached_tokens;
+use token_execution::measured_cached_tokens;
 
 #[path = "systemone/response.rs"]
 mod response;
@@ -261,10 +261,7 @@ async fn handle_request(
         );
     }
 
-    let selection = match state
-        .manager()
-        .get_systemone_execution_selection(&request.model)
-    {
+    let selection = match state.manager().get_systemone_execution_plan(&request.model) {
         Ok(selection) => selection,
         Err(SystemOneSelectionError::NotFound) => {
             return error(dialect, StatusCode::NOT_FOUND, "model is not registered");
@@ -282,6 +279,18 @@ async fn handle_request(
                 StatusCode::BAD_REQUEST,
                 "model does not support aggregate decision scoring",
             );
+        }
+        Err(SystemOneSelectionError::QualificationFailed) => {
+            let mut response = decision_error(DecisionError::new(
+                dialect,
+                StatusCode::BAD_REQUEST.as_u16(),
+                "model_qualification_failed",
+                "model decision qualification failed; operator intervention is required",
+            ));
+            response
+                .extensions_mut()
+                .insert(super::metrics::ErrorType::Internal);
+            return response;
         }
     };
     if let Err(cause) = request.validate_capabilities(&selection.context.decision_capabilities()) {
@@ -317,13 +326,39 @@ async fn handle_request(
         .to_owned();
     let request = Arc::new(request);
     let preflight_request = request.clone();
-    let (branches, admission_permit) = match tokio::time::timeout_at(
-        deadline,
+    let (branches, admission_permit) = match tokio::time::timeout_at(deadline, async move {
+        // Native routing initialization is async; CPU/tokenizer initialization stays in the
+        // admitted blocking job so observer cancellation cannot release its permits early.
+        if let Err(cause) = selection.prepare_native().await {
+            tracing::warn!(error = %cause, "decision resource initialization unavailable");
+            return Ok(Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "decision executor is unavailable".to_string(),
+            )));
+        }
         spawn_blocking_with_permit(admission_permit, move || {
             let _preflight_permit = preflight_permit;
+            let selection = selection.prepare().map_err(|cause| {
+                tracing::warn!(error = %cause, "decision resource initialization unavailable");
+                if matches!(
+                    cause.downcast_ref::<SystemOneSelectionError>(),
+                    Some(SystemOneSelectionError::Unsupported)
+                ) {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        "model does not support aggregate decision scoring".to_string(),
+                    )
+                } else {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "decision executor is unavailable".to_string(),
+                    )
+                }
+            })?;
             execution::prepare(&preflight_request, selection, max_input_tokens)
-        }),
-    )
+        })
+        .await
+    })
     .await
     {
         Ok(Ok(Ok(prepared))) => prepared,
@@ -475,5 +510,5 @@ fn bind_native(
 }
 
 #[cfg(test)]
-#[path = "systemone/tests_legacy.rs"]
+#[path = "systemone/tests.rs"]
 mod tests;

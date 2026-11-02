@@ -1,156 +1,168 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
-
-use anyhow::Context as _;
-use dynamo_runtime::pipeline::{RouterMode, network::egress::push_router::PushRouter};
-use tokio_util::sync::CancellationToken;
+use crate::model_card::decision_profile::DecisionKinds;
 
 use crate::{
-    discovery::{DecisionEngine, DecisionRoute, TokenExecutor, WorkerSet},
-    local_model::runtime_config::{DecisionProfileKind, NativeExecutorKind, TokenBackend},
+    discovery::{DecisionResources, ScoreFactory, TokenizerLoad, WorkerSet},
     model_card::ModelDeploymentCard,
     preprocessor::OpenAIPreprocessor,
-    protocols::{
-        Annotated,
-        decision_head::{DecisionHeadRequest, DecisionHeadResponse},
-        decision_read::{DecisionReadRequest, DecisionReadResponse},
-    },
     tokenizers::Tokenizer,
-    types::openai::generate::GenerateStreamingEngine,
 };
+use dynamo_runtime::{component::Client, pipeline::RouterMode};
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
-pub(super) enum DecisionPlan {
-    Disabled,
-    Token(TokenBackend),
-    Native {
-        kind: NativeExecutorKind,
-        mode: RouterMode,
-    },
-    UnsupportedRouting,
+pub(super) struct DecisionPlan {
+    advertised: DecisionKinds,
+    resources: Option<DecisionResources>,
 }
 
 impl DecisionPlan {
-    pub(super) fn new(card: &ModelDeploymentCard, enabled: bool, mode: RouterMode) -> Self {
-        let Some(profile) = enabled.then(|| card.decision_execution_profile()).flatten() else {
-            return Self::Disabled;
-        };
-        match profile.kind() {
-            DecisionProfileKind::Token(backend) => Self::Token(backend),
-            DecisionProfileKind::Native(kind) if Self::supports_native_routing(mode) => {
-                Self::Native { kind, mode }
-            }
-            DecisionProfileKind::Native(_) => {
-                tracing::warn!(
-                    model_name = card.name(),
-                    router_mode = ?mode,
-                    "Skipping optional decision engine: whole-request decisions have neither KV tokens nor explicit worker IDs; keeping other model surfaces active"
-                );
-                Self::UnsupportedRouting
-            }
-        }
-    }
-
-    pub(super) fn supports_native_routing(mode: RouterMode) -> bool {
-        matches!(
+    #[cfg(test)]
+    pub(super) fn new(
+        card: &ModelDeploymentCard,
+        enabled: bool,
+        mode: RouterMode,
+        teardown: Arc<super::super::allocator::AllocatorTrimOnDrop>,
+    ) -> Self {
+        Self::with_kinds(
+            card,
+            enabled,
             mode,
-            RouterMode::RoundRobin
-                | RouterMode::Random
-                | RouterMode::PowerOfTwoChoices
-                | RouterMode::LeastLoaded
-                | RouterMode::DeviceAwareWeighted
+            DecisionKinds::advertised(card),
+            teardown,
         )
     }
 
-    pub(super) fn needs_routing(&self) -> bool {
-        matches!(self, Self::Token(_) | Self::Native { .. })
+    pub(super) fn with_kinds(
+        card: &ModelDeploymentCard,
+        enabled: bool,
+        mode: RouterMode,
+        kinds: DecisionKinds,
+        teardown: Arc<super::super::allocator::AllocatorTrimOnDrop>,
+    ) -> Self {
+        Self {
+            advertised: kinds,
+            resources: DecisionResources::planned(card, mode, enabled, teardown),
+        }
     }
 
-    pub(super) fn needs_internal_generate(&self) -> bool {
-        matches!(self, Self::Token(_))
+    pub(super) fn needs_load_context(&self) -> bool {
+        self.resources
+            .as_ref()
+            .is_some_and(|resources| resources.capabilities().intent(self.advertised).any())
     }
 
-    pub(super) fn has_native_route(&self) -> bool {
-        matches!(self, Self::Native { .. })
+    pub(super) fn prepare_resources(
+        &mut self,
+        tokenizer: Option<&Tokenizer>,
+        routing: Option<&crate::entrypoint::input::PreprocessedRouting>,
+        load: Option<Arc<crate::kv_router::RoutingLoadContext>>,
+    ) -> Option<&DecisionResources> {
+        let resources = self.resources.take()?;
+        let score = routing
+            .filter(|_| resources.capabilities().token_possible)
+            .map(|routing| {
+                ScoreFactory::new(
+                    routing.score_engine(),
+                    tokenizer
+                        .cloned()
+                        .map_or(TokenizerLoad::Card, TokenizerLoad::Loaded),
+                )
+            });
+        self.resources = Some(resources.with_inputs(score, load));
+        let resources = self.resources.as_ref()?;
+        if resources.capabilities().intent(self.advertised).token {
+            // Optional scoring failure must leave ordinary surfaces available.
+            let _ = resources.prepare_token();
+        }
+        Some(resources)
     }
 
-    pub(super) fn preprocessor(
+    pub(super) fn chat_preprocessor(
         &self,
         card: &ModelDeploymentCard,
-        tokenizer: Option<&Tokenizer>,
+        tokenizer: Tokenizer,
         cancellation: &CancellationToken,
-    ) -> Option<Arc<OpenAIPreprocessor>> {
-        if !self.needs_internal_generate() {
-            return None;
-        }
-        let Some(tokenizer) = tokenizer else {
-            tracing::warn!(
-                model = card.name(),
-                "System One preprocessor is unavailable: model has no supported Rust tokenizer"
-            );
-            return None;
-        };
-        match super::worker_set_chat_preprocessor(card, tokenizer.clone(), cancellation) {
-            Ok(preprocessor) => Some(preprocessor),
-            Err(error) => {
-                tracing::warn!(
-                    model = card.name(),
-                    error = %format!("{error:#}"),
-                    "System One preprocessor is unavailable"
-                );
-                None
-            }
+    ) -> anyhow::Result<Arc<OpenAIPreprocessor>> {
+        match self
+            .resources
+            .as_ref()
+            .and_then(DecisionResources::prepared_token)
+        {
+            Some(token) => Ok(token.preprocessor.clone()),
+            None => super::worker_set_chat_preprocessor(card, tokenizer, cancellation),
         }
     }
 
-    pub(super) async fn attach(
-        self,
-        worker_set: &mut WorkerSet,
-        token_execution: Option<(GenerateStreamingEngine, Arc<OpenAIPreprocessor>)>,
-    ) -> anyhow::Result<()> {
-        let route = match self {
-            Self::Disabled => None,
-            Self::UnsupportedRouting => Some(DecisionRoute::UnsupportedRouting),
-            Self::Token(backend) => token_execution.map(|(engine, preprocessor)| {
-                DecisionRoute::Available(DecisionEngine::Token(TokenExecutor::new(
-                    backend,
-                    engine,
-                    preprocessor,
-                )))
-            }),
-            Self::Native { kind, mode } => {
-                let client = worker_set
-                    .load_context()
-                    .context("native decision load context")?
-                    .client()
-                    .clone();
-                let engine = match kind {
-                    NativeExecutorKind::Head => {
-                        let router = PushRouter::<
-                            DecisionHeadRequest,
-                            Annotated<DecisionHeadResponse>,
-                        >::from_client_with_monitor(
-                            client, mode, None
-                        )
-                        .await?;
-                        DecisionEngine::Head(Arc::new(router))
-                    }
-                    NativeExecutorKind::Read => {
-                        let router = PushRouter::<
-                            DecisionReadRequest,
-                            Annotated<DecisionReadResponse>,
-                        >::from_client_with_monitor(
-                            client, mode, None
-                        )
-                        .await?;
-                        DecisionEngine::Read(Arc::new(router))
-                    }
-                };
-                Some(DecisionRoute::Available(engine))
-            }
+    pub(super) async fn routing_dispatch(
+        &self,
+        client: &Client,
+        chooser: Option<&Arc<crate::kv_router::KvRouter>>,
+    ) -> anyhow::Result<Option<crate::kv_router::LlmDispatch>> {
+        let Some(capabilities) = self.resources.as_ref().map(DecisionResources::capabilities)
+        else {
+            return Ok(None);
         };
-        worker_set.decision = route;
-        Ok(())
+        if !capabilities.token_possible {
+            return Ok(None);
+        }
+        let client = crate::entrypoint::input::routing_client(client, capabilities.mode, chooser)?;
+        Ok(Some(
+            super::super::DecisionDispatch::for_client(
+                &client,
+                super::super::GuardPolicy::Optional,
+            )
+            .await?,
+        ))
+    }
+
+    pub(super) fn check_ordinary_surfaces(
+        &self,
+        card: &ModelDeploymentCard,
+        workers: &WorkerSet,
+    ) -> anyhow::Result<()> {
+        let native_read = self
+            .resources
+            .as_ref()
+            .is_some_and(|resources| resources.capabilities().intent(self.advertised).read);
+        if workers.has_any_serving_engine() || native_read {
+            if card.model_type.supports_chat() && workers.chat_engine.is_none() {
+                tracing::warn!(
+                    model_name = card.name(),
+                    surface = "chat/completions",
+                    "Advertised surface is unavailable: no supported Rust tokenizer or chat_engine_factory"
+                );
+            }
+            if card.model_type.supports_completions() && workers.completions_engine.is_none() {
+                tracing::warn!(
+                    model_name = card.name(),
+                    surface = "completions",
+                    "Advertised surface is unavailable: no Rust tokenizer available for this model"
+                );
+            }
+            return Ok(());
+        }
+        if card.model_type.supports_chat() {
+            anyhow::bail!(
+                "Model has no supported Rust tokenizer and no chat_engine_factory. \
+                     Use --dyn-chat-processor vllm/sglang or provide a supported \
+                     tokenizer file (tokenizer.json, tiktoken.model, or *.tiktoken)."
+            );
+        }
+        anyhow::bail!(
+            "Model '{}' requires frontend tokenization/preprocessing (ModelInput::Tokens) \
+                 but no serving engine could be built. Provide a working tokenizer config or \
+                 perform tokenization in the backend (ModelInput::Text).",
+            card.name()
+        );
+    }
+
+    pub(super) fn attach(self, worker_set: &mut WorkerSet, fleet: super::super::DecisionFleet) {
+        worker_set.decision = self
+            .resources
+            .and_then(DecisionResources::into_shared)
+            .map(|resources| super::super::DecisionSurface { resources, fleet });
     }
 }

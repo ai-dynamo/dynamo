@@ -14,6 +14,7 @@ use std::{
 };
 
 mod common;
+pub(crate) use common::routing_client;
 pub use common::{PreprocessedRouting, PreprocessedRoutingOptions, build_preprocessed_routing};
 pub mod endpoint;
 pub mod grpc;
