@@ -10,12 +10,11 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestGenerateInferencePoolSelectsWorkerClass(t *testing.T) {
 	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "ns"},
+		Name: "graph", Namespace: "ns",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				{ComponentName: "epp", ComponentType: v1beta1.ComponentTypeEPP},

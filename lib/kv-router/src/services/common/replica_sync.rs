@@ -18,7 +18,8 @@ use crate::identity::{RoutingPartitionId, RoutingPartitionRef};
 use crate::protocols::{ActiveSequenceEvent, WorkerWithDpRank};
 use crate::sequences::multi_worker::RateLimitedFailureLog;
 use crate::sequences::{
-    SchedulerLoadSnapshot, SequencePublishQueueError, SequencePublisher, SequenceSubscriber,
+    LocalWorkerLoad, SchedulerLoadSnapshot, SequencePublishQueueError, SequencePublisher,
+    SequenceSubscriber,
 };
 use crate::services::common::zmq::{
     create_bound_pub_socket, create_sub_socket_topics, validate_endpoint,
@@ -32,11 +33,11 @@ const REPLICA_TOPIC: &[u8] = b"dynamo.slot-tracker.v1";
 /// Session-affinity bindings ride the same mesh on their own topic, so peers
 /// that do not subscribe to it never see them.
 const AFFINITY_TOPIC: &[u8] = b"dynamo.session-affinity.v1";
-const AFFINITY_EVENT_CHANNEL_CAPACITY: usize = 4_096;
+pub(crate) const AFFINITY_EVENT_CHANNEL_CAPACITY: usize = 4_096;
 
 /// One replicated session binding.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct AffinityBindingEvent {
+pub struct AffinityBindingEvent {
     #[serde(flatten)]
     pub partition: RoutingPartitionId,
     pub session_id: String,
@@ -62,10 +63,30 @@ impl AffinityBindingEvent {
 
 #[cfg(feature = "standalone-selection")]
 /// Publishes bindings from a [`super::super::selection::affinity::SessionAffinity`]
-/// into the mesh. Best effort: a full channel drops the update.
-struct AffinityMeshSink {
+/// into a transport channel. Best effort: a full channel drops the update.
+pub(crate) struct AffinityMeshSink {
     partition: RoutingPartitionId,
     tx: mpsc::Sender<AffinityBindingEvent>,
+    cancel_token: CancellationToken,
+    full_drops: parking_lot::Mutex<RateLimitedFailureLog>,
+    unexpected_closed_drops: parking_lot::Mutex<RateLimitedFailureLog>,
+}
+
+#[cfg(feature = "standalone-selection")]
+impl AffinityMeshSink {
+    pub(crate) fn new(
+        partition: RoutingPartitionId,
+        tx: mpsc::Sender<AffinityBindingEvent>,
+        cancel_token: CancellationToken,
+    ) -> Self {
+        Self {
+            partition,
+            tx,
+            cancel_token,
+            full_drops: parking_lot::Mutex::default(),
+            unexpected_closed_drops: parking_lot::Mutex::default(),
+        }
+    }
 }
 
 #[cfg(feature = "standalone-selection")]
@@ -79,8 +100,34 @@ impl AffinityReplicaSink for AffinityMeshSink {
             sequence: version.sequence,
             writer_id: version.writer_id,
         };
-        if let Err(error) = self.tx.try_send(update) {
-            tracing::trace!(%error, "dropping best-effort session affinity replica update");
+        match self.tx.try_send(update) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                let Some(dropped_bindings) = self.full_drops.lock().record(Instant::now()) else {
+                    return;
+                };
+                tracing::warn!(
+                    partition = %self.partition,
+                    capacity = self.tx.max_capacity(),
+                    dropped_bindings_since_last_log = dropped_bindings,
+                    "Session affinity replication channel full; dropping binding"
+                );
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) if self.cancel_token.is_cancelled() => {
+                tracing::trace!("dropping session affinity replica update; channel closed");
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                let Some(dropped_bindings) =
+                    self.unexpected_closed_drops.lock().record(Instant::now())
+                else {
+                    return;
+                };
+                tracing::warn!(
+                    partition = %self.partition,
+                    dropped_bindings_since_last_log = dropped_bindings,
+                    "Session affinity replication channel closed unexpectedly; dropping binding"
+                );
+            }
         }
     }
 }
@@ -182,10 +229,11 @@ impl ReplicaSyncConfig {
         partition: &RoutingPartitionId,
     ) -> Option<Arc<dyn AffinityReplicaSink>> {
         self.affinity_tx.clone().map(|tx| {
-            Arc::new(AffinityMeshSink {
+            Arc::new(AffinityMeshSink::new(
+                partition.clone(),
                 tx,
-                partition: partition.clone(),
-            }) as Arc<dyn AffinityReplicaSink>
+                self.cancel_token.clone(),
+            )) as Arc<dyn AffinityReplicaSink>
         })
     }
 
@@ -208,10 +256,9 @@ pub(crate) struct ScopedReplicaSync {
 pub trait SchedulerLoadSink: Send + Sync {
     fn publish(&self, snapshot: SchedulerLoadSnapshot);
 
-    /// Per-worker load after any local mutation, including output blocks,
-    /// which are never published as shared scheduler load. The sink owns the
-    /// metric label so it matches the host's cleanup path.
-    fn observe_local_load(&self, _worker: &WorkerWithDpRank, _blocks: usize, _tokens: usize) {}
+    /// Per-worker load after any local mutation. The sink owns the metric
+    /// label so it matches the host's cleanup path.
+    fn observe_local_load(&self, _worker: &WorkerWithDpRank, _load: LocalWorkerLoad) {}
 
     fn publish_batch(&self, snapshots: Vec<SchedulerLoadSnapshot>) {
         for snapshot in snapshots {
@@ -368,15 +415,9 @@ impl SequencePublisher for ScopedSequencePublisher {
         }
     }
 
-    fn observe_load(
-        &self,
-        worker: &WorkerWithDpRank,
-        _worker_type: &str,
-        blocks: usize,
-        tokens: usize,
-    ) {
+    fn observe_load(&self, worker: &WorkerWithDpRank, _worker_type: &str, load: LocalWorkerLoad) {
         if let Some(sink) = &self.load_sink {
-            sink.observe_local_load(worker, blocks, tokens);
+            sink.observe_local_load(worker, load);
         }
     }
 }
@@ -1023,6 +1064,46 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[cfg(feature = "standalone-selection")]
+    #[test]
+    fn affinity_sink_warns_on_unexpected_close() {
+        let publish_to_closed_channel = |cancel_token: CancellationToken| {
+            let (tx, rx) = mpsc::channel(1);
+            drop(rx);
+            let sink =
+                AffinityMeshSink::new(RoutingPartitionId::new("model", "group"), tx, cancel_token);
+            sink.publish(
+                "session",
+                AffinityTarget::new(1, None),
+                AffinityVersion {
+                    sequence: 1,
+                    writer_id: 7,
+                },
+            );
+            sink
+        };
+
+        let unexpected = publish_to_closed_channel(CancellationToken::new());
+        assert_eq!(
+            unexpected
+                .unexpected_closed_drops
+                .lock()
+                .record(Instant::now()),
+            None
+        );
+
+        let cancel_token = CancellationToken::new();
+        cancel_token.cancel();
+        let shutdown = publish_to_closed_channel(cancel_token);
+        assert_eq!(
+            shutdown
+                .unexpected_closed_drops
+                .lock()
+                .record(Instant::now()),
+            Some(1)
+        );
     }
 
     #[tokio::test]

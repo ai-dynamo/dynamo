@@ -2,35 +2,53 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dynamo_backend_common::{BackendError, DisaggregationMode, FinishReason, LLMEngine};
 use dynamo_llm::discovery::{LoadThresholdHandle, ModelManager};
 use dynamo_llm::kv_router::PrefillRouter;
+use dynamo_llm::model_card::TokenizerKind;
 use dynamo_llm::session_affinity::SessionAffinityMode;
 use dynamo_llm::worker_type::WorkerType;
 use dynamo_runtime::pipeline::{AsyncEngine, AsyncEngineContextProvider, Operator, RouterMode};
 use dynamo_sidecar_testkit::{
     assert::{failure, terminal},
     bounded,
-    control::{Controller, Event, OpenAction, RequestPlan, StreamAction, StreamFault, StreamPoint},
+    control::{
+        Controller, Event, OpenAction, RequestHandle, RequestPlan, StreamAction, StreamFault,
+        StreamPoint,
+    },
 };
 use futures::StreamExt;
+use serde_json::{Value, json};
 
 #[path = "support/process.rs"]
 mod process;
 #[allow(dead_code)]
 mod support;
 
-use process::{Environment, Gate, outputs};
-use support::{FixtureConfig, ProcessFixture, SidecarFixture, vllm};
+use process::{Environment, Frontend, Gate, outputs};
+use support::{
+    DiscoveryFixture, FixtureConfig, HandoffFixture, ProcessFixture, Rejection, SidecarFixture,
+    lpx, sglang, vllm,
+};
 
 async fn healthy<F: ProcessFixture>(
     env: &Environment,
     router: &crate::process::Router,
     control: &Controller<F::Protocol>,
     id: &str,
-) {
+) -> RequestHandle<F::Protocol> {
+    healthy_with_model::<F>(env, router, control, id, &env.model).await
+}
+
+async fn healthy_with_model<F: ProcessFixture>(
+    env: &Environment,
+    router: &crate::process::Router,
+    control: &Controller<F::Protocol>,
+    id: &str,
+    model: &str,
+) -> RequestHandle<F::Protocol> {
     bounded("router fault recovery", async {
         while router.selectable_worker_ids().is_err() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -39,6 +57,7 @@ async fn healthy<F: ProcessFixture>(
     .await;
     let handle = control.request(id, RequestPlan::default());
     let mut request = env.request(id, 3);
+    request.model = model.into();
     F::configure_request(&mut request);
     let expected = request.content().clone();
     let stream = bounded("Dynamo request ingress", router.generate(request))
@@ -53,6 +72,7 @@ async fn healthy<F: ProcessFixture>(
         handle.wait(Event::Dropped),
     )
     .await;
+    handle
 }
 
 #[tokio::test]
@@ -91,11 +111,20 @@ async fn registration_and_errors_recover_through_worker_ingress<F: ProcessFixtur
     let rejected = control.request("unsupported", RequestPlan::default());
     let mut request = env.request("unsupported", 3);
     request.sampling_options.n = Some(2);
-    let error = match bounded("unsupported request ingress", router.generate(request)).await {
-        Err(error) => error
+    let ingress = bounded("unsupported request ingress", router.generate(request)).await;
+    let error = match (F::REJECTION, ingress) {
+        (Rejection::Returned, Err(error)) => error
             .downcast::<dynamo_backend_common::DynamoError>()
             .unwrap(),
-        Ok(_) => panic!("unsupported request must fail before a response stream"),
+        (Rejection::Returned, Ok(_)) => {
+            panic!("unsupported request must fail before a response stream")
+        }
+        (Rejection::FirstStreamItem, Ok(stream)) => {
+            failure(outputs(stream).await, &[], BackendError::InvalidArgument)
+        }
+        (Rejection::FirstStreamItem, Err(error)) => {
+            panic!("unsupported request must be refused inside its response stream: {error}")
+        }
     };
     assert!(
         dynamo_runtime::error::match_error_chain(
@@ -106,6 +135,27 @@ async fn registration_and_errors_recover_through_worker_ingress<F: ProcessFixtur
             &[],
         ),
         "{error}"
+    );
+    assert_eq!(
+        error.class(),
+        dynamo_backend_common::ErrorType::InvalidRequest,
+        "{error}"
+    );
+    assert!(
+        !dynamo_runtime::error::match_error_chain(
+            &error,
+            &[dynamo_backend_common::ErrorType::CannotConnect],
+            &[],
+        ),
+        "{error}"
+    );
+    // Checked as soon as the refusal returns, well inside `process::INHIBITED_DURATION`,
+    // so a wrongly inhibited worker is still out of rotation here.
+    assert!(
+        router
+            .selectable_worker_ids()
+            .is_ok_and(|ids| !ids.is_empty()),
+        "a request-validation refusal must not quarantine the worker"
     );
     assert!(!rejected.reached(Event::Received));
     healthy::<F>(&env, &router, &control, "after-unsupported").await;
@@ -129,7 +179,7 @@ async fn registration_and_errors_recover_through_worker_ingress<F: ProcessFixtur
                     pause: false,
                 }),
             },
-            BackendError::CannotConnect,
+            F::read_error(),
         ),
         (
             "early-eof",
@@ -172,6 +222,169 @@ async fn registration_and_errors_recover_through_worker_ingress<F: ProcessFixtur
     child.shutdown().await;
     env.withdrawn("backend", &router).await;
     peer.shutdown().await;
+}
+
+fn sse_events(body: &str) -> impl Iterator<Item = Value> + '_ {
+    body.lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str(data).ok())
+}
+
+async fn native_errors_reach_http_and_recover<F: ProcessFixture>() {
+    let env = Environment::new().await;
+    let control = Controller::default();
+    let mut peer = F::start(
+        control.clone(),
+        FixtureConfig {
+            model: env.model.clone(),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut child = env.spawn::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 5);
+    let router = env.ready("backend").await;
+    let frontend = Frontend::start(&env).await;
+    for is_streaming in [false, true] {
+        let handle = control.next_request(if is_streaming {
+            RequestPlan {
+                stream: Some(StreamFault {
+                    at: StreamPoint::TokenResponse(1),
+                    action: StreamAction::Fail,
+                    pause: true,
+                }),
+                ..Default::default()
+            }
+        } else {
+            RequestPlan {
+                open: OpenAction::Reject,
+                ..Default::default()
+            }
+        });
+        let mut response = bounded(
+            "HTTP native failure response",
+            frontend.generate(&env.model, is_streaming).send(),
+        )
+        .await
+        .unwrap();
+        if is_streaming {
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let mut body = String::new();
+            bounded("HTTP client receives native token before failure", async {
+                loop {
+                    let chunk = response.chunk().await.unwrap().expect("token chunk");
+                    body.push_str(&String::from_utf8_lossy(&chunk));
+                    if sse_events(&body).any(|event| {
+                        event["nvext"]["completion_token_ids"]
+                            .as_array()
+                            .is_some_and(|tokens| !tokens.is_empty())
+                    }) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            bounded("native failure checkpoint", handle.wait(Event::Checkpoint)).await;
+            assert_eq!(handle.tokens().len(), 1);
+            handle.release();
+            body.push_str(
+                &bounded("HTTP failed stream body", response.text())
+                    .await
+                    .unwrap(),
+            );
+            let events: Vec<_> = sse_events(&body).collect();
+            let errors: Vec<_> = events
+                .iter()
+                .filter_map(|event| event.get("error"))
+                .collect();
+            assert_eq!(errors.len(), 1, "{body}");
+            assert_eq!(errors[0]["code"], 503, "{body}");
+            assert!(!body.contains("injected read failure"), "{body}");
+            assert!(body.trim_end().ends_with("data: [DONE]"), "{body}");
+            assert!(
+                events
+                    .iter()
+                    .all(
+                        |event| event["choices"].as_array().is_none_or(|choices| choices
+                            .iter()
+                            .all(|choice| choice["finish_reason"].is_null()))
+                    ),
+                "failed stream reported a successful finish: {body}"
+            );
+        } else {
+            assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+            let body: Value = response.json().await.unwrap();
+            assert_eq!(body["code"], 400, "{body}");
+            assert_eq!(body["message"], "Invalid request", "{body}");
+            assert!(
+                handle.reached(Event::Received),
+                "frontend rejected before native RPC"
+            );
+        }
+        bounded(
+            "failed native request released",
+            handle.wait(Event::Dropped),
+        )
+        .await;
+        peer.scheduler_idle().await;
+
+        let recovered = control.next_request(RequestPlan::default());
+        let response = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let response = bounded(
+                    "HTTP recovery response",
+                    frontend.generate(&env.model, false).send(),
+                )
+                .await
+                .unwrap();
+                if !is_streaming
+                    || !F::QUARANTINES_ON_READ_ERROR
+                    || response.status() == reqwest::StatusCode::OK
+                {
+                    break response;
+                }
+                // A quarantined worker returns after the router reconciles discovery.
+                assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("HTTP recovery exceeded its deadline");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["choices"][0]["finish_reason"], "length", "{body}");
+        assert_eq!(body["usage"]["completion_tokens"], 3, "{body}");
+        assert_eq!(recovered.tokens().len(), 3);
+        bounded(
+            "HTTP recovery request released",
+            recovered.wait(Event::Dropped),
+        )
+        .await;
+        peer.scheduler_idle().await;
+    }
+    frontend.shutdown().await;
+    child.shutdown().await;
+    env.withdrawn("backend", &router).await;
+    peer.shutdown().await;
+}
+
+#[tokio::test]
+async fn vllm_native_errors_reach_http_and_recover() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        native_errors_reach_http_and_recover::<vllm::Fixture>(),
+    )
+    .await
+    .expect("HTTP error scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn sglang_native_errors_reach_http_and_recover() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        native_errors_reach_http_and_recover::<sglang::Fixture>(),
+    )
+    .await
+    .expect("HTTP error scenario exceeded its overall deadline");
 }
 
 #[tokio::test]
@@ -221,13 +434,15 @@ async fn vllm_failed_and_interrupted_startup_leave_no_registration() {
 
 async fn failed_and_interrupted_startup_leave_no_registration<F: ProcessFixture>() {
     let env = Environment::new().await;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    drop(listener);
+    // Reserve the unavailable endpoint so another parallel mock cannot acquire it.
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let endpoint = format!("http://{}", socket.local_addr().unwrap());
     let mut child = env.spawn::<F>(&endpoint, DisaggregationMode::Aggregated, 1);
     assert!(!child.exit().await.success(), "{}", child.logs());
     assert!(env.cards().await.is_empty());
     assert!(env.registrations("backend").await.is_empty());
+    drop(socket);
     for is_interrupted in [false, true] {
         let env = Environment::new().await;
         let mut gate = Gate::new("http://127.0.0.1:1").await;
@@ -414,7 +629,7 @@ async fn sigterm_withdraws_worker_and_releases_active_native_request<F: ProcessF
         },
     )
     .await;
-    let mut child = env.spawn_with_grace::<F>(&peer.endpoint(), DisaggregationMode::Aggregated);
+    let mut child = env.spawn_with_grace::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 1);
     let router = env.ready("backend").await;
     let handle = control.request("shutdown-active", hold_after_token());
     let mut stream = router
@@ -455,6 +670,60 @@ async fn sigterm_withdraws_worker_and_releases_active_native_request<F: ProcessF
     peer.shutdown().await;
 }
 
+/// Load that stays unavailable past the LPX sidecar's 30 s staleness limit
+/// withdraws the worker, and the sidecar then exits with an error.
+async fn load_loss_withdraws_worker_and_fails_the_process() {
+    let env = Environment::new().await;
+    let mut peer = lpx::Fixture::start(
+        Controller::default(),
+        FixtureConfig {
+            model: env.model.clone(),
+            ..Default::default()
+        },
+    )
+    .await;
+    // The grace keeps the withdrawn process up while the test observes it.
+    let mut child =
+        env.spawn_with_grace::<lpx::Fixture>(&peer.endpoint(), DisaggregationMode::Aggregated, 5);
+    let router = env.ready("backend").await;
+    // Valid load first, so the limit must count from the last valid answer
+    // rather than from the sidecar's start.
+    let warmed_up = Instant::now() + Duration::from_secs(5);
+    bounded("GetLoad answered after warm-up", async {
+        while peer.load_served_at().is_none_or(|at| at < warmed_up) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    peer.lose_load();
+    tokio::time::timeout(Duration::from_secs(40), async {
+        while !env.registrations("backend").await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("load loss did not withdraw the worker\n{}", child.logs()));
+    let withdrawn_after = peer
+        .load_served_at()
+        .expect("GetLoad served load before the loss")
+        .elapsed();
+    assert!(
+        withdrawn_after >= Duration::from_secs(29),
+        "withdrawn {withdrawn_after:?} after the last load, before the 30 s limit"
+    );
+    env.withdrawn("backend", &router).await;
+    assert!(child.is_running(), "withdrawal must precede process exit");
+    assert!(!child.exit().await.success(), "{}", child.logs());
+    assert!(
+        child
+            .logs()
+            .contains("Routing load remained unavailable for 30 seconds"),
+        "{}",
+        child.logs()
+    );
+    peer.shutdown().await;
+}
+
 async fn ready(router: &PrefillRouter) {
     bounded("real PrefillRouter availability", async {
         loop {
@@ -482,198 +751,724 @@ async fn ready(router: &PrefillRouter) {
     .await;
 }
 
-#[tokio::test]
-async fn vllm_prefill_router_preserves_handoff_failure_and_cancellation() {
-    tokio::time::timeout(Duration::from_secs(60), async {
-        let env = Environment::new().await;
-        let prefill_control = Controller::default();
-        let decode_control = Controller::default();
-        let mut prefill_peer = vllm::Fixture::start(
-            prefill_control.clone(),
-            FixtureConfig {
-                model: env.model.clone(),
-                disaggregation_mode: DisaggregationMode::Prefill,
-                ..Default::default()
-            },
-        )
-        .await;
-        let mut decode_peer = vllm::Fixture::start(
-            decode_control.clone(),
-            FixtureConfig {
-                model: env.model.clone(),
-                disaggregation_mode: DisaggregationMode::Decode,
-                ..Default::default()
-            },
-        )
-        .await;
-        let mut prefill = env.spawn::<vllm::Fixture>(
-            &prefill_peer.server.endpoint(),
-            DisaggregationMode::Prefill,
-            5,
-        );
-        let mut decode = env.spawn::<vllm::Fixture>(
-            &decode_peer.server.endpoint(),
-            DisaggregationMode::Decode,
-            5,
-        );
-        let prefill_router = env.ready("prefill").await;
-        let decode_router = env.ready("backend").await;
-        let cards = env.cards().await;
-        assert_eq!(cards.len(), 2);
-        for role in [WorkerType::Prefill, WorkerType::Decode] {
-            let card = cards
-                .iter()
-                .find(|card| card.worker_type == Some(role))
-                .unwrap();
-            assert_eq!(card.name(), env.model);
-            assert_eq!(card.kv_cache_block_size, 4);
-        }
-        let (activation, activated) = tokio::sync::oneshot::channel();
-        let router = PrefillRouter::new(
-            activated,
-            Arc::new(ModelManager::new()),
-            RouterMode::RoundRobin,
-            4,
-            None,
-            None,
-            None,
-            SessionAffinityMode::Hard,
-            env.model.clone(),
-            env.namespace.clone(),
-            LoadThresholdHandle::new(Default::default()),
-            env.runtime.primary_token(),
-        );
-        activation.send(env.endpoint("prefill")).unwrap();
-        ready(&router).await;
-
-        for id in ["handoff", "handoff-repeat"] {
-            let observed_prefill = prefill_control.request(id, RequestPlan::default());
-            let observed_decode = decode_control.request(id, RequestPlan::default());
-            let stream = bounded(
-                "prefill/decode handoff",
-                router.generate(env.request(id, 3), decode_router.clone()),
-            )
-            .await
+async fn prefill_router_preserves_handoff_failure_and_cancellation<
+    P: HandoffFixture<D>,
+    D: ProcessFixture,
+>() {
+    let env = Environment::new().await;
+    let prefill_control = Controller::default();
+    let decode_control = Controller::default();
+    let mut prefill_peer = P::start(
+        prefill_control.clone(),
+        FixtureConfig {
+            model: env.model.clone(),
+            disaggregation_mode: DisaggregationMode::Prefill,
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut decode_peer = D::start(
+        decode_control.clone(),
+        FixtureConfig {
+            model: env.model.clone(),
+            disaggregation_mode: DisaggregationMode::Decode,
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut prefill = env.spawn::<P>(&prefill_peer.endpoint(), DisaggregationMode::Prefill, 5);
+    let mut decode = env.spawn::<D>(&decode_peer.endpoint(), DisaggregationMode::Decode, 5);
+    let prefill_router = env.ready("prefill").await;
+    let decode_router = env.ready("backend").await;
+    let cards = env.cards().await;
+    assert_eq!(cards.len(), 2);
+    for role in [WorkerType::Prefill, WorkerType::Decode] {
+        let card = cards
+            .iter()
+            .find(|card| card.worker_type == Some(role))
             .unwrap();
-            terminal(
-                outputs(stream).await,
-                &observed_decode.tokens(),
-                4,
-                FinishReason::Length,
+        assert_eq!(card.name(), env.model);
+        assert_eq!(card.kv_cache_block_size, P::KV_BLOCK_SIZE);
+        if P::HAS_BOOTSTRAP && role == WorkerType::Prefill {
+            let endpoint = card.runtime_config.disaggregated_endpoint.as_ref().unwrap();
+            assert!(
+                endpoint
+                    .bootstrap_host
+                    .as_ref()
+                    .is_some_and(|host| !host.is_empty())
             );
-            let prefill_wire = observed_prefill.native_request().unwrap();
-            let decode_wire = observed_decode.native_request().unwrap();
-            assert_eq!(prefill_wire.request_id, id);
-            assert_eq!(decode_wire.request_id, id);
-            assert_eq!(prefill_wire.stopping.unwrap().max_new_tokens, 1);
-            assert_eq!(decode_wire.stopping.unwrap().max_new_tokens, 3);
-            let mut native_handoff = observed_prefill
-                .native_responses()
-                .into_iter()
-                .find_map(|response| response.outputs?.finish_info?.kv_transfer_params)
-                .expect("native prefill handoff");
-            let mut forwarded = decode_wire.kv.unwrap().kv_transfer_params.unwrap();
-            assert_eq!(
-                forwarded.fields["mocker_request_id"].kind,
-                Some(prost_types_v14::value::Kind::StringValue(id.to_string()))
-            );
-            assert_eq!(
-                native_handoff.fields.remove("remote_port").unwrap().kind,
-                Some(prost_types_v14::value::Kind::NumberValue(0.0))
-            );
-            assert_eq!(
-                forwarded.fields.remove("remote_port").unwrap().kind,
-                Some(prost_types_v14::value::Kind::StringValue("0".to_string()))
-            );
-            assert_eq!(forwarded, native_handoff);
+            assert_eq!(endpoint.bootstrap_port, Some(8998));
         }
+    }
+    let (activation, activated) = tokio::sync::oneshot::channel();
+    let router = PrefillRouter::new(
+        activated,
+        Arc::new(ModelManager::new()),
+        RouterMode::RoundRobin,
+        P::KV_BLOCK_SIZE,
+        None,
+        None,
+        None,
+        SessionAffinityMode::Hard,
+        env.model.clone(),
+        env.namespace.clone(),
+        LoadThresholdHandle::new(Default::default()),
+        env.runtime.primary_token(),
+    );
+    activation.send(env.endpoint("prefill")).unwrap();
+    ready(&router).await;
+    let prefill_plan = RequestPlan {
+        open: if P::HAS_BOOTSTRAP {
+            OpenAction::Hold
+        } else {
+            OpenAction::Continue
+        },
+        stream: None,
+    };
 
-        let failed = prefill_control.request(
-            "failed-prefill",
-            RequestPlan {
-                open: OpenAction::Fail,
-                stream: None,
-            },
-        );
-        let unsubmitted = decode_control.request("failed-prefill", RequestPlan::default());
-        let result = bounded(
-            "failed prefill",
-            router.generate(env.request("failed-prefill", 3), decode_router.clone()),
+    for id in ["handoff", "handoff-repeat"] {
+        let observed_prefill = prefill_control.request(id, prefill_plan);
+        let observed_decode = decode_control.request(id, RequestPlan::default());
+        let stream = bounded(
+            "prefill/decode handoff",
+            router.generate(env.request(id, 3), decode_router.clone()),
         )
-        .await;
+        .await
+        .unwrap();
+        if P::HAS_BOOTSTRAP {
+            bounded(
+                "prefill native acceptance",
+                observed_prefill.wait(Event::Received),
+            )
+            .await;
+            bounded(
+                "decode native acceptance",
+                observed_decode.wait(Event::Received),
+            )
+            .await;
+            assert!(observed_prefill.tokens().is_empty());
+            assert!(!observed_prefill.reached(Event::Dropped));
+            observed_prefill.release();
+        }
+        terminal(
+            outputs(stream).await,
+            &observed_decode.tokens(),
+            4,
+            FinishReason::Length,
+        );
+        P::assert_handoff(&observed_prefill, &observed_decode, id);
+    }
+
+    let failed = prefill_control.request(
+        "failed-prefill",
+        RequestPlan {
+            open: OpenAction::Fail,
+            stream: None,
+        },
+    );
+    let unsubmitted = decode_control.request("failed-prefill", RequestPlan::default());
+    let result = bounded(
+        "failed prefill",
+        router.generate(env.request("failed-prefill", 3), decode_router.clone()),
+    )
+    .await;
+    if !P::HAS_BOOTSTRAP {
         assert!(
             result.is_err(),
             "failed prefill must not produce a successful handoff"
         );
-        assert!(!unsubmitted.reached(Event::Received));
-        bounded("failed prefill native release", failed.wait(Event::Dropped)).await;
-        ready(&router).await;
-
-        let prefill_observation = prefill_control.request("cancel-handoff", RequestPlan::default());
-        let decode_observation = decode_control.request(
-            "cancel-handoff",
-            RequestPlan {
-                open: OpenAction::Hold,
-                stream: None,
-            },
-        );
-        let request = env.request("cancel-handoff", 3);
-        let context = request.context();
-        let generation = router.generate(request, decode_router.clone());
-        tokio::pin!(generation);
-        let stream = bounded("decode request accepted during handoff", async {
-            tokio::select! {
-                result = &mut generation => {
-                    let stream = result.unwrap();
-                    decode_observation.wait(Event::Received).await;
-                    Some(stream)
-                }
-                _ = decode_observation.wait(Event::Received) => None,
-            }
-        })
-        .await;
-        context.stop_generating();
-        assert!(prefill_observation.reached(Event::Received));
-        decode_observation.release();
-        bounded("handoff cancellation completion", async {
-            let stream = match stream {
-                Some(stream) => stream,
-                None => generation.await.unwrap(),
-            };
+    }
+    match result {
+        Err(_) => {}
+        Ok(stream) => {
+            let response = outputs(stream).await;
+            assert!(response.iter().any(Result::is_err));
             assert!(
-                outputs(stream)
-                    .await
+                response
                     .iter()
                     .filter_map(|item| item.as_ref().ok())
-                    .all(|output| !matches!(
-                        output.finish_reason,
-                        Some(FinishReason::Stop | FinishReason::Length)
-                    ))
+                    .all(|output| {
+                        !matches!(
+                            output.finish_reason,
+                            Some(FinishReason::Stop | FinishReason::Length)
+                        )
+                    })
             );
-        })
-        .await;
-        bounded("prefill release", prefill_observation.wait(Event::Dropped)).await;
-        bounded("decode release", decode_observation.wait(Event::Dropped)).await;
-        prefill_peer.scheduler_idle().await;
-        decode_peer.scheduler_idle().await;
-        let p = prefill_control.request("after-handoff-cancel", RequestPlan::default());
-        let d = decode_control.request("after-handoff-cancel", RequestPlan::default());
-        let stream = router
-            .generate(
-                env.request("after-handoff-cancel", 3),
-                decode_router.clone(),
+        }
+    }
+    if !P::HAS_BOOTSTRAP {
+        assert!(!unsubmitted.reached(Event::Received));
+    }
+    bounded("failed prefill native release", failed.wait(Event::Dropped)).await;
+    ready(&router).await;
+
+    let prefill_observation = prefill_control.request("cancel-handoff", prefill_plan);
+    let decode_observation = decode_control.request(
+        "cancel-handoff",
+        RequestPlan {
+            open: OpenAction::Hold,
+            stream: None,
+        },
+    );
+    let request = env.request("cancel-handoff", 3);
+    let context = request.context();
+    let generation = router.generate(request, decode_router.clone());
+    tokio::pin!(generation);
+    let stream = bounded("decode request accepted during handoff", async {
+        tokio::select! {
+            result = &mut generation => {
+                let stream = result.unwrap();
+                decode_observation.wait(Event::Received).await;
+                Some(stream)
+            }
+            _ = decode_observation.wait(Event::Received) => None,
+        }
+    })
+    .await;
+    bounded(
+        "prefill accepted before handoff cancellation",
+        prefill_observation.wait(Event::Received),
+    )
+    .await;
+    context.stop_generating();
+    assert!(prefill_observation.reached(Event::Received));
+    if P::HAS_BOOTSTRAP {
+        assert!(!prefill_observation.reached(Event::Dropped));
+        P::assert_handoff(&prefill_observation, &decode_observation, "cancel-handoff");
+        prefill_observation.release();
+    } else {
+        // The prefill has finished, so only the decode leg releases its KV.
+        // Nothing reports when the stop reaches the decode worker, so allow it
+        // a settle period: a Worker or sidecar that abandoned the pending
+        // Generate would drop the held native call well within it.
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(500),
+                decode_observation.wait(Event::Dropped)
             )
             .await
-            .unwrap();
-        terminal(outputs(stream).await, &d.tokens(), 4, FinishReason::Length);
-        assert!(p.reached(Event::Received));
-        prefill.shutdown().await;
-        decode.shutdown().await;
-        env.withdrawn("backend", &decode_router).await;
-        env.withdrawn("prefill", &prefill_router).await;
-        prefill_peer.shutdown().await;
-        decode_peer.shutdown().await;
+            .is_err(),
+            "the decode leg's Generate must stay open after the client leaves"
+        );
+    }
+    decode_observation.release();
+    bounded("handoff cancellation completion", async {
+        let stream = match stream {
+            Some(stream) => stream,
+            None => generation.await.unwrap(),
+        };
+        assert!(
+            outputs(stream)
+                .await
+                .iter()
+                .filter_map(|item| item.as_ref().ok())
+                .all(|output| !matches!(
+                    output.finish_reason,
+                    Some(FinishReason::Stop | FinishReason::Length)
+                ))
+        );
     })
+    .await;
+    bounded("prefill release", prefill_observation.wait(Event::Dropped)).await;
+    bounded("decode release", decode_observation.wait(Event::Dropped)).await;
+    prefill_peer.scheduler_idle().await;
+    decode_peer.scheduler_idle().await;
+    let p = prefill_control.request("after-handoff-cancel", RequestPlan::default());
+    let d = decode_control.request("after-handoff-cancel", RequestPlan::default());
+    let stream = router
+        .generate(
+            env.request("after-handoff-cancel", 3),
+            decode_router.clone(),
+        )
+        .await
+        .unwrap();
+    terminal(outputs(stream).await, &d.tokens(), 4, FinishReason::Length);
+    assert!(p.reached(Event::Received));
+    prefill.shutdown().await;
+    decode.shutdown().await;
+    env.withdrawn("backend", &decode_router).await;
+    env.withdrawn("prefill", &prefill_router).await;
+    prefill_peer.shutdown().await;
+    decode_peer.shutdown().await;
+}
+
+#[tokio::test]
+async fn vllm_prefill_router_preserves_handoff_failure_and_cancellation() {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        prefill_router_preserves_handoff_failure_and_cancellation::<vllm::Fixture, vllm::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn sglang_registration_and_errors_recover_through_worker_ingress() {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        registration_and_errors_recover_through_worker_ingress::<support::sglang::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn sglang_delayed_startup_publishes_only_after_native_readiness() {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        delayed_startup_publishes_only_after_native_readiness::<support::sglang::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn sglang_failed_and_interrupted_startup_leave_no_registration() {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        failed_and_interrupted_startup_leave_no_registration::<support::sglang::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn sglang_worker_cancel_and_consumer_drop_release_only_the_target() {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        worker_cancel_and_consumer_drop_release_only_the_target::<support::sglang::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn sglang_sigterm_withdraws_worker_and_releases_active_native_request() {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        sigterm_withdraws_worker_and_releases_active_native_request::<support::sglang::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn sglang_prefill_router_preserves_handoff_failure_and_cancellation() {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        prefill_router_preserves_handoff_failure_and_cancellation::<
+            sglang::Fixture,
+            sglang::Fixture,
+        >(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn vllm_served_model_alias_is_published() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        served_model_alias_is_published::<vllm::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn sglang_served_model_alias_is_published() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        served_model_alias_is_published::<sglang::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn sglang_distinct_model_tokenizer_and_alias_are_published() {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        distinct_model_tokenizer_and_alias_are_published(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn vllm_health_readiness_precedes_publication() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        health_readiness_precedes_publication::<vllm::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn sglang_health_readiness_precedes_publication() {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        health_readiness_precedes_publication::<sglang::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn vllm_unhealthy_worker_never_registers() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        unhealthy_worker_never_registers::<vllm::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn sglang_unhealthy_worker_never_registers() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        unhealthy_worker_never_registers::<sglang::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn sglang_changed_role_never_registers() {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        changed_role_never_registers(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+async fn served_model_alias_is_published<F: DiscoveryFixture>() {
+    let env = Environment::new().await;
+    let control = Controller::default();
+    let mut peer = F::start(
+        control.clone(),
+        FixtureConfig {
+            model: env.model.clone(),
+            ..Default::default()
+        },
+    )
+    .await;
+    peer.set_served_model_name("public-alias");
+    let mut child = env.spawn::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 5);
+    let router = env.ready("backend").await;
+    let cards = env.cards().await;
+    assert_eq!(cards.len(), 1);
+    let card = &cards[0];
+    assert_eq!(card.name(), "public-alias");
+    assert_eq!(card.source_path(), env.model);
+    assert_eq!(card.worker_type, Some(WorkerType::Aggregated));
+    assert!(card.tokenizer.is_some());
+    assert!(card.prompt_formatter.is_some());
+    F::assert_registration(card);
+    healthy_with_model::<F>(&env, &router, &control, "alias-request", "public-alias").await;
+    child.shutdown().await;
+    env.withdrawn("backend", &router).await;
+    peer.shutdown().await;
+}
+
+async fn distinct_model_tokenizer_and_alias_are_published() {
+    let env = Environment::new().await;
+    let tokenizer = std::path::Path::new(&env.model).join("separate-tokenizer");
+    std::fs::create_dir(&tokenizer).unwrap();
+    for file in ["config.json", "tokenizer.json", "tokenizer_config.json"] {
+        std::fs::copy(
+            std::path::Path::new(&env.model).join(file),
+            tokenizer.join(file),
+        )
+        .unwrap();
+    }
+    let tokenizer_file = tokenizer.join("tokenizer.json");
+    let mut tokenizer_json: Value =
+        serde_json::from_str(&std::fs::read_to_string(&tokenizer_file).unwrap()).unwrap();
+    tokenizer_json["model"]["vocab"]["separate"] = json!(3);
+    std::fs::write(&tokenizer_file, tokenizer_json.to_string()).unwrap();
+    let control = Controller::default();
+    let mut peer = sglang::Fixture::start(
+        control.clone(),
+        FixtureConfig {
+            model: env.model.clone(),
+            ..Default::default()
+        },
+    )
+    .await;
+    peer.override_discovery(
+        json!({"tokenizer_path": tokenizer}),
+        vec![json!({
+            "served_model_name": "public-alias",
+            "tool_call_parser": "hermes",
+            "reasoning_parser": "deepseek_r1",
+        })],
+    );
+    let mut child =
+        env.spawn::<sglang::Fixture>(&peer.endpoint(), DisaggregationMode::Aggregated, 5);
+    let router = env.ready("backend").await;
+    let cards = env.cards().await;
+    assert_eq!(cards.len(), 1);
+    let card = &cards[0];
+    assert_eq!(card.name(), "public-alias");
+    assert_eq!(card.source_path(), tokenizer.to_str().unwrap());
+    assert_eq!(card.worker_type, Some(WorkerType::Aggregated));
+    assert_eq!(card.kv_cache_block_size, 4);
+    assert_eq!(card.effective_context_length(), 32_768);
+    assert_eq!(
+        card.runtime_config.tool_call_parser.as_deref(),
+        Some("hermes")
+    );
+    assert_eq!(
+        card.runtime_config.reasoning_parser.as_deref(),
+        Some("deepseek_r1")
+    );
+    let TokenizerKind::HfTokenizerJson(file) = card.tokenizer.as_ref().unwrap() else {
+        panic!("expected the discovered tokenizer.json");
+    };
+    assert!(file.checksum_matches(&tokenizer_file));
+    assert!(!file.checksum_matches(std::path::Path::new(&env.model).join("tokenizer.json")));
+    assert!(card.prompt_formatter.is_some());
+    let handle = healthy::<sglang::Fixture>(&env, &router, &control, "distinct-metadata").await;
+    let native = handle.native_request().unwrap();
+    let traceparent = &native.trace_headers["traceparent"];
+    let fields = traceparent.split('-').collect::<Vec<_>>();
+    assert_eq!(fields.len(), 4);
+    assert_eq!(fields[0], "00");
+    assert_eq!(fields[1].len(), 32);
+    assert_eq!(fields[2].len(), 16);
+    assert!(u128::from_str_radix(fields[1], 16).unwrap() != 0);
+    assert!(u64::from_str_radix(fields[2], 16).unwrap() != 0);
+    child.shutdown().await;
+    env.withdrawn("backend", &router).await;
+    peer.shutdown().await;
+}
+
+async fn health_readiness_precedes_publication<F: DiscoveryFixture>() {
+    let env = Environment::new().await;
+    let control = Controller::default();
+    let mut peer = F::start(
+        control.clone(),
+        FixtureConfig {
+            model: env.model.clone(),
+            ..Default::default()
+        },
+    )
+    .await;
+    peer.set_health(None);
+    let mut child = env.spawn::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 5);
+    peer.health_check_received().await;
+    assert!(env.cards().await.is_empty());
+    assert!(env.registrations("backend").await.is_empty());
+    peer.set_health(Some(true));
+    let router = env.ready("backend").await;
+    healthy::<F>(&env, &router, &control, "after-health-readiness").await;
+    child.shutdown().await;
+    env.withdrawn("backend", &router).await;
+    peer.shutdown().await;
+}
+
+async fn unhealthy_worker_never_registers<F: DiscoveryFixture>() {
+    let env = Environment::new().await;
+    let mut peer = F::start(
+        Controller::default(),
+        FixtureConfig {
+            model: env.model.clone(),
+            ..Default::default()
+        },
+    )
+    .await;
+    peer.set_health(Some(false));
+    let mut child = env.spawn::<F>(&peer.endpoint(), DisaggregationMode::Aggregated, 1);
+    peer.health_check_received().await;
+    assert!(!child.exit().await.success(), "{}", child.logs());
+    assert!(env.cards().await.is_empty());
+    assert!(env.registrations("backend").await.is_empty());
+    F::assert_unhealthy_startup(&child.logs());
+    peer.shutdown().await;
+}
+
+async fn changed_role_never_registers() {
+    let env = Environment::new().await;
+    let mut peer = sglang::Fixture::start(
+        Controller::default(),
+        FixtureConfig {
+            model: env.model.clone(),
+            ..Default::default()
+        },
+    )
+    .await;
+    peer.override_discovery(
+        Value::Null,
+        vec![json!({}), json!({"disaggregation_mode": "prefill"})],
+    );
+    let mut child =
+        env.spawn::<sglang::Fixture>(&peer.endpoint(), DisaggregationMode::Aggregated, 1);
+    peer.health_check_received().await;
+    assert!(!child.exit().await.success(), "{}", child.logs());
+    assert!(env.cards().await.is_empty());
+    assert!(env.registrations("backend").await.is_empty());
+    assert!(
+        child.logs().contains("role changed since bootstrap"),
+        "{}",
+        child.logs()
+    );
+    peer.shutdown().await;
+}
+
+#[tokio::test]
+async fn trtllm_registration_and_errors_recover_through_worker_ingress() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        registration_and_errors_recover_through_worker_ingress::<support::trtllm::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn trtllm_delayed_startup_publishes_only_after_native_readiness() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        delayed_startup_publishes_only_after_native_readiness::<support::trtllm::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn trtllm_failed_and_interrupted_startup_leave_no_registration() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        failed_and_interrupted_startup_leave_no_registration::<support::trtllm::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn trtllm_worker_cancel_and_consumer_drop_release_only_the_target() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        worker_cancel_and_consumer_drop_release_only_the_target::<support::trtllm::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn trtllm_sigterm_withdraws_worker_and_releases_active_native_request() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        sigterm_withdraws_worker_and_releases_active_native_request::<support::trtllm::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn trtllm_prefill_router_preserves_handoff_failure_and_cancellation() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        prefill_router_preserves_handoff_failure_and_cancellation::<
+            support::trtllm::Fixture,
+            support::trtllm::Fixture,
+        >(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn trtllm_native_errors_reach_http_and_recover() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        native_errors_reach_http_and_recover::<support::trtllm::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn lpx_native_errors_reach_http_and_recover() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        native_errors_reach_http_and_recover::<lpx::Fixture>(),
+    )
+    .await
+    .expect("HTTP error scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn lpx_registration_and_errors_recover_through_worker_ingress() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        registration_and_errors_recover_through_worker_ingress::<lpx::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn lpx_delayed_startup_publishes_only_after_native_readiness() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        delayed_startup_publishes_only_after_native_readiness::<lpx::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn lpx_failed_and_interrupted_startup_leave_no_registration() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        failed_and_interrupted_startup_leave_no_registration::<lpx::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn lpx_worker_cancel_and_consumer_drop_release_only_the_target() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        worker_cancel_and_consumer_drop_release_only_the_target::<lpx::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn lpx_sigterm_withdraws_worker_and_releases_active_native_request() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        sigterm_withdraws_worker_and_releases_active_native_request::<lpx::Fixture>(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+#[tokio::test]
+async fn lpx_load_loss_withdraws_worker_and_fails_the_process() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        load_loss_withdraws_worker_and_fails_the_process(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+/// LPX has no prefill role, so a vLLM prefill worker hands off to it.
+#[tokio::test]
+async fn vllm_lpx_prefill_router_preserves_handoff_failure_and_cancellation() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        prefill_router_preserves_handoff_failure_and_cancellation::<vllm::Fixture, lpx::Fixture>(),
+    )
     .await
     .expect("process scenario exceeded its overall deadline");
 }

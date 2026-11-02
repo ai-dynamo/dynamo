@@ -9,10 +9,12 @@ spec:
     PrefillWorker:
       extraPodSpec:
         mainContainer:
-          env: &nixlEnvironment
+          env:
             - name: KV_TRANSFER_CONFIG
-              value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+              value: '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
     DecodeWorker:
       extraPodSpec:
         mainContainer:
-          env: *nixlEnvironment
+          env:
+            - name: KV_TRANSFER_CONFIG
+              value: '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'

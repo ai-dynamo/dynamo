@@ -62,6 +62,8 @@ DynamoComponentDeploymentSpec.experimental.grove.forceScalingGroup
 DynamoComponentDeploymentSpec.frontendSidecar
 DynamoComponentDeploymentSpec.globalDynamoNamespace
 DynamoComponentDeploymentSpec.lpx.buildId
+DynamoComponentDeploymentSpec.lpx.experimental.localPartitions.ids
+DynamoComponentDeploymentSpec.lpx.experimental.localPartitions.mode
 DynamoComponentDeploymentSpec.lpx.scheduling.attemptDeadlineSeconds
 DynamoComponentDeploymentSpec.minAvailable
 DynamoComponentDeploymentSpec.modelRef.name
@@ -138,6 +140,8 @@ DynamoGraphDeploymentSpec.components.experimental.grove.forceScalingGroup
 DynamoGraphDeploymentSpec.components.frontendSidecar
 DynamoGraphDeploymentSpec.components.globalDynamoNamespace
 DynamoGraphDeploymentSpec.components.lpx.buildId
+DynamoGraphDeploymentSpec.components.lpx.experimental.localPartitions.ids
+DynamoGraphDeploymentSpec.components.lpx.experimental.localPartitions.mode
 DynamoGraphDeploymentSpec.components.lpx.scheduling.attemptDeadlineSeconds
 DynamoGraphDeploymentSpec.components.minAvailable
 DynamoGraphDeploymentSpec.components.modelRef.name
@@ -247,8 +251,7 @@ func appendV1Beta1ConversionFieldPaths(paths []string, prefix string, typ reflec
 
 	stack = append(stack, typ)
 	before := len(paths)
-	for i := 0; i < typ.NumField(); i++ {
-		field := typ.Field(i)
+	for field := range typ.Fields() {
 		if field.PkgPath != "" {
 			continue
 		}

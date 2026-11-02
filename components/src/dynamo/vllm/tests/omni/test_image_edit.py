@@ -1,0 +1,301 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import asyncio
+import io
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+
+import pytest
+from PIL import Image
+
+from dynamo.common.http import HttpStatusError
+from dynamo.common.multimodal import ImageLoader
+from dynamo.vllm.omni import image_edit
+
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.vllm,
+    pytest.mark.multimodal,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.timeout(30),
+]
+
+
+@pytest.fixture
+def metadata_lookup(monkeypatch):
+    """Isolate admission logic from changes to the installed model registry."""
+    lookup = Mock(
+        return_value=SimpleNamespace(
+            supports_multimodal_inputs=True, max_multimodal_image_inputs=4
+        )
+    )
+    monkeypatch.setattr(image_edit, "get_diffusion_model_metadata", lookup)
+    return lookup
+
+
+@pytest.mark.parametrize("operator_limit, expected", [(1, 1), (2, 2), (4, 4), (8, 4)])
+def test_model_and_operator_limits(metadata_lookup, operator_limit, expected):
+    """Deployment limits may narrow a model budget but cannot raise it."""
+    assert (
+        image_edit.image_edit_input_limit(
+            "Flux2KleinPipeline", operator_limit=operator_limit
+        )
+        == expected
+    )
+    metadata_lookup.assert_called_once_with("Flux2KleinPipeline")
+
+
+@pytest.mark.parametrize("operator_limit", [0, True, 1.5])
+def test_invalid_operator_configuration(metadata_lookup, operator_limit):
+    """Reject booleans and fractions before consulting model metadata."""
+    with pytest.raises(ValueError, match="positive integer"):
+        image_edit.image_edit_input_limit(
+            "Flux2KleinPipeline", operator_limit=operator_limit
+        )
+    metadata_lookup.assert_not_called()
+
+
+@pytest.mark.parametrize("model_limit", [None, 0, True, 2.5])
+def test_unusable_model_limit_allows_only_single_image(metadata_lookup, model_limit):
+    """Malformed metadata cannot grant permission to send multiple references."""
+    metadata_lookup.return_value.max_multimodal_image_inputs = model_limit
+    assert image_edit.image_edit_input_limit("custom") == 1
+
+
+@pytest.mark.parametrize("support", [False, None, 1, "true"])
+def test_multi_input_requires_explicit_support(metadata_lookup, support):
+    """Truthy non-booleans must not enable the multi-image contract."""
+    metadata_lookup.return_value.supports_multimodal_inputs = support
+    assert image_edit.image_edit_input_limit("custom") == 1
+
+
+def test_missing_metadata_fields_preserve_single_image(metadata_lookup):
+    """An older registry record retains the legacy single-image path."""
+    metadata_lookup.return_value = SimpleNamespace()
+    assert image_edit.image_edit_input_limit("custom") == 1
+
+
+def test_missing_optional_registry_preserves_single_image(monkeypatch):
+    """Older Omni installations remain usable without a capability registry."""
+    monkeypatch.setattr(image_edit, "get_diffusion_model_metadata", None)
+    assert image_edit.image_edit_input_limit("custom") == 1
+
+
+def test_video_reference_limits_do_not_enable_multiple_image_edits(metadata_lookup):
+    """A video conditioning limit is not evidence of image-edit support."""
+    metadata_lookup.return_value.final_output_type = "video"
+    metadata_lookup.return_value.max_multimodal_image_inputs = 9
+    assert image_edit.image_edit_input_limit("video-pipeline") == 1
+
+
+def test_invalid_output_metadata_preserves_single_image(metadata_lookup):
+    """An unrecognized output type cannot authorize multiple edit inputs."""
+    metadata_lookup.return_value.final_output_type = True
+    assert image_edit.image_edit_input_limit("custom") == 1
+
+
+@pytest.mark.skipif(
+    image_edit.get_diffusion_model_metadata is None,
+    reason="Installed Omni does not publish diffusion capability metadata",
+)
+@pytest.mark.parametrize(
+    "pipeline,expected",
+    [
+        ("Flux2KleinPipeline", 4),
+        ("HunyuanImage3ForCausalMM", 3),
+        ("BooguImageTurboPipeline", 1),
+    ],
+)
+def test_installed_registry_resolves_pipeline_aliases(pipeline, expected):
+    """Check installed metadata aliases without claiming GPU model qualification."""
+    assert image_edit.image_edit_input_limit(pipeline) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [0, 5])
+async def test_invalid_count_rejected_before_any_fetch(metadata_lookup, count):
+    """Empty or excessive lists must not consume network or decode resources."""
+    loader = SimpleNamespace(load_image=AsyncMock())
+    with pytest.raises(ValueError):
+        await image_edit.load_image_edit_references(
+            ["https://example.com/image"] * count,
+            image_loader=loader,
+            model_class_name="Flux2KleinPipeline",
+        )
+    loader.load_image.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unknown_model_rejects_multiple_before_fetch(metadata_lookup):
+    """Fail closed for multiple references when the model has no capability data."""
+    metadata_lookup.return_value = SimpleNamespace()
+    loader = SimpleNamespace(load_image=AsyncMock())
+    with pytest.raises(ValueError, match="at most 1"):
+        await image_edit.load_image_edit_references(
+            ["first", "second"], image_loader=loader, model_class_name="unknown"
+        )
+    loader.load_image.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_empty_second_reference_rejected_before_any_fetch(metadata_lookup):
+    """Validate the whole list before even a valid first reference is fetched."""
+    loader = SimpleNamespace(load_image=AsyncMock())
+    with pytest.raises(ValueError, match=r"^Failed to load input_reference\[1\]$"):
+        await image_edit.load_image_edit_references(
+            ["first", " "], image_loader=loader, model_class_name="Flux2KleinPipeline"
+        )
+    loader.load_image.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [1, 2, 3, 4])
+async def test_every_reference_loaded_in_order(metadata_lookup, count):
+    """Preserve both loader call order and the association between input pixels."""
+    references = [f"image-{index}" for index in range(count)]
+    images = [Image.new("RGB", (2, 2), (index, 0, 0)) for index in range(count)]
+    loader = SimpleNamespace(load_image=AsyncMock(side_effect=images))
+    loaded = await image_edit.load_image_edit_references(
+        references, image_loader=loader, model_class_name="Flux2KleinPipeline"
+    )
+    assert loaded == images
+    assert [call.args[0] for call in loader.load_image.await_args_list] == references
+    assert [image.getpixel((0, 0)) for image in loaded] == [
+        (index, 0, 0) for index in range(count)
+    ]
+    for image in loaded:
+        image.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure, expected",
+    [(ValueError, ValueError), (Image.DecompressionBombError, HttpStatusError)],
+)
+async def test_bad_second_reference_preserves_shared_images_and_redacts_error(
+    metadata_lookup, failure, expected
+):
+    """Partial failure must neither close shared results nor expose signed URLs."""
+    first = Image.new("RGB", (2, 2), "red")
+    loader = SimpleNamespace(
+        load_image=AsyncMock(side_effect=[first, failure("private signed URL")])
+    )
+    with pytest.raises(expected) as caught:
+        await image_edit.load_image_edit_references(
+            ["first", "second", "third"],
+            image_loader=loader,
+            model_class_name="Flux2KleinPipeline",
+        )
+    if expected is HttpStatusError:
+        assert caught.value.status == 413
+    else:
+        assert str(caught.value) == "Failed to load input_reference[1]"
+    assert "private signed URL" not in str(caught.value)
+    assert loader.load_image.await_count == 2
+    assert first.getpixel((0, 0)) == (255, 0, 0)
+    first.close()
+
+
+@pytest.mark.asyncio
+async def test_single_image_error_stays_compatible(metadata_lookup):
+    """Keep the legacy unindexed error for clients using one reference."""
+    loader = SimpleNamespace(load_image=AsyncMock(side_effect=ValueError("secret")))
+    with pytest.raises(ValueError, match="^Failed to load input_reference$"):
+        await image_edit.load_image_edit_references(
+            ["reference"], image_loader=loader, model_class_name="Flux2KleinPipeline"
+        )
+
+
+@pytest.mark.asyncio
+async def test_failed_edit_does_not_poison_the_image_cache(
+    metadata_lookup, monkeypatch
+):
+    """A later failed input must not invalidate an earlier cached image."""
+    with io.BytesIO() as buffer:
+        Image.new("RGB", (2, 2), "red").save(buffer, format="PNG")
+        encoded = buffer.getvalue()
+    fetch = AsyncMock(return_value=encoded)
+    monkeypatch.setattr("dynamo.common.multimodal.image_loader.fetch_bytes", fetch)
+    loader = ImageLoader(session_scoped_cache=False)
+    reference = "https://8.8.8.8/reference.png"
+
+    with pytest.raises(ValueError, match=r"^Failed to load input_reference\[1\]$"):
+        await image_edit.load_image_edit_references(
+            [reference, "data:image/png;base64,%%%"],
+            image_loader=loader,
+            model_class_name="Flux2KleinPipeline",
+        )
+
+    cached = await loader.load_image(reference)
+    assert cached.getpixel((0, 0)) == (255, 0, 0)
+    fetch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [asyncio.CancelledError, RuntimeError])
+async def test_cancellation_and_internal_errors_preserve_shared_images(
+    metadata_lookup, failure
+):
+    """Propagate the original failure while leaving shared decoded images usable."""
+    first = Image.new("RGB", (2, 2), "red")
+    error = failure("interrupted")
+    loader = SimpleNamespace(load_image=AsyncMock(side_effect=[first, error]))
+    with pytest.raises(failure) as caught:
+        await image_edit.load_image_edit_references(
+            ["first", "second"],
+            image_loader=loader,
+            model_class_name="Flux2KleinPipeline",
+        )
+    assert caught.value is error
+    assert first.getpixel((0, 0)) == (255, 0, 0)
+    first.close()
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "true", "1.5", ""])
+def test_image_edit_environment_rejects_invalid_limits(monkeypatch, raw):
+    """Invalid deployment configuration must fail rather than silently default."""
+    monkeypatch.setenv("DYN_IMAGE_EDIT_MAX_IMAGES", raw)
+    with pytest.raises(ValueError, match="DYN_IMAGE_EDIT_MAX_IMAGES"):
+        image_edit.ImageEditLimits.from_env()
+
+
+def test_advertised_capability_respects_operator_limit(metadata_lookup, monkeypatch):
+    """Discovery must publish the configured ceiling, not just the model maximum."""
+    monkeypatch.setenv("DYN_IMAGE_EDIT_MAX_IMAGES", "2")
+    assert image_edit.image_edit_capability(
+        "Flux2KleinPipeline", image_edit.ImageEditLimits.from_env()
+    ) == {"schema_version": 1, "max_input_images": 2}
+
+
+@pytest.mark.asyncio
+async def test_aggregate_pixels_stop_loading_later_images(metadata_lookup):
+    """Stop at the exhausted aggregate budget without consuming later inputs."""
+    first = Image.new("RGB", (2, 2), "red")
+    loader = SimpleNamespace(load_image=AsyncMock(return_value=first))
+    with pytest.raises(HttpStatusError) as caught:
+        await image_edit.load_image_edit_references(
+            ["first", "second", "third"],
+            image_loader=loader,
+            model_class_name="Flux2KleinPipeline",
+            max_total_pixels=7,
+        )
+    assert caught.value.status == 413
+    assert loader.load_image.await_count == 2
+    assert first.getpixel((0, 0)) == (255, 0, 0)
+    first.close()
+
+
+@pytest.mark.asyncio
+async def test_pixel_budget_rejects_before_rgb_decode(monkeypatch):
+    """Header dimensions must bound memory before Pillow expands RGB pixels."""
+    with io.BytesIO() as buffer:
+        Image.new("RGB", (3, 3), "red").save(buffer, format="PNG")
+        encoded = buffer.getvalue()
+    convert = Mock(side_effect=AssertionError("must not expand oversized pixels"))
+    monkeypatch.setattr(Image.Image, "convert", convert)
+    with pytest.raises(HttpStatusError) as caught:
+        await ImageLoader._open_image(io.BytesIO(encoded), max_pixels=8)
+    assert caught.value.status == 413
+    convert.assert_not_called()

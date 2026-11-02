@@ -20,6 +20,7 @@ package validation
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -44,7 +45,7 @@ const (
 	vllmDistributedExecutorBackendMP  = "mp"
 	vllmDistributedExecutorBackendRay = "ray"
 
-	runtimeVersionOverrideRequiredMessage = "is required when the specified main container image has no parseable semantic-version tag"
+	runtimeVersionOverrideRequiredMessage = "is required when the specified Dynamo runtime container image has no parseable semantic-version tag"
 )
 
 // runtimeVersionValidationSource identifies the API representation whose field
@@ -87,12 +88,19 @@ func (v *sharedValidation) hasRuntimeVersionSource(source runtimeVersionValidati
 	return v.runtimeVersionSource == source
 }
 
-// runtimeVersionImageAndPath returns the main image and its v1beta1 field path.
+// runtimeVersionImageAndPath returns the Dynamo runtime image and its v1beta1 field path.
 // spec and fldPath must not be nil.
 func runtimeVersionImageAndPath(
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 ) (string, *field.Path) {
+	// In sidecar mode the engine image says nothing about Dynamo compatibility.
+	if spec.PodTemplate != nil {
+		if index := slices.IndexFunc(spec.PodTemplate.Spec.InitContainers, func(c corev1.Container) bool { return c.Name == consts.RuntimeContainerName }); index >= 0 {
+			return spec.PodTemplate.Spec.InitContainers[index].Image, fldPath.Child("podTemplate", "spec", "initContainers").Index(index).Child("image")
+		}
+	}
+
 	imagePath := fldPath.Child("podTemplate", "spec", "containers")
 
 	// Resolve the exact container path when the named main container exists.
@@ -105,12 +113,19 @@ func runtimeVersionImageAndPath(
 	return "", imagePath
 }
 
-// runtimeVersionImageAndPathV1Alpha1 returns the main image and its v1alpha1 field path.
+// runtimeVersionImageAndPathV1Alpha1 returns the runtime image and its alpha field path.
 // spec and fldPath must not be nil.
 func runtimeVersionImageAndPathV1Alpha1(
 	spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 ) (string, *field.Path) {
+	// Alpha represents init containers directly, so live fields determine the mode.
+	if spec.ExtraPodSpec != nil && spec.ExtraPodSpec.PodSpec != nil {
+		if index := slices.IndexFunc(spec.ExtraPodSpec.PodSpec.InitContainers, func(c corev1.Container) bool { return c.Name == consts.RuntimeContainerName }); index >= 0 {
+			return spec.ExtraPodSpec.PodSpec.InitContainers[index].Image, fldPath.Child("extraPodSpec", "initContainers").Index(index).Child("image")
+		}
+	}
+
 	imagePath := fldPath.Child("extraPodSpec", "mainContainer", "image")
 	if spec.ExtraPodSpec != nil && spec.ExtraPodSpec.MainContainer != nil {
 		return spec.ExtraPodSpec.MainContainer.Image, imagePath
@@ -121,6 +136,7 @@ func runtimeVersionImageAndPathV1Alpha1(
 // toleratesMissingRuntimeVersionOverride reports whether componentType may omit
 // runtimeVersionOverride when its image tag carries no resolvable version.
 //
+// Components without a Dynamo role do not carry a Dynamo runtime contract.
 // EPP is never exempt. Whether eppConfig is required (legacy Go EPP) or
 // forbidden (native Rust EPP, 1.5.0+) is decided entirely by the resolved
 // runtime version, so an unresolvable version enforces neither half of the
@@ -130,7 +146,15 @@ func runtimeVersionImageAndPathV1Alpha1(
 // non-semver tag (a CI sha tag, :latest, a digest ref) would silently skip the
 // check that the DynamoGraphDeployment path still performs.
 func (v *sharedValidation) toleratesMissingRuntimeVersionOverride(componentType string) bool {
-	return v.allowMissingRuntimeVersionOverride && componentType != consts.ComponentTypeEPP
+	switch componentType {
+	case consts.ComponentTypeEPP:
+		return false
+	case consts.ComponentTypeFrontend, consts.ComponentTypeWorker, consts.ComponentTypePrefill,
+		consts.ComponentTypeDecode, consts.ComponentTypePlanner:
+		return v.allowMissingRuntimeVersionOverride
+	default:
+		return true
+	}
 }
 
 // runtimeVersionOverrideRequired reports whether image cannot provide a version and override is absent.
@@ -379,4 +403,29 @@ func effectiveNumShadows(failover *nvidiacomv1beta1.FailoverSpec) int32 {
 		return 1
 	}
 	return failover.NumShadows
+}
+
+// groveNativeMinimumPath locates the owning component's native availability field.
+// component and fldPath are non-nil; an omitted override uses the same path.
+func groveNativeMinimumPath(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, fldPath *field.Path) *field.Path {
+	if component.UsesPCSG() || component.IsLPX() {
+		return fldPath.Child("providerOverride", "value", "minAvailable")
+	}
+	return fldPath.Child("providerOverride", "value", "spec", "minAvailable")
+}
+
+// hasRoleSidecarV1Alpha1 resolves component-wide mode from the authored leader.
+// spec must not be nil.
+func hasRoleSidecarV1Alpha1(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) bool {
+	for _, role := range spec.Roles {
+		if role.Name != nvidiacomv1alpha1.ComponentRoleLeader || role.PodTemplate == nil {
+			continue
+		}
+		for _, container := range role.PodTemplate.Spec.InitContainers {
+			if container.Name == consts.RuntimeContainerName {
+				return true
+			}
+		}
+	}
+	return false
 }

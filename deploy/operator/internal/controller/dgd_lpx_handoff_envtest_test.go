@@ -35,7 +35,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -59,9 +58,8 @@ func TestSetupDynamoGraphDeploymentWithoutLPXCRDs(t *testing.T) {
 	config := env.OperatorConfig().DeepCopy()
 	config.Namespace.Restricted = env.Namespace()
 	env.StartManager(func(mgr ctrl.Manager) error {
-		return SetupDynamoGraphDeployment(mgr, DynamoGraphDeploymentSetupOptions{SetupOptions: SetupOptions{
-			Config: config, RuntimeConfig: env.RuntimeConfig(),
-		}})
+		return SetupDynamoGraphDeployment(mgr, DynamoGraphDeploymentSetupOptions{
+			Config: config, RuntimeConfig: env.RuntimeConfig()})
 	})
 
 	t.Log("Verify an ordinary DGD still creates its component workloads")
@@ -155,13 +153,13 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 		},
 	}).RunT(t)
 	lprCRD := &apiextensionsv1.CustomResourceDefinition{
-		ObjectMeta: metav1.ObjectMeta{Name: "lpupipelinerequests." + lpxv1alpha1.APIGroup},
+		Name: "lpupipelinerequests." + lpxv1alpha1.APIGroup,
 		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
 			Group: lpxv1alpha1.APIGroup, Scope: apiextensionsv1.NamespaceScoped,
 			Names: apiextensionsv1.CustomResourceDefinitionNames{Kind: "LpuPipelineRequest", ListKind: "LpuPipelineRequestList", Plural: "lpupipelinerequests"},
 			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{
 				Name: "v1alpha1", Served: true, Storage: true,
-				Schema: &apiextensionsv1.CustomResourceValidation{OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{Type: "object", XPreserveUnknownFields: ptr.To(true)}},
+				Schema: &apiextensionsv1.CustomResourceValidation{OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{Type: "object", XPreserveUnknownFields: new(true)}},
 			}},
 		},
 	}
@@ -171,8 +169,8 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 	t.Log("Deny Grove publication with real namespace quota admission, not a mocked client")
 	quotaResource := corev1.ResourceName("count/podcliquesets.grove.io")
 	quota := &corev1.ResourceQuota{
-		ObjectMeta: metav1.ObjectMeta{Name: "block-lpx-publication", Namespace: env.Namespace()},
-		Spec:       corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{quotaResource: resource.MustParse("0")}},
+		Name: "block-lpx-publication", Namespace: env.Namespace(),
+		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{quotaResource: resource.MustParse("0")}},
 	}
 	require.NoError(t, env.Client().Create(t.Context(), quota))
 	quota.Status = corev1.ResourceQuotaStatus{Hard: quota.Spec.Hard.DeepCopy(), Used: corev1.ResourceList{quotaResource: resource.MustParse("0")}}
@@ -181,13 +179,13 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 	config.Namespace.Restricted = env.Namespace()
 	env.StartManager(func(mgr ctrl.Manager) error {
 		return SetupDynamoGraphDeployment(mgr, DynamoGraphDeploymentSetupOptions{
-			SetupOptions: SetupOptions{Config: config, RuntimeConfig: runtimeConfig},
+			Config: config, RuntimeConfig: runtimeConfig,
 		})
 	})
 
 	t.Log("Create only the public DGD and let production setup reconcile both controllers")
 	source := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "publication-failure", Namespace: env.Namespace()},
+		Name: "publication-failure", Namespace: env.Namespace(),
 		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
 			ComponentName: "lpx", ComponentType: v1beta1.ComponentTypeLPX,
 			LPX: &v1beta1.LPXConfig{BuildID: (&url.URL{Scheme: "file", Path: buildDir}).String()},
@@ -199,7 +197,7 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 						Command: []string{"/custom-conductor"}, Args: []string{"--workers", "$(LPX_ALLOCATION)"},
 						VolumeMounts: []corev1.VolumeMount{{Name: v1alpha1.ModelStorageVolumeName, MountPath: "/models"}},
 					}},
-					Volumes: []corev1.Volume{{Name: v1alpha1.ModelStorageVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
+					Volumes: []corev1.Volume{{Name: v1alpha1.ModelStorageVolumeName, EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 				}},
 			}, {
 				Name: v1beta1.ComponentRoleLPXAgent,
@@ -217,12 +215,12 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 						},
 					}},
 					Volumes: []corev1.Volume{
-						{Name: v1alpha1.ModelStorageVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-						{Name: "host-dev", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/dev"}}},
-						{Name: "host-sys", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/sys"}}},
-						{Name: "hugepages", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumHugePages}}},
-						{Name: "ssh-secret", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "ssh-secret"}}},
-						{Name: "single-v2-ssh-key", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+						{Name: v1alpha1.ModelStorageVolumeName, EmptyDir: &corev1.EmptyDirVolumeSource{}},
+						{Name: "host-dev", HostPath: &corev1.HostPathVolumeSource{Path: "/dev"}},
+						{Name: "host-sys", HostPath: &corev1.HostPathVolumeSource{Path: "/sys"}},
+						{Name: "hugepages", EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumHugePages}},
+						{Name: "ssh-secret", Secret: &corev1.SecretVolumeSource{SecretName: "ssh-secret"}},
+						{Name: "single-v2-ssh-key", EmptyDir: &corev1.EmptyDirVolumeSource{}},
 					},
 				}},
 			}},
@@ -300,9 +298,9 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 
 	t.Log("Release quota and observe alpha LGD ownership of the published PCS and runtime resources without waiting for scheduling")
 	require.NoError(t, env.Client().Delete(t.Context(), quota))
-	pcs := &grovev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{Name: dynamo.PCSNameForLPX(child), Namespace: source.Namespace}}
-	configMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: source.Namespace}}
-	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: pcs.Name + "-serve", Namespace: source.Namespace}}
+	pcs := &grovev1alpha1.PodCliqueSet{Name: dynamo.PCSNameForLPX(child), Namespace: source.Namespace}
+	configMap := &corev1.ConfigMap{Namespace: source.Namespace}
+	service := &corev1.Service{Name: pcs.Name + "-serve", Namespace: source.Namespace}
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		if !assert.NoError(c, env.Client().Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs)) {
 			return
@@ -313,7 +311,7 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 				assert.Equal(c, metav1.NewControllerRef(child, v1alpha1.LPXGraphDeploymentGVK), metav1.GetControllerOf(resource))
 			}
 		}
-		assert.Equal(c, ptr.To(true), configMap.Immutable)
+		assert.Equal(c, new(true), configMap.Immutable)
 	}, 20*time.Second, 50*time.Millisecond)
 }
 

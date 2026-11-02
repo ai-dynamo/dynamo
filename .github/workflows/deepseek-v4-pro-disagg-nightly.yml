@@ -37,7 +37,7 @@ concurrency:
 
 jobs:
   perf:
-    name: DeepSeek V4 Pro disaggregated perf
+    name: DeepSeek V4 Pro disaggregated
     uses: ./.github/workflows/shared-recipe-perf.yml
     with:
       recipe: deepseek-v4-pro-disagg

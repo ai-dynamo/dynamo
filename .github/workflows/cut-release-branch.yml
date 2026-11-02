@@ -203,9 +203,10 @@ jobs:
             echo "::warning::branch '${BRANCH}' is not release/X.Y.Z[.devN|.postN] or v<X.Y.Z>[-<name>] — treated as a THROWAWAY TEST branch: it is cut and built, but Stage Release RC will refuse to stage it."
           fi
 
-          # Fetch the version-bump script from THIS workflow's commit (GITHUB_SHA);
-          # source_ref may predate --set-version.
+          # Fetch the version-bump script and its sibling helper from THIS workflow's
+          # commit (GITHUB_SHA); source_ref may predate --set-version or the helper.
           git show "${GITHUB_SHA}:.github/scripts/apply_dev_version.py" > "${RUNNER_TEMP}/apply_dev_version.py"
+          git show "${GITHUB_SHA}:.github/scripts/helm_chart_version.py" > "${RUNNER_TEMP}/helm_chart_version.py"
 
           # Reuse the existing branch when present (a re-run adds only the diff);
           # else base on source_ref. Never clobber. refs/heads/ refspecs everywhere:

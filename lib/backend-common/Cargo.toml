@@ -23,7 +23,7 @@ integration = ["dynamo-runtime/integration"]
 
 [dependencies]
 dynamo-runtime = { workspace = true }
-dynamo-llm = { path = "../llm", default-features = false }
+dynamo-llm = { workspace = true }
 dynamo-protocols = { workspace = true }
 dynamo-rl = { workspace = true }
 

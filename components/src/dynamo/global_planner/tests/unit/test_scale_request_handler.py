@@ -1689,7 +1689,7 @@ async def test_generic_worker_partner_keeps_component_name(mock_runtime):
     assert results[0]["status"] == "success"
     connector_a.set_component_replicas.assert_called_once()
     # The partner's component name rides through to the actual scale call.
-    connector_b.kube_api.update_graph_replicas.assert_called_once_with(
+    connector_b.kube_api.update_dgd_replicas_directly.assert_called_once_with(
         "dgd-b", "worker-svc", 4
     )
 

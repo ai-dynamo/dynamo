@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow, bail};
 use dynamo_kv_router::config::KvRouterConfig;
 use tokio_util::sync::CancellationToken;
 
-use crate::common::protocols::{DirectRequest, MockEngineArgs};
+use crate::common::protocols::{DirectRequest, MockerConfig};
 use crate::loadgen::{AgenticTrace, Trace, WorkloadDriver};
 use crate::replay::{
     ReplayPrefillLoadEstimator, ReplayRouterMode, SlaThresholds, TraceSimulationReport,
@@ -24,7 +24,7 @@ pub(crate) struct OnlineReplayOptions {
 }
 
 pub(crate) struct OnlineReplayConfig {
-    pub(super) args: MockEngineArgs,
+    pub(super) args: MockerConfig,
     pub(super) router_config: Option<KvRouterConfig>,
     pub(super) prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     pub(super) num_workers: usize,
@@ -34,7 +34,7 @@ pub(crate) struct OnlineReplayConfig {
 
 impl OnlineReplayConfig {
     pub(crate) fn new(
-        args: MockEngineArgs,
+        args: MockerConfig,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         num_workers: usize,
@@ -200,7 +200,7 @@ pub(crate) fn simulate_agentic_trace_workload(
 
 #[cfg(test)]
 fn default_test_config(
-    args: MockEngineArgs,
+    args: MockerConfig,
     num_workers: usize,
     router_mode: ReplayRouterMode,
 ) -> OnlineReplayConfig {
@@ -216,7 +216,7 @@ fn default_test_config(
 
 #[cfg(test)]
 pub(super) fn simulate_trace_requests_with_stats(
-    args: MockEngineArgs,
+    args: MockerConfig,
     requests: Vec<DirectRequest>,
     num_workers: usize,
     arrival_speedup_ratio: f64,
@@ -234,7 +234,7 @@ pub(super) fn simulate_trace_requests_with_stats(
 
 #[cfg(test)]
 pub(super) fn simulate_concurrency_requests_with_stats(
-    args: MockEngineArgs,
+    args: MockerConfig,
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
     num_workers: usize,
@@ -252,7 +252,7 @@ pub(super) fn simulate_concurrency_requests_with_stats(
 
 #[cfg(test)]
 pub(super) fn simulate_trace_workload_with_stats(
-    args: MockEngineArgs,
+    args: MockerConfig,
     trace: Trace,
     num_workers: usize,
     router_mode: ReplayRouterMode,
@@ -271,7 +271,7 @@ pub(super) fn simulate_trace_workload_with_stats(
 
 #[cfg(test)]
 pub(super) fn simulate_concurrency_workload_with_stats(
-    args: MockEngineArgs,
+    args: MockerConfig,
     trace: Trace,
     max_in_flight: usize,
     num_workers: usize,

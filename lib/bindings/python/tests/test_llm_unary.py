@@ -3,11 +3,20 @@
 
 import asyncio
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from dynamo.llm import LLMUnaryClient, with_engine_data
+from dynamo.llm import (
+    LLMUnaryClient,
+    ModelInput,
+    ModelType,
+    UnaryChatModel,
+    WorkerType,
+    with_engine_data,
+)
 
 pytestmark = [
     pytest.mark.parallel,
@@ -16,6 +25,53 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.core,
 ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "public_name, template, expected_name, expected_template",
+    [
+        (None, None, "vision-app", None),
+        ("public-vision", Path("chat.jinja"), "public-vision", "chat.jinja"),
+    ],
+)
+async def test_unary_chat_model_registers_and_serves_handler(
+    monkeypatch: pytest.MonkeyPatch,
+    public_name: str | None,
+    template: Path | None,
+    expected_name: str,
+    expected_template: str | None,
+) -> None:
+    endpoint = Mock()
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+    register = AsyncMock()
+    context = object()
+    responses: list[Any] = []
+
+    async def serve_endpoint(generate: Any) -> None:
+        responses.extend(
+            [value async for value in generate({"token_ids": [1]}, context=context)]
+        )
+
+    endpoint.serve_endpoint = AsyncMock(side_effect=serve_endpoint)
+    monkeypatch.setattr("dynamo.llm._unary.register_model", register)
+
+    async def handler(request: Any, *, context: Any) -> Any:
+        return {"request": request, "context": context}
+
+    model = UnaryChatModel("Qwen/model", "vision-app", public_name, template)
+    await model.serve(runtime, handler)
+
+    runtime.endpoint.assert_called_once_with("vision-app.app.generate")
+    args, kwargs = register.await_args
+    assert args == (ModelInput.Tokens, ModelType.Chat, endpoint, "Qwen/model")
+    assert kwargs["model_name"] == expected_name
+    assert kwargs["custom_template_path"] == expected_template
+    assert kwargs["worker_type"] == WorkerType.Aggregated
+    assert kwargs["ignore_weights"] is True
+    endpoint.serve_endpoint.assert_awaited_once()
+    assert responses == [{"request": {"token_ids": [1]}, "context": context}]
 
 
 def test_with_engine_data_preserves_completion_and_existing_values() -> None:
@@ -115,6 +171,57 @@ def _request() -> dict[str, Any]:
         "sampling_options": {"n": 1},
         "output_options": {},
     }
+
+
+@pytest.mark.asyncio
+async def test_llm_unary_client_connect_waits_for_routable_instance() -> None:
+    ready = asyncio.Event()
+    waiting = asyncio.Event()
+
+    async def wait_for_instances() -> list[int]:
+        waiting.set()
+        await ready.wait()
+        return [1]
+
+    client = Mock()
+    client.wait_for_instances = AsyncMock(side_effect=wait_for_instances)
+    endpoint = Mock()
+    endpoint.client = AsyncMock(return_value=client)
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+
+    task = asyncio.create_task(
+        LLMUnaryClient.connect(runtime, "vision.generator.generate")
+    )
+    await waiting.wait()
+    assert not task.done()
+    ready.set()
+    connected = await task
+
+    runtime.endpoint.assert_called_once_with("vision.generator.generate")
+    endpoint.client.assert_awaited_once_with()
+    client.wait_for_instances.assert_awaited_once_with()
+    assert isinstance(connected, LLMUnaryClient)
+    assert connected._client is client
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_at", ["client", "readiness"])
+async def test_llm_unary_client_connect_propagates_errors(failure_at: str) -> None:
+    client = Mock()
+    client.wait_for_instances = AsyncMock()
+    endpoint = Mock()
+    endpoint.client = AsyncMock(return_value=client)
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+
+    if failure_at == "client":
+        endpoint.client.side_effect = RuntimeError("client failed")
+    else:
+        client.wait_for_instances.side_effect = RuntimeError("readiness failed")
+
+    with pytest.raises(RuntimeError, match=f"{failure_at} failed"):
+        await LLMUnaryClient.connect(runtime, "vision.generator.generate")
 
 
 @pytest.mark.asyncio
