@@ -1,0 +1,24 @@
+{
+  "TableName": "global-discovery-mcs",
+  "AttributeDefinitions": [
+    {"AttributeName": "pk", "AttributeType": "S"},
+    {"AttributeName": "sk", "AttributeType": "S"},
+    {"AttributeName": "updated_at", "AttributeType": "N"}
+  ],
+  "KeySchema": [
+    {"AttributeName": "pk", "KeyType": "HASH"},
+    {"AttributeName": "sk", "KeyType": "RANGE"}
+  ],
+  "LocalSecondaryIndexes": [
+    {
+      "IndexName": "by_updated_at",
+      "KeySchema": [
+        {"AttributeName": "pk", "KeyType": "HASH"},
+        {"AttributeName": "updated_at", "KeyType": "RANGE"}
+      ],
+      "Projection": {"ProjectionType": "KEYS_ONLY"}
+    }
+  ],
+  "BillingMode": "PAY_PER_REQUEST",
+  "DeletionProtectionEnabled": true
+}
