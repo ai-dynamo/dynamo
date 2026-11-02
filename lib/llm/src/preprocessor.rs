@@ -17,6 +17,7 @@ pub mod mm_routing;
 pub mod prompt;
 pub mod speculative_prefill;
 pub(crate) mod structural_tag;
+pub use structural_tag::structural_tag_parser_names;
 pub(crate) mod tool_choice;
 pub mod tools;
 use anyhow::Context;
@@ -604,15 +605,7 @@ fn drain_router_routing_data(
     let Some(tracker) = tracker else {
         return;
     };
-    if let Some(timing) = routing_data.timing {
-        tracker.set_external_timing(timing);
-    }
-    if let Some(worker_id) = routing_data.worker_id {
-        tracker.set_external_worker_info(worker_id);
-    }
-    if let Some(token_ids) = routing_data.token_ids {
-        tracker.set_external_query_token_ids(token_ids);
-    }
+    tracker.ingest_routing_data(routing_data);
 }
 
 fn attach_metrics_annotation<Resp>(response: &mut Annotated<Resp>, metrics: &LLMMetricAnnotation) {
