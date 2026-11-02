@@ -1621,6 +1621,7 @@ fn worker_set_chat_preprocessor(
 }
 
 #[cfg(test)]
+#[path = "watcher/decision_tests_legacy.rs"]
 mod decision_tests;
 
 #[cfg(test)]

@@ -451,5 +451,5 @@ fn bind_native(
 }
 
 #[cfg(test)]
-#[path = "systemone/tests.rs"]
+#[path = "systemone/tests_legacy.rs"]
 mod tests;

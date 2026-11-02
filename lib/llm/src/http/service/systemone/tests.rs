@@ -28,21 +28,31 @@ mod preflight;
 #[path = "tests/vllm.rs"]
 mod vllm;
 
+#[path = "tests/head.rs"]
+mod head;
+
+#[path = "tests/native_read.rs"]
+mod native_read;
+
 #[path = "tests/http.rs"]
 mod http;
 
 #[path = "tests/metrics.rs"]
 mod metrics;
 
+#[path = "tests/membership.rs"]
+mod membership;
+#[path = "tests/raw_routing.rs"]
+mod raw_routing;
+
 use super::{
     Placement, PreparedBranch, ScoringBranch, StartedBranch, add_input_tokens, bind_native,
     pin_to_placement, resolve_dp_rank,
 };
+use crate::discovery::test_support::PreparedSelectionFixture;
 use crate::{
-    discovery::{
-        DecisionEngine, DecisionRoute, SystemOneExecutionSelection, TokenExecutor, WorkerSet,
-    },
-    local_model::runtime_config::{DecisionExecutionProfile as Profile, TokenBackend},
+    decision_profile::{DecisionExecutionProfile as Profile, TokenBackend},
+    discovery::{DecisionEngine, SystemOneExecutionSelection, TokenExecutor, WorkerSet},
     model_card::ModelDeploymentCard,
     preprocessor::OpenAIPreprocessor,
     protocols::{
@@ -56,16 +66,16 @@ use crate::{
     },
 };
 
-#[tokio::test]
-async fn cumulative_input_limit_is_checked_without_overflow() {
+#[test]
+fn cumulative_input_limit_is_checked_without_overflow() {
     assert_eq!(add_input_tokens(7, 5, 12), Ok(12));
     assert_eq!(add_input_tokens(65_536, 1, 131_072), Ok(65_537));
     assert!(add_input_tokens(7, 6, 12).is_err());
     assert!(add_input_tokens(usize::MAX, 1, usize::MAX).is_err());
 }
 
-#[tokio::test]
-async fn placement_pin_sets_both_worker_and_rank() {
+#[test]
+fn placement_pin_sets_both_worker_and_rank() {
     crate::generate_format::test_formats::install();
     let native = build_native_score_request(&[1], &[2], "test-salt").unwrap();
     let mut preprocessed = bind_native("sglang", "test-model", 16, &native, "request-1")
@@ -90,7 +100,8 @@ fn prepared_noul_branch(index: usize) -> PreparedBranch {
 fn prepared_noul_branch_with_salt(index: usize, cache_salt: &str) -> PreparedBranch {
     let prompt_ids = vec![1, 2];
     let label_ids = vec![17 + index as u32 * 100, 4 + index as u32 * 100];
-    let native = build_native_score_request(&prompt_ids, &label_ids, cache_salt).unwrap();
+    let wire =
+        super::PreparedScoringRequest::new(prompt_ids.clone(), label_ids.clone(), cache_salt);
     PreparedBranch {
         scoring: ScoringBranch {
             index,
@@ -98,7 +109,7 @@ fn prepared_noul_branch_with_salt(index: usize, cache_salt: &str) -> PreparedBra
             prompt_len: prompt_ids.len(),
             label_ids,
         },
-        wire: super::PreparedScoringRequest::Sglang(Box::new(native)),
+        wire,
     }
 }
 
@@ -110,7 +121,12 @@ fn started_branch(
     crate::generate_format::test_formats::install();
     let exchange = prepared
         .wire
-        .compile("test-model", 16, "branch-0")
+        .compile(
+            super::token_execution::scoring_for(TokenBackend::Sglang),
+            "test-model",
+            16,
+            "branch-0",
+        )
         .unwrap()
         .exchange;
     StartedBranch {
@@ -150,14 +166,14 @@ async fn finish_branch_parses_terminal_scores_and_tracker_placement() {
         Context::new(()).context(),
     );
     let parent = Context::new(());
-    let result = super::token_execution::backend::finish_branch(
-        TokenBackend::Sglang,
-        started_branch(prepared_noul_branch(0), tracker, stream),
-        0,
-        4,
-        parent.context(),
-    )
-    .await;
+    let result = super::token_execution::scoring_for(TokenBackend::Sglang)
+        .read_branch(
+            started_branch(prepared_noul_branch(0), tracker, stream),
+            0,
+            4,
+            parent.context(),
+        )
+        .await;
     let Ok(result) = result else {
         panic!("valid terminal branch should succeed")
     };
@@ -173,14 +189,11 @@ async fn finish_branch_parses_terminal_scores_and_tracker_placement() {
 #[tokio::test]
 async fn sglang_scoring_preprocessing_preserves_exact_tracker_isl() {
     let selected = selection_for_test(TestEngine::new(EngineBehavior::Success)).await;
-    let request = super::token_execution::backend::PreparedScoringRequest::sglang(
-        vec![1, 2, 3],
-        &[17, 4],
-        "isolated",
-    )
-    .unwrap();
+    let request =
+        super::token_execution::PreparedScoringRequest::new(vec![1, 2, 3], vec![17, 4], "isolated");
     let preprocessed = request
         .compile(
+            super::token_execution::scoring_for(token_executor(&selected).backend()),
             &selected.context.canonical_model,
             selected.context.card.kv_cache_block_size,
             "isl-regression",
@@ -215,14 +228,14 @@ async fn finish_branch_stops_when_parent_is_cancelled() {
     let parent = Context::new(());
     let parent_context = parent.context();
     parent_context.kill();
-    let result = super::token_execution::backend::finish_branch(
-        TokenBackend::Sglang,
-        started_branch(prepared_noul_branch(0), tracker, stream),
-        0,
-        1,
-        parent_context,
-    )
-    .await;
+    let result = super::token_execution::scoring_for(TokenBackend::Sglang)
+        .read_branch(
+            started_branch(prepared_noul_branch(0), tracker, stream),
+            0,
+            1,
+            parent_context,
+        )
+        .await;
     let Err(error) = result else {
         panic!("cancelled parent should stop branch completion")
     };
@@ -237,18 +250,18 @@ async fn cancelled_stream_completion_is_not_a_malformed_response() {
         stream_parent.kill();
         std::task::Poll::Ready(None::<Annotated<LLMEngineOutput>>)
     });
-    let result = super::token_execution::backend::finish_branch(
-        TokenBackend::Sglang,
-        started_branch(
-            prepared_noul_branch(0),
-            Arc::new(RequestTracker::new()),
-            ResponseStream::new(Box::pin(stream), Context::new(()).context()),
-        ),
-        0,
-        1,
-        parent,
-    )
-    .await;
+    let result = super::token_execution::scoring_for(TokenBackend::Sglang)
+        .read_branch(
+            started_branch(
+                prepared_noul_branch(0),
+                Arc::new(RequestTracker::new()),
+                ResponseStream::new(Box::pin(stream), Context::new(()).context()),
+            ),
+            0,
+            1,
+            parent,
+        )
+        .await;
     let Err(error) = result else {
         panic!("cancelled stream must not produce an answer")
     };
@@ -292,6 +305,7 @@ struct TestEngine {
     started: Notify,
     sibling_started: Notify,
     admissions: Option<tokio::sync::watch::Sender<Vec<u64>>>,
+    resume_sibling: Option<Arc<Notify>>,
     frame: fn(&PreprocessedRequest) -> (Value, Annotated<LLMEngineOutput>),
 }
 
@@ -309,6 +323,7 @@ impl TestEngine {
             started: Notify::new(),
             sibling_started: Notify::new(),
             admissions: None,
+            resume_sibling: None,
             frame,
         })
     }
@@ -329,6 +344,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         &self,
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        crate::discovery::test_support::validate_fixture_dispatch(&request, 41);
+        assert!(
+            !request
+                .metadata()
+                .contains_key(crate::protocols::systemone::DECISION_DISPATCH_METADATA_KEY)
+        );
         let index: usize = request.id().rsplit('-').next().unwrap().parse().unwrap();
         let (native, terminal) = (self.frame)(&request);
         let stream_context = Context::new(()).context();
@@ -461,6 +482,22 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         if matches!(self.behavior, EngineBehavior::PendingStream)
             || (matches!(self.behavior, EngineBehavior::PendingSiblings) && index > 0)
         {
+            if let Some(resume) = &self.resume_sibling {
+                if index == 1 {
+                    let resume = resume.clone();
+                    return Ok(ResponseStream::new(
+                        Box::pin(stream::once(async move {
+                            resume.notified().await;
+                            terminal
+                        })),
+                        stream_context,
+                    ));
+                }
+                return Ok(ResponseStream::new(
+                    Box::pin(stream::iter([terminal])),
+                    stream_context,
+                ));
+            }
             return Ok(ResponseStream::new(
                 Box::pin(stream::pending()),
                 stream_context,
@@ -491,24 +528,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     }
 }
 
-struct PreparedSelectionFixture {
-    selection: SystemOneExecutionSelection,
-    _workers: WorkerSet,
-}
-
-impl std::ops::Deref for PreparedSelectionFixture {
-    type Target = SystemOneExecutionSelection;
-    fn deref(&self) -> &Self::Target {
-        &self.selection
-    }
-}
-
-impl std::ops::DerefMut for PreparedSelectionFixture {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.selection
-    }
-}
-
 async fn selection_for_test(engine: Arc<TestEngine>) -> PreparedSelectionFixture {
     crate::generate_format::test_formats::install();
     let mut card = ModelDeploymentCard::load_from_disk(
@@ -528,24 +547,23 @@ async fn token_selection_for_test(
     preprocessor: Arc<OpenAIPreprocessor>,
     profile: Profile,
 ) -> PreparedSelectionFixture {
-    let mut workers = WorkerSet::new("test-workers".into(), card.mdcsum().into(), card);
-    let crate::local_model::runtime_config::DecisionProfileKind::Token(backend) = profile.kind()
-    else {
+    let workers = WorkerSet::new("test-workers".into(), card.mdcsum().into(), card);
+    let crate::decision_profile::DecisionProfileKind::Token(_) = profile.kind() else {
         panic!("token fixture requires a token profile")
     };
-    workers.decision = Some(DecisionRoute::Available(DecisionEngine::Token(
-        TokenExecutor::new(backend, engine, preprocessor),
-    )));
-    let selection =
-        SystemOneExecutionSelection::for_test("test-model".into(), profile, &workers).unwrap();
-    PreparedSelectionFixture {
-        selection,
-        _workers: workers,
-    }
+    let resources = crate::discovery::test_support::token_resources(engine, preprocessor);
+    crate::discovery::test_support::forced_selection_for_test(
+        "test-model".into(),
+        profile,
+        workers,
+        resources,
+    )
+    .await
+    .unwrap()
 }
 
 fn token_executor(selection: &SystemOneExecutionSelection) -> &TokenExecutor {
-    let DecisionEngine::Token(executor) = selection.engine() else {
+    let DecisionEngine::Token(executor) = &selection.engine else {
         panic!("expected token executor")
     };
     executor
@@ -574,8 +592,31 @@ async fn dispatch(
     metrics: Arc<super::Metrics>,
     request: Arc<dynamo_decisions::CanonicalRequest>,
 ) -> Response {
-    let response = super::execution::dispatch(
-        super::execution::PreparedExecution::token(fixture.selection.clone(), branches).unwrap(),
+    let response = dispatch_selection_for_test(
+        fixture.selection.clone(),
+        branches,
+        request_id,
+        parent,
+        permit,
+        metrics,
+        request,
+    )
+    .await;
+    drop(fixture);
+    response
+}
+
+async fn dispatch_selection_for_test(
+    selection: SystemOneExecutionSelection,
+    branches: Vec<PreparedBranch>,
+    request_id: String,
+    parent: Arc<dyn AsyncEngineContext>,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    metrics: Arc<super::Metrics>,
+    request: Arc<dynamo_decisions::CanonicalRequest>,
+) -> Response {
+    super::execution::dispatch(
+        super::execution::PreparedExecution::token(selection, branches).unwrap(),
         request_id,
         parent,
         permit,
@@ -583,9 +624,7 @@ async fn dispatch(
         "test-model".into(),
         request,
     )
-    .await;
-    drop(fixture);
-    response
+    .await
 }
 
 async fn response_body(response: Response) -> Value {
@@ -612,6 +651,18 @@ fn canonical_request(branch_count: usize) -> Arc<dynamo_decisions::CanonicalRequ
         )
         .unwrap(),
     )
+}
+
+fn single_level_score_request() -> dynamo_decisions::CanonicalRequest {
+    dynamo_decisions::parse_request(
+        &serde_json::to_vec(&json!({
+            "model":"test-model", "state":"test",
+            "questions":{"severity":{"type":"score", "criteria":["Low"]}}
+        }))
+        .unwrap(),
+        dynamo_decisions::Route::SystemOne,
+    )
+    .unwrap()
 }
 
 async fn dispatch_request(
@@ -756,8 +807,10 @@ async fn sibling_failure_is_atomic_and_cancels_pending_peer() {
     )
     .await
     .expect("sibling failure must terminate without draining the pending peer");
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(response_body(response).await.get("answers").is_none());
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = response_body(response).await;
+    assert_eq!(body["code"], "invalid_executor_result");
+    assert!(body.get("answers").is_none());
     assert!(parent.is_killed());
     assert_eq!(semaphore.available_permits(), 3);
     let observations = engine.observations.lock().unwrap();

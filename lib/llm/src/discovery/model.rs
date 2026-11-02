@@ -972,6 +972,7 @@ impl Model {
 }
 
 #[cfg(test)]
+#[path = "model/decision_tests_legacy.rs"]
 mod decision_tests;
 
 #[cfg(test)]
