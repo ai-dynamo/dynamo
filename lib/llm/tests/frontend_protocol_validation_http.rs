@@ -587,6 +587,91 @@ async fn strict_tool_schema_rejected_before_dispatch() {
     .await;
 }
 
+// Beam route: the handler normalizes the request from the parsing options of the engine
+// it then dispatches to, and does so before generic validation, which would otherwise
+// reject exactly the shapes being normalized (noncompliant `strict` schema; legacy
+// `builtin_tools` declaration with `tool_choice: "required"` and no top-level `tools`).
+#[tokio::test]
+#[serial]
+async fn beam_request_normalization_precedes_generic_validation() {
+    let noncompliant_strict = json!({
+        "model": MODEL, "messages": [{"role": "user", "content": "ping"}],
+        "tools": [{"type": "function", "function": {
+            "name": "search", "strict": true, "parameters": {
+                "type": "object", "properties": {"query": {"type": "string", "minLength": 1}}
+            }
+        }}]
+    });
+    let legacy_builtin_required = json!({
+        "model": MODEL, "messages": [{"role": "user", "content": "ping"}],
+        "tool_choice": "required",
+        "chat_template_kwargs": {"builtin_tools": [{
+            "name": "lookup", "parameters": {"type": "object", "properties": {}}
+        }]}
+    });
+    let cases = [
+        ("noncompliant strict", noncompliant_strict),
+        ("legacy builtin_tools", legacy_builtin_required),
+    ];
+    temp_env::async_with_vars(BASE_ENV, async {
+        // Control: without the Beam parsers, generic validation rejects both shapes.
+        let svc = HarnessService::start(Vec::new()).await;
+        for (case, body) in &cases {
+            for stream in [false, true] {
+                let mut body = body.clone();
+                body["stream"] = json!(stream);
+                let response = post_json(&svc, "/v1/chat/completions", body).await;
+                assert_eq!(
+                    response.status(),
+                    reqwest::StatusCode::BAD_REQUEST,
+                    "{case} stream={stream} must be rejected off the Beam route"
+                );
+                assert!(svc.engine.take_requests().await.is_empty());
+            }
+        }
+        svc.shutdown().await;
+
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let mut card = dynamo_llm::model_card::ModelDeploymentCard::with_name_only(MODEL);
+        card.runtime_config.tool_call_parser = Some("beam".to_string());
+        card.runtime_config.reasoning_parser = Some("beam".to_string());
+        let engine = Arc::new(ScriptedChatEngine::new(
+            std::iter::repeat_n(script, cases.len() * 2).map(Ok),
+        ));
+        let svc = HarnessService::start_with_engine_and_card(engine, card).await;
+        for (case, body) in &cases {
+            for stream in [false, true] {
+                let mut body = body.clone();
+                body["stream"] = json!(stream);
+                let response = post_json(&svc, "/v1/chat/completions", body).await;
+                let status = response.status();
+                let body = bounded(response.text()).await.unwrap_or_default();
+                assert_eq!(
+                    status,
+                    reqwest::StatusCode::OK,
+                    "{case} stream={stream}: {body}"
+                );
+                let requests = svc.engine.take_requests().await;
+                assert_eq!(requests.len(), 1, "{case} stream={stream} dispatches once");
+                let tools = requests[0].inner.tools.as_ref().unwrap();
+                assert_eq!(tools.len(), 1, "{case} stream={stream}");
+                match *case {
+                    "noncompliant strict" => {
+                        assert_eq!(tools[0].function.name, "search");
+                        assert_eq!(tools[0].function.strict, None, "served as non-strict");
+                    }
+                    _ => {
+                        assert_eq!(tools[0].function.name, "lookup", "promoted into tools");
+                    }
+                }
+            }
+        }
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
 // The process-wide startup policy needs a fresh process for opt-in cases.
 async fn run_compatibility_subprocess(test_name: &str) -> bool {
     const CHILD: &str = "DYNAMO_STRICT_SCHEMA_TEST_CHILD";

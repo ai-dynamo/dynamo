@@ -59,9 +59,11 @@ kubectl apply -f lib/sidecar/vllm/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/vllm-sidecar-agg-frontend 8000:8000
 ```
 
-Multinode deployments require `backendFramework: vllm` and complete `leader` and
-`worker` role PodTemplates. The templates own the native engine commands and
-sidecar placement. The operator does not inject executor or coordination flags.
+Multinode deployments require complete `leader` and `worker` role PodTemplates. Set
+`backendFramework: vllm` as the examples do: the operator does not infer a backend from
+`vllm serve`, and compilation-cache defaults and inter-pod GMS admission depend on it.
+The templates own the native engine commands and sidecar placement. The operator does
+not inject executor or coordination flags.
 See the [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/vllm/deploy/multinode_tp.yaml),
 which uses the multiprocessing executor with a sidecar on the leader only, and the
 [hybrid-LB DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/vllm/deploy/multinode_dp.yaml),

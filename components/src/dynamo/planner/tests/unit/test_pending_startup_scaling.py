@@ -6,7 +6,7 @@
 from copy import deepcopy
 from datetime import datetime, timezone
 from threading import Lock
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from kubernetes import client
@@ -384,6 +384,118 @@ async def test_connector_cancels_startup_and_holds_until_drain_finishes():
     pods.pop()
     await connector.set_component_replicas(up, blocking=False)
     assert connector.kube_api.update_graph_replicas.call_count == 2
+
+
+def _frontend_short_deployment(decode_replicas=2):
+    """Workers settled at ``decode_replicas``; one of two Frontend Pods unready."""
+    deployment = _deployment()
+    deployment["spec"]["components"][1]["replicas"] = decode_replicas
+    deployment["spec"]["components"].append(
+        {"name": "fe", "type": "frontend", "replicas": 2}
+    )
+    deployment["status"]["components"]["d"] = {
+        "replicas": decode_replicas,
+        "updatedReplicas": decode_replicas,
+        "readyReplicas": decode_replicas,
+    }
+    deployment["status"]["components"]["fe"] = {
+        "replicas": 2,
+        "updatedReplicas": 2,
+        "readyReplicas": 1,
+    }
+    return deployment
+
+
+def _frontend_short_pods(decode_replicas=2):
+    components = (
+        [("p0", "p")]
+        + [(f"d{index}", "d") for index in range(decode_replicas)]
+        + [("fe0", "fe"), ("fe1", "fe")]
+    )
+    return [
+        client.V1Pod(
+            metadata=client.V1ObjectMeta(
+                name=name, labels={"nvidia.com/dynamo-component": component}
+            ),
+            status=client.V1PodStatus(phase="Running"),
+        )
+        for name, component in components
+    ]
+
+
+def _decode_target(replicas):
+    return [
+        TargetReplica(
+            sub_component_type=SubComponentType.DECODE, desired_replicas=replicas
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_frontend_only_unready_deployment_still_scales_workers():
+    connector = _connector(_frontend_short_deployment(), _frontend_short_pods())
+    connector.kube_api.wait_for_graph_deployment_ready = AsyncMock()
+
+    await connector.set_component_replicas(_decode_target(4), blocking=True)
+
+    connector.kube_api.update_graph_replicas.assert_called_once_with("qwen", "d", 4)
+    # DGD Ready stays False on the Frontend, so wait on worker stability only.
+    connector.kube_api.wait_for_graph_deployment_ready.assert_awaited_once_with(
+        "qwen", include_planner=False
+    )
+
+
+@pytest.mark.asyncio
+async def test_frontend_only_unready_keeps_worker_drain_guard():
+    # Status already reads zero while the old worker Pod still terminates.
+    pods = _frontend_short_pods(decode_replicas=0)
+    pods.append(
+        client.V1Pod(
+            metadata=client.V1ObjectMeta(
+                name="d-old",
+                labels={"nvidia.com/dynamo-component": "d"},
+                deletion_timestamp=datetime.now(timezone.utc),
+            ),
+            status=client.V1PodStatus(phase="Running"),
+        )
+    )
+    connector = _connector(_frontend_short_deployment(decode_replicas=0), pods)
+
+    await connector.set_component_replicas(_decode_target(1), blocking=False)
+
+    connector.kube_api.update_graph_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_frontend_only_unready_ignores_terminating_frontend_pod():
+    pods = _frontend_short_pods()
+    pods[-1].metadata.deletion_timestamp = datetime.now(timezone.utc)
+    connector = _connector(_frontend_short_deployment(), pods)
+
+    await connector.set_component_replicas(_decode_target(3), blocking=False)
+
+    connector.kube_api.update_graph_replicas.assert_called_once_with("qwen", "d", 3)
+
+
+@pytest.mark.asyncio
+async def test_frontend_only_unready_requires_pod_snapshot():
+    connector = _connector(_frontend_short_deployment(), _frontend_short_pods())
+    connector.kube_api.list_pods_for_graph.side_effect = client.ApiException(status=403)
+
+    await connector.set_component_replicas(_decode_target(4), blocking=False)
+
+    connector.kube_api.update_graph_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_frontend_only_unready_checks_dgdsa_target_before_dgd_propagation():
+    connector = _connector(_frontend_short_deployment(), _frontend_short_pods())
+    # An earlier DGDSA write to 8 has not reached the DGD spec or status yet.
+    connector.kube_api._test_scale_targets["d"] = 8
+
+    await connector.set_component_replicas(_decode_target(10), blocking=False)
+
+    connector.kube_api.update_graph_replicas.assert_not_called()
 
 
 @pytest.mark.asyncio

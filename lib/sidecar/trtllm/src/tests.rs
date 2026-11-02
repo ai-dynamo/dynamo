@@ -52,7 +52,9 @@ struct FakeTrtllm {
     empty_model_info: Arc<AtomicBool>,
     /// Answers `UNAVAILABLE`, the shape of an engine that is not serving yet.
     unavailable_model_info: Arc<AtomicBool>,
+    model_info_unavailable: Arc<tokio::sync::Notify>,
     model_info_calls: Arc<AtomicUsize>,
+    served_model_name: Arc<Mutex<Option<String>>>,
     kv_routing: Arc<AtomicBool>,
     server_info_error: Arc<Mutex<Option<tonic::Code>>>,
     kv_sources_error: Arc<Mutex<Option<tonic::Code>>>,
@@ -224,15 +226,23 @@ impl pb::control_server::Control for FakeTrtllm {
             return Err(Status::unimplemented("Control is not implemented"));
         }
         if self.unavailable_model_info.load(Ordering::SeqCst) {
+            self.model_info_unavailable.notify_one();
             return Err(Status::unavailable("not serving yet"));
         }
         Ok(Response::new(pb::ModelInfo {
             model_id: "fake-model".to_string(),
+            served_model_name: self
+                .served_model_name
+                .lock()
+                .await
+                .clone()
+                .unwrap_or_else(|| "served-model".into()),
             max_context_length: if self.empty_model_info.load(Ordering::SeqCst) {
                 None
             } else {
                 Some(4096)
             },
+            supports_multimodal: Some(false),
             ..Default::default()
         }))
     }
@@ -958,8 +968,8 @@ async fn start_without_a_context_length_fails() {
         .await
         .expect_err("a worker with no window must not register");
     assert!(
-        error.to_string().contains("--context-length"),
-        "the error must name the flag that supplies a window: {error}"
+        error.to_string().contains("GetModelInfo"),
+        "the error must name the required RPC: {error}"
     );
 }
 
@@ -989,25 +999,52 @@ async fn start_fails_at_once_when_the_server_answers_without_a_context_length() 
     );
 }
 
-/// The wait exists for an engine that is not serving yet: it keeps asking
-/// through transport failures and picks up the window once the engine answers.
+/// Transient metadata failures must not register an incorrect model name.
 #[tokio::test]
 async fn start_waits_for_a_server_that_is_not_serving_yet() {
-    let service = FakeTrtllm::default();
-    service.unavailable_model_info.store(true, Ordering::SeqCst);
-    let server = FakeServer::start(service).await;
-    let ready = Arc::clone(&server.service.unavailable_model_info);
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(40)).await;
-        ready.store(false, Ordering::SeqCst);
-    });
-    let engine = engine_with(&server.endpoint, impatient_transport(), None, AGG);
+    for configured_length in [None, Some(8192)] {
+        let service = FakeTrtllm::default();
+        service.unavailable_model_info.store(true, Ordering::SeqCst);
+        let server = FakeServer::start(service).await;
+        let ready = Arc::clone(&server.service.unavailable_model_info);
+        let unavailable = Arc::clone(&server.service.model_info_unavailable);
+        let release = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(5), unavailable.notified())
+                .await
+                .expect("first GetModelInfo was not observed");
+            ready.store(false, Ordering::SeqCst);
+        });
+        let engine = engine_with(
+            &server.endpoint,
+            GrpcTransportConfig {
+                startup_deadline: Duration::from_secs(5),
+                ..impatient_transport()
+            },
+            configured_length,
+            AGG,
+        );
+        let config = engine.start(0).await.expect("start once the engine serves");
+        release.await.expect("release discovery");
+        assert_eq!(config.served_model_name.as_deref(), Some("served-model"));
+        assert!(server.service.model_info_calls.load(Ordering::SeqCst) > 1);
+    }
+}
 
-    let config = engine.start(0).await.expect("start once the engine serves");
-    assert_eq!(
-        config.llm.expect("llm registration").context_length,
-        Some(4096)
-    );
+/// The public model name must not replace the path used to load artifacts.
+#[tokio::test]
+async fn engine_registers_reported_name_separately_from_model_path() {
+    for configured_length in [None, Some(8192)] {
+        let service = FakeTrtllm::default();
+        *service.served_model_name.lock().await = Some("org/served-model".into());
+        let server = FakeServer::start(service).await;
+        let engine = engine_with(&server.endpoint, transport(1), configured_length, AGG);
+        let config = engine.start(0).await.expect("start");
+        assert_eq!(config.model, "model-source");
+        assert_eq!(
+            config.served_model_name.as_deref(),
+            Some("org/served-model")
+        );
+    }
 }
 
 /// `--context-length` wins over what the engine reports. The engine is still
@@ -1034,23 +1071,31 @@ async fn a_configured_context_length_outranks_the_servers() {
     );
 }
 
-/// A configured window also means a server with no Control service is no longer
-/// a startup problem: there is nothing left to ask it for.
+/// The model name must come from the engine, even with a configured window.
 #[tokio::test]
-async fn a_configured_context_length_survives_a_server_without_control() {
-    let service = FakeTrtllm::default();
-    service.no_control.store(true, Ordering::SeqCst);
-    let server = FakeServer::start(service).await;
-    let engine = engine_with(&server.endpoint, transport(1), Some(8192), AGG);
-
-    let config = engine
-        .start(0)
-        .await
-        .expect("start with a configured window");
-    assert_eq!(
-        config.llm.expect("llm registration").context_length,
-        Some(8192)
-    );
+async fn a_configured_context_length_requires_model_info_and_a_served_name() {
+    for missing_control in [true, false] {
+        let service = FakeTrtllm::default();
+        service.no_control.store(missing_control, Ordering::SeqCst);
+        if !missing_control {
+            *service.served_model_name.lock().await = Some(String::new());
+        }
+        let server = FakeServer::start(service).await;
+        let engine = engine_with(&server.endpoint, impatient_transport(), Some(8192), AGG);
+        let error = engine
+            .start(0)
+            .await
+            .expect_err("model identity is required");
+        let expected = if missing_control {
+            "GetModelInfo"
+        } else {
+            "served_model_name"
+        };
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected error: {error}"
+        );
+    }
 }
 
 /// Shutdown has to terminate in-flight requests: the worker cannot drain if a

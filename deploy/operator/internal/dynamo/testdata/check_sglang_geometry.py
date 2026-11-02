@@ -27,5 +27,8 @@ server_args = ServerArgs.from_cli_args(parsed)
 server_args.resolve_once()
 config = resolved_view(server_args)
 observed = {key: getattr(config, key) for key in fixture["native"]}
-assert observed == fixture["native"], (fixture["name"], observed, fixture["native"])
+if observed != fixture["native"]:
+    raise SystemExit(
+        f"{fixture['name']}: native geometry {observed!r} != expected {fixture['native']!r}"
+    )
 print(json.dumps({"name": fixture["name"], "native": observed}), flush=True)

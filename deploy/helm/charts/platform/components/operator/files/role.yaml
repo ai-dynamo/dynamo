@@ -24,9 +24,10 @@ rules:
   - ""
   resources:
   - nodes
-  - pods/log
   verbs:
   - get
+  - list
+  - watch
 - apiGroups:
   - ""
   resources:
@@ -51,12 +52,28 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - pods/log
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
   - secrets
+  verbs:
+  - create
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - serviceaccounts
   verbs:
   - create
   - get
   - list
+  - patch
   - update
   - watch
 - apiGroups:
@@ -272,6 +289,7 @@ rules:
   - dynamographdeployments
   - dynamographdeploymentscalingadapters
   - dynamomodels
+  - dynamoworkermetadatas
   - lpxgraphdeployments
   verbs:
   - create
@@ -287,8 +305,10 @@ rules:
   - dynamocomponentdeployments/finalizers
   - dynamographdeploymentenginegroups/finalizers
   - dynamographdeploymentrequests/finalizers
+  - dynamographdeploymentruns/finalizers
   - dynamographdeployments/finalizers
   - dynamomodels/finalizers
+  - dynamopoolrelays/finalizers
   - lpxgraphdeployments/finalizers
   verbs:
   - update
@@ -296,16 +316,32 @@ rules:
   - nvidia.com
   resources:
   - dynamocomponentdeployments/status
+  - dynamographdeploymentcandidates/status
   - dynamographdeploymentenginegroups/status
   - dynamographdeploymentrequests/status
+  - dynamographdeploymentruns/status
   - dynamographdeployments/status
   - dynamographdeploymentscalingadapters/status
   - dynamomodels/status
+  - dynamopoolrelays/status
   - lpxgraphdeployments/status
   verbs:
   - get
   - patch
   - update
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamographdeploymentcandidates
+  - dynamographdeploymentruns
+  - snapshotjobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - watch
 - apiGroups:
   - nvidia.com
   resources:
@@ -319,19 +355,16 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - podsnapshots
+  - dynamopoolrelays
   verbs:
-  - delete
   - get
   - list
-  - patch
   - watch
 - apiGroups:
   - nvidia.com
   resources:
-  - snapshotjobs
+  - podsnapshots
   verbs:
-  - create
   - delete
   - get
   - list
@@ -354,6 +387,7 @@ rules:
   - delete
   - get
   - list
+  - patch
   - update
   - watch
 - apiGroups:
@@ -364,6 +398,7 @@ rules:
   - create
   - get
   - list
+  - patch
   - update
   - watch
 - apiGroups:

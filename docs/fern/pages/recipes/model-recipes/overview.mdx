@@ -29,6 +29,7 @@ Start with the model, runtime, and hardware you need to run. Model cards follow 
 <input className="dynamo-filter-input" type="radio" id="provider-upstage" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-meta" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-minimax" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-mistral" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-motif" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-reflection" name="provider" />
 {/* provider-inputs:end */}
@@ -73,6 +74,7 @@ Start with the model, runtime, and hardware you need to run. Model cards follow 
 <label className="dynamo-recipe-chip" htmlFor="provider-upstage">Upstage</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-meta">Meta</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-minimax">MiniMax</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-mistral">Mistral</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-motif">Motif Technologies</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-reflection">Reflection</label></div></div>
 {/* provider-chips:end */}
@@ -344,6 +346,14 @@ Start with the model, runtime, and hardware you need to run. Model cards follow 
     <p className="dynamo-model-summary">vLLM recipes for MiniMax M3 on GB200: aggregated or prefill/decode disaggregated, with KV-aware routing, EAGLE3 speculation and NVFP4 quantization.</p>
     <div className="dynamo-model-tags"><span>vLLM</span><span>GB200</span><span>up to 1M context</span></div>
   <a className="dynamo-card-link" href="minimax-m3.mdx" aria-label="Open the MiniMax M3 recipe">Open recipe</a>
+  </div>
+  <div className="dynamo-model-card" data-recipe-card data-provider="mistral" data-runtime="vllm" data-hardware="gb300 vr200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse" data-targets="vllm-agg-gb300 vllm-disagg-gb300 vllm-agg-vr200 vllm-disagg-vr200">
+    <div className="dynamo-model-card-top">
+      <div><h3>Mistral Large 4</h3><p>Mistral AI / NVIDIA</p></div>
+    </div>
+    <p className="dynamo-model-summary">Mistral Large 4 (1051B MoE, 54B active, NVFP4) recipes for vLLM on GB300 and Vera Rubin: aggregated and disaggregated, with DSpark, native CPU KV offload and KV-aware routing.</p>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>GB300 · Vera Rubin</span><span>Agentic</span></div>
+  <a className="dynamo-card-link" href="mistral-large-4.mdx" aria-label="Open the Mistral Large 4 recipe">Open recipe</a>
   </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="motif" data-runtime="vllm" data-hardware="b200" data-technique="aggregated disaggregated kv-routing expert-parallel spec-decoding" data-workload="chat" data-targets="agg-b200-chat disagg-b200-chat-3p1d-kv">
     <div className="dynamo-model-card-top"><div><h3>Motif-3 NVFP4</h3><p>Motif Technologies</p></div></div>
