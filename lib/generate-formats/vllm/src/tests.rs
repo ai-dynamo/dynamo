@@ -3,6 +3,47 @@
 
 use super::*;
 
+#[test]
+fn causal_decision_request_binds_through_native_format() {
+    let raw = dynamo_llm::protocols::systemone::vllm::causal_scoring_request(
+        vec![1, 2, 3],
+        &[20, 10],
+        "isolated",
+    )
+    .unwrap();
+    let body = serde_json::to_vec(&raw).unwrap();
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        "application/json".parse().unwrap(),
+    );
+    let opened = VllmFormat
+        .open(ClientRequest {
+            body: &body,
+            headers: &headers,
+            default_request_id: "decision-1",
+        })
+        .unwrap();
+    opened.validation.unwrap();
+    let bound = (opened.bind)(&routing_metadata(16, false, None)).unwrap();
+    assert_eq!(bound.request.token_ids.as_slice(), &[1, 2, 3]);
+    assert_eq!(
+        bound
+            .request
+            .routing
+            .as_ref()
+            .unwrap()
+            .cache_namespace
+            .as_deref(),
+        Some("isolated")
+    );
+    assert_eq!(bound.request.stop_conditions.max_tokens, Some(1));
+    assert_eq!(
+        bound.request.extra_args.as_ref().unwrap()["vllm_tito"]["sampling_params"],
+        raw["sampling_params"]
+    );
+}
+
 fn routing_metadata(
     kv_cache_block_size: u32,
     tower_connector_lora_enabled: bool,
