@@ -17,6 +17,8 @@ path = "src/main.rs"
 
 [dependencies]
 dynamo-global-common = { workspace = true }
+# Lists the other Global Frontends (`GET /routers`) for replica sync.
+dynamo-global-discovery-client = { path = "../global-discovery-client" }
 dynamo-global-router = { workspace = true }
 # For the PoolRelay protocol and the session header.
 dynamo-llm = { workspace = true }

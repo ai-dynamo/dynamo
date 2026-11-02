@@ -29,7 +29,10 @@
 //! [`policies::HeadroomPicker`] sees the binding as the request's affinity
 //! target. A session books on its first request, a move, and a refresh; the
 //! booking comes back as a [`Reservation`], which the forwarding engine
-//! holds until the response ends.
+//! holds until the response ends. With [`GrpcReplicaSync`] the session
+//! bindings and the frontends' requests in flight replicate to the other
+//! Global Frontends over the gRPC stream [`replica_sync`] serves on the API
+//! port; bookings stay local.
 
 mod catalog;
 mod directory;
@@ -60,6 +63,7 @@ use dynamo_kv_router::services::selection::{
 use dynamo_kv_router::{WorkerId, WorkerType};
 use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
+use url::Url;
 
 use crate::frontend_signals::FrontendSignals;
 use crate::selector::{Cursors, PoolSelector, RequestLifecycle, Selection, reachable, target};
@@ -73,6 +77,8 @@ pub use directory::{PoolDirectory, PoolEntry};
 /// an unavailable pool.
 pub use dynamo_kv_router::services::selection::affinity::MAX_SESSION_AFFINITY_ID_BYTES as MAX_SESSION_ID_BYTES;
 pub use policies::{HeadroomPicker, LeastInFlightPicker, RoundRobinPicker};
+use replica_sync::GrpcTransport;
+pub use replica_sync::{GrpcReplicaSync, ReplicaHub, ReplicaSyncStats};
 
 /// How the core picks among a model's pools.
 #[derive(Clone, Debug)]
@@ -81,7 +87,8 @@ pub enum CorePolicy {
     RoundRobin,
     /// The nearest pool with the fewest requests in flight from every Global
     /// Frontend, counted by the frontends themselves, with affinity's
-    /// placement rule ([`LeastInFlightPicker`]). Nothing is booked.
+    /// placement rule ([`LeastInFlightPicker`]). Nothing is booked; with gRPC
+    /// replica sync, each replica's counts reach its peers on a timer.
     LeastInFlight(LeastInFlightConfig),
     /// Each session on one pool, moved only for much more room
     /// ([`HeadroomPicker`] over the core's session table).
@@ -91,7 +98,8 @@ pub enum CorePolicy {
 /// What [`CorePolicy::LeastInFlight`] counts and weighs.
 #[derive(Clone, Debug)]
 pub struct LeastInFlightConfig {
-    /// The Global Frontends' requests in flight per pool.
+    /// The Global Frontends' requests in flight per pool: this process's
+    /// and, with replica sync, its peers'.
     pub counts: Arc<FrontendSignals>,
     /// Each pool's capacity, from its Relay, and the round trip to each
     /// region.
@@ -131,6 +139,7 @@ pub struct CoreSelector {
     sessions: bool,
     /// Under affinity, when each session's pin was last booked.
     pins: Option<PinRefresh>,
+    grpc: Option<GrpcTransport>,
     /// Where the policy's picks are pending until their requests take them
     /// over: least-in-flight's counts.
     pending: Option<Arc<FrontendSignals>>,
@@ -200,15 +209,21 @@ impl PinRefresh {
 }
 
 impl CoreSelector {
-    /// Builds a core with `policy`. Nothing is selectable until
-    /// [`Self::reconcile_catalog`] has applied the first pool snapshot.
-    pub async fn new(policy: CorePolicy) -> Result<Self> {
+    /// Builds a core with `policy`, replicating with peers over the gRPC
+    /// `ReplicaSync` stream when `replica_sync` is given. Nothing is
+    /// selectable until [`Self::reconcile_catalog`] has applied the first pool
+    /// snapshot, and peers are followed only from then on, so their events
+    /// find the partitions they name. The transport's tasks run on the
+    /// current runtime and stop at [`Self::stop_replication`] or when the
+    /// selector drops.
+    pub async fn new(policy: CorePolicy, replica_sync: Option<GrpcReplicaSync>) -> Result<Self> {
         let directory = Arc::new(PoolDirectory::new());
         let registry = policies::registry(&policy, directory.clone())
             .context("register the pool selection policies")?;
         let mut builder =
             SelectionServiceBuilder::new(config(&policy)?, WorkerType::Aggregated, registry)
                 .indexer_threads(1);
+        let affinity = matches!(policy, CorePolicy::Affinity(_));
         if let CorePolicy::Affinity(affinity) = &policy {
             // Soft: the binding follows the pool picked, as the current pin
             // moves with the request.
@@ -225,7 +240,36 @@ impl CoreSelector {
             },
             ..SelectionHost::default()
         });
+        let mut grpc = None;
+        if let Some(sync) = replica_sync {
+            let cancel = CancellationToken::new();
+            let hub = ReplicaHub::new(cancel.clone());
+            for peer in sync.peers {
+                replica_sync::peer_url(peer.as_str())?;
+                hub.add_peer(peer);
+            }
+            if affinity {
+                builder = builder.session_binding_replication(hub.process_id());
+            }
+            if let CorePolicy::LeastInFlight(LeastInFlightConfig { counts, .. }) = &policy {
+                hub.carry_in_flight(counts.clone());
+            }
+            grpc = Some(GrpcTransport { hub, cancel });
+        }
         let service = Arc::new(builder.build().await.context("build the router core")?);
+        if let Some(GrpcTransport { hub, .. }) = &grpc {
+            if affinity {
+                let updates = service
+                    .session_binding_updates()
+                    .context("take the core's session binding updates")?;
+                tokio::spawn(hub.clone().publish_bindings(updates));
+            }
+            tracing::info!(
+                process_id = hub.process_id(),
+                peers = ?hub.peers().iter().map(Url::as_str).collect::<Vec<_>>(),
+                "replicating over the gRPC ReplicaSync stream"
+            );
+        }
         let pending = match &policy {
             CorePolicy::LeastInFlight(config) => Some(config.counts.clone()),
             _ => None,
@@ -240,6 +284,7 @@ impl CoreSelector {
                 CorePolicy::Affinity(affinity) => Some(PinRefresh::new(affinity.idle)),
                 _ => None,
             },
+            grpc,
             pending,
         })
     }
@@ -257,6 +302,10 @@ impl CoreSelector {
     /// future as a task; the receiver resolves once the core has taken the
     /// first snapshot, so the caller can wait for the configured pools to be
     /// selectable before serving. It fails if the task ends first.
+    ///
+    /// With the gRPC transport the future also dials the peers, starting
+    /// once that first snapshot is in: an event that arrived before the
+    /// core had the partition it names would be dropped for good.
     pub fn reconcile_catalog<S>(
         &self,
         pools: watch::Receiver<Arc<S>>,
@@ -271,8 +320,37 @@ impl CoreSelector {
         let reconciler = CatalogReconciler::new(self.service.core().clone());
         let (source, first_taken) = PoolCatalogSource::with_ready(pools);
         let source = source.with_directory(self.directory.clone());
-        let reconcile = async move { reconciler.run(source, cancel).await };
-        (first_taken, reconcile)
+        let (ready, is_ready) = oneshot::channel();
+        let dialer = self
+            .grpc
+            .as_ref()
+            .map(|grpc| (grpc.hub.clone(), grpc.cancel.clone()));
+        let service = self.service.clone();
+        let stop = cancel.clone();
+        // Ends the peers when the catalog closes, as the reconciler does.
+        let catalog_closed = CancellationToken::new();
+        let closed = catalog_closed.clone();
+        let reconcile = async move {
+            let peers = async move {
+                if first_taken.await.is_err() {
+                    return;
+                }
+                let _ = ready.send(());
+                if let Some((hub, transport)) = dialer {
+                    tokio::select! {
+                        _ = stop.cancelled() => {}
+                        _ = closed.cancelled() => {}
+                        _ = replica_sync::dialer::run_peers(hub, service, transport) => {}
+                    }
+                }
+            };
+            let catalog = async {
+                reconciler.run(source, cancel).await;
+                catalog_closed.cancel();
+            };
+            tokio::join!(catalog, peers);
+        };
+        (is_ready, reconcile)
     }
 
     /// Books a request on `pool`, whatever the policy would pick.
@@ -603,6 +681,8 @@ fn spawn(task: impl Future<Output = ()> + Send + 'static) {
 mod tests {
     use url::Url;
 
+    use axum::serve::ListenerExt;
+
     use crate::affinity::tests::{OHIO, fleet, set_occupancy};
     use crate::selector::tests::pool;
     use crate::{InFlightTracker, RoundRobinSelector};
@@ -616,8 +696,17 @@ mod tests {
     /// A core following `pools`, once every pool with a frontend is one of
     /// its workers.
     async fn selector(policy: CorePolicy, pools: &[Pool]) -> (CoreSelector, Catalog) {
+        synced_selector(policy, pools, None).await
+    }
+
+    /// [`selector`], replicating over `transport`.
+    async fn synced_selector(
+        policy: CorePolicy,
+        pools: &[Pool],
+        transport: Option<GrpcReplicaSync>,
+    ) -> (CoreSelector, Catalog) {
         let (catalog, subscription) = watch::channel(Arc::new(pools.to_vec()));
-        let selector = CoreSelector::new(policy).await.unwrap();
+        let selector = CoreSelector::new(policy, transport).await.unwrap();
         let (first_snapshot, reconcile) =
             selector.reconcile_catalog(subscription, CancellationToken::new());
         tokio::spawn(reconcile);
@@ -1216,4 +1305,6 @@ mod tests {
         signals.forget(&pools[0].id);
         assert_eq!(host_for(&core, &pools, Some("s")).await, "oregon-a");
     }
+
+    mod replication;
 }

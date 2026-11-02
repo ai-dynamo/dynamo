@@ -5,7 +5,23 @@
 //!
 //! `--use-selection-core` selects through the embedded router core instead of
 //! the Global Router's own selectors, with each pool as one of the core's
-//! workers and every `--router-policy` as one of its plugins.
+//! workers and every `--router-policy` as one of its plugins. With
+//! `--replica-sync`, it shares its requests in flight and session pins with
+//! the other Global Frontends over the gRPC `ReplicaSync` stream, served on
+//! the API port itself; peers are the other frontends' API addresses:
+//!
+//! ```bash
+//! cargo run -p dynamo-global-frontend -- --port 8000 --use-selection-core \
+//!     --router-policy affinity --region ohio \
+//!     --pool ohio/dynamo/mocker-1=Qwen/Qwen3-0.6B@http://10.42.0.5:8000 \
+//!     --pool-relay ohio/dynamo/mocker-1=http://10.42.0.6:50051 \
+//!     --replica-sync --global-discovery http://discovery.dynamo:8080 \
+//!     --replica-url http://10.42.0.7:8000
+//! ```
+//!
+//! The stream is served from startup, before any peer is known. Peers are
+//! listed from Global Discovery (`--global-discovery`, with `--replica-url`
+//! naming this frontend's own entry) or given statically (`--peer`).
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -14,12 +30,13 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use dynamo_global_common::{PoolIdDeriver, PoolKey, V1PoolIdDeriver};
+use dynamo_global_discovery_client::GlobalDiscoveryClient;
 use dynamo_global_frontend::{
-    Metrics, PoolSnapshot, app, follow_relays, measure_round_trips, serve,
+    Metrics, PoolSnapshot, app, follow_relays, measure_round_trips, poll_replica_peers, serve,
 };
 use dynamo_global_router::{
-    AffinityConfig, AffinitySelector, CorePolicy, CoreSelector, FrontendSignals, InFlightTracker,
-    LeastInFlightConfig, LeastInFlightSelector, Pool, PoolSelector, PoolSignals,
+    AffinityConfig, AffinitySelector, CorePolicy, CoreSelector, FrontendSignals, GrpcReplicaSync,
+    InFlightTracker, LeastInFlightConfig, LeastInFlightSelector, Pool, PoolSelector, PoolSignals,
     RoundRobinSelector,
 };
 use tokio::sync::watch;
@@ -30,6 +47,10 @@ use url::Url;
 const ROUND_TRIP_INTERVAL: Duration = Duration::from_secs(30);
 /// How often expired session pins are dropped.
 const PIN_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+/// How often the replicas are listed from Global Discovery: the cadence of
+/// the frontend's other periodic reads of the fleet (`ROUND_TRIP_INTERVAL`).
+const DISCOVERY_POLL_INTERVAL: Duration = ROUND_TRIP_INTERVAL;
+const DISCOVERY_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How each request picks a pool.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -94,6 +115,30 @@ struct Args {
     /// full, a new session is placed without a pin until idle ones expire.
     #[arg(long, default_value_t = 1800)]
     session_idle_secs: u64,
+    /// Share this replica's requests in flight and session pins with the
+    /// other Global Frontends. Needs `--use-selection-core`.
+    #[arg(long, requires = "use_selection_core")]
+    replica_sync: bool,
+    /// `--replica-sync`: another Global Frontend to share requests in
+    /// flight and session pins with, as its API address `http://host:port`.
+    /// Repeat the flag for each peer. Static peers stay whatever Global
+    /// Discovery lists.
+    #[arg(long = "peer", value_parser = parse_api_url, requires = "replica_sync")]
+    peers: Vec<Url>,
+    /// `--replica-sync`: the Global Discovery service's base URL.
+    /// Its `/routers` lists every Global Frontend's API URL; every entry but
+    /// `--replica-url` becomes a peer, and the list is followed as it
+    /// changes.
+    #[arg(
+        long,
+        value_parser = parse_discovery_url,
+        requires_all = ["replica_sync", "replica_url"]
+    )]
+    global_discovery: Option<Url>,
+    /// This frontend's own API URL as Global Discovery lists it, so it does
+    /// not dial itself.
+    #[arg(long, value_parser = parse_api_url, requires = "global_discovery")]
+    replica_url: Option<Url>,
 }
 
 fn parse_key(key: &str) -> Result<PoolKey, String> {
@@ -125,6 +170,14 @@ fn parse_pool_relay(value: &str) -> Result<(PoolKey, Url), String> {
         return Err(format!("pool relay must be an http:// URL: {relay}"));
     }
     Ok((parse_key(key)?, relay))
+}
+
+fn parse_api_url(value: &str) -> Result<Url, String> {
+    dynamo_global_router::replica_sync::peer_url(value).map_err(|error| error.to_string())
+}
+
+fn parse_discovery_url(value: &str) -> Result<Url, String> {
+    parse_url(value, "global discovery")
 }
 
 /// Gives each pool its Relay. Every Relay must name a configured pool, and
@@ -162,6 +215,12 @@ fn parse_pool(value: &str) -> Result<Pool, String> {
     // Until pools come from Global Discovery, which reports each pool's
     // region, the cluster names it.
     Ok(Pool::new(&key, model, key.cluster_id(), frontends))
+}
+
+fn replica_transport(args: &Args) -> Result<Option<GrpcReplicaSync>> {
+    Ok(args.replica_sync.then(|| GrpcReplicaSync {
+        peers: args.peers.clone(),
+    }))
 }
 
 /// Starts following each pool's Relay and measuring each region's round
@@ -208,6 +267,7 @@ async fn main() -> Result<()> {
     if args.router_policy == RouterPolicy::RoundRobin && !args.pool_relays.is_empty() {
         tracing::warn!("--pool-relay is not used by --router-policy round-robin");
     }
+    let replica_transport = replica_transport(&args)?;
 
     let shutdown = CancellationToken::new();
     let signal = shutdown.clone();
@@ -229,12 +289,13 @@ async fn main() -> Result<()> {
     let in_flight = Arc::new(InFlightTracker::new());
     let metrics = Metrics::new(args.region.clone(), in_flight.clone());
     let idle = Duration::from_secs(args.session_idle_secs);
+    let mut replica_sync_routes = None;
     let selector: Arc<dyn PoolSelector> = match (args.use_selection_core, args.router_policy) {
         (true, policy) => {
             let policy = match policy {
                 RouterPolicy::RoundRobin => CorePolicy::RoundRobin,
-                // Counted by the frontend, as the current selector counts;
-                // nothing is booked.
+                // Counted by the frontends, as the current selector counts,
+                // and shared over gRPC replica sync; nothing is booked.
                 RouterPolicy::LeastInFlight => CorePolicy::LeastInFlight(LeastInFlightConfig {
                     counts: Arc::new(FrontendSignals::new(in_flight.clone())),
                     signals: load_signals(&args, &pools, in_flight.clone(), &shutdown),
@@ -248,7 +309,7 @@ async fn main() -> Result<()> {
                     idle,
                 }),
             };
-            let core = Arc::new(CoreSelector::new(policy).await?);
+            let core = Arc::new(CoreSelector::new(policy, replica_transport).await?);
             metrics.watch_core(core.clone());
             // Serve only once the configured pools are the core's workers;
             // a request before that would get a spurious 503.
@@ -258,6 +319,31 @@ async fn main() -> Result<()> {
             first_snapshot
                 .await
                 .context("the router core stopped before taking the first pool snapshot")?;
+            replica_sync_routes = core.replica_sync_routes();
+            // The replica streams are long-lived; ending them as shutdown
+            // begins lets the graceful drain finish with the requests.
+            let replication = core.clone();
+            let stopping = shutdown.clone();
+            tokio::spawn(async move {
+                stopping.cancelled().await;
+                replication.stop_replication();
+            });
+            if let Some(discovery) = args.global_discovery.clone() {
+                let client = GlobalDiscoveryClient::new(discovery, DISCOVERY_REQUEST_TIMEOUT)
+                    .context("build the Global Discovery client")?;
+                let (listed, peers) = watch::channel(Vec::new());
+                tokio::spawn(poll_replica_peers(
+                    client,
+                    args.replica_url.clone(),
+                    DISCOVERY_POLL_INTERVAL,
+                    listed,
+                    shutdown.child_token(),
+                ));
+                let reconcile_peers = core
+                    .reconcile_peers(peers, shutdown.child_token())
+                    .context("--global-discovery needs the gRPC replica transport")?;
+                tokio::spawn(reconcile_peers);
+            }
             core
         }
         (false, RouterPolicy::RoundRobin) => Arc::new(RoundRobinSelector::new()),
@@ -280,7 +366,12 @@ async fn main() -> Result<()> {
             selector
         }
     };
-    let app = app(pools, selector, in_flight, http, metrics);
+    let mut app = app(pools, selector, in_flight, http, metrics);
+    if let Some(routes) = replica_sync_routes {
+        // The gRPC stream shares the listener: its paths are the service's,
+        // beside `/v1/...`, and the listener speaks HTTP/1 and h2c alike.
+        app = app.merge(routes);
+    }
     let address = format!("{}:{}", args.host, args.port);
     let listener = tokio::net::TcpListener::bind(&address)
         .await
@@ -377,12 +468,112 @@ mod tests {
 
     const POOL: &str = "--pool=ohio/dynamo/blue=qwen@http://blue:8000";
 
+    fn transport(rest: &[&str]) -> Result<Option<GrpcReplicaSync>> {
+        let args = Args::try_parse_from([&["global-frontend", POOL], rest].concat())?;
+        replica_transport(&args)
+    }
+
+    const SYNC: [&str; 2] = ["--use-selection-core", "--replica-sync"];
+
     #[test]
-    fn the_core_is_off_unless_asked_for() {
+    fn the_core_and_replica_sync_are_off_unless_asked_for() {
         let args = Args::try_parse_from(["global-frontend", POOL]).unwrap();
         assert!(!args.use_selection_core);
-        let args = Args::try_parse_from(["global-frontend", POOL, "--use-selection-core"]).unwrap();
-        assert!(args.use_selection_core);
+        assert!(!args.replica_sync);
+        assert_eq!(replica_transport(&args).unwrap(), None);
+        assert_eq!(transport(&["--use-selection-core"]).unwrap(), None);
+    }
+
+    #[test]
+    fn replica_sync_dials_api_addresses_over_grpc() {
+        let peers = [
+            "--peer",
+            "http://10.0.0.2:8000",
+            "--peer",
+            "http://gf-b:8000",
+        ];
+        let expected = Some(GrpcReplicaSync {
+            peers: vec![
+                "http://10.0.0.2:8000".parse().unwrap(),
+                "http://gf-b:8000".parse().unwrap(),
+            ],
+        });
+        assert_eq!(
+            transport(&[&SYNC[..], &peers[..]].concat()).unwrap(),
+            expected
+        );
+        // Served from startup, with or without peers.
+        assert_eq!(
+            transport(&SYNC).unwrap(),
+            Some(GrpcReplicaSync { peers: Vec::new() })
+        );
+        // A peer is an API address: tcp:// is refused.
+        assert!(transport(&[&SYNC[..], &["--peer", "tcp://10.0.0.2:5600"]].concat()).is_err());
+    }
+
+    const DISCOVERY: [&str; 4] = [
+        "--global-discovery",
+        "http://discovery:8080",
+        "--replica-url",
+        "http://gf-a:8000",
+    ];
+
+    #[test]
+    fn discovery_lists_grpc_peers_and_names_this_replica() {
+        let args =
+            Args::try_parse_from([&["global-frontend", POOL], &SYNC[..], &DISCOVERY[..]].concat())
+                .unwrap();
+        assert_eq!(
+            args.global_discovery.as_ref().map(Url::as_str),
+            Some("http://discovery:8080/")
+        );
+        assert_eq!(
+            args.replica_url.as_ref().map(Url::as_str),
+            Some("http://gf-a:8000/")
+        );
+        assert_eq!(
+            replica_transport(&args).unwrap(),
+            Some(GrpcReplicaSync { peers: Vec::new() })
+        );
+        // Static peers ride along; discovery never removes them.
+        let with_peer = [&SYNC[..], &DISCOVERY[..], &["--peer", "http://gf-c:8000"]].concat();
+        assert_eq!(
+            transport(&with_peer).unwrap(),
+            Some(GrpcReplicaSync {
+                peers: vec!["http://gf-c:8000".parse().unwrap()],
+            })
+        );
+        // Discovery and this replica's URL need each other and replica sync.
+        assert!(transport(&[&SYNC[..], &DISCOVERY[..2]].concat()).is_err());
+        assert!(transport(&[&SYNC[..], &DISCOVERY[2..]].concat()).is_err());
+        assert!(transport(&[&["--use-selection-core"][..], &DISCOVERY[..]].concat()).is_err());
+    }
+
+    #[test]
+    fn replica_sync_needs_the_core_and_its_flags_need_replica_sync() {
+        for rejected in [
+            &["--replica-sync"][..],
+            &["--use-selection-core", "--peer", "http://10.0.0.2:8000"],
+            &["--peer", "http://10.0.0.2:8000"],
+        ] {
+            assert!(transport(rejected).is_err(), "{rejected:?}");
+        }
+    }
+
+    #[test]
+    fn parses_peers_as_api_addresses() {
+        assert_eq!(
+            parse_api_url("http://peer:8000"),
+            Ok("http://peer:8000".parse().unwrap())
+        );
+        // TLS peers wait for the transport to carry TLS.
+        assert!(parse_api_url("https://peer:8000").is_err());
+        assert!(parse_api_url("tcp://peer:5600").is_err());
+        assert!(parse_api_url("http://").is_err());
+        assert!(parse_api_url("peer:8000").is_err());
+        // Discovery itself is reached over HTTP(S).
+        assert!(parse_discovery_url("https://discovery:8080").is_ok());
+        assert!(parse_discovery_url("tcp://discovery:8080").is_err());
     }
 
     #[test]

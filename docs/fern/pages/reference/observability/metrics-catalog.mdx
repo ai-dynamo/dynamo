@@ -954,10 +954,22 @@ Emitted by the Global Frontend at `/metrics` on its serving port. It forwards ea
   **Experimental.** Time to select a pool for a request, in milliseconds, with either selection path (`--use-selection-core` or not) and any `--router-policy`. Counts every request that reaches selection, also one that no pool can take. No labels: a process runs one path and one policy, so compare paths across runs. Unit and buckets match the router's `dynamo_router_overhead_*_ms` histograms.
 </ParamField>
 
-The following is emitted with `--use-selection-core`. It is read from the embedded router core at scrape time.
+The following are emitted with `--use-selection-core`, and the `replica_sync_*` families also need `--replica-sync`. They are read from the embedded router core at scrape time.
 
 <ParamField path="dynamo_global_frontend_core_pin_bookings_total" type="counter">
   **Experimental.** Affinity pin bookings by the embedded router core: a session's first request, a move to another pool, and a periodic refresh. Under `round-robin` and `least-in-flight` the core books nothing. A rate close to the request rate under `affinity` means sessions are moving or starting rather than staying on their pools.
+</ParamField>
+
+<ParamField path="dynamo_global_frontend_replica_sync_peers" type="gauge">
+  **Experimental.** Peers whose replica-sync stream is open.
+</ParamField>
+
+<ParamField path="dynamo_global_frontend_replica_sync_frames_total" type="counter">
+  **Experimental.** Replica-sync frames this replica published to its subscribers (`direction="published"`) or received from its peers (`direction="received"`). Each replica publishes its requests in flight every 100 ms, and session pins as they change.
+</ParamField>
+
+<ParamField path="dynamo_global_frontend_replica_sync_dropped_total" type="counter">
+  **Experimental.** Replica-sync items lost, labeled by `reason`: `binding_rejected` (an inbound session pin the core refused, or that did not convert) or `subscriber_lagged` (frames a slow subscriber missed).
 </ParamField>
 
 ## Mocker Metrics

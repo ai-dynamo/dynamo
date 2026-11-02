@@ -11,7 +11,9 @@
 //!
 //! [`CoreSelector`] is a [`PoolSelector`] too: it selects through the
 //! embedded router core, with each pool registered as one of the core's
-//! workers and the policies as the core's plugins (see [`core`]).
+//! workers and the policies as the core's plugins. With replica sync it
+//! shares session pins and requests in flight with the other replicas (see
+//! [`core`]).
 
 mod affinity;
 pub mod core;
@@ -25,8 +27,8 @@ mod signals;
 pub use affinity::AffinitySelector;
 pub use core::replica_sync;
 pub use core::{
-    AffinityConfig, CorePolicy, CoreSelector, LeastInFlightConfig, MAX_SESSION_ID_BYTES,
-    Reservation,
+    AffinityConfig, CorePolicy, CoreSelector, GrpcReplicaSync, LeastInFlightConfig,
+    MAX_SESSION_ID_BYTES, ReplicaSyncStats, Reservation,
 };
 pub use frontend_signals::FrontendSignals;
 pub use load::{InFlightGuard, InFlightTracker};

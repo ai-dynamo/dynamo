@@ -154,7 +154,8 @@ impl WorkerPicker for RoundRobinPicker {
 /// Picks the nearest candidate with the fewest requests in flight, with the
 /// rule of [`crate::LeastInFlightSelector`] (affinity's placement on
 /// requests in flight over each pool's capacity), counting the Global
-/// Frontends' own requests ([`FrontendSignals`]). Ties rotate among the tied
+/// Frontends' own requests ([`FrontendSignals`]): this process's plus, with
+/// replica sync, each peer replica's last report. Ties rotate among the tied
 /// candidates.
 ///
 /// It reads none of the core's inputs, so the core books nothing for it: no
