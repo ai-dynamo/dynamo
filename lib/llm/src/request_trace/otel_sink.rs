@@ -261,6 +261,7 @@ fn schema_name(schema: RequestTraceSchema) -> &'static str {
 
 fn event_type_name(event_type: RequestTraceEventType) -> &'static str {
     match event_type {
+        RequestTraceEventType::RequestStart => "request_start",
         RequestTraceEventType::RequestEnd => "request_end",
         RequestTraceEventType::ToolStart => "tool_start",
         RequestTraceEventType::ToolEnd => "tool_end",

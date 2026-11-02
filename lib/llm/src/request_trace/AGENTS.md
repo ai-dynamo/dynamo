@@ -1,8 +1,8 @@
 # Request Trace Rust Modules
 
 This folder owns `DYN_REQUEST_TRACE` capture in `dynamo-llm`: replay hashing,
-request-end emission, optional `agent_context` enrichment, local trace sinks,
-and optional harness tool-event ingestion.
+request-start and request-end emission, optional `agent_context` enrichment,
+local trace sinks, and optional harness tool-event ingestion.
 
 ## Scope
 

@@ -280,8 +280,8 @@ impl LoadedAgentTrace {
     }
 }
 
-/// `request_payload` records are skipped; replay consumes `request_end` and
-/// terminal tool events only. Errors if no `request_end` rows were found.
+/// `request_payload` and `request_start` records are skipped; replay consumes
+/// `request_end` and terminal tool events only. Errors if no `request_end` rows were found.
 pub fn load_request_trace_records(paths: &[PathBuf]) -> Result<LoadedAgentTrace> {
     let mut loaded = LoadedAgentTrace::default();
     let mut request_ids = HashSet::new();
@@ -358,6 +358,12 @@ fn open_trace_reader(path: &Path) -> Result<Box<dyn BufRead>> {
     Ok(Box::new(BufReader::new(reader)))
 }
 
+/// Rows replay does not use. A `request_start` row repeats the prompt's
+/// hashes at arrival; `request_end` carries everything replay needs.
+fn is_skipped_event(event_type: Option<&str>) -> bool {
+    matches!(event_type, Some("request_payload" | "request_start"))
+}
+
 fn parse_trace_record(line: &str) -> Result<Option<RequestTraceRecord>> {
     let envelope = match serde_json::from_str::<JsonLineEnvelope>(line)? {
         JsonLineEnvelope::Object(envelope) => envelope,
@@ -366,7 +372,7 @@ fn parse_trace_record(line: &str) -> Result<Option<RequestTraceRecord>> {
 
     match envelope.event {
         Some(TraceEventEnvelope::Object(event)) => {
-            if event.event_type.as_deref() == Some("request_payload") {
+            if is_skipped_event(event.event_type.as_deref()) {
                 return Ok(None);
             }
             Ok(Some(
@@ -375,7 +381,7 @@ fn parse_trace_record(line: &str) -> Result<Option<RequestTraceRecord>> {
         }
         Some(TraceEventEnvelope::Other(_)) => Ok(None),
         None => {
-            if envelope.event_type.as_deref() == Some("request_payload") {
+            if is_skipped_event(envelope.event_type.as_deref()) {
                 return Ok(None);
             }
             Ok(Some(serde_json::from_str(line)?))
@@ -531,6 +537,30 @@ mod tests {
         writeln!(
             file,
             r#"{{"timestamp":1,"event":{{"schema":"dynamo.request.trace.v1","event_type":"request_end","event_time_unix_ms":1100,"request":{{"request_id":"req-1","request_received_ms":1000,"output_tokens":4,"replay":{{"trace_block_size":2,"input_length":3,"input_sequence_hashes":[11,22]}}}}}}}}"#
+        )
+        .unwrap();
+
+        let loaded = load_request_trace_records(&[file.path().to_path_buf()]).unwrap();
+        assert_eq!(loaded.requests.len(), 1);
+        assert_eq!(loaded.requests[0].request.request_id, "req-1");
+    }
+
+    #[test]
+    fn skips_request_start_records() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"{{"schema":"dynamo.request.trace.v1","event_type":"request_start","event_time_unix_ms":1000,"request":{{"request_id":"req-1","request_received_ms":1000,"input_tokens":3,"routing_hashes":{{"block_size":2,"local_block_hashes":[7],"sequence_hashes":[11]}}}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"timestamp":1,"event":{{"schema":"dynamo.request.trace.v1","event_type":"request_start","event_time_unix_ms":1000,"request":{{"request_id":"req-1"}}}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"schema":"dynamo.request.trace.v1","event_type":"request_end","event_time_unix_ms":1100,"request":{{"request_id":"req-1","request_received_ms":1000,"output_tokens":4,"replay":{{"trace_block_size":2,"input_length":3,"input_sequence_hashes":[11,22]}}}}}}"#
         )
         .unwrap();
 

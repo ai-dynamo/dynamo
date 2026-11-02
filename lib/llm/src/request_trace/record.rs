@@ -10,6 +10,7 @@ use crate::request_trace::RequestReplayMetrics;
 use crate::request_trace::RequestTraceEventSource;
 use crate::request_trace::RequestTracePayload;
 
+use super::RequestRoutingHashes;
 use super::RequestTraceEventType;
 use super::RequestTraceMetrics;
 use super::RequestTraceRecord;
@@ -52,6 +53,55 @@ fn event_time_unix_ms_from_request(request: &RequestTraceMetrics) -> u64 {
         })
 }
 
+/// The `request_start` row: published at preprocessing, before the request is
+/// dispatched, so a consumer sees the prompt's blocks at arrival.
+pub(super) fn request_start_record(
+    request_id: String,
+    x_request_id: Option<String>,
+    model: String,
+    tracker: &RequestTracker,
+    input_tokens: usize,
+    routing_hashes: RequestRoutingHashes,
+) -> RequestTraceRecord {
+    RequestTraceRecord {
+        schema: RequestTraceSchema::V1,
+        event_type: RequestTraceEventType::RequestStart,
+        event_time_unix_ms: unix_time_ms(),
+        event_source: None,
+        agent_context: None,
+        request: Some(RequestTraceMetrics {
+            request_id,
+            x_request_id,
+            model: Some(model),
+            input_tokens: Some(input_tokens as u64),
+            request_received_ms: Some(tracker.request_received_epoch_ms()),
+            routing_hashes: Some(routing_hashes),
+            ..Default::default()
+        }),
+        tool: None,
+        selection: None,
+        payload: None,
+    }
+}
+
+pub(crate) fn emit_request_start(
+    request_id: String,
+    x_request_id: Option<String>,
+    model: String,
+    tracker: &RequestTracker,
+    input_tokens: usize,
+    routing_hashes: RequestRoutingHashes,
+) {
+    publish(request_start_record(
+        request_id,
+        x_request_id,
+        model,
+        tracker,
+        input_tokens,
+        routing_hashes,
+    ));
+}
+
 pub(crate) fn emit_request_end(
     request_id: String,
     x_request_id: Option<String>,
@@ -92,6 +142,7 @@ pub(crate) fn emit_request_end(
         queue_depth: timing.router_queue_depth.map(|v| v as u64),
         worker,
         replay: Some(replay),
+        routing_hashes: None,
         finish_reason_metadata: None,
     };
     sanitize_request(&mut request);
