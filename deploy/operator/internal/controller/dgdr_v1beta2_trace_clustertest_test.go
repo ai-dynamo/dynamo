@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -44,9 +46,13 @@ const (
 	clusterTestTraceMode = "640"
 )
 
-// clusterTestTraceFile is the claim and claim-relative path a trace Request reads.
+// clusterTestCreateContainerConfigError is the kubelet's waiting reason for a container whose
+// configuration it cannot apply, such as a subPath that resolves outside its volume.
+const clusterTestCreateContainerConfigError = "CreateContainerConfigError"
+
+// clusterTestTraceFile is the claim and the claim-relative subPath a trace Request reads.
 type clusterTestTraceFile struct {
-	claim, path string
+	claim, subPath string
 }
 
 // clusterTestTraceWriter gzips the fixture to the claim file and gives it the requested owner and mode.
@@ -208,7 +214,7 @@ func writeClusterTestTrace(t *testing.T, env *clusterenv.TestEnv, trace clusterT
 	}))
 
 	runClusterTestTraceJob(t, env, "trace-writer", image, trace.claim, "trace-fixture", true, clusterTestTraceWriter,
-		"/fixture/trace.jsonl", filepath.Join("/claim", trace.path),
+		"/fixture/trace.jsonl", filepath.Join("/claim", trace.subPath),
 		fmt.Sprint(clusterTestTraceUID), fmt.Sprint(clusterTestTraceGID), clusterTestTraceMode)
 	return statClusterTestTrace(t, env, trace, "trace-before", image)
 }
@@ -218,7 +224,7 @@ func writeClusterTestTrace(t *testing.T, env *clusterenv.TestEnv, trace clusterT
 func statClusterTestTrace(t *testing.T, env *clusterenv.TestEnv, trace clusterTestTraceFile, name, image string) string {
 	t.Helper()
 	stat := runClusterTestTraceJob(t, env, name, image, trace.claim, "", false, clusterTestTraceStat,
-		filepath.Join("/claim", trace.path))
+		filepath.Join("/claim", trace.subPath))
 	require.Regexp(t, fmt.Sprintf(`^%d %d %s [0-9a-f]{64}$`, clusterTestTraceUID, clusterTestTraceGID, clusterTestTraceMode), stat)
 	return stat
 }
@@ -235,7 +241,7 @@ func requireClusterTestTraceInput(t *testing.T, run *nvidiacomv1beta2.DynamoGrap
 	}
 	require.NoError(t, yaml.Unmarshal(run.Status.AISimulate.Input.Raw, &input))
 	require.Equal(t, map[string]any{
-		"type": "trace", "format": "dynamo", "paths": []any{aisimulate.TracePath(trace.path)},
+		"type": "trace", "format": "dynamo", "paths": []any{aisimulate.TracePath(trace.subPath)},
 	}, input.Traffic.Source)
 	require.Equal(t, "trace_timestamps", input.Traffic.Load["type"])
 }
@@ -250,10 +256,10 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2RefusesATraceSymlinkThatLeave
 	env.BlockReplicaSets()
 
 	t.Log("Place a symlink at the trace path that points at a file outside the claim")
-	trace := clusterTestTraceFile{claim: "linked-traces", path: "retune/escape.jsonl.gz"}
+	trace := clusterTestTraceFile{claim: "linked-traces", subPath: "retune/escape.jsonl.gz"}
 	createClusterTestTraceClaim(t, env, trace)
 	runClusterTestTraceJob(t, env, "trace-linker", plannerImage, trace.claim, "", true, clusterTestTraceLinker,
-		filepath.Join("/claim", trace.path), "/etc/passwd")
+		filepath.Join("/claim", trace.subPath), "/etc/passwd")
 
 	t.Log("Apply a Request that reads the linked trace path through production admission")
 	request := &nvidiacomv1beta2.DynamoGraphDeploymentRequest{
@@ -268,8 +274,8 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2RefusesATraceSymlinkThatLeave
 					}},
 					Workload: &nvidiacomv1beta2.WorkloadSpec{Trace: &nvidiacomv1beta2.TraceWorkloadSpec{
 						Format: nvidiacomv1beta2.TraceFormatDynamo,
-						Source: nvidiacomv1beta2.TraceSourceSpec{PVC: &nvidiacomv1beta2.TracePVCSource{
-							ClaimName: trace.claim, Path: trace.path,
+						Source: nvidiacomv1beta2.TraceSourceSpec{PersistentVolumeClaim: &nvidiacomv1beta2.TracePVCSource{
+							ClaimName: trace.claim, SubPath: trace.subPath,
 						}},
 					}},
 				},
@@ -286,12 +292,32 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2RefusesATraceSymlinkThatLeave
 	defer runWatch.Stop()
 	startClusterTestDGDRV1beta2Controllers(t, env, plannerImage, operatorImage)
 
-	t.Log("The kubelet refuses the subPath, so the sweeper waits and the open Run reports it verbatim")
+	// An image pull or other waiting state can come first and recover; only the configuration error
+	// shows that the kubelet tried the trace mount and refused it.
+	t.Log("The kubelet refuses the subPath, so the sweeper waits with CreateContainerConfigError")
+	var sweeperPod types.UID
+	require.Eventually(t, func() bool {
+		var pods corev1.PodList
+		require.NoError(t, env.Client().List(ctx, &pods, client.InNamespace(env.Namespace())))
+		for i := range pods.Items {
+			for _, status := range pods.Items[i].Status.ContainerStatuses {
+				if status.Name == dgdrRunSweeperContainer && status.State.Waiting != nil &&
+					status.State.Waiting.Reason == clusterTestCreateContainerConfigError {
+					sweeperPod = pods.Items[i].UID
+					return true
+				}
+			}
+		}
+		return false
+	}, 5*time.Minute, time.Second, "the sweeper did not wait with %s", clusterTestCreateContainerConfigError)
+
+	t.Log("The open Run reports that configuration error of the sweeper")
 	var waiting nvidiacomv1beta2.DynamoGraphDeploymentRun
-	awaitClusterTestRun(t, runWatch, "the Run did not report its waiting sweeper", func(run *nvidiacomv1beta2.DynamoGraphDeploymentRun) bool {
+	awaitClusterTestRun(t, runWatch, "the Run did not report its sweeper's configuration error", func(run *nvidiacomv1beta2.DynamoGraphDeploymentRun) bool {
 		waiting = *run.DeepCopy()
 		condition := meta.FindStatusCondition(run.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
-		return condition != nil && condition.Reason == dgdrRunReasonContainerWaiting
+		return condition != nil && condition.Reason == dgdrRunReasonContainerWaiting && strings.HasPrefix(condition.Message,
+			fmt.Sprintf("container %q is waiting: %s: ", dgdrRunSweeperContainer, clusterTestCreateContainerConfigError))
 	})
 	condition := meta.FindStatusCondition(waiting.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted)
 	require.Equal(t, metav1.ConditionFalse, condition.Status)
@@ -303,6 +329,7 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2RefusesATraceSymlinkThatLeave
 	require.NoError(t, env.Client().List(ctx, &pods, client.InNamespace(env.Namespace()),
 		client.MatchingLabels{batchv1.JobNameLabel: waiting.Status.JobRef.Name}))
 	require.Len(t, pods.Items, 1)
+	require.Equal(t, sweeperPod, pods.Items[0].UID)
 	var sweeper *corev1.ContainerStatus
 	for i := range pods.Items[0].Status.ContainerStatuses {
 		if pods.Items[0].Status.ContainerStatuses[i].Name == dgdrRunSweeperContainer {
@@ -311,6 +338,7 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2RefusesATraceSymlinkThatLeave
 	}
 	require.NotNil(t, sweeper)
 	require.NotNil(t, sweeper.State.Waiting)
+	require.Equal(t, clusterTestCreateContainerConfigError, sweeper.State.Waiting.Reason)
 	require.Nil(t, sweeper.State.Running)
 	require.Nil(t, sweeper.LastTerminationState.Terminated)
 	require.Zero(t, sweeper.RestartCount)

@@ -32,6 +32,11 @@ import (
 // deleted, by its Request or with its namespace, before it released its claim. The claim keeps a
 // Run's finalizer while that Run exists and is not being deleted, or while a Job the Run controls
 // exists. The Run reconciler releases the finalizer of a completed Run itself.
+//
+// For a deleted Run, no Job does not mean no pod: garbage collection deletes the Run's Job in the
+// background, before the Job's pod has stopped, so the finalizer can be released while that pod
+// still has the trace file mounted. Kubernetes PersistentVolumeClaim protection, not this
+// finalizer, keeps the claim until the pod is gone.
 type DynamoGraphDeploymentRunTraceClaimReconciler struct {
 	client.Client
 	APIReader     client.Reader
@@ -45,20 +50,29 @@ func (r *DynamoGraphDeploymentRunTraceClaimReconciler) Reconcile(ctx context.Con
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	// The finalizers of Runs that the cache shows gone and without a Job.
+	stale, err := r.staleTraceClaimFinalizers(ctx, claim)
+	if err != nil || len(stale) == 0 {
+		return ctrl.Result{}, err
+	}
+
+	// The Job cache can miss a Job a Run created just before it was deleted, and releasing the claim
+	// cannot be undone, so one uncached list of the namespace's Jobs confirms every stale finalizer.
+	live := &batchv1.JobList{}
+	if err := r.APIReader.List(ctx, live, client.InNamespace(claim.Namespace)); err != nil {
+		return ctrl.Result{}, fmt.Errorf("list the Jobs of the Runs that read trace PersistentVolumeClaim %q from the API: %w",
+			claim.Name, err)
+	}
+	for i := range live.Items {
+		for _, uid := range dgdrRunJobControllerUIDs(&live.Items[i]) {
+			delete(stale, dgdrRunTraceClaimFinalizer(types.UID(uid)))
+		}
+	}
+
 	// Drop the finalizer of every Run that can no longer execute against the claim.
 	original := claim.DeepCopy()
-	for _, finalizer := range original.Finalizers {
-		uid, ok := strings.CutPrefix(finalizer, dgdrRunTraceClaimFinalizerPrefix)
-		if !ok {
-			continue
-		}
-		held, err := r.runHoldsClaim(ctx, claim, types.UID(uid))
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if !held {
-			controllerutil.RemoveFinalizer(claim, finalizer)
-		}
+	for finalizer := range stale {
+		controllerutil.RemoveFinalizer(claim, finalizer)
 	}
 	if len(claim.Finalizers) == len(original.Finalizers) {
 		return ctrl.Result{}, nil
@@ -69,46 +83,44 @@ func (r *DynamoGraphDeploymentRunTraceClaimReconciler) Reconcile(ctx context.Con
 	return ctrl.Result{}, nil
 }
 
-// runHoldsClaim reports whether the Run with uid may still execute against claim: the Run exists
-// and is not being deleted, or a Job it controls exists. A Run never appears after its finalizer, so
-// the cache answers for the Run. The Job cache can miss a Job the Run created just before it was
-// deleted, and releasing the claim cannot be undone, so the API server confirms that no such Job is
-// left before the claim is released. claim must not be nil.
-func (r *DynamoGraphDeploymentRunTraceClaimReconciler) runHoldsClaim(
+// staleTraceClaimFinalizers returns the Run finalizers on claim that the cache no longer justifies:
+// the Run is gone or being deleted, and the cache shows no Job it controls. A Run never appears after
+// its finalizer, so the cache answers for the Run; only the Jobs need the API server's confirmation,
+// which the caller makes once for all of them. claim must not be nil.
+func (r *DynamoGraphDeploymentRunTraceClaimReconciler) staleTraceClaimFinalizers(
 	ctx context.Context,
 	claim *corev1.PersistentVolumeClaim,
-	uid types.UID,
-) (bool, error) {
+) (map[string]struct{}, error) {
 	runs := &nvidiacomv1beta2.DynamoGraphDeploymentRunList{}
 	if err := r.List(ctx, runs, client.InNamespace(claim.Namespace),
 		client.MatchingFields{dgdrRunTraceClaimIndex: claim.Name}); err != nil {
-		return false, fmt.Errorf("list the Runs that read trace PersistentVolumeClaim %q: %w", claim.Name, err)
+		return nil, fmt.Errorf("list the Runs that read trace PersistentVolumeClaim %q: %w", claim.Name, err)
 	}
+	active := make(map[string]struct{}, len(runs.Items))
 	for i := range runs.Items {
-		if runs.Items[i].UID == uid && runs.Items[i].DeletionTimestamp == nil {
-			return true, nil
+		if runs.Items[i].DeletionTimestamp == nil {
+			active[dgdrRunTraceClaimFinalizer(runs.Items[i].UID)] = struct{}{}
 		}
 	}
 
-	// A Job of the Run, as the cache and then the API server show it.
-	jobs := &batchv1.JobList{}
-	if err := r.List(ctx, jobs, client.InNamespace(claim.Namespace),
-		client.MatchingFields{dgdrRunJobControllerUIDIndex: string(uid)}); err != nil {
-		return false, fmt.Errorf("list the Jobs of Run %q: %w", uid, err)
-	}
-	if len(jobs.Items) > 0 {
-		return true, nil
-	}
-	live := &batchv1.JobList{}
-	if err := r.APIReader.List(ctx, live, client.InNamespace(claim.Namespace)); err != nil {
-		return false, fmt.Errorf("list the Jobs of Run %q from the API: %w", uid, err)
-	}
-	for i := range live.Items {
-		if slices.Contains(dgdrRunJobControllerUIDs(&live.Items[i]), string(uid)) {
-			return true, nil
+	stale := map[string]struct{}{}
+	for _, finalizer := range claim.Finalizers {
+		uid, ok := strings.CutPrefix(finalizer, dgdrRunTraceClaimFinalizerPrefix)
+		if _, held := active[finalizer]; !ok || held {
+			continue
+		}
+
+		// A Job of the Run as the cache shows it.
+		jobs := &batchv1.JobList{}
+		if err := r.List(ctx, jobs, client.InNamespace(claim.Namespace),
+			client.MatchingFields{dgdrRunJobControllerUIDIndex: uid}); err != nil {
+			return nil, fmt.Errorf("list the Jobs of Run %q: %w", uid, err)
+		}
+		if len(jobs.Items) == 0 {
+			stale[finalizer] = struct{}{}
 		}
 	}
-	return false, nil
+	return stale, nil
 }
 
 // dgdrRunProtectsTraceClaim reports whether obj carries the finalizer of a Run.

@@ -212,7 +212,8 @@ func defaultGPUHardwareSpecV1beta2(gpu *nvidiacomv1beta2.GPUHardwareSpec, defaul
 }
 
 func defaultWorkloadSpecV1beta2(workload *nvidiacomv1beta2.WorkloadSpec) {
-	// A trace is the complete traffic model; it receives no static default and no format default.
+	// A trace is the complete traffic model and receives no static default. The CRD schema, not
+	// admission, defaults its format.
 	if workload.Trace != nil {
 		return
 	}

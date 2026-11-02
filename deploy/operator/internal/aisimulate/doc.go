@@ -32,10 +32,9 @@
 // SLA bound is set. Last, spec.aisimulate.inputOverrides is applied on top as a JSON Merge
 // Patch (RFC 7386): upstream objects merge recursively, arrays and scalars replace the value,
 // and null deletes it. The input overrides are authoritative: they win on every path they name,
-// including the derived defaults, and are applied once, last. Only the operator-owned paths are
-// exempt: Request admission rejects them and the Run controller restores them after this
-// lowering. They are the operator-owned dgdr_run fields and, for a trace, traffic.source.type,
-// format and paths.
+// including the derived defaults and the traffic a typed trace lowers, and are applied once, last.
+// Only the operator-owned dgdr_run fields are exempt: Request admission rejects them and the Run
+// controller restores them after this lowering.
 //
 // The document stays unstructured (map[string]any) because its schema belongs to the
 // AISimulate release bundled in the operator's Planner image, not to this package. Reads and writes go

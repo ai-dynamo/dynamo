@@ -379,10 +379,10 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 				require.NoError(t, yaml.Unmarshal(data, scenario))
 				require.NotNil(t, scenario.Spec.Workload, "trace scenario input has no workload")
 				require.NotNil(t, scenario.Spec.Workload.Trace, "trace scenario input has no trace workload")
-				require.NotNil(t, scenario.Spec.Workload.Trace.Source.PVC, "trace scenario input has no trace claim")
+				require.NotNil(t, scenario.Spec.Workload.Trace.Source.PersistentVolumeClaim, "trace scenario input has no trace claim")
 				trace = clusterTestTraceFile{
-					claim: scenario.Spec.Workload.Trace.Source.PVC.ClaimName,
-					path:  scenario.Spec.Workload.Trace.Source.PVC.Path,
+					claim:   scenario.Spec.Workload.Trace.Source.PersistentVolumeClaim.ClaimName,
+					subPath: scenario.Spec.Workload.Trace.Source.PersistentVolumeClaim.SubPath,
 				}
 				createClusterTestTraceClaim(t, env, trace)
 				traceBefore = writeClusterTestTrace(t, env, trace, traceFixture, plannerImage)

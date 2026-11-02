@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -47,7 +46,7 @@ import (
 
 const (
 	dgdrRunJobControllerUIDIndex = ".metadata.dgdrRunControllerUID"
-	dgdrRunTraceClaimIndex       = ".spec.workload.trace.source.pvc.claimName"
+	dgdrRunTraceClaimIndex       = ".spec.workload.trace.source.persistentVolumeClaim.claimName"
 	dgdrRunMaxJobNameLength      = 63
 
 	dgdrRunInputKey                = "input.yaml"
@@ -129,7 +128,7 @@ type DynamoGraphDeploymentRunV1beta2Reconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentcandidates/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;patch;update
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups="",resources=configmaps;serviceaccounts,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch
 
@@ -554,6 +553,8 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) cancelForDeletedTraceClaim(
 	jobs []batchv1.Job,
 	source *nvidiacomv1beta2.TracePVCSource,
 ) (ctrl.Result, error) {
+	message := fmt.Sprintf("trace PersistentVolumeClaim %q in namespace %q was deleted, which cancels the Run",
+		source.ClaimName, run.Namespace)
 	if len(jobs) == 0 {
 		live, err := r.uncachedOwnedJobs(ctx, run)
 		if err != nil {
@@ -564,11 +565,16 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) cancelForDeletedTraceClaim(
 				return ctrl.Result{RequeueAfter: dgdrRunExecutionCacheRetry}, nil
 			}
 		}
+
+		// The API server has just confirmed that no Job is left, so the Run completes without
+		// listing the Jobs again.
+		if len(live) == 0 {
+			return ctrl.Result{}, r.completeRun(ctx, run, dgdrRunReasonTraceSourceDeleted, message)
+		}
 		jobs = live
 	}
 
-	completed, err := r.stopAndCompleteRun(ctx, run, jobs, "for its deleted trace claim", dgdrRunReasonTraceSourceDeleted,
-		fmt.Sprintf("trace PersistentVolumeClaim %q in namespace %q was deleted, which cancels the Run", source.ClaimName, run.Namespace))
+	completed, err := r.stopAndCompleteRun(ctx, run, jobs, "for its deleted trace claim", dgdrRunReasonTraceSourceDeleted, message)
 	if err != nil || completed {
 		return ctrl.Result{}, err
 	}
@@ -635,7 +641,7 @@ func dgdrRunTraceClaim(run *nvidiacomv1beta2.DynamoGraphDeploymentRun) *nvidiaco
 	if run.Spec.Workload == nil || run.Spec.Workload.Trace == nil {
 		return nil
 	}
-	return run.Spec.Workload.Trace.Source.PVC
+	return run.Spec.Workload.Trace.Source.PersistentVolumeClaim
 }
 
 // dgdrRunTraceClaimNames indexes a Run by the claim its trace is read from.
@@ -651,7 +657,10 @@ func dgdrRunTraceClaimNames(obj client.Object) []string {
 }
 
 // runsForTraceClaim maps a claim event to the Runs in the claim's namespace that read their trace
-// from it.
+// from it and that the claim can still affect: a Run that has not completed, or a completed Run
+// whose finalizer the claim still carries and that has yet to release it. Many Runs can share one
+// claim, so waking every completed Run on each finalizer change would reconcile them all again
+// for nothing.
 func (r *DynamoGraphDeploymentRunV1beta2Reconciler) runsForTraceClaim(ctx context.Context, claim client.Object) []reconcile.Request {
 	runs := &nvidiacomv1beta2.DynamoGraphDeploymentRunList{}
 	if err := r.List(ctx, runs, client.InNamespace(claim.GetNamespace()),
@@ -661,7 +670,12 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) runsForTraceClaim(ctx contex
 	}
 	requests := make([]reconcile.Request, 0, len(runs.Items))
 	for i := range runs.Items {
-		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&runs.Items[i])})
+		run := &runs.Items[i]
+		if meta.IsStatusConditionTrue(run.Status.Conditions, nvidiacomv1beta2.DGDRRunConditionCompleted) &&
+			!controllerutil.ContainsFinalizer(claim, dgdrRunTraceClaimFinalizer(run.UID)) {
+			continue
+		}
+		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(run)})
 	}
 	return requests
 }
@@ -1032,24 +1046,6 @@ func dgdrRunInput(
 		if err := unstructured.SetNestedField(input, value, "dgdr_run", key); err != nil {
 			return nil, fmt.Errorf("set operator-owned dgdr_run.%s: %w", key, err)
 		}
-	}
-
-	// The typed trace owns traffic.source.type, format and paths the same way. Restoring them keeps a
-	// Run created without Request admission reading only the file on its read-only mount. Such a Run
-	// can also replace traffic or traffic.source with a non-object; that parent is rebuilt rather than
-	// failing every reconcile.
-	if run.Spec.Workload != nil && run.Spec.Workload.Trace != nil {
-		traffic, ok := input["traffic"].(map[string]any)
-		if !ok {
-			traffic = map[string]any{}
-			input["traffic"] = traffic
-		}
-		source, ok := traffic["source"].(map[string]any)
-		if !ok {
-			source = map[string]any{}
-			traffic["source"] = source
-		}
-		maps.Copy(source, aisimulate.TraceSource(run.Spec.Workload.Trace))
 	}
 	return input, nil
 }
@@ -1567,7 +1563,7 @@ func dgdrRunSweeperVolumeMounts(run *nvidiacomv1beta2.DynamoGraphDeploymentRun, 
 	}
 	if source := dgdrRunTraceClaim(run); source != nil {
 		mounts = append(mounts, corev1.VolumeMount{
-			Name: dgdrRunTraceVolume, MountPath: aisimulate.TracePath(source.Path), SubPath: source.Path, ReadOnly: true,
+			Name: dgdrRunTraceVolume, MountPath: aisimulate.TracePath(source.SubPath), SubPath: source.SubPath, ReadOnly: true,
 		})
 	}
 	return mounts
