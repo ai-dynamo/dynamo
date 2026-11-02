@@ -3630,7 +3630,7 @@ policy_classes:
                 assert_fetches_from_a_peer(&placement);
                 placement
             }
-            PlacementDecision::Queued => panic!("request {:?} was queued", request.uuid),
+            PlacementDecision::Queued => panic!("the request was queued"),
         }
     }
 

@@ -690,6 +690,28 @@ mod tests {
         assert!(placed.iter().all(|placement| placement.kv_hints.is_none()));
     }
 
+    #[test]
+    fn aggregated_placements_carry_kv_fetch_hints() {
+        use super::super::tests::{
+            fetch_hint, kv_fetch_target, occupy_worker_1, place_now, target_prefix_in_g2, topology,
+        };
+
+        let args =
+            MockerConfig::from_value(serde_json::json!({"engine": {"block_size": 64}})).unwrap();
+        let mut composition = KvReplayComposition::aggregated(args, 2, None, None, None);
+        let mut placement = composition
+            .create_aggregated_placement(1, topology(2, 1, true))
+            .unwrap();
+
+        occupy_worker_1(&mut placement, 0);
+        placement
+            .router
+            .on_kv_events(vec![target_prefix_in_g2(1, 0)])
+            .unwrap();
+        let placed = place_now(&mut placement, &kv_fetch_target(1), 0.0);
+        assert_eq!((placed.scheduler_id, placed.kv_hints), (0, fetch_hint(1)));
+    }
+
     fn retune_router_config() -> KvRouterConfig {
         KvRouterConfig {
             overlap_score_credit: 1.5,
