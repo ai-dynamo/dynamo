@@ -4,6 +4,33 @@
 use super::*;
 
 #[tokio::test]
+async fn native_abort_and_transport_share_capacity_message() {
+    for dialect in [
+        dynamo_decisions::Dialect::OpenAi,
+        dynamo_decisions::Dialect::Jev,
+    ] {
+        let cause = dynamo_runtime::error::DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::WorkerOverloaded)
+            .message("private overload")
+            .build();
+        let abort =
+            super::super::abort::classify(&json!({"type":"abort", "status_code":429})).unwrap();
+        let transport = super::super::backend_error::classify(&cause);
+        assert_eq!(abort.public_message, transport.public_message);
+        let parent = Context::new(()).context();
+        let abort = response_body(super::super::dispatch_error(
+            "capacity", &parent, abort, dialect,
+        ))
+        .await;
+        let transport = response_body(super::super::dispatch_error(
+            "capacity", &parent, transport, dialect,
+        ))
+        .await;
+        assert_eq!(abort, transport);
+    }
+}
+
+#[tokio::test]
 async fn native_abort_preserves_retry_status_and_cancels_pending_peer() {
     for status in [429, 503] {
         let engine = TestEngine::new(EngineBehavior::NativeAbort {
