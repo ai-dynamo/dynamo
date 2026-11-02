@@ -44,15 +44,19 @@ pub(super) struct ReplayWorkerConfig {
     pub(super) data_parallel_start_rank: u32,
     pub(super) data_parallel_size: u32,
     hint_capable: bool,
-    /// Derived from the fields above on first use; `enable_router_hint` resets it.
+    /// Derived from the fields above on first use.
     kv_transfer_keys: WorkerKvTransferKeysCache,
 }
 
 impl ReplayWorkerConfig {
-    /// Let this worker receive KV fetch hints and serve as their source.
-    pub(super) fn enable_router_hint(&mut self) {
-        self.hint_capable = true;
-        self.kv_transfer_keys = WorkerKvTransferKeysCache::default();
+    /// A worker with these limits that does or does not receive KV fetch hints
+    /// and serve as their source.
+    pub(super) fn with_router_hint(&self, router_hint: bool) -> Self {
+        Self {
+            hint_capable: router_hint,
+            kv_transfer_keys: WorkerKvTransferKeysCache::default(),
+            ..*self
+        }
     }
 
     pub(super) fn is_hint_capable(&self) -> bool {
@@ -193,14 +197,14 @@ mod tests {
 
     #[test]
     fn router_hint_metadata_covers_each_rank_and_keys_are_built_once() {
-        let mut config = ReplayWorkerConfig {
+        let template = ReplayWorkerConfig {
             data_parallel_start_rank: 2,
             data_parallel_size: 2,
             ..replay_worker_config(&MockerConfig::default())
         };
-        assert_eq!(config.kv_hint_transfer_metadata_for_dp_rank(2), None);
-        assert!(config.kv_transfer_keys().target().is_none());
-        config.enable_router_hint();
+        assert_eq!(template.kv_hint_transfer_metadata_for_dp_rank(2), None);
+        assert!(template.kv_transfer_keys().target().is_none());
+        let config = template.with_router_hint(true);
         assert!(config.is_hint_capable());
         let endpoint = |rank| {
             config
@@ -212,8 +216,8 @@ mod tests {
         // Ranks outside the worker's range get no metadata.
         assert_eq!(endpoint(1), None);
         assert_eq!(endpoint(4), None);
-        // Enabling hints drops the keys cached before; selections then borrow
-        // the keys derived on first use.
+        // The hint config derives its own keys, not the template's cached ones,
+        // and selections borrow them.
         let keys = config.kv_transfer_keys();
         assert!(matches!(keys, Cow::Borrowed(_)));
         assert_eq!(*keys, WorkerKvTransferKeys::new(&config));
