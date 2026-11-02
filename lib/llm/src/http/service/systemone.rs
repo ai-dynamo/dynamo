@@ -46,7 +46,7 @@ mod backend_error;
 
 #[path = "systemone/execution.rs"]
 mod execution;
-#[path = "systemone/token_execution.rs"]
+#[path = "systemone/token_execution_legacy.rs"]
 mod token_execution;
 use token_execution::backend::PreparedScoringRequest;
 #[cfg(test)]

@@ -3,12 +3,50 @@
 
 use super::backend_error::lifecycle_error;
 use super::*;
-#[path = "token_execution/backend_legacy.rs"]
-pub(super) mod backend;
 use crate::discovery::{DecisionContext, TokenExecutor};
-use crate::local_model::runtime_config::TokenBackend;
-use backend as token_scorer;
 use futures::{StreamExt, stream};
+
+#[path = "token_execution/backend.rs"]
+mod backend;
+pub(super) use backend::scoring_for;
+
+pub(super) struct TokenPolicy {
+    format_name: &'static str,
+    output_tokens: u32,
+    sibling_concurrency: usize,
+}
+
+/// Transport behavior belongs to the executor, not the passive model-card profile.
+#[async_trait::async_trait]
+pub(super) trait TokenScoring: Send + Sync {
+    fn policy(&self) -> TokenPolicy;
+    fn build_request(
+        &self,
+        prompt_ids: Vec<u32>,
+        label_ids: &[u32],
+        cache_salt: &str,
+    ) -> Result<serde_json::Value, crate::protocols::systemone::SystemOneError>;
+    async fn read_frames(
+        &self,
+        started: StartedBranch,
+        rank: u32,
+        size: u32,
+        parent: Arc<dyn AsyncEngineContext>,
+    ) -> Result<BranchResult, DispatchError>;
+    async fn read_branch(
+        &self,
+        started: StartedBranch,
+        rank: u32,
+        size: u32,
+        parent: Arc<dyn AsyncEngineContext>,
+    ) -> Result<BranchResult, DispatchError> {
+        let result = self.read_frames(started, rank, size, parent.clone()).await;
+        if parent.is_killed() {
+            return Err(DispatchError::cancelled());
+        }
+        result
+    }
+}
 
 pub(super) struct PreparedTokenExecution {
     executor: TokenExecutor,
@@ -20,13 +58,9 @@ impl PreparedTokenExecution {
         executor: TokenExecutor,
         branches: Vec<PreparedBranch>,
     ) -> Result<Self, DispatchError> {
-        if branches.is_empty()
-            || branches
-                .iter()
-                .any(|branch| branch.wire.backend() != executor.backend())
-        {
+        if branches.is_empty() {
             return Err(DispatchError::malformed(
-                "prepared scoring transport disagrees with its executor",
+                "prepared scoring execution has no branches",
             ));
         }
         Ok(Self { executor, branches })
@@ -39,7 +73,7 @@ impl PreparedTokenExecution {
 struct TokenDispatch<'a> {
     selection: &'a DecisionContext,
     engine: &'a crate::types::openai::generate::GenerateStreamingEngine,
-    backend: TokenBackend,
+    scoring: &'static dyn TokenScoring,
     request_id: &'a str,
     parent_context: &'a Arc<dyn AsyncEngineContext>,
     metrics: &'a Metrics,
@@ -54,7 +88,6 @@ pub(super) fn prepare_branches(
     cache_salt: &str,
 ) -> Result<Vec<PreparedBranch>, (StatusCode, String)> {
     let preprocessor = executor.preprocessor();
-    let backend = executor.backend();
     let context_length = selection.card.effective_context_length() as usize;
     let mut total_input_tokens = 0_usize;
     let mut remaining_tokenization_work = tokenization_work_limit(
@@ -148,14 +181,7 @@ pub(super) fn prepare_branches(
         remaining_tokenization_work -= prompt_ids.len() * (rendered.labels.len() + 2);
         remaining_encoding_bytes -= encoding_bytes;
         let prompt_len = prompt_ids.len();
-        let wire =
-            token_scorer::build(backend, prompt_ids, &label_ids, cache_salt).map_err(|cause| {
-                tracing::error!(error = %cause, "failed to build System One native request");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal server error".to_string(),
-                )
-            })?;
+        let wire = PreparedScoringRequest::new(prompt_ids, label_ids.clone(), cache_salt);
         branches.push(PreparedBranch {
             scoring: ScoringBranch {
                 index,
@@ -186,7 +212,7 @@ pub(super) async fn dispatch(
     let dispatch = TokenDispatch {
         selection,
         engine: executor.engine(),
-        backend: executor.backend(),
+        scoring: scoring_for(executor.backend()),
         request_id: &request_id,
         parent_context: &parent_context,
         metrics: &metrics,
@@ -213,7 +239,7 @@ pub(super) async fn dispatch(
             .into_iter()
             .map(|branch| dispatch.run_branch(branch, Some(placement))),
     )
-    .buffer_unordered(token_scorer::max_concurrent_siblings(dispatch.backend));
+    .buffer_unordered(dispatch.scoring.policy().sibling_concurrency);
     let mut failure = None;
     while let Some(result) = siblings.next().await {
         if failure.is_some() {
@@ -297,6 +323,7 @@ impl TokenDispatch<'_> {
             request: mut preprocessed,
             exchange,
         } = wire.compile(
+            self.scoring,
             &selection.canonical_model,
             selection.card.kv_cache_block_size,
             &branch_id,
@@ -308,28 +335,144 @@ impl TokenDispatch<'_> {
         if let Some(placement) = pinned {
             pin_to_placement(&mut preprocessed, placement);
         }
-        let context: Context<PreprocessedRequest> =
+        let mut context: Context<PreprocessedRequest> =
             Context::with_id_and_metadata(preprocessed, branch_id, Default::default());
-        let stream =
+        let receipt = selection.attach_dispatch_guard(&mut context);
+        let mut stream =
             decision_lifecycle::start_linked(parent_context.as_ref(), context, engine.as_ref())
                 .await
                 .map_err(lifecycle_error)?;
-        let result = token_scorer::finish_branch(
-            self.backend,
-            StartedBranch {
-                prepared,
-                tracker,
-                stream,
-                exchange,
-            },
-            selection.card.runtime_config.data_parallel_start_rank,
-            selection.card.runtime_config.data_parallel_size,
-            (*parent_context).clone(),
-        )
-        .await?;
+        // A lazy engine may establish its transport only while polling the first frame.
+        // Do not trust even an otherwise valid score stream unless the final hop checked it.
+        let first = run_until_killed(parent_context.as_ref(), stream.next())
+            .await
+            .ok_or_else(DispatchError::cancelled)?;
+        if !receipt.is_validated() {
+            stream.context().kill();
+            return Err(DispatchError::unavailable(
+                "scoring dispatch guard was not validated",
+            ));
+        }
+        let Some(first) = first else {
+            return Err(DispatchError::invalid_executor(
+                "empty decision scoring stream",
+            ));
+        };
+        let stream_context = stream.context();
+        let stream = dynamo_runtime::pipeline::ResponseStream::new(
+            Box::pin(stream::iter([first]).chain(stream)),
+            stream_context,
+        );
+        let result = self
+            .scoring
+            .read_branch(
+                StartedBranch {
+                    prepared,
+                    tracker,
+                    stream,
+                    exchange,
+                },
+                selection.card.runtime_config.data_parallel_start_rank,
+                selection.card.runtime_config.data_parallel_size,
+                (*parent_context).clone(),
+            )
+            .await?;
         if let Some(cached_tokens) = result.cached_tokens {
             metrics.observe_systemone_branch(self.metric_model, cached_tokens);
         }
         Ok(result)
     }
+}
+
+pub(super) struct PreparedScoringRequest {
+    prompt_ids: Vec<u32>,
+    label_ids: Vec<u32>,
+    cache_salt: String,
+}
+
+pub(super) fn measured_cached_tokens(
+    response: &serde_json::Value,
+    input_tokens: usize,
+) -> Result<Option<usize>, DispatchError> {
+    let Some(count) = response
+        .get("meta_info")
+        .and_then(|meta| meta.get("cached_tokens"))
+    else {
+        return Ok(None);
+    };
+    let count = count
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value <= input_tokens)
+        .ok_or_else(|| DispatchError::invalid_executor("invalid cache-read token count"))?;
+    Ok(Some(count))
+}
+
+impl PreparedScoringRequest {
+    #[cfg(test)]
+    pub(super) fn prompt_ids(&self) -> &[u32] {
+        &self.prompt_ids
+    }
+    pub(super) fn new(prompt_ids: Vec<u32>, label_ids: Vec<u32>, cache_salt: &str) -> Self {
+        Self {
+            prompt_ids,
+            label_ids,
+            cache_salt: cache_salt.to_owned(),
+        }
+    }
+    pub(super) fn compile(
+        self,
+        scoring: &dyn TokenScoring,
+        canonical_model: &str,
+        kv_cache_block_size: u32,
+        branch_id: &str,
+    ) -> Result<crate::generate_format::Bound, DispatchError> {
+        let prompt_len = self.prompt_ids.len();
+        let native = scoring
+            .build_request(self.prompt_ids, &self.label_ids, &self.cache_salt)
+            .map_err(|cause| DispatchError::malformed(cause.to_string()))?;
+        let mut bound = super::bind_native(
+            scoring.policy().format_name,
+            canonical_model,
+            kv_cache_block_size,
+            &native,
+            branch_id,
+        )
+        .map_err(|cause| DispatchError::malformed(format!("native request: {cause:#}")))?;
+        bound
+            .request
+            .routing
+            .get_or_insert_default()
+            .expected_output_tokens = Some(scoring.policy().output_tokens);
+        let tracker = Arc::new(RequestTracker::new());
+        tracker.record_isl(prompt_len, None);
+        bound.request.tracker = Some(tracker);
+        Ok(bound)
+    }
+}
+
+pub(super) fn scoring_placement(
+    tracker: &RequestTracker,
+    data_parallel_start_rank: u32,
+    data_parallel_size: u32,
+) -> Result<Placement, DispatchError> {
+    tracker
+        .get_worker_info()
+        .and_then(|worker| {
+            worker
+                .decode_worker_id
+                .or(worker.prefill_worker_id)
+                .map(|worker_id| {
+                    resolve_dp_rank(
+                        worker.decode_dp_rank.or(worker.prefill_dp_rank),
+                        data_parallel_start_rank,
+                        data_parallel_size,
+                    )
+                    .map(|dp_rank| Placement { worker_id, dp_rank })
+                })
+        })
+        .flatten()
+        .ok_or_else(|| {
+            DispatchError::unavailable("Dynamo did not report an unambiguous scoring worker rank")
+        })
 }

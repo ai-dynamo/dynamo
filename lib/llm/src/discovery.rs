@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#[path = "discovery/decision_legacy.rs"]
 mod decision;
 pub(crate) use decision::DecisionAvailability;
 pub(crate) mod image_edits;

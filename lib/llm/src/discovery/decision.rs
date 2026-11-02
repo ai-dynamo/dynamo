@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{SystemOneSelectionError, WorkerSet};
+use super::{DecisionResources, SystemOneSelectionError, TokenResources, WorkerSet};
+#[cfg(test)]
+use crate::decision_profile::DecisionProfileKind;
 use crate::{
-    local_model::runtime_config::{
-        DecisionExecutionProfile, DecisionProfileKind, NativeExecutorKind, TokenBackend,
-    },
+    decision_profile::{DecisionExecutionProfile, TokenBackend},
     model_card::ModelDeploymentCard,
     preprocessor::OpenAIPreprocessor,
     protocols::{
@@ -14,6 +14,13 @@ use crate::{
     types::openai::generate::GenerateStreamingEngine,
 };
 use std::sync::Arc;
+
+#[cfg(test)]
+#[path = "decision_dispatch_tests.rs"]
+mod dispatch_tests;
+#[cfg(test)]
+#[path = "decision/test_support.rs"]
+pub(crate) mod test_support;
 
 pub(crate) type DecisionQualification = (DecisionExecutionProfile, usize);
 
@@ -43,6 +50,13 @@ impl DecisionAvailability {
         }))
     }
 
+    pub(crate) fn admission(&self) -> Option<&Arc<DecisionAdmission>> {
+        match self {
+            Self::Qualified(admission) => Some(admission),
+            Self::Unadvertised | Self::Pending | Self::Failed => None,
+        }
+    }
+
     pub(crate) fn publish(sender: &tokio::sync::watch::Sender<Self>, mut next: Self) {
         sender.send_if_modified(|current| {
             if match (&*current, &next) {
@@ -69,30 +83,38 @@ impl DecisionAvailability {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct DecisionFleet {
+    pub(crate) state: tokio::sync::watch::Receiver<DecisionAvailability>,
+}
+
+impl DecisionFleet {
+    pub(crate) fn current(&self) -> Option<tokio::sync::watch::Ref<'_, DecisionAvailability>> {
+        self.state.has_changed().ok()?;
+        Some(self.state.borrow())
+    }
+}
+
+pub(crate) struct DecisionSurface {
+    pub(crate) resources: Arc<DecisionResources>,
+    pub(crate) fleet: DecisionFleet,
+}
+
 #[derive(Clone)]
 pub(crate) struct TokenExecutor {
-    pub(super) engine: GenerateStreamingEngine,
-    pub(super) preprocessor: Arc<OpenAIPreprocessor>,
-    pub(super) backend: TokenBackend,
+    resources: Arc<TokenResources>,
+    backend: TokenBackend,
 }
 
 impl TokenExecutor {
-    pub(crate) fn new(
-        backend: TokenBackend,
-        engine: GenerateStreamingEngine,
-        preprocessor: Arc<OpenAIPreprocessor>,
-    ) -> Self {
-        Self {
-            engine,
-            preprocessor,
-            backend,
-        }
+    pub(crate) fn new(backend: TokenBackend, resources: Arc<TokenResources>) -> Self {
+        Self { resources, backend }
     }
     pub(crate) fn engine(&self) -> &GenerateStreamingEngine {
-        &self.engine
+        &self.resources.engine
     }
     pub(crate) fn preprocessor(&self) -> &Arc<OpenAIPreprocessor> {
-        &self.preprocessor
+        &self.resources.preprocessor
     }
     pub(crate) fn backend(&self) -> TokenBackend {
         self.backend
@@ -107,41 +129,52 @@ pub(crate) enum DecisionEngine {
 }
 
 #[derive(Clone)]
-pub(crate) enum DecisionRoute {
-    Available(DecisionEngine),
-    UnsupportedRouting,
-}
-
-impl DecisionRoute {
-    pub(crate) fn available(&self) -> Option<&DecisionEngine> {
-        match self {
-            Self::Available(engine) => Some(engine),
-            Self::UnsupportedRouting => None,
-        }
-    }
-
-    pub(crate) fn available_for(
-        &self,
-        profile: DecisionExecutionProfile,
-    ) -> Option<&DecisionEngine> {
-        let engine = self.available()?;
-        let expected = match engine {
-            DecisionEngine::Token(executor) => DecisionProfileKind::Token(executor.backend),
-            DecisionEngine::Head(_) => DecisionProfileKind::Native(NativeExecutorKind::Head),
-            DecisionEngine::Read(_) => DecisionProfileKind::Native(NativeExecutorKind::Read),
-        };
-        (profile.kind() == expected).then_some(engine)
-    }
-}
-
-#[derive(Clone)]
 pub(crate) struct DecisionContext {
     pub(crate) canonical_model: String,
     pub(crate) card: ModelDeploymentCard,
-    pub(crate) admitted_ids: Option<tokio::sync::watch::Receiver<Vec<u64>>>,
-    pub(crate) lifecycle_cancellation: Option<tokio_util::sync::CancellationToken>,
+    fence: Arc<DispatchFence>,
     profile: DecisionExecutionProfile,
     max_candidates: usize,
+}
+
+pub(super) struct DispatchFence {
+    fleet: DecisionFleet,
+    admission: Arc<DecisionAdmission>,
+    admitted_ids: tokio::sync::watch::Receiver<Vec<u64>>,
+    cancellation: tokio_util::sync::CancellationToken,
+}
+
+impl DispatchFence {
+    pub(super) fn validate(&self, worker: Option<u64>) -> Result<(), SystemOneSelectionError> {
+        {
+            let state = self
+                .fleet
+                .current()
+                .ok_or(SystemOneSelectionError::Unavailable)?;
+            let current = state
+                .admission()
+                .ok_or(SystemOneSelectionError::Unavailable)?;
+            if self.admission.qualification != current.qualification
+                || !Arc::ptr_eq(&self.admission.epoch, &current.epoch)
+                || current.ids.is_empty()
+                || worker.is_some_and(|worker| !current.ids.contains(&worker))
+            {
+                return Err(SystemOneSelectionError::Unavailable);
+            }
+        }
+        if self.cancellation.is_cancelled() {
+            return Err(SystemOneSelectionError::Unavailable);
+        }
+        let admitted = &self.admitted_ids;
+        if admitted.has_changed().is_err() {
+            return Err(SystemOneSelectionError::Unavailable);
+        }
+        let workers = admitted.borrow();
+        if workers.is_empty() || worker.is_some_and(|worker| !workers.contains(&worker)) {
+            return Err(SystemOneSelectionError::Unavailable);
+        }
+        Ok(())
+    }
 }
 
 impl DecisionContext {
@@ -152,25 +185,22 @@ impl DecisionContext {
         &self,
         pinned_worker: Option<u64>,
     ) -> Result<(), SystemOneSelectionError> {
-        if self
-            .lifecycle_cancellation
-            .as_ref()
-            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
-        {
-            return Err(SystemOneSelectionError::Unavailable);
-        }
-        let Some(admitted) = &self.admitted_ids else {
-            return Ok(());
-        };
-        if admitted.has_changed().is_err() {
-            return Err(SystemOneSelectionError::Unavailable);
-        }
-        let workers = admitted.borrow();
-        if workers.is_empty() || pinned_worker.is_some_and(|worker| !workers.contains(&worker)) {
-            return Err(SystemOneSelectionError::Unavailable);
-        }
-        Ok(())
+        self.fence.validate(pinned_worker)
     }
+
+    pub(crate) fn attach_dispatch_guard<T: dynamo_runtime::engine::Data>(
+        &self,
+        request: &mut dynamo_runtime::pipeline::Context<T>,
+    ) -> super::decision_dispatch::DispatchReceipt {
+        let receipt = super::decision_dispatch::DispatchReceipt::default();
+        super::decision_dispatch::attach_dispatch_guard(
+            request,
+            self.fence.clone(),
+            receipt.clone(),
+        );
+        receipt
+    }
+
     pub(crate) fn decision_capabilities(&self) -> dynamo_decisions::Capabilities {
         dynamo_decisions::Capabilities {
             max_questions: self.profile.limits().0,
@@ -185,51 +215,68 @@ impl DecisionContext {
 }
 
 #[derive(Clone)]
-pub(crate) struct SystemOneExecutionSelection {
+pub(crate) struct SystemOneExecutionPlan {
     pub(crate) context: DecisionContext,
-    engine: DecisionEngine,
+    resources: Arc<DecisionResources>,
 }
 
-impl SystemOneExecutionSelection {
+impl SystemOneExecutionPlan {
     pub(crate) fn from_worker_set(canonical_model: String, worker_set: &WorkerSet) -> Option<Self> {
-        let profile = worker_set.card().decision_execution_profile()?;
-        Self::build(canonical_model, profile, worker_set)
-    }
-    #[cfg(test)]
-    pub(crate) fn for_test(
-        canonical_model: String,
-        profile: DecisionExecutionProfile,
-        worker_set: &WorkerSet,
-    ) -> Option<Self> {
-        Self::build(canonical_model, profile, worker_set)
-    }
-    fn build(
-        canonical_model: String,
-        profile: DecisionExecutionProfile,
-        worker_set: &WorkerSet,
-    ) -> Option<Self> {
-        let engine = worker_set
-            .decision
-            .as_ref()?
-            .available_for(profile)?
-            .clone();
-        let max_candidates = worker_set.card().decision_max_candidates(profile)?;
+        let surface = worker_set.decision.as_ref()?;
+        let state = surface.fleet.current()?;
+        let super::DecisionState::Qualified {
+            profile,
+            resources,
+            capacity: max_candidates,
+            ..
+        } = worker_set.decision_state_for(Some(&state))
+        else {
+            return None;
+        };
+        let admission = state.admission()?.clone();
         Some(Self {
             context: DecisionContext {
                 canonical_model,
                 profile,
                 max_candidates,
                 card: worker_set.card().clone(),
-                admitted_ids: worker_set.decision_admissions().cloned(),
-                lifecycle_cancellation: worker_set.lifecycle_cancellation(),
+                fence: Arc::new(DispatchFence {
+                    admitted_ids: worker_set.decision_admissions()?.clone(),
+                    cancellation: worker_set.lifecycle_cancellation()?.clone(),
+                    fleet: surface.fleet.clone(),
+                    admission,
+                }),
             },
-            engine,
+            resources: resources.clone(),
         })
     }
-    #[cfg(test)]
-    pub(crate) fn engine(&self) -> &DecisionEngine {
-        &self.engine
+
+    pub(crate) async fn prepare_native(&self) -> anyhow::Result<()> {
+        self.context.validate_dispatch(None)?;
+        self.resources
+            .prepare_native(self.context.profile.kind())
+            .await
     }
+
+    // Token construction runs in admitted blocking preflight, never on the async executor.
+    pub(crate) fn prepare(self) -> anyhow::Result<SystemOneExecutionSelection> {
+        self.context.validate_dispatch(None)?;
+        let engine = self.resources.prepare(self.context.profile.kind())?;
+        self.context.validate_dispatch(None)?;
+        Ok(SystemOneExecutionSelection {
+            engine,
+            context: self.context,
+        })
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct SystemOneExecutionSelection {
+    pub(crate) context: DecisionContext,
+    pub(crate) engine: DecisionEngine,
+}
+
+impl SystemOneExecutionSelection {
     pub(crate) fn into_parts(self) -> (DecisionContext, DecisionEngine) {
         (self.context, self.engine)
     }
