@@ -18,7 +18,7 @@ use dynamo_global_frontend::{
     Metrics, PoolSnapshot, app, follow_relays, measure_round_trips, serve,
 };
 use dynamo_global_router::{
-    AffinitySelector, CorePolicy, CoreSelector, FrontendSignals, InFlightTracker,
+    AffinityConfig, AffinitySelector, CorePolicy, CoreSelector, FrontendSignals, InFlightTracker,
     LeastInFlightConfig, LeastInFlightSelector, Pool, PoolSelector, PoolSignals,
     RoundRobinSelector,
 };
@@ -90,6 +90,8 @@ struct Args {
     #[arg(long, default_value_t = 2.0)]
     headroom_factor: f64,
     /// `affinity`: how long a session keeps its pool without a request.
+    /// The core keeps at most 65,536 sessions per model; while the table is
+    /// full, a new session is placed without a pin until idle ones expire.
     #[arg(long, default_value_t = 1800)]
     session_idle_secs: u64,
 }
@@ -239,11 +241,15 @@ async fn main() -> Result<()> {
                     region: args.region.clone().context("--region is required")?,
                     headroom_factor: args.headroom_factor,
                 }),
-                RouterPolicy::Affinity => {
-                    bail!("--router-policy affinity does not run on the router core yet")
-                }
+                RouterPolicy::Affinity => CorePolicy::Affinity(AffinityConfig {
+                    signals: load_signals(&args, &pools, in_flight.clone(), &shutdown),
+                    region: args.region.clone().context("--region is required")?,
+                    headroom_factor: args.headroom_factor,
+                    idle,
+                }),
             };
             let core = Arc::new(CoreSelector::new(policy).await?);
+            metrics.watch_core(core.clone());
             // Serve only once the configured pools are the core's workers;
             // a request before that would get a spurious 503.
             let (first_snapshot, reconcile) =

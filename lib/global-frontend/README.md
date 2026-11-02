@@ -96,8 +96,10 @@ named `dynamo_global_frontend_*`: requests per pool by response status,
 `no_response` when the pool sends no response, or `cancelled` when the client
 leaves before the pool's response headers arrive; requests answered without a
 pool; time to first byte and duration per pool; requests in flight per
-pool; and the time to select a pool, in milliseconds. The `pool` label is the pool's
-`<cluster>/<namespace>/<DGD name>` and `region` its region. On requests, `local`
+pool; and the time to select a pool, in milliseconds. With
+`--use-selection-core` it adds the router core's affinity pin bookings. The
+`pool` label is the pool's `<cluster>/<namespace>/<DGD name>` and `region` its
+region. On requests, `local`
 says whether the pool is in `--region` (`unknown` without it), which gives the
 share of requests kept in the region. Nothing is labelled from the request
 body. Inter-token latency and token counts need the stream parsed, so they come
@@ -122,10 +124,10 @@ for each family.
 With `--use-selection-core`, each Global Frontend picks pools through its
 embedded router core (DEP [#17638](https://github.com/ai-dynamo/dynamo/issues/17638)):
 each pool is one of the core's workers and each `--router-policy` one of its
-picker plugins, picking as the selectors above do. `round-robin` and
-`least-in-flight` run on the core; `affinity` does not yet. Every pick is
-the core's: the frontend sends it an advisory select, which books nothing,
-and the core runs the policy's picker. Least-in-flight counts this
+picker plugins, picking as the selectors above do. Under `affinity` the core
+pins sessions to pools and books a session's first request, a move, and a
+periodic refresh. Every other pick is an advisory select, which books
+nothing, and the core runs the policy's picker. Least-in-flight counts this
 frontend's own requests in flight per pool and places them by the rule
 above, as without the core; a pick
 counts as pending on its pool until the request is forwarded, so picks made

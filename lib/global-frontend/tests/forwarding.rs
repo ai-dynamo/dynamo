@@ -14,7 +14,8 @@ use axum::http::HeaderMap;
 use dynamo_global_common::PoolKey;
 use dynamo_global_frontend::{Metrics, PoolSnapshot};
 use dynamo_global_router::{
-    InFlightTracker, Pool, PoolSelector, RoundRobinSelector, RoutingRequest, Selection,
+    AffinityConfig, CorePolicy, CoreSelector, InFlightTracker, Pool, PoolSelector, PoolSignals,
+    RoundRobinSelector, RoutingRequest, Selection,
 };
 use dynamo_llm::endpoint_type::EndpointType;
 use dynamo_llm::engines::{StreamingEngineAdapter, make_echo_engine};
@@ -404,6 +405,23 @@ async fn requests_without_a_model_are_rejected() {
 }
 
 #[tokio::test]
+async fn session_ids_longer_than_the_core_accepts_are_rejected() {
+    let pool_frontend = echo_pool_frontend().await;
+    let global = global_frontend(vec![pool("blue", MODEL, &pool_frontend.url)]).await;
+
+    for (length, expected) in [(256, StatusCode::OK), (257, StatusCode::BAD_REQUEST)] {
+        let response = client()
+            .post(global.server.url.join("v1/chat/completions").unwrap())
+            .header("x-dynamo-session-id", "s".repeat(length))
+            .json(&chat(MODEL, "hi", false))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected, "session id of {length} bytes");
+    }
+}
+
+#[tokio::test]
 async fn pool_errors_pass_through() {
     // The catalog says the pool serves a model its frontend does not have.
     let echo = echo_pool_frontend().await;
@@ -553,6 +571,48 @@ async fn metrics_count_requests_by_pool() {
     }
     let in_flight = "dynamo_global_frontend_inflight_requests";
     assert_eq!(sample(&metrics, in_flight, &blue), Some(0.0));
+}
+
+#[tokio::test]
+async fn metrics_count_the_core_s_pin_bookings() {
+    let pool_frontend = echo_pool_frontend().await;
+    let pools = vec![pool("blue", MODEL, &pool_frontend.url)];
+    let (_catalog, receiver) = watch::channel(Arc::new(PoolSnapshot::new(pools)));
+    // Affinity books a session's first request and nothing after.
+    let in_flight = Arc::new(InFlightTracker::new());
+    let policy = CorePolicy::Affinity(AffinityConfig {
+        signals: Arc::new(PoolSignals::new(in_flight.clone())),
+        region: REGION.to_owned(),
+        headroom_factor: 2.0,
+        idle: Duration::from_secs(60),
+    });
+    let core = Arc::new(CoreSelector::new(policy).await.unwrap());
+    let cancel = CancellationToken::new();
+    let (first_snapshot, reconcile) = core.reconcile_catalog(receiver.clone(), cancel.clone());
+    tokio::spawn(reconcile);
+    first_snapshot.await.unwrap();
+    let metrics = Metrics::new(Some(REGION.to_owned()), in_flight.clone());
+    metrics.watch_core(core.clone());
+    let app = dynamo_global_frontend::app(receiver, core, in_flight, client(), metrics);
+    let (listener, url) = bind().await;
+    tokio::spawn(dynamo_global_frontend::serve(listener, app, cancel.clone()));
+    wait_until_ok(&url.join("live").unwrap()).await;
+
+    // Two sessions, each with two turns: one booking per session.
+    for session in ["a", "a", "b", "b"] {
+        let response = client()
+            .post(url.join("v1/chat/completions").unwrap())
+            .header("x-dynamo-session-id", session)
+            .json(&chat(MODEL, "hi", true))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        response.text().await.unwrap();
+    }
+    let bookings = "dynamo_global_frontend_core_pin_bookings_total";
+    metrics_when(&url, |metrics| sample(metrics, bookings, &[]) == Some(2.0)).await;
+    cancel.cancel();
 }
 
 #[tokio::test]

@@ -11,14 +11,18 @@
 //! The core's built-in selector weighs KV overlap and projected load; it has
 //! no plain round-robin or fewest-in-flight picker, so [`RoundRobinPicker`]
 //! and [`LeastInFlightPicker`] (counting the Global Frontends' requests in
-//! flight) are written here.
+//! flight) are written here. [`HeadroomPicker`] is the affinity rule of
+//! [`crate::AffinitySelector`] (`placement::headroom`), reading the same
+//! [`PoolSignals`]; the session pin it defaults to comes from the core's
+//! session affinity table as the request's affinity target.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::plugins::worker_selection::{
-    WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
-    WorkerSelectionPolicyError,
+    ScoredWorkerCandidate, WorkerInputView, WorkerPicker, WorkerSelectionContext,
+    WorkerSelectionPolicy, WorkerSelectionPolicyError,
 };
 use dynamo_kv_router::services::selection::{
     RouterPluginRegistry, WorkerSelectionPolicyFactory, WorkerSelectionPolicyParameters,
@@ -27,12 +31,12 @@ use dynamo_kv_router::services::selection::{
 };
 use dynamo_kv_router::{RoutingPartitionRef, WorkerId, WorkerType};
 
-use super::directory::PoolDirectory;
-use super::{CorePolicy, LeastInFlightConfig};
+use super::directory::{PoolDirectory, PoolEntry};
+use super::{AffinityConfig, CorePolicy, LeastInFlightConfig};
 use crate::frontend_signals::FrontendSignals;
 use crate::placement::{self, Placed};
 use crate::selector::in_flight_load;
-use crate::signals::PoolSignals;
+use crate::signals::{PoolOccupancy, PoolSignals};
 
 impl CorePolicy {
     /// The name the policy is registered and selected under.
@@ -40,6 +44,7 @@ impl CorePolicy {
         match self {
             Self::RoundRobin => "global-round-robin",
             Self::LeastInFlight(_) => "global-least-in-flight",
+            Self::Affinity(_) => "global-affinity",
         }
     }
 }
@@ -62,6 +67,13 @@ pub fn registry(
             registry.register_worker_selection(
                 policy.name(),
                 provider(move || LeastInFlightPicker::new(&config, directory.clone())),
+            )?;
+        }
+        CorePolicy::Affinity(affinity) => {
+            let affinity = affinity.clone();
+            registry.register_worker_selection(
+                policy.name(),
+                provider(move || HeadroomPicker::new(&affinity, directory.clone())),
             )?;
         }
         CorePolicy::RoundRobin => {}
@@ -228,6 +240,132 @@ impl WorkerPicker for LeastInFlightPicker {
             .ok_or_else(|| WorkerSelectionPolicyError::failed("no candidates"))?;
         self.counts.add_pending(workers[row]);
         Ok(row)
+    }
+}
+
+/// Keeps each session on one pool and moves it only for a pool with much
+/// more room: the rule of [`crate::AffinitySelector`], over the same
+/// signals, with the core's session table holding the pin.
+///
+/// Candidates are ordered nearest region first, then less full, then by
+/// worker id; unknown distances and loads come last. The default is the
+/// session's bound pool (the request's affinity target), else the first
+/// candidate. The request leaves the default only for the first candidate
+/// with more than `headroom_factor` times the default's spare capacity; a
+/// full default, or one whose load is unknown, leaves for the first
+/// candidate with any room, and stays if none has. The core then binds the
+/// session to the pool picked (soft affinity), so the pin moves with it.
+pub struct HeadroomPicker {
+    signals: Arc<PoolSignals>,
+    directory: Arc<PoolDirectory>,
+    region: String,
+    headroom_factor: f64,
+}
+
+/// A candidate row, with what the pick log describes.
+struct Row<'a> {
+    row: usize,
+    worker: WorkerId,
+    /// The pool, if the directory knows the worker.
+    entry: Option<&'a PoolEntry>,
+    /// How full the pool is; `None` without a fresh report.
+    occupancy: Option<PoolOccupancy>,
+}
+
+/// The candidate in one word for the pick log: region, slots and KV
+/// occupancy, and the round trip in milliseconds; `?` when unknown.
+fn describe(candidate: &Placed<Row<'_>>) -> String {
+    let region = candidate
+        .item
+        .entry
+        .map_or("?", |entry| entry.region.as_str());
+    let (slots, kv) = match candidate.item.occupancy {
+        Some(occupancy) => (
+            format!("{:.2}", occupancy.slots),
+            occupancy.kv.map_or("?".to_owned(), |kv| format!("{kv:.2}")),
+        ),
+        None => ("?".to_owned(), "?".to_owned()),
+    };
+    let rtt = candidate
+        .distance
+        .map_or("?".to_owned(), |rtt| rtt.as_millis().to_string());
+    format!("{region}:slots={slots},kv={kv},rtt={rtt}ms")
+}
+
+impl HeadroomPicker {
+    pub fn new(config: &AffinityConfig, directory: Arc<PoolDirectory>) -> Self {
+        Self {
+            signals: config.signals.clone(),
+            directory,
+            region: config.region.clone(),
+            headroom_factor: config.headroom_factor,
+        }
+    }
+
+    /// The candidates from least to most expensive ([`placement::order`]),
+    /// equal ones by worker id.
+    fn place<'a>(
+        &self,
+        pools: &'a HashMap<WorkerId, PoolEntry>,
+        rows: &[ScoredWorkerCandidate],
+    ) -> Vec<Placed<Row<'a>>> {
+        let round_trips = self.signals.region_round_trips();
+        let mut placed = rows
+            .iter()
+            .enumerate()
+            .map(|(row, candidate)| {
+                let worker = candidate.worker().worker_id;
+                let entry = pools.get(&worker);
+                let occupancy = entry.and_then(|entry| self.signals.occupancy(&entry.id));
+                Placed {
+                    item: Row {
+                        row,
+                        worker,
+                        entry,
+                        occupancy,
+                    },
+                    load: occupancy.map(|occupancy| occupancy.load),
+                    distance: entry.and_then(|entry| {
+                        placement::distance(&entry.region, &self.region, &round_trips)
+                    }),
+                    in_flight: 0,
+                }
+            })
+            .collect::<Vec<_>>();
+        placed.sort_by_key(|candidate| candidate.item.worker);
+        placement::order(&mut placed);
+        placed
+    }
+}
+
+impl WorkerPicker for HeadroomPicker {
+    fn pick(
+        &mut self,
+        context: &WorkerSelectionContext<'_>,
+        input: WorkerInputView<'_>,
+    ) -> Result<usize, WorkerSelectionPolicyError> {
+        let pools = self.directory.snapshot();
+        let placed = self.place(&pools, input.candidates());
+        if placed.is_empty() {
+            return Err(WorkerSelectionPolicyError::failed("no candidates"));
+        }
+        let bound = context.affinity_target().map(|target| target.worker_id);
+        let default = bound
+            .and_then(|worker| {
+                placed
+                    .iter()
+                    .position(|candidate| candidate.item.worker == worker)
+            })
+            .unwrap_or(0);
+        let choice = placement::headroom(&placed, default, self.headroom_factor);
+        tracing::trace!(
+            candidates = ?placed.iter().map(describe).collect::<Vec<_>>(),
+            default = describe(&placed[default]),
+            bound = bound.is_some(),
+            choice = describe(&placed[choice]),
+            "the affinity picker placed the pools"
+        );
+        Ok(placed[choice].item.row)
     }
 }
 
