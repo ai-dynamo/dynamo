@@ -5,6 +5,7 @@ use super::*;
 use tokio::sync::watch;
 
 pub(crate) use super::super::decision_dispatch::validate_fixture_dispatch;
+pub(crate) use super::super::decision_resources::token_error_is_retryable;
 pub(crate) use super::DecisionQualification;
 pub(crate) use super::dispatch_tests::assert_native_dispatch;
 
