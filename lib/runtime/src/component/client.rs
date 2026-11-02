@@ -2090,6 +2090,105 @@ mod tests {
         rt.shutdown();
     }
 
+    async fn admission_lookup_client(
+        namespace: &str,
+    ) -> (Runtime, Client, tokio::sync::watch::Sender<Vec<Instance>>) {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace(namespace)
+            .unwrap()
+            .component("workers")
+            .unwrap()
+            .endpoint("generate");
+        let mut client = endpoint.client().await.unwrap();
+        let (source_tx, source_rx) = tokio::sync::watch::channel(vec![
+            endpoint_instance(&endpoint, 1),
+            endpoint_instance(&endpoint, 2),
+        ]);
+        client.instance_source = Arc::new(source_rx);
+        (rt, client, source_tx)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn admitted_lookup_tracks_filters_without_expanding_nested_views() {
+        let (rt, client, _source) = admission_lookup_client("test_admission_lookup").await;
+        let (admissions, admission_rx) = tokio::sync::watch::channel(vec![1, 2]);
+        let admitted = client.with_admitted_instances(admission_rx);
+        let retained = admitted.clone();
+        let (_nested_admissions, nested_rx) = tokio::sync::watch::channel(vec![1, 2]);
+        let nested = admitted.with_admitted_instances(nested_rx);
+        assert!(retained.instance_by_id(1).is_some());
+        assert!(nested.instance_by_id(1).is_some());
+
+        admissions.send_replace(vec![2]);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while retained.instance_ids() != vec![2] || nested.instance_ids() != vec![2] {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        for view in [&retained, &nested] {
+            assert_eq!(view.instance_ids(), vec![2]);
+            assert!(view.instance_by_id(1).is_none());
+            assert!(!view.is_instance_live(1));
+            assert!(view.instance_by_id(2).is_some());
+            assert!(view.is_instance_live(2));
+        }
+        assert!(client.instance_by_id(1).is_some());
+        assert!(client.is_instance_live(1));
+        rt.shutdown();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn admitted_lookup_retains_frozen_generation_after_owners_retire() {
+        let (rt, client, source) = admission_lookup_client("test_admission_lifecycle").await;
+        let (admissions, admission_rx) = tokio::sync::watch::channel(vec![1, 2]);
+        let cancellation = CancellationToken::new();
+        let cancelled = client
+            .with_admitted_instances_and_cancellation(admission_rx.clone(), cancellation.clone());
+        let closed =
+            client.with_admitted_instances_and_cancellation(admission_rx, rt.child_token());
+        let retained = closed.clone();
+        cancellation.cancel();
+        assert!(cancelled.instance_by_id(1).is_some());
+        assert!(cancelled.is_instance_live(1));
+        assert!(closed.instance_by_id(1).is_some());
+
+        drop(admissions);
+        for view in [&closed, &retained] {
+            assert_eq!(view.instance_ids(), vec![1, 2]);
+            assert!(view.instance_by_id(1).is_some());
+            assert!(view.is_instance_live(1));
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while closed.instance_source.has_changed().is_ok()
+                || cancelled.instance_source.has_changed().is_ok()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        source.send_replace(vec![endpoint_instance(&client.endpoint, 3)]);
+        let (_successor, successor_rx) = tokio::sync::watch::channel(vec![3]);
+        let successor =
+            client.with_admitted_instances_and_cancellation(successor_rx, rt.child_token());
+        assert!(successor.instance_by_id(3).is_some());
+        assert!(successor.instance_by_id(1).is_none());
+        for view in [&cancelled, &closed, &retained] {
+            assert!(view.instance_by_id(1).is_some());
+            assert!(
+                view.instance_by_id(3).is_none(),
+                "retired views must not adopt successor IDs"
+            );
+        }
+        rt.shutdown();
+    }
+
     /// Test that concurrent least-loaded increments distribute load correctly.
     #[tokio::test]
     async fn test_concurrent_select_and_increment() {

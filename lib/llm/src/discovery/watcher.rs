@@ -1621,6 +1621,9 @@ fn worker_set_chat_preprocessor(
 }
 
 #[cfg(test)]
+mod decision_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::discovery::Model;
