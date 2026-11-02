@@ -3433,6 +3433,25 @@ mod ownership_tests {
     };
 
     #[test]
+    fn disagg_prefill_cancel_capability_isolates_worker_sets() {
+        use crate::local_model::runtime_config::DISAGG_PREFILL_CANCEL_ANYTIME_V1;
+
+        let missing = ModelDeploymentCard::with_name_only("model");
+        let mut disabled = ModelDeploymentCard::with_name_only("model");
+        disabled.runtime_config.runtime_data.insert(
+            DISAGG_PREFILL_CANCEL_ANYTIME_V1.to_string(),
+            false.into(),
+        );
+        let mut enabled = ModelDeploymentCard::with_name_only("model");
+        enabled.runtime_config.runtime_data.insert(
+            DISAGG_PREFILL_CANCEL_ANYTIME_V1.to_string(),
+            true.into(),
+        );
+        assert_eq!(missing.mdcsum(), disabled.mdcsum());
+        assert_ne!(missing.mdcsum(), enabled.mdcsum());
+    }
+
+    #[test]
     fn architectural_context_prefers_config_then_text_config_then_tokenizer() -> anyhow::Result<()>
     {
         let dir = tempfile::tempdir()?;
