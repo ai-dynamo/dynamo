@@ -10,6 +10,10 @@ mod json;
 mod run;
 mod transport;
 
+/// Startup budget for tests that expect a sidecar to become ready after a CI pause.
+#[cfg(any(test, feature = "testing"))]
+pub const TEST_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[cfg(feature = "tonic-v14")]
 pub mod v14 {
     use tonic_v14 as tonic;

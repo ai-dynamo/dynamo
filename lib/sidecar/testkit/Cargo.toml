@@ -21,7 +21,7 @@ tokio = { workspace = true }
 
 [dev-dependencies]
 # `tonic-v14`: the PD scenario reads vLLM's prost 0.14 handoff as JSON.
-dynamo-sidecar-common = { workspace = true, features = ["tonic-v14"] }
+dynamo-sidecar-common = { workspace = true, features = ["tonic-v14", "testing"] }
 dynamo-backend-common = { workspace = true, features = ["testing"] }
 dynamo-mocker = { workspace = true }
 dynamo-vllm-mocker = { path = "../../mocker/servers/vllm" }

@@ -35,5 +35,6 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+dynamo-sidecar-common = { workspace = true, features = ["testing"] }
 dynamo-backend-common = { workspace = true, features = ["testing"] }
 tokio-stream = { workspace = true, features = ["net"] }

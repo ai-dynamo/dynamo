@@ -47,5 +47,7 @@ tonic-health = { workspace = true }
 tower = { workspace = true }
 
 [features]
+# Shared startup budget for development dependencies.
+testing = []
 # The v14 protobuf/tonic surface, for sidecars generated against prost 0.14.
 tonic-v14 = ["dep:tonic-v14", "dep:prost-types-v14"]

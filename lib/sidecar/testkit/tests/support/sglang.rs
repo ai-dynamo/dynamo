@@ -19,6 +19,7 @@ use dynamo_sglang_sidecar::proto::{
     self as pb,
     sglang_service_server::{SglangService, SglangServiceServer},
 };
+use dynamo_sidecar_common::TEST_STARTUP_TIMEOUT;
 use dynamo_sidecar_testkit::control::{Controller, Protocol, RequestHandle};
 use dynamo_sidecar_testkit::fixtures::Outputs;
 use dynamo_sidecar_testkit::server::TestServer;
@@ -154,10 +155,8 @@ impl SidecarFixture for Fixture {
             "1".into(),
             "--grpc-retry-interval-secs".into(),
             "1".into(),
-            // Bounded but generous: parallel tests under coverage on a busy CI
-            // runner have stalled for over 5 s before discovery finished.
             "--grpc-startup-deadline-secs".into(),
-            "30".into(),
+            TEST_STARTUP_TIMEOUT.as_secs().to_string(),
         ];
         *self.server_info_entered.lock().unwrap() = None;
         let server_info_entered = self.server_info_entered.clone();
@@ -170,7 +169,7 @@ impl SidecarFixture for Fixture {
                         .unwrap()
                         .map(|at| at.duration_since(started));
                     panic!(
-                        "SGLang fixture startup failed after {:?}; server entered GetServerInfo after {entered:?}: {error:?}",
+                        "SGLang fixture startup failed after {:?}; server first entered GetServerInfo after {entered:?}: {error:?}",
                         started.elapsed()
                     )
                 })
@@ -458,7 +457,10 @@ macro_rules! delegate_service {
                 &self,
                 request: Request<pb::GetServerInfoRequest>,
             ) -> Result<Response<pb::GetServerInfoResponse>, Status> {
-                *self.server_info_entered.lock().unwrap() = Some(Instant::now());
+                self.server_info_entered
+                    .lock()
+                    .unwrap()
+                    .get_or_insert_with(Instant::now);
                 let mut response = self.inner.get_server_info(request).await?.into_inner();
                 let mut scripts = self.server_info.lock().unwrap();
                 if let Some(patch) = scripts.front() {
