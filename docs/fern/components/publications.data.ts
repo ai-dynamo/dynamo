@@ -208,6 +208,14 @@ export const PUBLICATIONS: Publication[] = [
     tags: ["Agentic", "Benchmarks & performance"],
   },
   {
+    title: "Multi-Node Dynamo Model Loading: MatrixHub Distribution and GPU P2P",
+    url: "https://matrixhub.ai/blog/matrixhub-modelexpress-dynamo-p2p",
+    partner: "MatrixHub",
+    date: "Aug 12, 2026",
+    iso: "2026-08-12",
+    tags: ["Fast startup", "NIXL", "Kubernetes", "Deployment guide"],
+  },
+  {
     title: "Accelerate Inference on AKS with Azure Blob Storage and NVIDIA Dynamo",
     url: "https://techcommunity.microsoft.com/blog/azurestorageblog/accelerate-inference-on-aks-with-azure-blob-storage-and-nvidia-dynamo/4543408",
     partner: "Microsoft Azure",
