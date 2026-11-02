@@ -378,7 +378,7 @@ async def test_wait_for_ready_fails_fast_on_failed_automatic_snapshot_job(
     tmp_path,
 ) -> None:
     """A Failed automatic SnapshotJob is final, so stop waiting for Ready."""
-    # DGD status from the TRTLLM Snapshot Deploy Test failure in DYN-5276.
+    # DGD status from a failed TRTLLM Snapshot Deploy Test on main (Actions run 41016812098).
     message = (
         "failed to reconcile checkpoints: failed to resolve checkpoint for "
         "component TRTLLMWorker: automatic SnapshotJob "
