@@ -51,6 +51,9 @@ fn build_protos() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
         .type_attribute(".", "#[derive(serde::Serialize,serde::Deserialize)]")
         .compile_protos(&["src/grpc/protos/kserve.proto"], &["src/grpc/protos"])?;
+    // Temporary: remove when AI gateway ships. authz-gateway's revoke lookup (http/service/flexprice/revoke.rs).
+    tonic_build::configure()
+        .compile_protos(&["src/grpc/protos/auth.proto"], &["src/grpc/protos"])?;
     Ok(())
 }
 

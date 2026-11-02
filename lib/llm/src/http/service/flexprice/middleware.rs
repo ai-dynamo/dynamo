@@ -55,6 +55,19 @@ pub async fn auth_middleware(
         Err(err) => return err.into_response(),
     };
 
+    // Temporary: remove when AI gateway ships
+    // Asked after the org allowlist, so requests rejected there never cost a revoke lookup.
+    if let Some(checker) = state.revoke_checker()
+        && checker.revoked(&ctx.token_uuid).await
+    {
+        tracing::warn!(org = %ctx.org_uuid, token_uuid = %ctx.token_uuid, "Unauthorized access: revoked token");
+        return AuthError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "token revoked".to_string(),
+        }
+        .into_response();
+    }
+
     // Wallet balance gate: prepaid orgs below the configured minimum balance
     // (negative by default) are blocked; postpaid orgs bypass this entirely.
     // Only runs when FlexPrice billing is enabled — no wallet, no gate.

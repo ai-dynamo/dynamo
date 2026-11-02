@@ -334,6 +334,12 @@ pub mod llm {
     /// are dropped (default: 4500).
     pub const DYN_FLEXPRICE_QUEUE_SIZE: &str = "DYN_FLEXPRICE_QUEUE_SIZE";
 
+    /// Temporary: remove when AI gateway ships. The cluster's authz-gateway,
+    /// host:port, asked whether a token is revoked (`auth.Auth/IsRevoked`) when
+    /// DYN_AUTH_ENABLED is true; empty leaves the check off. The name every
+    /// proxy reads, as model-suite-app sets it.
+    pub const REVOKE_AUTH_GRPC_TARGET: &str = "REVOKE_AUTH_GRPC_TARGET";
+
     /// Backend stream inactivity timeout in seconds.
     ///
     /// When set to a positive integer, the frontend will kill the engine context

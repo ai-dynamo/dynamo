@@ -1,0 +1,36 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+// Temporary: remove when AI gateway ships
+// Copy of authz-gateway's proto/auth.proto (keep in sync); native auth calls IsRevoked (http/service/flexprice/revoke.rs).
+
+syntax = "proto3";
+
+package auth;
+
+service Auth {
+  rpc Check(CheckRequest) returns (CheckResponse);
+  // Temporary: remove when AI gateway ships
+  // Whether a playground token is revoked, from Valkey. For proxies; no JWT and no org allowlist. A non-UUID is
+  // `revoked: false`; a failed lookup is UNAVAILABLE, which callers treat as a failure (allow and pause).
+  rpc IsRevoked(IsRevokedRequest) returns (IsRevokedResponse);
+}
+
+message CheckRequest {
+  // Metadata is passed in headers, no body needed
+}
+
+message CheckResponse {
+  bool allowed = 1;
+}
+
+// Temporary: remove when AI gateway ships
+message IsRevokedRequest {
+  // The token's `token_uuid` claim, any UUID spelling.
+  string token_uuid = 1;
+}
+
+// Temporary: remove when AI gateway ships
+message IsRevokedResponse {
+  bool revoked = 1;
+}

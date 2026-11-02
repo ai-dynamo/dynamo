@@ -200,10 +200,10 @@ pub fn authenticate(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn sign(alg: &str, secret: &str, header: &Value, claims: &Value) -> String {
+    pub(crate) fn sign(alg: &str, secret: &str, header: &Value, claims: &Value) -> String {
         let header_b64 = URL_SAFE_NO_PAD.encode(header.to_string());
         let payload_b64 = URL_SAFE_NO_PAD.encode(claims.to_string());
         let signing_input = format!("{header_b64}.{payload_b64}");

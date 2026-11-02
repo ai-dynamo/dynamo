@@ -64,6 +64,8 @@ pub struct State {
     flexprice_config: Arc<super::flexprice::FlexPriceConfig>,
     flexprice_client: Option<Arc<super::flexprice::FlexPriceClient>>,
     flexprice_balance_checker: Option<Arc<super::flexprice::BalanceChecker>>,
+    // Temporary: remove when AI gateway ships
+    revoke_checker: Option<Arc<super::flexprice::RevokeChecker>>,
 }
 
 #[derive(Default, Debug)]
@@ -159,7 +161,17 @@ impl State {
             flexprice_config,
             flexprice_client,
             flexprice_balance_checker,
+            revoke_checker: None,
         }
+    }
+
+    // Temporary: remove when AI gateway ships
+    pub fn with_revoke_checker(
+        mut self,
+        revoke_checker: Option<Arc<super::flexprice::RevokeChecker>>,
+    ) -> Self {
+        self.revoke_checker = revoke_checker;
+        self
     }
 
     /// Get the Prometheus [`Metrics`] object which tracks request counts and inflight requests
@@ -185,6 +197,12 @@ impl State {
     /// The FlexPrice wallet-balance checker, if `DYN_FLEXPRICE_ENABLED=true`.
     pub fn flexprice_balance_checker(&self) -> Option<Arc<super::flexprice::BalanceChecker>> {
         self.flexprice_balance_checker.clone()
+    }
+
+    /// Temporary: remove when AI gateway ships. The revoked-token check, if
+    /// `DYN_AUTH_ENABLED=true` and `REVOKE_AUTH_GRPC_TARGET` is a valid target.
+    pub fn revoke_checker(&self) -> Option<Arc<super::flexprice::RevokeChecker>> {
+        self.revoke_checker.clone()
     }
 
     pub fn manager(&self) -> &ModelManager {
@@ -553,16 +571,26 @@ impl HttpServiceConfigBuilder {
             flexprice_enabled = flexprice_config.enabled,
             "Auth/FlexPrice billing configuration"
         );
+        // Temporary: remove when AI gateway ships. Read beside the auth config but
+        // never fails the build: a bad target is logged and leaves the check off.
+        let revoke_checker = if auth_config.enabled {
+            super::flexprice::RevokeChecker::from_env()
+        } else {
+            None
+        };
 
-        let state = Arc::new(State::new(
-            model_manager,
-            discovery_client,
-            cancel_token,
-            auth_config,
-            flexprice_config,
-            flexprice_client,
-            flexprice_balance_checker,
-        ));
+        let state = Arc::new(
+            State::new(
+                model_manager,
+                discovery_client,
+                cancel_token,
+                auth_config,
+                flexprice_config,
+                flexprice_client,
+                flexprice_balance_checker,
+            )
+            .with_revoke_checker(revoke_checker),
+        );
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
@@ -620,6 +648,12 @@ impl HttpServiceConfigBuilder {
         }
         if let Err(e) = ensure_transport_metrics_registered_prometheus(&registry) {
             tracing::warn!("Failed to register transport metrics: {}", e);
+        }
+        // Temporary: remove when AI gateway ships
+        if let Some(checker) = state.revoke_checker()
+            && let Err(e) = checker.register_metrics(&registry)
+        {
+            tracing::warn!("Failed to register revoked-token check metrics: {}", e);
         }
 
         let mut all_docs = Vec::new();
@@ -896,5 +930,154 @@ mod tests {
             },
         )
         .await;
+    }
+
+    // Temporary: remove when AI gateway ships
+    fn playground_token(org_uuid: &str, token_uuid: Option<&str>) -> String {
+        let exp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
+        let mut claims = serde_json::json!({"uuid": "subject-1", "org_uuid": org_uuid, "exp": exp});
+        if let Some(token_uuid) = token_uuid {
+            claims["token_uuid"] = token_uuid.into();
+        }
+        super::super::flexprice::sign_test_jwt(
+            "HS256",
+            "test-secret",
+            &serde_json::json!({"alg": "HS256", "typ": "JWT"}),
+            &claims,
+        )
+    }
+
+    // Temporary: remove when AI gateway ships
+    /// Status and body of a chat completion with `token`.
+    async fn chat(port: u16, token: &str) -> (reqwest::StatusCode, String) {
+        let resp = reqwest::Client::new()
+            .post(format!("http://localhost:{port}/v1/chat/completions"))
+            .bearer_auth(token)
+            .json(&serde_json::json!({"model": "x", "messages": []}))
+            .send()
+            .await
+            .expect("chat completions request failed");
+        (resp.status(), resp.text().await.unwrap_or_default())
+    }
+
+    // Temporary: remove when AI gateway ships
+    #[tokio::test]
+    async fn test_revoked_token_is_rejected_on_inference_routes() {
+        use super::super::flexprice::revoke_tests::{FakeGateway, Mode, start};
+
+        const REVOKED: &str = "5b0c6f8e-3c1a-4e6b-9d2f-0a1b2c3d4e5f";
+        const ACTIVE: &str = "7d1e2f3a-4b5c-4d6e-8f9a-0b1c2d3e4f5a";
+        let gateway = Arc::new(FakeGateway::default());
+        gateway.revoked.lock().insert(REVOKED.to_string());
+        let (addr, _stop) = start(gateway.clone()).await;
+
+        temp_env::async_with_vars(
+            [
+                ("DYN_AUTH_ENABLED", Some("true")),
+                ("DYN_AUTH_SECRET_KEY", Some("test-secret")),
+                ("DYN_AUTH_VALID_ORGS", Some("org-1")),
+                ("REVOKE_AUTH_GRPC_TARGET", Some(addr.to_string().as_str())),
+            ],
+            async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("failed to bind ephemeral port");
+                let port = listener.local_addr().unwrap().port();
+                let service = HttpService::builder().port(port).build().unwrap();
+                assert!(service.state().revoke_checker().is_some());
+
+                let cancel_token = CancellationToken::new();
+                let service_token = cancel_token.clone();
+                let handle = tokio::spawn(async move {
+                    service.run_with_listener(service_token, listener).await
+                });
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+                let (status, body) = chat(port, &playground_token("org-1", Some(REVOKED))).await;
+                assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
+                assert!(body.contains("token revoked"), "{body}");
+                let (status, _) = chat(
+                    port,
+                    &playground_token("org-1", Some(&REVOKED.to_uppercase())),
+                )
+                .await;
+                assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
+
+                // Past auth: the unknown model, not 401.
+                for token in [
+                    playground_token("org-1", Some(ACTIVE)),
+                    playground_token("org-1", None),
+                ] {
+                    let (status, body) = chat(port, &token).await;
+                    assert_ne!(status, reqwest::StatusCode::UNAUTHORIZED, "{body}");
+                }
+                // Another org is refused by the allowlist, before any lookup.
+                let (status, body) = chat(port, &playground_token("org-2", Some(REVOKED))).await;
+                assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
+                assert!(body.contains("not permitted"), "{body}");
+                assert_eq!(
+                    gateway.calls(),
+                    2,
+                    "the UPPER-case id, claim-less token and other org cost no call"
+                );
+
+                // A failing gateway lets every token through (fail open).
+                *gateway.mode.lock() = Mode::Unavailable;
+                let other = "11111111-2222-4333-8444-555555555555";
+                let (status, _) = chat(port, &playground_token("org-1", Some(other))).await;
+                assert_ne!(status, reqwest::StatusCode::UNAUTHORIZED);
+
+                let metrics = reqwest::get(format!("http://localhost:{port}/metrics"))
+                    .await
+                    .unwrap()
+                    .text()
+                    .await
+                    .unwrap();
+                assert!(
+                    metrics.contains(r#"proxy_revoke_checks_total{outcome="revoked"} 2"#),
+                    "{metrics}"
+                );
+                assert!(
+                    metrics.contains(r#"proxy_revoke_checks_total{outcome="no_token_uuid"} 1"#)
+                );
+                assert!(metrics.contains(r#"proxy_revoke_store_calls_total{result="error"} 1"#));
+
+                cancel_token.cancel();
+                handle.abort();
+            },
+        )
+        .await;
+    }
+
+    // Temporary: remove when AI gateway ships
+    #[tokio::test]
+    async fn test_revoke_check_needs_auth_and_a_valid_target() {
+        for (auth, target) in [
+            (Some("true"), None),
+            (Some("true"), Some("")),
+            (Some("true"), Some("not-host-port")),
+            (None, Some("authz:50051")),
+        ] {
+            temp_env::async_with_vars(
+                [
+                    ("DYN_AUTH_ENABLED", auth),
+                    ("DYN_AUTH_SECRET_KEY", Some("test-secret")),
+                    ("REVOKE_AUTH_GRPC_TARGET", target),
+                ],
+                async {
+                    // Built either way: a bad target never fails start-up.
+                    let service = HttpService::builder().port(0).build().unwrap();
+                    assert!(
+                        service.state().revoke_checker().is_none(),
+                        "{auth:?} {target:?}"
+                    );
+                },
+            )
+            .await;
+        }
     }
 }

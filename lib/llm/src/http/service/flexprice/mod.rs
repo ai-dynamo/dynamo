@@ -25,6 +25,7 @@ mod client;
 mod config;
 mod guard;
 mod middleware;
+mod revoke;
 
 pub use auth::AuthError;
 pub use balance::{BalanceChecker, BalanceStatus};
@@ -32,3 +33,9 @@ pub use client::FlexPriceClient;
 pub use config::{AuthConfig, FlexPriceConfig};
 pub use guard::UsageBillingGuard;
 pub use middleware::{OrgUuid, UserUuid, auth_middleware};
+pub use revoke::RevokeChecker;
+
+#[cfg(test)]
+pub(crate) use auth::tests::sign as sign_test_jwt;
+#[cfg(test)]
+pub(crate) use revoke::tests as revoke_tests;
