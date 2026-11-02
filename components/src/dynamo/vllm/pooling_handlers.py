@@ -24,6 +24,7 @@ from vllm.inputs import TextPrompt, TokensPrompt
 from dynamo._core import Context
 
 from .args import Config
+from .decision_dispatch import DecisionDispatcher
 from .handlers import EmbeddingWorkerHandler
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,8 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
         )
         self.model_config = model_config
         self._default_pooling_task: str | None = None
+        # Only the factory upgrades this dispatcher, before registration and serving.
+        self.decision = DecisionDispatcher("head")
         logger.info("Classify worker handler initialized")
 
     def _id2label(self) -> dict[int, str]:
@@ -188,6 +191,11 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
         self, request: dict, context: Context
     ) -> AsyncIterator[dict[str, Any]]:
         """Handle one internal classify or pooling wire request."""
+        handled = self.decision.maybe_handle(request, context)
+        if handled is not None:
+            async for response in handled:
+                yield response
+            return
         if "encoding_format" in request:
             async for response in self._generate_pooling(request, context):
                 yield response

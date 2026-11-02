@@ -18,6 +18,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 import dynamo.llm as dynamo_llm
+from dynamo.vllm import decision_native_registry as native_registry
 from dynamo.vllm import envs
 from dynamo.vllm.args import (
     _connector_to_kv_transfer_json,
@@ -2551,8 +2552,21 @@ def test_maybe_freeze_gc_after_init_runs_once(monkeypatch, enabled):
 
 
 @pytest.mark.asyncio
-async def test_register_vllm_model_freezes_gc_before_register_model(monkeypatch):
+@pytest.mark.parametrize(
+    "failure_name",
+    [
+        None,
+        "vllm_d3_decision_v1",
+        "vllm_liquid_decision_v1",
+        "ready:vllm_d3_decision_v1",
+        "ready:vllm_liquid_decision_v1",
+    ],
+)
+async def test_register_vllm_model_freezes_gc_before_register_model(
+    monkeypatch, failure_name, caplog
+):
     vllm_main = _load_vllm_main()
+    caplog.set_level(logging.INFO)
     order: list[str] = []
     monkeypatch.setattr(
         vllm_main, "freeze_gc_heap", lambda: order.append("freeze_gc_heap")
@@ -2564,7 +2578,7 @@ async def test_register_vllm_model_freezes_gc_before_register_model(monkeypatch)
 
     monkeypatch.setattr(vllm_main, "register_model", fake_register_model)
     # Stub everything register_vllm_model calls before register_model; this
-    # test covers only the freeze ordering.
+    # test covers freeze ordering and the native publication boundary.
     for name in (
         "ModelRuntimeConfig",
         "publish_vllm_structural_tag_reasoning_policy",
@@ -2603,15 +2617,60 @@ async def test_register_vllm_model_freezes_gc_before_register_model(monkeypatch)
 
     config = Mock(freeze_gc_after_init=True, dyn_default_thinking_mode=None)
     vllm_config = Mock(lora_config=None)
+    selected = (
+        native_registry.PROFILES[failure_name.removeprefix("ready:")]
+        if failure_name is not None
+        else None
+    )
+    ready = failure_name is not None and failure_name.startswith("ready:")
+    failure = selected if not ready else None
+    publication = (
+        native_registry.NativeReady(selected)
+        if ready
+        else (native_registry.NativeFailed(failure) if failure else None)
+    )
+    head = selected is not None and selected.kind == "head"
 
     await vllm_main.register_vllm_model(
-        dynamo_llm.ModelInput.Tokens,
-        dynamo_llm.ModelType.Chat,
+        dynamo_llm.ModelInput.Text if head else dynamo_llm.ModelInput.Tokens,
+        (
+            dynamo_llm.ModelType.Classify | dynamo_llm.ModelType.Pooling
+            if head
+            else dynamo_llm.ModelType.Chat
+        ),
         Mock(),
         config,
         Mock(),
         vllm_config,
         worker_type=dynamo_llm.WorkerType.Aggregated,
+        native_decision=publication,
     )
 
     assert order == ["freeze_gc_heap", "register_model"]
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "native decision qualification failure" in message for message in messages
+    ) is (failure is not None)
+    assert (
+        any(
+            "Published vLLM native decision capability" in message
+            for message in messages
+        )
+        is ready
+    )
+    calls = vllm_main.ModelRuntimeConfig.return_value.set_engine_specific.call_args_list
+    failures = [
+        call.args
+        for call in calls
+        if call.args[0] == "vllm_native_decision_qualification_failure_v1"
+    ]
+    assert failures == (
+        []
+        if failure is None
+        else [
+            (
+                "vllm_native_decision_qualification_failure_v1",
+                json.dumps({"profile": failure.name}),
+            )
+        ]
+    )

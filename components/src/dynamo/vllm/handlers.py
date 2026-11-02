@@ -103,6 +103,7 @@ from .backend_args import _configured_artifact_router_profile
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import publish_vllm_token_budget
 from .constants import MX_LOAD_FORMATS, DisaggregationMode, EmbeddingTransferMode
+from .decision_dispatch import DecisionDispatcher
 from .dp_topology import get_dp_range_for_worker
 from .engine_generate import (
     adapt_engine_generate_request,
@@ -3807,11 +3808,18 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             encode_worker_client=encode_worker_client,
         )
         self._first_token_source = first_token_source
+        # Only the factory upgrades this dispatcher, before registration and serving.
+        self.decision = DecisionDispatcher("read")
         self._external_encoder_handoff_consumer: Optional[
             ExternalEncoderHandoffConsumer
         ] = None
 
     async def generate(self, request, context):
+        handled = self.decision.maybe_handle(request, context)
+        if handled is not None:
+            async for response in handled:
+                yield response
+            return
         normalize_request_token_ids(request)
         settings = _backend_metadata_upload_settings(request)
         if settings is not None and "kind" in settings and self.use_vllm_tokenizer:

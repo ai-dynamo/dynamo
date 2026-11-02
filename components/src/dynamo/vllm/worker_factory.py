@@ -36,6 +36,7 @@ from .args import Config
 from .cache_info import configure_kv_event_block_size
 from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
+from .decision_native_registry import initialize_native_decisions
 from .dp_topology import get_dp_range_for_worker
 from .handlers import (
     BaseWorkerHandler,
@@ -2289,12 +2290,21 @@ class WorkerFactory:
             shutdown_event=shutdown_event,
         )
 
-        classify_health_check_payload = VllmEmbeddingHealthCheckPayload(
-            model_name=config.served_model_name or config.model
-        ).to_dict()
-
         logger.info("Starting to serve the classify worker endpoint...")
         try:
+            handler.decision = await initialize_native_decisions(
+                "head",
+                engine_client,
+                handler.model_config,
+                config,
+                abort_monitor=handler._abort_monitor,
+                on_engine_dead=runtime.shutdown,
+            )
+            model_name = config.served_model_name or config.model
+            classify_health_check_payload = VllmEmbeddingHealthCheckPayload(
+                model_name=model_name,
+                default_payload=handler.decision.health_payload(model_name),
+            ).to_dict()
             await asyncio.gather(
                 generate_endpoint.serve_endpoint(
                     handler.generate,
@@ -2310,6 +2320,7 @@ class WorkerFactory:
                     vllm_config,
                     worker_type=WorkerType.Aggregated,
                     needs=[],
+                    native_decision=handler.decision.publication,
                 ),
             )
         except Exception as e:

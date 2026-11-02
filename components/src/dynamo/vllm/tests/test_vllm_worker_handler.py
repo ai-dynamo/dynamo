@@ -45,6 +45,39 @@ pytestmark = [
 ]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "marker,cached", [(None, None), ("causal", None), ("causal", 0), ("causal", 2)]
+)
+async def test_decode_token_stream_preserves_frames_without_metadata_validation(
+    marker, cached
+):
+    handler = object.__new__(mod.DecodeWorkerHandler)
+    handler.decision = SimpleNamespace(maybe_handle=lambda *_: None)
+    handler.use_vllm_tokenizer = False
+    handler._first_token_source = None
+    handler._multimodal_request_processor = SimpleNamespace(
+        validate_multimodal_request=lambda *_: None
+    )
+    usage = {"prompt_tokens": 3, "completion_tokens": 1}
+    if cached is not None:
+        usage["prompt_tokens_details"] = {"cached_tokens": cached}
+    frame = {"finish_reason": "length", "token_ids": [4], "completion_usage": usage}
+
+    async def generate(*args):
+        yield frame
+
+    handler._generate_token_mode = generate
+    context = SimpleNamespace(id=lambda: "token-stream", notify_first_token=MagicMock())
+    if marker is not None:
+        context.metadata = {"dynamo.internal.decision": marker}
+    returned = [
+        item async for item in handler.generate({"token_ids": [1, 2, 3]}, context)
+    ]
+    assert returned == [frame] and returned[0] is frame
+    context.notify_first_token.assert_called_once_with()
+
+
 def test_rl_weight_world_size_accepts_tensor_parallel_topology():
     parallel_config = SimpleNamespace(
         data_parallel_size=1,

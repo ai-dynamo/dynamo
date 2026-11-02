@@ -78,6 +78,12 @@ from .capacity import (
 )
 from .constants import MX_LOAD_FORMATS
 from .decision_execution import publish_vllm_decision_capability
+from .decision_native_registry import (
+    NativeFailed,
+    NativePublication,
+    NativeReady,
+    publish_native_decision_capability,
+)
 from .dp_topology import get_dp_range_for_worker
 from .embedding_worker_processes import (
     EmbeddingEngineCleanupResource,
@@ -929,6 +935,7 @@ async def register_vllm_model(
     vllm_config: VllmConfig,
     worker_type: WorkerType,
     needs: list[list[WorkerType]] | None = None,
+    native_decision: NativePublication | None = None,
 ) -> None:
     """
     Helper function to register a vLLM model with runtime configuration.
@@ -949,6 +956,7 @@ async def register_vllm_model(
             frontend's model-serving-readiness check.
         needs: Peer worker types required to serve traffic, in DNF form
             (list of alternative AND-sets).
+        native_decision: Ready or failed native qualification publication, if any.
     """
     runtime_config = ModelRuntimeConfig()
     publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
@@ -988,6 +996,21 @@ async def register_vllm_model(
         needs=needs,
     ):
         logger.info("Published vLLM causal decision capability")
+    publication = publish_native_decision_capability(
+        runtime_config,
+        native_decision,
+        model_input,
+        model_type,
+        worker_type,
+        needs,
+    )
+    match publication:
+        case NativeReady(profile):
+            logger.info("Published vLLM native decision capability: %s", profile.name)
+        case NativeFailed(profile):
+            logger.warning(
+                "Published vLLM native decision qualification failure: %s", profile.name
+            )
     if model_type != ModelType.Embedding:
         publish_vllm_token_budget(
             runtime_config, vllm_config.model_config.max_model_len

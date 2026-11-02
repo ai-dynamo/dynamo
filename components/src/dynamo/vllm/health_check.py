@@ -64,8 +64,11 @@ def _get_bos_token_id_from_engine(engine_client) -> int:
 def _make_default_payload(
     engine_client: Optional["AsyncLLM"], use_text_input: bool
 ) -> dict:
+    # Older optional runtimes may not expose diffusion model metadata.
+    model_config = getattr(engine_client, "model_config", None)
+    is_diffusion = getattr(model_config, "is_diffusion", False) is True
     sampling_options = {
-        "temperature": 0.0,
+        "temperature": 1.0 if is_diffusion else 0.0,
     }
 
     stop_conditions = {
@@ -136,7 +139,12 @@ class VllmEmbeddingHealthCheckPayload(HealthCheckPayload):
     cycle.
     """
 
-    def __init__(self, model_name: Optional[str] = None):
+    def __init__(
+        self,
+        model_name: Optional[str] = None,
+        *,
+        default_payload: Optional[dict[str, Any]] = None,
+    ):
         """
         Args:
             model_name: served model name to put on ``request["model"]``.
@@ -145,8 +153,11 @@ class VllmEmbeddingHealthCheckPayload(HealthCheckPayload):
                 absent. Passing it keeps the probe self-describing in
                 worker logs; omit when the caller doesn't have a
                 specific name to advertise.
+            default_payload: Optional model-specific raw pooling probe.
         """
-        self.default_payload: dict[str, Any] = {"input": "probe"}
+        self.default_payload: dict[str, Any] = (
+            dict(default_payload) if default_payload is not None else {"input": "probe"}
+        )
         if model_name is not None:
             self.default_payload["model"] = model_name
         super().__init__()
