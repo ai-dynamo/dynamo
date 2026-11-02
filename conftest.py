@@ -24,7 +24,8 @@ _NO_DEFAULT_MARKERS_ENV = "DYNAMO_PYTEST_NO_DEFAULT_MARKERS"
 _SUITE_MARKERS = REQUIRED_CATEGORIES["Lifecycle"]
 _MACHINE_MARKERS = REQUIRED_CATEGORIES["Hardware"]
 
-# Trees that ship runnable demos and agent scripts rather than CI suites.
+# Trees with dedicated CI jobs or runnable demos outside the runtime suites.
+# Helm chart tests run in helm-chart-tests, which installs the Helm CLI.
 # Their files are still collected, so a developer can run one explicitly, but
 # they must not be defaulted into a lifecycle: an unmarked demo helper such as
 # examples/backends/sglang/test_sglang_profile.py assumes a server the harness
@@ -32,7 +33,7 @@ _MACHINE_MARKERS = REQUIRED_CATEGORIES["Hardware"]
 # Anything under these roots that carries its own markers is unaffected.
 # ``skills`` is a symlink to ``.agents/skills``, so resolve() lands on
 # ``.agents``; both names are listed because either can reach collection.
-_UNMANAGED_ROOTS = frozenset({"examples", "skills", ".agents"})
+_UNMANAGED_PATHS = (("examples",), ("skills",), (".agents",), ("deploy", "helm"))
 _REPO_ROOT = Path(__file__).resolve().parent
 
 # Seed sys.modules with the venv copies before pytest collection runs.
@@ -138,7 +139,7 @@ def pytest_runtest_protocol(item, nextitem):
 
 
 def _is_unmanaged(item) -> bool:
-    """True when the item lives in a demo or script tree, not a CI suite."""
+    """True when runtime CI must not supply lifecycle or hardware defaults."""
     try:
         path = Path(str(item.path)).resolve()
     except (AttributeError, OSError, ValueError):
@@ -147,7 +148,7 @@ def _is_unmanaged(item) -> bool:
         parts = path.relative_to(_REPO_ROOT).parts
     except ValueError:
         return False
-    return bool(parts) and parts[0] in _UNMANAGED_ROOTS
+    return any(parts[: len(prefix)] == prefix for prefix in _UNMANAGED_PATHS)
 
 
 def _tag_xfail_for_datadog(item) -> None:
@@ -214,7 +215,7 @@ def pytest_itemcollected(item):
     fault-tolerance suite in a single process -- the imports alone cost ~90 MB
     resident for the rest of the run, and the job was OOM-killed (exit 137).
 
-    Trees in ``_UNMANAGED_ROOTS`` are skipped entirely; they keep the
+    Trees in ``_UNMANAGED_PATHS`` are skipped entirely; they keep the
     pre-default behaviour of being deselected unless they mark themselves.
 
     ``DYNAMO_PYTEST_NO_DEFAULT_MARKERS=1`` disables the defaults so the marker

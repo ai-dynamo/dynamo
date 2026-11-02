@@ -297,6 +297,25 @@ RUN set -eux; \
         -o -name 'libfaac*.so*' -o -name 'libvo-aacenc*.so*' \
         -o -name 'libaacplus*.so*' \) -delete; \
     ldconfig
+
+# Remove the development tooling a development-flavor base ships (see
+# dev_image_packages.txt). Only installed packages are purged, and the build stops
+# if apt would also remove a package outside the list, so the purge cannot reach
+# what the runtime loads. A no-op on the runtime-flavor bases.
+RUN --mount=type=bind,source=./container/deps/sglang/dev_image_packages.txt,target=/tmp/dev_image_packages.txt \
+    set -eu; \
+    listed="$(grep -v -e '^#' -e '^$' /tmp/dev_image_packages.txt)"; \
+    purge="$(dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' $listed 2>/dev/null | awk '$1 == "ii" {print $2}')"; \
+    if [ -n "$purge" ]; then \
+        extra="$(apt-get -s purge $purge | awk '/^Purg /{print $2}' | grep -vxF "$purge" || true)"; \
+        if [ -n "$extra" ]; then \
+            echo "ERROR: purging the development packages would also remove:" >&2; \
+            echo "$extra" >&2; \
+            exit 1; \
+        fi; \
+        DEBIAN_FRONTEND=noninteractive apt-get purge -y $purge; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*
 {% endif %}
 
 # Drop the Nsight efa_metrics plugin the CUDA floor carries: a Go NIC sampler

@@ -21,7 +21,7 @@ use dynamo_protocols::types::{
     ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
     ChatCompletionRequestUserMessageContentPart, ChatCompletionTool,
     ChatCompletionToolChoiceOption, ChatCompletionToolType, CompletionUsage, FunctionName,
-    FunctionObject, FunctionType, ImageUrl, ReasoningContent, ResponseFormat,
+    FunctionObject, FunctionType, ImageUrl, ReasoningContent, ReasoningEffort, ResponseFormat,
     ResponseFormatJsonSchema,
 };
 use uuid::Uuid;
@@ -57,6 +57,83 @@ fn system_message_content(content: &AnthropicMessageContent) -> String {
             .join("\n"),
     }
 }
+
+/// Fold `role: "system"` messages from `messages[]` into the leading system prompt,
+/// and report whether any were folded.
+///
+/// mistral-common's message order rejects a system message after an assistant or tool
+/// turn, and Claude Code sends one after each tool result while its `<total_tokens>`
+/// reminder is on. Upstream vLLM merges them similarly for templates that reject them.
+/// The leading system prompt precedes the tools and the history, so each new inline
+/// message changes the whole prompt prefix and the next turn misses the prefix cache.
+pub(crate) fn merge_inline_system_messages(req: &mut AnthropicCreateMessageRequest) -> bool {
+    let mut inline = Vec::new();
+    req.messages.retain(|msg| {
+        if !matches!(msg.role, AnthropicRole::System) {
+            return true;
+        }
+        let text = system_message_content(&msg.content);
+        if !text.is_empty() {
+            inline.push(text);
+        }
+        false
+    });
+    if inline.is_empty() {
+        return false;
+    }
+    let (leading, cache_control) = match req.system.take() {
+        Some(SystemContent {
+            text,
+            cache_control,
+        }) => (Some(text), cache_control),
+        None => (None, None),
+    };
+    let text = leading
+        .into_iter()
+        .chain(inline)
+        .collect::<Vec<_>>()
+        .join("\n");
+    req.system = Some(SystemContent {
+        text,
+        cache_control,
+    });
+    true
+}
+
+/// The `reasoning_effort` for a model whose only reasoning control is `reasoning_effort`,
+/// as upstream vLLM's Anthropic endpoint sets it (`_handle_output_config`, then
+/// `_handle_thinking` in `vllm/entrypoints/anthropic/serving.py`).
+///
+/// `output_config.effort` passes through unchanged, so the renderer rejects a level the
+/// model does not support, as native `vllm serve` does. `thinking.type` `disabled`
+/// selects `disabled_effort` over any valid effort: `none`, or `low` for a model whose
+/// renderer rejects `none`, as upstream's `DisabledThinkingEffortResolver` probes it.
+/// `adaptive` and `enabled` set nothing, so a request without an effort keeps the
+/// model's default.
+pub(crate) fn reasoning_effort_from_anthropic(
+    thinking: Option<&ThinkingConfig>,
+    output_config: Option<&serde_json::Value>,
+    disabled_effort: ReasoningEffort,
+) -> anyhow::Result<Option<ReasoningEffort>> {
+    let effort = match output_config.and_then(|config| config.get("effort")) {
+        None | Some(serde_json::Value::Null) => None,
+        Some(effort) => Some(match effort.as_str() {
+            Some("low") => ReasoningEffort::Low,
+            Some("medium") => ReasoningEffort::Medium,
+            Some("high") => ReasoningEffort::High,
+            Some("xhigh") => ReasoningEffort::Xhigh,
+            Some("max") => ReasoningEffort::Max,
+            _ => anyhow::bail!(
+                "output_config.effort must be one of low, medium, high, xhigh, max; got {effort}"
+            ),
+        }),
+    };
+    if thinking.is_some_and(|thinking| thinking.thinking_type == "disabled") {
+        return Ok(Some(disabled_effort));
+    }
+    Ok(effort)
+}
+
 impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
     type Error = anyhow::Error;
 
@@ -1249,6 +1326,105 @@ mod tests {
             &chat_req.inner.messages[2],
             ChatCompletionRequestMessage::User(_)
         ));
+    }
+
+    #[test]
+    fn test_merge_inline_system_messages_after_tool_result() {
+        let json = r#"{
+            "model": "test-model",
+            "max_tokens": 100,
+            "system": "You are a coding agent.",
+            "messages": [
+                {"role": "user", "content": "Run cat notes.txt"},
+                {"role": "system", "content": "Environment: macOS"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "toolu_01", "name": "Bash", "input": {"command": "cat notes.txt"}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_01", "content": "hello"}
+                ]},
+                {"role": "system", "content": [{"type": "text", "text": "1000 tokens left"}]}
+            ]
+        }"#;
+        let mut req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        assert!(merge_inline_system_messages(&mut req));
+
+        assert_eq!(
+            req.system.as_ref().unwrap().text,
+            "You are a coding agent.\nEnvironment: macOS\n1000 tokens left"
+        );
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let roles: Vec<_> = chat_req
+            .inner
+            .messages
+            .iter()
+            .map(|message| match message {
+                ChatCompletionRequestMessage::System(_) => "system",
+                ChatCompletionRequestMessage::User(_) => "user",
+                ChatCompletionRequestMessage::Assistant(_) => "assistant",
+                ChatCompletionRequestMessage::Tool(_) => "tool",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(roles, ["system", "user", "assistant", "tool"]);
+    }
+
+    #[test]
+    fn test_merge_inline_system_messages_without_inline_keeps_system() {
+        let json = r#"{
+            "model": "test-model",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Hi"}]
+        }"#;
+        let mut req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        assert!(!merge_inline_system_messages(&mut req));
+        assert!(req.system.is_none());
+        assert_eq!(req.messages.len(), 1);
+    }
+
+    #[test]
+    fn test_reasoning_effort_from_anthropic() {
+        let thinking = |kind: &str| ThinkingConfig {
+            thinking_type: kind.to_string(),
+            budget_tokens: None,
+        };
+        let effort = |level: serde_json::Value| serde_json::json!({ "effort": level });
+        let resolve = |kind: Option<&str>, config: Option<serde_json::Value>| {
+            reasoning_effort_from_anthropic(
+                kind.map(thinking).as_ref(),
+                config.as_ref(),
+                ReasoningEffort::None,
+            )
+        };
+
+        // A level the model lacks passes through; the renderer rejects it.
+        assert_eq!(
+            resolve(Some("adaptive"), Some(effort("medium".into()))).unwrap(),
+            Some(ReasoningEffort::Medium)
+        );
+        // Without an effort, adaptive keeps the model's default.
+        assert_eq!(resolve(Some("adaptive"), None).unwrap(), None);
+        assert_eq!(
+            resolve(Some("adaptive"), Some(effort(serde_json::Value::Null))).unwrap(),
+            None
+        );
+        // Disabled thinking selects `none` over a valid effort, not over an invalid one.
+        assert_eq!(
+            resolve(Some("disabled"), Some(effort("high".into()))).unwrap(),
+            Some(ReasoningEffort::None)
+        );
+        assert!(resolve(Some("disabled"), Some(effort("bogus".into()))).is_err());
+        assert!(resolve(Some("adaptive"), Some(effort("none".into()))).is_err());
+        // A model without `none` turns thinking down to `low` instead.
+        assert_eq!(
+            reasoning_effort_from_anthropic(
+                Some(&thinking("disabled")),
+                Some(&effort("high".into())),
+                ReasoningEffort::Low,
+            )
+            .unwrap(),
+            Some(ReasoningEffort::Low)
+        );
     }
 
     #[test]

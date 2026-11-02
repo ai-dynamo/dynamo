@@ -13,6 +13,7 @@ use tokenizers::models::bpe::{BPE, Vocab};
 
 const HF_PATH: &str = "tests/data/sample-models/TinyLlama_v1.1";
 const TIKTOKEN_PATH: &str = "tests/data/sample-models/mock-tiktoken";
+const MISTRAL_TEKKEN_PATH: &str = "tests/data/sample-models/mock-mistral-tekken";
 
 fn unsupported_alternate_tokenizer() -> (TempDir, PathBuf) {
     let dir = tempdir().unwrap();
@@ -66,8 +67,71 @@ async fn test_tokenizer_from_hf_like_local_repo() {
     // Verify tokenizer file was found
     match mdc.tokenizer.unwrap() {
         TokenizerKind::HfTokenizerJson(_) => (),
-        TokenizerKind::TikTokenModel(_) => panic!("Expected HfTokenizerJson, got TikTokenModel"),
+        other => panic!("Expected HfTokenizerJson, got {other:?}"),
     }
+}
+
+#[test]
+fn test_unsupported_tekken_version_keeps_the_python_path() {
+    let dir = tempdir().unwrap();
+    let mut tekken: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(format!("{MISTRAL_TEKKEN_PATH}/tekken.json")).unwrap(),
+    )
+    .unwrap();
+    tekken["config"]["version"] = "v11".into();
+    std::fs::write(dir.path().join("tekken.json"), tekken.to_string()).unwrap();
+    std::fs::copy(
+        format!("{MISTRAL_TEKKEN_PATH}/params.json"),
+        dir.path().join("params.json"),
+    )
+    .unwrap();
+
+    let mdc = ModelDeploymentCard::load_from_disk(dir.path(), None).unwrap();
+    assert!(mdc.tokenizer.is_none());
+}
+
+#[test]
+fn test_mistral_native_checkpoint_serves_on_the_rust_frontend() {
+    let mdc = ModelDeploymentCard::load_from_disk(MISTRAL_TEKKEN_PATH, None).unwrap();
+    assert!(matches!(mdc.tokenizer, Some(TokenizerKind::TekkenJson(_))));
+    assert!(
+        mdc.model_info.is_none(),
+        "no config.json to describe the model"
+    );
+    assert_eq!(mdc.architectural_max_context_length, Some(32768));
+
+    let info = mdc.resolved_model_info().unwrap().unwrap();
+    assert_eq!(info.bos_token_id(), Some(1));
+    assert_eq!(info.eos_token_ids(), vec![2]);
+    assert_eq!(info.vocab_size(), Some(1040));
+
+    let tokenizer = mdc.tokenizer().unwrap();
+    let ids = tokenizer
+        .encode_segments(&[
+            EncodeSegment::control("<s>"),
+            EncodeSegment::control("[INST]"),
+            EncodeSegment::ordinary("hi [INST]"),
+        ])
+        .unwrap();
+    assert_eq!(&ids.token_ids()[..2], &[1, 3]);
+    assert_eq!(ids.token_ids().iter().filter(|&&id| id == 3).count(), 1);
+
+    let dynamo_renderer::PromptFormatter::OAI(formatter) =
+        dynamo_llm::preprocessor::prompt::prompt_formatter_from_mdc(&mdc).unwrap();
+    assert!(formatter.renders_continuation_natively());
+    let mut request: dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest =
+        serde_json::from_value(serde_json::json!({
+            "model": "mistral",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "high"
+        }))
+        .unwrap();
+    // The HTTP boundary folds the top-level field into the template args.
+    request.normalize_reasoning_template_args().unwrap();
+    assert_eq!(
+        formatter.render(&request).unwrap(),
+        r#"<s>[MODEL_SETTINGS]{"reasoning_effort": "high"}[/MODEL_SETTINGS][INST]hi[/INST]"#
+    );
 }
 
 #[test]

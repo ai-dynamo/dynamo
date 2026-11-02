@@ -60,19 +60,74 @@ async fn responses_sse_requires_terminal_event_without_trailers() {
     );
 }
 
+/// Hosted web search is dropped before dispatch for unary and streaming requests, so
+/// clients that send it by default still reach the model with their function tools.
+#[tokio::test]
+#[serial]
+async fn hosted_web_search_is_ignored_before_dispatch() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc =
+            HarnessService::start([script.clone(), script.clone(), script.clone(), script]).await;
+        for stream in [false, true] {
+            for tools in [
+                json!([tool("read_file"), {"type": "web_search"}]),
+                json!([{"type": "web_search_preview"}]),
+            ] {
+                let body = json!({
+                    "model": MODEL,
+                    "input": "ping",
+                    "stream": stream,
+                    "tools": tools,
+                });
+                let response = post_responses(&svc, &body).await;
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                let _ = response.bytes().await.unwrap();
+            }
+            // With only hosted web search left, a required choice has nothing to call.
+            let body = json!({
+                "model": MODEL,
+                "input": "ping",
+                "stream": stream,
+                "tools": [{"type": "web_search"}],
+                "tool_choice": "required",
+            });
+            let response = post_responses(&svc, &body).await;
+            assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+            let error: Value = response.json().await.unwrap();
+            assert!(error["message"].as_str().unwrap().contains("web_search"));
+        }
+
+        let requests = svc.engine.take_requests().await;
+        assert_eq!(requests.len(), 4);
+        for pair in requests.chunks(2) {
+            let tools = pair[0].inner.tools.as_deref().unwrap();
+            assert_eq!(tools.len(), 1);
+            assert_eq!(tools[0].function.name, "read_file");
+            assert!(pair[1].inner.tools.is_none());
+        }
+        svc.shutdown().await;
+    })
+    .await;
+}
+
 /// Unsupported tool definitions return HTTP 400 before backend dispatch for both
 /// unary and streaming requests, including mixed tools and namespace members.
 #[tokio::test]
 #[serial]
-async fn unsupported_hosted_tools_fail_before_dispatch_or_streaming() {
+async fn unsupported_client_tools_fail_before_dispatch_or_streaming() {
     temp_env::async_with_vars(ENV, async {
         let svc = HarnessService::start([]).await;
         for stream in [false, true] {
             for (tools, tool_type) in [
-                (json!([{"type": "web_search"}]), "web_search"),
+                (json!([{"type": "local_shell"}]), "local_shell"),
                 (
-                    json!([tool("read_file"), {"type": "web_search"}]),
-                    "web_search",
+                    json!([tool("read_file"), {"type": "local_shell"}]),
+                    "local_shell",
+                ),
+                (
+                    json!([{"type": "file_search", "vector_store_ids": ["vs_1"]}]),
+                    "file_search",
                 ),
                 (
                     json!([{

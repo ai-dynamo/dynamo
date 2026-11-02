@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use futures::{Stream, StreamExt, TryStreamExt};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate_finalize;
@@ -184,6 +184,9 @@ struct DeltaChoice {
     // which required id/name/arguments to all be set on the same chunk.
     tool_call_chunks: BTreeMap<u32, dynamo_protocols::types::ChatCompletionMessageToolCallChunk>,
     parser_call_completion: HashMap<u32, bool>,
+    // Ids of finalized calls the parser marked complete. Streaming clients already
+    // received them as-is, so terminal argument validation leaves them alone.
+    parser_confirmed_call_ids: HashSet<String>,
     // Optional tool calls for the chat choice, populated *after* fold either
     // by finalizing `tool_call_chunks` above, or by
     // `try_tool_call_parse_aggregate_finalize` running against `text` for producers
@@ -240,11 +243,13 @@ fn drop_incomplete_length_tool_calls(choice: &mut DeltaChoice, unified: bool) {
     }
 }
 
-/// A stop or EOF can follow a streamed call whose last argument fragment is not
-/// valid JSON. The adapter can normalize that stop to `ToolCalls` before aggregation,
-/// so validate that terminal state too before exposing an executable final response.
-/// An empty argument string remains valid when the upstream explicitly completed a
-/// parameterless call with `ToolCalls`.
+/// A stop or EOF can follow a streamed backend call whose last argument fragment is
+/// not valid JSON. The adapter can normalize that stop to `ToolCalls` before
+/// aggregation, so validate the arguments of calls without parser completion
+/// evidence here. An empty argument string remains valid when the upstream
+/// explicitly completed a parameterless call with `ToolCalls`. A call the parser
+/// confirmed complete keeps its arguments as the model wrote them, as the streaming
+/// response already delivered them.
 fn drop_malformed_terminal_tool_calls(
     choice: &mut DeltaChoice,
     require_explicit_tool_terminal: bool,
@@ -267,12 +272,14 @@ fn drop_malformed_terminal_tool_calls(
 
     let explicit_parameterless_call =
         choice.finish_reason == Some(dynamo_protocols::types::FinishReason::ToolCalls);
+    let confirmed = &choice.parser_confirmed_call_ids;
     let Some(tool_calls) = choice.tool_calls.as_mut() else {
         return;
     };
     tool_calls.retain(|tool_call| {
         let arguments = &tool_call.function.arguments;
-        (explicit_parameterless_call && arguments.is_empty())
+        confirmed.contains(&tool_call.id)
+            || (explicit_parameterless_call && arguments.is_empty())
             || serde_json::from_str::<serde_json::Value>(arguments).is_ok()
     });
     if tool_calls.is_empty() {
@@ -519,6 +526,7 @@ impl DeltaAggregator {
                                     logprobs: None,
                                     tool_call_chunks: BTreeMap::new(),
                                     parser_call_completion: HashMap::new(),
+                                    parser_confirmed_call_ids: HashSet::new(),
                                     tool_calls: None,
                                     reasoning_content: None,
                                     refusal: None,
@@ -626,10 +634,20 @@ impl DeltaAggregator {
             }
             let finalized: Vec<_> = std::mem::take(&mut choice.tool_call_chunks)
                 .into_iter()
-                // Explicit parser evidence owns provisional calls. Backend chunks have
-                // no completion bit; the shared argument validation below handles them.
-                .filter(|(index, _)| choice.parser_call_completion.get(index) != Some(&false))
-                .filter_map(|(_, chunk)| finalize_merged_tool_chunk(chunk))
+                // Explicit parser evidence owns provisional and confirmed calls.
+                // Backend chunks have no completion bit; the terminal argument
+                // validation below handles them.
+                .filter_map(|(index, chunk)| {
+                    let complete = choice.parser_call_completion.get(&index).copied();
+                    if complete == Some(false) {
+                        return None;
+                    }
+                    let call = finalize_merged_tool_chunk(chunk)?;
+                    if complete == Some(true) {
+                        choice.parser_confirmed_call_ids.insert(call.id.clone());
+                    }
+                    Some(call)
+                })
                 .collect();
             // choice.tool_calls is always None at this point: or_insert
             // initializes it to None, try_tool_call_parse_aggregate_finalize
@@ -2449,8 +2467,6 @@ mod tests {
                 incomplete_filtered,
                 unterminated,
             ])),
-            // DeepSeek V4.1 selects the unified adapter without the Qwen opt-in flag,
-            // so this terminal-policy regression also runs in the default test suite.
             ParsingOptions::new(
                 Some("deepseek_v41".to_string()),
                 Some("deepseek_v41".to_string()),
@@ -2543,6 +2559,75 @@ mod tests {
             Some(dynamo_protocols::types::FinishReason::Length)
         );
         assert!(response.inner.choices[0].message.tool_calls.is_none());
+    }
+
+    /// A Mistral call whose closed body is not valid JSON streams to the client as a
+    /// tool call. The non-streaming response must return the same calls: neither the
+    /// malformed call nor its valid sibling may be dropped.
+    #[tokio::test]
+    async fn mistral_parser_confirmed_call_with_invalid_json_survives_aggregation() {
+        let tool = |name: &str, parameter: &str| dynamo_parsers::tool_calling::ToolDefinition {
+            name: name.to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {parameter: {"type": "string"}},
+                "required": [parameter]
+            })),
+            strict: None,
+        };
+        let tools = vec![tool("cd", "folder"), tool("mkdir", "dir_name")];
+        let raw = create_test_delta(
+            0,
+            r#"[TOOL_CALLS]cd[ARGS]{"workspace"}[TOOL_CALLS]mkdir[ARGS]{"dir_name": "Projects"}"#,
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            None,
+            None,
+        );
+        let adapted = super::super::unified_parser::apply_stream(
+            stream::iter(vec![raw]),
+            Some(tools),
+            None,
+            false,
+            dynamo_parsers_v2::UnifiedParserStartingState::Response,
+            "mistral",
+        );
+
+        let response = DeltaAggregator::apply_with_tool_terminal_policy(
+            adapted,
+            ParsingOptions::new(Some("mistral".to_string()), Some("mistral".to_string())),
+            true,
+        )
+        .await
+        .expect("aggregation should succeed");
+
+        let choice = &response.inner.choices[0];
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::ToolCalls)
+        );
+        let calls = choice
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("the streamed calls must not be dropped");
+        let calls: Vec<_> = calls
+            .iter()
+            .map(|call| {
+                (
+                    call.function.name.as_str(),
+                    call.function.arguments.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                ("cd", r#"{"workspace"}"#),
+                ("mkdir", r#"{"dir_name": "Projects"}"#)
+            ]
+        );
+        assert!(choice.message.content.is_none());
     }
 
     #[tokio::test]
@@ -3537,6 +3622,7 @@ mod tests {
             logprobs: None,
             tool_call_chunks: BTreeMap::new(),
             parser_call_completion: HashMap::new(),
+            parser_confirmed_call_ids: HashSet::new(),
             tool_calls: None,
             reasoning_content: Some("Analyzing the question.".to_string()),
             refusal: None,

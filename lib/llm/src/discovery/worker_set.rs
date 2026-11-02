@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use dynamo_protocols::types::ReasoningEffort;
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, Data};
 use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
 use dynamo_runtime::{
@@ -250,6 +251,10 @@ pub struct WorkerSet {
     /// Drops after engine fields and after every active request context releases it.
     allocator_trim: Option<Arc<AllocatorTrimOnDrop>>,
     allocator_trim_wrapped: bool,
+
+    /// The `reasoning_effort` Anthropic disabled thinking selects on a native Mistral card,
+    /// resolved from its `tekken.json` when the set is prepared.
+    mistral_disabled_thinking_effort: Option<ReasoningEffort>,
 }
 
 impl WorkerSet {
@@ -280,6 +285,7 @@ impl WorkerSet {
             lifecycle_cancellation: None,
             allocator_trim: None,
             allocator_trim_wrapped: false,
+            mistral_disabled_thinking_effort: None,
         }
     }
 
@@ -424,6 +430,10 @@ impl WorkerSet {
         !self.is_encode_set() && !self.has_any_serving_engine()
     }
 
+    pub(crate) fn set_mistral_disabled_thinking_effort(&mut self, effort: Option<ReasoningEffort>) {
+        self.mistral_disabled_thinking_effort = effort;
+    }
+
     /// Build ParsingOptions from this WorkerSet's card configuration.
     pub fn parsing_options(&self) -> crate::protocols::openai::ParsingOptions {
         crate::protocols::openai::ParsingOptions {
@@ -434,6 +444,8 @@ impl WorkerSet {
                 .get(crate::preprocessor::DEFAULT_THINKING_MODE_RUNTIME_KEY)
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
+            native_mistral_renderer: self.card.uses_native_mistral_renderer(),
+            mistral_disabled_thinking_effort: self.mistral_disabled_thinking_effort.clone(),
             structural_tag: self.card.runtime_config.structural_tag.clone(),
             exclude_tools_when_tool_choice_none: self
                 .card
@@ -556,6 +568,8 @@ impl WorkerSet {
                 .map(CancellationToken::child_token),
             allocator_trim: None,
             allocator_trim_wrapped: false,
+            // An adapter renders through the base model's chat engine and tokenizer.
+            mistral_disabled_thinking_effort: self.mistral_disabled_thinking_effort.clone(),
         };
         if self.allocator_trim.is_some() {
             view.enable_allocator_trim_on_teardown();
@@ -669,6 +683,24 @@ mod tests {
                 .as_ref()
                 .and_then(|routing| routing.lora_name.clone());
             Err(anyhow::anyhow!("captured request"))
+        }
+    }
+
+    #[test]
+    fn adapter_view_keeps_the_mistral_disabled_thinking_effort() {
+        let mut base = make_worker_set("ns1", "abc123");
+        base.set_mistral_disabled_thinking_effort(Some(ReasoningEffort::Low));
+        let mut adapter_card = ModelDeploymentCard::with_name_only("adapter-model");
+        adapter_card.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter-model".to_string(),
+            max_gpu_lora_count: Some(4),
+        });
+        let adapter = base.adapter_view(adapter_card);
+        for set in [&base, &adapter] {
+            assert_eq!(
+                set.parsing_options().mistral_disabled_thinking_effort,
+                Some(ReasoningEffort::Low)
+            );
         }
     }
 

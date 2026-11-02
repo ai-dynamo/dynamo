@@ -702,10 +702,27 @@ fn convert_input_items_to_messages(
     Ok(messages)
 }
 
+/// Whether a tool is the provider-hosted web search.
+///
+/// No backend behind this adapter can run it, and agent clients such as Codex CLI send
+/// it by default, so it is ignored, as upstream vLLM does, instead of failing the
+/// request. Other hosted tools carry resources the caller configured (vector stores,
+/// MCP servers) and stay unsupported, as do client-executed built-ins.
+fn is_hosted_web_search(tool: &Tool) -> bool {
+    matches!(
+        tool,
+        Tool::WebSearch(_)
+            | Tool::WebSearch20250826(_)
+            | Tool::WebSearchPreview(_)
+            | Tool::WebSearchPreview20250311(_)
+    )
+}
+
 /// Convert Responses API tools to the flat Chat Completions representation.
 ///
 /// Preserve unambiguous bare names and assign reversible aliases to collisions.
-/// Unsupported tool kinds are rejected instead of silently discarded.
+/// Hosted web search is ignored; other unsupported tool kinds are rejected instead of
+/// silently discarded.
 fn convert_tools(tools: &[Tool], names: &ToolNameMap) -> anyhow::Result<Vec<ChatCompletionTool>> {
     let mut converted = Vec::new();
     let mut push_function = |name: &str,
@@ -725,6 +742,10 @@ fn convert_tools(tools: &[Tool], names: &ToolNameMap) -> anyhow::Result<Vec<Chat
     };
 
     for tool in tools {
+        if is_hosted_web_search(tool) {
+            tracing::debug!("ignoring the hosted Responses web_search tool");
+            continue;
+        }
         match tool {
             Tool::Function(f) => {
                 push_function(&f.name, &f.description, &f.parameters, f.strict, None)
@@ -870,6 +891,17 @@ fn convert_tools_and_choice(
         Some(choice) => Some(convert_tool_choice(choice, names)?),
         None => None,
     };
+
+    if converted_tools.is_empty()
+        && tools.is_some_and(|tools| !tools.is_empty())
+        && converted_choice == Some(ChatCompletionToolChoiceOption::Required)
+    {
+        return Err(ResponsesConversionError::InvalidArgument(
+            "Responses tool_choice 'required' needs a function tool; hosted web_search is ignored"
+                .to_string(),
+        )
+        .into());
+    }
 
     Ok((
         (!converted_tools.is_empty()).then_some(converted_tools),

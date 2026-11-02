@@ -47,6 +47,7 @@ use crate::protocols::anthropic::types::{
     AnthropicContentBlock, AnthropicCountTokensRequest, AnthropicCountTokensResponse,
     AnthropicCreateMessageRequest, AnthropicErrorBody, AnthropicErrorResponse, AnthropicMessage,
     AnthropicMessageContent, AnthropicTool, SystemContent, chat_completion_to_anthropic_response,
+    merge_inline_system_messages, reasoning_effort_from_anthropic,
 };
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, SESSION_AFFINITY_CONTEXT_KEY, agent_context_from_headers,
@@ -61,6 +62,7 @@ use crate::protocols::openai::chat_completions::{
 use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
+use dynamo_protocols::types::ReasoningEffort;
 
 // Re-use helpers from the openai module (sibling under service/)
 use super::error::{
@@ -539,8 +541,39 @@ async fn anthropic_messages(
             .into_marked_response(&mut inflight_guard),
         })?;
 
-    let (orig_request, context) = request.into_parts();
+    let (mut orig_request, context) = request.into_parts();
     let model_for_resp = orig_request.model.clone();
+
+    // The native Mistral renderer follows mistral-common's message order, and its
+    // only reasoning control is `reasoning_effort`.
+    let is_native_mistral = parsing_options.native_mistral_renderer;
+    let mistral_reasoning_effort = if is_native_mistral {
+        if merge_inline_system_messages(&mut orig_request) {
+            static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+            WARN_ONCE.call_once(|| {
+                tracing::warn!(
+                    model,
+                    "Inline system messages in /v1/messages are merged into the leading \
+                     system prompt for the native Mistral renderer; each new one changes the \
+                     prompt prefix, so the conversation misses the prefix cache"
+                );
+            });
+        }
+        reasoning_effort_from_anthropic(
+            orig_request.thinking.as_ref(),
+            orig_request.output_config.as_ref(),
+            parsing_options
+                .mistral_disabled_thinking_effort
+                .clone()
+                .unwrap_or(ReasoningEffort::None),
+        )
+        .map_err(|error| {
+            AnthropicHandlerError::validation(error.to_string())
+                .into_marked_response(&mut inflight_guard)
+        })?
+    } else {
+        None
+    };
 
     // Anthropic exposes input usage in `message_start`, before the backend's
     // authoritative count is available. Seed the stream with the same
@@ -574,6 +607,17 @@ async fn anthropic_messages(
     // etc.) that the stream converter needs for faithful response reconstruction.
     let anthropic_ctx = unified_request.anthropic_context().cloned();
     let mut chat_request = unified_request.into_inner();
+    if let Some(effort) = mistral_reasoning_effort {
+        chat_request.inner.reasoning_effort = Some(effort);
+        // State the effort in `chat_template_args` too, where Dynamo's own reasoning
+        // gates read it, as the OpenAI chat handler does at its HTTP boundary.
+        chat_request
+            .normalize_reasoning_template_args()
+            .map_err(|error| {
+                AnthropicHandlerError::validation(format!("Invalid thinking: {error}"))
+                    .into_marked_response(&mut inflight_guard)
+            })?;
+    }
     apply_anthropic_nvext_policy(&mut chat_request, &headers, state.nvext_enabled());
     // Native Anthropic stop reporting needs this internal metadata even when
     // client extensions are disabled. The converters consume it, never emit nvext.

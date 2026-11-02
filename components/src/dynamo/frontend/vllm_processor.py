@@ -18,7 +18,11 @@ from typing import Any
 
 from msgspec.structs import replace as msgspec_replace
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
-from vllm.entrypoints.chat_utils import load_chat_template
+
+try:
+    from vllm.renderers.chat_utils.chat_template import load_chat_template
+except ModuleNotFoundError:  # vLLM before the chat_utils move (vllm-project/vllm#62390)
+    from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.exceptions import VLLMClientError
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
