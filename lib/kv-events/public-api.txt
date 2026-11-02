@@ -47,7 +47,7 @@ pub dynamo_kv_events::event::KvCacheStoreData::parent_hash: core::option::Option
 pub dynamo_kv_events::event::KvCacheStoreData::start_position: core::option::Option<u32>
 pub struct dynamo_kv_events::event::KvCacheStoredBlockData
 pub dynamo_kv_events::event::KvCacheStoredBlockData::block_hash: dynamo_kv_hashing::block_hash::ExternalSequenceBlockHash
-pub dynamo_kv_events::event::KvCacheStoredBlockData::mm_extra_info: core::option::Option<dynamo_router_protocol::mm::BlockExtraInfo>
+pub dynamo_kv_events::event::KvCacheStoredBlockData::mm_extra_info: core::option::Option<dynamo_multimodal::info::BlockExtraInfo>
 pub dynamo_kv_events::event::KvCacheStoredBlockData::tokens_hash: dynamo_kv_hashing::block_hash::LocalBlockHash
 pub struct dynamo_kv_events::event::RouterEvent
 pub dynamo_kv_events::event::RouterEvent::event: dynamo_kv_events::event::KvCacheEvent
@@ -182,7 +182,7 @@ pub dynamo_kv_events::zmq_wire::RawKvEvent::BlockRemoved::medium: core::option::
 pub dynamo_kv_events::zmq_wire::RawKvEvent::BlockRemoved::ownership: core::option::Option<alloc::string::String>
 pub dynamo_kv_events::zmq_wire::RawKvEvent::BlockStored
 pub dynamo_kv_events::zmq_wire::RawKvEvent::BlockStored::block_hashes: alloc::vec::Vec<dynamo_kv_events::zmq_wire::BlockHashValue>
-pub dynamo_kv_events::zmq_wire::RawKvEvent::BlockStored::block_mm_infos: core::option::Option<alloc::vec::Vec<core::option::Option<dynamo_router_protocol::mm::BlockExtraInfo>>>
+pub dynamo_kv_events::zmq_wire::RawKvEvent::BlockStored::block_mm_infos: core::option::Option<alloc::vec::Vec<core::option::Option<dynamo_multimodal::info::BlockExtraInfo>>>
 pub dynamo_kv_events::zmq_wire::RawKvEvent::BlockStored::block_size: usize
 pub dynamo_kv_events::zmq_wire::RawKvEvent::BlockStored::cache_namespace: core::option::Option<alloc::string::String>
 pub dynamo_kv_events::zmq_wire::RawKvEvent::BlockStored::group_idx: core::option::Option<u32>
@@ -231,7 +231,7 @@ pub dynamo_kv_events::zmq_wire::StoredBlockOptions::cache_namespace: core::optio
 pub dynamo_kv_events::zmq_wire::StoredBlockOptions::image_token_id: core::option::Option<u32>
 pub dynamo_kv_events::zmq_wire::StoredBlockOptions::is_eagle: core::option::Option<bool>
 pub dynamo_kv_events::zmq_wire::StoredBlockOptions::lora_name: core::option::Option<&'a str>
-pub dynamo_kv_events::zmq_wire::StoredBlockOptions::mm_extra_info: core::option::Option<dynamo_router_protocol::mm::BlockExtraInfo>
+pub dynamo_kv_events::zmq_wire::StoredBlockOptions::mm_extra_info: core::option::Option<dynamo_multimodal::info::BlockExtraInfo>
 pub dynamo_kv_events::zmq_wire::StoredBlockOptions::video_token_id: core::option::Option<u32>
 pub struct dynamo_kv_events::zmq_wire::ZmqEventNormalizer
 impl dynamo_kv_events::zmq_wire::ZmqEventNormalizer
@@ -247,11 +247,9 @@ pub fn dynamo_kv_events::zmq_wire::ZmqEventNormalizer::with_warning_count(u32, a
 pub const dynamo_kv_events::zmq_wire::DYNAMO_CACHE_SALT_PREFIX: &str
 pub fn dynamo_kv_events::zmq_wire::convert_event(dynamo_kv_events::zmq_wire::RawKvEvent, u64, u32, dynamo_router_protocol::worker::WorkerWithDpRank, &alloc::sync::Arc<core::sync::atomic::AtomicU32>, core::option::Option<u32>, core::option::Option<u32>) -> core::option::Option<dynamo_kv_events::placement::PlacementEvent>
 pub fn dynamo_kv_events::zmq_wire::create_stored_block_from_parts(u32, u64, &[u32], dynamo_kv_events::zmq_wire::StoredBlockOptions<'_>) -> dynamo_kv_events::event::KvCacheStoredBlockData
-pub fn dynamo_kv_events::zmq_wire::create_stored_blocks(u32, &[u32], &[u64], &[u64], core::option::Option<&str>, core::option::Option<&str>, &alloc::sync::Arc<core::sync::atomic::AtomicU32>, core::option::Option<&[core::option::Option<dynamo_router_protocol::mm::BlockExtraInfo>]>, core::option::Option<bool>, core::option::Option<u32>, core::option::Option<u32>) -> alloc::vec::Vec<dynamo_kv_events::event::KvCacheStoredBlockData>
+pub fn dynamo_kv_events::zmq_wire::create_stored_blocks(u32, &[u32], &[u64], &[u64], core::option::Option<&str>, core::option::Option<&str>, &alloc::sync::Arc<core::sync::atomic::AtomicU32>, core::option::Option<&[core::option::Option<dynamo_multimodal::info::BlockExtraInfo>]>, core::option::Option<bool>, core::option::Option<u32>, core::option::Option<u32>) -> alloc::vec::Vec<dynamo_kv_events::event::KvCacheStoredBlockData>
 pub fn dynamo_kv_events::zmq_wire::decode_event_batch(&[u8]) -> core::result::Result<dynamo_kv_events::zmq_wire::KvEventBatch, rmp_serde::decode::Error>
-pub fn dynamo_kv_events::zmq_wire::extra_keys_to_block_mm_infos(core::option::Option<alloc::vec::Vec<core::option::Option<alloc::vec::Vec<dynamo_kv_events::zmq_wire::ExtraKeyItem>>>>) -> core::option::Option<alloc::vec::Vec<core::option::Option<dynamo_router_protocol::mm::BlockExtraInfo>>>
+pub fn dynamo_kv_events::zmq_wire::extra_keys_to_block_mm_infos(core::option::Option<alloc::vec::Vec<core::option::Option<alloc::vec::Vec<dynamo_kv_events::zmq_wire::ExtraKeyItem>>>>) -> core::option::Option<alloc::vec::Vec<core::option::Option<dynamo_multimodal::info::BlockExtraInfo>>>
 pub fn dynamo_kv_events::zmq_wire::extra_keys_to_cache_namespace(core::option::Option<&[core::option::Option<alloc::vec::Vec<dynamo_kv_events::zmq_wire::ExtraKeyItem>>]>, core::option::Option<&str>) -> core::option::Option<alloc::string::String>
-pub fn dynamo_kv_events::zmq_wire::mark_mm_hash_for_extra_key(u64) -> alloc::string::String
 pub fn dynamo_kv_events::zmq_wire::normalize_mm_placeholder_runs(&[u32], core::option::Option<u32>, core::option::Option<u32>, &[u64]) -> core::option::Option<(alloc::vec::Vec<u32>, usize)>
 pub fn dynamo_kv_events::zmq_wire::normalize_mm_token_runs(&[u32], u32, &[u64]) -> core::option::Option<(alloc::vec::Vec<u32>, usize)>
-pub fn dynamo_kv_events::zmq_wire::parse_mm_hash_from_extra_key(&str) -> core::option::Option<u64>

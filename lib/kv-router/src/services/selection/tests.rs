@@ -24,8 +24,8 @@ use dynamo_kv_hashing::routing::{
 };
 use dynamo_kv_indexer::overlap::OverlapScores;
 use dynamo_kv_indexer::{LowerTierMatchDetails, MatchDetails, TieredMatchDetails};
+use dynamo_multimodal::{BlockExtraInfo, BlockMmObjectInfo};
 use dynamo_router_protocol::identity::RoutingPartitionRef;
-use dynamo_router_protocol::mm::{BlockExtraInfo, BlockMmObjectInfo};
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_scheduler::overlap::build_overlap_scores_response;
 use dynamo_scheduler::tracking_hash::{TrackingHashContext, TrackingHashScope};

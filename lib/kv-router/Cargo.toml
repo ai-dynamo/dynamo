@@ -41,6 +41,7 @@ dynamo-kv-events = { workspace = true }
 dynamo-kv-hashing = { workspace = true }
 dynamo-kv-hints = { workspace = true }
 dynamo-kv-indexer = { workspace = true }
+dynamo-multimodal = { workspace = true }
 dynamo-slot-tracker = { workspace = true }
 dynamo-session-affinity = { workspace = true }
 dynamo-worker-selection = { workspace = true }

@@ -25,10 +25,9 @@ pub use dynamo_kv_events::residency::{
     WireResidencyDomain,
 };
 pub use dynamo_kv_hashing::routing::{
-    BlockHashOptions, MM_PAD_HASH_MASK, MM_PAD_SHIFT_VALUE, TokensWithHashes, XXH3_SEED,
-    complete_block_count, compute_block_hash, compute_block_hash_for_seq,
-    compute_block_hash_for_seq_with_seed, compute_next_seq_hash, compute_seq_hash_for_block,
-    compute_seq_hash_for_tokens_with_seeds, hash_mm_identifier, pad_value_for_mm_hash,
+    BlockHashOptions, TokensWithHashes, XXH3_SEED, complete_block_count, compute_block_hash,
+    compute_block_hash_for_seq, compute_block_hash_for_seq_with_seed, compute_next_seq_hash,
+    compute_seq_hash_for_block, compute_seq_hash_for_tokens_with_seeds,
 };
 pub use dynamo_kv_hints::{KvHintTransferWorkerMetadata, KvTransferEnforcement};
 pub use dynamo_kv_indexer::overlap::OverlapScores;
@@ -36,10 +35,11 @@ pub use dynamo_kv_indexer::residency::{
     ResidencyOwnerKey, ResidencyOwnerKeyExt, ResidencyProjection, ResidencyProjectionError,
     ResidencyRoutingSnapshot, ResolvedRouterHintSource,
 };
-pub use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
-pub use dynamo_router_protocol::mm::{
-    BlockExtraInfo, BlockMmObjectInfo, RequestExtraInfo, RequestMmObjectInfo,
+pub use dynamo_multimodal::{
+    BlockExtraInfo, BlockMmObjectInfo, MM_PAD_HASH_MASK, MM_PAD_SHIFT_VALUE, RequestExtraInfo,
+    RequestMmObjectInfo, hash_mm_identifier, pad_value_for_mm_hash,
 };
+pub use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
 pub use dynamo_router_protocol::worker::{
     ActiveLoad, DpRank, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
 };

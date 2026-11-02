@@ -79,6 +79,7 @@ dynamo-kv-hashing = { workspace = true }
 dynamo-kv-hints = { workspace = true }
 dynamo-kv-indexer = { workspace = true, features = ["export"] }
 dynamo-kv-router = { workspace = true, features = ["metrics"] }
+dynamo-multimodal = { workspace = true }
 dynamo-router-protocol = { workspace = true }
 dynamo-scheduler = { workspace = true }
 dynamo-session-affinity = { workspace = true }

@@ -21,11 +21,13 @@ pub use dynamo_kv_events::zmq_wire::create_stored_blocks;
 #[cfg(test)]
 use dynamo_kv_events::zmq_wire::{
     BlockHashValue, ExtraKeyItem, KvEventBatch, RawKvEvent, convert_event,
-    create_stored_block_from_parts, extra_keys_to_block_mm_infos, parse_mm_hash_from_extra_key,
+    create_stored_block_from_parts, extra_keys_to_block_mm_infos,
 };
 #[cfg(test)]
 use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
 use dynamo_kv_indexer::host::{KvIndexerMetrics, LocalKvIndexer};
+#[cfg(test)]
+use dynamo_multimodal::parse_mm_hash_from_extra_key;
 use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
 use dynamo_runtime::component::{Component, Endpoint};
 use dynamo_runtime::discovery::{DiscoverySpec, EventScope};

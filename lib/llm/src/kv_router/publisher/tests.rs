@@ -4128,7 +4128,7 @@ mod event_plane_batch_tests {
         KvCacheStoredBlockData, RouterEvent,
     };
     use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
-    use dynamo_router_protocol::mm::{BlockExtraInfo, BlockMmObjectInfo};
+    use dynamo_multimodal::{BlockExtraInfo, BlockMmObjectInfo};
     use dynamo_runtime::config::environment_names::zmq_broker as broker_env;
     use dynamo_runtime::distributed::DistributedConfig;
     use dynamo_runtime::transports::event_plane::{

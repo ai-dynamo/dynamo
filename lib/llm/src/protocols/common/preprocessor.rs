@@ -9,7 +9,7 @@ use dynamo_admission::host::AbortCause;
 pub use dynamo_kv_hints::{
     KV_HINT_TRANSFER_CAPABILITY_KEY, KvHint, KvHintAction, KvSourceLocationsPayload,
 };
-use dynamo_router_protocol::mm::BlockExtraInfo;
+use dynamo_multimodal::BlockExtraInfo;
 use dynamo_router_protocol::worker::WorkerId;
 use dynamo_runtime::error::{DynamoError, ErrorType, match_error_chain};
 use dynamo_scheduler::host::{RequestLifecycle, RouterConfigOverride, RoutingConstraints};

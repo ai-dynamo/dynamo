@@ -78,6 +78,7 @@
 /lib/kv-hints/                                                                                          @ai-dynamo/dynamo-router-codeowners
 /lib/kv-events/                                                                                         @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/                                                                                         @ai-dynamo/dynamo-router-codeowners
+/lib/multimodal/                                                                                        @ai-dynamo/dynamo-router-codeowners
 /lib/router-plugins/                                                                                    @ai-dynamo/dynamo-router-codeowners
 /lib/kv-router/tests/                                                                                   @ai-dynamo/dynamo-router-codeowners
 /lib/router/protocol/                                                                                   @ai-dynamo/dynamo-router-codeowners
@@ -629,6 +630,7 @@ requirements.txt                                                                
 /.lycheeignore                                                                                          @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-docs-codeowners
 /tests/deploy/                                                                                          @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners
 /deploy/**/*lpx*                                                                                        @ai-dynamo/dynamo-operator-codeowners
+/lib/multimodal/                                                                                        @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /lib/sidecar/lpx/                                                                                       @ai-dynamo/dynamo-lpx-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /lib/sidecar/vllm/                                                                                      @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-sidecar-codeowners
 /benchmarks/router/                                                                                     @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-router-codeowners

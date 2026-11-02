@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde::Deserializer;
 use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
-use dynamo_router_protocol::mm::BlockExtraInfo;
+use dynamo_multimodal::BlockExtraInfo;
 
 use super::extra_keys::{extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace};
 use super::filter::{

@@ -24,8 +24,8 @@ use dynamo_kv_router::plugins::worker_selection::{
     WorkerInfo, WorkerInfoExt, WorkerInputs, WorkerSelectionPolicyFactory,
 };
 use dynamo_kv_router::tracking_hash::tracking_hash_context;
+use dynamo_multimodal::BlockExtraInfo;
 use dynamo_router_protocol::identity::{DEFAULT_ROUTING_GROUP, RoutingPartitionRef};
-use dynamo_router_protocol::mm::BlockExtraInfo;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_runtime::{
     CancellationToken,

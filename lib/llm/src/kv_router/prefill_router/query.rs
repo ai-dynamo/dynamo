@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use anyhow::Result;
-use dynamo_router_protocol::mm::BlockExtraInfo;
+use dynamo_multimodal::BlockExtraInfo;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_scheduler::host::{BookingHandle, RoutingConstraints};
 

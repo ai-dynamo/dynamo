@@ -12,7 +12,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-dynamo-router-protocol = { workspace = true }
+dynamo-multimodal = { workspace = true }
 dynamo-tokens = { workspace = true }
 derive_builder = { workspace = true }
 serde = { workspace = true }

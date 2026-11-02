@@ -6,7 +6,8 @@
 # section 10): dynamo-kv-router, the one crate plugins and standalone consumers name;
 # dynamo-router-protocol, the vocabulary every crate names; dynamo-kv-events, the KV events
 # and residency vocabulary engines publish; dynamo-kv-hints, the KV transfer hints engines
-# consume; and dynamo-error, the error contract every component classifies with. This
+# consume; dynamo-error, the error contract every component classifies with; and
+# dynamo-multimodal, the multimodal identity both ends of the wire compute. This
 # script regenerates each
 # with cargo-public-api and fails when a committed file differs; --update rewrites them.
 # Needs cargo-public-api (cargo install cargo-public-api@0.52.0 --locked) and the nightly
@@ -20,6 +21,7 @@ SNAPSHOTS=(
   "lib/kv-events | lib/kv-events/public-api.txt | -"
   "lib/kv-hints | lib/kv-hints/public-api.txt | -"
   "lib/error | lib/error/public-api.txt | -"
+  "lib/multimodal | lib/multimodal/public-api.txt | -"
 )
 update=0
 case "${1:-}" in

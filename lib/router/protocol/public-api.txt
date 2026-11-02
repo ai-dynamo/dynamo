@@ -144,19 +144,6 @@ pub struct dynamo_router_protocol::metadata::RouterHintSourceMetadata
 pub dynamo_router_protocol::metadata::RouterHintSourceMetadata::source_control_endpoint: alloc::string::String
 pub dynamo_router_protocol::metadata::RouterHintSourceMetadata::topology_domains: std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>
 pub dynamo_router_protocol::metadata::RouterHintSourceMetadata::worker_type: alloc::string::String
-pub mod dynamo_router_protocol::mm
-pub struct dynamo_router_protocol::mm::BlockExtraInfo
-pub dynamo_router_protocol::mm::BlockExtraInfo::mm_objects: alloc::vec::Vec<dynamo_router_protocol::mm::BlockMmObjectInfo>
-pub struct dynamo_router_protocol::mm::BlockMmObjectInfo
-pub dynamo_router_protocol::mm::BlockMmObjectInfo::mm_hash: u64
-pub dynamo_router_protocol::mm::BlockMmObjectInfo::offsets: alloc::vec::Vec<(usize, usize)>
-pub struct dynamo_router_protocol::mm::RequestExtraInfo
-pub dynamo_router_protocol::mm::RequestExtraInfo::mm_objects: alloc::vec::Vec<dynamo_router_protocol::mm::RequestMmObjectInfo>
-impl dynamo_router_protocol::mm::RequestExtraInfo
-pub fn dynamo_router_protocol::mm::RequestExtraInfo::to_block_level(&self, usize, usize) -> alloc::vec::Vec<core::option::Option<dynamo_router_protocol::mm::BlockExtraInfo>>
-pub struct dynamo_router_protocol::mm::RequestMmObjectInfo
-pub dynamo_router_protocol::mm::RequestMmObjectInfo::mm_hash: u64
-pub dynamo_router_protocol::mm::RequestMmObjectInfo::offsets: alloc::vec::Vec<(usize, usize)>
 pub mod dynamo_router_protocol::session
 pub enum dynamo_router_protocol::session::WorkerSelectionInputTrigger
 pub dynamo_router_protocol::session::WorkerSelectionInputTrigger::Other

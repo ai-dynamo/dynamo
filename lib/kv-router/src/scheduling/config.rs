@@ -1480,8 +1480,8 @@ mod tests {
 
     use super::*;
     use dynamo_kv_hashing::routing::compute_seq_hash_for_block;
+    use dynamo_multimodal::{BlockExtraInfo, BlockMmObjectInfo};
     use dynamo_router_protocol::identity::RoutingPartitionRef;
-    use dynamo_router_protocol::mm::{BlockExtraInfo, BlockMmObjectInfo};
     use std::collections::HashMap;
 
     fn test_tracking_scope(block_size: u32) -> TrackingHashScope<'static> {

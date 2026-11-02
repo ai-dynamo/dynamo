@@ -1,0 +1,19 @@
+pub mod dynamo_multimodal
+pub struct dynamo_multimodal::BlockExtraInfo
+pub dynamo_multimodal::BlockExtraInfo::mm_objects: alloc::vec::Vec<dynamo_multimodal::BlockMmObjectInfo>
+pub struct dynamo_multimodal::BlockMmObjectInfo
+pub dynamo_multimodal::BlockMmObjectInfo::mm_hash: u64
+pub dynamo_multimodal::BlockMmObjectInfo::offsets: alloc::vec::Vec<(usize, usize)>
+pub struct dynamo_multimodal::RequestExtraInfo
+pub dynamo_multimodal::RequestExtraInfo::mm_objects: alloc::vec::Vec<dynamo_multimodal::RequestMmObjectInfo>
+impl dynamo_multimodal::RequestExtraInfo
+pub fn dynamo_multimodal::RequestExtraInfo::to_block_level(&self, usize, usize) -> alloc::vec::Vec<core::option::Option<dynamo_multimodal::BlockExtraInfo>>
+pub struct dynamo_multimodal::RequestMmObjectInfo
+pub dynamo_multimodal::RequestMmObjectInfo::mm_hash: u64
+pub dynamo_multimodal::RequestMmObjectInfo::offsets: alloc::vec::Vec<(usize, usize)>
+pub const dynamo_multimodal::MM_PAD_HASH_MASK: u64
+pub const dynamo_multimodal::MM_PAD_SHIFT_VALUE: u64
+pub fn dynamo_multimodal::hash_mm_identifier(&str) -> core::option::Option<u64>
+pub fn dynamo_multimodal::mark_mm_hash_for_extra_key(u64) -> alloc::string::String
+pub fn dynamo_multimodal::pad_value_for_mm_hash(u64) -> u32
+pub fn dynamo_multimodal::parse_mm_hash_from_extra_key(&str) -> core::option::Option<u64>

@@ -42,7 +42,7 @@ use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
 #[cfg(feature = "select-service")]
 use dynamo_router_protocol::WorkerType;
 use dynamo_kv_hashing::{ExternalSequenceBlockHash, LocalBlockHash};
-use dynamo_router_protocol::mm::BlockExtraInfo;
+use dynamo_multimodal::BlockExtraInfo;
 use dynamo_router_protocol::worker::{DpRank, WorkerId};
 use dynamo_scheduler::host::RouterConfigOverride;
 #[cfg(feature = "select-service")]

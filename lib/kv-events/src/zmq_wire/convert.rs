@@ -12,7 +12,7 @@ use crate::placement::{Placement, PlacementEvent};
 use crate::residency::StorageTier;
 use dynamo_kv_hashing::ExternalSequenceBlockHash;
 use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
-use dynamo_router_protocol::mm::BlockExtraInfo;
+use dynamo_multimodal::BlockExtraInfo;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 use super::types::{BlockHashValue, Locality, RawKvEvent};
@@ -264,7 +264,7 @@ pub fn normalize_mm_placeholder_runs(
 
     let mut out = token_ids.to_vec();
     for ((start, end, _), group_index) in runs.into_iter().zip(run_groups) {
-        let pad = dynamo_kv_hashing::routing::pad_value_for_mm_hash(mm_objects[group_index]);
+        let pad = dynamo_multimodal::pad_value_for_mm_hash(mm_objects[group_index]);
         out[start..end].fill(pad);
     }
     Some((out, group_count))
@@ -293,7 +293,7 @@ pub fn normalize_mm_token_runs(
                 in_run = true;
                 runs += 1;
                 let mm_hash = mm_hashes.get(object_index).copied().unwrap_or(last_mm_hash);
-                run_pad = dynamo_kv_hashing::routing::pad_value_for_mm_hash(mm_hash);
+                run_pad = dynamo_multimodal::pad_value_for_mm_hash(mm_hash);
             }
             out.push(run_pad);
         } else {
@@ -490,8 +490,8 @@ pub fn create_stored_blocks(
 #[cfg(test)]
 mod normalize_tests {
     use super::*;
-    use dynamo_kv_hashing::routing::pad_value_for_mm_hash;
-    use dynamo_router_protocol::mm::BlockMmObjectInfo;
+    use dynamo_multimodal::BlockMmObjectInfo;
+    use dynamo_multimodal::pad_value_for_mm_hash;
 
     #[test]
     fn image_only_normalization_preserves_worker_order_and_clamping() {

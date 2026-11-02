@@ -156,7 +156,7 @@ fn generate_mm_routing_info(
             )
             .map_err(|_| "multimodal kwargs_data must contain valid base64")?;
         let identifier = preprocessed_mm_identifier("image", &raw_kwargs);
-        let hash = dynamo_kv_hashing::routing::hash_mm_identifier(&identifier)
+        let hash = dynamo_multimodal::hash_mm_identifier(&identifier)
             .ok_or("content-derived multimodal identifier must not be empty")?;
         let placeholder = placeholder
             .as_object()
@@ -295,7 +295,7 @@ fn generate_mm_routing_info(
                     .is_none_or(|mask| mask[global_position - *offset]);
                 if should_embed {
                     expected_tokens[global_position - block_start] =
-                        dynamo_kv_hashing::routing::pad_value_for_mm_hash(*hash);
+                        dynamo_multimodal::pad_value_for_mm_hash(*hash);
                 }
             }
         }
@@ -330,7 +330,7 @@ fn generate_mm_routing_info(
         },
         marked_image_hashes: ranges
             .iter()
-            .map(|(_, _, hash, _)| dynamo_kv_events::zmq_wire::mark_mm_hash_for_extra_key(*hash))
+            .map(|(_, _, hash, _)| dynamo_multimodal::mark_mm_hash_for_extra_key(*hash))
             .collect(),
     }))
 }
