@@ -3,8 +3,8 @@
 
 """Live retune sweep executor: one window through DGDR v1beta2 Requests.
 
-``run_dgdr_sweep`` is the live ``sweep_fn`` of ``RetuneController`` (design
-§4.5). It runs on the controller's single sweep thread and never raises:
+``run_dgdr_sweep`` is the live ``sweep_fn`` of ``RetuneController``. It
+runs on the controller's single sweep thread and never raises:
 
 1. Shard the router grid (``plan_shards``): balanced Cartesian sub-grids of
    at most 100 points (a Request's ``maxCandidates`` bound), one
@@ -29,8 +29,9 @@ The executor never deletes anything itself: Requests to remove go to the
 ``SweepRegistry`` deletion queue, which the reconciler drains while this
 process leads. Shutdown (``cancel``) and loss of leadership (``abort``)
 return at once with ``failure_reason`` ``shutdown``/``lost_leadership`` and
-leave every Request in place for the next leader to adopt. Every mutating
-call first checks ``abort`` and ``context.is_leader()``.
+leave every Request in place for the next leader to adopt: the wait between
+polls ends as soon as either is set. Every mutating call first checks
+``abort`` and ``context.is_leader()``.
 
 A shard that holds the baseline, or the probe, is critical: when it fails
 the window fails. Any other failed shard only leaves its points unscored.
@@ -53,7 +54,14 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, NoReturn, Optional
 
-from dynamo.planner.config.planner_config import DgdrExecutorConfig, RetuneConfig
+from dynamo.planner.config.planner_config import (
+    DGDR_MAX_SHARD_POINTS,
+    DgdrExecutorConfig,
+    RetuneConfig,
+    balanced_shard_parts,
+    dgdr_need_seconds,
+    largest_shard_points,
+)
 from dynamo.planner.core.types import RetuneParams
 from dynamo.planner.retune.live.contracts import (
     DGDR_GROUP,
@@ -77,6 +85,7 @@ from dynamo.planner.retune.live.contracts import (
     WindowCutResult,
     WindowCutter,
 )
+from dynamo.planner.retune.live.reconciler import trace_pvc_source
 from dynamo.planner.retune.sweep import (
     SweepRequest,
     SweepResult,
@@ -88,16 +97,11 @@ logger = logging.getLogger(__name__)
 
 ShardKind = Literal["grid", "point", "probe"]
 
-# A Request publishes at most recommendation.maxCandidates (<= 100) points.
-MAX_SHARD_POINTS = 100
 # Seconds a new Request may go without an Accepted condition before the
 # window fails as operator_not_reconciling.
 ACCEPT_TIMEOUT_S = 60.0
 # Relative score difference the CRN probe tolerates.
 CRN_REL_TOLERANCE = 1e-9
-# Oldest Dynamo runtime whose trace replay runs with common random numbers.
-# None: the version is not checked and the CRN probe alone decides.
-CRN_MIN_VERSION: Optional[str] = None
 # Annotation holding the cut window's row counts, so a window adopted as
 # Succeeded reports them without cutting the window again.
 ROWS_ANNOTATION = LABEL_PREFIX + "rows"
@@ -164,13 +168,14 @@ def plan_shards(
     """Split ``router_domain`` (live knob -> values) into Request shards.
 
     The grid becomes at most ``max_shards`` Cartesian sub-grids of at most
-    ``MAX_SHARD_POINTS`` points: each knob's sorted values are cut into
-    contiguous, near-equal chunks. The split minimizes the largest shard's
+    ``DGDR_MAX_SHARD_POINTS`` points: each knob's sorted values are cut into
+    contiguous, near-equal chunks by ``balanced_shard_parts``, the split
+    the configuration check (P13) uses. It minimizes the largest shard's
     wall time, then the shard count: with the Run ``parallelism`` the time
-    is its evaluation rounds (``1 + ceil((n - 1) / parallelism)``, as in
-    ``need_seconds``), so a shard that would not shorten the window is not
-    added; without it, the largest shard's size. ``baseline`` and ``startup``
-    (live knob -> value) each get a single-point shard when off the grid.
+    is its evaluation rounds (``dgdr_rounds``), so a shard that would not
+    shorten the window is not added; without it, the largest shard's size.
+    ``baseline`` and ``startup`` (live knob -> value) each get a
+    single-point shard when off the grid.
     With ``probe``, a ``probe`` shard repeats one fixed grid point (the
     middle value of each knob, a positive temperature when the grid has
     one) to check common random numbers across Runs. Raises ``ValueError``
@@ -197,37 +202,19 @@ def plan_shards(
                 f"router domain {list(keys)}"
             )
 
-    if parallelism is not None and parallelism < 1:
-        raise ValueError(f"parallelism must be at least 1, got {parallelism}")
     sizes = [len(axes[key]) for key in keys]
-    best: tuple[float, int, int, tuple[int, ...]] | None = None
-    for splits in _splits(sizes, max_shards):
-        largest = math.prod(
-            math.ceil(size / split) for size, split in zip(sizes, splits)
-        )
-        # An oversized shard can never be chosen over one that fits.
-        cost = (
-            math.inf
-            if largest > MAX_SHARD_POINTS
-            else largest
-            if parallelism is None
-            else _rounds(largest, parallelism)
-        )
-        candidate = (cost, math.prod(splits), largest, splits)
-        if best is None or candidate < best:
-            best = candidate
-    assert best is not None  # all-ones always fits max_shards >= 1
-    _, _, largest, splits = best
-    if largest > MAX_SHARD_POINTS:
+    parts = balanced_shard_parts(sizes, max_shards, parallelism=parallelism)
+    largest = largest_shard_points(sizes, parts)
+    if largest > DGDR_MAX_SHARD_POINTS:
         raise ValueError(
             f"the router grid of {math.prod(sizes)} points cannot be split into "
             f"at most {max_shards} Cartesian shards of at most "
-            f"{MAX_SHARD_POINTS} points (the smallest largest shard has "
+            f"{DGDR_MAX_SHARD_POINTS} points (the smallest largest shard has "
             f"{largest}); raise retune.dgdr.run.max_shards or shrink the domain"
         )
 
     shards: list[Shard] = []
-    chunked = [_chunks(axes[key], split) for key, split in zip(keys, splits)]
+    chunked = [_chunks(axes[key], part) for key, part in zip(keys, parts)]
     for index, combo in enumerate(itertools.product(*chunked)):
         choices = dict(zip(keys, combo))
         shards.append(
@@ -260,26 +247,6 @@ def plan_shards(
     if probe:
         shards.append(single("probe", "probe", _probe_point(axes)))
     return shards
-
-
-def _rounds(points: int, parallelism: int) -> int:
-    """Evaluation rounds of a Run: the first candidate alone, then batches."""
-
-    return 1 + math.ceil((points - 1) / parallelism)
-
-
-def _splits(sizes: Sequence[int], max_shards: int) -> Iterable[tuple[int, ...]]:
-    """Every per-knob split count whose product is at most ``max_shards``."""
-
-    def walk(index: int, budget: int) -> Iterable[tuple[int, ...]]:
-        if index == len(sizes):
-            yield ()
-            return
-        for split in range(1, min(sizes[index], budget) + 1):
-            for rest in walk(index + 1, budget // split):
-                yield (split, *rest)
-
-    return walk(0, max_shards)
 
 
 def _chunks(values: tuple[float, ...], count: int) -> list[tuple[float, ...]]:
@@ -315,22 +282,6 @@ def _probe_point(axes: Mapping[str, tuple[float, ...]]) -> dict[str, float]:
             pool = positive or values
         point[key] = pool[len(pool) // 2]
     return point
-
-
-def need_seconds(shard: Shard, cfg: DgdrExecutorConfig, *, needs_cut: bool) -> float:
-    """Wall time a shard needs from now to finish (design §4.1).
-
-    ``(cut_budget if needs_cut) + job_startup + (1 + ceil((n - 1) /
-    parallelism)) * candidate_timeout``: AISimulate evaluates the first
-    candidate alone, then ``parallelism`` at a time.
-    """
-
-    rounds = _rounds(shard.size, cfg.run.parallelism)
-    return (
-        (cfg.cut_budget_seconds if needs_cut else 0.0)
-        + cfg.job_startup_seconds
-        + rounds * cfg.run.candidate_timeout_seconds
-    )
 
 
 # ----------------------------------------------------------------- Request
@@ -385,7 +336,7 @@ def build_request(
     backend: str,
     attempt: int,
 ) -> dict:
-    """The DGDR v1beta2 Request that replays one shard of a window (§4.5.2).
+    """The DGDR v1beta2 Request that replays one shard of a window.
 
     The engine is ``cfg.engine`` with every leaf a scalar and each used
     role's ``parallelism.preset[0].replicas`` set from ``spec_replicas``
@@ -398,21 +349,24 @@ def build_request(
 
     engine = _pinned_engine(cfg.engine, spec_replicas, backend)
     size = shard.size
-    if not 1 <= size <= MAX_SHARD_POINTS:
-        raise ValueError(f"shard {shard.id} has {size} points; 1..100 fit a Request")
+    if not 1 <= size <= DGDR_MAX_SHARD_POINTS:
+        raise ValueError(
+            f"shard {shard.id} has {size} points; "
+            f"1..{DGDR_MAX_SHARD_POINTS} fit a Request"
+        )
     spec: dict[str, Any] = {
         "model": {"name": cfg.model},
         "backends": [backend],
         "hardware": {
             "gpu": {"sku": cfg.sku, "budget": _gpu_budget(engine, spec_replicas)}
         },
+        # The trace format is left to its CRD default, Dynamo.
         "workload": {
             "trace": {
-                "format": "dynamo",
                 "source": {
-                    "pvc": {
+                    "persistentVolumeClaim": {
                         "claimName": cfg.claim_name,
-                        "path": window_claim_path(cfg, dgd, window_end_ms),
+                        "subPath": window_claim_path(cfg, dgd, window_end_ms),
                     }
                 },
             }
@@ -553,20 +507,6 @@ def _router_section(shard: Shard) -> dict[str, Any]:
 # --------------------------------------------------------- input read-back
 
 
-def merge_patch(target: Any, patch: Any) -> Any:
-    """RFC 7386 JSON merge patch (the operator's lowering); never mutates."""
-
-    if not isinstance(patch, Mapping):
-        return copy.deepcopy(patch)
-    result = dict(target) if isinstance(target, Mapping) else {}
-    for key, value in patch.items():
-        if value is None:
-            result.pop(key, None)
-        else:
-            result[key] = merge_patch(result.get(key), value)
-    return result
-
-
 def _get(obj: Any, path: Sequence[str], default: Any = None) -> Any:
     for key in path:
         if not isinstance(obj, Mapping) or key not in obj:
@@ -576,20 +516,13 @@ def _get(obj: Any, path: Sequence[str], default: Any = None) -> Any:
 
 
 def _same_json(left: Any, right: Any) -> bool:
-    """JSON equality: numbers by value (2 == 2.0), booleans never equal numbers."""
+    """JSON equality of leaves: numbers by value (2 == 2.0), booleans never
+    equal numbers."""
 
     if isinstance(left, bool) or isinstance(right, bool):
         return isinstance(left, bool) and isinstance(right, bool) and left == right
     if isinstance(left, (int, float)) and isinstance(right, (int, float)):
         return float(left) == float(right)
-    if isinstance(left, Mapping) and isinstance(right, Mapping):
-        return set(left) == set(right) and all(
-            _same_json(left[key], right[key]) for key in left
-        )
-    if isinstance(left, list) and isinstance(right, list):
-        return len(left) == len(right) and all(
-            _same_json(a, b) for a, b in zip(left, right)
-        )
     return type(left) is type(right) and left == right
 
 
@@ -600,22 +533,57 @@ def missing_fields(stored: Any, submitted: Any, path: str = "") -> list[str]:
     requires the stored value to be absent or ``null``.
     """
 
+    prefix = (path,) if path else ()
+    return [
+        ".".join(where) or "."
+        for where, _, _ in _differences(stored, submitted, prefix)
+    ]
+
+
+def _differences(
+    stored: Any, submitted: Any, path: tuple[str, ...]
+) -> list[tuple[tuple[str, ...], Any, Any]]:
+    """``(path, submitted, stored)`` of every submitted value ``stored`` lacks.
+
+    A mapping may hold more keys than submitted, at any depth, including
+    the mappings of a list of the submitted length. A submitted ``null``
+    requires the stored value to be absent or ``null``; ``_ABSENT`` stands
+    for an absent stored value.
+    """
+
+    if submitted is None:
+        if stored is None or stored is _ABSENT:
+            return []
+        return [(path, None, stored)]
     if isinstance(submitted, Mapping):
         if not isinstance(stored, Mapping):
-            return [path or "."]
-        problems: list[str] = []
+            return [(path, submitted, stored)]
+        found: list[tuple[tuple[str, ...], Any, Any]] = []
         for key, value in submitted.items():
-            child = f"{path}.{key}" if path else key
-            if value is None:
-                if stored.get(key) is not None:
-                    problems.append(child)
-                continue
-            if key not in stored:
-                problems.append(child)
-                continue
-            problems.extend(missing_fields(stored[key], value, child))
-        return problems
-    return [] if _same_json(stored, submitted) else [path or "."]
+            found += _differences(stored.get(key, _ABSENT), value, (*path, str(key)))
+        return found
+    if (
+        isinstance(submitted, list)
+        and isinstance(stored, list)
+        and len(stored) == len(submitted)
+    ):
+        found = []
+        for index, (left, right) in enumerate(zip(stored, submitted)):
+            found += _differences(left, right, (*path, str(index)))
+        return found
+    return [] if _same_json(stored, submitted) else [(path, submitted, stored)]
+
+
+def _overlay(target: Any, patch: Any) -> Any:
+    """``patch`` merged over ``target`` like a merge patch, but a ``null`` in
+    ``patch`` stays (as "must be unset") instead of deleting the key."""
+
+    if not isinstance(patch, Mapping):
+        return copy.deepcopy(patch)
+    result = dict(target) if isinstance(target, Mapping) else {}
+    for key, value in patch.items():
+        result[key] = _overlay(result.get(key), value)
+    return result
 
 
 def input_mismatches(
@@ -623,94 +591,63 @@ def input_mismatches(
 ) -> list[str]:
     """How ``Run.status.aisimulate.input`` differs from what ``spec`` asks for.
 
-    The expected input follows the operator's lowering at #17483: the
-    public role underlay, ``spec.model``/``backends``/``hardware`` into
-    ``engine``, then ``inputOverrides`` as a merge patch. ``engine``,
-    ``router`` and ``optimizer`` must match exactly; the objective, SLA,
-    budget, trace source and the direct generator are checked by value.
+    The expected input is what the operator lowers ``spec``'s typed fields
+    to (model, backends, GPU SKU and budget, objective, SLA, the trace file
+    on its read-only mount, ``maxCandidates``) with ``inputOverrides``
+    merged over them. ``inputOverrides`` wins: nothing restores the typed
+    trace source after it. The check is the create path's subset check
+    (``missing_fields``), so the input may carry more, such as a new
+    operator default, but must hold every expected value; an expected
+    ``null`` (a worker role the overrides delete, an SLA or a replay
+    speedup the Request leaves unset) must be absent or ``null``.
     """
 
-    overrides = _get(spec, ("aisimulate", "inputOverrides"), {}) or {}
-    typed_engine: dict[str, Any] = {
-        "workers": {role: {} for role in _ROLES},
-        "model": _get(spec, ("model", "name")),
-        "backend": {"choices": list(spec.get("backends") or [])},
-        "hardware": _get(spec, ("hardware", "gpu", "sku")),
-    }
-    expected_trace = _get(spec, ("workload", "trace", "source", "pvc", "path"), "")
+    _, sub_path = trace_pvc_source(spec)
     mounted = TRACE_MOUNT_PATH + (
-        "/trace.jsonl.gz" if str(expected_trace).endswith(".gz") else "/trace.jsonl"
+        "/trace.jsonl.gz" if (sub_path or "").endswith(".gz") else "/trace.jsonl"
     )
+    backends = list(spec.get("backends") or [])
     sla = _get(spec, ("objective", "sla"), {}) or {}
-    checks: list[tuple[tuple[str, ...], Any]] = [
-        (("engine",), merge_patch(typed_engine, overrides.get("engine") or {})),
-        (("router",), merge_patch({}, overrides.get("router") or {})),
-        (("optimizer",), merge_patch({}, overrides.get("optimizer") or {})),
-        (
-            ("optimization", "target"),
-            _METRIC_TARGETS.get(_get(spec, ("objective", "metric"), ""), _ABSENT),
-        ),
-        (
-            ("optimization", "strict_sla"),
-            _get(overrides, ("optimization", "strict_sla")),
-        ),
-        (
-            ("optimization", "constraints", "max_candidate_gpus"),
-            _get(spec, ("hardware", "gpu", "budget")),
-        ),
-        (("evaluation", "sla", "ttft_ms"), sla.get("ttftMs", _ABSENT)),
-        (("evaluation", "sla", "itl_ms"), sla.get("itlMs", _ABSENT)),
-        (("evaluation", "sla", "e2e_ms"), sla.get("e2eMs", _ABSENT)),
-        (
-            ("traffic", "source"),
-            {"type": "trace", "format": "dynamo", "paths": [mounted]},
-        ),
-        (("traffic", "load"), {"type": "trace_timestamps"}),
-        (("dgdr_run", "generator"), _get(overrides, ("dgdr_run", "generator"))),
-        (
-            ("dgdr_run", "max_candidates"),
-            _get(spec, ("recommendation", "maxCandidates")),
-        ),
-    ]
+    typed = {
+        "engine": {
+            "model": _get(spec, ("model", "name")),
+            "backend": {"choices": backends} if backends else None,
+            "hardware": _get(spec, ("hardware", "gpu", "sku")),
+        },
+        "optimization": {
+            "target": _METRIC_TARGETS.get(_get(spec, ("objective", "metric"), "")),
+            "constraints": {
+                "max_candidate_gpus": _get(spec, ("hardware", "gpu", "budget"))
+            },
+        },
+        "evaluation": {
+            "sla": {
+                "ttft_ms": sla.get("ttftMs"),
+                "itl_ms": sla.get("itlMs"),
+                "e2e_ms": sla.get("e2eMs"),
+            }
+        },
+        "traffic": {
+            "source": {"type": "trace", "format": "dynamo", "paths": [mounted]},
+            "load": {
+                "type": "trace_timestamps",
+                "speedup": _get(
+                    spec, ("workload", "trace", "replay", "arrivalSpeedupRatio")
+                ),
+            },
+        },
+        "dgdr_run": {"max_candidates": _get(spec, ("recommendation", "maxCandidates"))},
+    }
+    overrides = _get(spec, ("aisimulate", "inputOverrides"), {}) or {}
     # Normalize like the API server (JSON numbers, no tuples).
-    effective = json.loads(json.dumps(effective))
-    problems: list[str] = []
-    for path, expected in checks:
-        expected = expected if expected is _ABSENT else json.loads(json.dumps(expected))
-        actual = _get(effective, path, _ABSENT)
-        if expected is _ABSENT:
-            if actual is not _ABSENT and actual is not None:
-                problems.append(f"{'.'.join(path)}: expected unset, got {actual!r}")
-        elif actual is _ABSENT or not _same_json(actual, expected):
-            shown = "unset" if actual is _ABSENT else repr(actual)
-            problems.append(f"{'.'.join(path)}: expected {expected!r}, got {shown}")
-    return problems
-
-
-def _version_tuple(text: str | None) -> tuple[int, ...] | None:
-    if not text:
-        return None
-    found = re.match(r"^v?(\d+)\.(\d+)(?:\.(\d+))?", text.strip())
-    if found is None:
-        return None
-    return tuple(int(part) for part in found.groups(default="0"))
-
-
-def crn_unsupported(
-    runtime_version: str | None, runtime_image: str | None, minimum: str | None
-) -> bool:
-    """Whether a parseable runtime version is below ``minimum`` (None: unknown)."""
-
-    floor = _version_tuple(minimum)
-    if floor is None:
-        return False
-    version = _version_tuple(runtime_version)
-    if version is None and runtime_image:
-        # registry/repo:tag@digest -> tag
-        last = runtime_image.split("@", 1)[0].rsplit("/", 1)[-1]
-        if ":" in last:
-            version = _version_tuple(last.split(":", 1)[1])
-    return version is not None and version < floor
+    expected = json.loads(json.dumps(_overlay(typed, overrides)))
+    actual = json.loads(json.dumps(effective))
+    return [
+        f"{'.'.join(path)}: expected "
+        f"{'unset' if want is None else repr(want)}, got "
+        f"{'unset' if got is _ABSENT else repr(got)}"
+        for path, want, got in _differences(actual, expected, ())
+    ]
 
 
 # ---------------------------------------------------------------- executor
@@ -721,9 +658,10 @@ class DgdrContext:
     """Everything ``run_dgdr_sweep`` needs besides the ``SweepRequest``.
 
     ``backend`` is the deployed backend (``vllm``, ``sglang``, ``trtllm``).
-    ``is_leader`` is checked before every mutating call. ``now``/``sleep``
-    are wall-clock (``deadline_s`` is epoch seconds). ``crn_min_version`` is
-    the oldest runtime that replays traces with common random numbers.
+    ``is_leader`` is checked before every mutating call. ``now`` is the
+    wall clock (``deadline_s`` is epoch seconds). Between polls the sweep
+    waits on ``cancel`` and ``abort``, so either ends the wait at once;
+    ``sleep``, when set, replaces that wait (a test's simulated clock).
     """
 
     dgd: DgdRef
@@ -735,9 +673,8 @@ class DgdrContext:
     cut_window: WindowCutter
     is_leader: Callable[[], bool]
     now: Callable[[], float] = time.time
-    sleep: Callable[[float], None] = time.sleep
+    sleep: Optional[Callable[[float], None]] = None
     poll_interval_s: float = 5.0
-    crn_min_version: Optional[str] = CRN_MIN_VERSION
 
 
 def run_dgdr_sweep(
@@ -788,29 +725,45 @@ class _WindowFailed(Exception):
         self.message = message
 
 
-class _EitherEvent(threading.Event):
-    """An event that reads as set once any of its sources is set.
+class _Stop:
+    """Shutdown (``cancel``) or loss of leadership (``abort``), as one flag.
 
-    Hands the window cutter one ``cancel`` for both shutdown and abort.
+    The window cutter only asks ``is_set()``. ``wait`` is the sweep's pause
+    between polls and returns as soon as either event is set.
     """
 
-    def __init__(self, *sources: Optional[threading.Event]) -> None:
-        super().__init__()
-        self._sources = [source for source in sources if source is not None]
+    def __init__(
+        self, cancel: threading.Event, abort: Optional[threading.Event]
+    ) -> None:
+        self._events = tuple(event for event in (cancel, abort) if event is not None)
 
     def is_set(self) -> bool:
-        return super().is_set() or any(source.is_set() for source in self._sources)
+        return any(event.is_set() for event in self._events)
 
-    isSet = is_set
+    def wait(self, timeout: float) -> bool:
+        """Block up to ``timeout`` seconds; True once either event is set.
 
-    def wait(self, timeout: Optional[float] = None) -> bool:
-        end = None if timeout is None else time.monotonic() + timeout
-        while not self.is_set():
-            remaining = None if end is None else end - time.monotonic()
-            if remaining is not None and remaining <= 0:
-                return False
-            super().wait(0.05 if remaining is None else min(0.05, remaining))
-        return True
+        A ``threading.Event`` is waited on alone, so with two events each
+        gets a helper thread that waits on it for the same ``timeout`` and
+        wakes this call; no thread outlives the timeout.
+        """
+
+        if len(self._events) == 1:
+            return self._events[0].wait(timeout)
+        if self.is_set():
+            return True
+        woken = threading.Event()
+
+        def watch(event: threading.Event) -> None:
+            if event.wait(timeout):
+                woken.set()
+
+        for event in self._events:
+            threading.Thread(
+                target=watch, args=(event,), name="retune-dgdr-wait", daemon=True
+            ).start()
+        woken.wait(timeout)
+        return self.is_set()
 
 
 ShardState = Literal["create", "unknown", "wait", "done", "missing"]
@@ -833,6 +786,9 @@ class _ShardRun:
     created: bool = False
     reason: Optional[str] = None
     message: Optional[str] = None
+    # The open Run's Completed reason and message (JobRunning, or why it
+    # waits: ContainerWaiting, TraceSourceMissing); None once it ends.
+    run_status: Optional[str] = None
     run_name: Optional[str] = None
     run_uid: Optional[str] = None
     checked_run_uid: Optional[str] = None
@@ -855,6 +811,12 @@ class _ShardRun:
             )
         return self.name
 
+    def status(self) -> Optional[str]:
+        """The open Run's status, else why the shard ended or its last
+        attempt was replaced."""
+
+        return self.run_status or self.message
+
     def summary(self) -> dict[str, Any]:
         return {
             "kind": self.shard.kind,
@@ -866,7 +828,7 @@ class _ShardRun:
             "run": self.run_name,
             "state": self.state,
             "reason": self.reason,
-            "message": self.message,
+            "message": self.status(),
             "published": self.published,
             "run_pending": self.run_pending,
         }
@@ -890,12 +852,14 @@ class _DgdrSweep:
         self.request = request
         self.cancel = cancel
         self.abort = abort
+        self.stop = _Stop(cancel, abort)
         self.ctx = context
         self.cfg = context.cfg
         self.started = started
-        deadline = getattr(request, "deadline_s", None)
         self.deadline = (
-            float(deadline) if deadline is not None else started + request.timeout_s
+            float(request.deadline_s)
+            if request.deadline_s is not None
+            else started + request.timeout_s
         )
         self.window_end_ms = int(round(request.window_end_ms))
         # Registry references this sweep took; each is released at the end.
@@ -909,8 +873,8 @@ class _DgdrSweep:
         self.details: dict[str, Any] = {
             "window": {"path": self.claim_path, "cut": False},
             "deadline_s": self.deadline,
-            "generation": getattr(request, "generation", 0),
-            "replicas_verified": getattr(request, "replicas_verified", True),
+            "generation": request.generation,
+            "replicas_verified": request.replicas_verified,
         }
         self.k8s_errors = 0
         self.runtime: dict[str, Any] = {}
@@ -999,6 +963,14 @@ class _DgdrSweep:
     def _timeout(self) -> float:
         return max(_MIN_K8S_TIMEOUT_S, min(_K8S_TIMEOUT_S, self.deadline - self._now()))
 
+    def _pause(self, seconds: float) -> None:
+        """Wait between polls; shutdown or abort ends the wait at once."""
+
+        if self.ctx.sleep is not None:
+            self.ctx.sleep(seconds)
+        else:
+            self.stop.wait(seconds)
+
     def _check_interrupt(self) -> None:
         if self.cancel.is_set():
             raise _Interrupted("shutdown")
@@ -1029,7 +1001,7 @@ class _DgdrSweep:
                 if self._now() + self.ctx.poll_interval_s >= self.deadline:
                     self._fail("k8s_error", f"{what}: {error}", "timeout")
                 logger.warning("retune %s failed, retrying: %s", what, error)
-                self.ctx.sleep(self.ctx.poll_interval_s)
+                self._pause(self.ctx.poll_interval_s)
 
     def _read_failed(self, what: str, error: KubeError) -> None:
         """A GET failed: a permanent error fails the window; else poll again."""
@@ -1057,7 +1029,7 @@ class _DgdrSweep:
 
     def _prepare(self) -> None:
         request = self.request
-        domain = getattr(request, "router_domain", None)
+        domain = request.router_domain
         if not domain:
             self._fail("invalid_request", "the sweep request has no router domain")
         if any(candidate.planner for candidate in request.candidates):
@@ -1077,7 +1049,7 @@ class _DgdrSweep:
             )
         except (KeyError, ValueError) as error:
             self._fail("invalid_domain", str(error))
-        replicas = getattr(request, "spec_replicas", None) or request.replicas
+        replicas = request.spec_replicas or request.replicas
         self.details["replicas"] = dict(replicas)
         probe = next((shard for shard in shards if shard.kind == "probe"), None)
         for shard in shards:
@@ -1250,7 +1222,7 @@ class _DgdrSweep:
     def _too_late(self, run: _ShardRun) -> bool:
         """Apply the launch gate; True when the shard was given up."""
 
-        need = need_seconds(run.shard, self.cfg, needs_cut=not self.cut_done)
+        need = dgdr_need_seconds(run.shard.size, self.cfg, needs_cut=not self.cut_done)
         left = self.deadline - self._now()
         if left >= need:
             return False
@@ -1370,7 +1342,6 @@ class _DgdrSweep:
             self._fail("launch_too_late", "no time left to cut the window", "timeout")
         # WindowCutter takes the deadline as absolute wall-clock seconds.
         cut_deadline_s = self._now() + budget
-        cancel = _EitherEvent(self.cancel, self.abort)
         try:
             os.makedirs(os.path.dirname(self.local_path), exist_ok=True)
             result: WindowCutResult = self.ctx.cut_window(
@@ -1381,7 +1352,7 @@ class _DgdrSweep:
                 self.local_path,
                 max_rows=self.cfg.max_window_rows,
                 deadline_s=cut_deadline_s,
-                cancel=cancel,
+                cancel=self.stop,
             )
         except Exception as error:
             # A cut cancelled by shutdown or abort reports which one it was.
@@ -1423,11 +1394,17 @@ class _DgdrSweep:
                 return
             if self._now() >= self.deadline:
                 pending = [run.shard.id for run in active if run.run_pending]
+                last = [
+                    f"{run.shard.id}: {run.status()}"
+                    for run in sorted(active, key=lambda run: run.shard.id)
+                    if run.status()
+                ]
                 self._fail(
                     "run_pending" if pending else "timeout",
                     "the deadline passed with shards "
                     f"{sorted(run.shard.id for run in active)} unfinished"
-                    + (f" (Runs pending: {sorted(pending)})" if pending else ""),
+                    + (f" (Runs pending: {sorted(pending)})" if pending else "")
+                    + (f"; {'; '.join(last)}" if last else ""),
                     "timeout",
                 )
             for run in active:
@@ -1443,7 +1420,7 @@ class _DgdrSweep:
                 for run in self.shards.values()
             ):
                 left = self.deadline - self._now()
-                self.ctx.sleep(max(0.0, min(self.ctx.poll_interval_s, left)))
+                self._pause(max(0.0, min(self.ctx.poll_interval_s, left)))
 
     def _resolve_unknown(self, run: _ShardRun) -> None:
         """After a create whose outcome is unknown: adopt it or create again."""
@@ -1480,7 +1457,13 @@ class _DgdrSweep:
         )
 
     def _observe(self, run: _ShardRun) -> None:
-        """One look at a shard's Request and Run (the §4.5.3 state machine)."""
+        """One look at a shard's Request and Run.
+
+        The Request must be Accepted for its current generation (within
+        ``ACCEPT_TIMEOUT_S``); its Run's input is read back once per Run
+        UID; a Succeeded Run makes the shard ``done``, a failed one goes to
+        ``_run_failed``, and a live one is waited on.
+        """
 
         kube = self.ctx.kube
         try:
@@ -1531,6 +1514,7 @@ class _DgdrSweep:
             f"Run {run.run_name} {completed.get('reason')}: "
             f"{completed.get('message', '')}"
         )
+        run.run_status = outcome if not terminal and completed.get("reason") else None
         if not terminal:
             self._track_pending(run, status)
         if run.checked_run_uid != run_uid:
@@ -1556,8 +1540,10 @@ class _DgdrSweep:
         """Flag a live Run that has had no Job for a long time (``run_pending``).
 
         The operator writes ``status.aisimulate.input`` and ``jobRef`` in one
-        status patch once the Job exists; until then the Run has no status
-        at all, so this runs before the input is read back.
+        status patch once the Job exists; until then the Run has no status,
+        or only a ``Completed=False`` condition that says why it waits (such
+        as ``TraceSourceMissing``), so this runs before the input is read
+        back.
         """
 
         if status.get("jobRef") or status.get("startTime"):
@@ -1572,17 +1558,18 @@ class _DgdrSweep:
         ):
             if not run.run_pending:
                 logger.warning(
-                    "retune Run %s has no Job after %.0fs (run_pending)",
+                    "retune Run %s has no Job after %.0fs (run_pending): %s",
                     run.run_name,
                     now - run.pending_since,
+                    run.run_status or "no status yet",
                 )
             run.run_pending = True
 
     def _run_failed(self, run: _ShardRun, outcome: str) -> None:
         """A Run ended without success.
 
-        An attempt a previous leader created is replaced while there is time
-        (design §4.5.3 adopts only a live or Succeeded attempt); otherwise
+        An attempt a previous leader created is replaced while there is time,
+        since only a live or Succeeded attempt is worth adopting; otherwise
         the shard fails.
         """
 
@@ -1636,17 +1623,12 @@ class _DgdrSweep:
         image = dgdr_run.get("runtime_image")
         version = dgdr_run.get("runtime_version_override")
         if image or version:
+            # For audit: the runtime that replayed the window.
             self.runtime = {"runtime_image": image, "runtime_version": version}
         problems = input_mismatches(run.spec, effective)
         if problems:
             self._input_mismatch(run, problems)
             return False
-        if crn_unsupported(version, image, self.ctx.crn_min_version):
-            self._fail(
-                "crn_unsupported",
-                f"Run {run.run_name} runtime {version or image} predates CRN "
-                f"trace replay ({self.ctx.crn_min_version})",
-            )
         return True
 
     def _input_mismatch(self, run: _ShardRun, problems: list[str]) -> None:
@@ -1669,7 +1651,7 @@ class _DgdrSweep:
         False (nothing changed) when ``D_k - now < need(shard)``.
         """
 
-        need = need_seconds(run.shard, self.cfg, needs_cut=not self.cut_done)
+        need = dgdr_need_seconds(run.shard.size, self.cfg, needs_cut=not self.cut_done)
         if self.deadline - self._now() < need:
             return False
         self._enqueue_delete([run.name])
@@ -1679,6 +1661,7 @@ class _DgdrSweep:
         run.created = False
         run.name = None
         run.run_name = None
+        run.run_status = None
         run.checked_run_uid = None
         run.unaccepted_since = None
         run.pending_since = None
@@ -1690,7 +1673,7 @@ class _DgdrSweep:
 
     def _harvest(self) -> SweepResult:
         request = self.request
-        domain_keys = set(getattr(request, "router_domain", None) or {})
+        domain_keys = set(request.router_domain or {})
         results: dict[str, _Scored] = {}
         probe_results: dict[str, _Scored] = {}
         engine_signature: Optional[str] = None

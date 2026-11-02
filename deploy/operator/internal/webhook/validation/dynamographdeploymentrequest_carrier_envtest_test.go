@@ -50,13 +50,13 @@ func TestDynamoGraphDeploymentRequestCarrierObjectsStayWritable(t *testing.T) {
 	t.Run("native v1beta2 trace written through v1beta1", func(t *testing.T) {
 		foreign := carrierRoundTrip(t, beta2DGDRForAdmission(setBeta2AdmissionTrace), betaDGDRForAdmission(nil), "v1beta2")
 
-		t.Log("The v1beta1 carrier holds the complete trace and no static default")
+		t.Log("The v1beta1 carrier holds the complete trace with its defaulted format and no static default")
 		trace, found, err := unstructured.NestedMap(foreign.Object, "spec", "v1beta2", "workload", "trace")
 		if err != nil || !found {
 			t.Fatalf("spec.v1beta2.workload.trace found=%v err=%v", found, err)
 		}
-		path, _, _ := unstructured.NestedString(trace, "source", "pvc", "path")
-		if trace["format"] != "dynamo" || path != "retune/w-1.jsonl.gz" {
+		subPath, _, _ := unstructured.NestedString(trace, "source", "persistentVolumeClaim", "subPath")
+		if trace["format"] != "Dynamo" || subPath != "retune/w-1.jsonl.gz" {
 			t.Fatalf("spec.v1beta2.workload.trace = %#v", trace)
 		}
 		if _, found, _ := unstructured.NestedFieldNoCopy(foreign.Object, "spec", "v1beta2", "workload", "static"); found {
@@ -68,9 +68,8 @@ func TestDynamoGraphDeploymentRequestCarrierObjectsStayWritable(t *testing.T) {
 func setBeta2AdmissionTrace(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
 	setBeta2AdmissionHardware(request)
 	request.Spec.Workload = &nvidiacomv1beta2.WorkloadSpec{Trace: &nvidiacomv1beta2.TraceWorkloadSpec{
-		Format: nvidiacomv1beta2.TraceFormatDynamo,
-		Source: nvidiacomv1beta2.TraceSourceSpec{PVC: &nvidiacomv1beta2.TracePVCSource{
-			ClaimName: "request-traces", Path: "retune/w-1.jsonl.gz",
+		Source: nvidiacomv1beta2.TraceSourceSpec{PersistentVolumeClaim: &nvidiacomv1beta2.TracePVCSource{
+			ClaimName: "request-traces", SubPath: "retune/w-1.jsonl.gz",
 		}},
 	}}
 }

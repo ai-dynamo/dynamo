@@ -14,11 +14,11 @@ spec:
     - vllm
   workload:
     trace:
-      format: dynamo
+      # format defaults to Dynamo.
       source:
-        pvc:
+        persistentVolumeClaim:
           claimName: request-traces
-          path: retune/w-1.jsonl.gz
+          subPath: retune/w-1.jsonl.gz
       replay:
         arrivalSpeedupRatio: 2.0
   objective:

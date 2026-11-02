@@ -8,20 +8,20 @@ plus the searched knobs, while the live frontends start from whatever their
 argv and env say. The two agree only when the frontend leaves every
 unsearched routing field at its default (premise P4), so the planner reads
 the frontend's startup from the DynamoGraphDeployment spec, never from a
-running pod (design §4.3):
+running pod:
 
 - ``find_frontend`` picks the one standalone frontend component.
 - ``parse_frontend`` rebuilds the frontend's effective argv (the operator's
   ``command``/``args`` defaulting) and env (operator-injected, graph ``env``
   and the main container's, with Kubernetes ``$(VAR)`` expansion), then
-  parses them with the frontend's own argument groups. Those groups read
-  ``os.environ`` while registering their arguments; here they run as copies
-  of their functions whose ``os`` sees only the frontend's env, so the
-  planner process's environment is neither read nor modified. A
-  shell-wrapped command, a ``--router-policy-config`` file, router env set
-  through ``valueFrom`` and an argument whose unreadable ``$(VAR)`` could
-  set a router flag make the frontend unparseable. ``envFrom`` sources are
-  assumed to set no router env; ``evaluate_premises`` warns about them.
+  parses them with the frontend's own parser (``build_frontend_parser``),
+  which reads env defaults from that env alone, so the planner process's
+  environment is neither read nor modified. A shell-wrapped command, a
+  ``--router-policy-config`` file, router env set through ``valueFrom`` and
+  an argument whose unreadable ``$(VAR)`` could set a router flag make the
+  frontend unparseable. ``envFrom`` sources are assumed to set no router
+  env; ``evaluate_premises`` warns about them, and P14 compares the
+  routers' policy parameters with the parsed startup.
 - ``evaluate_premises`` checks P4 and P7-P10 and warns on P6 and P7; P14
   is the router actuator's. P4 also parses every worker component's router
   flags and env the same way: a worker that resolves a router mode
@@ -38,11 +38,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import posixpath
 import re
 import shlex
-import types
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
@@ -52,8 +50,18 @@ from dynamo.common.configuration.groups.kv_router_args import (
     _KV_ROUTER_FIELDS,
     KvRouterConfigBase,
 )
-from dynamo.common.configuration.groups.router_args import RouterConfigBase
+from dynamo.common.configuration.groups.router_args import (
+    RouterConfigBase,
+    add_worker_router_arguments,
+)
+from dynamo.common.configuration.utils import ArgEnv
+from dynamo.frontend.frontend_args import build_frontend_parser
 from dynamo.llm import KvRouterConfig
+from dynamo.planner.retune.domains import (
+    OVERLAP_SCORE_CREDIT,
+    expand_router_domain,
+    grid_points,
+)
 from dynamo.planner.retune.live.contracts import FrontendStartup, PremiseReport
 
 if TYPE_CHECKING:
@@ -79,7 +87,7 @@ ENV_PARENT_DGD_NAME = "DYN_PARENT_DGD_K8S_NAME"
 ENV_PARENT_DGD_NAMESPACE = "DYN_PARENT_DGD_K8S_NAMESPACE"
 _OPERATOR_FIELD_REF_ENV = ("POD_NAME", "POD_NAMESPACE", "POD_UID")
 
-# The trace recipe of design §4.4.1 (P10).
+# The frontend's request trace recipe (P10).
 ENV_POD_NAME = "DYN_POD_NAME"
 ENV_TRACE = "DYN_REQUEST_TRACE"
 ENV_TRACE_SINKS = "DYN_REQUEST_TRACE_SINKS"
@@ -170,11 +178,6 @@ _PYTHON_FLAGS_WITH_VALUE = frozenset({"-X", "-W"})
 _OPAQUE = "\x00opaque:"
 _OPAQUE_REPR = repr(_OPAQUE)[1:-1]
 
-# Receives the frontend argument groups' own log lines (deprecation and
-# removed-flag notices), which would otherwise repeat on every parse.
-_SILENT_LOGGER = logging.getLogger(f"{__name__}.frontend_args")
-_SILENT_LOGGER.disabled = True
-
 
 class FrontendParseError(ValueError):
     """The frontend's router configuration cannot be derived from the spec."""
@@ -198,10 +201,8 @@ def canonical_json(value: Any) -> str:
 def find_frontend(dgd: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
     """Return the name and spec of the DGD's one standalone frontend component.
 
-    v1beta1 lists components in ``spec.components``; a v1alpha1
-    ``spec.services`` map is converted to the same shape (``type``,
-    ``replicas``, ``podTemplate.spec`` with a ``main`` container), so callers
-    read one layout. Raises ``FrontendParseError`` ("P7: ...") unless there
+    Reads the v1beta1 ``spec.components`` list (the planner reads every DGD
+    as v1beta1). Raises ``FrontendParseError`` ("P7: ...") unless there
     is exactly one standalone frontend, naming an EPP or ``frontendSidecar``
     layout when that is why.
     """
@@ -288,23 +289,17 @@ def parse_frontend(
 
 
 def evaluate_premises(
-    dgd: Mapping[str, Any],
-    *,
-    planner_config: PlannerConfig,
-    startup: FrontendStartup | None,
-    parse_error: str | None,
-    planner_replicas: int | None,
+    dgd: Mapping[str, Any], *, planner_config: PlannerConfig
 ) -> PremiseReport:
     """Evaluate the spec premises P4 and P7-P10, and the P6 and P7 warnings.
 
-    ``startup``/``parse_error`` are ``parse_frontend``'s result for ``dgd``;
-    what a ``FrontendStartup`` cannot carry (serde-skipped flags, session
-    affinity, unread router env, TLS, the trace recipe) is re-derived from
-    ``dgd`` (cached, so cheap). P4 also fails for a worker component that
-    advertises its own router configuration. ``planner_replicas``, when
-    given, replaces the planner component replicas read from the DGD (P9).
-    A malformed DGD never raises; every problem becomes a reason. Raises
-    ``ValueError`` only when ``planner_config.retune.dgdr`` is unset.
+    Parses the frontend as ``parse_frontend`` does (cached, so cheap) and
+    reports its startup; P4 also covers what a ``FrontendStartup`` cannot
+    carry (serde-skipped flags, session affinity, unread router env) and
+    fails for a worker component that advertises its own router
+    configuration. A malformed DGD never raises; every problem becomes a
+    reason. Raises ``ValueError`` only when ``planner_config.retune.dgdr`` is
+    unset.
     """
 
     retune = planner_config.retune
@@ -313,6 +308,7 @@ def evaluate_premises(
     dgdr = retune.dgdr
     mode = str(planner_config.mode)
     analysis = _analyze(dgd, mode)
+    startup = analysis.startup
     components = _components(dgd)
     p4: list[str] = []
     others: list[str] = []
@@ -321,7 +317,7 @@ def evaluate_premises(
     # P4: a parsed KV router whose unsearched fields are the defaults and
     # whose startup passes the retune controller's constructor checks.
     if startup is None:
-        p4.append(parse_error or analysis.error or "P4: the frontend was not parsed")
+        p4.append(analysis.error or "P4: the frontend configuration cannot be parsed")
     else:
         p4.extend(analysis.p4_violations)
         p4.extend(_startup_errors(startup, retune, mode))
@@ -394,7 +390,7 @@ def evaluate_premises(
                 f"P9: worker component {component.get('name')} has a "
                 "scalingAdapter; its replicas could change during a window"
             )
-    others.extend(_planner_replica_errors(components, planner_replicas, warnings))
+    others.extend(_planner_replica_errors(components, warnings))
 
     # P10: the frontend records request_end traces onto the claim.
     if analysis.component is not None and analysis.env is not None:
@@ -483,7 +479,6 @@ def _analyze(dgd: Mapping[str, Any], planner_mode: str) -> _Analysis:
                 "argv": list(argv),
                 "values": dict(env.values),
                 "opaque": sorted(env.opaque),
-                "env_from": [dict(source) for source in env.env_from],
             }
         ),
         worker_types(planner_mode),
@@ -530,7 +525,6 @@ def _parse_cached(key: str, wts: tuple[str, ...]) -> _Parsed:
             inputs["argv"],
             inputs["values"],
             frozenset(inputs["opaque"]),
-            inputs["env_from"],
             wts,
         )
     except FrontendParseError as error:
@@ -549,7 +543,6 @@ def _parse(
     argv: Sequence[str],
     values: Mapping[str, str],
     opaque: frozenset[str],
-    env_from: Sequence[Mapping[str, Any]],
     wts: tuple[str, ...],
 ) -> _Parsed:
     args = _frontend_args(argv)
@@ -570,10 +563,6 @@ def _parse(
             "(or references such a value); the planner cannot read it, so set "
             "it with a literal value"
         )
-    # envFrom sources (typically an HF token secret) are assumed not to set
-    # router env; evaluate_premises warns, and P14 compares the routers'
-    # policy parameters with the parsed startup.
-    del env_from
 
     # An unreadable $(VAR) becomes a marker the parser carries as a value: a
     # non-router flag keeps it unconverted, a router flag fails the parse,
@@ -995,93 +984,22 @@ class _ArgsParser(argparse.ArgumentParser):
         return super()._check_value(action, value)
 
 
-class _OsWithEnv:
-    """``os`` with ``environ`` replaced by the frontend's env."""
-
-    def __init__(self, environ: Mapping[str, str]) -> None:
-        self.environ = dict(environ)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(os, name)
-
-
-class _QuietIgnore(argparse.Action):
-    """Accept and drop a removed flag, without the frontend's warning."""
-
-    def __call__(self, parser, namespace, values, option_string=None) -> None:  # type: ignore[no-untyped-def]
-        return None
-
-
-class _NoArguments:
-    """Replaces an argument group none of whose flags matter here."""
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        pass
-
-    def add_arguments(self, parser: Any) -> None:
-        return None
-
-
-def _rebind(
-    function: Callable[..., Any], overrides: Mapping[str, Any]
-) -> Callable[..., Any]:
-    """A copy of ``function`` whose module globals are overlaid with ``overrides``.
-
-    The module is untouched, so other threads keep running the original.
-    """
-
-    rebound = types.FunctionType(
-        function.__code__,
-        {**function.__globals__, **overrides},
-        function.__name__,
-        function.__defaults__,
-        function.__closure__,
-    )
-    rebound.__kwdefaults__ = function.__kwdefaults__
-    return rebound
-
-
 def _frontend_parser(
     env: Mapping[str, str],
 ) -> tuple[argparse.ArgumentParser, dict[str, str]]:
     """The frontend's argument parser with every env default read from ``env``.
 
-    Runs ``FrontendArgGroup.add_arguments`` and the router groups it adds as
-    copies whose ``os``, ``env_or_default``, ``add_argument`` and
-    ``add_negatable_bool_argument`` see only ``env``. Deprecation warnings,
-    the AISimulate perf-model flags (whose type reads files) and the
-    ``--model-path`` directory check are dropped. Returns the parser and the
-    env name -> dest map of everything it registered.
+    ``build_frontend_parser`` registers the frontend's arguments without
+    reading the planner's env or filesystem and without the frontend's
+    notices. Returns the parser and the env name -> dest map of everything
+    it registered.
     """
 
-    from dynamo.common.configuration.groups import kv_router_args, router_args
-    from dynamo.frontend import frontend_args
-
-    overrides, bound, registered = _env_bound(env)
-    add_frontend_arguments = _rebind(
-        frontend_args.FrontendArgGroup.add_arguments,
-        {
-            **overrides,
-            "RouterArgGroup": bound(router_args.RouterArgGroup),
-            "KvRouterArgGroup": bound(kv_router_args.KvRouterArgGroup),
-            "AisPerfArgGroup": _NoArguments,
-            "validate_model_path": str,
-        },
-    )
-    parser = _ArgsParser()
     try:
-        add_frontend_arguments(frontend_args.FrontendArgGroup(), parser)
+        return build_frontend_parser(env, _ArgsParser())
     except (ValueError, TypeError, argparse.ArgumentTypeError) as error:
         # The frontend itself fails to start on such env.
         raise FrontendParseError(f"P4: invalid frontend env: {error}") from None
-
-    # The removed flags only log when used; keep their arity, drop the noise.
-    for action in parser._actions:
-        if isinstance(action, router_args._DeprecatedEnforceDisaggAction):
-            action.__class__ = argparse.BooleanOptionalAction  # type: ignore[assignment]
-        elif isinstance(action, router_args._IgnoredAdmissionControlAction):
-            action.__class__ = _QuietIgnore  # type: ignore[assignment]
-    return parser, registered
 
 
 def _worker_router_parser(
@@ -1089,79 +1007,23 @@ def _worker_router_parser(
 ) -> tuple[argparse.ArgumentParser, dict[str, str]]:
     """A worker's router-advertisement parser with env defaults from ``env``.
 
-    Runs ``router_args.add_worker_router_arguments``, which every backend
-    (vLLM, SGLang, TensorRT-LLM, mocker) uses, the way ``_frontend_parser``
-    runs the frontend's groups. Only ``router_mode`` is relevant: it decides
-    whether the worker advertises a router configuration at all.
+    Registers ``router_args.add_worker_router_arguments``, which every
+    backend (vLLM, SGLang, TensorRT-LLM, mocker) uses, against ``env``. Only
+    ``router_mode`` is relevant: it decides whether the worker advertises a
+    router configuration at all.
     """
 
-    from dynamo.common.configuration.groups import kv_router_args, router_args
-
-    overrides, bound, registered = _env_bound(env)
-    add_worker_arguments = _rebind(
-        router_args.add_worker_router_arguments,
-        {
-            "RouterArgGroup": bound(router_args.RouterArgGroup),
-            "KvRouterArgGroup": bound(kv_router_args.KvRouterArgGroup),
-        },
-    )
+    arg_env = ArgEnv(environ=dict(env))
     parser = _ArgsParser(
         relevant=frozenset({_ROUTER_MODE_DEST}),
         describe=_worker_parse_error_message,
     )
     try:
-        add_worker_arguments(parser)
+        add_worker_router_arguments(parser, env=arg_env)
     except (ValueError, TypeError, argparse.ArgumentTypeError) as error:
         # The worker itself fails to start on such env.
         raise FrontendParseError(f"has invalid router env ({error})") from None
-    return parser, registered
-
-
-def _env_bound(
-    env: Mapping[str, str],
-) -> tuple[dict[str, Any], Callable[[type], type], dict[str, str]]:
-    """Globals that make an argument group read only ``env``.
-
-    Returns the overrides for ``_rebind``, a function that subclasses an
-    ``ArgGroup`` with its ``add_arguments`` rebound to them, and the env
-    name -> dest map the bound groups fill while registering.
-    """
-
-    from dynamo.common.configuration import utils
-
-    fake_os = _OsWithEnv(env)
-    registered: dict[str, str] = {}
-    env_or_default = _rebind(utils.env_or_default, {"os": fake_os})
-    base_add = _rebind(
-        utils.add_argument, {"os": fake_os, "env_or_default": env_or_default}
-    )
-
-    def add_argument(parser: Any, **kwargs: Any) -> None:
-        kwargs.pop("deprecated", None)
-        flag = str(kwargs["flag_name"])
-        registered[str(kwargs["env_var"])] = str(
-            kwargs.get("dest") or flag.lstrip("-").replace("-", "_")
-        )
-        base_add(parser, **kwargs)
-
-    overrides = {
-        "os": fake_os,
-        "env_or_default": env_or_default,
-        "add_argument": add_argument,
-        "add_negatable_bool_argument": _rebind(
-            utils.add_negatable_bool_argument, {"add_argument": add_argument}
-        ),
-        "logger": _SILENT_LOGGER,
-    }
-
-    def bound(group: Any) -> type:
-        return type(
-            group.__name__,
-            (group,),
-            {"add_arguments": _rebind(group.add_arguments, overrides)},
-        )
-
-    return overrides, bound, registered
+    return parser, arg_env.env_dests
 
 
 # --------------------------------------------------------- premise checks
@@ -1347,8 +1209,6 @@ def _worker_argv(component: Mapping[str, Any], env: _Env) -> tuple[list[str], bo
 def _router_domain_keys(retune: RetuneConfig) -> list[str]:
     if retune.router is None:
         return []
-    from dynamo.planner.retune.domains import expand_router_domain
-
     return list(expand_router_domain(retune))
 
 
@@ -1363,12 +1223,6 @@ def _controller_errors(
 
     if retune.router is None:
         return []
-    from dynamo.planner.retune.domains import (
-        OVERLAP_SCORE_CREDIT,
-        expand_router_domain,
-        grid_points,
-    )
-
     startup_json = canonical_json(dict(router_config))
     try:
         startup_maps = _policy_maps(startup_json, wts)
@@ -1443,16 +1297,8 @@ def _startup_config_mismatch(
 
 
 def _planner_replica_errors(
-    components: Sequence[Mapping[str, Any]],
-    planner_replicas: Optional[int],
-    warnings: list[str],
+    components: Sequence[Mapping[str, Any]], warnings: list[str]
 ) -> list[str]:
-    if planner_replicas is not None:
-        if planner_replicas != 1:
-            return [
-                f"P9: the planner has {planner_replicas} replicas; live retune needs 1"
-            ]
-        return []
     planners = [c for c in components if _type(c) == PLANNER_TYPE]
     if not planners:
         warnings.append(
@@ -1474,7 +1320,7 @@ def _trace_recipe_errors(
     segments_dir: str,
     warnings: list[str],
 ) -> list[str]:
-    """P10: the frontend writes request_end segments onto the claim (§4.4.1)."""
+    """P10: the frontend writes request_end segments onto the claim."""
 
     assert analysis.spec is not None and analysis.env is not None
     entries = analysis.env.entries
@@ -1590,11 +1436,23 @@ def _join_dir(mount: str, *parts: str) -> str:
     return "/".join([mount.rstrip("/"), *(part for part in parts if part)]) + "/"
 
 
+@lru_cache(maxsize=8)
 def _model_warning(model: str) -> Optional[str]:
+    """P6 for ``model``; cached, so a broken install logs once per model."""
+
     try:
+        # Optional dependency of a warn-only premise: without it, P6 is not
+        # checked.
         from aisimulate_core.sdk.common import DefaultHFModels
-    except Exception:  # noqa: BLE001 - optional dependency of a warn-only premise
+    except ImportError:
         return None
+    except Exception as error:  # noqa: BLE001 - evaluate_premises never raises
+        logger.exception("live retune could not load AISimulate's default HF models")
+        return (
+            f"P6: cannot check retune.dgdr.model {model!r} against AISimulate's "
+            f"default HF models ({type(error).__name__}: {error}); each DGDR Run "
+            "must be able to download it"
+        )
     if model in DefaultHFModels:
         return None
     return (
@@ -1607,65 +1465,14 @@ def _model_warning(model: str) -> Optional[str]:
 
 
 def _components(dgd: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    spec = dgd.get("spec") or {}
-    components = spec.get("components")
+    components = (dgd.get("spec") or {}).get("components")
     if isinstance(components, list):
         return [c for c in components if isinstance(c, Mapping)]
-    services = spec.get("services")
-    if isinstance(services, Mapping):
-        return [
-            _from_v1alpha1(str(name), service)
-            for name, service in services.items()
-            if isinstance(service, Mapping)
-        ]
     return []
 
 
-def _from_v1alpha1(name: str, service: Mapping[str, Any]) -> dict[str, Any]:
-    """A v1alpha1 service in the v1beta1 component shape this module reads."""
-
-    extra = service.get("extraPodSpec") or {}
-    main = dict(extra.get("mainContainer") or {})
-    main["name"] = MAIN_CONTAINER
-    env: dict[str, Any] = {}
-    for entry in [*(service.get("envs") or []), *(main.get("env") or [])]:
-        if isinstance(entry, Mapping) and entry.get("name"):
-            env[str(entry["name"])] = entry
-    main["env"] = list(env.values())
-    env_from = list(main.get("envFrom") or [])
-    if service.get("envFromSecret"):
-        env_from.append({"secretRef": {"name": service["envFromSecret"]}})
-    main["envFrom"] = env_from
-    # v1alpha1 volumeMounts name a PVC and mount it at mountPoint.
-    mounts = list(main.get("volumeMounts") or [])
-    volumes = list(extra.get("volumes") or [])
-    for mount in service.get("volumeMounts") or []:
-        if isinstance(mount, Mapping) and mount.get("name"):
-            claim = str(mount["name"])
-            mounts.append({"name": claim, "mountPath": mount.get("mountPoint")})
-            volumes.append(
-                {"name": claim, "persistentVolumeClaim": {"claimName": claim}}
-            )
-    main["volumeMounts"] = mounts
-    component: dict[str, Any] = {
-        "name": name,
-        "type": service.get("componentType") or "",
-        "podTemplate": {"spec": {"containers": [main], "volumes": volumes}},
-    }
-    for key in ("replicas", "roles", "modelRef"):
-        if service.get(key) is not None:
-            component[key] = service[key]
-    if service.get("frontendSidecar"):
-        component["frontendSidecar"] = "sidecar-frontend"
-    # v1alpha1 needs enabled: true; v1beta1 opts in with any object.
-    if (service.get("scalingAdapter") or {}).get("enabled"):
-        component["scalingAdapter"] = {}
-    return component
-
-
 def _graph_env(dgd: Mapping[str, Any]) -> list[Any]:
-    spec = dgd.get("spec") or {}
-    return list(spec.get("env") or spec.get("envs") or [])
+    return list((dgd.get("spec") or {}).get("env") or [])
 
 
 def _pod_spec(spec: Mapping[str, Any]) -> Mapping[str, Any]:

@@ -978,15 +978,6 @@ class DgdrExecutorConfig(BaseModel):
         allow_inf_nan=False,
         description="Period of the router actuator and reconciler rounds.",
     )
-    trace_incomplete_threshold: float = Field(
-        default=0.05,
-        ge=0,
-        le=1,
-        description=(
-            "With a Prometheus endpoint, a window whose request count is below "
-            "the frontend's by more than this fraction fails (trace_incomplete)."
-        ),
-    )
 
 
 # Live retune (``retune.executor: dgdr``) limits. A sweep must end this long
@@ -1018,42 +1009,66 @@ _DGDR_PRESET_OPTIONAL_KEYS = ("prefill_context", "decode_context")
 _DGDR_SCHEDULER_KNOBS = ("max_batched_tokens", "max_sequences")
 
 
+def dgdr_rounds(points: int, parallelism: int) -> int:
+    """Evaluation rounds of a DGDR Run that scores ``points`` candidates.
+
+    The AISimulate optimizer evaluates the first candidate alone, then
+    ``parallelism`` candidates at a time.
+    """
+
+    if points < 1:
+        raise ValueError(f"a DGDR shard has at least one point, got {points}")
+    if parallelism < 1:
+        raise ValueError(f"parallelism must be at least 1, got {parallelism}")
+    return 1 + math.ceil((points - 1) / parallelism)
+
+
 def dgdr_need_seconds(
     points: int, dgdr: DgdrExecutorConfig, *, needs_cut: bool
 ) -> float:
     """Wall-clock seconds one DGDR shard of ``points`` router points needs.
 
     ``cut_budget`` (when the window file must still be cut) + Run Job
-    start-up + one round per ``run.parallelism`` candidates, plus one: the
-    AISimulate optimizer evaluates its first candidate alone. ``parallelism``
-    is the configured value; Job resources may lower it, so this is
-    optimistic.
+    start-up + ``dgdr_rounds(points, run.parallelism)`` rounds of
+    ``candidate_timeout``. ``parallelism`` is the configured value; Job
+    resources may lower it, so this is optimistic.
     """
 
-    if points < 1:
-        raise ValueError(f"a DGDR shard has at least one point, got {points}")
-    rounds = 1 + math.ceil((points - 1) / dgdr.run.parallelism)
+    rounds = dgdr_rounds(points, dgdr.run.parallelism)
     cut = dgdr.cut_budget_seconds if needs_cut else 0.0
     return cut + dgdr.job_startup_seconds + rounds * dgdr.run.candidate_timeout_seconds
 
 
-def balanced_shard_parts(sizes: Sequence[int], max_shards: int) -> tuple[int, ...]:
-    """How many chunks to cut each grid dimension into for DGDR sharding.
+def balanced_shard_parts(
+    sizes: Sequence[int], max_shards: int, *, parallelism: int | None = None
+) -> tuple[int, ...]:
+    """How many chunks to cut each router grid dimension into for DGDR sharding.
 
-    ``sizes`` are the value counts of the router grid dimensions. Cutting
-    dimension ``i`` into ``parts[i]`` contiguous chunks of at most
-    ``ceil(sizes[i] / parts[i])`` values gives ``prod(parts)`` Cartesian
-    shards, the largest with ``largest_shard_points(sizes, parts)`` points.
-    Returns the parts with ``prod(parts) <= max_shards`` that minimize the
-    largest shard, then the shard count, then lexicographically, so every
-    caller derives the same split: the default 3 x 9 x 4 grid with
-    ``max_shards=3`` gives ``(1, 3, 1)``, three shards of 36 points.
+    ``sizes`` are the value counts of the grid dimensions. Cutting dimension
+    ``i`` into ``parts[i]`` contiguous chunks whose sizes differ by at most
+    one gives ``prod(parts)`` Cartesian shards, the largest with
+    ``largest_shard_points(sizes, parts)`` points. Of the parts with
+    ``prod(parts) <= max_shards``, returns the one that minimizes, in order:
+
+    1. whether the largest shard exceeds ``DGDR_MAX_SHARD_POINTS``, and when
+       every split does, its points (so the caller reports the smallest);
+    2. the largest shard's wall time: its ``dgdr_rounds`` with
+       ``parallelism``, its points without;
+    3. the shard count, the largest shard's points, then the parts.
+
+    P13 calls it with ``parallelism=run.parallelism``; the live executor
+    must plan each window's shards with the same call, so that both see the
+    same largest shard. The default 3 x 9 x 4 grid with ``max_shards=3``
+    gives ``(1, 3, 1)``, three shards of 36 points, with or without
+    parallelism.
     """
 
     if max_shards < 1:
         raise ValueError(f"max_shards must be at least 1, got {max_shards}")
     if any(size < 1 for size in sizes):
         raise ValueError(f"every grid dimension needs a value, got sizes {sizes}")
+    if parallelism is not None and parallelism < 1:
+        raise ValueError(f"parallelism must be at least 1, got {parallelism}")
 
     def splits(index: int, budget: int):
         if index == len(sizes):
@@ -1063,14 +1078,14 @@ def balanced_shard_parts(sizes: Sequence[int], max_shards: int) -> tuple[int, ..
             for rest in splits(index + 1, budget // part):
                 yield (part, *rest)
 
-    return min(
-        splits(0, max_shards),
-        key=lambda parts: (
-            largest_shard_points(sizes, parts),
-            math.prod(parts),
-            parts,
-        ),
-    )
+    def rank(parts: tuple[int, ...]) -> tuple[Any, ...]:
+        largest = largest_shard_points(sizes, parts)
+        if largest > DGDR_MAX_SHARD_POINTS:
+            return (True, largest, math.prod(parts), parts)
+        cost = largest if parallelism is None else dgdr_rounds(largest, parallelism)
+        return (False, cost, math.prod(parts), largest, parts)
+
+    return min(splits(0, max_shards), key=rank)
 
 
 def largest_shard_points(sizes: Sequence[int], parts: Sequence[int]) -> int:
@@ -2530,7 +2545,9 @@ class PlannerConfig(BaseModel):
             # _validate_live_retune rejects both first.
             raise ValueError("retune.executor 'dgdr' requires dgdr and timeout_seconds")
         sizes = [len(values) for values in router_domain.values()]
-        parts = balanced_shard_parts(sizes, dgdr.run.max_shards)
+        parts = balanced_shard_parts(
+            sizes, dgdr.run.max_shards, parallelism=dgdr.run.parallelism
+        )
         points = largest_shard_points(sizes, parts)
         if points > DGDR_MAX_SHARD_POINTS:
             raise ValueError(
@@ -2542,7 +2559,7 @@ class PlannerConfig(BaseModel):
             )
         need = dgdr_need_seconds(points, dgdr, needs_cut=True)
         if need > retune.timeout_seconds:
-            rounds = 1 + math.ceil((points - 1) / dgdr.run.parallelism)
+            rounds = dgdr_rounds(points, dgdr.run.parallelism)
             raise ValueError(
                 f"the largest retune grid shard ({points} points) needs "
                 f"{need:g}s: cut_budget_seconds {dgdr.cut_budget_seconds:g} + "

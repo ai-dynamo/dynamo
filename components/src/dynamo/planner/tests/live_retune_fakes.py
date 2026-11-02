@@ -11,7 +11,11 @@ Request deletion, and injectable faults (including writes that time out but
 land). ``FakeDgdrOperator`` drives the Requests in a ``FakeRetuneKube``
 through the DGDR v1beta2 lifecycle (Accepted -> Run -> Completed with
 Candidates) the way the operator at #17483 does, lowering each Request into
-``Run.status.aisimulate.input`` with the same merge-patch rules.
+``Run.status.aisimulate.input`` with the same merge-patch rules. The
+operator's golden
+``deploy/operator/internal/aisimulate/testdata/trace_request_lowering.golden.json``
+is the oracle for that lowering; ``test_live_retune_dgdr`` checks
+``lower_request_input`` against it.
 
 This is a plain module, not a conftest: tests import what they need.
 """
@@ -51,6 +55,10 @@ TRACE_MOUNT_PATH = "/var/run/aisimulate/trace"
 DEFAULT_RUNTIME_IMAGE = "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.8.0"
 DEFAULT_DYNAMO_VERSION = "1.8.0"
 ROUTER_ADAPTER = "dynamo.router"
+# spec.workload.trace.format: the CRD default, and each API value's
+# AISimulate traffic.source.format spelling.
+DEFAULT_TRACE_FORMAT = "Dynamo"
+_TRACE_FORMATS = {"Dynamo": "dynamo"}
 
 _METRIC_TARGETS = {
     "Throughput": "throughput",
@@ -175,7 +183,9 @@ def lower_request_input(
     Mirrors ``aisimulate.LowerWithUnderlay`` and ``dgdrRunInput`` at #17483:
     the public role underlay, the ``dgdr_run`` static underlay, the typed
     underlay, the derived defaults, ``inputOverrides`` as the final merge
-    patch, then the operator-owned ``dgdr_run`` fields and the trace source.
+    patch, then the operator-owned ``dgdr_run`` fields. ``inputOverrides``
+    wins over the typed trace source: nothing restores it afterwards. For
+    the golden's ``request_spec`` it returns the golden's ``run_input``.
     """
 
     spec = request.get("spec") or {}
@@ -201,18 +211,22 @@ def lower_request_input(
             typed, ("optimization", "constraints", "max_candidate_gpus"), int(budget)
         )
     trace = nested_get(spec, "workload", "trace")
-    trace_source = None
     if trace is not None:
-        path = nested_get(trace, "source", "pvc", "path", default="")
-        mounted = TRACE_MOUNT_PATH + (
-            "/trace.jsonl.gz" if path.endswith(".gz") else "/trace.jsonl"
+        sub_path = nested_get(
+            trace, "source", "persistentVolumeClaim", "subPath", default=""
         )
+        mounted = TRACE_MOUNT_PATH + (
+            "/trace.jsonl.gz" if sub_path.endswith(".gz") else "/trace.jsonl"
+        )
+        api_format = trace.get("format", DEFAULT_TRACE_FORMAT)
+        if api_format not in _TRACE_FORMATS:
+            raise ValueError(f"unsupported trace format {api_format!r}")
         trace_source = {
             "type": "trace",
-            "format": trace.get("format"),
+            "format": _TRACE_FORMATS[api_format],
             "paths": [mounted],
         }
-        _nested_set(typed, ("traffic", "source"), dict(trace_source))
+        _nested_set(typed, ("traffic", "source"), trace_source)
         _nested_set(typed, ("traffic", "load", "type"), "trace_timestamps")
         speedup = nested_get(trace, "replay", "arrivalSpeedupRatio")
         if speedup is not None:
@@ -255,9 +269,6 @@ def lower_request_input(
     }
     for key, value in reserved.items():
         _nested_set(effective, ("dgdr_run", key), value)
-    if trace_source is not None:
-        traffic = effective.setdefault("traffic", {})
-        traffic.setdefault("source", {}).update(trace_source)
     # Round-trip through JSON like the API server does.
     return json.loads(json.dumps(effective))
 
@@ -375,9 +386,10 @@ class FakeRetuneKube:
     Request create honours ``field_validation='Strict'``: a path listed in
     ``unknown_fields`` (dotted, e.g. ``spec.workload.trace``) is rejected
     with ``KubeInvalid``; a path in ``pruned_fields`` is dropped silently
-    (an API server that ignores the validation directive). ``reject_create``
-    rejects every create with ``KubeInvalid``. ``on_request_created`` hooks
-    run after each stored (non dry-run) create.
+    (an API server that ignores the validation directive). Like the CRD
+    schema, create defaults ``spec.workload.trace.format`` to ``Dynamo``.
+    ``reject_create`` rejects every create with ``KubeInvalid``.
+    ``on_request_created`` hooks run after each stored (non dry-run) create.
     """
 
     def __init__(
@@ -576,6 +588,9 @@ class FakeRetuneKube:
                     raise KubeInvalid(f'strict decoding error: unknown field "{path}"')
             for path in self.pruned_fields:
                 _nested_pop(stored, _split(path))
+            trace = nested_get(stored, "spec", "workload", "trace")
+            if isinstance(trace, dict):
+                trace.setdefault("format", DEFAULT_TRACE_FORMAT)
             name = nested_get(stored, "metadata", "name")
             if not name:
                 raise KubeInvalid("metadata.name is required")
@@ -873,6 +888,17 @@ class FakeRetuneKube:
             status["startTime"] = rfc3339(self.now())
             status["phase"] = "Running"
             self._set_completed(run, "False", "JobRunning", "AISimulate Job is running")
+
+    def set_run_completed(
+        self, run_name: str, *, status: str, reason: str, message: str = ""
+    ) -> None:
+        """Set the Run's ``Completed`` condition, e.g. ``False`` with
+        ``ContainerWaiting`` while a Job's container cannot start."""
+
+        with self._lock:
+            run = self.runs[run_name]
+            run.setdefault("status", {})
+            self._set_completed(run, status, reason, message)
 
     def add_candidate(
         self,

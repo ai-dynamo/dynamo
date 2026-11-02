@@ -149,18 +149,18 @@ def _decode(response: Any) -> dict:
 
 
 class KubernetesRetuneKube:
-    """``contracts.RetuneKube`` for one namespace.
+    """``contracts.RetuneKube`` for one namespace over ``api_client``.
 
-    ``api_client`` defaults to a new ``ApiClient`` on the default
-    configuration, which ``KubernetesAPI`` loads (in-cluster or kubeconfig);
-    ``from_kube_api`` reuses that connector's client instead.
+    The client must carry a loaded configuration (in-cluster or kubeconfig):
+    a bare ``ApiClient()`` targets localhost. ``from_kube_api`` reuses the
+    planner connector's client, which ``KubernetesAPI`` configured.
     """
 
-    def __init__(self, namespace: str, api_client: Optional[client.ApiClient] = None):
+    def __init__(self, namespace: str, api_client: client.ApiClient):
         if not namespace:
             raise ValueError("namespace must be set")
         self.namespace = namespace
-        self.api_client = api_client if api_client is not None else client.ApiClient()
+        self.api_client = api_client
         self._custom = client.CustomObjectsApi(self.api_client)
         self._core = client.CoreV1Api(self.api_client)
         self._coordination = client.CoordinationV1Api(self.api_client)
