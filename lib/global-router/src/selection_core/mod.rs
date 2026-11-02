@@ -11,6 +11,7 @@
 mod catalog;
 mod directory;
 mod policies;
+pub mod replica_sync;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
