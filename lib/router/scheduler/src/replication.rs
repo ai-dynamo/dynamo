@@ -17,9 +17,10 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::identity::{RoutingPartitionId, RoutingPartitionRef};
-use crate::protocols::{ActiveSequenceEvent, WorkerWithDpRank};
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_session_affinity::{AffinityReplicaSink, AffinityTarget, AffinityVersion};
 use dynamo_slot_tracker::multi_worker::RateLimitedFailureLog;
+use dynamo_slot_tracker::wire::ActiveSequenceEvent;
 use dynamo_slot_tracker::{
     LocalWorkerLoad, SchedulerLoadSnapshot, SequencePublishQueueError, SequencePublisher,
     SequenceSubscriber,
@@ -501,7 +502,8 @@ impl ReplicaInbox {
 mod tests {
     use super::*;
 
-    use crate::protocols::{ActiveSequenceEventData, WorkerWithDpRank};
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
+    use dynamo_slot_tracker::wire::ActiveSequenceEventData;
 
     fn event() -> ScopedReplicaEvent {
         ScopedReplicaEvent {
@@ -755,7 +757,8 @@ mod tests {
         // All N events were queued before the first drain, whose batch is
         // capped, so the first sample must show the backlog.
         assert!(
-            observer.max_depth.load(Relaxed) >= N - crate::protocols::MAX_REPLICA_BATCH_EVENTS,
+            observer.max_depth.load(Relaxed)
+                >= N - dynamo_slot_tracker::wire::MAX_REPLICA_BATCH_EVENTS,
             "depth sample reflects the queued backlog: {}",
             observer.max_depth.load(Relaxed)
         );

@@ -8,13 +8,14 @@ use super::reservations::{
 };
 use super::*;
 use crate::config::RouterConfig;
-use crate::protocols::ResidencyOwnerKeyExt;
-use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
-use crate::protocols::{RoutingConstraints, StorageTier};
+use crate::protocols::RoutingConstraints;
 use crate::replication::HostReplicaChannels;
 use crate::test_utils::{local_test_core, test_core_with, test_router_config};
+use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_indexer::backend::{RemotePrimary, test_util::store_event};
+use dynamo_kv_indexer::residency::ResidencyOwnerKeyExt;
 use dynamo_session_affinity::SessionAffinityMode;
+use dynamo_slot_tracker::wire::{ActiveSequenceEvent, ActiveSequenceEventData};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::sleep;
@@ -448,7 +449,7 @@ async fn hint_fixture_with(
     prompt_tokens: u32,
     configure: impl Fn(&mut WorkerRequest),
 ) -> (SelectionCore, Arc<SelectionEntry>, Vec<u32>) {
-    use crate::protocols::{BlockHashOptions, compute_block_hash_for_seq};
+    use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
     use dynamo_kv_indexer::KvIndexerInterface;
 
     let core = local_core(config);
@@ -589,7 +590,7 @@ async fn router_hint_needs_capable_workers() {
 /// catalog instead of lingering as `Unschedulable`.
 #[tokio::test]
 async fn hint_capability_tracks_catalog_membership() {
-    use crate::protocols::{BlockHashOptions, compute_block_hash_for_seq};
+    use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
     use dynamo_kv_indexer::KvIndexerInterface;
 
     let (core, entry, tokens) = hint_fixture(|_| {}).await;
@@ -3375,9 +3376,9 @@ fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
         CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
     };
-    use crate::protocols::{
-        ResidencyOwner, ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
-    };
+    use dynamo_kv_events::residency::ResidencyOwner;
+    use dynamo_kv_indexer::residency::{ResidencyProjection, ResidencyRoutingSnapshot};
+    use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
     let mut stale = hint_config("prefill", &[(0, "tcp://stale-worker:23280")]);
     stale.kv_event_source_mode = Some("state_agent_v2".to_string());
     let configs = HashMap::from([(7, hint_config("prefill", &[])), (8, stale)]);
@@ -3446,7 +3447,7 @@ fn island_config(endpoint: &str, island: &str) -> SelectionWorkerConfig {
     let mut config = hint_config("prefill", &[(0, endpoint)]);
     config.topology_domains = HashMap::from([(ISLAND_DOMAIN.to_string(), island.to_string())]);
     config.kv_transfer_domain = Some(ISLAND_DOMAIN.to_string());
-    config.kv_transfer_enforcement = Some(crate::protocols::KvTransferEnforcement::Required);
+    config.kv_transfer_enforcement = Some(dynamo_kv_hints::KvTransferEnforcement::Required);
     config
 }
 
@@ -3496,7 +3497,7 @@ fn hint_source_must_share_the_target_island() {
 #[test]
 fn preferred_island_falls_back_to_a_cross_island_source() {
     let mut target = island_config("tcp://target:23280", "a");
-    target.kv_transfer_enforcement = Some(crate::protocols::KvTransferEnforcement::Preferred);
+    target.kv_transfer_enforcement = Some(dynamo_kv_hints::KvTransferEnforcement::Preferred);
     let configs = HashMap::from([
         (7, target),
         (8, island_config("tcp://same-island:23280", "a")),
@@ -3530,9 +3531,9 @@ fn cache_owner_island_is_published_or_taken_from_its_attached_worker() {
         CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
     };
-    use crate::protocols::{
-        ResidencyOwner, ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
-    };
+    use dynamo_kv_events::residency::ResidencyOwner;
+    use dynamo_kv_indexer::residency::{ResidencyProjection, ResidencyRoutingSnapshot};
+    use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
     let owner = |slot: u8| {
         CacheOwnerId::new(
             PoolId::new(

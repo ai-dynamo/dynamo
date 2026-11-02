@@ -30,10 +30,7 @@ use super::types::{
     NonMaxOverlapSelection, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider,
     SchedulingContext, SchedulingRequest, SchedulingResponse, WorkerAvailabilityProvider,
 };
-use crate::protocols::{
-    PrefillLoadHint, SelectionTrace, SelectionTraceSpec, WorkerConfigLike, WorkerId,
-    WorkerSelectionResult, WorkerWithDpRank,
-};
+use crate::protocols::{WorkerConfigLike, WorkerSelectionResult};
 use crate::selector::WorkerCapacityExt;
 use crate::types::RejectThresholdsProvider;
 #[cfg(test)]
@@ -43,12 +40,15 @@ use dynamo_admission::placement::WorkerPlacement;
 use dynamo_admission::queue::{PolicyQueue, QueueMetadata, QueueSnapshot};
 use dynamo_admission::{PolicyClassConfig, PolicyProfile};
 use dynamo_kv_hashing::LocalBlockHash;
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_slot_tracker::busy::{BusyThresholds, FullRankCounts};
+use dynamo_slot_tracker::wire::PrefillLoadHint;
 use dynamo_slot_tracker::{
     ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
     WorkerLoadProjection, WorkerLoadReader,
 };
 use dynamo_worker_selection::{RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate};
+use dynamo_worker_selection::{SelectionTrace, SelectionTraceSpec};
 use dynamo_worker_selection::{WorkerCapacity, WorkerInputRows, WorkerLoadInput};
 
 // The fallback lives beside `WorkerCapacity`; this path stays for existing importers.
@@ -2317,8 +2317,10 @@ mod tests {
 
     use crate::kv_hints::KvTransferCandidates;
 
-    use crate::protocols::{ActiveSequenceEvent, WorkerSelectionResult, WorkerWithDpRank};
+    use crate::protocols::WorkerSelectionResult;
     use dynamo_kv_hashing::ExternalSequenceBlockHash;
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
+    use dynamo_slot_tracker::wire::ActiveSequenceEvent;
 
     use crate::selector::{DefaultWorkerSelector, WorkerInputs, WorkerSelector};
 

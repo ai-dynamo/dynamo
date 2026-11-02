@@ -14,8 +14,9 @@ use super::{
 };
 use crate::filter::RoutingEligibility;
 use crate::kv_hints::KvTransferScope;
-use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
+use crate::protocols::{WorkerConfigLike, WorkerSelectionResult};
 use crate::types::{KvSchedulerError, SchedulingRequest};
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_worker_selection::DefaultWorkerPicker;
 use dynamo_worker_selection::SelectionConfig;
 use dynamo_worker_selection::WorkerTransferInput;
@@ -511,8 +512,8 @@ mod tests {
     use super::super::test_support::*;
     use super::*;
     use crate::config::RouterConfigOverride;
-    use crate::protocols::SharedCacheHits;
     use crate::{OverlapSignals, ScheduleMode};
+    use dynamo_worker_selection::SharedCacheHits;
 
     fn worker_logit(
         selector: &DefaultWorkerSelector,
@@ -945,8 +946,8 @@ mod tests {
 
     #[test]
     fn default_policy_retains_eligible_affinity_and_falls_back_when_overloaded() {
-        use crate::protocols::WorkerAffinityTarget;
         use crate::test_utils::SimpleWorkerConfig;
+        use dynamo_router_protocol::worker::WorkerAffinityTarget;
 
         let selector = DefaultWorkerSelector::new(
             Some(SelectionConfig {

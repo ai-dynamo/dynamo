@@ -13,8 +13,9 @@ use tokio::sync::{oneshot, watch};
 use tokio::time::Instant;
 
 use dynamo_admission::{PolicyProfile, RouterQueuePolicy};
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_scheduler::OverlapSignals;
-use dynamo_scheduler::protocols::{WorkerConfigLike, WorkerWithDpRank};
+use dynamo_scheduler::protocols::WorkerConfigLike;
 use dynamo_scheduler::queue::*;
 use dynamo_scheduler::selector::{DefaultWorkerSelector, WorkerCapacityExt, WorkerInputs};
 use dynamo_scheduler::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};

@@ -21,7 +21,8 @@ pub use dynamo_kv_indexer::kv_hints::{KvTransferCandidateSource, KvTransferCandi
 
 use std::collections::HashMap;
 
-use crate::protocols::{WorkerConfigLike, WorkerId};
+use crate::protocols::WorkerConfigLike;
+use dynamo_router_protocol::worker::WorkerId;
 
 /// Derives a worker's hashed hint identity from its runtime config. Lives beside
 /// [`WorkerConfigLike`] because the vocabulary crate does not know the config trait; the
@@ -115,7 +116,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::protocols::{KvHintTransferWorkerMetadata, KvTransferEnforcement};
+    use dynamo_kv_hints::{KvHintTransferWorkerMetadata, KvTransferEnforcement};
 
     /// Two ranks, the second a source, two topology labels, a transfer domain, `preferred`.
     struct Worker {
@@ -193,11 +194,12 @@ mod tests {
 mod summary_tests {
     use std::collections::HashMap;
 
-    use crate::protocols::WorkerWithDpRank;
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
 
     use super::KvTransferCandidates;
-    use crate::protocols::ResidencyOwnerKeyExt;
-    use crate::protocols::{WorkerConfigLike, WorkerId};
+    use crate::protocols::WorkerConfigLike;
+    use dynamo_kv_indexer::residency::ResidencyOwnerKeyExt;
+    use dynamo_router_protocol::worker::WorkerId;
     use std::sync::Arc;
 
     use super::*;
@@ -205,11 +207,11 @@ mod summary_tests {
         CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
     };
-    use crate::protocols::{
-        KvHintTransferWorkerMetadata, ResidencyOwner, ResidencyProjection,
-        ResidencyRoutingSnapshot, RouterHintSourceMetadata,
-    };
+    use dynamo_kv_events::residency::ResidencyOwner;
     use dynamo_kv_hashing::ExternalSequenceBlockHash;
+    use dynamo_kv_hints::KvHintTransferWorkerMetadata;
+    use dynamo_kv_indexer::residency::{ResidencyProjection, ResidencyRoutingSnapshot};
+    use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
 
     struct Worker;
 

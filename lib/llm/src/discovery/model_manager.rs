@@ -3371,8 +3371,8 @@ mod tests {
 
     #[test]
     fn lora_state_and_load_are_isolated_by_endpoint() {
-        use crate::kv_router::protocols::WorkerWithDpRank;
         use crate::model_card::LoraInfo;
+        use dynamo_router_protocol::worker::WorkerWithDpRank;
 
         let manager = ModelManager::new();
         let endpoint_a = EndpointId::from("test.worker-a.generate");

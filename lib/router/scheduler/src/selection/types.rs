@@ -15,12 +15,12 @@ use crate::kv_hints::{
     KvHint, WorkerKvTransferKeys, WorkerKvTransferKeysCache, WorkerKvTransferKeysExt,
 };
 use crate::overlap_summary::MooncakeOverlapSummary;
-use crate::protocols::{
-    BlockExtraInfo, DpRank, KvHintTransferWorkerMetadata, KvTransferEnforcement,
-    RoutingConstraints, WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
-};
+use crate::protocols::{RoutingConstraints, WorkerConfigLike};
 pub use crate::{OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore};
 use crate::{PotentialLoad, SessionContext, WorkerSelectionInputTrigger};
+use dynamo_kv_hints::{KvHintTransferWorkerMetadata, KvTransferEnforcement};
+use dynamo_multimodal::BlockExtraInfo;
+use dynamo_router_protocol::worker::{DpRank, WorkerAffinityTarget, WorkerId, WorkerWithDpRank};
 
 use super::input::{MmRoutingInfoRequest, PromptRequest};
 

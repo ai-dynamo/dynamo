@@ -12,13 +12,13 @@ use dynamo_tokens::SequenceHash;
 use crate::config::RouterConfigOverride;
 use crate::identity::RoutingPartitionId;
 use crate::kv_hints::KvHint;
-use crate::protocols::{
-    RoutingConstraints, SharedCacheHits, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
-};
+use crate::protocols::RoutingConstraints;
 use crate::queue::BookingHandle;
 use crate::{AdvisoryWorkerLoad, SchedulingResponse, SessionContext};
 use dynamo_admission::queue::QueueRejection;
 use dynamo_kv_hashing::LocalBlockHash;
+use dynamo_router_protocol::worker::{WorkerAffinityTarget, WorkerId, WorkerWithDpRank};
+use dynamo_worker_selection::SharedCacheHits;
 
 use super::super::error::SelectionError;
 use super::super::input::PromptView;

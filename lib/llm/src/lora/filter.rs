@@ -8,11 +8,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::kv_router::protocols::WorkerWithDpRank;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::lora::routing::RendezvousHasher;
 use crate::lora::routing::table::LoraRoutingTable;
 use crate::lora::state_tracker::{LoraObservedSnapshot, LoraStateTracker};
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 type WorkerId = u64;
 
@@ -248,10 +248,10 @@ impl LoraFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kv_router::protocols::WorkerWithDpRank;
     use crate::lora::routing::table::{LoraReplicaConfig, LoraRoutingTable};
     use crate::lora::state_tracker::LoraStateTracker;
     use crate::model_card::LoraInfo;
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
     use std::time::Instant;
 
     fn make_workers_map(ids: &[u64]) -> HashMap<WorkerId, ModelRuntimeConfig> {

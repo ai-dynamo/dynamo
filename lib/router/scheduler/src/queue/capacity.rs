@@ -7,7 +7,7 @@ use crossbeam_queue::ArrayQueue;
 use rustc_hash::FxHashSet;
 use tokio::sync::Notify;
 
-use crate::protocols::WorkerWithDpRank;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 const CAPACITY_UPDATE_LIMIT: usize = 256;
 

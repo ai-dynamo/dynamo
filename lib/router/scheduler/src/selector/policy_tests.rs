@@ -5,7 +5,7 @@
 //! request, worker configs, and eligibility: the stage and its adapter together.
 
 use crate::SessionContext;
-use crate::protocols::WorkerWithDpRank;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_worker_selection::WorkerInputView;
 use std::{
     cell::Cell,
@@ -192,7 +192,7 @@ fn selection_trace_is_captured_only_when_requested() {
     let (traced, trace) = policy
         .select_worker_traced(
             input(),
-            Some(crate::protocols::SelectionTraceSpec { top_k: 3 }),
+            Some(dynamo_worker_selection::SelectionTraceSpec { top_k: 3 }),
         )
         .unwrap();
     assert_eq!(traced.worker.worker_id, 7);
@@ -267,8 +267,8 @@ fn custom_picker_receives_requested_cache_inputs() {
 #[test]
 fn components_read_fetchable_prefixes_only_when_declared() {
     use crate::kv_hints::KvTransferCandidates;
-    use crate::protocols::KvHintTransferWorkerMetadata;
     use dynamo_kv_hashing::ExternalSequenceBlockHash;
+    use dynamo_kv_hints::KvHintTransferWorkerMetadata;
     use std::sync::{Arc, Mutex};
 
     struct HintWorker;
@@ -493,8 +493,8 @@ fn worker_info_reaches_every_component_without_declaration() {
 fn prepared_candidates_select_like_rows_built_at_selection() {
     use crate::ScheduleMode;
     use crate::kv_hints::KvTransferCandidates;
-    use crate::protocols::KvHintTransferWorkerMetadata;
     use dynamo_kv_hashing::ExternalSequenceBlockHash;
+    use dynamo_kv_hints::KvHintTransferWorkerMetadata;
 
     struct Worker {
         dp_size: u32,

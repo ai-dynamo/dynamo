@@ -17,7 +17,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dynamo_llm::kv_router::protocols::WorkerWithDpRank;
 use dynamo_llm::lora::config::LoraAllocationConfig;
 use dynamo_llm::lora::controller::LoraController;
 use dynamo_llm::lora::filter::LoraFilter;
@@ -26,6 +25,7 @@ use dynamo_llm::lora::routing::AllocationAlgorithmType;
 use dynamo_llm::lora::routing::table::{LoraReplicaConfig, LoraRoutingTable};
 use dynamo_llm::lora::state_tracker::LoraStateTracker;
 use dynamo_llm::model_card::LoraInfo;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 use rand::SeedableRng;
 use rand::prelude::*;

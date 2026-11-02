@@ -23,10 +23,7 @@ use crate::kv_hints::{
     KvHint, KvHintAction, KvSourceLocationsPayload, KvTransferCandidateSource, KvTransferCandidates,
 };
 use crate::overlap_summary::MooncakeOverlapSummary;
-use crate::protocols::{
-    PrefillLoadHint, SharedCacheHits, WorkerAffinityTarget, WorkerConfigLike, WorkerId,
-    WorkerWithDpRank,
-};
+use crate::protocols::WorkerConfigLike;
 use crate::queue::SchedulerBookingDescriptor;
 use crate::replication::{
     AFFINITY_EVENT_CHANNEL_CAPACITY, AffinityMeshSink, HostReplicaSyncFactory, ReplicaInbox,
@@ -46,10 +43,13 @@ use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_indexer::backend::{Indexer, IndexerPolicy};
 use dynamo_kv_indexer::registry::IndexRegistry;
 use dynamo_kv_indexer::{LowerTierQueryOptions, RoutingDecisionHashes, TieredMatchDetails};
+use dynamo_router_protocol::worker::{WorkerAffinityTarget, WorkerId, WorkerWithDpRank};
+use dynamo_slot_tracker::wire::PrefillLoadHint;
 use dynamo_slot_tracker::{
     ActiveSequencesMultiWorker, LifecycleMutationOutcome, ReplicaRequestLeaseObserver,
     ReplicaWorkerPolicy, SequenceRequest, SequenceTrackerOptions, active_request_expiry_duration,
 };
+use dynamo_worker_selection::SharedCacheHits;
 use dynamo_worker_selection::WorkerInputs;
 use dynamo_worker_selection::lora_filter::{LoraWorkerFilter, narrow_allowed_worker_ids_by_lora};
 

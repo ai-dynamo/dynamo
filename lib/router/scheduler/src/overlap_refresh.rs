@@ -224,8 +224,9 @@ impl OverlapScoresRefresh for NoopOverlapScoresRefresh {
 mod tests {
     use super::*;
     use crate::OverlapSignals;
-    use crate::protocols::{OverlapScores, WorkerWithDpRank};
+    use dynamo_kv_indexer::overlap::OverlapScores;
     use dynamo_kv_indexer::{KvRouterError, MatchDetails, TieredMatchDetails};
+    use dynamo_router_protocol::worker::WorkerWithDpRank;
     use std::{
         collections::HashMap,
         sync::{

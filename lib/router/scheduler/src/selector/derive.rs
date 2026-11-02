@@ -6,7 +6,8 @@
 
 use rustc_hash::FxHashMap;
 
-use crate::protocols::{WorkerConfigLike, WorkerWithDpRank};
+use crate::protocols::WorkerConfigLike;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_slot_tracker::WorkerLoadProjection;
 use dynamo_worker_selection::{WorkerCapacity, WorkerInfo, WorkerLoadInput};
 

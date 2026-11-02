@@ -2284,6 +2284,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "clap",
+ "dynamo-kv-hints",
  "dynamo-llm",
  "dynamo-protocols",
  "dynamo-rl",

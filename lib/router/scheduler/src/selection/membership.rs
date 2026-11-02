@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 use super::core::SelectionCore;
 use super::error::SelectionError;
 use super::types::{WorkerCatalogRecord, WorkerLifecycle, WorkerRequest};
-use crate::protocols::WorkerId;
+use dynamo_router_protocol::worker::WorkerId;
 
 /// Delay before [`CatalogReconciler::run`] re-applies a snapshot whose pass failed.
 const RECONCILE_RETRY_DELAY: Duration = Duration::from_secs(5);

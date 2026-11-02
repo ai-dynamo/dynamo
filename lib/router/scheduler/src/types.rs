@@ -14,13 +14,12 @@ use super::overlap::{OverlapSignals, SelectedWorkerTierSnapshot};
 use super::prefill_load::effective_prefill_tokens;
 use crate::kv_hints::{KvTransferCandidates, KvTransferSourceChoice};
 pub use crate::protocols::PotentialLoad;
-use crate::protocols::{
-    RoutingConstraints, SelectionLogFields, SelectionTrace, SharedCacheHits, WorkerAffinityTarget,
-    WorkerConfigLike, WorkerId, WorkerWithDpRank,
-};
+use crate::protocols::{RoutingConstraints, SelectionLogFields, WorkerConfigLike};
 use dynamo_admission::queue::QueueRejection;
 use dynamo_kv_hashing::LocalBlockHash;
+use dynamo_router_protocol::worker::{WorkerAffinityTarget, WorkerId, WorkerWithDpRank};
 use dynamo_slot_tracker::WorkerLoadProjection;
+use dynamo_worker_selection::{SelectionTrace, SharedCacheHits};
 
 pub use dynamo_router_protocol::attempt::{AttemptId, AttemptIdMinter};
 pub use dynamo_router_protocol::session::{SessionContext, WorkerSelectionInputTrigger};

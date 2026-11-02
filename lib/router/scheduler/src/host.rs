@@ -14,8 +14,8 @@ pub use crate::overlap::{OverlapAnalysis, OverlapScoresResponse, OverlapSignals}
 pub use crate::overlap_summary::MooncakeOverlapSummary;
 pub use crate::prefill_load::PrefillLoadEstimator;
 pub use crate::protocols::{
-    KvHintTransferWorkerMetadata, KvTransferEnforcement, PotentialLoad, RouterEventSink,
-    RouterRequest, RouterResponse, RoutingConstraints, WorkerConfigLike, WorkerSelectionResult,
+    PotentialLoad, RouterEventSink, RouterRequest, RouterResponse, RoutingConstraints,
+    WorkerConfigLike, WorkerSelectionResult,
 };
 pub use crate::queue::{ClassQueueStats, RuntimePolicyControl};
 pub use crate::replication::{
@@ -55,6 +55,7 @@ pub use crate::types::{
 };
 pub use crate::types::{RejectThresholdsProvider, WorkerSelectionPolicyFactory};
 pub use dynamo_admission::classifier::RequestLifecycle;
+pub use dynamo_kv_hints::{KvHintTransferWorkerMetadata, KvTransferEnforcement};
 pub use dynamo_kv_indexer::backend::IndexerPolicy;
 pub use dynamo_kv_indexer::registry::IndexRegistry;
 

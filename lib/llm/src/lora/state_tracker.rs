@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 
-use crate::kv_router::protocols::WorkerWithDpRank;
 use crate::model_card::LoraInfo;
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 const DEFAULT_MAX_GPU_LORA_COUNT: u32 = 4;
 

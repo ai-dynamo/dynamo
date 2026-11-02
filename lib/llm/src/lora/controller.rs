@@ -11,7 +11,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::kv_router::protocols::WorkerWithDpRank;
 use crate::lora::config::LoraAllocationConfig;
 use crate::lora::load_estimator::LoadEstimator;
 use crate::lora::routing::mcf_allocator::{
@@ -20,6 +19,7 @@ use crate::lora::routing::mcf_allocator::{
 use crate::lora::routing::table::{LoraReplicaConfig, LoraRoutingTable};
 use crate::lora::routing::{AllocationAlgorithmType, LoraAllocator, create_lora_allocator};
 use crate::lora::state_tracker::{LoraObservedSnapshot, LoraStateTracker};
+use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::protocols::EndpointId;
 
 #[derive(Debug, Clone)]

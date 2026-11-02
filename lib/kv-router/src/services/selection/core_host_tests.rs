@@ -10,12 +10,14 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_indexer::backend::test_util::store_event;
 use dynamo_kv_indexer::backend::{Indexer, IndexerPolicy};
+use dynamo_router_protocol::worker::WorkerId;
 use dynamo_scheduler::config::RouterConfig;
 use dynamo_scheduler::identity::RoutingPartitionId;
-use dynamo_scheduler::protocols::{RoutingConstraints, StorageTier, WorkerId};
+use dynamo_scheduler::protocols::RoutingConstraints;
 use dynamo_scheduler::selection::{
     HostCache, KvIndexSource, PromptRequest, SelectRequest, SelectionCacheConfig, SelectionCore,
     SelectionError, SelectionHost, WorkerLifecycle, WorkerRequest,
@@ -367,7 +369,7 @@ async fn affinity_configuration_rejects_invalid_or_conflicting_config() {
 /// The ZMQ ingress's detach drops a departed worker's blocks; a metadata update keeps them.
 #[tokio::test]
 async fn rejoined_worker_feeds_partition_index() {
-    use dynamo_scheduler::protocols::{BlockHashOptions, compute_block_hash_for_seq};
+    use dynamo_kv_hashing::routing::{BlockHashOptions, compute_block_hash_for_seq};
     for update_only in [false, true] {
         let (core, ingress) =
             local_core_with_ingress(test_config(true), 1, CancellationToken::new());

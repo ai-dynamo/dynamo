@@ -15,11 +15,11 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::identity::RoutingPartitionRef;
-use crate::protocols::{
+use dynamo_kv_hashing::LocalBlockHash;
+use dynamo_kv_hashing::routing::{
     BlockHashOptions, complete_block_count, compute_block_hash_for_seq, compute_seq_hash_for_block,
     compute_seq_hash_for_tokens_with_seeds,
 };
-use dynamo_kv_hashing::LocalBlockHash;
 
 pub const KEY_SIZE: usize = 32;
 
@@ -253,7 +253,7 @@ mod tests {
     use zeroize::Zeroize;
 
     use super::*;
-    use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo};
+    use dynamo_multimodal::{BlockExtraInfo, BlockMmObjectInfo};
 
     /// A keyed configuration from raw key bytes, no file involved; the first element keeps the
     /// `(_guard, config)` destructuring the vector tests share with the flat-config tests.

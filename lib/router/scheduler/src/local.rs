@@ -27,7 +27,7 @@ use super::types::{
     WorkerAvailabilityProvider,
 };
 use crate::protocols::RoutingConstraints;
-use crate::protocols::{SelectionTraceSpec, WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use crate::protocols::WorkerConfigLike;
 use crate::selector::WorkerCapacityExt;
 use crate::types::RejectThresholdsProvider;
 use dynamo_admission::PolicyProfile;
@@ -36,12 +36,14 @@ use dynamo_admission::RouterQueuePolicy;
 use dynamo_admission::classifier::{ClassifyRequest, RequestClassifier};
 use dynamo_admission::classifier::{RequestClassifierRuntime, RequestLifecycle};
 use dynamo_kv_hashing::LocalBlockHash;
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_slot_tracker::topology::WorkerDpRange;
 use dynamo_slot_tracker::{
     ActiveSequencesMultiWorker, LifecycleMutationOutcome, PrefillCompletion, PrefillTokenDeltas,
     SequenceError, SequencePublisher, SequenceRequest,
 };
 use dynamo_tokens::SequenceHash;
+use dynamo_worker_selection::SelectionTraceSpec;
 use dynamo_worker_selection::WorkerCapacity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -547,7 +549,7 @@ where
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
-        shared_cache_hits: Option<crate::protocols::SharedCacheHits>,
+        shared_cache_hits: Option<dynamo_worker_selection::SharedCacheHits>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         self.schedule_with_block_hashes(
             maybe_request_id,
@@ -594,7 +596,7 @@ where
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
-        shared_cache_hits: Option<crate::protocols::SharedCacheHits>,
+        shared_cache_hits: Option<dynamo_worker_selection::SharedCacheHits>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         self.schedule_with_policy_class_and_block_hashes(
             maybe_request_id,
@@ -639,7 +641,7 @@ where
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
-        shared_cache_hits: Option<crate::protocols::SharedCacheHits>,
+        shared_cache_hits: Option<dynamo_worker_selection::SharedCacheHits>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         let mode = ScheduleMode::from_legacy(maybe_request_id, update_states)?;
         self.schedule_request(ScheduleRequest {
@@ -974,13 +976,13 @@ mod tests {
 
     use super::*;
     use crate::PrefillLoadEstimator;
-    use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
     use crate::selector::DefaultWorkerSelector;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
     use dynamo_admission::classifier::ClassifyFuture;
     use dynamo_admission::classifier::WorkerView;
     use dynamo_slot_tracker::SequenceSubscriber;
     use dynamo_slot_tracker::busy::BusyThresholds;
+    use dynamo_slot_tracker::wire::{ActiveSequenceEvent, ActiveSequenceEventData};
 
     struct TestSequenceSubscriber {
         rx: mpsc::UnboundedReceiver<ActiveSequenceEvent>,
@@ -1016,7 +1018,7 @@ mod tests {
                     token_sequence: None,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
-                    prefill_load_hint: Some(crate::protocols::PrefillLoadHint {
+                    prefill_load_hint: Some(dynamo_slot_tracker::wire::PrefillLoadHint {
                         initial_effective_prefill_tokens: 64,
                         expected_prefill_duration: None,
                     }),
@@ -1575,7 +1577,7 @@ mod tests {
                 token_sequence: None,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
-                prefill_load_hint: Some(crate::protocols::PrefillLoadHint {
+                prefill_load_hint: Some(dynamo_slot_tracker::wire::PrefillLoadHint {
                     initial_effective_prefill_tokens: 64,
                     expected_prefill_duration: None,
                 }),

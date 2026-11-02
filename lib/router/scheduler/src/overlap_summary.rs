@@ -7,8 +7,9 @@ use rustc_hash::FxHashMap;
 use serde::Serialize;
 
 use crate::overlap::SelectedWorkerTierSnapshot;
-use crate::protocols::{StorageTier, WorkerId, WorkerWithDpRank};
+use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_indexer::{LowerTierMatchDetails, TieredMatchDetails};
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 
 /// Per-instance match summary aligned with Mooncake RFC #1403.
 ///
@@ -101,7 +102,7 @@ fn extension_blocks(extension: Option<&LowerTierMatchDetails>, worker: WorkerWit
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::OverlapScores;
+    use dynamo_kv_indexer::overlap::OverlapScores;
     use dynamo_kv_indexer::{LowerTierMatchDetails, MatchDetails};
 
     #[test]
