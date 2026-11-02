@@ -1813,8 +1813,8 @@ func dgdrRunWithTraceForTest(t *testing.T, inputOverrides map[string]any) *nvidi
 	run := dgdrRunForTest(t, inputOverrides)
 	run.Spec.Workload = &nvidiacomv1beta2.WorkloadSpec{Trace: &nvidiacomv1beta2.TraceWorkloadSpec{
 		Format: nvidiacomv1beta2.TraceFormatDynamo,
-		Source: nvidiacomv1beta2.TraceSourceSpec{PVC: &nvidiacomv1beta2.TracePVCSource{
-			ClaimName: "request-traces", Path: "retune/w-1.jsonl.gz",
+		Source: nvidiacomv1beta2.TraceSourceSpec{PersistentVolumeClaim: &nvidiacomv1beta2.TracePVCSource{
+			ClaimName: "request-traces", SubPath: "retune/w-1.jsonl.gz",
 		}},
 	}}
 	return run
@@ -1898,64 +1898,67 @@ func TestV1beta2RunControllerRequestsNoPodGroupsWithoutATrace(t *testing.T) {
 	}
 }
 
-func TestDGDRRunInputEnforcesTheTypedTraceSource(t *testing.T) {
-	t.Log("Lower a Run whose overrides try to replace the trace source and change the load")
-	run := dgdrRunWithTraceForTest(t, map[string]any{"traffic": map[string]any{
-		"source": map[string]any{"type": "synthetic", "format": "mooncake", "paths": []any{"/etc/passwd"}},
-		"load":   map[string]any{"speedup": 4},
-	}})
-	input, err := dgdrRunInput(run, "example.com/dynamo-planner:1.2.3", "1.2.3")
-	if err != nil {
-		t.Fatalf("lower input: %v", err)
-	}
-
-	t.Log("The typed trace wins for the source; the load override is kept")
-	traffic := input["traffic"].(map[string]any)
-	wantSource := map[string]any{"type": "trace", "format": "dynamo", "paths": []any{"/var/run/aisimulate/trace/trace.jsonl.gz"}}
-	if !reflect.DeepEqual(traffic["source"], wantSource) {
-		t.Fatalf("traffic.source = %#v, want %#v", traffic["source"], wantSource)
-	}
-	load := traffic["load"].(map[string]any)
-	if load["type"] != "trace_timestamps" || load["speedup"] != json.Number("4") {
-		t.Fatalf("traffic.load = %#v, want trace_timestamps with the override speedup", load)
-	}
-	if _, found := traffic["stop"]; found {
-		t.Fatalf("traffic.stop = %#v, want none for a trace", traffic["stop"])
-	}
-}
-
-func TestDGDRRunInputRebuildsANonObjectTraceSourceParent(t *testing.T) {
-	wantSource := map[string]any{"type": "trace", "format": "dynamo", "paths": []any{"/var/run/aisimulate/trace/trace.jsonl.gz"}}
+func TestDGDRRunInputLetsOverridesReplaceOrDeleteTheTypedTraceSource(t *testing.T) {
+	typedSource := map[string]any{"type": "trace", "format": "dynamo", "paths": []any{"/var/run/aisimulate/trace/trace.jsonl.gz"}}
 	tests := []struct {
-		name      string
-		overrides map[string]any
-		wantLoad  map[string]any
+		name        string
+		overrides   map[string]any
+		wantTraffic any
+		wantFound   bool
 	}{
 		{
-			name:      "scalar traffic",
-			overrides: map[string]any{"traffic": "invalid"},
+			name:        "no override keeps the typed underlay",
+			overrides:   map[string]any{},
+			wantTraffic: map[string]any{"source": typedSource, "load": map[string]any{"type": "trace_timestamps"}},
+			wantFound:   true,
 		},
 		{
-			name:      "scalar traffic.source",
-			overrides: map[string]any{"traffic": map[string]any{"source": "invalid"}},
-			wantLoad:  map[string]any{"type": "trace_timestamps"},
+			name: "replaced source fields and load are kept",
+			overrides: map[string]any{"traffic": map[string]any{
+				"source": map[string]any{"type": "synthetic", "format": "mooncake", "paths": []any{"/etc/passwd"}},
+				"load":   map[string]any{"speedup": 4},
+			}},
+			wantTraffic: map[string]any{
+				"source": map[string]any{"type": "synthetic", "format": "mooncake", "paths": []any{"/etc/passwd"}},
+				"load":   map[string]any{"type": "trace_timestamps", "speedup": json.Number("4")},
+			},
+			wantFound: true,
+		},
+		{
+			name:        "a null source stays deleted",
+			overrides:   map[string]any{"traffic": map[string]any{"source": nil}},
+			wantTraffic: map[string]any{"load": map[string]any{"type": "trace_timestamps"}},
+			wantFound:   true,
+		},
+		{
+			name:      "a null traffic stays deleted",
+			overrides: map[string]any{"traffic": nil},
+		},
+		{
+			name:        "a scalar traffic.source replaces the object",
+			overrides:   map[string]any{"traffic": map[string]any{"source": "invalid"}},
+			wantTraffic: map[string]any{"source": "invalid", "load": map[string]any{"type": "trace_timestamps"}},
+			wantFound:   true,
+		},
+		{
+			name:        "a scalar traffic replaces the object",
+			overrides:   map[string]any{"traffic": "invalid"},
+			wantTraffic: "invalid",
+			wantFound:   true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Lower a Run created without admission whose override replaces a trace source parent")
+			t.Log("Lower a trace Run whose overrides name the traffic the trace lowers")
 			input, err := dgdrRunInput(dgdrRunWithTraceForTest(t, tt.overrides), "example.com/dynamo-planner:1.2.3", "1.2.3")
 			if err != nil {
 				t.Fatalf("lower input: %v", err)
 			}
 
-			t.Log("The parent is an object again and carries the typed trace source")
-			traffic := input["traffic"].(map[string]any)
-			if !reflect.DeepEqual(traffic["source"], wantSource) {
-				t.Fatalf("traffic.source = %#v, want %#v", traffic["source"], wantSource)
-			}
-			if load, _ := traffic["load"].(map[string]any); !reflect.DeepEqual(load, tt.wantLoad) {
-				t.Fatalf("traffic.load = %#v, want %#v", traffic["load"], tt.wantLoad)
+			t.Log("The overrides win, and what they delete is not restored")
+			traffic, found := input["traffic"]
+			if found != tt.wantFound || !reflect.DeepEqual(traffic, tt.wantTraffic) {
+				t.Fatalf("traffic = %#v (found %v), want %#v (found %v)", traffic, found, tt.wantTraffic, tt.wantFound)
 			}
 		})
 	}
@@ -2967,16 +2970,30 @@ func TestV1beta2RunControllerWakesTheRunsThatReadAChangedTraceClaim(t *testing.T
 	reader := dgdrRunWithTraceForTest(t, map[string]any{})
 	otherClaim := dgdrRunWithTraceForTest(t, map[string]any{})
 	otherClaim.Name = "search-2"
-	otherClaim.Spec.Workload.Trace.Source.PVC.ClaimName = "other-traces"
+	otherClaim.Spec.Workload.Trace.Source.PersistentVolumeClaim.ClaimName = "other-traces"
 	otherNamespace := dgdrRunWithTraceForTest(t, map[string]any{})
 	otherNamespace.Namespace = "elsewhere"
 	withoutTrace := dgdrRunForTest(t, map[string]any{})
 	withoutTrace.Name = "search-3"
-	f := newDGDRRunFixture(t, reader, otherClaim, otherNamespace, withoutTrace)
+	completedHolding := dgdrRunWithTraceForTest(t, map[string]any{})
+	completedHolding.Name, completedHolding.UID = "search-4", "run-uid-4"
+	completedReleased := dgdrRunWithTraceForTest(t, map[string]any{})
+	completedReleased.Name, completedReleased.UID = "search-5", "run-uid-5"
+	for _, run := range []*nvidiacomv1beta2.DynamoGraphDeploymentRun{completedHolding, completedReleased} {
+		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
+			Type: nvidiacomv1beta2.DGDRRunConditionCompleted, Status: metav1.ConditionTrue, Reason: dgdrRunReasonSucceeded,
+		})
+	}
+	f := newDGDRRunFixture(t, reader, otherClaim, otherNamespace, withoutTrace, completedHolding, completedReleased)
 
-	t.Log("An event on request-traces in default wakes only the Run that reads it")
-	got := f.reconciler.runsForTraceClaim(t.Context(), traceClaimForTest())
-	want := []reconcile.Request{{NamespacedName: client.ObjectKeyFromObject(reader)}}
+	t.Log("An event on request-traces in default wakes the open Run that reads it and the completed Run whose finalizer it still carries")
+	claim := traceClaimForTest()
+	claim.Finalizers = []string{dgdrRunTraceClaimFinalizer(completedHolding.UID)}
+	got := f.reconciler.runsForTraceClaim(t.Context(), claim)
+	want := []reconcile.Request{
+		{NamespacedName: client.ObjectKeyFromObject(reader)},
+		{NamespacedName: client.ObjectKeyFromObject(completedHolding)},
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("requests = %v, want %v", got, want)
 	}
@@ -3091,18 +3108,31 @@ func TestV1beta2RunControllerCancelsAJobWhoseJobRefWasNeverRecorded(t *testing.T
 		t.Fatalf("Completed condition = %+v, want none until the stop is confirmed", condition)
 	}
 
-	t.Log("Once the API server confirms the Job is gone, the Run is canceled")
+	t.Log("Once the API server confirms the Job is gone, the Run is canceled without a second uncached Job list")
+	apiJobLists := 0
+	f.reconciler.APIReader = interceptor.NewClient(f.client.(client.WithWatch), interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(*batchv1.JobList); ok {
+				apiJobLists++
+			}
+			return c.List(ctx, list, opts...)
+		},
+	})
 	f.reconciler.Client = cached
 	f.reconcile()
 	assertDGDRRunCanceledForTrace(t, f.run(), "")
+	if apiJobLists != 1 {
+		t.Fatalf("uncached Job lists = %d, want 1", apiJobLists)
+	}
 }
 
 // newDGDRRunTraceClaimFixture returns a trace claim reconciler over a fake client holding objects,
-// whose cached Job List the returned hide flag can make empty.
+// whose cached Job List the returned hide flag can make empty, and the count of the Job Lists its
+// uncached reader serves.
 func newDGDRRunTraceClaimFixture(
 	t *testing.T,
 	objects ...client.Object,
-) (*DynamoGraphDeploymentRunTraceClaimReconciler, client.Client, *bool) {
+) (*DynamoGraphDeploymentRunTraceClaimReconciler, client.Client, *bool, *int) {
 	t.Helper()
 	f := newDGDRRunFixture(t, objects...)
 	hide := new(bool)
@@ -3114,7 +3144,16 @@ func newDGDRRunTraceClaimFixture(
 			return c.List(ctx, list, opts...)
 		},
 	})
-	return &DynamoGraphDeploymentRunTraceClaimReconciler{Client: cached, APIReader: f.client}, f.client, hide
+	apiJobLists := new(int)
+	uncached := interceptor.NewClient(f.client.(client.WithWatch), interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(*batchv1.JobList); ok {
+				*apiJobLists++
+			}
+			return c.List(ctx, list, opts...)
+		},
+	})
+	return &DynamoGraphDeploymentRunTraceClaimReconciler{Client: cached, APIReader: uncached}, f.client, hide, apiJobLists
 }
 
 func TestDGDRRunTraceClaimReconcilerReleasesOnlyRunsThatCanNoLongerExecute(t *testing.T) {
@@ -3143,6 +3182,7 @@ func TestDGDRRunTraceClaimReconcilerReleasesOnlyRunsThatCanNoLongerExecute(t *te
 		{name: "a deleted Run whose Job only the API server shows", jobFor: []types.UID{"gone-uid"}, hideJobs: true,
 			uids: []types.UID{"gone-uid"}, want: []string{dgdrRunTraceClaimFinalizer("gone-uid")}},
 		{name: "a deleted Run whose Job is gone", uids: []types.UID{"gone-uid"}},
+		{name: "two deleted Runs whose Jobs are gone", uids: []types.UID{"gone-uid", "other-gone-uid"}},
 		{name: "a Run being deleted whose Job remains", runs: []*nvidiacomv1beta2.DynamoGraphDeploymentRun{deleting},
 			jobFor: []types.UID{"deleting-uid"}, uids: []types.UID{"deleting-uid"},
 			want: []string{dgdrRunTraceClaimFinalizer("deleting-uid")}},
@@ -3175,7 +3215,7 @@ func TestDGDRRunTraceClaimReconcilerReleasesOnlyRunsThatCanNoLongerExecute(t *te
 					},
 				})
 			}
-			reconciler, c, hide := newDGDRRunTraceClaimFixture(t, objects...)
+			reconciler, c, hide, apiJobLists := newDGDRRunTraceClaimFixture(t, objects...)
 			*hide = tt.hideJobs
 
 			t.Log("Reconcile the claim")
@@ -3191,6 +3231,11 @@ func TestDGDRRunTraceClaimReconcilerReleasesOnlyRunsThatCanNoLongerExecute(t *te
 			want := append([]string{otherFinalizer}, tt.want...)
 			if !reflect.DeepEqual(stored.Finalizers, want) {
 				t.Fatalf("finalizers = %v, want %v", stored.Finalizers, want)
+			}
+
+			t.Log("One uncached Job list at most confirms every stale finalizer")
+			if *apiJobLists > 1 {
+				t.Fatalf("uncached Job lists = %d, want at most 1", *apiJobLists)
 			}
 		})
 	}
@@ -3232,7 +3277,7 @@ func TestDGDRRunTraceClaimReconcilerWatchesOnlyWhatReleasesAClaim(t *testing.T) 
 	withoutTrace := dgdrRunForTest(t, map[string]any{})
 	claimRequest := []reconcile.Request{{Namespace: "default", Name: "request-traces"}}
 	unowned := &batchv1.Job{Name: "nightly", Namespace: "default", Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{
-		Spec: corev1.PodSpec{Volumes: []corev1.Volume{dgdrRunTraceClaimVolume(run.Spec.Workload.Trace.Source.PVC)}},
+		Spec: corev1.PodSpec{Volumes: []corev1.Volume{dgdrRunTraceClaimVolume(run.Spec.Workload.Trace.Source.PersistentVolumeClaim)}},
 	}}}
 
 	t.Log("Claims pass the filter only while a Run protects them")

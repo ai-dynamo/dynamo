@@ -200,7 +200,12 @@ func (b *builder) setTraceWorkload(workload *v1beta2.WorkloadSpec) {
 		return
 	}
 	trace := workload.Trace
-	b.set(TraceSource(trace), trafficSource)
+	source, err := traceSource(trace)
+	if err != nil {
+		b.err = err
+		return
+	}
+	b.set(source, trafficSource)
 	b.set("trace_timestamps", trafficLoadType)
 	if replay := trace.Replay; replay != nil && replay.ArrivalSpeedupRatio != nil {
 		b.set(*replay.ArrivalSpeedupRatio, trafficLoadSpeedup)
