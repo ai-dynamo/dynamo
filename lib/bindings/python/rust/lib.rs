@@ -1303,6 +1303,10 @@ impl ModelType {
         self.inner.supports_chat()
     }
 
+    fn supports_completions(&self) -> bool {
+        self.inner.supports_completions()
+    }
+
     fn supports_embedding(&self) -> bool {
         self.inner.supports_embedding()
     }
