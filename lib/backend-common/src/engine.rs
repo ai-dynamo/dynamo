@@ -555,6 +555,8 @@ pub enum KvEventSource {
         image_token_id: Option<u32>,
         /// Opt-in idle heartbeat deadline; absent preserves legacy publishers.
         heartbeat_timeout: Option<std::time::Duration>,
+        /// Opt-in replay recovery for engines that gate readiness on KV continuity.
+        recovery: Option<dynamo_llm::kv_router::publisher::ZmqRecoveryConfig>,
     },
     Push {
         on_ready: OnPublisherReady,

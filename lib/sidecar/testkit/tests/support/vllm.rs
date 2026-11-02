@@ -72,6 +72,7 @@ impl SidecarFixture for Fixture {
     async fn start(control: Controller<Adapter>, config: FixtureConfig) -> Self {
         let mut args = fast_engine_args(EngineType::Vllm);
         args.speedup_ratio = config.speedup_ratio;
+        args.enable_prefix_caching = false;
         let service = VllmMockerService::new(
             MockerServerConfig {
                 model: config.model.clone(),

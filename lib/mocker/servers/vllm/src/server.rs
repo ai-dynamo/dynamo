@@ -185,6 +185,7 @@ impl VllmMockerService {
                 topic: String::new(),
                 data_parallel_rank: Some(DP_RANK),
                 replay_endpoint: sink.replay_endpoint().unwrap_or_default().to_string(),
+                buffer_steps: sink.replay_buffer_capacity() as u32,
                 encoding: "msgpack".to_string(),
                 schema_version: 1,
                 ..Default::default()

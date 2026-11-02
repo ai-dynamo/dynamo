@@ -270,6 +270,7 @@ async fn sidecar_relays_stored_and_evicted_blocks() {
     let mut args = fast_engine_args();
     args.num_gpu_blocks = 8;
     args.max_num_seqs = 1;
+    args.runtime.zmq_replay_port = Some(0);
     let block_size = u32::try_from(args.block_size).unwrap();
     let server = RunningServer::start(ServerMode::Aggregated, args, false).await;
     let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
