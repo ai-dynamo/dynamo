@@ -100,6 +100,187 @@ impl AsyncEngine<Input, Output, Error> for ReplayEngine {
     }
 }
 
+/// A vLLM worker that generates `OUTPUT` one token per chunk and whose first
+/// `failures` attempts drop after two chunks.
+struct FlakyVllmWorker {
+    calls: std::sync::atomic::AtomicUsize,
+    failures: usize,
+    prompt: usize,
+}
+
+const VLLM_OUTPUT: [u32; 5] = [10, 11, 12, 13, 14];
+
+#[async_trait::async_trait]
+impl AsyncEngine<Input, Output, Error> for FlakyVllmWorker {
+    async fn generate(&self, request: Input) -> Result<Output, Error> {
+        let call = self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (request, context) = request.transfer(());
+        // A retry's prompt is the client's prompt plus the delivered tokens.
+        let delivered = request.token_ids.len() - self.prompt;
+        assert_eq!(request.token_ids[self.prompt..], VLLM_OUTPUT[..delivered]);
+        let budget = request.stop_conditions.max_tokens.unwrap() as usize;
+        let sampling = &request.extra_args.as_ref().unwrap()["vllm_tito"]["sampling_params"];
+        assert_eq!(sampling["max_tokens"], budget);
+        let tokens = &VLLM_OUTPUT[delivered..(delivered + budget).min(VLLM_OUTPUT.len())];
+        // Like the vLLM worker, prompt logprobs ride on the final chunk.
+        let prompt_logprobs = request.output_options.prompt_logprobs.map(|_| {
+            let mut entries = vec![Value::Null];
+            entries.extend(request.token_ids[1..].iter().enumerate().map(|(i, token)| {
+                serde_json::json!({ token.to_string(): {"logprob": -(i as f32) - 1.0} })
+            }));
+            serde_json::json!({ "prompt_logprobs": entries })
+        });
+        let mut items: Vec<_> = tokens
+            .iter()
+            .enumerate()
+            .map(|(i, &token)| {
+                let last = i + 1 == tokens.len();
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![token],
+                    finish_reason: last
+                        .then_some(dynamo_llm::protocols::common::FinishReason::Length),
+                    engine_data: prompt_logprobs.clone().filter(|_| last),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        if call < self.failures {
+            items.truncate(2);
+            items.push(Annotated::from_err(
+                DynamoError::builder()
+                    .error_type(dynamo_runtime::error::ErrorType::Backend(
+                        dynamo_runtime::error::BackendError::StreamIncomplete,
+                    ))
+                    .message("engine died")
+                    .build(),
+            ));
+        }
+        Ok(ResponseStream::new(
+            Box::pin(futures::stream::iter(items)),
+            context.context(),
+        ))
+    }
+}
+
+struct MigratingVllm(Arc<dynamo_llm::migration::Migration>, Arc<FlakyVllmWorker>);
+
+#[async_trait::async_trait]
+impl AsyncEngine<Input, Output, Error> for MigratingVllm {
+    async fn generate(&self, request: Input) -> Result<Output, Error> {
+        use dynamo_runtime::pipeline::Operator;
+        self.0.generate(request, self.1.clone()).await
+    }
+}
+
+#[tokio::test]
+async fn a_vllm_request_migrated_mid_generation_returns_what_an_unbroken_one_does() {
+    let respond = |failures: usize, sampling: Value| async move {
+        let body = serde_json::json!({
+            "token_ids": [1, 2, 3], "request_id": "request-id", "sampling_params": sampling,
+        });
+        let worker = Arc::new(FlakyVllmWorker {
+            calls: Default::default(),
+            failures,
+            prompt: 3,
+        });
+        let card = dynamo_llm::model_card::ModelDeploymentCard::with_name_only("test-model");
+        let metrics = Arc::new(dynamo_llm::http::service::metrics::Metrics::new());
+        let migration = dynamo_llm::migration::Migration::for_generate(&card, 3, None, metrics);
+        let response = respond(
+            state(),
+            Arc::new(dynamo_vllm_generate::VllmFormat),
+            Arc::new(MigratingVllm(migration, worker.clone())),
+            body,
+            HeaderMap::new(),
+        )
+        .await;
+        let status = response.status();
+        let calls = worker.calls.load(std::sync::atomic::Ordering::Relaxed);
+        (status, json(response).await, calls)
+    };
+    let budget = serde_json::json!({"max_tokens": 5});
+    let (status, unbroken, calls) = respond(0, budget.clone()).await;
+    assert_eq!((status, calls), (StatusCode::OK, 1));
+    assert_eq!(
+        unbroken["choices"][0]["token_ids"],
+        serde_json::json!(VLLM_OUTPUT)
+    );
+    let (status, migrated, calls) = respond(2, budget).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(calls, 3, "two failed attempts, then one that finishes");
+    assert_eq!(migrated, unbroken);
+    // Prompt logprobs arrive only with the final chunk, so the retry recomputes
+    // them over a longer prompt and the client sees the original prompt's.
+    let prompt = serde_json::json!({"max_tokens": 5, "prompt_logprobs": 1});
+    let (status, unbroken, _) = respond(0, prompt.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(unbroken["prompt_logprobs"].as_array().unwrap().len(), 3);
+    let (status, migrated, calls) = respond(2, prompt).await;
+    assert_eq!((status, calls), (StatusCode::OK, 3));
+    assert_eq!(migrated, unbroken);
+    // A seeded request cannot be continued with the same RNG state.
+    let (status, _, calls) = respond(1, serde_json::json!({"max_tokens": 5, "seed": 7})).await;
+    assert_eq!((status, calls), (StatusCode::INTERNAL_SERVER_ERROR, 1));
+}
+
+#[tokio::test]
+async fn a_vllm_stream_migrated_mid_generation_streams_what_an_unbroken_one_does() {
+    let respond = |failures: usize| async move {
+        let body = serde_json::json!({
+            "token_ids": [1, 2, 3], "request_id": "request-id", "stream": true,
+            "stream_options": {"include_usage": true},
+            "sampling_params": {"max_tokens": 5},
+        });
+        let worker = Arc::new(FlakyVllmWorker {
+            calls: Default::default(),
+            failures,
+            prompt: 3,
+        });
+        let card = dynamo_llm::model_card::ModelDeploymentCard::with_name_only("test-model");
+        let metrics = Arc::new(dynamo_llm::http::service::metrics::Metrics::new());
+        let migration = dynamo_llm::migration::Migration::for_generate(&card, 3, None, metrics);
+        let response = respond(
+            state(),
+            Arc::new(dynamo_vllm_generate::VllmFormat),
+            Arc::new(MigratingVllm(migration, worker.clone())),
+            body,
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let calls = worker.calls.load(std::sync::atomic::Ordering::Relaxed);
+        (String::from_utf8(body.to_vec()).unwrap(), calls)
+    };
+    let (unbroken, calls) = respond(0).await;
+    assert_eq!(calls, 1);
+    let events: Vec<Value> = unbroken
+        .split("\n\n")
+        .filter_map(|event| event.strip_prefix("data: "))
+        .filter(|data| *data != "[DONE]")
+        .map(|data| serde_json::from_str(data).unwrap())
+        .collect();
+    let tokens: Vec<u64> = events
+        .iter()
+        .flat_map(|event| event["choices"].as_array().unwrap())
+        .flat_map(|choice| choice["token_ids"].as_array().unwrap())
+        .map(|token| token.as_u64().unwrap())
+        .collect();
+    assert_eq!(tokens, VLLM_OUTPUT.map(u64::from));
+    assert_eq!(
+        events.last().unwrap()["usage"],
+        serde_json::json!({"prompt_tokens": 3, "completion_tokens": 5, "total_tokens": 8})
+    );
+    assert!(unbroken.ends_with("data: [DONE]\n\n"));
+    let (migrated, calls) = respond(2).await;
+    assert_eq!(calls, 3, "two failed attempts, then one that finishes");
+    assert_eq!(migrated, unbroken);
+}
+
 #[tokio::test]
 async fn native_responses_record_cached_token_metrics() {
     struct MetricsEngine(Arc<prometheus::Registry>, LLMEngineOutput);
@@ -232,6 +413,7 @@ async fn vllm_format_preserves_binding_terminal_status_and_wire_shape() {
             .unwrap();
         assert_eq!(opened.request_id, "header-id");
         let bound = (opened.bind)(&dynamo_sglang_generate::testkit::worker()).unwrap();
+        assert!(bound.migration.is_ok());
         let hints = bound.request.routing.as_ref().unwrap();
         assert_eq!(hints.dp_rank, Some(3));
         assert_eq!(hints.priority, Some(7));
