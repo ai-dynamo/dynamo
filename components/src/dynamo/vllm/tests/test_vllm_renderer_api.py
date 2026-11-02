@@ -402,6 +402,7 @@ class TestVllmRendererApi:
             "new_sampling_mask",
             "spec_decode_metrics",
             "prompt_token_id_logprobs",
+            "error",
         )
 
         if EngineCoreRequest.__module__ == "vllm_omni.engine":
