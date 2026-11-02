@@ -50,7 +50,7 @@ pub fn causal_scoring_request(
 pub struct VllmScoreResult {
     pub scores: Vec<f64>,
     pub input_tokens: usize,
-    pub cached_tokens: Option<usize>,
+    pub cached_tokens: usize,
 }
 
 /// Collect delta outputs before accepting a complete, measured scoring result.
@@ -175,6 +175,9 @@ impl VllmScoreCollector {
             .as_ref()
             .and_then(|details| details.cached_tokens)
             .map(|tokens| tokens as usize);
+        if frame.finish_reason.is_some() && cached.is_none() {
+            return Err(invalid("terminal scoring usage lacks measured cache reads"));
+        }
         if cached.is_some_and(|tokens| tokens > self.prompt_tokens)
             || self.cached_tokens.zip(cached).is_some_and(|(a, b)| a != b)
         {
@@ -215,7 +218,9 @@ impl VllmScoreCollector {
         Ok(VllmScoreResult {
             scores: ordered,
             input_tokens: self.prompt_tokens,
-            cached_tokens: self.cached_tokens,
+            cached_tokens: self
+                .cached_tokens
+                .ok_or_else(|| invalid("missing measured cache reads"))?,
         })
     }
 }
@@ -297,11 +302,11 @@ mod tests {
         let result = collector.finish().unwrap();
         assert_eq!(result.scores, [-3.0, -2.0]);
         assert_eq!(result.input_tokens, 3);
-        assert_eq!(result.cached_tokens, Some(2));
+        assert_eq!(result.cached_tokens, 2);
     }
 
     #[test]
-    fn separate_score_and_terminal_frames_preserve_unknown_cache_usage() {
+    fn terminal_scoring_frame_requires_its_own_measured_cache_usage() {
         let scores = LLMEngineOutput {
             finish_reason: None,
             completion_usage: None,
@@ -313,10 +318,15 @@ mod tests {
         }));
         let mut collector = VllmScoreCollector::new(vec![20, 10], 3).unwrap();
         collector.observe(&scores).unwrap();
-        collector.observe(&terminal).unwrap();
-        let result = collector.finish().unwrap();
-        assert_eq!(result.scores, [-2.0, -3.0]);
-        assert_eq!(result.cached_tokens, None);
+        assert!(collector.observe(&terminal).is_err());
+        assert!(collector.finish().is_err());
+        let mut collector = VllmScoreCollector::new(vec![20, 10], 3).unwrap();
+        let measured_earlier = LLMEngineOutput {
+            finish_reason: None,
+            ..complete()
+        };
+        collector.observe(&measured_earlier).unwrap();
+        assert!(collector.observe(&terminal).is_err());
     }
 
     #[test]
