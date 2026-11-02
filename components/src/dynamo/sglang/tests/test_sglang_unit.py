@@ -2778,6 +2778,26 @@ async def test_decode_warmup_image_failure_aborts_startup(monkeypatch):
     assert events == []
 
 
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_decode_warmup_final_generation_times_out(
+    monkeypatch, record_text_warmup
+):
+    events = record_text_warmup
+    engine = _decode_warmup_engine(events)
+
+    async def hanging_generate(**kwargs):
+        events.append(("generate", kwargs))
+        await asyncio.Event().wait()
+
+    engine.async_generate = hanging_generate
+    monkeypatch.setattr(init_llm_mod, "_warmup_timeout", lambda: 0.05)
+    with pytest.raises(asyncio.TimeoutError):
+        await init_llm_mod._warmup_decode_engine(engine, _decode_warmup_server_args())
+
+    assert [name for name, _ in events] == ["warmup", "freeze_gc", "generate"]
+
+
 @pytest.mark.parametrize(
     ("image", "overrides", "expected"),
     [

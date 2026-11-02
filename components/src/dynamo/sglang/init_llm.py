@@ -82,6 +82,12 @@ def _uses_image_warmup(engine: sgl.Engine, server_args) -> bool:
     )
 
 
+def _warmup_timeout() -> float:
+    """SGLANG_WARMUP_TIMEOUT in seconds, 600 when unset, as launch_server uses."""
+    timeout = envs.SGLANG_WARMUP_TIMEOUT.get()
+    return timeout if timeout > 0 else 600
+
+
 async def _image_warmup(engine: sgl.Engine) -> None:
     """launch_server's image chat warmup request, with SGLang's image for the model."""
     tokenizer_manager = engine.tokenizer_manager
@@ -117,8 +123,7 @@ async def _image_warmup(engine: sgl.Engine) -> None:
         async for _ in tokenizer_manager.generate_request(internal, None):
             pass
 
-    timeout = envs.SGLANG_WARMUP_TIMEOUT.get()
-    await asyncio.wait_for(run(), timeout=timeout if timeout > 0 else 600)
+    await asyncio.wait_for(run(), timeout=_warmup_timeout())
 
 
 async def _warmup_decode_engine(engine: sgl.Engine, server_args) -> None:
@@ -141,8 +146,13 @@ async def _warmup_decode_engine(engine: sgl.Engine, server_args) -> None:
     # Freezes the tokenizer manager (this process), schedulers and detokenizer.
     await engine.tokenizer_manager.freeze_gc()
     if not server_args.skip_server_warmup:
-        await engine.async_generate(
-            input_ids=[0], sampling_params={"temperature": 0.0, "max_new_tokens": 1}
+        # Engine requests are not bounded by SGLang's HTTP polling timeout.
+        await asyncio.wait_for(
+            engine.async_generate(
+                input_ids=[0],
+                sampling_params={"temperature": 0.0, "max_new_tokens": 1},
+            ),
+            timeout=_warmup_timeout(),
         )
     logging.info("Engine warmup and GC freeze done in %.1fs", time.time() - started)
 
