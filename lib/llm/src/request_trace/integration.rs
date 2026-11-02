@@ -17,6 +17,7 @@ use crate::protocols::openai::{
 use crate::request_trace::{
     AgentContextTraceState, RequestReplayMetrics, SharedFinishReasonMetadata,
 };
+use dynamo_kv_router::protocols::BlockHashOptions;
 
 struct RequestTraceRequestEndState {
     request_tracker: Arc<RequestTracker>,
@@ -58,31 +59,49 @@ fn shared_replay_metrics(
     super::replay_metrics(token_ids, trace_block_size).map(Arc::new)
 }
 
-pub(crate) fn build_request_end_trace_state(
+/// Which request records the policy enables.
+#[derive(Clone, Copy)]
+struct RequestRecords {
+    start: bool,
+    end: bool,
+}
+
+/// Start tracing a preprocessed request, before it is dispatched: publish its
+/// `request_start` row now, and return the state that publishes `request_end`
+/// when the response completes. `is_eagle` selects the router's EAGLE block
+/// layout for the `request_start` hashes.
+pub(crate) fn start_request_trace(
     common_request: &PreprocessedRequest,
     tracker: &Option<Arc<RequestTracker>>,
     context: &Context<()>,
     trace_block_size: usize,
+    is_eagle: bool,
 ) -> Option<RequestEndTraceState> {
-    build_request_end_trace_state_for_policy(
+    let policy = super::policy();
+    start_request_trace_for_policy(
         common_request,
         tracker,
         context,
         trace_block_size,
-        super::policy().emit_request_end_records(),
+        is_eagle,
+        RequestRecords {
+            start: policy.emit_request_start_records(),
+            end: policy.emit_request_end_records(),
+        },
     )
 }
 
-fn build_request_end_trace_state_for_policy(
+fn start_request_trace_for_policy(
     common_request: &PreprocessedRequest,
     tracker: &Option<Arc<RequestTracker>>,
     context: &Context<()>,
     trace_block_size: usize,
-    request_trace_enabled: bool,
+    is_eagle: bool,
+    records: RequestRecords,
 ) -> Option<RequestEndTraceState> {
     let has_agent_context = common_request.agent_context.is_some();
 
-    if !request_trace_enabled {
+    if !records.start && !records.end {
         return None;
     }
 
@@ -107,16 +126,39 @@ fn build_request_end_trace_state_for_policy(
         }
     };
 
-    let replay_metrics = match shared_replay_metrics(&common_request.token_ids, trace_block_size) {
-        Some(metrics) => metrics,
-        None => {
-            tracing::warn!(
-                %request_id,
-                "request trace skipped because the KV cache block size is unavailable"
-            );
-            return None;
-        }
-    };
+    if trace_block_size == 0 {
+        tracing::warn!(
+            %request_id,
+            "request trace skipped because the KV cache block size is unavailable"
+        );
+        return None;
+    }
+
+    let x_request_id = super::x_request_id_from_context(context);
+    if records.start {
+        // Hash as the router does for selection, so the keys match the
+        // engine's KV events for salted and LoRA requests too.
+        let routing = common_request.routing.as_ref();
+        let options = BlockHashOptions {
+            block_mm_infos: None,
+            lora_name: routing.and_then(|routing| routing.lora_name.as_deref()),
+            cache_namespace: routing.and_then(|routing| routing.cache_namespace.as_deref()),
+            is_eagle: Some(is_eagle),
+        };
+        super::record::emit_request_start(
+            request_id.to_string(),
+            x_request_id.clone(),
+            common_request.model.clone(),
+            &request_tracker,
+            common_request.token_ids.len(),
+            super::routing_hashes(&common_request.token_ids, trace_block_size, options),
+        );
+    }
+    if !records.end {
+        return None;
+    }
+
+    let replay_metrics = shared_replay_metrics(&common_request.token_ids, trace_block_size)?;
 
     let agent = has_agent_context
         .then(|| super::build_agent_context_trace_state(common_request, tracker, context))
@@ -126,7 +168,7 @@ fn build_request_end_trace_state_for_policy(
         request_tracker,
         replay_metrics,
         model: common_request.model.clone(),
-        x_request_id: super::x_request_id_from_context(context),
+        x_request_id,
     };
 
     Some(RequestEndTraceState {
@@ -244,6 +286,12 @@ mod tests {
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use crate::request_trace::BUS;
     use crate::request_trace::RequestTraceEventSource;
+    use crate::request_trace::{RequestRoutingHashes, RequestTraceEventType};
+    use dynamo_kv_router::protocols::{
+        KvCacheEventData, LocalBlockHash, WorkerWithDpRank, compute_seq_hash_for_block,
+    };
+    use dynamo_kv_router::zmq_wire::{BlockHashValue, RawKvEvent, convert_event};
+    use std::sync::atomic::AtomicU32;
 
     struct TrackerDropStream {
         tracker: Arc<RequestTracker>,
@@ -543,12 +591,13 @@ mod tests {
             "llm-call-1".to_string(),
         );
         let expected_request_id = context.id().to_string();
-        let state = build_request_end_trace_state_for_policy(
+        let state = start_request_trace_for_policy(
             &request,
             &Some(tracker.clone()),
             &context,
             2,
-            true,
+            false,
+            END_ONLY,
         )
         .unwrap();
         let stream = TrackerDropStream {
@@ -596,6 +645,292 @@ mod tests {
         );
     }
 
+    const END_ONLY: RequestRecords = RequestRecords {
+        start: false,
+        end: true,
+    };
+    const START_AND_END: RequestRecords = RequestRecords {
+        start: true,
+        end: true,
+    };
+    const START_ONLY: RequestRecords = RequestRecords {
+        start: true,
+        end: false,
+    };
+
+    fn request_with_tokens(token_ids: Vec<u32>) -> PreprocessedRequest {
+        let mut request = preprocessed_request(SamplingOptions::default());
+        request.token_ids = Arc::new(token_ids);
+        request
+    }
+
+    fn routing_hashes(record: &crate::request_trace::RequestTraceRecord) -> &RequestRoutingHashes {
+        record
+            .request
+            .as_ref()
+            .and_then(|request| request.routing_hashes.as_ref())
+            .expect("request_start routing hashes")
+    }
+
+    /// `request_start` is published while the request is preprocessed, before
+    /// anything is dispatched, and its hashes chain to the `request_end` hashes.
+    #[test]
+    fn request_start_is_published_before_dispatch_and_chains_to_request_end() {
+        BUS.init(64);
+        let mut receiver = BUS.subscribe();
+        // 7 tokens at block size 2: three full blocks and a partial one, then an
+        // exact multiple, where every request_end hash is a full block.
+        for (token_count, full_blocks) in [(7_u32, 3_usize), (8, 4)] {
+            let tracker = Arc::new(RequestTracker::new());
+            let request = request_with_tokens((1..=token_count).collect());
+            let mut context = Context::new(());
+            context.insert(
+                crate::request_trace::X_REQUEST_ID_CONTEXT_KEY,
+                "client-req-2".to_string(),
+            );
+            let request_id = context.id().to_string();
+
+            let mut state = start_request_trace_for_policy(
+                &request,
+                &Some(tracker.clone()),
+                &context,
+                2,
+                false,
+                START_AND_END,
+            )
+            .unwrap();
+
+            // Only request_start exists before the response stream completes.
+            let start_records = drain_request_records(&mut receiver, &request_id);
+            assert_eq!(start_records.len(), 1);
+            let start = &start_records[0];
+            assert_eq!(start.event_type, RequestTraceEventType::RequestStart);
+
+            tracker.record_finish();
+            state.emit();
+            let end_records = drain_request_records(&mut receiver, &request_id);
+            assert_eq!(end_records.len(), 1);
+            let end = &end_records[0];
+            assert_eq!(end.event_type, RequestTraceEventType::RequestEnd);
+
+            let hashes = routing_hashes(start);
+            assert_eq!(hashes.block_size, 2);
+            assert_eq!(hashes.local_block_hashes.len(), full_blocks);
+            let local = hashes
+                .local_block_hashes
+                .iter()
+                .map(|hash| LocalBlockHash(*hash))
+                .collect::<Vec<_>>();
+            assert_eq!(compute_seq_hash_for_block(&local), hashes.sequence_hashes);
+            let end_hashes = &end
+                .request
+                .as_ref()
+                .unwrap()
+                .replay
+                .as_ref()
+                .unwrap()
+                .input_sequence_hashes;
+            assert_eq!(hashes.sequence_hashes, end_hashes[..full_blocks]);
+
+            let start_request = start.request.as_ref().unwrap();
+            let end_request = end.request.as_ref().unwrap();
+            assert_eq!(start_request.x_request_id.as_deref(), Some("client-req-2"));
+            assert_eq!(end_request.x_request_id.as_deref(), Some("client-req-2"));
+            assert_eq!(start_request.model.as_deref(), Some("test-model"));
+            assert_eq!(start_request.input_tokens, Some(u64::from(token_count)));
+            assert_eq!(
+                start_request.request_received_ms,
+                end_request.request_received_ms
+            );
+            assert!(start_request.replay.is_none());
+            assert!(end_request.routing_hashes.is_none());
+        }
+    }
+
+    #[test]
+    fn request_start_alone_publishes_without_request_end_state() {
+        BUS.init(64);
+        let mut receiver = BUS.subscribe();
+        let request = request_with_tokens(vec![1, 2, 3, 4]);
+        let context = Context::new(());
+        let request_id = context.id().to_string();
+
+        let state = start_request_trace_for_policy(
+            &request,
+            &Some(Arc::new(RequestTracker::new())),
+            &context,
+            2,
+            false,
+            START_ONLY,
+        );
+
+        assert!(state.is_none());
+        let records = drain_request_records(&mut receiver, &request_id);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].event_type, RequestTraceEventType::RequestStart);
+    }
+
+    #[test]
+    fn request_start_follows_request_trace_eligibility() {
+        BUS.init(64);
+        let mut receiver = BUS.subscribe();
+        let request = preprocessed_request(SamplingOptions {
+            n: Some(2),
+            ..Default::default()
+        });
+        let context = Context::new(());
+        let request_id = context.id().to_string();
+
+        let state = start_request_trace_for_policy(
+            &request,
+            &Some(Arc::new(RequestTracker::new())),
+            &context,
+            2,
+            false,
+            START_AND_END,
+        );
+
+        assert!(state.is_none());
+        assert!(drain_request_records(&mut receiver, &request_id).is_empty());
+    }
+
+    /// The keys the engine's KV events produce for this prompt, after the KV
+    /// event publisher converts them: one `tokens_hash` per stored block.
+    fn engine_event_keys(
+        token_ids: &[u32],
+        block_size: usize,
+        lora_name: Option<&str>,
+        cache_namespace: Option<&str>,
+    ) -> Vec<LocalBlockHash> {
+        let full_tokens = token_ids.len() / block_size * block_size;
+        let raw = RawKvEvent::BlockStored {
+            block_hashes: (0..full_tokens / block_size)
+                .map(|index| BlockHashValue::Unsigned(1_000 + index as u64))
+                .collect(),
+            parent_block_hash: None,
+            token_ids: token_ids[..full_tokens].to_vec(),
+            block_size,
+            medium: None,
+            lora_name: lora_name.map(str::to_string),
+            cache_namespace: cache_namespace.map(str::to_string),
+            block_mm_infos: None,
+            is_eagle: None,
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
+            locality: None,
+            ownership: None,
+            session_id: None,
+        };
+        let event = convert_event(
+            raw,
+            1,
+            block_size as u32,
+            WorkerWithDpRank::from_worker_id(1),
+            &Arc::new(AtomicU32::new(0)),
+            None,
+            None,
+        )
+        .expect("stored event");
+        match event.event.data {
+            KvCacheEventData::Stored(stored) => stored
+                .blocks
+                .iter()
+                .map(|block| block.tokens_hash)
+                .collect(),
+            other => panic!("expected a stored event, got {other:?}"),
+        }
+    }
+
+    /// The router hashes a salted or LoRA request with that salt or LoRA name,
+    /// and so does the engine. `request_start` must carry those keys; the
+    /// default-option `request_end` hashes do not match the engine's.
+    #[test]
+    fn request_start_hashes_match_engine_keys_for_salted_and_lora_requests() {
+        BUS.init(64);
+        let mut receiver = BUS.subscribe();
+        let token_ids = (1..=9_u32).collect::<Vec<_>>();
+        for (lora_name, cache_namespace) in [
+            (None, None),
+            (None, Some("tenant-salt")),
+            (Some("adapter-a"), None),
+            (Some("adapter-a"), Some("tenant-salt")),
+        ] {
+            let mut request = request_with_tokens(token_ids.clone());
+            if lora_name.is_some() || cache_namespace.is_some() {
+                let routing = request.routing_mut();
+                routing.lora_name = lora_name.map(str::to_string);
+                routing.cache_namespace = cache_namespace.map(str::to_string);
+            }
+            let context = Context::new(());
+            let request_id = context.id().to_string();
+
+            let mut state = start_request_trace_for_policy(
+                &request,
+                &Some(Arc::new(RequestTracker::new())),
+                &context,
+                4,
+                false,
+                START_AND_END,
+            )
+            .unwrap();
+            state.emit();
+            let records = drain_request_records(&mut receiver, &request_id);
+            assert_eq!(records.len(), 2);
+            let hashes = routing_hashes(&records[0]);
+            let end_hashes = records[1]
+                .request
+                .as_ref()
+                .unwrap()
+                .replay
+                .as_ref()
+                .unwrap()
+                .input_sequence_hashes
+                .clone();
+
+            let engine_keys = engine_event_keys(&token_ids, 4, lora_name, cache_namespace);
+            assert_eq!(engine_keys.len(), 2);
+            assert_eq!(
+                hashes.local_block_hashes,
+                engine_keys.iter().map(|hash| hash.0).collect::<Vec<_>>(),
+                "lora={lora_name:?} salt={cache_namespace:?}"
+            );
+            assert_eq!(
+                hashes.sequence_hashes,
+                compute_seq_hash_for_block(&engine_keys)
+            );
+            // request_end keeps its default-option hashes, which join the
+            // engine's keys only for a plain request.
+            let plain = lora_name.is_none() && cache_namespace.is_none();
+            assert_eq!(hashes.sequence_hashes == end_hashes[..2], plain);
+        }
+    }
+
+    /// The trace bus is bounded in records, so `request_start` adds one record
+    /// per request; its size grows with the prompt. Prints the serialized size
+    /// at a 128k-token prompt with 16-token blocks.
+    #[test]
+    fn request_start_record_size_at_long_isl() {
+        let token_ids = (0..131_072_u32).collect::<Vec<_>>();
+        let hashes = super::super::routing_hashes(&token_ids, 16, BlockHashOptions::default());
+        assert_eq!(hashes.local_block_hashes.len(), 8_192);
+        assert_eq!(hashes.sequence_hashes.len(), 8_192);
+        let record = super::super::record::request_start_record(
+            "req-long".to_string(),
+            Some("client-long".to_string()),
+            "test-model".to_string(),
+            &RequestTracker::new(),
+            token_ids.len(),
+            hashes,
+        );
+        let json_bytes = serde_json::to_vec(&record).unwrap().len();
+        let hash_bytes = 2 * 8_192 * std::mem::size_of::<u64>();
+        eprintln!(
+            "request_start at 131072 tokens, block size 16: {hash_bytes} bytes of hashes in memory, {json_bytes} bytes as JSON"
+        );
+        assert!(json_bytes > hash_bytes);
+    }
+
     /// The frontend mints its own `request_id`, so the client's `x-request-id`
     /// is the only key a client can join on. A plain request must carry it.
     #[tokio::test]
@@ -610,12 +945,13 @@ mod tests {
             "client-req-1".to_string(),
         );
         let request_id = context.id().to_string();
-        let mut state = build_request_end_trace_state_for_policy(
+        let mut state = start_request_trace_for_policy(
             &request,
             &Some(tracker.clone()),
             &context,
             2,
-            true,
+            false,
+            END_ONLY,
         )
         .unwrap();
         tracker.record_finish();
@@ -646,7 +982,8 @@ mod tests {
         let tracker = Some(Arc::new(RequestTracker::new()));
         let context = Context::new(());
 
-        let state = build_request_end_trace_state_for_policy(&request, &tracker, &context, 2, true);
+        let state =
+            start_request_trace_for_policy(&request, &tracker, &context, 2, false, END_ONLY);
 
         assert!(state.is_none());
     }

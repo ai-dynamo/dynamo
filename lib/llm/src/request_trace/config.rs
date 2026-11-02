@@ -52,6 +52,7 @@ impl RequestTraceSinkKind {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RequestTraceRecordKind {
+    RequestStart,
     RequestEnd,
     RequestPayload,
     Tool,
@@ -61,6 +62,7 @@ pub enum RequestTraceRecordKind {
 impl RequestTraceRecordKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::RequestStart => "request_start",
             Self::RequestEnd => "request_end",
             Self::RequestPayload => "request_payload",
             Self::Tool => "tool",
@@ -117,6 +119,10 @@ impl RequestTracePolicy {
 
     pub fn record_names(&self) -> Vec<&'static str> {
         self.records.iter().map(|record| record.as_str()).collect()
+    }
+
+    pub fn emit_request_start_records(&self) -> bool {
+        self.records.contains(&RequestTraceRecordKind::RequestStart)
     }
 
     pub fn emit_request_end_records(&self) -> bool {
@@ -300,6 +306,7 @@ fn parse_record_kind_names(value: &str) -> Vec<RequestTraceRecordKind> {
         .filter(|v| !v.is_empty())
     {
         match name.as_str() {
+            "request_start" => push_record(&mut records, RequestTraceRecordKind::RequestStart),
             "request_end" => push_record(&mut records, RequestTraceRecordKind::RequestEnd),
             "request_payload" => push_record(&mut records, RequestTraceRecordKind::RequestPayload),
             "router_selection" => {
@@ -517,6 +524,7 @@ mod tests {
                     RequestTraceRecordKind::Tool
                 ]
             );
+            assert!(!policy.emit_request_start_records());
             assert!(policy.emit_request_end_records());
             assert!(!policy.emit_request_payload_records());
             assert!(policy.emit_tool_records());
@@ -574,7 +582,7 @@ mod tests {
             &[
                 (
                     env_request_trace::DYN_REQUEST_TRACE_RECORDS,
-                    "request_end,router_selection",
+                    "request_start,request_end,router_selection",
                 ),
                 (
                     env_request_trace::DYN_REQUEST_TRACE_ROUTER_SELECTION_TOP_K,
@@ -587,10 +595,12 @@ mod tests {
                 assert_eq!(
                     policy.records,
                     vec![
+                        RequestTraceRecordKind::RequestStart,
                         RequestTraceRecordKind::RequestEnd,
                         RequestTraceRecordKind::RouterSelection,
                     ]
                 );
+                assert!(policy.emit_request_start_records());
                 assert!(policy.emit_router_selection_records());
                 assert_eq!(policy.router_selection_top_k, 0);
             },

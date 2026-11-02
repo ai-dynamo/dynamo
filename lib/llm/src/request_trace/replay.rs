@@ -12,7 +12,23 @@ use dynamo_tokens::compute_hash_v2;
 
 use crate::protocols::TokenIdType;
 
-use super::RequestReplayMetrics;
+use super::{RequestReplayMetrics, RequestRoutingHashes};
+
+/// The prompt's full-block hashes as the KV router computes them, with the
+/// request's hash options (cache salt, LoRA name, EAGLE layout).
+pub(crate) fn routing_hashes(
+    token_ids: &[TokenIdType],
+    block_size: usize,
+    options: BlockHashOptions<'_>,
+) -> RequestRoutingHashes {
+    let local = compute_block_hash_for_seq(token_ids, block_size as u32, options);
+    let sequence_hashes = compute_seq_hash_for_block(&local);
+    RequestRoutingHashes {
+        block_size,
+        local_block_hashes: local.into_iter().map(|hash| hash.0).collect(),
+        sequence_hashes,
+    }
+}
 
 pub(crate) fn replay_metrics(
     token_ids: &[TokenIdType],

@@ -228,6 +228,7 @@ pub(crate) fn request_metrics(
             .and_then(|timing| timing.router_queue_depth.map(|v| v as u64)),
         worker,
         replay: None,
+        routing_hashes: None,
         finish_reason_metadata: None,
     }
 }

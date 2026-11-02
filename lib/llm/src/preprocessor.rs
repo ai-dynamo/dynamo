@@ -8694,11 +8694,12 @@ impl
         )?;
 
         tracing::trace!(model = %common_request.model, token_count = common_request.token_ids.len(), ?prompt_injected_reasoning, "Pre-processed request");
-        let trace_state = crate::request_trace::build_request_end_trace_state(
+        let trace_state = crate::request_trace::start_request_trace(
             &common_request,
             &tracker,
             &context,
             self.kv_cache_block_size,
+            self.runtime_config.enable_eagle,
         );
         let trace_tokens_enabled = trace_state.is_some();
         let trace_finish_reason_metadata =
@@ -8886,11 +8887,12 @@ impl
         }
         attach_request_context_metadata(&mut common_request, &context);
 
-        let trace_state = crate::request_trace::build_request_end_trace_state(
+        let trace_state = crate::request_trace::start_request_trace(
             &common_request,
             &tracker,
             &context,
             self.kv_cache_block_size,
+            self.runtime_config.enable_eagle,
         );
         let trace_tokens_enabled = trace_state.is_some();
         let trace_finish_reason_metadata =

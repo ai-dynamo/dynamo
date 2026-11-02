@@ -615,6 +615,7 @@ mod tests {
                     input_length: 3,
                     input_sequence_hashes: vec![11, 22],
                 }),
+                routing_hashes: None,
                 finish_reason_metadata: None,
             }),
             tool: None,
