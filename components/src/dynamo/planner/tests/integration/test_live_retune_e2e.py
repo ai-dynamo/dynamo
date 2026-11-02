@@ -13,9 +13,8 @@ canary), ``LiveRetuneSupervisor`` with its Lease leadership and state store,
 
 Fake: the Kubernetes API (``FakeRetuneKube``, with ``FakeDgdrOperator``
 driving each DGDR v1beta2 Request to a Run and its Candidates), the
-frontends' ``/router_policy`` (revision-checked PATCH and reset with the
-semantics of ``router_policy.rs`` and ``worker_selection/runtime.rs``), the
-trace claim (a temporary directory of real ``jsonl.gz`` segments) and the
+frontends' ``/router_policy`` (a revision-checked PATCH that merges, and a
+reset to the startup values), the trace claim (a temporary directory of real ``jsonl.gz`` segments) and the
 clocks. The test advances the clocks in 15 s steps; each step runs every
 live planner the way ``NativePlannerBase`` and the supervisor's background
 tasks do: lease round, the due planner tick (its decisions go to the
@@ -31,7 +30,6 @@ import asyncio
 import dataclasses
 import gzip
 import json
-import math
 import os
 import time
 import uuid
@@ -383,11 +381,17 @@ class FakeFrontends:
 
     def start(self, pod: str) -> None:
         self.kube.add_pod(pod, dgd=DGD_NAME, component_type="frontend", ready=True)
-        self.restart(pod)
+        self._register(pod)
 
     def restart(self, pod: str) -> None:
-        """A new frontend process: a new router id at revision 0 with the
-        startup values (``RouterPolicyRegistry::register``)."""
+        """A new frontend process in the pod (a container restart)."""
+
+        self.kube.restart_pod(pod)
+        self._register(pod)
+
+    def _register(self, pod: str) -> None:
+        """A new router id at revision 0 with the startup values
+        (``RouterPolicyRegistry::register``)."""
 
         startup = startup_map()
         self.routers[pod] = [
@@ -413,13 +417,9 @@ class FakeFrontends:
 
 
 class FakeRouterPolicyClient:
-    """``RouterPolicyClient`` with the ``/router_policy`` semantics of
-    ``lib/llm/src/http/service/router_policy.rs`` and
-    ``lib/kv-router/src/plugins/worker_selection/runtime.rs``: an empty patch
-    is 400, an unknown router 404, a stale ``expected_revision`` 409, an
-    unknown parameter or an invalid value 422; a PATCH replaces only the
-    keys it names (``null`` restores that key's startup value), a reset
-    restores every startup value, and both bump the revision."""
+    """``RouterPolicyClient`` over ``FakeFrontends``: a stale
+    ``expected_revision`` is 409; a PATCH replaces only the keys it names, a
+    reset restores every startup value, and both bump the revision."""
 
     def __init__(self, frontends: FakeFrontends, writer: str) -> None:
         self.frontends = frontends
@@ -485,39 +485,13 @@ class FakeRouterPolicyClient:
         expected_revision: int,
         parameters: Optional[dict[str, Any]],
     ) -> tuple[int, Optional[FakeRouter], Optional[str]]:
-        if parameters is not None and not parameters:
-            return 400, None, "provide either nonempty parameters or reset: true"
-        router = next(
-            (
-                r
-                for r in self.frontends.routers.get(pod, ())
-                if r.router_id == router_id
-            ),
-            None,
-        )
-        if router is None:
-            return 404, None, "router instance not found"
+        (router,) = [r for r in self.frontends.routers[pod] if r.router_id == router_id]
         if expected_revision != router.revision:
             return 409, None, "policy revision conflict"
         if parameters is None:
-            updated = dict(router.initial)
+            router.parameters = dict(router.initial)
         else:
-            updated = dict(router.parameters)
-            for key, value in parameters.items():
-                if key not in router.initial:
-                    return 422, None, f"unknown parameter {key!r}"
-                if value is None:
-                    updated[key] = router.initial[key]
-                    continue
-                if (
-                    isinstance(value, bool)
-                    or not isinstance(value, (int, float))
-                    or not math.isfinite(value)
-                    or value < 0
-                ):
-                    return 422, None, f"invalid value {value!r} for {key!r}"
-                updated[key] = float(value)
-        router.parameters = updated
+            router.parameters = {**router.parameters, **parameters}
         router.revision += 1
         return 200, router, None
 

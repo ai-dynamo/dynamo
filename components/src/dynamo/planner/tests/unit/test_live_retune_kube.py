@@ -285,8 +285,16 @@ def _pod(
                 {"type": "PodScheduled", "status": "True"},
                 {"type": "Ready", "status": "True" if ready else "False"},
             ],
+            "containerStatuses": [
+                {"name": "sidecar", "restartCount": 7, **_CONTAINER_STATUS},
+                {"name": "main", "restartCount": 2, **_CONTAINER_STATUS},
+            ],
         },
     }
+
+
+# The fields V1ContainerStatus requires besides name and restartCount.
+_CONTAINER_STATUS = {"image": "img", "imageID": "", "ready": True}
 
 
 def test_list_pods_builds_pod_info(kube):
@@ -325,6 +333,7 @@ def test_list_pods_builds_pod_info(kube):
         terminating=False,
         labels={"nvidia.com/dynamo-component-type": "frontend"},
         http_port=8000,  # the main container's port wins
+        restarts=2,  # the main container's
     )
     assert (pods[1].ready, pods[1].terminating, pods[1].ip) == (False, True, None)
     assert pods[2].http_port == 8080
@@ -385,8 +394,14 @@ def test_leases_round_trip_raw_json(kube):
     transport.reply({"kind": "Status", "status": "Success"})
     retune_kube.delete_lease("l2")
     assert transport.calls[-1]["method"] == "DELETE"
+    assert transport.calls[-1]["body"] is None
     transport.reply(api_error(404))
     retune_kube.delete_lease("l2")
+    # Conditional on a resourceVersion: a changed Lease is a conflict.
+    transport.reply(api_error(409, "Precondition failed: ResourceVersion"))
+    with pytest.raises(KubeConflict):
+        retune_kube.delete_lease("l2", resource_version="5")
+    assert transport.calls[-1]["body"]["preconditions"] == {"resourceVersion": "5"}
 
 
 def test_from_kube_api_shares_the_connector_client():

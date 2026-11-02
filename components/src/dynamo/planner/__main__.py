@@ -18,7 +18,7 @@ import asyncio
 import logging
 import signal
 from collections.abc import Awaitable
-from typing import Any
+from typing import Any, Optional
 
 from pydantic import BaseModel
 
@@ -56,26 +56,33 @@ async def start_planner(runtime: DistributedRuntime, config: PlannerConfig):
     if not planner.may_hold_retune_lease:
         await asyncio.gather(serve, planner.run())
         return
-    await _run_until_sigterm(runtime, serve, planner.run())
+    await _run_until_sigterm(runtime, serve, planner.run(), planner.retune_lease_found)
 
 
 async def _run_until_sigterm(
-    runtime: Any, serve: Awaitable[Any], run: Awaitable[None]
+    runtime: Any,
+    serve: Awaitable[Any],
+    run: Awaitable[None],
+    lease_found: asyncio.Event,
 ) -> None:
-    """Serve and run the planner; SIGTERM stops the planner cleanly.
+    """Serve and run the planner; once ``lease_found`` is set, SIGTERM stops
+    the planner cleanly.
 
     Live retune, and the clean-up of a removed one, hold a leadership Lease,
     and live retune may have a sweep in flight. Without a handler SIGTERM
     kills the process before ``run()``'s ``finally`` stops the sweep and
-    releases the Lease, so the next leader would wait out the Lease. The handler cancels only the run
-    task; once its shutdown finished, the runtime is shut down to stop
-    serving the endpoint and the call returns normally.
+    releases the Lease, so the next leader would wait out the Lease. The
+    handler is installed when the planner may hold the Lease: at once with
+    live retune, or when the clean-up check finds a Lease. It cancels only
+    the run task; once its shutdown finished, the runtime is shut down to
+    stop serving the endpoint and the call returns normally.
     """
 
     loop = asyncio.get_running_loop()
     run_task = asyncio.ensure_future(run)
     serve_task = asyncio.ensure_future(serve)
     terminating = False
+    installed = False
 
     def on_sigterm() -> None:
         nonlocal terminating
@@ -85,13 +92,24 @@ async def _run_until_sigterm(
         logger.info("SIGTERM received; stopping the planner")
         run_task.cancel()
 
-    try:
-        loop.add_signal_handler(signal.SIGTERM, on_sigterm)
-        installed = True
-    except (NotImplementedError, RuntimeError, ValueError) as exc:
-        # No signal handlers on this platform or off the main thread.
-        logger.warning("Cannot install a planner SIGTERM handler: %s", exc)
-        installed = False
+    def install() -> None:
+        nonlocal installed
+        try:
+            loop.add_signal_handler(signal.SIGTERM, on_sigterm)
+            installed = True
+        except (NotImplementedError, RuntimeError, ValueError) as exc:
+            # No signal handlers on this platform or off the main thread.
+            logger.warning("Cannot install a planner SIGTERM handler: %s", exc)
+
+    async def install_once_found() -> None:
+        await lease_found.wait()
+        install()
+
+    installer: Optional[asyncio.Future[None]] = None
+    if lease_found.is_set():
+        install()
+    else:
+        installer = asyncio.ensure_future(install_once_found())
     try:
         await asyncio.gather(serve_task, run_task)
     except asyncio.CancelledError:
@@ -107,6 +125,9 @@ async def _run_until_sigterm(
                 "Planner endpoint stopped with an error: %s", serve_task.exception()
             )
     finally:
+        if installer is not None and not installer.done():
+            installer.cancel()
+            await asyncio.wait([installer])
         if installed:
             loop.remove_signal_handler(signal.SIGTERM)
 

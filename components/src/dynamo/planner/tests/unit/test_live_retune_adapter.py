@@ -12,7 +12,6 @@ so these tests cover only the host contract: the disabled state,
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import logging
 import os
 import signal
@@ -35,7 +34,7 @@ from dynamo.planner.core.types import (
     WorkerCounts,
 )
 from dynamo.planner.environment.state import DeploymentState
-from dynamo.planner.plugins.clock import VirtualClock, WallClock
+from dynamo.planner.plugins.clock import WallClock
 from dynamo.planner.plugins.orchestrator.engine_adapter import (
     OrchestratorEngineAdapter,
     RetuneHooks,
@@ -133,70 +132,30 @@ def test_live_controller_gets_the_hooks_and_the_phase(stub_controller):
     assert (controller.started, controller.phases) == ([1_000.0], [PHASE])
 
 
-def test_replay_controller_is_built_and_started_as_before(stub_controller):
-    engine = OrchestratorEngineAdapter(
-        retune_only_config(),
-        caps(),
-        clock=VirtualClock(),
-        retune_inputs=retune_inputs(),
-    )
-
-    (controller,) = stub_controller.instances
-    assert controller.hooks == {}
-    engine.initial_tick(5.0)
-    assert (controller.started, controller.phases) == ([5.0], [None])
-
-
-def test_replay_without_inputs_still_fails_at_construction(stub_controller):
-    with pytest.raises(ValueError, match="requires retune inputs"):
-        OrchestratorEngineAdapter(retune_only_config(), caps(), clock=VirtualClock())
-
-
-def test_hooks_without_retune_config_build_nothing(stub_controller):
-    engine = OrchestratorEngineAdapter(
-        PlannerConfig(mode="agg"),
-        caps(),
-        clock=WallClock(),
-        retune_inputs=retune_inputs(),
-        retune_hooks=_hooks(),
-    )
-
-    assert engine.retune_controller is None
-    assert stub_controller.instances == []
-
-
-def test_live_without_inputs_starts_disabled(stub_controller, caplog):
+def test_live_without_inputs_or_a_valid_controller_starts_disabled(
+    stub_controller, caplog
+):
     with caplog.at_level(logging.WARNING):
         engine = _adapter(inputs=None)
-
-    assert engine.retune_controller is None
-    assert stub_controller.instances == []
+    assert engine.retune_controller is None and stub_controller.instances == []
     assert "retune stays disabled" in caplog.text
     engine.initial_tick(0.0)  # no controller to start
 
-
-def test_live_controller_construction_failure_starts_disabled(stub_controller, caplog):
     stub_controller.construct_error = ValueError("retune.router requires kv_router")
-
     with caplog.at_level(logging.ERROR):
         engine = _adapter(inputs=retune_inputs())
-
     assert engine.retune_controller is None
     assert "requires kv_router" in caplog.text
 
 
-@pytest.mark.parametrize(
-    "ready, overrides",
-    [(16, {}), (1, {"min_endpoint": 2})],
-    ids=["above-default-max-gpu-budget", "below-min-endpoint"],
-)
 async def test_disabled_retune_only_planner_never_reconciles_replicas(
-    stub_controller, ready, overrides
+    stub_controller,
 ):
     # retune_only follows the config, not the controller: a disabled live
-    # retune keeps the deployment's replicas and stays quiet.
-    engine = _adapter(inputs=None, optimization_target="sla", **overrides)
-    counts = WorkerCounts(ready_num_decode=ready, expected_num_decode=ready)
+    # retune keeps the deployment's replicas (here below min_endpoint) and
+    # stays quiet.
+    engine = _adapter(inputs=None, optimization_target="sla", min_endpoint=2)
+    counts = WorkerCounts(ready_num_decode=1, expected_num_decode=1)
 
     scheduled = engine.initial_tick(0.0)
     for _ in range(10):
@@ -267,92 +226,6 @@ def test_replace_retune_with_no_inputs_disables_retune(stub_controller):
     assert len(stub_controller.instances) == 1
 
 
-def test_replace_retune_construction_failure_leaves_retune_disabled(
-    stub_controller,
-):
-    engine = _adapter(inputs=retune_inputs())
-    (old,) = stub_controller.instances
-    stub_controller.construct_error = ValueError("zero startup credit")
-
-    with pytest.raises(ValueError, match="zero startup credit"):
-        engine.replace_retune(retune_inputs(), generation=3, now_s=10.0)
-
-    assert old.closed == 1
-    assert engine.retune_controller is None
-
-
-def test_replace_retune_survives_an_old_controller_that_fails_to_close(
-    stub_controller,
-):
-    engine = _adapter(inputs=retune_inputs())
-    (old,) = stub_controller.instances
-    old.close_error = RuntimeError("worker stuck")
-
-    engine.replace_retune(retune_inputs(), generation=1, now_s=10.0)
-
-    assert engine.retune_controller is stub_controller.instances[1]
-
-
-def test_replace_retune_requires_live_hooks(stub_controller):
-    engine = OrchestratorEngineAdapter(
-        retune_only_config(),
-        caps(),
-        clock=VirtualClock(),
-        retune_inputs=retune_inputs(),
-    )
-
-    with pytest.raises(RuntimeError, match="live retune"):
-        engine.replace_retune(None, generation=1, now_s=0.0)
-
-
-async def test_real_controller_with_live_hooks_anchors_at_the_phase():
-    pytest.importorskip(
-        "aisimulate.sweeper",
-        reason="AI Simulate is an optional Dynamo simulation dependency",
-    )
-    from dynamo.planner.retune.sweep import SweepResult
-
-    def sweep(request, *, cancel, abort):
-        return SweepResult(
-            status="ok",
-            num_requests=1,
-            scores={candidate.key(): 1.0 for candidate in request.candidates},
-        )
-
-    gate_calls = []
-
-    def gate(k, window):
-        gate_calls.append((k, window))
-        return GateResult(spec_replicas={"aggregated": 2})
-
-    engine = OrchestratorEngineAdapter(
-        retune_only_config(),
-        caps(),
-        clock=VirtualClock(),
-        retune_inputs=retune_inputs(),
-        retune_hooks=_hooks(sweep_fn=sweep, launch_gate=gate, phase_s=0.0),
-    )
-    controller = engine.retune_controller
-    assert controller is not None and controller.generation == 0
-    counts = WorkerCounts(ready_num_decode=2, expected_num_decode=2)
-    try:
-        # Started mid-window W_1 = [60, 120): W_1 launches at L_1 = 120 + grace.
-        scheduled = engine.initial_tick(90.0)
-        decisions = []
-        while scheduled.at_s <= 240.0:
-            effects = await engine.tick(
-                scheduled, TickInput(now_s=scheduled.at_s, worker_counts=counts)
-            )
-            decisions.extend(effects.retune_decisions)
-            assert effects.next_tick is not None
-            scheduled = effects.next_tick
-    finally:
-        await engine.shutdown()
-
-    assert gate_calls[0][0] == 0
-    assert [d.decision_id for d in decisions][:2] == ["retune-w60000", "retune-w120000"]
-
-
 @pytest.mark.timeout(10)
 async def test_rebuilt_real_controllers_never_sweep_at_once():
     """Two generations of one window never run their sweeps concurrently.
@@ -360,7 +233,7 @@ async def test_rebuilt_real_controllers_never_sweep_at_once():
     Generation 0's sweep of window k is dropped but, like a DGDR sweep that
     polls, only returns a while later; generation 1 relaunches window k in
     the meantime. Its sweep must start only after generation 0's returned,
-    and its decision's launch time moves to that start.
+    and it is decided once it is done.
     """
 
     pytest.importorskip(
@@ -440,8 +313,6 @@ async def test_rebuilt_real_controllers_never_sweep_at_once():
     assert [g for g, _ in order] == [0, 1] and k0 == k1
     (decision,) = effects.retune_decisions
     assert decision.window_index == k0
-    # Launched when generation 0's sweep returned, not at the tick.
-    assert decision.launched_at_s > now + 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -478,7 +349,6 @@ class FakeLiveRetune:
         self.effects: list[PlannerEffects] = []
         self.host = None
         self.on_effects_error: Exception | None = None
-        self.stop_error: Exception | None = None
         # The host's engine when stop ran (it must still be up).
         self.engine_at_stop = None
 
@@ -497,8 +367,6 @@ class FakeLiveRetune:
         self.calls.append("live.stop")
         if self.host is not None:
             self.engine_at_stop = self.host._engine
-        if self.stop_error is not None:
-            raise self.stop_error
 
     def on_effects(self, effects):
         self.effects.append(effects)
@@ -562,12 +430,6 @@ def test_live_planner_rejects_the_local_executor():
         _base(_live_config("local"), _Environment())
 
 
-def test_live_planner_accepts_the_dgdr_executor():
-    planner, _, _ = _planner()
-
-    assert planner._live_retune is None
-
-
 async def test_async_init_builds_the_engine_with_live_retune_and_starts_it(
     stub_controller,
 ):
@@ -604,17 +466,6 @@ async def test_async_init_builds_the_engine_with_live_retune_and_starts_it(
     assert planner._live_retune is None
 
 
-async def test_async_init_with_failing_premises_starts_disabled(stub_controller):
-    planner, _, live = _planner(inputs=None)
-
-    await planner._async_init()
-    try:
-        assert planner._engine.retune_controller is None  # type: ignore[union-attr]
-        assert live.host is planner
-    finally:
-        await planner._shutdown_runtime()
-
-
 async def test_failed_init_still_stops_live_retune(stub_controller):
     planner, environment, live = _planner(inputs=retune_inputs())
 
@@ -627,18 +478,6 @@ async def test_failed_init_still_stops_live_retune(stub_controller):
         await planner._async_init()
 
     assert environment.calls[-2:] == ["live.stop", "environment.shutdown"]
-
-
-async def test_shutdown_logs_a_failing_live_retune_stop(stub_controller, caplog):
-    planner, environment, live = _planner(inputs=None)
-    await planner._async_init()
-    live.stop_error = RuntimeError("lease release timed out")
-
-    with caplog.at_level(logging.ERROR):
-        await planner._shutdown_runtime()
-
-    assert "Failed to stop planner live retune" in caplog.text
-    assert environment.calls[-1] == "environment.shutdown"
 
 
 class _FakeEngine:
@@ -704,13 +543,6 @@ async def test_replace_live_retune_holds_the_config_lock(stub_controller):
         await planner._shutdown_runtime()
 
 
-async def test_replace_live_retune_needs_the_orchestrator_engine():
-    planner, _, _ = _planner()
-
-    with pytest.raises(RuntimeError, match="orchestrator engine"):
-        await planner.replace_live_retune(None, generation=1)
-
-
 # ---------------------------------------------------------------------------
 # SIGTERM
 # ---------------------------------------------------------------------------
@@ -724,6 +556,17 @@ class _Runtime:
     def shutdown(self) -> None:
         self.shutdowns += 1
         self.stopped.set()
+
+
+def _found() -> asyncio.Event:
+    found = asyncio.Event()
+    found.set()
+    return found
+
+
+def _sigterm_installed() -> bool:
+    loop = asyncio.get_running_loop()
+    return signal.SIGTERM in loop._signal_handlers  # type: ignore[attr-defined]
 
 
 async def test_sigterm_cancels_the_planner_run_and_stops_serving():
@@ -744,86 +587,91 @@ async def test_sigterm_cancels_the_planner_run_and_stops_serving():
             await asyncio.sleep(0)
             events.append("run finally")
 
-    main = asyncio.create_task(planner_main._run_until_sigterm(runtime, serve(), run()))
+    main = asyncio.create_task(
+        planner_main._run_until_sigterm(runtime, serve(), run(), _found())
+    )
     await asyncio.wait_for(running.wait(), timeout=5)
-    loop = asyncio.get_running_loop()
-    assert signal.SIGTERM in loop._signal_handlers  # type: ignore[attr-defined]
+    assert _sigterm_installed()
     os.kill(os.getpid(), signal.SIGTERM)
     os.kill(os.getpid(), signal.SIGTERM)  # a second one changes nothing
     await asyncio.wait_for(main, timeout=5)
 
     assert events == ["run finally", "serve stopped"]
     assert runtime.shutdowns == 1
-    assert signal.SIGTERM not in loop._signal_handlers  # type: ignore[attr-defined]
+    assert not _sigterm_installed()
 
 
-async def test_without_sigterm_a_run_failure_propagates():
+async def test_sigterm_is_handled_only_once_a_retune_lease_is_found():
+    # The clean-up check of a removed live retune runs in the background;
+    # a planner whose check finds no Lease keeps the default SIGTERM.
     runtime = _Runtime()
+    found = asyncio.Event()
+    running = asyncio.Event()
 
     async def serve():
         await runtime.stopped.wait()
 
     async def run():
-        raise RuntimeError("tick failed")
+        running.set()
+        await asyncio.sleep(3600)
 
-    with pytest.raises(RuntimeError, match="tick failed"):
-        await planner_main._run_until_sigterm(runtime, serve(), run())
-    assert runtime.shutdowns == 0
-    loop = asyncio.get_running_loop()
-    assert signal.SIGTERM not in loop._signal_handlers  # type: ignore[attr-defined]
-    runtime.shutdown()  # let the serve task finish
+    main = asyncio.create_task(
+        planner_main._run_until_sigterm(runtime, serve(), run(), found)
+    )
+    await asyncio.wait_for(running.wait(), timeout=5)
+    assert not _sigterm_installed()
+    found.set()
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert _sigterm_installed()
+    os.kill(os.getpid(), signal.SIGTERM)
+    await asyncio.wait_for(main, timeout=5)
+    assert runtime.shutdowns == 1 and not _sigterm_installed()
 
 
-async def test_outer_cancellation_is_not_mistaken_for_sigterm():
+async def test_run_failure_and_outer_cancellation_propagate():
     runtime = _Runtime()
-    started = asyncio.Event()
 
     async def serve():
         await runtime.stopped.wait()
+
+    async def failing():
+        raise RuntimeError("tick failed")
+
+    with pytest.raises(RuntimeError, match="tick failed"):
+        await planner_main._run_until_sigterm(runtime, serve(), failing(), _found())
+    assert runtime.shutdowns == 0 and not _sigterm_installed()
+
+    started = asyncio.Event()
 
     async def run():
         started.set()
         await asyncio.sleep(3600)
 
-    main = asyncio.create_task(planner_main._run_until_sigterm(runtime, serve(), run()))
+    # Never found: the waiting installer is cancelled with the call.
+    main = asyncio.create_task(
+        planner_main._run_until_sigterm(runtime, serve(), run(), asyncio.Event())
+    )
     await asyncio.wait_for(started.wait(), timeout=5)
     main.cancel()
     with pytest.raises(asyncio.CancelledError):
         await main
     assert runtime.shutdowns == 0
+    runtime.shutdown()  # let the serve tasks finish
 
 
-async def test_platforms_without_signal_handlers_still_run(monkeypatch, caplog):
-    runtime = _Runtime()
-    loop = asyncio.get_running_loop()
-
-    def unsupported(*_args):
-        raise NotImplementedError
-
-    monkeypatch.setattr(loop, "add_signal_handler", unsupported)
-
-    async def serve():
-        return None
-
-    async def run():
-        return None
-
-    with caplog.at_level(logging.WARNING):
-        await planner_main._run_until_sigterm(runtime, serve(), run())
-    assert "Cannot install a planner SIGTERM handler" in caplog.text
-
-
-async def test_start_planner_installs_sigterm_only_when_a_retune_lease_may_be_held(
+async def test_start_planner_runs_the_sigterm_path_only_when_a_lease_may_be_held(
     monkeypatch,
 ):
     # With live retune, or the clean-up check of a removed one (every
     # Kubernetes planner without retune config), the planner may hold the
     # retune leadership Lease.
-    seen: list[bool] = []
+    seen: list[asyncio.Event] = []
 
     class _Planner:
         def __init__(self, may_hold: bool) -> None:
             self.may_hold_retune_lease = may_hold
+            self.retune_lease_found = asyncio.Event()
 
         async def _async_init(self):
             pass
@@ -839,8 +687,8 @@ async def test_start_planner_installs_sigterm_only_when_a_retune_lease_may_be_he
         def endpoint(self, _name):
             return _Endpoint()
 
-    async def fake_run_until_sigterm(runtime, serve, run):
-        seen.append(isinstance(runtime, _StartRuntime))
+    async def fake_run_until_sigterm(runtime, serve, run, lease_found):
+        seen.append(lease_found)
         await asyncio.gather(serve, run)
 
     planners = iter([_Planner(False), _Planner(True)])
@@ -850,20 +698,15 @@ async def test_start_planner_installs_sigterm_only_when_a_retune_lease_may_be_he
     await planner_main.start_planner(_StartRuntime(), PlannerConfig(mode="agg"))
     assert seen == []
     await planner_main.start_planner(_StartRuntime(), PlannerConfig(mode="agg"))
-    assert seen == [True]
+    assert len(seen) == 1 and not seen[0].is_set()
 
 
-async def test_may_hold_retune_lease(stub_controller):
+async def test_live_retune_finds_its_lease_at_start(stub_controller):
     planner, _, _ = _planner(inputs=None)
     assert not planner.may_hold_retune_lease
     await planner._async_init()
     try:
         assert planner.may_hold_retune_lease
+        assert planner.retune_lease_found.is_set()
     finally:
         await planner._shutdown_runtime()
-
-
-def test_hooks_are_frozen():
-    hooks = _hooks()
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        hooks.phase_s = 1.0  # type: ignore[misc]

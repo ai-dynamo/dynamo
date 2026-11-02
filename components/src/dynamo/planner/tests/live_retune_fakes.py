@@ -32,7 +32,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Optional
 
 from dynamo.planner.retune.live.contracts import (
@@ -527,6 +527,7 @@ class FakeRetuneKube:
         ip: str | None = None,
         http_port: int | None = 8000,
         labels: Mapping[str, str] | None = None,
+        restarts: int | None = 0,
     ) -> PodInfo:
         all_labels = dict(labels or {})
         if dgd is not None:
@@ -541,10 +542,20 @@ class FakeRetuneKube:
             terminating=terminating,
             labels=all_labels,
             http_port=http_port,
+            restarts=restarts,
         )
         with self._lock:
             self.pods[name] = pod
         return pod
+
+    def restart_pod(self, name: str) -> PodInfo:
+        """The pod's ``main`` container restarted."""
+
+        with self._lock:
+            pod = self.pods[name]
+            pod = replace(pod, restarts=(pod.restarts or 0) + 1)
+            self.pods[name] = pod
+            return pod
 
     def remove_pod(self, name: str) -> None:
         with self._lock:
@@ -743,11 +754,31 @@ class FakeRetuneKube:
             "replace_lease", (name, body), {"timeout_s": timeout_s}, operation
         )
 
-    def delete_lease(self, name: str, *, timeout_s: float = 10.0) -> None:
+    def delete_lease(
+        self,
+        name: str,
+        *,
+        resource_version: Optional[str] = None,
+        timeout_s: float = 10.0,
+    ) -> None:
         def operation() -> None:
-            self.leases.pop(name, None)
+            current = self.leases.get(name)
+            if current is None:
+                return
+            found = current["metadata"]["resourceVersion"]
+            if resource_version is not None and resource_version != found:
+                raise KubeConflict(
+                    f"leases {name!r}: precondition resourceVersion "
+                    f"{resource_version!r} is stale (current {found!r})"
+                )
+            del self.leases[name]
 
-        return self._call("delete_lease", name, {"timeout_s": timeout_s}, operation)
+        return self._call(
+            "delete_lease",
+            name,
+            {"resource_version": resource_version, "timeout_s": timeout_s},
+            operation,
+        )
 
     # ------------------------------------------------- operator simulation
 

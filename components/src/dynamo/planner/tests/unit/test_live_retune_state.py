@@ -242,6 +242,7 @@ def test_state_parsing_edge_cases() -> None:
         _body(dgd_uid="u", last_window_end_ms=math.inf),
         _body(dgd_uid="u", updated_ms="x"),
         _body(dgd_uid="u", updated_ms=[1]),
+        _body(dgd_uid="u", fingerprint=math.nan),
     ):
         with pytest.raises(StateFormatError):
             RetuneState.from_annotations({STATE_ANNOTATION: bad})
@@ -250,6 +251,27 @@ def test_state_parsing_edge_cases() -> None:
         {STATE_ANNOTATION: _body(dgd_uid="u"), HISTORY_ANNOTATION: "not json"}
     )
     assert parsed is not None and parsed.history == ()
+
+
+def test_unwritable_history_entries_are_dropped_on_read() -> None:
+    # json.loads accepts NaN and Infinity, canonical_json does not: one such
+    # entry kept would make every later state write raise.
+    history = [
+        {"decision_id": "ok", "best": 1.5},
+        {"decision_id": "nan", "best": math.nan},
+        {"decision_id": "inf", "by_wt": {"aggregated": {"t": math.inf}}},
+        "not an object",
+    ]
+    parsed = RetuneState.from_annotations(
+        {
+            STATE_ANNOTATION: _body(dgd_uid="u"),
+            HISTORY_ANNOTATION: json.dumps(history),
+        }
+    )
+    assert parsed is not None
+    assert [entry["decision_id"] for entry in parsed.history] == ["ok"]
+    written = append_history(parsed, {"decision_id": "next"}).to_annotations()
+    assert json.loads(written[HISTORY_ANNOTATION])[0] == history[0]
 
 
 def test_another_format_version_is_rejected_not_corrupt() -> None:
@@ -421,7 +443,10 @@ def test_store_creates_reads_and_conditionally_replaces() -> None:
     assert store.read().state.leader_term == "t2"
     assert updated.resource_version != read.resource_version
 
-    store.delete()
+    # The delete is conditional too: a stale snapshot leaves the Lease.
+    with pytest.raises(KubeConflict):
+        store.delete(read)
+    store.delete(store.read())
     assert store.read().lease is None
 
 
@@ -479,6 +504,8 @@ def test_leadership_create_renew_and_expire_locally() -> None:
     clock.advance(20)
     assert a.step() == "renewed"
     assert a.leader_until == clock.mono + 45.0
+    # What a conditional delete of the Lease needs.
+    assert a.resource_version == kube.leases[a.name]["metadata"]["resourceVersion"]
     # Renewal failures keep leadership only until leader_until.
     kube.fail("get_lease", times=10)
     clock.advance(20)

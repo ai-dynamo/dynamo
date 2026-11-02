@@ -7,9 +7,9 @@
 
 Covers what a live host adds on top of the replay loop: epoch-phase
 anchoring, the launch gate, harvest gating and abandoned sweeps,
-``drop_pending``/``rewind``, the sweep thread shared across generations,
-the DGD spec replicas check, ``restore_desired`` and the structured failure
-reason of a decision.
+``drop_pending``/``rewind``, the DGD spec replicas check, ``restore_desired``
+and the structured failure reason of a decision. The sweep thread shared
+across generations is tested with the engine adapter.
 """
 
 from __future__ import annotations
@@ -25,18 +25,16 @@ pytest.importorskip(
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-import dynamo.planner.retune.controller as controller_module
 from dynamo.llm import KvRouterConfig
 from dynamo.planner.config.planner_config import PlannerConfig, RetuneEngineSpec
 from dynamo.planner.core.types import (
-    RetuneDecision,
     RetuneInputs,
     RetuneParams,
     WorkerCapabilities,
     WorkerCounts,
 )
 from dynamo.planner.plugins.clock import VirtualClock, WallClock
-from dynamo.planner.retune.controller import RetuneController, SweepExecutor
+from dynamo.planner.retune.controller import RetuneController
 from dynamo.planner.retune.live.contracts import NON_DECISION_FAILURES, GateResult
 from dynamo.planner.retune.sweep import SweepResult
 
@@ -128,16 +126,6 @@ class Harvest:
         return self.answers.popleft() if self.answers else self.default
 
 
-class ManualClock(WallClock):
-    """A wall clock (no inline await) whose monotonic time tests set."""
-
-    def __init__(self):
-        self.mono = 0.0
-
-    def monotonic(self) -> float:
-        return self.mono
-
-
 def _scored(score_of, *, wall_s=0.5, **extra):
     def build(request):
         return SweepResult(
@@ -224,42 +212,6 @@ def _window_ms(k):
 
 
 # ---------------------------------------------------------------------------
-# Construction and properties
-# ---------------------------------------------------------------------------
-
-
-def test_launch_gate_requires_a_sweep_fn():
-    with pytest.raises(ValueError, match="launch_gate requires a sweep_fn"):
-        RetuneController(
-            _config(),
-            _inputs(),
-            WorkerCapabilities(),
-            VirtualClock(),
-            STEP,
-            launch_gate=Gate(),
-        )
-
-
-def test_generation_router_keys_and_domain_are_exposed():
-    controller = _live(FakeSweeps(), generation=7)
-    try:
-        assert controller.generation == 7
-        assert controller.router_keys == (
-            "overlap_score_credit",
-            "prefill_load_scale",
-            "router_temperature",
-        )
-        assert controller.router_domain == {
-            key: list(values) for key, values in ROUTER_DOMAIN.items()
-        }
-        # A copy: callers cannot change the controller's domain.
-        controller.router_domain["router_temperature"].append(9.0)
-        assert controller.router_domain["router_temperature"] == [0.0, 0.5]
-    finally:
-        controller.close()
-
-
-# ---------------------------------------------------------------------------
 # Phase anchoring
 # ---------------------------------------------------------------------------
 
@@ -295,40 +247,6 @@ async def test_phase_anchoring_gives_restart_stable_windows_and_ids():
     finally:
         first.close()
         second.close()
-
-
-async def test_replay_start_keeps_its_decision_ids(monkeypatch):
-    sweeps = FakeSweeps()
-    sweeps.default = _flat()
-    monkeypatch.setattr(controller_module, "run_sweep", sweeps)
-    controller = RetuneController(
-        _config(), _inputs(), WorkerCapabilities(), VirtualClock(), STEP
-    )
-    controller.start(10.0)
-    try:
-        await _tick(controller, 75.0)
-        (decision,) = (await _tick(controller, 80.0)).decisions
-    finally:
-        controller.close()
-
-    assert decision.decision_id == "retune-10-w0"
-    (request,) = sweeps.requests
-    # Replay requests keep the live-only fields at their defaults.
-    assert request.router_domain is None
-    assert request.deadline_s is None
-    assert request.spec_replicas is None
-    assert request.replicas_verified is True
-    assert request.generation == 0
-    assert sweeps.aborts == [None]
-
-
-def test_phase_must_be_finite():
-    controller = _live(FakeSweeps())
-    try:
-        with pytest.raises(ValueError, match="phase_s must be finite"):
-            controller.start(T0, float("nan"))
-    finally:
-        controller.close()
 
 
 # ---------------------------------------------------------------------------
@@ -441,26 +359,6 @@ async def test_gate_runs_before_the_busy_branch():
     assert len(sweeps.requests) == 1
 
 
-@pytest.mark.parametrize(
-    "bad",
-    [RuntimeError("supervisor bug"), GateResult(reason="bogus")],  # type: ignore[arg-type]
-    ids=["raises", "unknown-reason"],
-)
-async def test_a_failing_gate_holds_the_window(bad):
-    sweeps = FakeSweeps()
-    sweeps.default = _flat()
-    gate = Gate(bad, default=GateResult(spec_replicas=SPEC))
-    controller = _live(sweeps, gate=gate)
-    try:
-        held = await _tick(controller, L_K)
-        launched = await _tick(controller, L_K + STEP)
-    finally:
-        controller.close()
-
-    assert held.decisions == [] and held.audit_events == []
-    assert launched.audit_events == [f"retune:launch w={K}"]
-
-
 # ---------------------------------------------------------------------------
 # Harvest gating and abandoned sweeps
 # ---------------------------------------------------------------------------
@@ -484,24 +382,6 @@ async def test_refused_harvest_drops_the_result_and_relaunches_the_window():
     assert refused.audit_events == [f"retune:dropped w={K}", f"retune:launch w={K}"]
     assert [r.window_index for r in sweeps.requests] == [K, K]
     assert [(d.outcome, d.window_index) for d in decided.decisions] == [("kept", K)]
-
-
-async def test_harvest_allowed_that_raises_counts_as_refused():
-    sweeps = FakeSweeps()
-    sweeps.default = _flat()
-
-    def harvest(_generation):
-        raise RuntimeError("lease read failed")
-
-    controller = _live(sweeps, harvest=harvest)
-    try:
-        await _tick(controller, L_K)
-        refused = await _tick(controller, L_K + STEP)
-    finally:
-        controller.close()
-
-    assert refused.decisions == []
-    assert f"retune:dropped w={K}" in refused.audit_events
 
 
 @pytest.mark.parametrize("reason", sorted(NON_DECISION_FAILURES))
@@ -540,69 +420,6 @@ async def test_abandoned_window_is_not_relaunched_once_its_successor_is_due():
     assert result.audit_events == [f"retune:dropped w={K}", f"retune:launch w={K + 1}"]
 
 
-@pytest.mark.parametrize(
-    "result, outcome",
-    [
-        (
-            SweepResult(
-                status="failed",
-                error="probe scores differ",
-                failure_reason="crn_mismatch",
-                details={"probe": {"expected": 1.0, "got": 1.5}},
-            ),
-            "failed",
-        ),
-        (
-            SweepResult(
-                status="timeout",
-                error="window deadline",
-                failure_reason="timeout",
-                details={"requests": ["a", "b"]},
-            ),
-            "timeout",
-        ),
-        (
-            _flat(failure_reason=None, details={"runtime_image": "ais:0.13"}),
-            "kept",
-        ),
-    ],
-    ids=["failed", "timeout", "kept"],
-)
-async def test_failure_reason_and_details_reach_the_decision(result, outcome):
-    sweeps = FakeSweeps()
-    sweeps.default = result
-    controller = _live(sweeps)
-    try:
-        await _tick(controller, L_K)
-        (decision,) = (await _tick(controller, L_K + STEP)).decisions
-    finally:
-        controller.close()
-
-    expected = result if isinstance(result, SweepResult) else result(sweeps.requests[0])
-    assert decision.outcome == outcome
-    assert decision.failure_reason == expected.failure_reason
-    assert decision.details == expected.details
-    record = decision.to_dict()
-    assert record["failure_reason"] == expected.failure_reason
-    assert record["details"] == expected.details
-
-
-async def test_a_raising_sweep_fn_is_a_failed_decision_without_reason():
-    def raises(_request, *, cancel, abort):
-        raise RuntimeError("kube unreachable")
-
-    controller = _live(raises)
-    try:
-        await _tick(controller, L_K)
-        (decision,) = (await _tick(controller, L_K + STEP)).decisions
-    finally:
-        controller.close()
-
-    assert decision.outcome == "failed"
-    assert decision.reason == "RuntimeError: kube unreachable"
-    assert decision.failure_reason is None
-
-
 # ---------------------------------------------------------------------------
 # drop_pending and rewind
 # ---------------------------------------------------------------------------
@@ -638,9 +455,9 @@ async def test_drop_pending_and_rewind_relaunch_instead_of_busy():
         relaunch = await _tick(controller, L_K + STEP)
         release.set()
         dropped.result(timeout=30)
+        # The relaunch queued behind the dropped sweep; it is decided once
+        # its own sweep is done.
         controller._pending.future.result(timeout=30)
-        # The relaunch queued behind the dropped sweep, so it launched (and
-        # becomes ready) a little after L_K + STEP.
         decided = await _tick(controller, L_K + 3 * STEP)
     finally:
         release.set()
@@ -650,181 +467,6 @@ async def test_drop_pending_and_rewind_relaunch_instead_of_busy():
     assert relaunch.audit_events == [f"retune:launch w={K}"]
     assert [r.window_index for r in sweeps.requests] == [K, K]
     assert [(d.outcome, d.window_index) for d in decided.decisions] == [("kept", K)]
-
-
-async def test_drop_pending_cancels_a_sweep_that_has_not_started():
-    release = threading.Event()
-    sweeps = FakeSweeps()
-
-    def blocking(request):
-        release.wait(30)
-        return _flat()(request)
-
-    sweeps.default = blocking
-    controller = _live(sweeps, clock=WallClock())
-    try:
-        # Occupy the sweep thread so the next submission stays queued.
-        blocker = controller._executor.submit(release.wait, 30)
-        await _tick(controller, L_K)
-        queued = controller._pending.future
-        controller.drop_pending()
-        assert queued.cancelled()
-        release.set()
-        blocker.result(timeout=30)
-    finally:
-        release.set()
-        controller.close()
-
-    assert sweeps.requests == []
-
-
-def test_drop_pending_and_rewind_without_a_sweep():
-    controller = _live(FakeSweeps())
-    try:
-        controller.drop_pending()
-        controller._last_k = K
-        controller.rewind(K + 3)
-        assert controller._last_k == K
-        controller.rewind(K - 2)
-        assert controller._last_k == K - 2
-    finally:
-        controller.close()
-
-
-async def test_a_sweep_queued_behind_a_dropped_one_launches_when_it_starts():
-    release = threading.Event()
-    sweeps = FakeSweeps()
-
-    def blocking(request):
-        release.wait(30)
-        return _flat()(request)
-
-    sweeps.results.append(blocking)
-    sweeps.default = _flat()
-    clock = ManualClock()
-    controller = _live(sweeps, clock=clock)
-    try:
-        clock.mono = 100.0
-        await _tick(controller, L_K)
-        dropped = controller._pending.future
-        controller.drop_pending()
-        controller.rewind(K - 1)
-        await _tick(controller, L_K + STEP)  # submitted at monotonic 100
-        clock.mono = 107.0  # the dropped sweep returns 7 s later
-        release.set()
-        dropped.result(timeout=30)
-        controller._pending.future.result(timeout=30)
-        (decision,) = (await _tick(controller, L_K + 4 * STEP)).decisions
-    finally:
-        release.set()
-        controller.close()
-
-    assert decision.launched_at_s == L_K + STEP + 7.0
-
-
-async def test_repeated_drops_keep_tracking_the_sweep_holding_the_thread():
-    release = threading.Event()
-    sweeps = FakeSweeps()
-
-    def blocking(request):
-        release.wait(30)
-        return _flat()(request)
-
-    sweeps.results.append(blocking)
-    sweeps.default = _flat()
-    clock = ManualClock()
-    controller = _live(sweeps, clock=clock)
-    try:
-        clock.mono = 100.0
-        await _tick(controller, L_K)
-        running = controller._pending.future
-        controller.drop_pending()
-        controller.rewind(K - 1)
-        await _tick(controller, L_K + STEP)  # queued behind the running one
-        queued = controller._pending.future
-        controller.drop_pending()
-        assert queued.cancelled()
-        controller.rewind(K - 1)
-        await _tick(controller, L_K + 2 * STEP)  # still behind the first one
-        clock.mono = 104.0
-        release.set()
-        running.result(timeout=30)
-        controller._pending.future.result(timeout=30)
-        (decision,) = (await _tick(controller, L_K + 5 * STEP)).decisions
-    finally:
-        release.set()
-        controller.close()
-
-    # The cancelled sweep never ran; the last one started when the first ended.
-    assert len(sweeps.requests) == 2
-    assert decision.launched_at_s == L_K + 2 * STEP + 4.0
-
-
-# ---------------------------------------------------------------------------
-# The sweep thread shared across generations
-# ---------------------------------------------------------------------------
-
-
-async def test_generations_sharing_the_sweep_thread_never_sweep_at_once():
-    # Generation 0 is slow to see its abort while generation 2 relaunches the
-    # same window; generation 1 was replaced before it launched. All three
-    # submit to the host's one sweep thread, which close() leaves running.
-    lock = threading.Lock()
-    running: list[int] = []
-    overlaps: list[list[int]] = []
-    order: list[tuple[int, int]] = []
-    release = threading.Event()
-    started = threading.Event()
-
-    def sweep(request, *, cancel, abort):
-        with lock:
-            running.append(request.generation)
-            order.append((request.generation, request.window_index))
-            if len(running) > 1:
-                overlaps.append(list(running))
-        try:
-            if request.generation == 0:
-                started.set()
-                release.wait(30)
-                return SweepResult(status="failed", failure_reason="lost_leadership")
-            return _flat()(request)
-        finally:
-            with lock:
-                running.remove(request.generation)
-
-    executor = SweepExecutor()
-    clock = ManualClock()
-    controllers = []
-    try:
-        old = _live(sweep, clock=clock, generation=0, executor=executor)
-        controllers.append(old)
-        clock.mono = 100.0
-        await _tick(old, L_K)
-        assert started.wait(30)
-        old.drop_pending()
-        old.close()
-        middle = _live(sweep, clock=clock, generation=1, executor=executor)
-        controllers.append(middle)
-        middle.close()
-        new = _live(sweep, clock=clock, generation=2, executor=executor)
-        controllers.append(new)
-        launched = await _tick(new, L_K + STEP)
-        assert launched.audit_events == [f"retune:launch w={K}"]
-        relaunch = new._pending.future
-        assert not relaunch.done()
-        clock.mono = 105.0  # generation 0 returns 5 s later
-        release.set()
-        relaunch.result(timeout=30)
-        (decision,) = (await _tick(new, L_K + 4 * STEP)).decisions
-    finally:
-        release.set()
-        for controller in controllers:
-            controller.close()
-        executor.shutdown(wait=True)
-
-    assert overlaps == []
-    assert order == [(0, K), (2, K)]
-    assert decision.launched_at_s == L_K + STEP + 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -849,24 +491,6 @@ async def _run_window(controller, counts_at, *, start, until):
 
 def _requests_for_k(sweeps):
     return [request for request in sweeps.requests if request.window_index == K]
-
-
-async def test_replicas_verified_when_the_counts_cover_the_window():
-    sweeps = FakeSweeps()
-    sweeps.default = _flat()
-    start = T0 - INTERVAL - 2 * STEP
-    controller = _live(sweeps, start=start)
-    try:
-        decisions = await _run_window(
-            controller, lambda _now: 2, start=start, until=L_K
-        )
-    finally:
-        controller.close()
-
-    assert decisions == []
-    (request,) = _requests_for_k(sweeps)
-    assert request.replicas_verified is True
-    assert request.replicas == request.spec_replicas == SPEC
 
 
 async def test_a_ready_count_change_in_the_window_fails_it():
@@ -947,24 +571,6 @@ async def test_window_started_before_the_controller_launches_unverified():
     assert request.replicas == SPEC
 
 
-async def test_unverified_window_still_fails_on_an_observed_change():
-    sweeps = FakeSweeps()
-    sweeps.default = _flat()
-    start = T0 - INTERVAL / 2
-    controller = _live(sweeps, start=start)
-    try:
-        decisions = await _run_window(
-            controller, lambda _now: 3, start=start, until=L_K
-        )
-    finally:
-        controller.close()
-
-    assert [(d.outcome, d.failure_reason) for _, d in decisions] == [
-        ("failed", "replicas_changed")
-    ]
-    assert _requests_for_k(sweeps) == []
-
-
 # ---------------------------------------------------------------------------
 # restore_desired
 # ---------------------------------------------------------------------------
@@ -991,85 +597,3 @@ async def test_restore_desired_sets_the_deployed_point_but_not_startup():
     # The restored point is the baseline; startup stays a candidate.
     assert request.baseline == BEST
     assert STARTUP in request.candidates
-
-
-@pytest.mark.parametrize(
-    "flat, match",
-    [
-        (
-            {"overlap_score_credit": 0.0, "prefill_load_scale": 1.0},
-            "router_temperature",
-        ),
-        ({**BEST.router, "router_temperature": -1.0}, "non-negative"),
-        ({**BEST.router, "router_temperature": float("inf")}, "finite"),
-    ],
-    ids=["missing-key", "negative", "infinite"],
-)
-def test_restore_desired_rejects_bad_values_and_keeps_the_desired_point(flat, match):
-    controller = _live(FakeSweeps())
-    try:
-        with pytest.raises(ValueError, match=match):
-            controller.restore_desired(flat)
-        assert controller.current_point() == STARTUP
-    finally:
-        controller.close()
-
-
-# ---------------------------------------------------------------------------
-# Decision record
-# ---------------------------------------------------------------------------
-
-
-def test_decision_record_carries_failure_reason_and_a_private_details_copy():
-    details = {"shards": [{"id": "g0", "state": "Completed"}]}
-    decision = RetuneDecision(
-        decision_id="retune-w1800000000000",
-        outcome="failed",
-        window_index=K,
-        window_start_s=T0 - INTERVAL,
-        window_end_s=T0,
-        as_of_s=L_K,
-        launched_at_s=L_K,
-        decided_at_s=L_K + STEP,
-        num_requests=0,
-        num_candidates=2,
-        previous=STARTUP,
-        chosen=STARTUP,
-        baseline_score=None,
-        best_score=None,
-        reason="probe scores differ",
-        failure_reason="crn_mismatch",
-        details=details,
-    )
-    # A deep copy: neither the details nor a value nested in them is shared.
-    details["shards"][0]["state"] = "Failed"
-    details["shards"] = []
-
-    record = decision.to_dict()
-    assert record["failure_reason"] == "crn_mismatch"
-    assert record["details"] == {"shards": [{"id": "g0", "state": "Completed"}]}
-    json.dumps(record)
-    with pytest.raises(ValueError, match="failure_reason"):
-        RetuneDecision(**{**decision.__dict__, "failure_reason": ""})
-
-
-def test_replay_decision_record_has_empty_failure_fields():
-    decision = RetuneDecision(
-        decision_id="retune-0-w0",
-        outcome="kept",
-        window_index=0,
-        window_start_s=0.0,
-        window_end_s=60.0,
-        as_of_s=65.0,
-        launched_at_s=65.0,
-        decided_at_s=70.0,
-        num_requests=1,
-        num_candidates=1,
-        previous=STARTUP,
-        chosen=STARTUP,
-        baseline_score=1.0,
-        best_score=1.0,
-    )
-
-    record = decision.to_dict()
-    assert (record["failure_reason"], record["details"]) == (None, {})

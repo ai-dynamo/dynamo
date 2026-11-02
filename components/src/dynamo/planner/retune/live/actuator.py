@@ -112,6 +112,8 @@ ROUTER_CONTROL_TIMEOUT_S = 5.0
 DEFAULT_CLIENT_TIMEOUT_S = ROUTER_CONTROL_TIMEOUT_S + 3.0
 # Pod phases after which no container runs again.
 _FINISHED_POD_PHASES = frozenset({"Succeeded", "Failed"})
+# (pod uid, restarts): one run of a frontend; its routers live only as long.
+_PodInstance = tuple[str, Optional[int]]
 
 
 # ----------------------------------------------------------------- client
@@ -341,8 +343,10 @@ class RouterActuator:
         self._admin_disabled_rounds = int(admin_disabled_rounds)
         # router_id -> initial configuration latched by this process.
         self._latched: dict[str, dict[str, float]] = {}
-        # router_id -> name of the pod it was last seen on.
-        self._router_pod: dict[str, str] = {}
+        # router_id -> the pod instances it may run on: the one it was last
+        # seen on, or for an initial not seen by this process, every
+        # frontend listed when it was first missing.
+        self._router_hosts: dict[str, frozenset[_PodInstance]] = {}
         # router_id -> signature of a write the router rejected with 422;
         # the same write is not retried until the target changes.
         self._rejected: dict[str, str] = {}
@@ -591,7 +595,7 @@ class RouterActuator:
                 continue
             if router.worker_type not in self._startup_maps:
                 continue
-            self._router_pod[router.router_id] = pod.name
+            self._router_hosts[router.router_id] = frozenset({_instance(pod)})
             if router.configuration is None:
                 scoped.append(router)
                 continue
@@ -796,33 +800,34 @@ class RouterActuator:
     ) -> set[str]:
         """Routers observed this round plus known ones not provably gone.
 
-        A known router is gone when its pod no longer exists (or has
-        finished: Succeeded/Failed) or answered GET without it; with an
-        unknown pod, when every live frontend with an IP answered GET this
-        round.
+        A GET answers without the routers whose control call timed out or
+        failed (``router_policy.rs``), so a router missing from its pod's
+        answer may still be there. A known router is gone only once every
+        pod instance it may run on is gone: no longer listed, finished
+        (Succeeded/Failed), or restarted (a restarted frontend registers new
+        routers).
         """
 
         observed = {
             router.router_id for outcome in outcomes for router in outcome.routers
         }
-        existing = {pod.name for pod in pods if pod.phase not in _FINISHED_POD_PHASES}
-        answered = {outcome.pod.name for outcome in outcomes if outcome.ok}
-        complete = all(pod.name in answered for pod in pods if _serving(pod) and pod.ip)
+        present = frozenset(
+            _instance(pod) for pod in pods if pod.phase not in _FINISHED_POD_PHASES
+        )
         seen = set(observed)
         for router_id in set(state.initials) | set(self._latched):
             if router_id in observed:
                 continue
-            pod_name = self._router_pod.get(router_id)
-            if pod_name is None:
-                gone = complete
-            else:
-                gone = pod_name not in existing or pod_name in answered
-            if not gone:
+            # A persisted initial this process has not seen on any pod: its
+            # router runs on a frontend listed now (a pod never comes back),
+            # or on none.
+            hosts = self._router_hosts.setdefault(router_id, present)
+            if hosts & present:
                 seen.add(router_id)
         return seen
 
     def _prune(self, seen: set[str]) -> None:
-        for cache in (self._latched, self._router_pod, self._rejected):
+        for cache in (self._latched, self._router_hosts, self._rejected):
             for router_id in [key for key in cache if key not in seen]:
                 del cache[router_id]
 
@@ -841,6 +846,12 @@ class RouterActuator:
 
 
 # ---------------------------------------------------------------- helpers
+
+
+def _instance(pod: PodInfo) -> _PodInstance:
+    """One run of a pod's frontend: its uid and container restart count."""
+
+    return (pod.uid, pod.restarts)
 
 
 def _serving(pod: PodInfo) -> bool:

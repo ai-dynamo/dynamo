@@ -220,6 +220,19 @@ def _float_map(value: Any, what: str) -> dict[str, float]:
     return out
 
 
+def _writable_entry(item: Any) -> bool:
+    """A history entry that ``canonical_json`` can write back: a JSON object
+    without NaN or infinities (``json.loads`` accepts both)."""
+
+    if not isinstance(item, Mapping):
+        return False
+    try:
+        canonical_json(item)
+    except ValueError:
+        return False
+    return True
+
+
 def _nested_map(value: Any, what: str) -> dict[str, dict[str, float]]:
     if not isinstance(value, Mapping):
         raise StateFormatError(f"{what} must be an object")
@@ -309,6 +322,9 @@ class RetuneState:
         mode = body.get("mode")
         if mode is not None and mode not in _MODES:
             raise StateFormatError(f"state.mode must be one of {_MODES} or null")
+        fingerprint = body.get("fingerprint")
+        if fingerprint is not None and not isinstance(fingerprint, str):
+            raise StateFormatError("state.fingerprint must be a string or null")
         deploy_seq = body.get("deploy_seq", 0)
         if isinstance(deploy_seq, bool) or not isinstance(deploy_seq, int):
             raise StateFormatError("state.deploy_seq must be an integer")
@@ -328,11 +344,17 @@ class RetuneState:
                 logger.warning("retune state: unreadable history annotation dropped")
                 parsed = []
             if isinstance(parsed, list):
-                history = [dict(item) for item in parsed if isinstance(item, Mapping)]
+                # A NaN in one entry would make every later write raise.
+                history = [dict(item) for item in parsed if _writable_entry(item)]
+                if len(history) < len(parsed):
+                    logger.warning(
+                        "retune state: %d malformed history entries dropped",
+                        len(parsed) - len(history),
+                    )
         return cls(
             dgd_uid=dgd_uid,
             leader_term=str(body.get("leader_term") or ""),
-            fingerprint=body.get("fingerprint"),
+            fingerprint=fingerprint,
             mode=mode,
             rollback_pending=bool(body.get("rollback_pending", False)),
             deploy_seq=int(deploy_seq),
@@ -630,8 +652,18 @@ class StateStore:
             lease=replaced,
         )
 
-    def delete(self) -> None:
-        self._kube.delete_lease(self.name, timeout_s=self._timeout_s)
+    def delete(self, snapshot: StateSnapshot) -> None:
+        """Delete the state Lease read or written as ``snapshot``.
+
+        Conditional on its resourceVersion: a Lease changed since (another
+        term claimed it) raises ``KubeConflict`` and stays.
+        """
+
+        self._kube.delete_lease(
+            self.name,
+            resource_version=snapshot.resource_version,
+            timeout_s=self._timeout_s,
+        )
 
     def _new_body(self, annotations: Mapping[str, str]) -> dict[str, Any]:
         return {
@@ -706,6 +738,8 @@ class LeaseLeadership:
         self._held = False
         self._leader_until = -math.inf
         self.transitions = 0
+        # resourceVersion of this process's last successful write.
+        self.resource_version: Optional[str] = None
         # (holderIdentity, resourceVersion) of a foreign lease, and when this
         # process first saw it unchanged.
         self._observed: Optional[tuple[str, Optional[str]]] = None
@@ -779,7 +813,7 @@ class LeaseLeadership:
             new_holder = (updated.get("spec") or {}).get("holderIdentity") or ""
             if new_holder != self.identity:
                 return self._lose()
-            self._lead(t_send, transitions)
+            self._lead(t_send, transitions, updated)
             return "renewed" if was_held else "acquired"
 
         lost = self.held
@@ -838,11 +872,12 @@ class LeaseLeadership:
 
     # ------------------------------------------------------------ helpers
 
-    def _lead(self, t_send: float, transitions: int) -> None:
+    def _lead(self, t_send: float, transitions: int, written: dict[str, Any]) -> None:
         with self._lock:
             self._held = True
             self._leader_until = t_send + self.lease_duration_s - self.margin_s
         self.transitions = transitions
+        self.resource_version = (written.get("metadata") or {}).get("resourceVersion")
         self._observed = None
 
     def _lose(self) -> LeaseStep:
@@ -870,7 +905,7 @@ class LeaseLeadership:
             },
         }
         try:
-            self._kube.create_lease(body, timeout_s=self._timeout_s)
+            created = self._kube.create_lease(body, timeout_s=self._timeout_s)
         except (KubeAlreadyExists, KubeConflict):
             return self._lose()
         except KubeError as error:
@@ -878,7 +913,7 @@ class LeaseLeadership:
                 "retune leadership: creating %s failed: %s", self.name, error
             )
             return "error"
-        self._lead(t_send, 0)
+        self._lead(t_send, 0, created)
         logger.info(
             "retune leadership: acquired new lease %s as %s", self.name, self.identity
         )
@@ -889,7 +924,9 @@ class LeaseLeadership:
     ) -> LeaseStep:
         body = self._body(lease, transitions=transitions + 1, acquire=True)
         try:
-            self._kube.replace_lease(self.name, body, timeout_s=self._timeout_s)
+            written = self._kube.replace_lease(
+                self.name, body, timeout_s=self._timeout_s
+            )
         except KubeConflict:
             return "lost" if lost else "standby"
         except KubeError as error:
@@ -897,7 +934,7 @@ class LeaseLeadership:
                 "retune leadership: taking over %s failed: %s", self.name, error
             )
             return "error"
-        self._lead(t_send, transitions + 1)
+        self._lead(t_send, transitions + 1, written)
         logger.info(
             "retune leadership: acquired lease %s as %s (transitions=%d)",
             self.name,

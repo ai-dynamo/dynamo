@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import sys
 import types
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -106,22 +105,11 @@ class StubController:
             raise self.close_error
 
 
-class StubSweepExecutor(ThreadPoolExecutor):
-    """The live sweep thread a host hands the stub (which never sweeps)."""
-
-    def __init__(self) -> None:
-        super().__init__(max_workers=1)
-
-    def busy(self) -> bool:
-        return False
-
-
 def install_stub_controller(monkeypatch) -> type[StubController]:
     """Install ``StubController`` as ``dynamo.planner.retune.controller``."""
 
     module = types.ModuleType(CONTROLLER_MODULE)
     module.RetuneController = StubController  # type: ignore[attr-defined]
-    module.SweepExecutor = StubSweepExecutor  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, CONTROLLER_MODULE, module)
     StubController.instances = []
     StubController.construct_error = None

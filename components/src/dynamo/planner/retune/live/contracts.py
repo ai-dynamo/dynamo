@@ -137,6 +137,9 @@ class PodInfo:
     http_port: Optional[int] = None
     # ``status.phase`` (Pending, Running, Succeeded, Failed, Unknown).
     phase: Optional[str] = None
+    # ``restartCount`` of the ``main`` container, if reported. A restarted
+    # frontend registers new routers (new router ids).
+    restarts: Optional[int] = None
 
 
 class RetuneKube(Protocol):
@@ -204,7 +207,15 @@ class RetuneKube(Protocol):
         """Update with ``body['metadata']['resourceVersion']``; 409 -> KubeConflict."""
         ...
 
-    def delete_lease(self, name: str, *, timeout_s: float = 10.0) -> None:
+    def delete_lease(
+        self,
+        name: str,
+        *,
+        resource_version: Optional[str] = None,
+        timeout_s: float = 10.0,
+    ) -> None:
+        """Missing Leases are not an error. With ``resource_version`` the
+        delete is conditional on it; a changed Lease -> KubeConflict."""
         ...
 
 
@@ -322,7 +333,8 @@ class ActuationReport:
     converged: bool
     # router_id -> configuration latched this round (revision 0 or reset).
     new_initials: dict[str, dict[str, float]] = field(default_factory=dict)
-    # router_ids seen this round (to prune stale initials).
+    # router_ids seen this round, or known and not provably gone; the
+    # initials of every other router are pruned.
     seen_router_ids: frozenset[str] = frozenset()
     # P14: every known initial equals startup_maps[worker_type].
     parity_ok: Optional[bool] = None

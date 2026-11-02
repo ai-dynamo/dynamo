@@ -124,7 +124,17 @@ def _pod_info(pod: Any) -> PodInfo:
         labels=dict(metadata.labels or {}),
         http_port=_http_port(pod.spec),
         phase=status.phase if status is not None else None,
+        restarts=_main_restarts(status),
     )
+
+
+def _main_restarts(status: Any) -> Optional[int]:
+    """``restartCount`` of the main container, if its status is reported."""
+
+    for container in (status.container_statuses if status is not None else None) or ():
+        if container.name == MAIN_CONTAINER_NAME:
+            return int(container.restart_count)
+    return None
 
 
 def _http_port(spec: Any) -> Optional[int]:
@@ -371,9 +381,21 @@ class KubernetesRetuneKube:
             ),
         )
 
-    def delete_lease(self, name: str, *, timeout_s: float = 10.0) -> None:
-        """Missing Leases are not an error."""
+    def delete_lease(
+        self,
+        name: str,
+        *,
+        resource_version: Optional[str] = None,
+        timeout_s: float = 10.0,
+    ) -> None:
+        """Missing Leases are not an error. ``resource_version`` makes the
+        delete conditional (a 409 -> ``KubeConflict`` when it changed)."""
 
+        options = None
+        if resource_version is not None:
+            options = client.V1DeleteOptions(
+                preconditions=client.V1Preconditions(resource_version=resource_version)
+            )
         try:
             self._call(
                 "delete",
@@ -381,6 +403,7 @@ class KubernetesRetuneKube:
                 lambda: self._coordination.delete_namespaced_lease(
                     name=name,
                     namespace=self.namespace,
+                    body=options,
                     _request_timeout=request_timeout(timeout_s),
                 ),
             )

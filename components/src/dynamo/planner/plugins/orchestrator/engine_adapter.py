@@ -61,7 +61,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Sequence
 
@@ -72,7 +72,7 @@ from dynamo.planner.monitoring.signal_health import PlannerSignalHealth
 if TYPE_CHECKING:
     import grpc.aio
 
-    from dynamo.planner.retune.controller import RetuneController, SweepExecutor
+    from dynamo.planner.retune.controller import RetuneController
     from dynamo.planner.retune.live.contracts import HarvestAllowed, LaunchGate
 
 from dynamo.planner.core.budget import (
@@ -361,7 +361,7 @@ class OrchestratorEngineAdapter:
         # Live: the one sweep thread every controller generation submits to,
         # so a rebuilt controller's sweep queues behind a dropped one and two
         # generations never sweep at once.
-        self._retune_executor: Optional[SweepExecutor] = None
+        self._retune_executor: Optional[ThreadPoolExecutor] = None
         if retune_hooks is None or self._config.retune is None:
             self._retune = self._build_retune_controller(retune_inputs)
         elif retune_inputs is None:
@@ -408,7 +408,7 @@ class OrchestratorEngineAdapter:
         # of the import chain of planners that never enable retune, and avoids
         # an import cycle through dynamo.replay, whose planner host imports
         # this module.
-        from dynamo.planner.retune.controller import RetuneController, SweepExecutor
+        from dynamo.planner.retune.controller import RetuneController
 
         hooks = self._retune_hooks
         if hooks is None:
@@ -420,7 +420,9 @@ class OrchestratorEngineAdapter:
                 self._scale_interval,
             )
         if self._retune_executor is None:
-            self._retune_executor = SweepExecutor()
+            self._retune_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="planner-retune"
+            )
         return RetuneController(
             self._config,
             retune_inputs,

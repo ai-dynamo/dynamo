@@ -1257,7 +1257,7 @@ class LiveRetuneSupervisor:
                     snapshot.state.dgd_uid,
                     self._dgd.uid,
                 )
-                await self._io(self._store.delete)
+                await self._io(self._store.delete, snapshot)
                 await self._delete_foreign_requests(snapshot.state.dgd_uid)
                 snapshot = StateSnapshot(state=None, resource_version=None, lease=None)
             elif snapshot.corrupt:
@@ -1771,10 +1771,19 @@ class LiveRetuneSupervisor:
         Only as the initialized leader of ``epoch``, checked again before
         every delete: a lost term (a failed state write of this round) or
         lost leadership stops it, so it never deletes under another leader.
+        The local clock is not the only fence: each Lease delete is
+        conditional on the resourceVersion this process last read or wrote,
+        so it fails once another term has claimed the state or taken over
+        the leadership Lease.
         """
 
-        state = self.state
-        if self.decommissioned or state is None or state.rollback_pending:
+        snapshot = self._snapshot
+        if (
+            self.decommissioned
+            or snapshot is None
+            or snapshot.state is None
+            or snapshot.state.rollback_pending
+        ):
             return
         if not self._reconcile_allowed(epoch):
             return
@@ -1792,15 +1801,28 @@ class LiveRetuneSupervisor:
                 await self._io(self._kube.delete_request, name)
             if not self._reconcile_allowed(epoch):
                 return
-            await self._io(self._store.delete)
+            await self._io(self._store.delete, snapshot)
+        except KubeConflict:
+            logger.warning(
+                "retune clean-up: the state changed since this term read it; "
+                "not deleting it"
+            )
+            self._request_reinit("the state changed under the clean-up")
+            return
         except (KubeError, asyncio.TimeoutError) as error:
             logger.warning("retune clean-up: deleting Requests/state failed: %s", error)
             return
         if not self._reconcile_allowed(epoch):
             return
         try:
-            await self._io(self._kube.delete_lease, self._leadership.name)
+            await self._io(
+                self._kube.delete_lease,
+                self._leadership.name,
+                resource_version=self._leadership.resource_version,
+            )
         except (KubeError, asyncio.TimeoutError) as error:
+            # A KubeConflict: the Lease changed since this process wrote it.
+            # It stays for the DGD's garbage collection or a later clean-up.
             logger.warning("retune clean-up: deleting the lease failed: %s", error)
         self._leadership.drop()
         self._initialized = False

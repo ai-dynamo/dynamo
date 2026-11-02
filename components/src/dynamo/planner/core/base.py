@@ -58,7 +58,7 @@ from dynamo.planner.reconfiguration import (
     runtime_candidate_errors,
     runtime_configuration_errors,
 )
-from dynamo.planner.retune.live.contracts import KubeError
+from dynamo.planner.retune.live.contracts import KubeError, KubeNotFound
 from dynamo.planner.retune.live.kube import KubernetesRetuneKube
 from dynamo.planner.retune.live.state import find_retune_leases
 from dynamo.runtime import DistributedRuntime
@@ -138,6 +138,9 @@ _CONFIG_LOCK_TIMEOUT_SECONDS = 10.0
 # The background check for a removed live retune reads two Leases, then,
 # only if one exists, the DGD; each Kubernetes call is bounded by this.
 _LEGACY_RETUNE_CALL_TIMEOUT_SECONDS = 10.0
+# The check runs once per start; a transient API error is retried once after
+# this long (403 and 404 are not).
+_LEGACY_RETUNE_RETRY_SECONDS = 15.0
 # A tick waits briefly for the common fast submission path, then leaves the
 # task running. It is deliberately not cancelled: a remote request may have
 # been accepted even when its response has not arrived, so retrying could
@@ -258,6 +261,7 @@ class NativePlannerBase:
         # whether a removed live retune left its Leases, and cleans up after it.
         self._legacy_retune_task: Optional[asyncio.Task[None]] = None
         self._legacy_retune_cleanup: Optional[RetuneCleanupHandle] = None
+        self._retune_lease_found = asyncio.Event()
 
     async def _async_init(self) -> None:
         # Shutdown is safe for a partially initialized environment and is
@@ -271,6 +275,7 @@ class NativePlannerBase:
                 # Before the first _ensure_engine (regression bootstrap builds
                 # the engine): the engine takes the live retune inputs/hooks.
                 self._live_retune = await self._build_live_retune()
+                self._retune_lease_found.set()
 
             await self._bootstrap_regression()
             await self._bootstrap_engine_plugins_if_needed()
@@ -321,6 +326,14 @@ class NativePlannerBase:
 
         return self._live_retune is not None or self._legacy_retune_task is not None
 
+    @property
+    def retune_lease_found(self) -> asyncio.Event:
+        """Set once this planner may hold a retune Lease: at start with live
+        retune configured, or when the clean-up check of a removed one finds
+        a Lease. ``__main__`` installs its SIGTERM handler then."""
+
+        return self._retune_lease_found
+
     async def _build_live_retune(self) -> LiveRetuneHandle:
         return await _live_retune_bootstrap().build_live_retune(self)
 
@@ -351,31 +364,55 @@ class NativePlannerBase:
         Reads the DGD's two retune Leases; only when one exists does it load
         the live retune stack, which rolls back the routers that retune
         deployed and then deletes its Requests and Leases. Without Lease RBAC
-        (the default chart) the read answers 403, logged at debug.
+        (the default chart) the read answers 403, logged at debug. Any other
+        API error but a 404 is retried once.
         """
 
         kube = KubernetesRetuneKube.from_kube_api(connector.kube_api)
-        try:
-            leases = await asyncio.to_thread(
-                find_retune_leases,
-                kube,
-                connector.parent_dgd_name,
-                timeout_s=_LEGACY_RETUNE_CALL_TIMEOUT_SECONDS,
-            )
-            if not leases:
-                return
-            cleanup = await _live_retune_bootstrap().build_legacy_cleanup(
-                self, kube, timeout_s=_LEGACY_RETUNE_CALL_TIMEOUT_SECONDS
-            )
-        except KubeError as error:
-            # ``status`` is set by the Kubernetes client wrapper only.
-            if getattr(error, "status", None) == 403:
-                logger.debug("Live retune legacy clean-up check skipped: %s", error)
-            else:
-                logger.info("Live retune legacy clean-up skipped: %s", error)
+        cleanup: Optional[RetuneCleanupHandle] = None
+        for retry in (True, False):
+            try:
+                cleanup = await self._find_legacy_retune(
+                    kube, connector.parent_dgd_name
+                )
+                break
+            except KubeError as error:
+                # ``status`` is set by the Kubernetes client wrapper only.
+                if getattr(error, "status", None) == 403:
+                    logger.debug("Live retune legacy clean-up check skipped: %s", error)
+                    return
+                if not retry or isinstance(error, KubeNotFound):
+                    logger.info("Live retune legacy clean-up skipped: %s", error)
+                    return
+                logger.info(
+                    "Live retune legacy clean-up check failed; retrying in %.0f s: %s",
+                    _LEGACY_RETUNE_RETRY_SECONDS,
+                    error,
+                )
+                await asyncio.sleep(_LEGACY_RETUNE_RETRY_SECONDS)
+        if cleanup is None:
             return
         self._legacy_retune_cleanup = cleanup
         await cleanup.start(self)
+
+    async def _find_legacy_retune(
+        self, kube: KubernetesRetuneKube, dgd_name: str
+    ) -> Optional[RetuneCleanupHandle]:
+        """The clean-up of a removed live retune; ``None`` without its Leases."""
+
+        leases = await asyncio.to_thread(
+            find_retune_leases,
+            kube,
+            dgd_name,
+            timeout_s=_LEGACY_RETUNE_CALL_TIMEOUT_SECONDS,
+        )
+        if not leases:
+            return None
+        # The clean-up takes the leadership Lease: stop cleanly on SIGTERM.
+        self._retune_lease_found.set()
+        return await _live_retune_bootstrap().build_legacy_cleanup(
+            self, kube, timeout_s=_LEGACY_RETUNE_CALL_TIMEOUT_SECONDS
+        )
 
     async def replace_live_retune(
         self,

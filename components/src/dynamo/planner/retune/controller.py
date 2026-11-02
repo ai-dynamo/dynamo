@@ -41,8 +41,8 @@ behaviour is unchanged:
   router values.
 - ``executor`` is the live host's single sweep thread, shared by every
   controller generation it builds, so two generations never sweep at once:
-  a launch queues behind a dropped sweep that still runs, and its launch
-  time moves to when the sweep really started.
+  a launch queues behind a dropped sweep that still runs. Harvest waits for
+  the queued sweep's future, so the queue delay needs no bookkeeping.
 """
 
 from __future__ import annotations
@@ -109,35 +109,6 @@ _GATE_RETRY_REASONS = frozenset({"not_leader", "not_ready"})
 SweepFn = Callable[..., SweepResult]
 
 
-class SweepExecutor(ThreadPoolExecutor):
-    """The single sweep thread; ``busy`` while a submitted call is unfinished.
-
-    A live host shares one across the controller generations it builds, so
-    their sweeps run one at a time in submission order.
-    """
-
-    def __init__(self) -> None:
-        super().__init__(max_workers=1, thread_name_prefix="planner-retune")
-        self._lock = threading.Lock()
-        self._unfinished = 0
-
-    def busy(self) -> bool:
-        with self._lock:
-            return self._unfinished > 0
-
-    def submit(self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Future:
-        future = super().submit(fn, *args, **kwargs)
-        with self._lock:
-            self._unfinished += 1
-        # Runs at once if the call already finished (or was cancelled).
-        future.add_done_callback(self._finished)
-        return future
-
-    def _finished(self, _future: Future) -> None:
-        with self._lock:
-            self._unfinished -= 1
-
-
 @dataclass(frozen=True)
 class RetuneTickResult:
     """What one ``on_tick`` call hands back to the engine.
@@ -167,11 +138,6 @@ class _PendingSweep:
     ready_at_s: float | None
     # Set by the supervisor to stop this sweep (lost leadership, rebuild).
     abort: threading.Event | None = None
-    # Submitted while the sweep thread was still busy with a dropped sweep
-    # (of this or an earlier controller generation):
-    # ``(submitted_monotonic, [started_monotonic])``. ``launched_at_s`` then
-    # moves to the moment the sweep really started.
-    queued: tuple[float, list[float]] | None = None
 
 
 class RetuneController:
@@ -208,7 +174,7 @@ class RetuneController:
         launch_gate: LaunchGate | None = None,
         harvest_allowed: HarvestAllowed | None = None,
         generation: int = 0,
-        executor: SweepExecutor | None = None,
+        executor: ThreadPoolExecutor | None = None,
     ) -> None:
         retune = config.retune
         if retune is None:
@@ -293,7 +259,9 @@ class RetuneController:
         self._pending: _PendingSweep | None = None
         self._cancel = threading.Event()
         self._owns_executor = executor is None
-        self._executor = executor or SweepExecutor()
+        self._executor = executor or ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="planner-retune"
+        )
         logger.info(
             "retune enabled: interval=%ss grace=%ss %d grid points, router keys %s, "
             "planner keys %s, predictor candidates %s, objective %s, "
@@ -358,7 +326,6 @@ class RetuneController:
 
         pending = self._pending
         if pending is not None and pending.future.done():
-            self._settle_queue_delay(pending)
             if pending.ready_at_s is None:
                 pending.decision_latency_s = self._decision_latency_s(pending.future)
                 pending.ready_at_s = pending.launched_at_s + pending.decision_latency_s
@@ -706,20 +673,6 @@ class RetuneController:
             return None
         return self._decide(pending, result, now_s)
 
-    def _settle_queue_delay(self, pending: _PendingSweep) -> None:
-        """Move a queued sweep's launch time to when it actually started."""
-
-        if pending.queued is None:
-            return
-        submitted, started = pending.queued
-        pending.queued = None
-        if not started:
-            return  # never ran (cancelled at close); keep the submit time
-        delay = max(0.0, started[0] - submitted)
-        pending.launched_at_s += delay
-        if pending.ready_at_s is not None:
-            pending.ready_at_s += delay
-
     def _replicas_for_launch(
         self, start_s: float, end_s: float, spec_replicas: Mapping[str, int] | None
     ) -> tuple[dict[str, int] | None, bool, str | None]:
@@ -816,7 +769,7 @@ class RetuneController:
             **self._live_request_fields(as_of_s, spec_replicas, verified),
         )
         abort = gate.abort if gate is not None else None
-        future, queued = self._submit(request, abort, gated=gate is not None)
+        future = self._submit(request, abort, gated=gate is not None)
         if isinstance(self._clock, VirtualClock):
             # Virtual time is frozen while the sweep runs; wait for it here.
             await asyncio.wait([asyncio.wrap_future(future)])
@@ -835,7 +788,6 @@ class RetuneController:
             decision_latency_s=latency,
             ready_at_s=None if latency is None else now_s + latency,
             abort=abort,
-            queued=queued,
         )
         logger.info(
             "retune launched window %d [%s, %s) with %d candidates, replicas %s%s",
@@ -876,34 +828,22 @@ class RetuneController:
         abort: threading.Event | None,
         *,
         gated: bool,
-    ) -> tuple[Future[SweepResult], tuple[float, list[float]] | None]:
+    ) -> Future[SweepResult]:
         """Submit the sweep to the single sweep thread.
 
         ``run_sweep`` is looked up at call time so tests can substitute it.
         A gated (live) launch also passes the gate's abort event. While the
         sweep thread still runs a dropped sweep, of this or an earlier
-        controller generation, the launch queues behind it and records when
-        it really starts (``_settle_queue_delay``).
+        controller generation, the launch queues behind it; the decision
+        waits for its future either way.
         """
 
         sweep_fn: SweepFn = self._sweep_fn if self._sweep_fn is not None else run_sweep
         if not gated:
-            return self._executor.submit(sweep_fn, request, cancel=self._cancel), None
-        cancel = self._cancel
-        if not self._executor.busy():
-            future = self._executor.submit(
-                sweep_fn, request, cancel=cancel, abort=abort
-            )
-            return future, None
-        clock = self._clock
-        started: list[float] = []
-
-        def timed_sweep() -> SweepResult:
-            started.append(clock.monotonic())
-            return sweep_fn(request, cancel=cancel, abort=abort)
-
-        future = self._executor.submit(timed_sweep)
-        return future, (clock.monotonic(), started)
+            return self._executor.submit(sweep_fn, request, cancel=self._cancel)
+        return self._executor.submit(
+            sweep_fn, request, cancel=self._cancel, abort=abort
+        )
 
     def _decision_latency_s(self, future: Future[SweepResult]) -> float:
         """Delay from launch to decision; ``measured`` needs a done sweep."""
