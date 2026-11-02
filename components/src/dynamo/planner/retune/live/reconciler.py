@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Garbage collection of live retune files and DGDR Requests (design §4.4.5).
+"""Garbage collection of live retune files and DGDR Requests.
 
 The supervisor runs ``Reconciler.run_once`` only while this process leads and
 is initialized. It deletes, with ``fs_root`` the planner's mount of the trace
@@ -16,8 +16,9 @@ timeout::
   highest-numbered segment of a live pod; other segments of a live pod, and
   the whole directory of a pod that no longer exists, once every file is
   older than ``T + G + timeout + visibility margin``. A live pod's segments
-  are the files directly in its directory: P10 requires the sink's file
-  prefix to sit directly under ``$(DYN_POD_NAME)/``. A pod directory that
+  are the files directly in its directory: the frontend premise check
+  requires the sink's file prefix to sit directly under
+  ``$(DYN_POD_NAME)/``. A pod directory that
   cannot be read is skipped for the round; the other pods are still
   collected.
 - Window files, never while protected: ``window_end_ms`` in
@@ -33,10 +34,13 @@ timeout::
   non-terminal Request whose window deadline has passed, a Request in the
   delete queue, and a Request of another DGD uid (the DGD was recreated).
 
-``run_once(should_continue=...)`` asks the caller before every delete or
-unlink and ends the round as soon as it says no (leadership or the term was
-lost while the round ran on its worker thread). ``set_dgd`` follows the DGD
-identity when the DGD is recreated under the same name.
+``run_once(should_continue=...)`` asks the caller before every delete,
+unlink or Kubernetes read and ends the round as soon as it says no
+(leadership or the term was lost, or the round's budget passed, while it
+ran on its worker thread). ``set_dgd`` follows the DGD identity when the DGD
+is recreated under the same name. Conditions that persist across rounds
+(a frontend without a trace directory, an unlabelled Request) are logged
+when they start, not every round.
 
 ``Reconciler`` is also the ``SweepRegistry`` the DGDR sweep uses to protect
 its window and Requests and to queue deletions; those methods are thread-safe
@@ -109,6 +113,24 @@ def window_relpath(cfg: DgdrExecutorConfig, dgd_name: str, window_end_ms: int) -
 
     return "/".join(
         (cfg.windows_dir.strip("/"), dgd_name, window_file_name(window_end_ms))
+    )
+
+
+def trace_pvc_source(spec: Any) -> tuple[Optional[str], Optional[str]]:
+    """``(claimName, subPath)`` of a DGDR spec's trace claim.
+
+    The fields are ``workload.trace.source.persistentVolumeClaim.claimName``
+    and ``.subPath`` (the claim-relative file the Run replays); each is
+    ``None`` when absent or not a string.
+    """
+
+    pvc = _dig(spec, "workload", "trace", "source", "persistentVolumeClaim")
+    if not isinstance(pvc, Mapping):
+        return None, None
+    claim, sub_path = pvc.get("claimName"), pvc.get("subPath")
+    return (
+        claim if isinstance(claim, str) else None,
+        sub_path if isinstance(sub_path, str) else None,
     )
 
 
@@ -216,7 +238,12 @@ class Reconciler:
         # neither can revert for one generation.
         self._terminal: set[tuple[str, int]] = set()
         self._finished: set[tuple[str, int]] = set()
+        # Owned by the round (one runs at a time): the pods whose
+        # trace_sink_missing gauge is set, those last reported missing, and
+        # the (Request uid, label) pairs already reported missing.
         self._sink_reported: set[str] = set()
+        self._sink_missing: set[str] = set()
+        self._unlabelled: set[tuple[str, str]] = set()
 
     def _root(self, directory: str, dgd: DgdRef) -> str:
         return os.path.join(self._fs_root, directory.strip("/"), dgd.name)
@@ -322,8 +349,9 @@ class Reconciler:
         """One GC round. ``deadline_for(window_end_ms)`` is that window's
         sweep deadline ``D_k`` in epoch seconds; ``frontend_pods`` is the
         actuator's listing (None when it failed). ``should_continue`` is
-        called before every delete or unlink; once it returns False (or
-        raises) the round deletes nothing more and returns."""
+        called before every delete, unlink or Kubernetes read; once it
+        returns False (or raises) the round deletes and reads nothing more
+        and returns."""
 
         now = float(self._now())
         with self._lock:
@@ -336,7 +364,8 @@ class Reconciler:
             )
 
         def in_window_range(window_end_ms: int) -> bool:
-            """The design's protected range: undecided and before D_k."""
+            """Undecided (from the last decided window to the due one) and
+            before its deadline D_k: a sweep may still cut or adopt it."""
 
             if last_window_end_ms is not None and window_end_ms < last_window_end_ms:
                 return False
@@ -357,7 +386,7 @@ class Reconciler:
                 state.error("sinks")
 
         requests: Optional[list[_RequestView]] = None
-        if not state.stopped:
+        if self._proceed(state):
             try:
                 requests = self._list_requests(state.dgd)
             except KubeError as exc:
@@ -417,8 +446,9 @@ class Reconciler:
         return report
 
     def _proceed(self, state: _Round) -> bool:
-        """Whether the round may delete one more thing; asked right before
-        every delete or unlink. A no is final for the round."""
+        """Whether the round may delete or read one more thing; asked right
+        before every delete, unlink or Kubernetes read. A no is final for
+        the round."""
 
         if state.stopped:
             return False
@@ -481,8 +511,9 @@ class Reconciler:
     def _collect_pod_segments(
         self, state: _Round, directory: str, cutoff: float
     ) -> None:
-        # Top level only: P10 puts the sink's file prefix directly under the
-        # pod directory, so there is no subdirectory to walk.
+        # Top level only: the frontend premise check puts the sink's file
+        # prefix directly under the pod directory, so there is no
+        # subdirectory to walk.
         segments: dict[str, list[tuple[int, os.DirEntry[str]]]] = {}
         for entry in _scandir(directory):
             match = _SEGMENT_RE.match(entry.name)
@@ -526,12 +557,15 @@ class Reconciler:
         for name in self._sink_reported - current:
             self._metrics.trace_sink_missing(name, False)
         self._sink_reported = current
-        if missing:
+        # The gauge tracks the condition; the log marks where it starts.
+        newly = sorted(set(missing) - self._sink_missing)
+        self._sink_missing = set(missing)
+        if newly:
             logger.warning(
                 "retune reconciler: Ready frontends without a trace directory "
                 "under %s: %s",
                 state.segments_root,
-                missing,
+                newly,
             )
         return missing
 
@@ -616,12 +650,11 @@ class Reconciler:
         for obj in items:
             metadata = obj.get("metadata") or {}
             labels = metadata.get("labels") or {}
-            pvc = _dig(obj, "spec", "workload", "trace", "source", "pvc") or {}
-            path = pvc.get("path")
+            claim, path = trace_pvc_source(obj.get("spec"))
             trace_file = None
             if (
-                pvc.get("claimName") == self._cfg.claim_name
-                and isinstance(path, str)
+                claim == self._cfg.claim_name
+                and path is not None
                 and path.startswith(prefix)
                 and "/" not in path[len(prefix) :]
             ):
@@ -655,17 +688,18 @@ class Reconciler:
                     cache.difference_update(
                         [key for key in cache if key[0] not in listed]
                     )
+            self._unlabelled.difference_update(
+                [key for key in self._unlabelled if key[0] not in listed]
+            )
             ours = [view for view in requests if view.dgd_uid == dgd_uid]
             for view in requests:
                 if view.dgd_uid is None:
-                    logger.warning(
-                        "retune reconciler: Request %s has no %s label",
-                        view.name,
-                        LABEL_DGD_UID,
-                    )
+                    self._report_unlabelled(view, LABEL_DGD_UID)
                 elif view.dgd_uid != dgd_uid:
                     # The DGD was deleted and recreated under the same name.
                     reasons.setdefault(view.name, "other_dgd_uid")
+            # Each uncached verdict reads Runs; _is_terminal asks
+            # should_continue first, so a stopped round reads nothing more.
             states = {view.name: self._is_terminal(state, view) for view in ours}
             terminal = {name for name, value in states.items() if value is True}
             kept_windows = sorted(
@@ -679,11 +713,7 @@ class Reconciler:
             for view in ours:
                 window = view.window_end_ms
                 if window is None:
-                    logger.warning(
-                        "retune reconciler: Request %s has no %s label",
-                        view.name,
-                        LABEL_WINDOW,
-                    )
+                    self._report_unlabelled(view, LABEL_WINDOW)
                     continue
                 value = states[view.name]
                 if value is None:
@@ -718,6 +748,16 @@ class Reconciler:
             with self._lock:
                 self._delete_queue.discard(name)
 
+    def _report_unlabelled(self, view: _RequestView, label: str) -> None:
+        """Warn once per Request about a missing (or unparsable) label."""
+
+        key = (view.uid, label)
+        if key not in self._unlabelled:
+            self._unlabelled.add(key)
+            logger.warning(
+                "retune reconciler: Request %s has no %s label", view.name, label
+            )
+
     # ------------------------------------------------- Request / Run state
 
     def _cached(self, cache: set[tuple[str, int]], key: tuple[str, int]) -> bool:
@@ -743,6 +783,8 @@ class Reconciler:
         key = (view.uid, generation)
         if self._cached(self._terminal, key):
             return True
+        if not self._proceed(state):
+            return None
         try:
             run = self._current_run(view, generation)
         except KubeError as exc:
@@ -771,6 +813,8 @@ class Reconciler:
         if self._cached(self._finished, key):
             return True
         if _dig(view.obj, "status", "activeRunRef", "name"):
+            return False
+        if not self._proceed(state):
             return False
         try:
             run = self._current_run(view, generation)
