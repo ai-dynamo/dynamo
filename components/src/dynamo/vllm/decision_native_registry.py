@@ -13,6 +13,9 @@ from typing import Literal
 
 from dynamo.llm import ModelInput, ModelType, WorkerType
 
+from .decision_dispatch import DecisionDispatcher
+from .decision_execution import decision_worker_eligible
+
 logger = logging.getLogger(__name__)
 
 D3_PROFILE = "vllm_d3_decision_v1"
@@ -104,6 +107,25 @@ def profile_for_architecture(
 def supports_decision_generation(model_type: ModelType) -> bool:
     """Match native read-profile cards' Chat-or-Completions model flags."""
     return model_type.supports_chat() or model_type.supports_completions()
+
+
+async def initialize_native_decisions(
+    kind, engine, model_config, config, *, abort_monitor, on_engine_dead=None
+) -> DecisionDispatcher:
+    """Gate optional native imports before initializing one recognized profile."""
+    profile = profile_for_architecture(
+        getattr(model_config, "architecture", None), kind=kind
+    )
+    if profile is None:
+        return DecisionDispatcher(kind)
+    if not decision_worker_eligible(config):
+        logger.info("vLLM native %s decisions disabled by worker configuration", kind)
+        return DecisionDispatcher(kind)
+    from .decision_surface import NativeDecisionSurface
+
+    return await NativeDecisionSurface.create(
+        engine, profile, abort_monitor=abort_monitor, on_engine_dead=on_engine_dead
+    )
 
 
 def publish_native_decision_capability(
