@@ -1322,3 +1322,43 @@ async fn sglang_visible_stop_tokens_preserve_tool_delimiters() {
     })
     .await;
 }
+
+// An LPX engine withholds the matched stop token, and the sidecar returns a
+// visible one.
+#[tokio::test]
+async fn lpx_visible_stop_tokens_preserve_tool_delimiters() {
+    bounded("visible tool delimiter", async {
+        use dynamo_mocker::live::deterministic_token_id;
+        use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
+        use dynamo_trtllm_mocker::MockerServerConfig;
+        use dynamo_trtllm_sidecar::proto as pb;
+        let control = Controller::<support::trtllm::Adapter>::default();
+        let mut fixture =
+            support::lpx::Fixture::start(control.clone(), FixtureConfig::default()).await;
+        let engine = fixture.engine().await;
+        engine.start(0).await.unwrap();
+        // The Mocker's output follows from the request ID; its second token
+        // is the visible stop.
+        let ctx =
+            Context::with_id_and_metadata((), "visible-stop".into(), Default::default()).context();
+        let seed = MockerServerConfig::default().seed;
+        let [first, stop] = [0, 1].map(|position| deterministic_token_id(seed, ctx.id(), position));
+        let handle = control.request(ctx.id(), RequestPlan::default());
+        let mut req = request("mocker-model", vec![11, 22, 33], 4);
+        req.stop_conditions.stop_token_ids_visible = Some(vec![stop]);
+        req.stop_conditions.stop_token_ids_hidden = Some(vec![2]);
+        let outputs = collect(&engine, req, GenerateContext::new(ctx, None)).await;
+        assert_eq!(handle.tokens(), [first], "the engine strips the match");
+        terminal(outputs, &[first, stop], 3, FinishReason::Stop);
+        let stopping = handle.native_request().unwrap().stopping.unwrap();
+        assert_eq!(
+            stopping.conditions,
+            [2, stop].map(|id| pb::StopCondition {
+                condition: Some(pb::stop_condition::Condition::StopTokenId(id)),
+            })
+        );
+        assert_eq!(stopping.include_stop_in_output, Some(false));
+        finish(&mut fixture, &engine).await;
+    })
+    .await;
+}
