@@ -1681,6 +1681,7 @@ mod tests {
             (&[][..], "0.32.0", false),
             (&[][..], "", false),
             (&["--dyn-structural-tag"][..], "0.32.0", true),
+            (&["--dyn-structural-tag", "false"][..], "0.33.0", false),
         ] {
             let args = Args::try_parse_from(
                 ["sidecar", "--grpc-endpoint", "127.0.0.1:12345"]
