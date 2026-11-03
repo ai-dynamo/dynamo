@@ -63,7 +63,7 @@ func upgradeComponentGraphReady(objects []unstructured.Unstructured, components 
 }
 
 func TestUpgradeComponentSafety(t *testing.T) {
-	for _, kind := range []string{"Deployment", "LeaderWorkerSet"} {
+	for _, kind := range []string{"Deployment", "LeaderWorkerSet", "DisaggregatedSet"} {
 		t.Run(kind, func(t *testing.T) {
 			t.Log("Preserve immediate workload identity and spec independently of golden updates")
 			old := unstructured.Unstructured{Object: map[string]any{
@@ -71,6 +71,13 @@ func TestUpgradeComponentSafety(t *testing.T) {
 				"metadata": map[string]any{"name": "worker", "uid": "original", "generation": int64(1)},
 				"spec":     map[string]any{"replicas": int64(2)},
 			}}
+			if kind == "LeaderWorkerSet" {
+				t.Log("Seed both existing LWS templates before testing independent hostname changes")
+				for _, template := range []string{"leader", "worker"} {
+					require.NoError(t, unstructured.SetNestedField(old.Object, "original-"+template, "spec", "leaderWorkerTemplate", template+"Template", "spec", "hostname"))
+				}
+			}
+
 			before := []unstructured.Unstructured{old}
 			metadata := old.DeepCopy()
 			metadata.SetAnnotations(map[string]string{"reviewed-default": "true"})
@@ -83,13 +90,22 @@ func TestUpgradeComponentSafety(t *testing.T) {
 			changed := old.DeepCopy()
 			changed.SetGeneration(2)
 			require.ErrorContains(t, upgradeSafetyError(false, before, []unstructured.Unstructured{*changed}), "generation")
-			changed = old.DeepCopy()
-			path := []string{"spec", "template", "spec", "hostname"}
+			paths := [][]string{{"spec", "template", "spec", "hostname"}}
 			if kind == "LeaderWorkerSet" {
-				path = []string{"spec", "leaderWorkerTemplate", "workerTemplate", "spec", "hostname"}
+				paths = [][]string{
+					{"spec", "leaderWorkerTemplate", "leaderTemplate", "spec", "hostname"},
+					{"spec", "leaderWorkerTemplate", "workerTemplate", "spec", "hostname"},
+				}
 			}
-			require.NoError(t, unstructured.SetNestedField(changed.Object, "changed-worker", path...))
-			require.ErrorContains(t, upgradeSafetyError(false, before, []unstructured.Unstructured{*changed}), "rollout intent")
+			for _, path := range paths {
+				changed = old.DeepCopy()
+				if kind == "DisaggregatedSet" {
+					require.NoError(t, unstructured.SetNestedSlice(changed.Object, []any{map[string]any{"name": "changed-role"}}, "spec", "roles"))
+				} else {
+					require.NoError(t, unstructured.SetNestedField(changed.Object, "changed-worker", path...))
+				}
+				require.ErrorContains(t, upgradeSafetyError(false, before, []unstructured.Unstructured{*changed}), "rollout intent")
+			}
 			require.ErrorContains(t, upgradeSafetyError(false, before, nil), "inventory")
 		})
 	}
@@ -129,19 +145,27 @@ func TestUpgradeComponentGraphReady(t *testing.T) {
 }
 
 func TestUpgradeComponentVersionBindings(t *testing.T) {
-	t.Log("Keep generated component identities exact across an operator version bump")
-	path := "testdata/upgrade/latest/sglang/aggregated/single/component/output.yaml"
-	previous := upgradeLatestVariables(t, path, "1.6.0")
-	current := upgradeLatestVariables(t, path, "1.7.0")
-	require.NotEqual(t, previous["worker-hash"], current["worker-hash"])
-	bindings := 0
-	for name, value := range current {
-		if !strings.HasPrefix(name, "worker-string:") {
-			continue
-		}
-		bindings++
-		require.Contains(t, value, current["worker-hash"])
-		require.NotEqual(t, previous[name], value)
+	for _, scenario := range []string{"aggregated/single/component", "aggregated/multi/component", "disaggregated/multi/disaggregatedset"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Log("Keep generated component identities exact across an operator version bump")
+			path := "testdata/upgrade/latest/sglang/" + scenario + "/output.yaml"
+			previous := upgradeLatestVariables(t, path, "1.6.0")
+			current := upgradeLatestVariables(t, path, "1.7.0")
+			require.NotEqual(t, previous["worker-hash"], current["worker-hash"])
+			bindings := 0
+			for name, value := range current {
+				if !strings.HasPrefix(name, "worker-string:") {
+					continue
+				}
+				bindings++
+				require.Contains(t, value, current["worker-hash"])
+				require.NotEqual(t, previous[name], value)
+			}
+			require.Positive(t, bindings, "component names must follow the reviewed DGD hash")
+			if strings.HasSuffix(scenario, "/disaggregatedset") {
+				require.NotEqual(t, "pending", current["ds-revision"])
+				require.NotEqual(t, previous["ds-revision"], current["ds-revision"])
+			}
+		})
 	}
-	require.Positive(t, bindings, "component names must follow the reviewed DGD hash")
 }

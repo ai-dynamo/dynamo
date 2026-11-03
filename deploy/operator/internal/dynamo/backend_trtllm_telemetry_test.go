@@ -12,7 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestTRTLLMTelemetryEnvironment(t *testing.T) {
@@ -48,8 +47,8 @@ func TestTRTLLMTelemetryEnvironment(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Build the graph and a four-GPU TRT-LLM worker with explicit telemetry settings")
 			dgd := &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "telemetry", Namespace: "default"},
-				Spec:       v1beta1.DynamoGraphDeploymentSpec{Env: tc.graphEnv},
+				Name: "telemetry", Namespace: "default",
+				Spec: v1beta1.DynamoGraphDeploymentSpec{Env: tc.graphEnv},
 			}
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "prefill",

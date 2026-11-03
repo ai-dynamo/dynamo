@@ -372,10 +372,17 @@ def vllm_modules(frontend_stubs):
         VllmConfig=dummy,
     )
     install(
-        "vllm.entrypoints.chat_utils",
+        "vllm.entrypoints.generate.base.protocol",
+        DeltaFunctionCall=dummy,
+        DeltaMessage=dummy,
+        DeltaToolCall=dummy,
+    )
+    install(
+        "vllm.renderers.chat_utils",
         make_tool_call_id=lambda: "call",
         load_chat_template=lambda value: value,
     )
+    install("vllm.renderers.hf", resolve_chat_template=lambda *args, **kwargs: None)
     install(
         "vllm.entrypoints.openai.chat_completion.protocol",
         ChatCompletionNamedFunction=dummy,

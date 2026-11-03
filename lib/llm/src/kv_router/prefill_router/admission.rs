@@ -270,6 +270,7 @@ mod tests {
                             })
                         });
                         let levels = Arc::new(Mutex::new(Vec::new()));
+                        let _interest_guard = crate::test_utils::tracing_interest_guard();
                         let subscriber =
                             tracing_subscriber::registry().with(Levels(levels.clone()));
                         let run = async {

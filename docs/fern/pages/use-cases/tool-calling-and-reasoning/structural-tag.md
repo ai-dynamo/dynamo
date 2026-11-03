@@ -189,12 +189,12 @@ Currently tested and supported:
 
 - `qwen3_coder`, `nemotron_nano`
 - `hermes`, `qwen25`
-- `deepseek_v3_2`, `deepseek_v4`
+- `deepseek_v3_2`, `deepseek_v4`, `deepseek_v41`
 - `kimi_k2`, `kimi_k3`, `kimi-k3`
 - `inkling`
 - `glm47` with parsers v2
 
-The parsers-v2 builders for `qwen3_coder`, `deepseek_v4`, and `glm47` require
+The parsers-v2 builders for `qwen3_coder`, `deepseek_v4`, `deepseek_v41`, and `glm47` require
 a compatible V2 parser route in the worker and frontend processes. Unset `DYN_PARSER_VERSION` and `auto` select V2 when the configured tool and reasoning parsers resolve to a compatible family; explicit `DYN_PARSER_VERSION=2` requires V2.
 
 Contributions adding structural tag support for new parsers are welcome.
@@ -203,6 +203,22 @@ This list describes Dynamo's Rust parser registry. The Python vLLM and SGLang
 frontend processors apply the same mode, scope, and schema policy through the
 tool parser supplied by their installed engine version. Parser availability can
 therefore differ by backend and engine version.
+
+### Checking Grammar Availability
+
+Output-parser availability does not guarantee structural-tag support. Query the registered grammar builders separately:
+
+```python
+from dynamo._core import get_structural_tag_parser_names
+
+parser_name = "deepseek_v41"
+if parser_name not in get_structural_tag_parser_names():
+    raise ValueError(f"No structural-tag grammar registered for {parser_name}")
+```
+
+`get_structural_tag_parser_names()` returns a sorted, deduplicated inventory across the V1 and V2 registries. It does not select a parser generation, validate a tool/reasoning parser pair, or qualify the backend's installed XGrammar version. Check those deployment requirements separately.
+
+On a compatible V2 route, `deepseek_v41` uses its V4.1 framing and `deepseek_v4_1_xml` argument style; `deepseek_v4` retains `deepseek_xml`. With structural tags enabled, the registered V4.1 builder supplies guidance by default. Set `--dyn-structural-tag false` to disable optional guidance.
 
 ## Activation Scope
 
@@ -227,7 +243,9 @@ based on the request's `tool_choice`:
 
 ## Request Validation
 
-Dynamo validates supplied function parameter schemas with explicit `strict: true` before inference on `/v1/chat/completions` and `/v1/responses`. Invalid schemas now return HTTP 400 where earlier versions could accept them. This validation runs even when structural tags are disabled or `tool_choice` is `none`. Responses checks all submitted functions, including namespace members and functions excluded by `allowed_tools`.
+By default, Dynamo validates supplied function parameter schemas with explicit `strict: true` before inference on `/v1/chat/completions` and `/v1/responses`. Strict client tools converted from `/v1/messages` use the same check. Invalid schemas now return HTTP 400 where earlier versions could accept them. This validation runs even when structural tags are disabled or `tool_choice` is `none`. Responses checks all submitted functions, including namespace members and functions excluded by `allowed_tools`.
+
+To retain legacy request admission during an upgrade, set `DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION=1` on the frontend. This skips strict function-schema preflight without requiring client changes, including definitions with optional properties, open objects, or `oneOf`. It applies to every model in the frontend process, including strict tools converted from `/v1/messages`, and preserves the submitted schema and `strict` declaration. Schema reference and complexity preflight checks are also skipped; basic tool validation, HTTP body limits, and downstream processor and backend checks remain active. This mode does not guarantee that a backend can enforce or compile the schema. See [Frontend Configuration](../../reference/components/frontend-configuration.mdx#frontend-feature-switches).
 
 Use an object-only root. Close each object with `additionalProperties: false` and include every named property in `required`. These object checks also apply to nullable nested objects and schemas that declare `properties` or `patternProperties`. For example:
 

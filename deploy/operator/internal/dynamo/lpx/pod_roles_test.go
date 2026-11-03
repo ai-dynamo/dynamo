@@ -53,9 +53,7 @@ func TestAgentSchedulingUsesManifestDeviceCountAndPreservesAuthoredResources(t *
 			},
 		},
 		EphemeralContainers: []corev1.EphemeralContainer{{
-			EphemeralContainerCommon: corev1.EphemeralContainerCommon{
-				Name: "debug", Resources: corev1.ResourceRequirements{Limits: lpuResources.DeepCopy()},
-			},
+			Name: "debug", Resources: corev1.ResourceRequirements{Limits: lpuResources.DeepCopy()},
 		}},
 		Resources: &corev1.ResourceRequirements{
 			Limits: lpuResources.DeepCopy(), Requests: lpuResources.DeepCopy(),

@@ -159,6 +159,8 @@ When workers advertise router-hint support, as vLLM workers with KVCR do, the ro
 - A target without `kv_transfer_domain` is not filtered.
 - Filtering never fails a request. It only changes or removes the hint.
 
+Worker selection and the fetch source are one decision. For every candidate, the router finds the source the hint would name under these rules. With the default policy's `shared_cache_multiplier` above `0`, it credits the blocks that source would add, so an idle worker that can fetch a prefix can win over a busy worker that holds it. The selected worker's hint names the source that earned the credit, and a source the target cannot use earns no credit. The credit lowers only the score: booked prefill still counts the fetched blocks, because a fetch can miss.
+
 KVCR caches are hint sources through their cache owners. A vLLM worker publishes its topology with each cache owner it creates, because KVCR runs in the worker's pod. An owner without published topology, for example one created by an older worker, takes the island of the worker it is attached to. An unattached owner without published topology is in no island.
 
 A cache owner's published topology is fixed when its slot is first created, the same as its control endpoint.

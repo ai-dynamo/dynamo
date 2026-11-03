@@ -13,7 +13,6 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -55,7 +54,7 @@ data:
 		t.Fatalf("add core types to scheme: %v", err)
 	}
 	k8sClient := &delayedListClient{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "generated", Namespace: "test"}, Data: map[string]string{"key": "value"}},
+		&corev1.ConfigMap{Name: "generated", Namespace: "test", Data: map[string]string{"key": "value"}},
 	).Build()}
 
 	t.Log("Eventually match after the object appears on a later list")
@@ -85,7 +84,7 @@ data:
 		t.Fatalf("add core types to scheme: %v", err)
 	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "generated", Namespace: "test"}, Data: map[string]string{"worker-hash": "aabbccdd"}},
+		&corev1.ConfigMap{Name: "generated", Namespace: "test", Data: map[string]string{"worker-hash": "aabbccdd"}},
 	).Build()
 
 	t.Log("Match the value exactly after resolving the worker-hash variable")
@@ -208,7 +207,7 @@ func TestCompareIncludesManifestDiff(t *testing.T) {
 		t.Fatalf("add core types to scheme: %v", err)
 	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "wanted", Namespace: "test"}, Data: map[string]string{"key": "actual"}},
+		&corev1.ConfigMap{Name: "wanted", Namespace: "test", Data: map[string]string{"key": "actual"}},
 	).Build()
 	expected := readTestDocuments(t, `
 $strict: false
@@ -246,8 +245,8 @@ func TestCompareMatchesExactSetsAcrossKinds(t *testing.T) {
 		t.Fatalf("add core types to scheme: %v", err)
 	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "generated-a1", Namespace: "test"}, Data: map[string]string{"key": "value"}},
-		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "credentials", Namespace: "test"}, StringData: map[string]string{"token": "secret"}},
+		&corev1.ConfigMap{Name: "generated-a1", Namespace: "test", Data: map[string]string{"key": "value"}},
+		&corev1.Secret{Name: "credentials", Namespace: "test", StringData: map[string]string{"token": "secret"}},
 	).Build()
 	expected := readTestDocuments(t, `
 $strict: false
@@ -286,8 +285,8 @@ func TestCompareRejectsAmbiguousGeneratedName(t *testing.T) {
 		t.Fatalf("add core types to scheme: %v", err)
 	}
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "generated-a", Namespace: "test"}},
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "generated-b", Namespace: "test"}},
+		&corev1.ConfigMap{Name: "generated-a", Namespace: "test"},
+		&corev1.ConfigMap{Name: "generated-b", Namespace: "test"},
 	).Build()
 	expected := readTestDocuments(t, `
 $strict: false

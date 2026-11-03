@@ -11,6 +11,7 @@
 // `set_status` operations mirror the OTel `Span` API.
 
 use dynamo_backend_common::FirstTokenNotifier;
+use dynamo_llm::protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId};
 use dynamo_llm::protocols::common::ttft::{
     MAX_TTFT_BATCH_INTERVALS, TTFT_CONTEXT_KEY, TtftCoarseReason, TtftDegradedReason, TtftSpan,
     TtftStage, TtftTimings,
@@ -69,6 +70,7 @@ pub struct Context {
     first_token: Option<FirstTokenNotifier>,
     metadata: Arc<Mutex<BTreeMap<String, String>>>,
     ttft: Option<Arc<TtftTimings>>,
+    session_affinity: Option<SessionAffinityId>,
     /// Captured `engine.generate` span. `None` for Python-instantiated test
     /// contexts (where no parent span was plumbed in) — `current_span` /
     /// `start_span` return a no-op `SpanProxy` in that case.
@@ -233,6 +235,7 @@ impl Context {
             first_token,
             metadata: Arc::new(Mutex::new(metadata)),
             ttft: None,
+            session_affinity: None,
             span: None,
         }
     }
@@ -249,6 +252,16 @@ impl Context {
 
     pub fn ttft(&self) -> Option<&Arc<TtftTimings>> {
         self.ttft.as_ref()
+    }
+
+    pub fn with_session_affinity_from<T: Send + Sync + 'static>(
+        mut self,
+        context: &PipelineContext<T>,
+    ) -> Result<Self, String> {
+        self.session_affinity = context
+            .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)?
+            .map(|session_affinity| session_affinity.as_ref().clone());
+        Ok(self)
     }
 
     /// Attach the `engine.generate` span. Called by `PyLLMEngine::generate`
@@ -288,6 +301,10 @@ impl Context {
         }
         self.first_token =
             FirstTokenNotifier::for_request(None, Some(source), self.inner.id(), Some(dp_rank));
+    }
+
+    pub fn session_affinity(&self) -> Option<&SessionAffinityId> {
+        self.session_affinity.as_ref()
     }
 
     /// Build the `traceparent` header value. Prefers the engine.generate
@@ -338,6 +355,7 @@ impl Context {
             first_token: None,
             metadata: Arc::new(Mutex::new(metadata.unwrap_or_default())),
             ttft: None,
+            session_affinity: None,
             span: None,
         }
     }
@@ -356,6 +374,7 @@ impl Context {
             first_token: None,
             metadata: Arc::new(Mutex::new(self.metadata_snapshot())),
             ttft: self.ttft.clone(),
+            session_affinity: self.session_affinity.clone(),
             span: self.span.clone(),
         }
     }
