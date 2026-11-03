@@ -20,6 +20,9 @@ Covers (after realignment to the merged TRT-LLM PR #13199):
   * First-stat schema probe disables the publisher when the nested IBS dict
     is missing or any of the 11 required fields is absent — protecting
     against silent planner poison when running against pre-#13199 TRT-LLM.
+  * Under attention DP only the rank 0 row reaches TRT-LLM's native
+    MetricsCollector, so trtllm_num_requests_waiting keeps the engine-global
+    queue and copied spec-decode counts are not added once per rank.
 
 The handle_stat closure is defined inside Publisher._publish_stats_task,
 so we mirror its FPM branch via ``_invoke_handler`` below — kept in
@@ -739,6 +742,153 @@ async def test_stats_polling_processes_complete_drain_through_batch_handler():
         0,
         1,
     ]
+
+
+# ---------------------------------------------------------------------------
+# Native TRT-LLM MetricsCollector under attention DP
+# ---------------------------------------------------------------------------
+
+_COLLECTOR_LABELS = {"model_name": "test-attention-dp", "engine_type": "trtllm"}
+
+
+def _unregister_trtllm_collectors():
+    from prometheus_client import REGISTRY
+
+    for collector in list(REGISTRY._collector_to_names.keys()):
+        names = REGISTRY._collector_to_names.get(collector, set())
+        if any(n.startswith("trtllm_") for n in names):
+            REGISTRY.unregister(collector)
+
+
+@pytest.fixture
+def trtllm_metrics_collector():
+    """A real TRT-LLM MetricsCollector on the global registry.
+
+    MetricsCollector registers fixed trtllm_* families on the global
+    prometheus_client REGISTRY, so clear them before and after the test.
+    """
+    collector_mod = pytest.importorskip("tensorrt_llm.metrics.collector")
+    _unregister_trtllm_collectors()
+    yield collector_mod.MetricsCollector(dict(_COLLECTOR_LABELS))
+    _unregister_trtllm_collectors()
+
+
+def _collector_sample(name):
+    from prometheus_client import REGISTRY
+
+    return REGISTRY.get_sample_value(name, _COLLECTOR_LABELS)
+
+
+def _engine_rank_row(rank, *, queued, ibs_overrides):
+    """A stats row shaped like TRT-LLM's ADPIterStatsBuffer output.
+
+    Every row copies rank 0's top-level scalars, kvCacheStats and
+    specDecodingStats; only numQueuedRequests and the scheduled
+    inflightBatchingStats fields differ per rank.
+    """
+    ibs = dict(_DEFAULT_IBS)
+    ibs.update(ibs_overrides)
+    stat = {
+        "iter": 7,
+        "iterLatencyMS": 25.0,
+        "numActiveRequests": 3,
+        "numQueuedRequests": queued,
+        "numCompletedRequests": 0,
+        "maxNumActiveRequests": 64,
+        "kvCacheStats": {
+            "usedNumBlocks": 40,
+            "maxNumBlocks": 100,
+            "freeNumBlocks": 60,
+            "tokensPerBlock": 32,
+        },
+        "inflightBatchingStats": ibs,
+        "specDecodingStats": {"numDraftTokens": 8, "numAcceptedTokens": 5},
+    }
+    if rank is not None:
+        stat["attentionDpRank"] = rank
+    return stat
+
+
+async def _drain_rows_through_publisher(rows, metrics_collector):
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub._stop_event = threading.Event()
+    pub.engine = MagicMock()
+    pub.metrics_publisher = MagicMock()
+    pub.component_gauges = MagicMock()
+    pub.metrics_collector = metrics_collector
+    pub.fpm_publisher = None
+    pub._fpm_schema_checked = False
+
+    async def fetch_stats(timeout):
+        for row in rows:
+            yield row
+
+    def publish_metric(*_args, **_kwargs):
+        if pub.metrics_publisher.publish.call_count == len(rows):
+            pub._stop_event.set()
+
+    pub.engine.llm.get_stats_async = fetch_stats
+    pub.metrics_publisher.publish.side_effect = publish_metric
+
+    assert await pub._publish_stats_task() is True
+    return pub
+
+
+@pytest.mark.asyncio
+async def test_native_collector_keeps_rank0_queue_under_attention_dp(
+    trtllm_metrics_collector,
+):
+    rows = [
+        _engine_rank_row(
+            0,
+            queued=6,
+            ibs_overrides={"numContextRequests": 2, "numScheduledRequests": 4},
+        ),
+        _engine_rank_row(
+            1,
+            queued=0,
+            ibs_overrides={
+                "numContextRequests": 0,
+                "numScheduledRequests": 1,
+                "numQueuedContextRequests": 0,
+                "numQueuedCtxTokens": 0,
+                "numQueuedGenRequests": 0,
+                "numQueuedGenKvTokens": 0,
+            },
+        ),
+    ]
+
+    pub = await _drain_rows_through_publisher(rows, trtllm_metrics_collector)
+
+    # Dynamo's own per-rank metrics still see both rows.
+    assert [c.args[0] for c in pub.metrics_publisher.publish.call_args_list] == [
+        0,
+        1,
+    ]
+    assert _collector_sample("trtllm_num_requests_waiting") == 6
+    assert _collector_sample("trtllm_num_requests_running") == 3
+    assert _collector_sample("trtllm_kv_cache_utilization") == pytest.approx(0.4)
+    assert _collector_sample("trtllm_kv_cache_used_blocks") == 40
+    assert _collector_sample("trtllm_num_context_requests") == 2
+    assert _collector_sample("trtllm_num_scheduled_requests") == 4
+    assert _collector_sample("trtllm_spec_decode_num_draft_tokens_total") == 8
+    assert _collector_sample("trtllm_spec_decode_num_accepted_tokens_total") == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rank", [0, None], ids=["rank0", "missing_rank"])
+async def test_native_collector_receives_single_rank_rows(
+    trtllm_metrics_collector, rank
+):
+    rows = [_engine_rank_row(rank, queued=2, ibs_overrides={"numScheduledRequests": 3})]
+
+    await _drain_rows_through_publisher(rows, trtllm_metrics_collector)
+
+    assert _collector_sample("trtllm_num_requests_waiting") == 2
+    assert _collector_sample("trtllm_num_requests_running") == 3
+    assert _collector_sample("trtllm_kv_cache_utilization") == pytest.approx(0.4)
+    assert _collector_sample("trtllm_num_scheduled_requests") == 3
+    assert _collector_sample("trtllm_spec_decode_num_draft_tokens_total") == 8
 
 
 @pytest.mark.asyncio

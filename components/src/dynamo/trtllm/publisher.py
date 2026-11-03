@@ -891,10 +891,20 @@ class Publisher:
             )
             self.component_gauges.set_gpu_cache_usage(dp_rank_label, gpu_cache_usage)
 
-            # Log iteration stats to TRT-LLM MetricsCollector (PR #11243)
-            # This populates trtllm_kv_cache_hit_rate and trtllm_kv_cache_utilization gauges
-            if self.metrics_collector and hasattr(
-                self.metrics_collector, "log_iteration_stats"
+            # Feed the native trtllm_* metrics from the rank 0 row only. The
+            # collector has no rank label, so under attention DP every row
+            # would overwrite the last. Rank 0's row carries the engine-global
+            # queued and completed counts (other ranks report 0), and TRT-LLM
+            # copies rank 0's running, KV and spec-decode stats into every
+            # other row, so those rows add nothing but would reset
+            # trtllm_num_requests_waiting to 0 and double-count spec-decode
+            # counters. TRT-LLM does not report true per-rank running or KV
+            # values; per-rank scheduled values are exported with dp_rank by
+            # the component gauges and FPM.
+            if (
+                dp_rank == 0
+                and self.metrics_collector
+                and hasattr(self.metrics_collector, "log_iteration_stats")
             ):
                 try:
                     self.metrics_collector.log_iteration_stats(stat)
