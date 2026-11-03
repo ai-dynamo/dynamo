@@ -29,6 +29,7 @@ areas:
   - lib/llm/src/http/service/
   - lib/llm/src/lora.rs
   - lib/llm/src/lora/
+  - lib/lora/
   - lib/llm/src/preprocessor.rs
   - lib/llm/src/preprocessor/
   - lib/llm/src/preprocessor/tools/
@@ -287,7 +288,8 @@ areas:
   - lib/llm/src/discovery/
   - lib/llm/src/kernels/
   - lib/llm/src/local_model/
-  - lib/llm/src/lora/routing/
+  - lib/lora/src/routing/
+  - lib/lora/tests/
   - lib/llm/src/model_card.rs
   - lib/llm/src/perf/
   - lib/llm/src/utils/

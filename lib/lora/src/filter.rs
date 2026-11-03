@@ -8,11 +8,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::kv_router::protocols::WorkerWithDpRank;
-use crate::local_model::runtime_config::ModelRuntimeConfig;
-use crate::lora::routing::RendezvousHasher;
-use crate::lora::routing::table::LoraRoutingTable;
-use crate::lora::state_tracker::{LoraObservedSnapshot, LoraStateTracker};
+use crate::routing::RendezvousHasher;
+use crate::routing::table::LoraRoutingTable;
+use crate::state_tracker::{LoraObservedSnapshot, LoraStateTracker};
+use dynamo_kv_router::protocols::WorkerWithDpRank;
 
 type WorkerId = u64;
 
@@ -103,7 +102,7 @@ impl LoraFilter {
         self.filter_worker_ids_for_lora_with_pin(lora_name, available, None)
     }
 
-    pub(crate) fn filter_worker_ids_for_lora_with_pin(
+    pub fn filter_worker_ids_for_lora_with_pin(
         &self,
         lora_name: Option<&str>,
         available: &[u64],
@@ -224,11 +223,11 @@ impl LoraFilter {
     }
 
     /// Filter workers for a LoRA request (HashMap variant for KV routing).
-    pub fn filter_workers_for_lora(
+    pub fn filter_workers_for_lora<T: Clone>(
         &self,
         lora_name: Option<&str>,
-        workers: &HashMap<WorkerId, ModelRuntimeConfig>,
-    ) -> HashMap<WorkerId, ModelRuntimeConfig> {
+        workers: &HashMap<WorkerId, T>,
+    ) -> HashMap<WorkerId, T> {
         let available_ids: Vec<u64> = workers.keys().copied().collect();
         let selected_ids = self.filter_worker_ids_for_lora(lora_name, &available_ids);
 
@@ -248,16 +247,14 @@ impl LoraFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kv_router::protocols::WorkerWithDpRank;
-    use crate::lora::routing::table::{LoraReplicaConfig, LoraRoutingTable};
-    use crate::lora::state_tracker::LoraStateTracker;
-    use crate::model_card::LoraInfo;
+    use crate::LoraInfo;
+    use crate::routing::table::{LoraReplicaConfig, LoraRoutingTable};
+    use crate::state_tracker::LoraStateTracker;
+    use dynamo_kv_router::protocols::WorkerWithDpRank;
     use std::time::Instant;
 
-    fn make_workers_map(ids: &[u64]) -> HashMap<WorkerId, ModelRuntimeConfig> {
-        ids.iter()
-            .map(|&id| (id, ModelRuntimeConfig::default()))
-            .collect()
+    fn make_workers_map(ids: &[u64]) -> HashMap<WorkerId, ()> {
+        ids.iter().map(|&id| (id, ())).collect()
     }
 
     fn make_worker(id: u64) -> WorkerWithDpRank {
