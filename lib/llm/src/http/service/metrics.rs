@@ -89,31 +89,13 @@ pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
     dynamo_runtime::error::match_error_chain(err, REJECTION, NON_REJECTION)
 }
 
-/// User-facing body for a request whose due time passed while it waited in a router class
-/// queue; shared by every HTTP surface so the wording stays uniform.
+/// User-facing body for a request whose caller-supplied deadline elapsed
+/// before dispatch; shared by every HTTP surface so the wording stays uniform.
 pub(crate) const REQUEST_DEADLINE_EXCEEDED_MESSAGE: &str = "request deadline exceeded";
 
-/// Identify a deadline that expired while waiting in the router's queue. Like a queue-limit
-/// rejection ([`queue_rejection`]), it is a queue drop: every surface answers it with the
-/// configured overload status and no `Retry-After`.
+/// Identify a deadline that expired while waiting in the router's queue.
 pub fn request_deadline_exceeded(err: &(dyn std::error::Error + 'static)) -> bool {
     queue_deadline_error(err).is_some()
-}
-
-/// The queue-limit rejection anywhere in the chain: a router class queue refused the request.
-pub fn queue_rejection<'a>(
-    err: &'a (dyn std::error::Error + 'static),
-) -> Option<&'a dynamo_kv_router::scheduling::QueueRejection> {
-    let mut current = Some(err);
-    while let Some(error) = current {
-        if let Some(rejection) =
-            error.downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
-        {
-            return Some(rejection);
-        }
-        current = error.source();
-    }
-    None
 }
 
 pub(super) fn queue_deadline_error<'a>(

@@ -75,16 +75,13 @@ fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
         | KvSchedulerError::SubscriberShutdown
         | KvSchedulerError::InitFailed(_) => StatusCode::SERVICE_UNAVAILABLE,
         KvSchedulerError::WorkerSelectionPolicy(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        // Deadline expiry is deliberately 429, not 504: the deadline elapsed
+        // while waiting for capacity, so it is backpressure the client should
+        // respond to like the overloaded family, not a gateway timeout.
         KvSchedulerError::AllEligibleWorkersOverloaded
-        | KvSchedulerError::PinnedWorkerOverloaded { .. } => StatusCode::TOO_MANY_REQUESTS,
-        // A policy class queue dropped the request: a class limit refused it, or its due time
-        // passed while it waited, which is not a gateway timeout. A drop is the overload
-        // response that the frontend also returns for it, 529 unless
-        // `DYN_HTTP_OVERLOAD_STATUS_CODE` sets another status, without `Retry-After`.
-        KvSchedulerError::QueueRejected(_) | KvSchedulerError::DeadlineExceeded => {
-            StatusCode::from_u16(crate::overload_status::overload_status_code())
-                .expect("an accepted overload status is a valid HTTP status code")
-        }
+        | KvSchedulerError::PinnedWorkerOverloaded { .. }
+        | KvSchedulerError::QueueRejected(_)
+        | KvSchedulerError::DeadlineExceeded => StatusCode::TOO_MANY_REQUESTS,
         KvSchedulerError::PinnedWorkerNotAllowed { .. }
         | KvSchedulerError::UnknownPolicyClass(_) => StatusCode::BAD_REQUEST,
         // A duplicate live request id, or a lifecycle the caller ended (or
@@ -165,55 +162,10 @@ mod tests {
             SelectionError::Scheduler(KvSchedulerError::AllEligibleWorkersOverloaded).status_code(),
             StatusCode::TOO_MANY_REQUESTS.as_u16()
         );
-    }
-
-    /// Both queue drops answer with the shared overload status and no `Retry-After`; each keeps
-    /// its own message, and a limit rejection keeps its details.
-    #[tokio::test]
-    async fn queue_drops_use_the_overload_status_without_retry_after() {
-        use crate::scheduling::{QueueLimitKind, QueueRejection};
-
-        let overload = crate::overload_status::overload_status_code();
-        let configured = std::env::var(crate::overload_status::DYN_HTTP_OVERLOAD_STATUS_CODE).ok();
         assert_eq!(
-            overload,
-            crate::overload_status::parse_overload_status_code(configured.as_deref())
+            SelectionError::Scheduler(KvSchedulerError::DeadlineExceeded).status_code(),
+            StatusCode::TOO_MANY_REQUESTS.as_u16()
         );
-        let rejection = QueueRejection {
-            policy_class: "latency".to_string(),
-            limit_kind: QueueLimitKind::Requests,
-            current: 4,
-            limit: 4,
-        };
-        for (error, body) in [
-            (
-                KvSchedulerError::DeadlineExceeded,
-                serde_json::json!({"error": "request deadline exceeded"}),
-            ),
-            (
-                KvSchedulerError::QueueRejected(rejection.clone()),
-                serde_json::json!({
-                    "error": rejection.to_string(),
-                    "details": {
-                        "policy_class": "latency",
-                        "limit_kind": "requests",
-                        "current": 4,
-                        "limit": 4,
-                    },
-                }),
-            ),
-        ] {
-            let error = SelectionError::Scheduler(error);
-            assert_eq!(error.status_code(), overload);
-            let response = error.into_response();
-            assert_eq!(response.status().as_u16(), overload);
-            assert!(!response.headers().contains_key("retry-after"));
-            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            let actual: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-            assert_eq!(actual, body);
-        }
     }
 
     #[tokio::test]

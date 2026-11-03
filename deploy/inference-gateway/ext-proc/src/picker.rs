@@ -207,11 +207,6 @@ pub enum PickError {
     /// multiplexing means the connection cap does not bound concurrent requests.
     #[error("endpoint picker overloaded")]
     Overloaded,
-    /// A router class queue dropped the request: a class limit refused it, or its due time
-    /// passed while it waited → the overload status (529 unless
-    /// `DYN_HTTP_OVERLOAD_STATUS_CODE` sets another), without `Retry-After`.
-    #[error("{0}")]
-    QueueDropped(String),
 }
 
 #[cfg(test)]

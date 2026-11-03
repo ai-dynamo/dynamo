@@ -114,18 +114,14 @@ pub async fn completion_response_stream(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        // A router class queue drop, a due time that passed while the request waited or a
-        // class limit that refused it, is checked before overload, the deadline first, so a
-        // chain carrying both markers keeps the drop outcome. RESOURCE_EXHAUSTED is the
-        // counterpart of the HTTP surfaces' overload status: the queue dropped the request
-        // rather than a gateway timing out. No rejection accounting.
+        // Deadline is checked before overload so a chain carrying both markers
+        // keeps the deadline outcome. RESOURCE_EXHAUSTED mirrors the HTTP
+        // surfaces' 429: the deadline elapsed waiting for capacity, so it is
+        // backpressure rather than a gateway timeout. No rejection accounting.
         if crate::http::service::metrics::request_deadline_exceeded(e.as_ref()) {
             return Status::resource_exhausted(
                 crate::http::service::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
             );
-        }
-        if let Some(rejection) = crate::http::service::metrics::queue_rejection(e.as_ref()) {
-            return Status::resource_exhausted(rejection.to_string());
         }
         if crate::http::service::metrics::request_was_rejected(e.as_ref()) {
             state.metrics_clone().inc_rejection(

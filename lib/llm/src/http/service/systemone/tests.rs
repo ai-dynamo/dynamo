@@ -470,11 +470,6 @@ enum EngineBehavior {
     PendingSiblings,
     RejectGenerate,
     RejectStream,
-    /// A router class queue drops the branch before its stream: its due time passed (`true`)
-    /// or a class limit refused it.
-    QueueDrop {
-        deadline: bool,
-    },
     RejectRequest {
         class: dynamo_runtime::error::ErrorClass,
         branch: usize,
@@ -594,26 +589,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
         if matches!(self.behavior, EngineBehavior::RemoveWorkerDuringFanout) && index == 1 {
             self.admissions.as_ref().unwrap().send_replace(vec![99]);
-        }
-        if let EngineBehavior::QueueDrop { deadline } = self.behavior {
-            return Err(if deadline {
-                dynamo_runtime::error::DynamoError::builder()
-                    .error_type(dynamo_runtime::error::ErrorType::DeadlineExceeded)
-                    .reason(
-                        dynamo_runtime::error::ErrorReason::new("router.queue_deadline_exceeded")
-                            .unwrap(),
-                    )
-                    .message("private worker detail")
-                    .build()
-                    .into()
-            } else {
-                anyhow::Error::new(dynamo_kv_router::scheduling::QueueRejection {
-                    policy_class: "scoring".to_string(),
-                    limit_kind: dynamo_kv_router::scheduling::QueueLimitKind::Requests,
-                    current: 4,
-                    limit: 4,
-                })
-            });
         }
         if matches!(
             self.behavior,

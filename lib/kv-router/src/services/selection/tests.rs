@@ -1224,17 +1224,7 @@ policy_classes:
         Some("latency"),
     )
     .await;
-    // A class queue limit refusal is a drop: the shared overload status, 529 unless
-    // `DYN_HTTP_OVERLOAD_STATUS_CODE` sets another, without `Retry-After`.
-    assert_eq!(
-        rejected.status().as_u16(),
-        crate::overload_status::overload_status_code()
-    );
-    assert!(
-        !rejected
-            .headers()
-            .contains_key(axum::http::header::RETRY_AFTER)
-    );
+    assert_eq!(rejected.status(), StatusCode::TOO_MANY_REQUESTS);
     let body = response_json(rejected).await;
     assert_eq!(body["details"]["policy_class"], "latency");
     assert_eq!(body["details"]["limit_kind"], "requests");

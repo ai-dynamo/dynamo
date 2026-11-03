@@ -4,16 +4,26 @@
 use std::sync::LazyLock;
 
 use axum::http::StatusCode;
+use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
 use thiserror::Error;
 
-/// Overload / admission-control rejection status: `DYN_HTTP_OVERLOAD_STATUS_CODE` (default
-/// 529), read once by [`dynamo_kv_router::overload_status::overload_status_code`], which the
-/// selection service and the endpoint picker share.
+fn parse_overload_status_code(value: Option<&str>) -> StatusCode {
+    let default = StatusCode::from_u16(529).expect("529 is a valid HTTP status code");
+    value
+        .and_then(|s| s.trim().parse::<u16>().ok())
+        .and_then(|n| StatusCode::from_u16(n).ok())
+        .filter(|status| !status.is_informational())
+        .unwrap_or(default)
+}
+
+/// Overload / admission-control rejection status. Reads
+/// `DYN_HTTP_OVERLOAD_STATUS_CODE` (default 529) on first use; cached since the
+/// environment is fixed at runtime and this is on the rejection path.
 pub(crate) fn overload_status_code() -> StatusCode {
     static CODE: LazyLock<StatusCode> = LazyLock::new(|| {
-        StatusCode::from_u16(dynamo_kv_router::overload_status::overload_status_code())
-            .expect("an accepted overload status is a valid HTTP status code")
+        let value = std::env::var(env_llm::DYN_HTTP_OVERLOAD_STATUS_CODE).ok();
+        parse_overload_status_code(value.as_deref())
     });
     *CODE
 }
@@ -304,20 +314,30 @@ impl std::fmt::Display for SanitizedError {
 mod tests {
     use super::*;
 
-    /// The shared parser accepts exactly the statuses the frontend's earlier parser accepted:
-    /// valid HTTP statuses that are not informational, else 529.
     #[test]
-    fn shared_overload_status_parser_matches_http_status_validation() {
-        for code in 0..=u16::MAX {
-            let expected = StatusCode::from_u16(code)
-                .ok()
-                .filter(|status| !status.is_informational())
-                .map_or(529, |status| status.as_u16());
-            let value = code.to_string();
+    fn parses_configured_overload_status_code() {
+        for value in [
+            None,
+            Some(""),
+            Some("not-a-code"),
+            Some("99"),
+            Some("100"),
+            Some("199"),
+            Some("1000"),
+        ] {
             assert_eq!(
-                dynamo_kv_router::overload_status::parse_overload_status_code(Some(&value)),
-                expected,
-                "{code}"
+                parse_overload_status_code(value).as_u16(),
+                529,
+                "expected {value:?} to fall back to 529"
+            );
+        }
+
+        for value in [200_u16, 503, 529, 600, 999] {
+            let configured = value.to_string();
+            assert_eq!(
+                parse_overload_status_code(Some(&configured)).as_u16(),
+                value,
+                "expected {value} to be preserved"
             );
         }
     }

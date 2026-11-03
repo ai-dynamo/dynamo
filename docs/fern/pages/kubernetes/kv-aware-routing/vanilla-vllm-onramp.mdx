@@ -511,7 +511,6 @@ For a single EPP replica, set `spec.replicas: 1` and remove `DYN_EPP_PEER_SERVIC
 | `DYN_EPP_TOKENIZER_MAX_RESPONSE_BYTES` | No | Maximum render response size; defaults to `16777216`. |
 | `DYN_EPP_SESSION_AFFINITY_TTL_SECS` | No | Pin each `x-dynamo-session-id` to the worker that served it for this many seconds (1 to 31,536,000) after its last request; the binding replicates to peer EPPs over the replica mesh. Unset disables session affinity. |
 | `DYN_EPP_MAX_INFLIGHT_REQUESTS` | No | Concurrent EPP request guardrail; defaults to `1024`, and excess requests receive `503`. |
-| `DYN_HTTP_OVERLOAD_STATUS_CODE` | No | Status for a request that a router class queue drops, because a queue limit refuses it or its due time passes while it waits; defaults to `529`, sent without a `Retry-After` header. Accepts the same values as the Frontend: 200 through 999. |
 | `DYN_EPP_PEER_SERVICE` | No | Existing EPP Service used to discover sibling replicas. Enables replica sync. |
 | `DYN_EPP_REPLICA_SYNC_PORT` | No | ZMQ port every replica binds and dials for replica sync; defaults to `9092`. All replicas selected by `DYN_EPP_PEER_SERVICE` must use the same value. |
 | `POD_IP` | With peer service | EPP pod IP used to exclude the local replica from its peer set. |

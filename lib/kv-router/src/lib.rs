@@ -13,7 +13,6 @@ pub mod conditional_disagg;
 pub mod identity;
 pub mod indexer;
 pub mod kv_hints;
-pub mod overload_status;
 pub mod plugins;
 pub mod protocols;
 pub mod recovery;

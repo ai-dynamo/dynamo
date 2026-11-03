@@ -252,6 +252,7 @@ enum ExpectedError {
     Validation,
     NotImplemented,
     UnsupportedContent,
+    DeadlineExceeded,
 }
 
 impl ExpectedError {
@@ -260,6 +261,7 @@ impl ExpectedError {
             Self::Validation => reqwest::StatusCode::BAD_REQUEST,
             Self::NotImplemented => reqwest::StatusCode::BAD_REQUEST,
             Self::UnsupportedContent => reqwest::StatusCode::BAD_REQUEST,
+            Self::DeadlineExceeded => reqwest::StatusCode::TOO_MANY_REQUESTS,
         }
     }
 
@@ -268,6 +270,7 @@ impl ExpectedError {
             Self::Validation => "invalid_request_error",
             Self::NotImplemented => "invalid_request_error",
             Self::UnsupportedContent => "invalid_request_error",
+            Self::DeadlineExceeded => "rate_limit_error",
         }
     }
 }
@@ -409,112 +412,50 @@ fn assert_error_metrics_for_model(
     }
 }
 
-/// A router class queue drops a request when its due time passes while it waits or a class
-/// limit refuses it. The Anthropic, Chat Completions, and Responses surfaces answer both drops
-/// with the overload status, 529 unless `DYN_HTTP_OVERLOAD_STATUS_CODE` sets another, and no
-/// `Retry-After`, keep the two messages distinct, and count an overload error without rejection
-/// accounting, rather than a 429, a cancellation, or a 500.
+/// A router deadline rejection reaches the Anthropic surface as HTTP 429
+/// `rate_limit_error` with the `Cancelled` metric label, the same contract as
+/// the OpenAI surface, rather than falling through to a 500 `api_error`.
 #[tokio::test]
 #[serial]
-async fn queue_drops_return_the_overload_status_without_retry_after() {
+async fn anthropic_deadline_exceeded_maps_to_rate_limit_error_with_cancelled_metric() {
     temp_env::async_with_vars(BASE_ENV, async {
-        // The status this process uses is the one its environment configures, 529 when unset.
-        let overload = dynamo_kv_router::overload_status::overload_status_code();
-        let configured =
-            std::env::var(dynamo_kv_router::overload_status::DYN_HTTP_OVERLOAD_STATUS_CODE).ok();
-        assert_eq!(
-            overload,
-            dynamo_kv_router::overload_status::parse_overload_status_code(configured.as_deref())
-        );
-        let rejection = dynamo_kv_router::scheduling::QueueRejection {
-            policy_class: "latency".to_string(),
-            limit_kind: dynamo_kv_router::scheduling::QueueLimitKind::Requests,
-            current: 4,
-            limit: 4,
-        };
-        let surfaces = [
-            (
-                "/v1/messages",
-                Endpoint::AnthropicMessages,
-                json!({
-                    "model": MODEL,
-                    "max_tokens": 16,
-                    "messages": [{"role": "user", "content": "ping"}]
-                }),
-            ),
-            (
-                "/v1/chat/completions",
-                Endpoint::ChatCompletions,
-                json!({"model": MODEL, "messages": [{"role": "user", "content": "ping"}]}),
-            ),
-            (
-                "/v1/responses",
-                Endpoint::Responses,
-                json!({"model": MODEL, "input": "ping"}),
-            ),
-        ];
-        for deadline in [true, false] {
-            let message = if deadline {
-                "request deadline exceeded".to_string()
-            } else {
-                rejection.to_string()
-            };
-            for (path, endpoint, request) in &surfaces {
-                let error: anyhow::Error = if deadline {
-                    DynamoError::builder()
-                        .error_type(DynamoErrorType::DeadlineExceeded)
-                        .reason(
-                            dynamo_runtime::error::ErrorReason::new(
-                                "router.queue_deadline_exceeded",
-                            )
-                            .unwrap(),
-                        )
-                        .message("internal deadline detail")
-                        .build()
-                        .into()
-                } else {
-                    anyhow::Error::new(rejection.clone())
-                };
-                let svc =
-                    HarnessService::start_with_engine(Arc::new(ScriptedChatEngine::new([Err(
-                        error,
-                    )])))
-                    .await;
+        let error = DynamoError::builder()
+            .error_type(DynamoErrorType::DeadlineExceeded)
+            .reason(
+                dynamo_runtime::error::ErrorReason::new("router.queue_deadline_exceeded").unwrap(),
+            )
+            .message("internal deadline detail")
+            .build();
+        let svc = HarnessService::start_with_generate_error(error).await;
 
-                let response = post_json(&svc, path, request.clone()).await;
-                assert_eq!(response.status().as_u16(), overload, "{path} {message}");
-                assert!(
-                    response
-                        .headers()
-                        .get(reqwest::header::RETRY_AFTER)
-                        .is_none(),
-                    "{path} {message}"
-                );
-                let body: Value = bounded(response.json()).await.unwrap();
-                if *path == "/v1/messages" {
-                    assert_eq!(body["type"], "error");
-                    assert_eq!(body["error"]["type"], "overloaded_error");
-                    assert_eq!(body["error"]["message"], message.as_str());
-                } else {
-                    assert_eq!(body["code"].as_u64(), Some(u64::from(overload)));
-                    assert_eq!(body["type"], "Overloaded");
-                    assert_eq!(body["message"], message.as_str());
-                }
-                assert!(!body.to_string().contains("internal deadline detail"));
-                assert_error_metrics(
-                    &svc,
-                    endpoint,
-                    &RequestType::Unary,
-                    &[
-                        (ErrorType::Overload, 1),
-                        (ErrorType::Cancelled, 0),
-                        (ErrorType::Internal, 0),
-                    ],
-                );
-                assert_eq!(svc.metrics.get_rejection_count(MODEL, *endpoint), 0);
-                svc.shutdown().await;
-            }
-        }
+        let response = post_json(
+            &svc,
+            "/v1/messages",
+            json!({
+                "model": MODEL,
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "ping"}]
+            }),
+        )
+        .await;
+
+        assert_anthropic_error(
+            response,
+            ExpectedError::DeadlineExceeded,
+            "request deadline exceeded",
+        )
+        .await;
+        assert_error_metrics(
+            &svc,
+            &Endpoint::AnthropicMessages,
+            &RequestType::Unary,
+            &[
+                (ErrorType::Cancelled, 1),
+                (ErrorType::Overload, 0),
+                (ErrorType::Internal, 0),
+            ],
+        );
+        svc.shutdown().await;
     })
     .await;
 }

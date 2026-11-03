@@ -400,10 +400,7 @@ pub mod llm {
     /// to 503 for Service Unavailable retry semantics. Status codes from 200
     /// through 999 are accepted; an informational value from 100 through 199,
     /// an unparseable value, or an out-of-range value falls back to 529. The
-    /// value is read and cached on first use. A router class queue drop, a
-    /// queue-limit rejection or an expired due time, gets this status without
-    /// `Retry-After` from the frontend, the selection service, and the endpoint
-    /// picker; `dynamo_kv_router::overload_status` parses it for all three.
+    /// value is read and cached on first use.
     pub const DYN_HTTP_OVERLOAD_STATUS_CODE: &str = "DYN_HTTP_OVERLOAD_STATUS_CODE";
 
     /// Emit an SSE comment at this interval while a streaming response has no

@@ -369,10 +369,11 @@ later capacity recheck or cache refresh does not restart it.
 rejected at startup. With it, the class rejects a request that is still waiting
 for admission when its due time passes: the request's explicit deadline, which
 wins even when later, else router ingress plus `slo_ttft_ms`. The request gets
-the router's queue-deadline error, spends none of its class's scheduling
-credit, and is counted in `dynamo_frontend_router_admission_rejected_total`
-with `reason="due_time_passed"`. A request whose client has already
-disconnected when the router checks it is dropped uncounted. Each class queue keeps its own
+the router's queue-deadline error, spends none of its class's
+scheduling credit, and is counted in
+`dynamo_frontend_router_admission_rejected_total` with
+`reason="due_time_passed"`. A request whose client has already disconnected
+when the router checks it is dropped uncounted. Each class queue keeps its own
 expiry timer, so a request expires on time even when no request arrives and no
 capacity frees. Without `controlled_delay`, the budget only orders the class.
 `fcfs` and `wspt` classes neither order by the budget nor expire on it. In
@@ -380,13 +381,6 @@ every class, a classifier's explicit deadline expires a waiting request,
 including one waiting behind an `edf` head whose class due time only orders
 it. The budget bounds waiting for router admission only: it does not limit an
 admitted request or predict its TTFT.
-
-A queue-limit rejection and a due time that passes while a request waits are
-both drops. For either one, the Frontend returns its overload status, HTTP 529
-unless `DYN_HTTP_OVERLOAD_STATUS_CODE` sets another, without a `Retry-After`
-header; the selection service and the endpoint picker return the same status,
-and gRPC returns `RESOURCE_EXHAUSTED`. Each drop keeps its own error message
-and rejection reason, `queue_size_exceeded` or `due_time_passed`.
 
 > [!NOTE]
 > Older frontends without `controlled_delay` support reject a policy YAML that contains the key,

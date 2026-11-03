@@ -373,11 +373,16 @@ impl EndpointPicker for EppRouter {
 
         // On either error return below the guard (still armed) frees the booking.
 
-        let resp = self
-            .selector
-            .select_and_reserve(select_req)
-            .await
-            .map_err(selection_pick_error)?;
+        let resp = match self.selector.select_and_reserve(select_req).await {
+            Ok(resp) => resp,
+            Err(SelectionError::BadRequest(message)) => {
+                return Err(PickError::InvalidRequest(message));
+            }
+            Err(error @ SelectionError::Scheduler(KvSchedulerError::UnknownPolicyClass(_))) => {
+                return Err(PickError::InvalidRequest(error.to_string()));
+            }
+            Err(e) => return Err(PickError::RoutingFailed(e.to_string())),
+        };
 
         // The reflector owns the address + readiness. If it can no longer resolve
         // the selected worker, the pod left Ready in the race, so the selection is
@@ -548,22 +553,6 @@ impl TokenizeError {
                 }
             }
         }
-    }
-}
-
-/// Maps a [`Selector::select_and_reserve`] error to the pick error.
-pub(crate) fn selection_pick_error(error: SelectionError) -> PickError {
-    match error {
-        SelectionError::BadRequest(message) => PickError::InvalidRequest(message),
-        error @ SelectionError::Scheduler(KvSchedulerError::UnknownPolicyClass(_)) => {
-            PickError::InvalidRequest(error.to_string())
-        }
-        // A router class queue dropped the request: a class limit refused it, or its due time
-        // passed while it waited.
-        error @ SelectionError::Scheduler(
-            KvSchedulerError::QueueRejected(_) | KvSchedulerError::DeadlineExceeded,
-        ) => PickError::QueueDropped(error.to_string()),
-        error => PickError::RoutingFailed(error.to_string()),
     }
 }
 

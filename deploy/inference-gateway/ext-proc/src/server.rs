@@ -990,9 +990,7 @@ fn extract_candidate_subset(
 // ---------------------------------------------------------------------------
 
 struct ExtProcError {
-    /// Numeric, as Envoy's `HttpStatus.code` is: the overload status of a queue drop, 529 by
-    /// default, has no name in Envoy's status enum.
-    status_code: i32,
+    status_code: StatusCode,
     message: String,
 }
 
@@ -1000,53 +998,47 @@ impl ExtProcError {
     fn from_pick_error(e: PickError) -> Self {
         match e {
             PickError::NoEndpoints => Self {
-                status_code: StatusCode::ServiceUnavailable.into(),
+                status_code: StatusCode::ServiceUnavailable,
                 message: e.to_string(),
             },
             PickError::RoutingFailed(msg) => Self {
-                status_code: StatusCode::ServiceUnavailable.into(),
+                status_code: StatusCode::ServiceUnavailable,
                 message: msg,
             },
             PickError::InvalidRequest(msg) => Self {
-                status_code: StatusCode::BadRequest.into(),
+                status_code: StatusCode::BadRequest,
                 message: msg,
             },
             PickError::MetadataHeadersTooLarge(err) => Self {
-                status_code: StatusCode::RequestHeaderFieldsTooLarge.into(),
+                status_code: StatusCode::RequestHeaderFieldsTooLarge,
                 message: err.to_string(),
             },
             // Upstream tokenizer failures are not client errors: preserve their
             // semantics so clients retry appropriately. `e.to_string()` is the
             // client-safe variant message; the detailed cause is logged upstream.
             PickError::TokenizerUnavailable => Self {
-                status_code: StatusCode::ServiceUnavailable.into(),
+                status_code: StatusCode::ServiceUnavailable,
                 message: e.to_string(),
             },
             PickError::TokenizerTimeout => Self {
-                status_code: StatusCode::GatewayTimeout.into(),
+                status_code: StatusCode::GatewayTimeout,
                 message: e.to_string(),
             },
             PickError::TokenizerUpstreamError => Self {
-                status_code: StatusCode::BadGateway.into(),
+                status_code: StatusCode::BadGateway,
                 message: e.to_string(),
             },
             // In-flight limit saturated: shed as retryable backpressure. The
             // variant message ("endpoint picker overloaded") is client-safe.
             PickError::Overloaded => Self {
-                status_code: StatusCode::ServiceUnavailable.into(),
+                status_code: StatusCode::ServiceUnavailable,
                 message: e.to_string(),
-            },
-            // A router class queue dropped the request: the overload status the frontend and
-            // the selection service also return for a drop, without `Retry-After`.
-            PickError::QueueDropped(message) => Self {
-                status_code: dynamo_kv_router::overload_status::overload_status_code().into(),
-                message,
             },
         }
     }
 
     fn into_processing_response(self) -> ProcessingResponse {
-        envoy_helpers::build_error_response_with_code(self.status_code, Some(&self.message))
+        envoy_helpers::build_error_response(self.status_code, Some(&self.message))
     }
 }
 
@@ -1687,32 +1679,7 @@ mod tests {
     #[test]
     fn overloaded_pick_error_maps_to_503() {
         let err = ExtProcError::from_pick_error(PickError::Overloaded);
-        assert_eq!(err.status_code, i32::from(StatusCode::ServiceUnavailable));
-    }
-
-    /// A queue drop keeps its numeric overload status, 529 by default, through to Envoy's
-    /// immediate response, which carries no `Retry-After` header.
-    #[test]
-    fn queue_drop_maps_to_the_overload_status() {
-        use crate::proto::envoy::service::ext_proc::v3::processing_response::Response;
-
-        let configured =
-            std::env::var(dynamo_kv_router::overload_status::DYN_HTTP_OVERLOAD_STATUS_CODE).ok();
-        assert_eq!(
-            dynamo_kv_router::overload_status::overload_status_code(),
-            dynamo_kv_router::overload_status::parse_overload_status_code(configured.as_deref())
-        );
-        let overload = i32::from(dynamo_kv_router::overload_status::overload_status_code());
-        let err =
-            ExtProcError::from_pick_error(PickError::QueueDropped("queue dropped".to_string()));
-        assert_eq!(err.status_code, overload);
-        let Some(Response::ImmediateResponse(immediate)) = err.into_processing_response().response
-        else {
-            panic!("a pick error answers with an immediate response");
-        };
-        assert_eq!(immediate.status.map(|status| status.code), Some(overload));
-        assert_eq!(immediate.body, b"queue dropped");
-        assert!(immediate.headers.is_none());
+        assert_eq!(err.status_code, StatusCode::ServiceUnavailable);
     }
 
     #[test]
@@ -1720,10 +1687,7 @@ mod tests {
         let err = ExtProcError::from_pick_error(PickError::MetadataHeadersTooLarge(
             dynamo_llm::http::service::metadata::MetadataHeaderError::TooManyEntries { limit: 64 },
         ));
-        assert_eq!(
-            err.status_code,
-            i32::from(StatusCode::RequestHeaderFieldsTooLarge)
-        );
+        assert_eq!(err.status_code, StatusCode::RequestHeaderFieldsTooLarge);
     }
 
     /// Cache salt is injected as a top-level field and tagged with the Dynamo

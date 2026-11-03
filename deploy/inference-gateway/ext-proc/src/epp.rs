@@ -561,8 +561,9 @@ impl Router {
                 overlap_blocks,
                 ..
             } => Ok((worker, overlap_blocks)),
-            // Typed, so `decode_pick_error` reports the queue drop.
-            FindBestMatchOutcome::QueueRejected { rejection } => Err(anyhow::Error::new(rejection)),
+            FindBestMatchOutcome::QueueRejected { rejection } => {
+                Err(anyhow::anyhow!("Decode query failed: {rejection}"))
+            }
         }
     }
 
@@ -752,22 +753,10 @@ fn is_invalid_argument(error: &anyhow::Error) -> bool {
         .is_some_and(|error| error.error_type() == ErrorType::InvalidArgument)
 }
 
-/// The message of a router class queue drop anywhere in the error chain: a class limit refused
-/// the request, or its due time passed while it waited (`router.queue_deadline_exceeded`).
-fn queue_drop_message(error: &anyhow::Error) -> Option<String> {
-    use dynamo_llm::http::service::metrics::{queue_rejection, request_deadline_exceeded};
-
-    let error: &(dyn std::error::Error + 'static) = error.as_ref();
-    if request_deadline_exceeded(error) {
-        return Some(dynamo_kv_router::scheduling::KvSchedulerError::DeadlineExceeded.to_string());
-    }
-    queue_rejection(error).map(ToString::to_string)
-}
-
-/// Wraps a decode-router error for [`Router::route_decode`]. An invalid-argument error or a
-/// queue drop keeps its type so [`decode_pick_error`] can report it.
+/// Wraps a decode-router error for [`Router::route_decode`]. An invalid-argument error keeps
+/// its type so [`decode_pick_error`] can report it as invalid input.
 fn decode_query_error(error: anyhow::Error) -> anyhow::Error {
-    if is_invalid_argument(&error) || queue_drop_message(&error).is_some() {
+    if is_invalid_argument(&error) {
         error
     } else {
         anyhow::anyhow!("Decode query failed: {:?}", error)
@@ -776,19 +765,17 @@ fn decode_query_error(error: anyhow::Error) -> anyhow::Error {
 
 /// Maps a [`Router::route_decode`] error to the pick error.
 fn decode_pick_error(error: anyhow::Error) -> PickError {
-    if let Some(message) = queue_drop_message(&error) {
-        PickError::QueueDropped(message)
-    } else if is_invalid_argument(&error) {
+    if is_invalid_argument(&error) {
         PickError::InvalidRequest(error.to_string())
     } else {
         PickError::RoutingFailed(error.to_string())
     }
 }
 
-/// Wraps a prefill-reservation error for [`Router::route_prefill`]. An invalid-argument error or
-/// a queue drop keeps its type so [`prefill_disaggregated`] can fail the pick with it.
+/// Wraps a prefill-reservation error for [`Router::route_prefill`]. An invalid-argument error
+/// keeps its type so [`prefill_disaggregated`] can fail the pick with it.
 fn prefill_reservation_error(error: anyhow::Error) -> anyhow::Error {
-    if is_invalid_argument(&error) || queue_drop_message(&error).is_some() {
+    if is_invalid_argument(&error) {
         error
     } else {
         anyhow::anyhow!("Prefill reservation failed: {error}")
@@ -797,9 +784,7 @@ fn prefill_reservation_error(error: anyhow::Error) -> anyhow::Error {
 
 /// Whether the pick routes disaggregated after its prefill reservation. An invalid-argument
 /// error fails the pick: the request's class was rejected when it entered the prefill class.
-/// A queue drop fails it too, as it fails the frontend's request: the prefill class queue
-/// dropped the request, and aggregated routing would bypass that drop. Any other prefill error
-/// falls back to aggregated routing.
+/// Any other prefill error falls back to aggregated routing.
 fn prefill_disaggregated<T>(prefill: &Result<T>) -> Result<bool, PickError> {
     match prefill {
         Ok(_) => Ok(true),
@@ -807,9 +792,6 @@ fn prefill_disaggregated<T>(prefill: &Result<T>) -> Result<bool, PickError> {
             Err(PickError::InvalidRequest(error.to_string()))
         }
         Err(error) => {
-            if let Some(message) = queue_drop_message(error) {
-                return Err(PickError::QueueDropped(message));
-            }
             tracing::debug!(
                 error = %error,
                 "Prefill routing failed; falling back to aggregated mode"
@@ -2911,75 +2893,6 @@ mod tests {
                 PickError::RoutingFailed(message) if message == expected
             ));
         }
-    }
-
-    /// A router class queue drop, a due time that passed or a class limit refusal, fails the
-    /// pick as a drop in both hops: the decode pick keeps the drop's type through its wrapper,
-    /// and a prefill drop fails the pick instead of falling back to aggregated routing. A
-    /// deadline that is not the router queue's keeps its existing mapping.
-    #[test]
-    fn queue_drops_fail_decode_and_prefill_picks_as_queue_drops() {
-        use dynamo_kv_router::scheduling::{QueueLimitKind, QueueRejection};
-
-        let queue_deadline = || -> anyhow::Error {
-            DynamoError::builder()
-                .error_type(ErrorType::DeadlineExceeded)
-                .reason(
-                    dynamo_runtime::error::ErrorReason::new("router.queue_deadline_exceeded")
-                        .unwrap(),
-                )
-                .message("request deadline exceeded")
-                .build()
-                .into()
-        };
-        let rejection = QueueRejection {
-            policy_class: "latency".to_string(),
-            limit_kind: QueueLimitKind::Requests,
-            current: 2,
-            limit: 2,
-        };
-        let deadline_message = "request deadline exceeded".to_string();
-
-        // `route_decode` returns its queue rejection outcome as the bare rejection.
-        for (error, expected) in [
-            (queue_deadline(), deadline_message.clone()),
-            (anyhow::Error::new(rejection.clone()), rejection.to_string()),
-        ] {
-            assert!(matches!(
-                decode_pick_error(decode_query_error(error)),
-                PickError::QueueDropped(message) if message == expected
-            ));
-        }
-        // `reserve_prefill_worker` adds context to its rejection.
-        for (error, expected) in [
-            (queue_deadline(), deadline_message),
-            (
-                anyhow::Error::new(rejection.clone())
-                    .context("prefill router policy-class queue rejection"),
-                rejection.to_string(),
-            ),
-        ] {
-            assert!(matches!(
-                prefill_disaggregated(&Err::<(), _>(prefill_reservation_error(error))),
-                Err(PickError::QueueDropped(message)) if message == expected
-            ));
-        }
-
-        let other_deadline = || -> anyhow::Error {
-            DynamoError::builder()
-                .error_type(ErrorType::DeadlineExceeded)
-                .message("attempt deadline exceeded")
-                .build()
-                .into()
-        };
-        assert!(matches!(
-            decode_pick_error(decode_query_error(other_deadline())),
-            PickError::RoutingFailed(_)
-        ));
-        assert!(matches!(
-            prefill_disaggregated(&Err::<(), _>(prefill_reservation_error(other_deadline()))),
-            Ok(false)
-        ));
     }
 
     /// Prefill can run under its own advertised router configuration. Here prefill has no
