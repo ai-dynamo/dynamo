@@ -17,17 +17,26 @@ running pod:
   parses them with the frontend's own parser (``build_frontend_parser``),
   which reads env defaults from that env alone, so the planner process's
   environment is neither read nor modified. A shell-wrapped command, a
-  ``--router-policy-config`` file, router env set through ``valueFrom`` and
+  ``--router-policy-config`` file, router env the planner cannot read and
   an argument whose unreadable ``$(VAR)`` could set a router flag make the
-  frontend unparseable. ``envFrom`` sources are assumed to set no router
-  env; ``evaluate_premises`` warns about them, and P14 compares the
-  routers' policy parameters with the parsed startup.
+  frontend unparseable.
+- Env set through ``valueFrom`` is unreadable. A ConfigMap, Secret or
+  annotation value could also be or create an option ("dangerous"), as
+  could a ``$(VAR)`` the env leaves undefined that an ``envFrom`` source
+  may define (its ``prefix`` plus a ConfigMap or Secret key). Any other
+  ``fieldRef`` (the operator's ``POD_*`` among them) and a
+  ``resourceFieldRef`` never start with ``-`` or hold whitespace, so they
+  stay unreadable values but never stand for an option ("inert").
+  ``envFrom`` sources are otherwise assumed to set no router env;
+  ``evaluate_premises`` warns about them, and P14 compares the routers'
+  policy parameters with the parsed startup.
 - ``evaluate_premises`` checks P4 and P7-P10 and warns on P6 and P7; P14
   is the router actuator's. P4 also parses every worker component's router
-  flags and env the same way: a worker that resolves a router mode
-  advertises its own router configuration, which replaces the frontend's
-  for its worker set. ``p4_ok`` alone decides whether a retune controller
-  can be built.
+  flags and env the same way (``_worker_router_errors``): a worker that
+  resolves a router mode advertises its own router configuration, which
+  replaces the frontend's for its worker set, and one where dangerous env
+  could stand for an option fails too. ``p4_ok`` alone decides whether a
+  retune controller can be built.
 
 Every function is pure (a dict in, a value out, no Kubernetes calls) and
 never reads the planner's own environment.
@@ -77,12 +86,32 @@ MAIN_CONTAINER = "main"
 DEFAULT_FRONTEND_COMMAND = ("python3",)
 DEFAULT_FRONTEND_ARGS = ("-m", "dynamo.frontend")
 FRONTEND_MODULE = "dynamo.frontend"
+# The operator's worker invocation (component_common.go getCommonContainer),
+# kept by graph.go's merge under an empty authored command. A native-sidecar
+# main, one whose pod template has an init container named RUNTIME_CONTAINER,
+# skips that base container (graph.go: native-sidecar engines retain their
+# image entrypoint), so its args stay an exec-form argv.
+DEFAULT_WORKER_COMMAND = ("/bin/sh", "-c")
+# consts.go RuntimeContainerName.
+RUNTIME_CONTAINER = "runtime"
+# Worker options known to take exactly one value, so an unreadable value
+# right after one is that value: were it itself an option, the listed one
+# would lack its value and the worker would fail at startup. The worker's
+# router parser knows only the router flags, not the arity of engine or
+# runtime flags (--enforce-eager takes none, --connector a variable number),
+# so only these exempt a value; the recipes need no other. Before adding an
+# option, check its nargs and action in every backend that accepts it.
+_WORKER_VALUE_OPTIONS = frozenset({"--speculative-config"})
 
 # Env the operator injects into every component (component_common.go
 # getCommonContainer); user env of the same name overrides it.
 ENV_PARENT_DGD_NAME = "DYN_PARENT_DGD_K8S_NAME"
 ENV_PARENT_DGD_NAMESPACE = "DYN_PARENT_DGD_K8S_NAMESPACE"
-_OPERATOR_FIELD_REF_ENV = ("POD_NAME", "POD_NAMESPACE", "POD_UID")
+_OPERATOR_FIELD_REF_ENV = {
+    "POD_NAME": "metadata.name",
+    "POD_NAMESPACE": "metadata.namespace",
+    "POD_UID": "metadata.uid",
+}
 
 # The frontend's request trace recipe (P10).
 ENV_POD_NAME = "DYN_POD_NAME"
@@ -168,12 +197,40 @@ _RELEVANT_DESTS = frozenset(
 # runtime_status.go ResolveComponentRuntimeStatus, in its priority order.
 _MODEL_FLAGS = ("--served-model-name", "--model-name", "--model", "--model-path")
 _SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ash", "ksh"})
+# Shell option letters that take the next argument (-o pipefail, -O extglob),
+# and bash's long options that do.
+_SHELL_OPERAND_LETTERS = frozenset("oO")
+_SHELL_LONG_OPTIONS_WITH_VALUE = frozenset({"--init-file", "--rcfile"})
 # Python options that may precede ``-m``; the second set takes a value.
 _PYTHON_FLAGS = frozenset({"-u", "-B", "-E", "-I", "-O", "-OO", "-P", "-q", "-s", "-S"})
 _PYTHON_FLAGS_WITH_VALUE = frozenset({"-X", "-W"})
-# Marks an argument part that references env the planner cannot read.
-_OPAQUE = "\x00opaque:"
-_OPAQUE_REPR = repr(_OPAQUE)[1:-1]
+# Python's -m, alone or closing a cluster of flags (-um), with its module
+# attached or in the next word.
+_PYTHON_MODULE_OPTION = re.compile(r"-[A-Za-z]*?m(.*)")
+# Marks an argument part that references env the planner cannot read, as
+# "<marker><reference>\x00": _OPAQUE where the value could be or create an
+# option, _INERT where it cannot.
+_UNREADABLE = "\x00unreadable"
+_OPAQUE = _UNREADABLE + ":"
+_INERT = _UNREADABLE + "-inert:"
+# A marker, also as argparse quotes it with repr.
+_MARKER = re.compile(r"(?:\x00|\\x00)unreadable(?:-inert)?:(.*?)(?:\x00|\\x00|$)")
+# The keys a ConfigMap or Secret may hold, so what an envFrom source defines.
+_ENV_FROM_KEY = re.compile(r"[-._a-zA-Z0-9]+")
+
+# Shell syntax the worker script scan reads.
+_SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_SHELL_ASSIGNMENT = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\+?=")
+_SHELL_BLANKS = frozenset(" \t")
+_SHELL_OPERATORS = frozenset("\n;&|()<>")
+# Reserved words that may precede a command's name.
+_SHELL_RESERVED = frozenset(
+    {"!", "{", "do", "elif", "else", "if", "then", "time", "until", "while"}
+)
+_SHELL_DECLARATIONS = frozenset({"declare", "export", "local", "readonly", "typeset"})
+# Commands that parse a quoted word again or turn it into env, so that one
+# word can still reach the worker's options or env.
+_SHELL_REPARSING = frozenset({".", "env", "eval", "export", "source"})
 
 
 class FrontendParseError(ValueError):
@@ -422,13 +479,29 @@ class _Env:
     ``entries`` is the merged raw env keyed by name (operator-injected, then
     graph ``env``, then the container's; later wins). ``values`` holds each
     name whose value the planner can compute, after ``$(VAR)`` expansion;
-    ``opaque`` the names it cannot (``valueFrom``, or a reference to one).
+    ``opaque`` the names it cannot (``valueFrom``, or a reference to
+    unreadable env), and ``inert`` those of them whose value can never be or
+    create an option.
     """
 
     entries: Mapping[str, Mapping[str, Any]]
     values: Mapping[str, str]
     opaque: frozenset[str]
+    inert: frozenset[str]
     env_from: tuple[Mapping[str, Any], ...]
+
+    @property
+    def env_from_prefixes(self) -> tuple[str, ...]:
+        return _env_from_prefixes(self.env_from)
+
+    def expand(self, value: str) -> str:
+        return _expand(
+            value,
+            self.values,
+            self.opaque,
+            inert=self.inert,
+            env_from_prefixes=self.env_from_prefixes,
+        )
 
 
 @dataclass(frozen=True)
@@ -472,6 +545,8 @@ def _analyze(dgd: Mapping[str, Any], planner_mode: str) -> _Analysis:
                 "argv": list(argv),
                 "values": dict(env.values),
                 "opaque": sorted(env.opaque),
+                "inert": sorted(env.inert),
+                "env_from_prefixes": list(env.env_from_prefixes),
             }
         ),
         worker_types(planner_mode),
@@ -519,6 +594,8 @@ def _parse_cached(key: str, wts: tuple[str, ...]) -> _Parsed:
             inputs["values"],
             frozenset(inputs["opaque"]),
             wts,
+            inert=frozenset(inputs["inert"]),
+            env_from_prefixes=tuple(inputs["env_from_prefixes"]),
         )
     except FrontendParseError as error:
         return _Parsed(error=str(error))
@@ -537,6 +614,9 @@ def _parse(
     values: Mapping[str, str],
     opaque: frozenset[str],
     wts: tuple[str, ...],
+    *,
+    inert: frozenset[str] = frozenset(),
+    env_from_prefixes: tuple[str, ...] = (),
 ) -> _Parsed:
     args = _frontend_args(argv)
     parser, registered = _frontend_parser(values)
@@ -553,14 +633,17 @@ def _parse(
     if hidden:
         raise FrontendParseError(
             f"P4: frontend router env {', '.join(hidden)} is set through valueFrom "
-            "(or references such a value); the planner cannot read it, so set "
-            "it with a literal value"
+            "(or references such a value, or a $(VAR) an envFrom source may "
+            "define); the planner cannot read it, so set it with a literal value"
         )
 
     # An unreadable $(VAR) becomes a marker the parser carries as a value: a
     # non-router flag keeps it unconverted, a router flag fails the parse,
-    # and one left over where a flag could stand fails below.
-    expanded = [_expand_arg(arg, values, opaque) for arg in args]
+    # and a dangerous one left over where a flag could stand fails below.
+    expanded = [
+        _expand(arg, values, opaque, inert=inert, env_from_prefixes=env_from_prefixes)
+        for arg in args
+    ]
     namespace, unknown = parser.parse_known_args(expanded)
     hidden_flag = _opaque_flag_position(unknown)
     if hidden_flag is not None:
@@ -573,7 +656,7 @@ def _parse(
     unresolved = sorted(
         dest
         for dest, value in vars(namespace).items()
-        if dest in _RELEVANT_DESTS and _OPAQUE in str(value)
+        if dest in _RELEVANT_DESTS and _UNREADABLE in str(value)
     )
     if unresolved:
         raise FrontendParseError(
@@ -760,7 +843,8 @@ def _component_env(dgd: Mapping[str, Any], spec: Mapping[str, Any]) -> _Env:
 
     The operator injects ``DYN_PARENT_DGD_K8S_*`` and ``POD_*``, MergeEnvs
     overlays graph ``env`` and the main container's ``env`` and sorts the
-    result by name; Kubernetes expands ``$(VAR)`` against earlier names.
+    result by name; Kubernetes expands ``$(VAR)`` against earlier names and
+    every ``envFrom`` key.
     """
 
     metadata = dgd.get("metadata") or {}
@@ -774,34 +858,82 @@ def _component_env(dgd: Mapping[str, Any], spec: Mapping[str, Any]) -> _Env:
             "value": str(metadata.get("namespace", "")),
         },
     }
-    for name in _OPERATOR_FIELD_REF_ENV:
-        entries[name] = {"name": name, "valueFrom": {"fieldRef": {}}}
+    for name, path in _OPERATOR_FIELD_REF_ENV.items():
+        entries[name] = {"name": name, "valueFrom": {"fieldRef": {"fieldPath": path}}}
     main = _main_container(spec)
     for entry in [*_graph_env(dgd), *(main.get("env") or [])]:
         if isinstance(entry, Mapping) and entry.get("name"):
             entries[str(entry["name"])] = entry
-
-    values: dict[str, str] = {}
-    opaque: set[str] = set()
-    for name in sorted(entries):
-        entry = entries[name]
-        expanded = (
-            None
-            if entry.get("valueFrom") is not None
-            else _expand(str(entry.get("value") or ""), values, opaque)
-        )
-        if expanded is None:
-            opaque.add(name)
-        else:
-            values[name] = expanded
     env_from = tuple(
         source for source in main.get("envFrom") or [] if isinstance(source, Mapping)
     )
+    prefixes = _env_from_prefixes(env_from)
+
+    values: dict[str, str] = {}
+    opaque: set[str] = set()
+    inert: set[str] = set()
+    for name in sorted(entries):
+        entry = entries[name]
+        source = entry.get("valueFrom")
+        if source is not None:
+            opaque.add(name)
+            if _inert_source(source):
+                inert.add(name)
+            continue
+        expanded = _expand(
+            str(entry.get("value") or ""),
+            values,
+            opaque,
+            inert=inert,
+            env_from_prefixes=prefixes,
+        )
+        if _UNREADABLE not in expanded:
+            values[name] = expanded
+            continue
+        opaque.add(name)
+        # Literal text around inert values may still make an option.
+        if _OPAQUE not in expanded and not (
+            expanded.startswith("-") or any(char.isspace() for char in expanded)
+        ):
+            inert.add(name)
     return _Env(
         entries=entries,
         values=values,
         opaque=frozenset(opaque),
+        inert=frozenset(inert),
         env_from=env_from,
+    )
+
+
+def _inert_source(source: Any) -> bool:
+    """Whether a ``valueFrom`` value can never be or create an option.
+
+    A fieldRef other than an annotation (a name, namespace, uid, label, IP,
+    node or service account name) and a resourceFieldRef (a quantity) never
+    start with ``-`` or hold whitespace; a ConfigMap or Secret key and an
+    annotation can hold anything.
+    """
+
+    if not isinstance(source, Mapping):
+        return False
+    if isinstance(source.get("resourceFieldRef"), Mapping):
+        return True
+    field_ref = source.get("fieldRef")
+    if not isinstance(field_ref, Mapping):
+        return False
+    return not str(field_ref.get("fieldPath") or "").startswith("metadata.annotations")
+
+
+def _env_from_prefixes(env_from: Iterable[Mapping[str, Any]]) -> tuple[str, ...]:
+    return tuple(sorted({str(source.get("prefix") or "") for source in env_from}))
+
+
+def _env_from_may_define(name: str, prefixes: Iterable[str]) -> bool:
+    """Whether an ``envFrom`` source with one of ``prefixes`` could define ``name``."""
+
+    return any(
+        name.startswith(prefix) and _ENV_FROM_KEY.fullmatch(name[len(prefix) :])
+        for prefix in prefixes
     )
 
 
@@ -810,16 +942,19 @@ def _expand(
     values: Mapping[str, str],
     opaque: Iterable[str],
     *,
-    mark_opaque: bool = False,
-) -> Optional[str]:
-    """Kubernetes ``$(VAR)`` expansion.
+    inert: Iterable[str] = (),
+    env_from_prefixes: Iterable[str] = (),
+) -> str:
+    """Kubernetes ``$(VAR)`` expansion, marking what the planner cannot read.
 
-    ``$$`` escapes a ``$`` and a reference to an undefined name stays as
-    written. A reference to an opaque name makes the result ``None``, or,
-    with ``mark_opaque``, is replaced by a marker.
+    ``$$`` escapes a ``$``. A reference to an ``opaque`` name, or to an
+    undefined one an ``envFrom`` source may define, is replaced by a marker:
+    ``_INERT`` for an ``inert`` name, ``_OPAQUE`` otherwise. Any other
+    undefined reference stays as written.
     """
 
-    hidden = set(opaque)
+    hidden, harmless = set(opaque), set(inert)
+    prefixes = tuple(env_from_prefixes)
     out: list[str] = []
     index = 0
     while index < len(value):
@@ -831,10 +966,12 @@ def _expand(
             close = value.find(")", index + 2)
             if close != -1:
                 name = value[index + 2 : close]
-                if name in hidden:
-                    if not mark_opaque:
-                        return None
-                    out.append(f"{_OPAQUE}{name}\x00")
+                if name in harmless:
+                    out.append(f"{_INERT}$({name})\x00")
+                elif name in hidden or (
+                    name not in values and _env_from_may_define(name, prefixes)
+                ):
+                    out.append(f"{_OPAQUE}$({name})\x00")
                 else:
                     out.append(values.get(name, value[index : close + 1]))
                 index = close + 1
@@ -844,54 +981,66 @@ def _expand(
     return "".join(out)
 
 
-def _expand_arg(arg: str, values: Mapping[str, str], opaque: Iterable[str]) -> str:
-    """Expand one argument, marking opaque references for the parser."""
+def _opaque_flag_position(
+    unknown: Sequence[str], *, value_options: Optional[frozenset[str]] = None
+) -> Optional[str]:
+    """A left-over argument whose dangerous env could stand for a flag.
 
-    expanded = _expand(arg, values, opaque, mark_opaque=True)
-    assert expanded is not None
-    return expanded
+    ``unknown`` is what the frontend parser, or a worker's router parser,
+    leaves over in exec form. The parser consumes the value of every flag it
+    knows, so a dangerous argument it leaves over sits where a flag could,
+    unless it is the value of a left-over option, and a left-over option
+    whose name is unreadable always could. Inert env never stands for a
+    flag, and ``--option=$(VAR)`` is the option's value whatever it holds.
 
-
-def _opaque_flag_position(unknown: Sequence[str]) -> Optional[str]:
-    """A left-over argument whose unreadable env could stand for a flag.
-
-    The frontend parser consumes the value of every flag it knows, so a
-    marked argument it leaves over sits where a flag could, unless it
-    follows a left-over option (a flag the frontend hands to its chat
-    processor, and this its value). A left-over option whose name is
-    marked always could.
+    A reference expands to exactly one argument, so it is a value after an
+    option that takes exactly one: one that starts with ``-`` makes that
+    option's own parser fail at startup. With ``value_options`` unset, every
+    left-over option counts as one (the frontend hands them to its chat
+    processor); a worker passes the options known to take one value, since
+    its router parser cannot tell an engine flag that takes none
+    (``--enforce-eager``) or optional values (``--connector``), which the
+    worker would let the reference follow as a flag.
     """
+
+    def takes_value(option: Optional[str]) -> bool:
+        if option is None:
+            return False
+        if value_options is not None:
+            return option in value_options
+        return option.startswith("-") and "=" not in option
 
     previous: Optional[str] = None
     for token in unknown:
         if token.startswith("-"):
-            if _OPAQUE in token.split("=", 1)[0]:
+            if _UNREADABLE in token.split("=", 1)[0]:
                 return token
-        elif token.startswith(_OPAQUE) and not (
-            previous is not None
-            and previous.startswith("-")
-            and "=" not in previous
-            and _OPAQUE not in previous
-        ):
+        elif token.startswith(_OPAQUE) and not takes_value(previous):
             return token
         previous = token
     return None
 
 
+def _env_from_note(
+    reference: Optional[str], opaque: frozenset[str], prefixes: Sequence[str]
+) -> str:
+    """Says why a reference is unreadable when only an envFrom source may define it."""
+
+    name = (reference or "").strip("$()")
+    if name in opaque or not _env_from_may_define(name, prefixes):
+        return ""
+    return " (the container's env leaves it to an envFrom source)"
+
+
 def _opaque_reference(text: str) -> Optional[str]:
-    """``$(NAME)`` for the first opaque marker in ``text``, or ``None``.
+    """The reference (``$(NAME)``, ``$NAME``) of the first marker in ``text``.
 
     argparse quotes a rejected value with ``repr``, so the marker may appear
     escaped.
     """
 
-    for marker, end_marker in ((_OPAQUE, "\x00"), (_OPAQUE_REPR, "\\x00")):
-        index = text.find(marker)
-        if index != -1:
-            start = index + len(marker)
-            end = text.find(end_marker, start)
-            return f"$({text[start:end] if end != -1 else text[start:]})"
-    return None
+    match = _MARKER.search(text)
+    return None if match is None else match.group(1)
 
 
 def _env_from_may_set_router_env(source: Mapping[str, Any]) -> bool:
@@ -935,7 +1084,7 @@ def _worker_parse_error_message(message: str) -> str:
 class _ArgsParser(argparse.ArgumentParser):
     """An ``ArgumentParser`` that raises instead of printing and exiting.
 
-    A value carrying the opaque marker skips type conversion and the
+    A value carrying an unreadable marker skips type conversion and the
     choices check unless its destination is in ``relevant``, so an
     unreadable value of a flag that does not matter here parses, while one
     of a flag that does fails with a message naming the reference.
@@ -962,7 +1111,7 @@ class _ArgsParser(argparse.ArgumentParser):
     def _opaque_irrelevant(self, action: argparse.Action, value: Any) -> bool:
         return (
             isinstance(value, str)
-            and _OPAQUE in value
+            and _UNREADABLE in value
             and action.dest not in self._relevant
         )
 
@@ -1080,6 +1229,12 @@ def _worker_router_errors(
     ``DYN_ROUTER_MODE``, from its container or the graph env) puts a
     ``RouterConfig`` in its model card, and the frontend routes that worker
     set with it instead of its own flags; replay would model the frontend's.
+    A worker whose mode the planner cannot rule out fails too: one where
+    dangerous env could stand for an option. In exec form that is a
+    reference neither attached to its option (``--option=$(VAR)``) nor
+    after one of ``_WORKER_VALUE_OPTIONS``; in shell form any dangerous
+    ``$(VAR)``, which Kubernetes substitutes before the shell parses, and
+    the script references ``_shell_expand`` marks.
     """
 
     errors: list[str] = []
@@ -1097,6 +1252,7 @@ def _worker_router_errors(
                     "shell": shell,
                     "values": dict(env.values),
                     "opaque": sorted(env.opaque),
+                    "env_from_prefixes": list(env.env_from_prefixes),
                 }
             )
         )
@@ -1130,6 +1286,7 @@ def _worker_router_cached(key: str) -> Optional[str]:
             bool(inputs["shell"]),
             inputs["values"],
             frozenset(inputs["opaque"]),
+            tuple(inputs["env_from_prefixes"]),
         )
     except FrontendParseError as error:
         return str(error)
@@ -1146,6 +1303,7 @@ def _worker_router_mode(
     shell: bool,
     values: Mapping[str, str],
     opaque: frozenset[str],
+    env_from_prefixes: Sequence[str],
 ) -> Optional[str]:
     parser, registered = _worker_router_parser(values)
     mode_env = sorted(
@@ -1155,8 +1313,8 @@ def _worker_router_mode(
     if hidden:
         return (
             f"sets {', '.join(hidden)} through valueFrom (or a reference to such "
-            "a value), so the planner cannot tell whether it advertises a router "
-            "configuration"
+            "a value, or a $(VAR) an envFrom source may define), so the planner "
+            "cannot tell whether it advertises a router configuration"
         )
     # A shell script can also export the env inline.
     inline = sorted(
@@ -1165,41 +1323,600 @@ def _worker_router_mode(
     )
     if inline:
         return f"sets {', '.join(inline)} in its shell command"
-    namespace, _ = parser.parse_known_args(list(argv))
+    namespace, remainder = parser.parse_known_args(list(argv))
     mode = getattr(namespace, _ROUTER_MODE_DEST, None)
-    if mode is None:
+    if mode is not None:
+        return (
+            f"advertises its own router configuration (router mode {mode!r} from "
+            f"--router-mode or {ENV_ROUTER_MODE})"
+        )
+    if shell:
+        # Kubernetes substitutes $(VAR) into the script before the shell
+        # parses it, so a dangerous one can become several words anywhere;
+        # _shell_expand marks only the shell's own references that can.
+        opaque_word = next((word for word in argv if _OPAQUE in word), None)
+        if opaque_word is None:
+            return None
+        reference = _opaque_reference(opaque_word)
+        return (
+            f"has a shell script that references {reference} where it could "
+            "become an option, and the planner cannot read it"
+            f"{_env_from_note(reference, opaque, env_from_prefixes)}, so it could "
+            "select a router mode; give the value literally, quote the reference "
+            '("$VAR") outside the worker\'s arguments, or attach it to its '
+            'option (--option="$VAR")'
+        )
+    hidden_flag = _opaque_flag_position(remainder, value_options=_WORKER_VALUE_OPTIONS)
+    if hidden_flag is None:
         return None
+    reference = _opaque_reference(hidden_flag)
     return (
-        f"advertises its own router configuration (router mode {mode!r} from "
-        f"--router-mode or {ENV_ROUTER_MODE})"
+        f"has an argument that references {reference}, which the planner cannot "
+        f"read{_env_from_note(reference, opaque, env_from_prefixes)} and which "
+        "is neither attached to an option nor the value of one known to take a value "
+        f"({', '.join(sorted(_WORKER_VALUE_OPTIONS))}), so it could select a "
+        "router mode; give the value literally or attach it to its option "
+        "(--option=$(VAR))"
     )
 
 
 def _worker_argv(component: Mapping[str, Any], env: _Env) -> tuple[list[str], bool]:
     """A worker's argv after ``$(VAR)`` expansion, and whether a shell runs it.
 
-    Unreadable references stay marked. A shell-wrapped command is split
-    into the script's words, so the flags of the command it runs are seen.
+    An empty command is the operator's ``/bin/sh -c``, except for a
+    native-sidecar main, which keeps its image entrypoint and so runs its
+    args. A shell runs the command when it starts with one, or when a
+    shell's ``-c`` follows a launcher (``env bash -c``, ``tini -- sh -c``);
+    then its script's own references are resolved (``_shell_expand``) and
+    every part is split into words, so the flags of the commands it runs are
+    seen. Unreadable ``$(VAR)`` references stay marked. A standalone ``--``
+    is dropped: a launcher consumes it, while the router parser would read
+    every later flag as a positional.
     """
 
     main = _main_container(component)
-    parts: list[str] = []
-    for part in [*(main.get("command") or []), *(main.get("args") or [])]:
-        expanded = _expand(str(part), env.values, env.opaque, mark_opaque=True)
-        assert expanded is not None
-        parts.append(expanded)
-    shell = bool(parts) and (
-        posixpath.basename(parts[0]) in _SHELLS or parts[1:2] == ["-c"]
+    command = list(main.get("command") or [])
+    if not command and not _native_sidecar(component):
+        command = list(DEFAULT_WORKER_COMMAND)
+    parts = [env.expand(str(part)) for part in [*command, *(main.get("args") or [])]]
+    script = _shell_script_index(parts)
+    shell = script is not None or (
+        bool(parts)
+        and (posixpath.basename(parts[0]) in _SHELLS or parts[1:2] == ["-c"])
     )
-    if not shell:
-        return parts, False
-    words: list[str] = []
-    for part in parts:
-        try:
-            words.extend(shlex.split(part))
-        except ValueError:
-            words.extend(part.split())
-    return words, True
+    words = parts
+    if shell:
+        words = []
+        for index, part in enumerate(parts):
+            if index == script:
+                part = _shell_expand(part, env)
+            try:
+                words.extend(shlex.split(part))
+            except ValueError:
+                words.extend(part.split())
+    return [word for word in words if word != "--"], shell
+
+
+def _native_sidecar(component: Mapping[str, Any]) -> bool:
+    """Whether the operator runs the component's Dynamo runtime as a native sidecar.
+
+    v1beta1_helpers.go GetComponentDynamoSidecar: an init container named
+    ``runtime`` in the pod template, or in the leader role's.
+    """
+
+    templates = [component]
+    for role in component.get("roles") or []:
+        if isinstance(role, Mapping) and role.get("name") == "leader":
+            templates.append(role)
+    return any(
+        isinstance(container, Mapping) and container.get("name") == RUNTIME_CONTAINER
+        for template in templates
+        for container in _pod_spec(template).get("initContainers") or []
+    )
+
+
+def _shell_script_index(parts: Sequence[str]) -> Optional[int]:
+    """The index of the script a shell's ``-c`` runs in ``parts``, if any.
+
+    It is ``len(parts)`` when ``parts`` end before the script.
+    """
+
+    for index, part in enumerate(parts):
+        if posixpath.basename(part) in _SHELLS:
+            script = _shell_options_end(parts, index + 1)
+            if script is not None:
+                return script
+    return None
+
+
+def _shell_options_end(parts: Sequence[str], index: int) -> Optional[int]:
+    """Where the options a shell reads from ``index`` on end, if they include ``-c``.
+
+    The shell reads ``-`` and ``+`` clusters up to ``--``, ``-`` or a word
+    that is none; each ``o`` or ``O`` in a cluster takes the next argument
+    (``-euo pipefail``). With ``-c`` the script is the first word after them.
+    """
+
+    command = False
+    while index < len(parts):
+        option = parts[index]
+        if option[:1] not in ("-", "+"):
+            break
+        index += 1
+        if option in ("-", "--"):
+            break
+        if option.startswith("--"):
+            if option in _SHELL_LONG_OPTIONS_WITH_VALUE:
+                index += 1
+            continue
+        command |= option.startswith("-") and "c" in option
+        index += sum(letter in _SHELL_OPERAND_LETTERS for letter in option[1:])
+    return index if command else None
+
+
+def _shell_expand(script: str, env: _Env) -> str:
+    """A worker script with the shell's own parameter references resolved.
+
+    Runs on the text the shell parses, after Kubernetes ``$(VAR)``
+    substitution, and keeps it apart from each ``$NAME``, ``${NAME}`` and
+    ``${NAME<op>word}`` outside single quotes, comments and heredocs:
+
+    - literal env becomes its value as the shell passes it on (split into
+      words when unquoted), so the router parser sees an option it holds;
+    - dangerous env becomes ``_OPAQUE`` where its value could be or create
+      an option of the worker: unquoted, which the shell splits into words;
+      anywhere in an argument of ``eval`` or of a shell given ``-c`` (also
+      behind a launcher), which parse it again; or quoted as a whole
+      argument of the command that runs the worker (``-m dynamo.<x>``) or
+      of one that turns it into code or env (source, env, export, a shell),
+      unless it follows one of ``_WORKER_VALUE_OPTIONS``. An assignment
+      neither splits nor passes it on, but leaves its variable dangerous;
+    - other unreadable env becomes ``_INERT``;
+    - script variables, image env and special parameters stay as written;
+    - a default or alternate word is scanned in their place wherever the
+      shell may use it.
+
+    The scan does not follow control flow, so an assignment may not run:
+    it leaves literal env and explicit dangerous env of its name, and a
+    dangerous earlier assignment, in place. Command substitution, backticks
+    and arithmetic are neither evaluated nor rejected, and neither are
+    scripts the worker sources or runs, or literal text that ``eval`` or a
+    nested shell parses again; a script variable counts as dangerous only
+    when the script assigns it from dangerous env directly (not through an
+    array, positional parameters, a function argument or a command's
+    output).
+    """
+
+    return _ShellScan(script, env).run()
+
+
+class _ShellScan:
+    """One pass of ``_shell_expand`` over a script."""
+
+    def __init__(self, script: str, env: _Env) -> None:
+        self.script = script
+        self.env = env
+        self.out: list[str] = []
+        self.index = 0
+        self.quoted = False
+        # The current word as far as the scan knows it: an expansion it does
+        # not evaluate adds nothing, since it may be empty.
+        self.word = ""
+        self.in_word = False
+        self.assignment = False
+        self.dangerous = False
+        # The known words of the current simple command, and its name.
+        self.words: list[str] = []
+        self.command: Optional[str] = None
+        self.command_dangerous = False
+        self.redirect = False
+        self.heredocs: list[tuple[str, bool]] = []
+        # Script variables, and whether each was assigned dangerous env.
+        self.variables: dict[str, bool] = {}
+
+    def run(self) -> str:
+        while self.index < len(self.script):
+            # A default or alternate word is spliced into the script.
+            script = self.script
+            char = script[self.index]
+            if char == "\x00":
+                end = script.find("\x00", self.index + 1)
+                self.dangerous |= script.startswith(_OPAQUE, self.index)
+                self.emit(len(script) if end == -1 else end + 1, "")
+            elif not self.quoted and char in _SHELL_BLANKS:
+                self.end_word()
+                self.copy(self.index + 1)
+            elif not self.quoted and char in _SHELL_OPERATORS:
+                self.operator()
+            elif not self.quoted and char == "#" and not self.in_word:
+                end = script.find("\n", self.index)
+                self.copy(len(script) if end == -1 else end)
+            elif char == "\\":
+                self.escape()
+            elif char == "'" and not self.quoted:
+                end = script.find("'", self.index + 1)
+                end = len(script) if end == -1 else end + 1
+                self.emit(end, script[self.index + 1 : end - 1])
+            elif char == '"':
+                self.emit(self.index + 1, "")
+                self.quoted = not self.quoted
+            elif char == "`":
+                self.emit(_backtick_end(script, self.index + 1), "")
+            elif char == "$":
+                self.dollar()
+            else:
+                self.emit(self.index + 1, char)
+        self.end_word()
+        self.end_command()
+        return "".join(self.out)
+
+    def copy(self, end: int) -> None:
+        self.out.append(self.script[self.index : end])
+        self.index = end
+
+    def emit(self, end: int, known: str, text: Optional[str] = None) -> None:
+        """Add the script up to ``end`` (or ``text`` for it) to the current word."""
+
+        if not self.in_word:
+            self.in_word = True
+            self.assignment = self.command is None and bool(
+                _SHELL_ASSIGNMENT.match(self.script, self.index)
+            )
+        self.out.append(self.script[self.index : end] if text is None else text)
+        self.word += known
+        self.index = end
+
+    def end_word(self) -> None:
+        if not self.in_word:
+            return
+        word = self.word
+        self.command_dangerous |= self.dangerous
+        if self.redirect:
+            self.redirect = False
+        else:
+            match = _SHELL_ASSIGNMENT.match(word)
+            if match and (self.assignment or self.command in _SHELL_DECLARATIONS):
+                self.assign(match.group(1), self.dangerous)
+            elif _SHELL_NAME.fullmatch(word) and (
+                self.command == "read"
+                or (self.command == "for" and self.words == ["for"])
+            ):
+                self.assign(word, False)
+            self.words.append(word)
+            if (
+                self.command is None
+                and not self.assignment
+                and word not in _SHELL_RESERVED
+            ):
+                self.command = word
+        self.word, self.in_word, self.assignment, self.dangerous = (
+            "",
+            False,
+            False,
+            False,
+        )
+
+    def end_command(self) -> None:
+        if self.command == "for" and len(self.words) > 1 and self.command_dangerous:
+            self.variables[self.words[1]] = True
+        self.words, self.command = [], None
+        self.command_dangerous = self.redirect = False
+
+    def assign(self, name: str, dangerous: bool) -> None:
+        # The scan does not follow control flow, so the assignment may not
+        # run: it never clears explicit dangerous env or an earlier
+        # dangerous assignment.
+        env = self.env
+        self.variables[name] = (
+            dangerous
+            or self.variables.get(name, False)
+            or (name in env.opaque and name not in env.inert)
+        )
+
+    def operator(self) -> None:
+        script, index = self.script, self.index
+        self.end_word()
+        if script.startswith("<<", index) and not script.startswith("<<<", index):
+            heredoc, end = _shell_heredoc(script, index)
+            if heredoc is not None:
+                self.heredocs.append(heredoc)
+            self.copy(end)
+            return
+        if script[index] in "<>" or script.startswith("&>", index):
+            # A redirection, whose target is no argument.
+            end = index + 1
+            while end < len(script) and script[end] in "<>&|":
+                end += 1
+            self.copy(end)
+            self.redirect = True
+            return
+        self.end_command()
+        self.copy(index + 1)
+        if script[index] == "\n":
+            for delimiter, strip in self.heredocs:
+                self.copy(_shell_heredoc_end(script, self.index, delimiter, strip))
+            self.heredocs.clear()
+
+    def escape(self) -> None:
+        index = self.index
+        following = self.script[index + 1 : index + 2]
+        if following == "\n":
+            # A line continuation joins the lines.
+            self.index += 2
+        elif self.quoted and following not in ('"', "\\", "$", "`"):
+            self.emit(index + 1, "\\")
+        else:
+            self.emit(index + 2, following)
+
+    def dollar(self) -> None:
+        script, index = self.script, self.index
+        following = script[index + 1 : index + 2]
+        name = _SHELL_NAME.match(script, index + 1)
+        if following == "(":
+            # Command substitution or arithmetic, not evaluated.
+            self.emit(_shell_substitution_end(script, index + 2), "")
+        elif following == "{":
+            self.braced()
+        elif name is not None:
+            self.reference(name.group(0), name.end())
+        elif following and following in "@*#?$!-0123456789":
+            self.emit(index + 2, "")
+        else:
+            self.emit(index + 1, "$")
+
+    def braced(self) -> None:
+        script, index = self.script, self.index
+        close = _shell_brace_end(script, index + 2)
+        if close == -1:
+            self.emit(len(script), "")
+            return
+        body = script[index + 2 : close]
+        name = _SHELL_NAME.match(body)
+        if name is None:
+            # A length, an indirection or a positional parameter.
+            self.emit(close + 1, "")
+            return
+        operator = body[name.end() :]
+        word_operator = operator.lstrip(":")[:1]
+        if word_operator in ("-", "=", "+"):
+            word = operator[operator.index(word_operator) + 1 :]
+            kind = self.kind(name.group(0))
+            value = self.env.values.get(name.group(0), "")
+            known_set = kind == "readable" and (
+                bool(value) or not operator.startswith(":")
+            )
+            # The shell expands the word where it replaces the value: an
+            # alternate one where the value may be set, a default one where
+            # it may be unset and is not unreadable env.
+            if word_operator == "+":
+                if known_set or kind != "readable":
+                    self.script = script[:index] + word + script[close + 1 :]
+                else:
+                    self.index = close + 1
+                return
+            if not known_set and kind not in ("dangerous", "inert"):
+                self.script = script[:index] + word + script[close + 1 :]
+                return
+        self.reference(name.group(0), close + 1, operator)
+
+    def reference(self, name: str, end: int, operator: str = "") -> None:
+        kind = self.kind(name)
+        if kind == "readable":
+            value = self.env.values[name]
+            # The value, unless a default word replaces an empty one or an
+            # operator derives another value from it.
+            if operator[:1] in ("", "-", "=", "?") or (
+                operator[:2] in (":-", ":=", ":?") and value
+            ):
+                self.literal(value, end)
+            else:
+                self.emit(end, "")
+        elif kind == "unknown":
+            self.emit(end, "")
+        else:
+            dangerous = kind == "dangerous"
+            self.dangerous |= dangerous
+            marker = _OPAQUE if dangerous and self.option_position() else _INERT
+            self.emit(end, "", f"{marker}${name}\x00")
+
+    def kind(self, name: str) -> str:
+        env = self.env
+        assigned = self.variables.get(name)
+        if assigned:
+            return "dangerous"
+        if name in env.values:
+            # The script's own assignment may not run either.
+            return "readable"
+        if assigned is not None:
+            return "unknown"
+        if name in env.inert:
+            return "inert"
+        if name in env.opaque or _env_from_may_define(name, env.env_from_prefixes):
+            return "dangerous"
+        return "unknown"
+
+    def literal(self, value: str, end: int) -> None:
+        if self.quoted:
+            self.emit(end, value, value.replace("\\", "\\\\").replace('"', '\\"'))
+        elif self.in_word and self.assignment:
+            self.emit(end, value, shlex.quote(value))
+        else:
+            # The shell splits an unquoted value into words.
+            pieces = value.split()
+            for position, piece in enumerate(pieces):
+                if position or value[:1].isspace():
+                    self.end_word()
+                    self.out.append(" ")
+                self.emit(self.index, piece, shlex.quote(piece))
+            if value[-1:].isspace():
+                self.end_word()
+                self.out.append(" ")
+            self.index = end
+
+    def option_position(self) -> bool:
+        """Whether a dangerous value here could be or create an option of the worker."""
+
+        if self.in_word and self.assignment:
+            return False
+        if not self.quoted or self.reparses():
+            return True
+        lead = self.word if self.in_word else ""
+        if lead:
+            # Attached to its option, or inside one's name.
+            return lead.startswith("-") and "=" not in lead
+        if self.words and self.words[-1] in _WORKER_VALUE_OPTIONS:
+            return False
+        if self.command is None:
+            # The command's name: one word, a program to run.
+            return False
+        if (
+            self.command in _SHELL_REPARSING
+            or posixpath.basename(self.command) in _SHELLS
+        ):
+            return True
+        words = self.words
+        for word, following in zip(words, [*words[1:], ""]):
+            module = _PYTHON_MODULE_OPTION.fullmatch(word)
+            if module is not None and (module.group(1) or following).startswith(
+                "dynamo."
+            ):
+                return True
+        return False
+
+    def reparses(self) -> bool:
+        """Whether the current command parses its arguments again as a script.
+
+        ``eval`` does, and so does a shell given ``-c``, also behind a
+        launcher (``exec``, ``nohup``, ``env``), whose positional parameters
+        its script may expand unquoted.
+        """
+
+        return self.command == "eval" or _shell_script_index(self.words) is not None
+
+
+def _backtick_end(script: str, index: int) -> int:
+    """The index after the backtick closing one opened before ``index``."""
+
+    while index < len(script):
+        if script[index] == "\\":
+            index += 2
+        elif script[index] == "`":
+            return index + 1
+        else:
+            index += 1
+    return len(script)
+
+
+def _shell_brace_end(script: str, index: int) -> int:
+    """The index of the ``}`` closing a ``${`` whose body starts at ``index``, or -1."""
+
+    depth = 0
+    while index < len(script):
+        if script[index] == "\\":
+            index += 2
+            continue
+        if script.startswith("${", index):
+            depth += 1
+            index += 2
+            continue
+        if script[index] == "}":
+            if depth == 0:
+                return index
+            depth -= 1
+        index += 1
+    return -1
+
+
+def _shell_substitution_end(script: str, index: int) -> int:
+    """The index after the ``)`` closing a ``$(`` whose body starts at ``index``."""
+
+    depth = 0
+    quote = ""
+    heredocs: list[tuple[str, bool]] = []
+    word_start = True
+    while index < len(script):
+        char = script[index]
+        if quote == "'":
+            quote = "" if char == "'" else quote
+            index += 1
+            continue
+        if char == "\\":
+            index += 2
+            word_start = False
+            continue
+        if char == "`":
+            index = _backtick_end(script, index + 1)
+            continue
+        if script.startswith("$(", index):
+            index = _shell_substitution_end(script, index + 2)
+            continue
+        if quote == '"':
+            quote = "" if char == '"' else quote
+            index += 1
+            continue
+        if char in "'\"":
+            quote = char
+        elif char == "#" and word_start:
+            end = script.find("\n", index)
+            index = len(script) if end == -1 else end
+            continue
+        elif script.startswith("<<", index) and not script.startswith("<<<", index):
+            heredoc, index = _shell_heredoc(script, index)
+            if heredoc is not None:
+                heredocs.append(heredoc)
+            continue
+        elif char == "\n" and heredocs:
+            index += 1
+            for delimiter, strip in heredocs:
+                index = _shell_heredoc_end(script, index, delimiter, strip)
+            heredocs.clear()
+            word_start = True
+            continue
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            if depth == 0:
+                return index + 1
+            depth -= 1
+        word_start = char in _SHELL_BLANKS or char in _SHELL_OPERATORS
+        index += 1
+    return len(script)
+
+
+def _shell_heredoc(script: str, index: int) -> tuple[Optional[tuple[str, bool]], int]:
+    """The heredoc ``<<`` at ``index`` opens, and the index after its delimiter.
+
+    The heredoc is its delimiter and whether ``<<-`` strips leading tabs.
+    """
+
+    index += 2
+    strip = script.startswith("-", index)
+    if strip:
+        index += 1
+    while index < len(script) and script[index] in _SHELL_BLANKS:
+        index += 1
+    start = index
+    while (
+        index < len(script)
+        and script[index] not in _SHELL_BLANKS
+        and script[index] not in _SHELL_OPERATORS
+    ):
+        index += 1
+    delimiter = re.sub(r"[\"'\\]", "", script[start:index])
+    return ((delimiter, strip) if delimiter else None), index
+
+
+def _shell_heredoc_end(script: str, index: int, delimiter: str, strip: bool) -> int:
+    """The index after a heredoc body starting at ``index`` and its delimiter line."""
+
+    while index < len(script):
+        end = script.find("\n", index)
+        end = len(script) if end == -1 else end
+        line = script[index:end]
+        index = end + 1
+        if (line.lstrip("\t") if strip else line) == delimiter:
+            break
+    return min(index, len(script))
 
 
 def _planner_replica_errors(
@@ -1440,8 +2157,7 @@ def _model_flags(
     main = _main_container(component)
     tokens: list[str] = []
     for part in [*(main.get("command") or []), *(main.get("args") or [])]:
-        text = _expand(str(part), env.values, env.opaque, mark_opaque=True)
-        assert text is not None
+        text = env.expand(str(part))
         try:
             tokens.extend(shlex.split(text))
         except ValueError:
@@ -1458,7 +2174,7 @@ def _model_flags(
             resolved = (
                 value
                 and "$" not in value
-                and _OPAQUE not in value
+                and _UNREADABLE not in value
                 and not value.startswith("-")
             )
             found.append((flag, value if resolved else None))
