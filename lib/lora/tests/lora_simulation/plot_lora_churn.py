@@ -15,13 +15,13 @@ Usage:
     cargo test --test lora_simulation -- test_export_csv --ignored --nocapture
 
     # 2. Generate plots:
-    python lib/llm/tests/lora_simulation/plot_lora_churn.py
+    python lib/lora/tests/lora_simulation/plot_lora_churn.py
 
     # Or save to PNG instead of showing interactively:
-    python lib/llm/tests/lora_simulation/plot_lora_churn.py --save
+    python lib/lora/tests/lora_simulation/plot_lora_churn.py --save
 
     # Plot a single scenario:
-    python lib/llm/tests/lora_simulation/plot_lora_churn.py --scenario hot_lora_poisson --save
+    python lib/lora/tests/lora_simulation/plot_lora_churn.py --scenario hot_lora_poisson --save
 """
 
 import argparse
