@@ -55,10 +55,8 @@ def admits_only_empty_object(schema: Any) -> bool:
     return True
 
 
-# Keywords whose value is a map of subschemas, and keywords whose value is a
-# subschema or a list of subschemas. Mirrors ``rebase_schema_refs`` in
-# lib/llm/src/protocols/openai/tools.rs; keep the two in step. Literal keywords
-# such as ``const``, ``enum``, ``default`` and ``examples`` are never entered.
+# Keywords holding subschemas; literal keywords such as ``const`` are skipped.
+# Mirrors ``rebase_schema_refs`` in lib/llm/src/protocols/openai/tools.rs.
 _SCHEMA_MAP_KEYWORDS = frozenset(
     {
         "$defs",
