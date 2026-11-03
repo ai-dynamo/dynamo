@@ -328,17 +328,24 @@ def test_snapshot_sanitizes_directory_scan_failures(tmp_path, monkeypatch):
         [""],
         ["x" * 257],
         ["q\nproj"],
-        ["missing_proj"],
     ],
 )
-def test_snapshot_rejects_invalid_or_missing_targets(tmp_path, targets):
+def test_snapshot_rejects_invalid_target_metadata(tmp_path, targets):
     snapshot = _snapshot(tmp_path, target_modules=targets)
 
     _assert_invalid(snapshot, tmp_path)
 
 
-def test_snapshot_accepts_regex_targets(tmp_path):
-    snapshot = _snapshot(tmp_path, target_modules=".*q_proj")
+@pytest.mark.parametrize("targets", [".*q_proj", "all-linear"])
+def test_snapshot_accepts_string_target_selectors(tmp_path, targets):
+    snapshot = _snapshot(tmp_path, target_modules=targets)
+
+    assert validate_snapshot(snapshot, tmp_path, 1024, 64, ("base",)) == snapshot
+
+
+def test_snapshot_accepts_unused_config_targets(tmp_path):
+    # PEFT can retain nonexistent targets; vLLM validates actual tensor modules.
+    snapshot = _snapshot(tmp_path, target_modules=["q_proj", "absent_proj"])
 
     assert validate_snapshot(snapshot, tmp_path, 1024, 64, ("base",)) == snapshot
 
