@@ -20,7 +20,8 @@ pub use crate::{OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapSco
 use crate::{PotentialLoad, SessionContext, WorkerSelectionInputTrigger};
 use dynamo_kv_hints::{KvHintTransferWorkerMetadata, KvTransferEnforcement};
 use dynamo_multimodal::BlockExtraInfo;
-use dynamo_router_protocol::worker::{DpRank, WorkerAffinityTarget, WorkerId, WorkerWithDpRank};
+use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
+use dynamo_session_affinity::WorkerAffinityTarget;
 
 use super::input::{MmRoutingInfoRequest, PromptRequest};
 

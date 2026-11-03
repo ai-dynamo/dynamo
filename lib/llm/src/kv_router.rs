@@ -1332,7 +1332,7 @@ impl KvRouter {
         policy_class: Option<String>,
         session_context: Option<dynamo_router_protocol::session::SessionContext>,
         expected_output_tokens: Option<u32>,
-        affinity_target: Option<dynamo_router_protocol::worker::WorkerAffinityTarget>,
+        affinity_target: Option<dynamo_session_affinity::host::WorkerAffinityTarget>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,

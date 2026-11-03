@@ -7,12 +7,13 @@ use dynamo_admission::host::QueueRejection;
 use dynamo_kv_hints::KvHint;
 use dynamo_kv_indexer::host::RoutingDecisionHashes;
 use dynamo_multimodal::BlockExtraInfo;
-use dynamo_router_protocol::worker::{WorkerAffinityTarget, WorkerId, WorkerWithDpRank};
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
 use dynamo_scheduler::host::{
     AdvisoryWorkerLoad, BookingHandle, RequestLifecycle, RouterConfigOverride, RoutingConstraints,
     RoutingEligibility,
 };
+use dynamo_session_affinity::host::WorkerAffinityTarget;
 
 use crate::{
     kv_router::{FindBestMatchAdmission, FindBestMatchOutcome, routing_host::RoutingHost},

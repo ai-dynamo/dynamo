@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_router_protocol::session::SessionContext;
-use dynamo_router_protocol::worker::{WorkerAffinityTarget, WorkerWithDpRank};
+use dynamo_router_protocol::worker::WorkerWithDpRank;
+use dynamo_session_affinity::WorkerAffinityTarget;
 
 use super::inputs::CacheSnapshot;
 use super::shared_cache::SharedCacheHits;

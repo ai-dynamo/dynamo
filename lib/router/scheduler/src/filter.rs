@@ -5,7 +5,8 @@ use std::collections::{HashMap, HashSet};
 
 use super::types::KvSchedulerError;
 use crate::protocols::{RoutingConstraints, WorkerConfigLike};
-use dynamo_router_protocol::worker::{DpRank, WorkerAffinityTarget, WorkerId, WorkerWithDpRank};
+use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
+use dynamo_session_affinity::WorkerAffinityTarget;
 use dynamo_slot_tracker::busy::FullRankCounts;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

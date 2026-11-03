@@ -19,6 +19,7 @@ use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dashmap::{DashMap, mapref::entry::Entry};
+use dynamo_router_protocol::worker::{DpRank, WorkerId, WorkerWithDpRank};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use tokio::sync::futures::OwnedNotified;
@@ -28,7 +29,27 @@ use tokio_util::sync::CancellationToken;
 pub mod host;
 pub mod wire;
 
-pub use dynamo_router_protocol::worker::WorkerAffinityTarget as AffinityTarget;
+/// A worker affinity target that may apply to every data-parallel rank of a worker.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct WorkerAffinityTarget {
+    pub worker_id: WorkerId,
+    pub dp_rank: Option<DpRank>,
+}
+
+impl WorkerAffinityTarget {
+    pub fn new(worker_id: WorkerId, dp_rank: Option<DpRank>) -> Self {
+        Self { worker_id, dp_rank }
+    }
+}
+
+impl From<WorkerWithDpRank> for WorkerAffinityTarget {
+    fn from(worker: WorkerWithDpRank) -> Self {
+        Self::new(worker.worker_id, Some(worker.dp_rank))
+    }
+}
+
+/// The stage's own name for the target a session binds to.
+pub type AffinityTarget = WorkerAffinityTarget;
 
 pub const MAX_SESSION_AFFINITY_TTL_SECS: u64 = 31_536_000;
 pub const MAX_SESSION_AFFINITY_ENTRIES: usize = 65_536;

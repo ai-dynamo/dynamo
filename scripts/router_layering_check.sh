@@ -50,9 +50,9 @@ TABLE=(
   "dynamo-kv-hints | dynamo-kv-hashing dynamo-kv-indexer dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-slot-tracker dynamo-session-affinity dynamo-worker-selection dynamo-admission dynamo-scheduler prometheus axum hyper reqwest zmq"
   "dynamo-kv-indexer | dynamo-kv-events dynamo-kv-hashing dynamo-router-protocol dynamo-tokens | dynamo-runtime dynamo-kv-router dynamo-kv-hints dynamo-zmq axum hyper reqwest zmq"
   "dynamo-slot-tracker | dynamo-router-protocol dynamo-tokens | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-kv-events dynamo-kv-hashing dynamo-multimodal dynamo-zmq axum hyper reqwest zmq prometheus"
-  "dynamo-session-affinity | dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-slot-tracker dynamo-kv-events dynamo-kv-hashing dynamo-multimodal dynamo-zmq axum hyper reqwest zmq prometheus"
-  "dynamo-worker-selection | dynamo-router-protocol dynamo-slot-tracker | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-session-affinity dynamo-kv-events dynamo-kv-hashing dynamo-multimodal dynamo-zmq axum hyper reqwest zmq prometheus"
-  "dynamo-admission | dynamo-router-protocol dynamo-slot-tracker dynamo-tokens | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-session-affinity dynamo-worker-selection dynamo-kv-events dynamo-kv-hashing dynamo-multimodal dynamo-zmq axum hyper reqwest zmq prometheus"
+  "dynamo-session-affinity | dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-slot-tracker dynamo-worker-selection dynamo-admission dynamo-kv-events dynamo-kv-hashing dynamo-multimodal dynamo-zmq axum hyper reqwest zmq prometheus"
+  "dynamo-worker-selection | dynamo-router-protocol dynamo-session-affinity dynamo-slot-tracker | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-kv-events dynamo-kv-hashing dynamo-multimodal dynamo-zmq axum hyper reqwest zmq prometheus"
+  "dynamo-admission | dynamo-router-protocol dynamo-session-affinity dynamo-slot-tracker dynamo-tokens | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-worker-selection dynamo-kv-events dynamo-kv-hashing dynamo-multimodal dynamo-zmq axum hyper reqwest zmq prometheus"
   "dynamo-scheduler | dynamo-admission dynamo-kv-events dynamo-kv-hashing dynamo-kv-hints dynamo-kv-indexer dynamo-multimodal dynamo-router-protocol dynamo-session-affinity dynamo-slot-tracker dynamo-tokens dynamo-worker-selection | dynamo-runtime dynamo-kv-router dynamo-zmq axum hyper reqwest zmq prometheus"
 )
 

@@ -2061,6 +2061,7 @@ version = "1.7.0"
 dependencies = [
  "async-trait",
  "dynamo-router-protocol",
+ "dynamo-session-affinity",
  "dynamo-slot-tracker",
  "dynamo-tokens",
  "futures-util",
@@ -2732,6 +2733,7 @@ dependencies = [
  "async-trait",
  "crossbeam-queue",
  "dynamo-router-protocol",
+ "dynamo-session-affinity",
  "dynamo-slot-tracker",
  "fastrand",
  "rustc-hash 2.1.2",

@@ -10,5 +10,5 @@ pub use crate::{
     AcquireStep, AffinityError, AffinityLease, AffinityReplicaSink, AffinityTarget,
     AffinityVersion, Hold, MAX_SESSION_AFFINITY_ID_BYTES, MAX_SESSION_AFFINITY_TTL_SECS,
     ReplicaApplyOutcome, SessionAffinity, SessionAffinityConfig, SessionAffinityMode,
-    WeakSessionAffinity, subagent_group_affinity_id,
+    WeakSessionAffinity, WorkerAffinityTarget, subagent_group_affinity_id,
 };

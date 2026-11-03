@@ -23,7 +23,8 @@ use tokio::time::Instant;
 
 use dynamo_router_protocol::columns::WorkerInputs;
 use dynamo_router_protocol::session::SessionContext;
-use dynamo_router_protocol::worker::{WorkerAffinityTarget, WorkerWithDpRank};
+use dynamo_router_protocol::worker::WorkerWithDpRank;
+use dynamo_session_affinity::WorkerAffinityTarget;
 use dynamo_slot_tracker::busy::BusyThresholds;
 
 use crate::profile::PolicyProfile;

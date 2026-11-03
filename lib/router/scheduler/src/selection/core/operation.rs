@@ -17,7 +17,8 @@ use crate::queue::BookingHandle;
 use crate::{AdvisoryWorkerLoad, SchedulingResponse, SessionContext};
 use dynamo_admission::queue::QueueRejection;
 use dynamo_kv_hashing::LocalBlockHash;
-use dynamo_router_protocol::worker::{WorkerAffinityTarget, WorkerId, WorkerWithDpRank};
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_session_affinity::WorkerAffinityTarget;
 use dynamo_worker_selection::SharedCacheHits;
 
 use super::super::error::SelectionError;

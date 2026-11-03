@@ -947,7 +947,7 @@ mod tests {
     #[test]
     fn default_policy_retains_eligible_affinity_and_falls_back_when_overloaded() {
         use crate::test_utils::SimpleWorkerConfig;
-        use dynamo_router_protocol::worker::WorkerAffinityTarget;
+        use dynamo_session_affinity::WorkerAffinityTarget;
 
         let selector = DefaultWorkerSelector::new(
             Some(SelectionConfig {

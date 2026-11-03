@@ -43,7 +43,8 @@ use dynamo_kv_hashing::LocalBlockHash;
 use dynamo_kv_indexer::backend::{Indexer, IndexerPolicy};
 use dynamo_kv_indexer::registry::IndexRegistry;
 use dynamo_kv_indexer::{LowerTierQueryOptions, RoutingDecisionHashes, TieredMatchDetails};
-use dynamo_router_protocol::worker::{WorkerAffinityTarget, WorkerId, WorkerWithDpRank};
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
+use dynamo_session_affinity::WorkerAffinityTarget;
 use dynamo_slot_tracker::wire::PrefillLoadHint;
 use dynamo_slot_tracker::{
     ActiveSequencesMultiWorker, LifecycleMutationOutcome, ReplicaRequestLeaseObserver,
