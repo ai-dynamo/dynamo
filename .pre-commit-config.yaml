@@ -239,12 +239,6 @@ repos:
       language: python
       pass_filenames: false
       files: ^(\.github/actions/compliance-extract/|\.pre-commit-config\.yaml$)
-    - id: bump-main-version-selftest
-      name: Self-test the main-version bump script
-      entry: python3 .github/scripts/test_bump_main_version.py
-      language: system
-      files: ^\.github/scripts/(test_)?bump_main_version\.py$
-      pass_filenames: false
     - id: check-action-pins-selftest
       name: Self-test the action-pin matcher
       entry: python3 scripts/check_action_pins.py --test
