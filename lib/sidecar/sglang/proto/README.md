@@ -19,3 +19,11 @@ The local file adds SPDX and temporary-copy comments and applies Dynamo's
 `clang-format` style; these changes do not alter the protobuf descriptor. The
 SGLang sidecar generates both client and server types and temporarily exposes
 them to the Mocker server.
+
+SGLang 0.5.23 adds the `GenerateRequest` media fields 19 to 21 (`image_data`,
+`video_data`, and `audio_data`) and the `GetServerInfo` `grpc_features` list.
+The sidecar sends each media kind only to a server that lists it in
+`grpc_features` (`image_inputs`, `video_inputs`, or `audio_inputs`). An older
+server drops unknown fields, and a model processor drops each media kind that
+it has no placeholder for. Both drops are silent, so the sidecar refuses each
+media kind that the server does not list.
