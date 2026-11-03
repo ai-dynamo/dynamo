@@ -19,7 +19,7 @@ use dashmap::DashMap;
 use dynamo_kv_router::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
 
 use crate::lora::config::PredictorType;
-use crate::predictor::{EmaPredictor, LoadPredictor};
+use crate::lora::predictor::{EmaPredictor, LoadPredictor};
 
 // ─── BucketedRateCounter ────────────────────────────────────────────────────
 
