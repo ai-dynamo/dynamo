@@ -193,7 +193,7 @@ pub(crate) struct LegacyLoraPolicy {
 }
 
 impl LegacyLoraPolicy {
-    pub(crate) fn hosted(
+    pub(super) fn hosted(
         filter: Arc<LoraFilter>,
         estimator: Arc<LoadEstimator>,
         selector: BuiltinWorkerSelector,
