@@ -744,9 +744,7 @@ async def test_stats_polling_processes_complete_drain_through_batch_handler():
     ]
 
 
-# ---------------------------------------------------------------------------
 # Native TRT-LLM MetricsCollector under attention DP
-# ---------------------------------------------------------------------------
 
 _COLLECTOR_LABELS = {"model_name": "test-attention-dp", "engine_type": "trtllm"}
 
