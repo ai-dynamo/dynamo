@@ -1643,6 +1643,11 @@ class EngineFactory:
                 "from runtime_config.context_length",
                 context_length,
             )
+        # Preserve vLLM defaults when optional frontend arguments are absent.
+        for name in ("renderer_num_workers", "mm_processor_cache_gb"):
+            value = getattr(self.flags, name, None)
+            if value is not None:
+                model_config_kwargs[name] = value
         model_config = ModelConfig(**model_config_kwargs)
         # Use processor_only cache so tensor data persists across requests.
         # The default "lru" sender cache drops tensor data on cache hits
