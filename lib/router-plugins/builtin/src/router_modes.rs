@@ -3,10 +3,10 @@
 
 //! The non-KV routing modes as worker-selection policies, one module per mode.
 //!
-//! `--router-mode random`, `round-robin`, `least-loaded` and `power-of-two` resolve to these types
-//! by name. Each picker declares at most [`WorkerInputs::ACTIVE_REQUESTS`]. `PushRouter` runs
-//! the same pickers through the instance selectors its caller passes, so each algorithm lives
-//! only here.
+//! `--router-mode random`, `round-robin`, `least-loaded` and the deprecated `power-of-two` resolve
+//! to these types by name. Each picker declares at most [`WorkerInputs::ACTIVE_REQUESTS`].
+//! `PushRouter` runs the same pickers through the instance selectors its caller passes, so each
+//! algorithm lives only here.
 //!
 //! [`WorkerInputs::ACTIVE_REQUESTS`]: dynamo_kv_router::plugins::worker_selection::WorkerInputs::ACTIVE_REQUESTS
 
@@ -100,10 +100,8 @@ pub(crate) fn register_missing(registry: &mut RouterPluginRegistry) {
             LEAST_LOADED,
             Arc::new(provider(|| least_loaded::LeastLoadedPicker)),
         ),
-        (
-            POWER_OF_TWO,
-            Arc::new(provider(|| power_of_two::PowerOfTwoPicker)),
-        ),
+        // TODO(v1.8): Remove with the deprecated `power-of-two` router mode.
+        (POWER_OF_TWO, Arc::new(power_of_two::provider())),
     ];
     for (name, provider) in modes {
         match registry.register_worker_selection(name, provider) {

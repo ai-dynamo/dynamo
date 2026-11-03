@@ -397,7 +397,8 @@ for the shared fields.
 
 <ParamField path="--router-mode" type="string" default="inherit frontend">
   Advertise a Router configuration for this worker set. When omitted, the worker advertises no
-  Router configuration and inherits the Frontend configuration.
+  Router configuration and inherits the Frontend configuration. `power-of-two` is deprecated and will
+  be removed in v1.8; use `least-loaded` instead.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>round-robin</Badge> <Badge intent="note" minimal>random</Badge> <Badge intent="note" minimal>power-of-two</Badge> <Badge intent="note" minimal>kv</Badge> <Badge intent="note" minimal>direct</Badge> <Badge intent="note" minimal>least-loaded</Badge> <Badge intent="note" minimal>device-aware-weighted</Badge></span>
 </ParamField>

@@ -46,6 +46,12 @@ _ABSOLUTE_PREFILL_THRESHOLD_DEPRECATION = (
     "use --active-prefill-tokens-threshold-frac"
 )
 
+# TODO(v1.8): Remove with the power-of-two router mode.
+_POWER_OF_TWO_DEPRECATION = (
+    "--router-mode power-of-two is deprecated and will be removed in v1.8; "
+    "use --router-mode least-loaded"
+)
+
 _ENFORCE_DISAGG_DEPRECATION = (
     "%s is deprecated and ignored; disaggregated routing topology and readiness "
     "are determined automatically from registered worker types"
@@ -233,7 +239,8 @@ class RouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_MODE",
             default=self.default_router_mode,
             help=(
-                "How to route the request. power-of-two picks 2 random workers and "
+                "How to route the request. power-of-two (deprecated; removed in v1.8, "
+                "use least-loaded) picks 2 random workers and "
                 "routes to the one with fewer in-flight requests. least-loaded routes to "
                 "the worker with the fewest active requests. device-aware-weighted routes "
                 "based on worker device type (CPU/CUDA). In disaggregated prefill mode, "
@@ -243,6 +250,7 @@ class RouterArgGroup(ArgGroup):
             choices=[
                 "round-robin",
                 "random",
+                # TODO(v1.8): Remove the deprecated power-of-two router mode.
                 "power-of-two",
                 "kv",
                 "direct",
@@ -323,6 +331,7 @@ class RouterArgGroup(ArgGroup):
 ROUTER_MODE_MAP: dict[str, str] = {
     "round-robin": "RoundRobin",
     "random": "Random",
+    # TODO(v1.8): Remove the deprecated power-of-two router mode.
     "power-of-two": "PowerOfTwoChoices",
     "kv": "KV",
     "direct": "Direct",
@@ -427,6 +436,9 @@ def build_router_config(
     # deprecated value is actually forwarded.
     if router_kwargs["active_prefill_tokens_threshold"] is not None:
         logger.warning(_ABSOLUTE_PREFILL_THRESHOLD_DEPRECATION)
+    # TODO(v1.8): Remove with the power-of-two router mode.
+    if router_mode == "power-of-two":
+        logger.warning(_POWER_OF_TWO_DEPRECATION)
 
     # Imported lazily so that importing a backend's argument definitions does
     # not pull in the compiled bindings.

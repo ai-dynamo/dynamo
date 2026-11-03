@@ -13,8 +13,8 @@
 use std::sync::Arc;
 
 use dynamo_kv_router::{
-    KvRouterConfig, RoutingPartitionRef, WorkerType,
-    selector::{HostedWorkerPicker, WorkerInputs},
+    KvRouterConfig, RoutingPartitionRef, WorkerType, plugins::worker_selection::WorkerInputs,
+    selector::HostedWorkerPicker,
 };
 use dynamo_router_policies::router_modes;
 use dynamo_runtime::{

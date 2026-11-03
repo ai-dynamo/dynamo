@@ -15,10 +15,10 @@ use crate::kv_router::SelectionPolicySource;
 use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 use dynamo_kv_router::{
     config::KvRouterConfig,
-    protocols::RoutingConstraints,
-    scheduling::{
+    plugins::request_classifier::{
         ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
     },
+    protocols::RoutingConstraints,
 };
 use dynamo_runtime::{
     DistributedRuntime, Runtime,
@@ -2535,7 +2535,10 @@ async fn tracked_admission_without_lifecycle_bypasses_classifier() {
 }
 
 struct TokenContractClassifier {
-    classified: mpsc::UnboundedSender<(usize, dynamo_kv_router::scheduling::RequestProgress)>,
+    classified: mpsc::UnboundedSender<(
+        usize,
+        dynamo_kv_router::plugins::request_classifier::RequestProgress,
+    )>,
     completed: mpsc::UnboundedSender<usize>,
 }
 

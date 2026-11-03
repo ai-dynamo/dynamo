@@ -1,24 +1,29 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Compile legacy plugin import paths against the canonical registry and contracts.
+//! Compile external plugins against the public `plugins` contracts and the common registry.
 //! Scorer implementations use the current batch signature; old scalar signatures must migrate.
-//! TODO(v1.7): Remove the legacy import coverage when the compatibility exports are removed.
 
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::{RouterPluginRegistry, request_classifier, worker_selection};
-use dynamo_kv_router::scheduling::{ClassifyFuture, ClassifyRequest, RequestClassifier};
+use dynamo_kv_router::plugins::request_classifier::{
+    self, ClassifyFuture, ClassifyRequest, RequestClassifier,
+};
+use dynamo_kv_router::plugins::worker_selection::{
+    self, WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView, WorkerInputs,
+    WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
+};
+use dynamo_kv_router::plugins::{
+    RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProviderError,
+};
 use dynamo_kv_router::selector::{HostedSelectionRequest, HostedWorkerPicker};
 use dynamo_kv_router::{
-    KvRouterConfig, RoutingPartitionRef, WorkerCandidate, WorkerCandidates, WorkerFilter,
-    WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerType,
+    KvRouterConfig, RoutingPartitionRef, WorkerSelectionPolicyError, WorkerType,
 };
 
-struct LegacyPolicy;
+struct ExamplePolicy;
 
-impl WorkerFilter for LegacyPolicy {
+impl WorkerFilter for ExamplePolicy {
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::CACHE
     }
@@ -35,7 +40,7 @@ impl WorkerFilter for LegacyPolicy {
     }
 }
 
-impl WorkerScorer for LegacyPolicy {
+impl WorkerScorer for ExamplePolicy {
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::LOAD
     }
@@ -56,7 +61,7 @@ impl WorkerScorer for LegacyPolicy {
     }
 }
 
-impl WorkerPicker for LegacyPolicy {
+impl WorkerPicker for ExamplePolicy {
     fn pick(
         &self,
         _context: &WorkerSelectionContext<'_>,
@@ -91,9 +96,9 @@ impl WorkerPicker for ActiveRequestsPicker {
     }
 }
 
-struct LegacyClassifier;
+struct ExampleClassifier;
 
-impl RequestClassifier for LegacyClassifier {
+impl RequestClassifier for ExampleClassifier {
     fn classify(
         &mut self,
         request: ClassifyRequest,
@@ -102,70 +107,47 @@ impl RequestClassifier for LegacyClassifier {
         let _: Option<&str> = request.request_id();
         let _: usize = request.isl_tokens();
         let _: Option<&[u64]> = request.sequence_hashes();
-        let _: &dynamo_kv_router::scheduling::RequestProgress = request.progress();
         let _: &request_classifier::RequestProgress = request.progress();
         let _: Option<tokio::time::Instant> = request.due_at();
         Box::pin(async move { Ok(request) })
     }
 }
 
-fn legacy_provider(
-    _parameters: &dynamo_kv_router::plugins::WorkerSelectionPolicyParameters,
-) -> Result<
-    dynamo_kv_router::WorkerSelectionPolicyFactory,
-    dynamo_kv_router::plugins::WorkerSelectionPolicyProviderError,
-> {
+fn example_provider(
+    _parameters: &WorkerSelectionPolicyParameters,
+) -> Result<worker_selection::WorkerSelectionPolicyFactory, WorkerSelectionPolicyProviderError> {
     Ok(Arc::new(|config, worker_type, _partition| {
         WorkerSelectionPolicy::new_with_filters(
             config.clone(),
             worker_type.as_str(),
-            vec![Box::new(LegacyPolicy)],
-            vec![Box::new(LegacyPolicy)],
-            Box::new(LegacyPolicy),
+            vec![Box::new(ExamplePolicy)],
+            vec![Box::new(ExamplePolicy)],
+            Box::new(ExamplePolicy),
         )
     }))
 }
 
 #[test]
-fn legacy_plugins_resolve_through_the_common_registry() {
-    // These assignments require identity, not wrappers around the original traits.
-    let _: Box<dyn worker_selection::WorkerFilter> = Box::new(LegacyPolicy);
-    let _: Box<dyn worker_selection::WorkerScorer> = Box::new(LegacyPolicy);
-    let _: Box<dyn worker_selection::WorkerPicker> = Box::new(LegacyPolicy);
-    let _: Box<dyn request_classifier::RequestClassifier> = Box::new(LegacyClassifier);
+fn plugins_resolve_through_the_common_registry() {
+    let _: Box<dyn RequestClassifier> = Box::new(ExampleClassifier);
 
-    let mut registry = dynamo_kv_router::plugins::WorkerSelectionPolicyRegistry::default();
+    let mut registry = RouterPluginRegistry::default();
     registry
-        .register("legacy", Arc::new(legacy_provider))
+        .register_worker_selection("example", Arc::new(example_provider))
         .unwrap();
-    let registry: RouterPluginRegistry = registry;
     let policy = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(policy.path(), "worker_selection:\n  aggregated: legacy\n  prefill: legacy\n  decode: legacy\n  encode: legacy\n  instances:\n    - name: legacy\n      type: legacy\n").unwrap();
+    std::fs::write(policy.path(), "worker_selection:\n  aggregated: example\n  prefill: example\n  decode: example\n  encode: example\n  instances:\n    - name: example\n      type: example\n").unwrap();
     let config = KvRouterConfig {
         router_policy_config: Some(policy.path().display().to_string()),
         ..Default::default()
     };
     let plugins = registry.resolve_plugins(&config).unwrap();
     let factory = plugins.worker_selection().unwrap();
-    let _policy: worker_selection::WorkerSelectionPolicy = factory(
+    let _policy: WorkerSelectionPolicy = factory(
         &config,
         WorkerType::Aggregated,
         RoutingPartitionRef::new("model", "default"),
     );
-}
-
-#[cfg(feature = "standalone-selection")]
-#[test]
-fn legacy_service_catalog_registers_into_the_common_registry() {
-    use dynamo_kv_router::services::selection::{
-        WorkerSelectionPolicyProvider, WorkerSelectionPolicyRegistry,
-    };
-
-    let mut registry = RouterPluginRegistry::default();
-    let legacy_registry: &mut WorkerSelectionPolicyRegistry = &mut registry;
-    let provider: WorkerSelectionPolicyProvider = Arc::new(legacy_provider);
-    legacy_registry.register("legacy", provider).unwrap();
-    assert!(!registry.is_empty());
 }
 
 #[test]

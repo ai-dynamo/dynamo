@@ -104,11 +104,11 @@ pub(crate) fn register(
 mod tests {
     use std::collections::HashMap;
 
+    use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicy;
     use dynamo_kv_router::protocols::{RoutingConstraints, WorkerConfigLike, WorkerWithDpRank};
     use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode, SchedulingRequest};
     use dynamo_kv_router::{
-        KvRouterConfig, WorkerLoadProjection, WorkerSelectionInput, WorkerSelectionPolicy,
-        WorkerSelector,
+        KvRouterConfig, WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
     };
 
     use super::*;

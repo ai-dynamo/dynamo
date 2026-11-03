@@ -1803,6 +1803,7 @@ class RouterMode:
     """Router mode for load balancing requests across workers"""
     RoundRobin: "RouterMode"
     Random: "RouterMode"
+    # Deprecated; removed in v1.8. Use LeastLoaded.
     PowerOfTwoChoices: "RouterMode"
     KV: "RouterMode"
     Direct: "RouterMode"

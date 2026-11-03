@@ -262,6 +262,9 @@ pub enum RouterMode {
     #[default]
     RoundRobin,
     Random,
+    /// Deprecated `--router-mode power-of-two`, removed in v1.8.
+    // Model deployment cards carry this value, so it stays decodable after the mode is removed.
+    // TODO(v1.9): Remove this wire value.
     PowerOfTwoChoices,
     KV,
     Direct,
@@ -999,6 +1002,11 @@ where
     }
 
     /// Issue a request to the less loaded of two random instances.
+    // TODO(v1.8): Remove with the deprecated `power-of-two` router mode.
+    #[deprecated(
+        since = "1.7.0",
+        note = "the power-of-two router mode is deprecated and will be removed in v1.8; use `least_loaded`"
+    )]
     pub async fn power_of_two_choices(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         self.dispatch_by(RouterMode::PowerOfTwoChoices, request)
             .await

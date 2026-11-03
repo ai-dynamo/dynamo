@@ -125,8 +125,9 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 
 <ParamField path="--router-mode" type="string" default="round-robin">
   Routing strategy. `power-of-two` samples two workers and selects the worker with fewer in-flight
-  requests. In disaggregated prefill mode, `power-of-two` and `least-loaded` use the synchronous
-  prefill fallback path.
+  requests; it is deprecated, logs a warning at startup, and will be removed in v1.8, so use
+  `least-loaded` instead. In disaggregated prefill mode, `power-of-two` and `least-loaded` use the
+  synchronous prefill fallback path.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>round-robin</Badge> <Badge intent="note" minimal>random</Badge> <Badge intent="note" minimal>power-of-two</Badge> <Badge intent="note" minimal>kv</Badge> <Badge intent="note" minimal>direct</Badge> <Badge intent="note" minimal>least-loaded</Badge> <Badge intent="note" minimal>device-aware-weighted</Badge></span>
 

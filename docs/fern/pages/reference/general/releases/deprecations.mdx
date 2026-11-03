@@ -41,6 +41,23 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** Replace `WorkerInputs::OCCUPANCY` with `WorkerInputs::ACTIVE_REQUESTS` in custom worker-selection policies.
 
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Deprecated the `power-of-two` Router mode.** `--router-mode power-of-two` still works and logs a deprecation warning at startup, as does a policy file that names the `power-of-two` worker-selection type. The flag value, the `power-of-two` policy type, and the Rust `PushRouter::power_of_two_choices()` method are slated for removal in Dynamo v1.8.0. Model cards that carry the `power_of_two_choices` Router mode remain readable until v1.9.0.
+
+  > **Migrate:** Switch to `--router-mode least-loaded`, which routes to the worker with the fewest active requests, or to `random` or `round-robin`.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Removed the compatibility import paths and names for Router plugins** in the `dynamo-kv-router` and `dynamo-llm` Rust crates.
+
+| Removed | Replacement |
+| :---- | :---- |
+| Crate-root `dynamo_kv_router::{WorkerFilter, WorkerScorer, WorkerPicker, WorkerCandidate, WorkerCandidates, WorkerInputs, WorkerInputView, WorkerLoadInput, WorkerCacheInput, WorkerCacheInputs, ScoredWorkerCandidate, WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyFactory}`, the same contract names under `selector`, and `services::selection::WorkerSelectionPolicyFactory` | `dynamo_kv_router::plugins::worker_selection::*` |
+| `scheduling::{RequestClassifier, ClassifyRequest, ClassifyFuture, ClassifyEvent, ClassifierError, AbortCause, RequestClassifierContext, RequestProgress, ...}` and the same names under `scheduling::request_classifier` | `dynamo_kv_router::plugins::request_classifier::*` |
+| `scheduling::{WorkerSelectionConfig, WorkerSelectionInstance}`, `scheduling::policy_config::{RequestClassifierConfig, WorkerSelectionConfig, WorkerSelectionInstance}` | `plugins::worker_selection::{WorkerSelectionConfig, WorkerSelectionInstance}`, `plugins::request_classifier::RequestClassifierConfig` |
+| `WorkerSelectionPolicyRegistry`; `RouterPluginRegistry::register` | `RouterPluginRegistry`; `RouterPluginRegistry::register_worker_selection` |
+| `dynamo_llm::kv_router::{install_worker_selection_policy_registry, worker_selection_policy_registry}` | `dynamo_llm::kv_router::plugins::{install_router_plugin_registry, router_plugin_registry}` |
+| `HttpFrontend::worker_selection_policy_factory` | `HttpFrontend::plugins(RouterPlugins::default().with_worker_selection(...))` |
+
+  > **Migrate:** Update `use` paths and registry calls in custom policy crates and catalogs. The types and traits are unchanged, so no other code changes are needed.
+
 <a id="v160"></a>
 
 ## v1.6.0 - Oct 22, 2026

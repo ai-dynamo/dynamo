@@ -11,9 +11,10 @@ use std::sync::Arc;
 use anyhow::Result;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::identity::RoutingPartitionId;
+use dynamo_kv_router::plugins::worker_selection::WorkerInputs;
 use dynamo_kv_router::services::indexer::registry::WorkerRegistry;
 use dynamo_kv_router::services::selection::KvEventIngress;
-use dynamo_kv_router::{SessionPrefixIndexer, WorkerInputs, WorkerType};
+use dynamo_kv_router::{SessionPrefixIndexer, WorkerType};
 use dynamo_runtime::component::Endpoint;
 use tokio_util::sync::CancellationToken;
 
