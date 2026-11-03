@@ -506,7 +506,7 @@ impl ModelManager {
         if bases.next().is_some() {
             return Err(RuntimeLoraError::BaseModelRequired);
         }
-        if !model.has_runtime_lora_base_deployment(supports_surface) {
+        if !model.has_runtime_lora_base_surface(supports_surface) {
             return Err(RuntimeLoraError::BaseModelUnsupported(name.clone()));
         }
         Ok(name.clone())
@@ -3800,13 +3800,13 @@ mod tests {
         configs.send_replace(HashMap::new());
         assert_eq!(
             mm.infer_runtime_lora_base_model(WorkerSet::has_chat_engine),
-            Err(RuntimeLoraError::BaseModelUnsupported("token-base".into()))
+            Ok("token-base".into())
         );
         configs.send_replace(HashMap::from([(1, token_card.runtime_config.clone())]));
         instances.send_replace(Vec::new());
         assert_eq!(
             mm.infer_runtime_lora_base_model(WorkerSet::has_chat_engine),
-            Err(RuntimeLoraError::BaseModelUnsupported("token-base".into()))
+            Ok("token-base".into())
         );
         instances.send_replace(vec![1]);
         assert_eq!(
@@ -3847,7 +3847,7 @@ mod tests {
         drop(configs);
         assert_eq!(
             mm.infer_runtime_lora_base_model(WorkerSet::has_chat_engine),
-            Err(RuntimeLoraError::BaseModelUnsupported("token-base".into()))
+            Ok("token-base".into())
         );
     }
 

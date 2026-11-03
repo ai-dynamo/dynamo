@@ -55,9 +55,11 @@ use super::{
     },
     service_v2::{self, BackendErrorCheck},
 };
-use crate::discovery::WorkerSet;
+use crate::discovery::{ModelManager, WorkerSet};
 use crate::engines::ValidateRequest;
-use crate::lora::runtime::{RuntimeLoraError, RuntimeLoraSelection, resolve_runtime_lora_model};
+use crate::lora::runtime::{
+    RuntimeLoraConfig, RuntimeLoraError, RuntimeLoraSelection, resolve_runtime_lora_model,
+};
 use crate::preprocessor::{
     PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, REQUEST_PARSING_OPTIONS_CONTEXT_KEY,
     RUNTIME_LORA_CONTEXT_KEY, decode_base64_to_floats,
@@ -1212,46 +1214,48 @@ fn runtime_lora_error_response(error: RuntimeLoraError) -> ErrorResponse {
 }
 
 fn runtime_lora_selection(
-    state: &service_v2::State,
+    manager: &ModelManager,
+    config: &RuntimeLoraConfig,
     requested_model: &str,
     supports_surface: fn(&WorkerSet) -> bool,
 ) -> Result<Option<RuntimeLoraSelection>, ErrorResponse> {
-    if !state.runtime_lora_config().enabled {
+    if !config.enabled {
         return Ok(None);
     }
     if requested_model.is_empty() {
         return Ok(None);
     }
-    let requested_canonical = state.manager().resolve_canonical_name(requested_model);
-    if state
-        .manager()
-        .get_committed_model(&requested_canonical)
-        .is_some()
-    {
+    let requested_canonical = manager.resolve_canonical_name(requested_model);
+    if manager.get_committed_model(&requested_canonical).is_some() {
         return Ok(None);
     }
-    resolve_runtime_lora_model(
+    let selection = resolve_runtime_lora_model(
         requested_model,
-        state.runtime_lora_config(),
+        config,
         |name| {
-            let canonical = state.manager().resolve_canonical_name(name);
-            state.manager().get_committed_model(&canonical).is_some()
+            let canonical = manager.resolve_canonical_name(name);
+            manager.get_committed_model(&canonical).is_some()
         },
         |name| {
-            let canonical = state.manager().resolve_canonical_name(name);
-            state
-                .manager()
+            let canonical = manager.resolve_canonical_name(name);
+            manager
                 .get_committed_model(&canonical)
-                .filter(|model| model.has_runtime_lora_base_deployment(supports_surface))
+                .filter(|model| model.has_runtime_lora_base_surface(supports_surface))
                 .map(|_| canonical)
         },
-        || {
-            state
-                .manager()
-                .infer_runtime_lora_base_model(supports_surface)
-        },
+        || manager.infer_runtime_lora_base_model(supports_surface),
     )
-    .map_err(runtime_lora_error_response)
+    .map_err(runtime_lora_error_response)?;
+    if selection.as_ref().is_some_and(|selection| {
+        !manager
+            .get_committed_model(&selection.base_model_name)
+            .is_some_and(|model| model.has_runtime_lora_base_deployment(supports_surface))
+    }) {
+        return Err(ErrorMessage::service_unavailable_with_body(
+            "runtime_lora_capability_unavailable".to_string(),
+        ));
+    }
+    Ok(selection)
 }
 
 /// Warn once when the disabled NvExt policy discards a field or routing header.
@@ -1288,7 +1292,8 @@ async fn handler_completions(
     // before model parsing or runtime-LoRA selection.
     check_ready(&state)?;
     let runtime_lora = runtime_lora_selection(
-        &state,
+        state.manager(),
+        state.runtime_lora_config(),
         &request.inner.model,
         WorkerSet::has_completions_engine,
     )?;
@@ -2636,15 +2641,19 @@ async fn handler_chat_completions(
         return Err(error);
     }
     let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
-    let runtime_lora =
-        match runtime_lora_selection(&state, resolved_model, WorkerSet::has_chat_engine) {
-            Ok(selection) => selection,
-            Err(error) => {
-                lifecycle_request.record_session(&request_id, None);
-                terminal.finish(terminal_outcome_for_error_response(&error));
-                return Err(error);
-            }
-        };
+    let runtime_lora = match runtime_lora_selection(
+        state.manager(),
+        state.runtime_lora_config(),
+        resolved_model,
+        WorkerSet::has_chat_engine,
+    ) {
+        Ok(selection) => selection,
+        Err(error) => {
+            lifecycle_request.record_session(&request_id, None);
+            terminal.finish(terminal_outcome_for_error_response(&error));
+            return Err(error);
+        }
+    };
     let serving_model = runtime_lora
         .as_ref()
         .map(|selection| selection.base_model_name.as_str())
@@ -10428,6 +10437,103 @@ mod tests {
 
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1.0.message, "runtime_lora_unsupported");
+    }
+
+    #[test]
+    fn runtime_lora_selection_recovers_after_capability_loss() {
+        use crate::engines::{StreamingEngineAdapter, make_echo_engine};
+        use crate::model_card::ModelDeploymentCard;
+        use crate::model_type::{ModelInput, ModelType};
+        use crate::worker_type::WorkerType;
+
+        let manager = ModelManager::new();
+        let mut card = ModelDeploymentCard::default();
+        card.model_input = ModelInput::Tokens;
+        card.model_type = ModelType::Chat | ModelType::Completions;
+        card.worker_type = Some(WorkerType::Aggregated);
+        card.runtime_config
+            .taints
+            .insert("dynamo.runtime-lora/v2".into());
+        for (key, value) in [
+            ("supports_runtime_lora_resolution", serde_json::json!(true)),
+            ("runtime_lora_protocol_versions", serde_json::json!([2])),
+            ("runtime_lora_schemes", serde_json::json!(["custom"])),
+        ] {
+            card.runtime_config.set_engine_specific(key, value).unwrap();
+        }
+        let mut worker_set = WorkerSet::new("workers".into(), "checksum".into(), card.clone());
+        worker_set.chat_engine = Some(Arc::new(StreamingEngineAdapter::new(make_echo_engine())));
+        worker_set.completions_engine =
+            Some(Arc::new(StreamingEngineAdapter::new(make_echo_engine())));
+        let (instances, instance_rx) = tokio::sync::watch::channel(vec![1]);
+        let (configs, config_rx) = tokio::sync::watch::channel(std::collections::HashMap::new());
+        worker_set.set_instance_watcher(instance_rx);
+        worker_set.set_runtime_config_watcher(config_rx);
+        assert!(manager.add_worker_set("base", "workers", worker_set));
+        assert!(manager.register_alias("base-alias", "base"));
+        let config = RuntimeLoraConfig { enabled: true };
+        let requests = [
+            "base|opaque-private-reference",
+            "base-alias|opaque-private-reference",
+            "opaque-private-reference",
+        ];
+
+        for (worker_ids, advertised) in [
+            (vec![1], false),
+            (vec![1], true),
+            (Vec::new(), true),
+            (vec![1], true),
+        ] {
+            let available = !worker_ids.is_empty() && advertised;
+            instances.send_replace(worker_ids);
+            configs.send_replace(if advertised {
+                std::collections::HashMap::from([(1, card.runtime_config.clone())])
+            } else {
+                std::collections::HashMap::new()
+            });
+            for surface in [
+                WorkerSet::has_chat_engine as fn(&WorkerSet) -> bool,
+                WorkerSet::has_completions_engine,
+            ] {
+                assert!(
+                    runtime_lora_selection(&manager, &config, "base", surface)
+                        .unwrap()
+                        .is_none()
+                );
+                for requested in requests {
+                    let result = runtime_lora_selection(&manager, &config, requested, surface);
+                    if available {
+                        let selection = result.unwrap().unwrap();
+                        assert_eq!(selection.base_model_name, "base");
+                        assert_eq!(selection.source_uri.as_str(), "opaque-private-reference");
+                    } else {
+                        let response = result.unwrap_err();
+                        assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
+                        assert_eq!(response.1.0.message, "runtime_lora_capability_unavailable");
+                        assert_eq!(
+                            extract_error_type_from_response(&response),
+                            ErrorType::Unavailable
+                        );
+                        assert!(
+                            !serde_json::to_string(&response.1.0)
+                                .unwrap()
+                                .contains("opaque-private-reference")
+                        );
+                    }
+                }
+            }
+        }
+        for requested in requests {
+            let response = runtime_lora_selection(
+                &manager,
+                &config,
+                requested,
+                WorkerSet::has_embeddings_engine,
+            )
+            .unwrap_err();
+            assert_eq!(response.0, StatusCode::BAD_REQUEST);
+            assert_eq!(response.1.0.message, "runtime_lora_unsupported");
+        }
     }
 
     #[test]

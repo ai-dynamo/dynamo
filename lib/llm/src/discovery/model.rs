@@ -270,8 +270,23 @@ impl Model {
         })
     }
 
-    /// Whether this catalog model can carry request-time LoRA metadata through
-    /// frontend preprocessing to a non-LoRA base deployment.
+    pub(crate) fn has_runtime_lora_base_surface(
+        &self,
+        supports_surface: fn(&WorkerSet) -> bool,
+    ) -> bool {
+        self.worker_sets.load().values().any(|worker_set| {
+            let card = worker_set.card();
+            supports_surface(worker_set)
+                && card.lora.is_none()
+                && card.requires_preprocessing()
+                && matches!(
+                    card.worker_type,
+                    None | Some(crate::worker_type::WorkerType::Aggregated)
+                )
+        })
+    }
+
+    /// Live capability is separate from the committed base/surface contract.
     pub(crate) fn has_runtime_lora_base_deployment(
         &self,
         supports_surface: fn(&WorkerSet) -> bool,
