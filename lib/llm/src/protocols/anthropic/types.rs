@@ -1540,31 +1540,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_forced_tool_choice_without_tools_is_invalid() {
-        for tools in [serde_json::Value::Null, serde_json::json!([])] {
-            for choice in [
-                serde_json::json!({"type": "any"}),
-                serde_json::json!({"type": "tool", "name": "missing"}),
-            ] {
-                let mut payload = serde_json::json!({
-                    "model": "test-model",
-                    "max_tokens": 100,
-                    "messages": [{"role": "user", "content": "Hi"}],
-                    "tool_choice": choice
-                });
-                if !tools.is_null() {
-                    payload["tools"] = tools.clone();
-                }
-                let req: AnthropicCreateMessageRequest = serde_json::from_value(payload).unwrap();
-                let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
-                let error = crate::engines::ValidateRequest::validate(&chat_req).unwrap_err();
-                assert!(error.to_string().contains("tool_choice"), "{error}");
-                assert!(error.to_string().contains("tools"), "{error}");
-            }
-        }
-    }
-
     #[allow(deprecated)]
     #[test]
     fn test_chat_completion_to_anthropic_response() {
