@@ -635,10 +635,8 @@ def test_request_migration_trtllm_kv_transfer(
                 long_prompt_repetitions=KV_TRANSFER_PROMPT_REPETITIONS,
                 force_max_output_tokens=True,
             )
-            # The first request after startup can take a cold path through the
-            # prefill worker and KV transfer and produce a different greedy
-            # continuation, which shortens the common prefix below. Serve and
-            # discard one request per decode worker before characterizing it.
+            # A cold first request can produce a different greedy continuation and
+            # shorten the common prefix, so discard one per decode worker first.
             for _ in range(KV_TRANSFER_WARMUP_REQUESTS):
                 request_to_completion(
                     frontend.frontend_port, **baseline_request_options
