@@ -26,8 +26,8 @@ use crate::protocols::{
 use super::convert::has_duplicate_block_hashes;
 use super::types::{BlockHashValue, RawKvEvent, WIDE_TOKEN_SENTINEL};
 
-/// Bound on per-block exclusion state. Overflow switches the affected rank to
-/// root stores until its cache is cleared, keeping unknown parents out of relays.
+/// Bound on per-block exclusion state. Overflow blocks descendants whose parent
+/// may have been excluded.
 const DEFAULT_EXCLUDED_CAPACITY: usize = 1 << 20;
 
 type Key = (WorkerWithDpRank, StorageTier, u64);
