@@ -361,6 +361,7 @@ fn create_response_with_linear_probs(
                         alt_prob
                     );
                     TopLogprobs {
+                        token_id: None,
                         token: alt_token.to_string(),
                         logprob: alt_prob.ln(),
                         bytes: None,
@@ -445,6 +446,7 @@ fn create_multi_choice_response(
                                 alt_prob
                             );
                             TopLogprobs {
+                                token_id: None,
                                 token: alt_token,
                                 logprob: alt_prob.ln(),
                                 bytes: None,

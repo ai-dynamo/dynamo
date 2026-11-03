@@ -426,45 +426,95 @@ async fn resumed_thinking_keeps_sequential_blocks_and_pending_tool_order() {
 
 #[tokio::test]
 #[serial]
-async fn omitted_thinking_enables_default_http_heartbeats() {
+async fn buffered_messages_enable_default_http_heartbeats() {
     use dynamo_runtime::config::environment_names::llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS;
     let mut env = ENV.to_vec();
     env.push((DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS, None));
     temp_env::async_with_vars(env, async {
-        let script = load_agent_fixture("thinking-tool.sse").await.unwrap();
-        let (svc, gate) = HarnessService::start_with_gated_tail(script, 1).await;
-        let mut response = svc
-            .client
-            .post(format!("{}/v1/messages", svc.base_url))
-            .timeout(Duration::from_secs(25))
-            .json(&json!({"model": MODEL, "max_tokens": 4096, "stream": true,
-                "messages": [{"role": "user", "content": "ping"}],
-                "thinking": {"type": "adaptive", "display": "omitted"}}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::OK);
-        let mut body = String::new();
-        tokio::time::timeout(Duration::from_secs(18), async {
-            loop {
-                let chunk = response
-                    .chunk()
-                    .await
-                    .unwrap()
-                    .expect("stream ended before heartbeat");
-                body.push_str(std::str::from_utf8(&chunk).unwrap());
-                if body.lines().any(|line| line.starts_with(':')) {
-                    break;
+        // Wait for the default interval once, with all display cases in flight.
+        futures::future::join_all([None, Some("summarized"), Some("omitted")].map(
+            |display| async move {
+                let fixture = load_agent_fixture("thinking-tool.sse").await.unwrap();
+                let post_tool = display != Some("omitted");
+                let (script, split_at) = if post_tool {
+                    let mut script = vec![fixture[2].clone(), fixture[0].clone()];
+                    script.extend(fixture[3..].iter().cloned());
+                    (script, 2)
+                } else {
+                    (fixture, 1)
+                };
+                // The harness supplies structured tool/reasoning chunks without parsers.
+                let (svc, gate) = HarnessService::start_with_gated_tail(script, split_at).await;
+                let mut thinking = json!({"type": "adaptive"});
+                if let Some(display) = display {
+                    thinking["display"] = json!(display);
                 }
-            }
-        })
-        .await
-        .expect("omitted thinking must send the default 15-second heartbeat");
-        assert!(!body.contains("I should inspect"));
-        gate.release();
-        body.push_str(&response.text().await.unwrap());
-        assert!(body.contains("message_stop"));
-        svc.shutdown().await;
+                let mut response = svc
+                    .client
+                    .post(format!("{}/v1/messages", svc.base_url))
+                    .timeout(Duration::from_secs(25))
+                    .json(&json!({"model": MODEL, "max_tokens": 4096, "stream": true,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "thinking": thinking,
+                    "tools": [{"name": "list_directory", "input_schema": {"type": "object"}}]}))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                let mut body = String::new();
+                tokio::time::timeout(Duration::from_secs(18), async {
+                    loop {
+                        let chunk = response
+                            .chunk()
+                            .await
+                            .unwrap()
+                            .expect("stream ended before heartbeat");
+                        body.push_str(std::str::from_utf8(&chunk).unwrap());
+                        if body.lines().any(|line| line.starts_with(':')) {
+                            break;
+                        }
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("display {display:?} must send the default 15-second heartbeat")
+                });
+                assert!(!body.contains("I should inspect"));
+                if post_tool {
+                    assert!(!body.contains("content_block_start"), "{body}");
+                }
+                gate.release();
+                body.push_str(&response.text().await.unwrap());
+                let data_events = body
+                    .lines()
+                    .filter(|line| !line.starts_with(':'))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let events = parse_json_sse_events(&data_events).await.unwrap();
+                let blocks: Vec<_> = events
+                    .iter()
+                    .filter(|event| event.event == "content_block_start")
+                    .map(|event| event.data["content_block"]["type"].as_str().unwrap())
+                    .collect();
+                assert_eq!(
+                    blocks,
+                    if post_tool {
+                        vec!["tool_use", "thinking"]
+                    } else {
+                        vec!["thinking", "text", "tool_use"]
+                    },
+                    "{body}"
+                );
+                assert_eq!(
+                    body.contains("I should inspect the directory."),
+                    post_tool,
+                    "{body}"
+                );
+                assert_eq!(events.last().unwrap().event, "message_stop");
+                svc.shutdown().await;
+            },
+        ))
+        .await;
     })
     .await;
 }

@@ -880,11 +880,13 @@ mod tests {
             bytes: None,
             top_logprobs: vec![
                 TopLogprobs {
+                    token_id: None,
                     token: "best_option".to_string(),
                     logprob: (0.4_f32).ln(), // Much better option: 40%
                     bytes: None,
                 },
                 TopLogprobs {
+                    token_id: None,
                     token: "second_best".to_string(),
                     logprob: (0.3_f32).ln(), // Still better than selected: 30%
                     bytes: None,
@@ -938,6 +940,7 @@ mod tests {
             top_logprobs: top_probs
                 .into_iter()
                 .map(|(t, p)| TopLogprobs {
+                    token_id: None,
                     token: t.to_string(),
                     logprob: p.ln(),
                     bytes: None,
