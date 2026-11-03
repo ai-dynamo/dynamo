@@ -67,7 +67,7 @@ use crate::http::service::metrics::generate_log_buckets;
 use crate::protocols::common::timing::RequestPhase;
 
 mod worker_registered;
-use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
+use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 use dynamo_kv_router::indexer::ApproximateLruStats;
 use dynamo_kv_router::sequences::LocalWorkerLoad;
 use worker_registered::RouterWorkerRegistered;
@@ -1170,7 +1170,7 @@ impl RouterRequestMetrics {
         let non_max_overlap_selections_total = metrics
             .create_intcountervec(
                 &router_metric(frontend_service::NON_MAX_OVERLAP_SELECTIONS_TOTAL),
-                "Total admitted prefill scheduler selections with less KV cache overlap than another eligible worker",
+                "Total admitted prefill or aggregated scheduler selections with less KV cache overlap than another eligible worker",
                 &[labels::WORKER_TYPE],
                 extra_labels,
             )
@@ -1178,14 +1178,17 @@ impl RouterRequestMetrics {
         let overlap_blocks_lost = metrics
             .create_histogramvec(
                 &router_metric(frontend_service::OVERLAP_BLOCKS_LOST),
-                "Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and selected worker",
+                "Difference in effective KV cache overlap between the highest-overlap eligible worker and selected worker",
                 &[labels::WORKER_TYPE],
                 extra_labels,
                 Some(prometheus::exponential_buckets(0.25, 2.0, 16).unwrap()),
             )
             .expect("failed to create router_overlap_blocks_lost");
-        non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
-        overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
+        // Aggregated routers emit under the decode label, so initialize both series.
+        for worker_type in [WORKER_TYPE_PREFILL, WORKER_TYPE_DECODE] {
+            non_max_overlap_selections_total.with_label_values(&[worker_type]);
+            overlap_blocks_lost.with_label_values(&[worker_type]);
+        }
         let kv_tokens_counter = |name: &str, help: &str| {
             metrics
                 .create_intcountervec(

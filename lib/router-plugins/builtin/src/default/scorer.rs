@@ -35,6 +35,7 @@ struct DefaultScorer<const REQUEST_COST: bool, const SHARED_CREDIT: bool> {
     shared_cache_multiplier: f64,
     decode_active_request_weight: f64,
     prefill_load_scale: f64,
+    prefix_affinity_weight: f64,
     is_decode: bool,
     prepared: PreparedRequest,
 }
@@ -46,6 +47,8 @@ struct PreparedRequest {
     min_prefill: usize,
     block_size: IntegerDivisor,
     request_blocks: IntegerDivisor,
+    /// Unclamped prompt block count; the affinity penalty charges zero for an empty prompt.
+    prompt_blocks: f64,
     overlap_credit: f64,
     needs_decay: bool,
     needs_decode_subtraction: bool,
@@ -97,6 +100,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
             shared_cache_multiplier: config.shared_cache_multiplier,
             decode_active_request_weight: config.decode_active_request_weight,
             prefill_load_scale: config.prefill_load_scale,
+            prefix_affinity_weight: config.prefix_affinity_weight,
             is_decode: worker_label == "decode",
             prepared: PreparedRequest::default(),
         }
@@ -117,6 +121,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
             // An empty prompt (e.g. embeddings-only input) has no overlap to decay;
             // clamp so a worker at the load floor does not compute 0/0.
             request_blocks: IntegerDivisor::new(context.request_blocks().max(1)),
+            prompt_blocks: context.request_blocks() as f64,
             overlap_credit: self.overlap_score_credit,
             needs_decay: context.tracks_prefill_tokens() && self.overlap_score_credit_decay > 0.0,
             needs_decode_subtraction: self.is_decode && !context.tracks_prefill_tokens(),
@@ -146,7 +151,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
         let load = candidate
             .load()
             .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-        let (cached_tokens, credit) = if let Some(cache) = candidate.cache() {
+        let (cached_tokens, credit, device_blocks) = if let Some(cache) = candidate.cache() {
             let (estimated_overlap, cached_tokens) = cache.accounting_cache_estimate();
             let device = if cache.has_tier_matches() {
                 cache.device_overlap_blocks()
@@ -190,9 +195,9 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
                 + self.host_cache_hit_weight * cache.host_overlap_blocks()
                 + self.disk_cache_hit_weight * cache.disk_overlap_blocks()
                 + shared_credit;
-            (cached_tokens, credit)
+            (cached_tokens, credit, device)
         } else {
-            (0, 0.0)
+            (0, 0.0, 0.0)
         };
         let request_cost = if REQUEST_COST {
             self.decode_active_request_weight * load.active_requests() as f64
@@ -200,7 +205,17 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
             self.decode_active_request_weight
         };
         let logit = if self.prepared.needs_decode_subtraction {
-            (load.decode_cost_blocks() - credit).max(0.0) + request_cost
+            let logit = (load.decode_cost_blocks() - credit).max(0.0) + request_cost;
+            // Load-only decode routing (no overlap credit) ignores the prompt, so it never
+            // charges missing prefix blocks. Cache-aware decode routing (conditional
+            // disaggregation, or aggregated serving without prefill tracking) does: the
+            // credit here only offsets decode load, so it has the same cap as below.
+            if self.prefix_affinity_weight != 0.0 && self.prepared.overlap_credit > 0.0 {
+                let missing = (self.prepared.prompt_blocks - device_blocks).max(0.0);
+                logit + self.prefix_affinity_weight * missing
+            } else {
+                logit
+            }
         } else {
             let raw_tokens = if !context.tracks_prefill_tokens() {
                 0
@@ -211,7 +226,17 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
                 context.isl_tokens()
             };
             let prefill = (self.prepared.block_size.divide(raw_tokens as f64) - credit).max(0.0);
-            self.prefill_load_scale * prefill + load.decode_cost_blocks() + request_cost
+            let logit =
+                self.prefill_load_scale * prefill + load.decode_cost_blocks() + request_cost;
+            if self.prefix_affinity_weight != 0.0 {
+                // Charge each prompt block this worker lacks. The overlap credit above is
+                // capped at the request's own prefill, so it cannot outweigh transient
+                // decode load on the worker that already holds a resumed prefix.
+                let missing = (self.prepared.prompt_blocks - device_blocks).max(0.0);
+                logit + self.prefix_affinity_weight * missing
+            } else {
+                logit
+            }
         };
         let cost = logit * candidate.preferred_taint_multiplier().unwrap_or(1.0);
         Ok(cost)
@@ -227,6 +252,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool> WorkerScorer
             // The host builds fetch sources per selection only for policies that ask.
             inputs | WorkerInputs::CACHE | WorkerInputs::KV_TRANSFER
         } else if self.overlap_score_credit != 0.0
+            || self.prefix_affinity_weight != 0.0
             || self.host_cache_hit_weight != 0.0
             || self.disk_cache_hit_weight != 0.0
         {
