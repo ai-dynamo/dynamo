@@ -185,7 +185,7 @@ Not all parsers support structural tags. Parsers without a structural-tag
 builder fall back to their existing best-effort tool-calling behavior without
 rejecting the request.
 
-Unified routes use the compatible Unified builder; V1 routes use the V1 registry. Backend compilation and request-schema support are separate checks.
+After selector validation, builder lookup tries the compatible Unified builder, then the tool selector’s V1 builder if none is available. This does not change the response parser route: explicit V2 still rejects unavailable or incompatible selector configurations. Backend compilation and request-schema support are separate checks.
 
 - `beam` through the pinned Unified library builder
 - `deepseek_v3_2`, `deepseek_v4`, `deepseek_v41`

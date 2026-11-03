@@ -2896,9 +2896,9 @@ impl OpenAIPreprocessor {
         tokenizer: crate::tokenizers::Tokenizer,
         embedding_tokenizers: Option<EmbeddingTokenizerState>,
         speculative_prefill_cancel: Option<CancellationToken>,
-        enable_chat_parsers: bool,
+        validate_chat_parsers: bool,
     ) -> Result<Arc<Self>> {
-        let enable_chat_parsers = enable_chat_parsers && mdc.model_type.supports_chat();
+        let validate_chat_parsers = validate_chat_parsers && mdc.model_type.supports_chat();
         let mdcsum = mdc.mdcsum().to_string();
         let tokenizer: Arc<dyn Tokenizer> = (*tokenizer).clone();
         let lora_name = mdc.lora.as_ref().map(|l| l.name.clone());
@@ -2918,7 +2918,7 @@ impl OpenAIPreprocessor {
         });
         let token_id_bound = token_id_bound(model_info.vocab_size(), tokenizer_id_bound);
         let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
-        if enable_chat_parsers {
+        if validate_chat_parsers {
             crate::protocols::openai::chat_completions::tool_parser_v2::validate_parser_version(
                 tool_call_parser.as_deref(),
                 mdc.runtime_config.reasoning_parser.as_deref(),
@@ -2935,7 +2935,7 @@ impl OpenAIPreprocessor {
                 "Selected model parser route"
             );
         }
-        let parser_requires_special_tokens = enable_chat_parsers
+        let parser_requires_special_tokens = mdc.model_type.supports_chat()
             && Self::parser_requires_special_tokens(
                 tool_call_parser.as_deref(),
                 mdc.runtime_config.reasoning_parser.as_deref(),
@@ -2943,7 +2943,7 @@ impl OpenAIPreprocessor {
         let normalize_tool_call_args = mdc.runtime_config.tool_call_arguments_format
             == crate::local_model::runtime_config::ToolCallArgumentsFormat::JsonObject
             || mdc.runtime_config.tool_call_parser.as_deref() == Some("glm47");
-        let beam_route = enable_chat_parsers
+        let beam_route = mdc.model_type.supports_chat()
             && crate::protocols::openai::chat_completions::unified_parser::selected_family(
                 tool_call_parser.as_deref(),
                 mdc.runtime_config.reasoning_parser.as_deref(),
@@ -9160,6 +9160,71 @@ mod token_data_tests {
         );
         let PromptFormatter::OAI(formatter) = PromptFormatter::no_op();
         assert!(OpenAIPreprocessor::new_with_parts(card, formatter, tokenizer).is_err());
+    }
+
+    #[test]
+    fn completions_preserve_card_derived_decode_defaults() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::completions_preserve_card_derived_decode_defaults"
+            ),
+            &[("DYN_PARSER_VERSION", "auto")],
+        ) {
+            return;
+        }
+        use crate::model_type::ModelType;
+
+        let base = ModelDeploymentCard::load_from_disk(LLAMA_DIR, None).unwrap();
+        let tokenizer = base.tokenizer().unwrap();
+        for (tool, reasoning) in [
+            (None, None),
+            (Some("harmony"), Some("gpt_oss")),
+            (None, Some("gpt_oss")),
+            (Some("kimi_k2"), Some("kimi_k25")),
+            (Some("gemma4"), Some("gemma4")),
+            (Some("muse_glimmer"), Some("muse_glimmer")),
+            (Some("deepseek_v41"), Some("deepseek_v41")),
+            (Some("beam"), Some("beam")),
+        ] {
+            for model_type in [
+                ModelType::Chat | ModelType::Completions,
+                ModelType::Completions,
+            ] {
+                let mut card = base.clone();
+                card.model_type = model_type;
+                card.runtime_config.tool_call_parser = tool.map(str::to_string);
+                card.runtime_config.reasoning_parser = reasoning.map(str::to_string);
+                let preprocessor =
+                    OpenAIPreprocessor::new_for_completions(card, tokenizer.clone()).unwrap();
+                for skip in [None, Some(true), Some(false)] {
+                    let mut request = serde_json::json!({"model": "test-model", "prompt": "hello"});
+                    if let Some(skip) = skip {
+                        request["skip_special_tokens"] = serde_json::json!(skip);
+                    }
+                    let request: NvCreateCompletionRequest =
+                        serde_json::from_value(request).unwrap();
+                    let output = preprocessor
+                        .builder_with_lora(&request, None)
+                        .unwrap()
+                        .token_ids(vec![])
+                        .build()
+                        .unwrap();
+                    let preserves =
+                        model_type.supports_chat() && (tool.is_some() || reasoning.is_some());
+                    assert_eq!(
+                        output.output_options.skip_special_tokens,
+                        skip.or(preserves.then_some(false)),
+                        "tool={tool:?}, model_type={model_type:?}, skip={skip:?}"
+                    );
+                    assert_eq!(
+                        output.output_options.retain_model_stop_token_text,
+                        (model_type.supports_chat() && tool == Some("beam")).then_some(true),
+                        "tool={tool:?}, model_type={model_type:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]
