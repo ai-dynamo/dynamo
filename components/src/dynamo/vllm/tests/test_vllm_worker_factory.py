@@ -1111,7 +1111,7 @@ class TestPrefillRegistrationContract:
         )
         factory._maybe_get_encode_worker_client = AsyncMock(return_value=None)  # type: ignore[assignment]
         factory._maybe_wait_for_failover_lock = AsyncMock()  # type: ignore[assignment]
-        factory.register_engine_routes = Mock()  # type: ignore[assignment]
+        factory.register_engine_routes = AsyncMock()  # type: ignore[assignment]
 
         # embedding_cache_manager=None skips register_embedding_cache_metrics.
         mock_handler = Mock(embedding_cache_manager=None)
@@ -1206,7 +1206,7 @@ async def test_prefill_initializes_metrics_and_serves_lora_lifecycle(
     )
     factory._maybe_get_encode_worker_client = AsyncMock(return_value=None)  # type: ignore[assignment]
     factory._maybe_wait_for_failover_lock = AsyncMock()  # type: ignore[assignment]
-    factory.register_engine_routes = Mock()  # type: ignore[assignment]
+    factory.register_engine_routes = AsyncMock()  # type: ignore[assignment]
 
     handler = Mock(embedding_cache_manager=None)
     handler.cleanup = Mock()
@@ -1577,7 +1577,7 @@ def restore_path_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         WorkerFactory, "_maybe_get_encode_worker_client", AsyncMock(return_value=None)
     )
-    monkeypatch.setattr(WorkerFactory, "register_engine_routes", Mock())
+    monkeypatch.setattr(WorkerFactory, "register_engine_routes", AsyncMock())
 
 
 def _restored_endpoint() -> Mock:
@@ -2187,7 +2187,7 @@ async def test_worker_gc_restore_completes_before_model_registration(
     )
     factory._maybe_get_encode_worker_client = AsyncMock(return_value=None)  # type: ignore[assignment]
     factory._maybe_wait_for_failover_lock = AsyncMock()  # type: ignore[assignment]
-    factory.register_engine_routes = Mock()  # type: ignore[assignment]
+    factory.register_engine_routes = AsyncMock()  # type: ignore[assignment]
     mock_handler = Mock(embedding_cache_manager=None)
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.PrefillWorkerHandler",
@@ -2347,7 +2347,7 @@ async def test_prefill_call_site_stops_workers_when_benchmark_wait_raises(
     )
     factory._maybe_get_encode_worker_client = AsyncMock(return_value=None)  # type: ignore[assignment]
     factory._maybe_wait_for_failover_lock = AsyncMock()  # type: ignore[assignment]
-    factory.register_engine_routes = Mock()  # type: ignore[assignment]
+    factory.register_engine_routes = AsyncMock()  # type: ignore[assignment]
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.PrefillWorkerHandler",
         Mock(return_value=Mock(embedding_cache_manager=None)),
@@ -2411,7 +2411,7 @@ def _decode_benchmark_factory(monkeypatch, tmp_path, register_fn):
     factory._maybe_create_failover_metrics = Mock(return_value=None)  # type: ignore[method-assign]
     factory._maybe_get_encode_worker_client = AsyncMock(return_value=None)  # type: ignore[method-assign]
     factory._maybe_wait_for_failover_lock = AsyncMock()  # type: ignore[method-assign]
-    factory.register_engine_routes = Mock()  # type: ignore[method-assign]
+    factory.register_engine_routes = AsyncMock()  # type: ignore[method-assign]
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.StatLoggerFactory", Mock(return_value=Mock())
     )

@@ -38,6 +38,10 @@ from dynamo.vllm.backend_args import (
 from dynamo.vllm.benchmark_points import RANDOM_KDA_WORKER
 from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.kv_connector_protocols import MULTI_CONNECTOR_WRAPPERS
+from dynamo.vllm.strict_rl_config import (
+    validate_strict_rl_config,
+    validate_strict_rl_profile,
+)
 
 from . import envs
 
@@ -89,6 +93,8 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
         DynamoVllmConfig.validate(self)
+        if self.enable_rl_weight_transfer:
+            validate_strict_rl_config(self)
 
 
 @register_encoder(Config)
@@ -216,10 +222,26 @@ def configure_rl_logprobs_mode(config: Config) -> None:
         )
 
 
+def configure_rl_weight_transfer_worker(
+    config: Config, engine_config: AsyncEngineArgs
+) -> None:
+    """Install standalone device discovery only when no user extension was set."""
+    if (
+        config.enable_rl_weight_transfer is True
+        and not engine_config.worker_extension_cls
+    ):
+        engine_config.worker_extension_cls = (
+            "dynamo.vllm.weight_transfer_worker.StrictRLWorkerExtension"
+        )
+
+
 def cross_validate_config(
     dynamo_config: Config, engine_config: AsyncEngineArgs
 ) -> None:
     """Validate dynamo and engine config together. This should not modify the configs."""
+
+    if dynamo_config.enable_rl_weight_transfer:
+        validate_strict_rl_profile(dynamo_config, engine_config)
 
     if hasattr(engine_config, "stream_interval") and engine_config.stream_interval != 1:
         logger.info(
@@ -356,6 +378,7 @@ def update_engine_config_with_dynamo(
     engine_config: AsyncEngineArgs,
 ) -> None:
     """Update engine config based on Dynamo config."""
+    configure_rl_weight_transfer_worker(dynamo_config, engine_config)
     if engine_config.enable_prefix_caching is None:
         if dynamo_config.embedding_worker or dynamo_config.classify_worker:
             # Pooling engines never decode, so prefix caching buys nothing —
