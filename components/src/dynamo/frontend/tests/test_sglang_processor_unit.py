@@ -2987,6 +2987,7 @@ class TestTokenBudgetValidation:
 
         class FakeMdc:
             def runtime_config(self):
+                """Return worker metadata containing a valid token budget."""
                 return {
                     "runtime_data": {
                         "token_budget": {
@@ -3004,9 +3005,11 @@ class TestTokenBudgetValidation:
 
         class FakeRuntimeConfig:
             def __init__(self):
+                """Create an empty fake runtime configuration."""
                 self.runtime_data = {}
 
             def set_engine_specific(self, key, value):
+                """Store worker-published engine metadata."""
                 self.runtime_data[key] = value
 
         runtime_config = FakeRuntimeConfig()
@@ -3015,6 +3018,7 @@ class TestTokenBudgetValidation:
 
         class FakeMdc:
             def runtime_config(self):
+                """Expose the serialized worker runtime metadata."""
                 return {"runtime_data": runtime_config.runtime_data}
 
         assert _runtime_token_budget(FakeMdc()) == expected
@@ -3024,6 +3028,7 @@ class TestTokenBudgetValidation:
 
         class FakeMdc:
             def runtime_config(self):
+                """Return malformed worker token-budget metadata."""
                 return {
                     "runtime_data": {
                         "token_budget": {
@@ -3091,11 +3096,45 @@ class TestTokenBudgetValidation:
         )
 
         async def collect():
+            """Collect the processor stream for the rejection assertion."""
             return [item async for item in processor.generator(request)]
 
         with pytest.raises(InvalidArgument, match="combined input and output tokens"):
             asyncio.run(collect())
         assert not engine.requests
+
+    def test_configured_budget_allows_missing_stop_conditions(self, tokenizer):
+        """Use the default output allowance when stop conditions are absent."""
+        engine = FakeRoutedEngine(
+            items=[{"token_ids": [65], "finish_reason": "stop"}]
+        )
+        processor = SglangProcessor(
+            tokenizer,
+            engine,
+            None,
+            None,
+            None,
+            token_budget=TokenBudget(32, True, True),
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+        )
+
+        async def collect():
+            """Collect a stream whose preprocessing omitted stop conditions."""
+            return [
+                item
+                async for item in processor._generate_and_stream(
+                    "req-budget-default",
+                    {"model": "test-model"},
+                    {},
+                    [1],
+                    post,
+                )
+            ]
+
+        assert asyncio.run(collect())
+        assert len(engine.requests) == 1
 
 
 @pytest.mark.multimodal
@@ -3106,9 +3145,11 @@ def test_multimodal_token_overflow_is_delegated_to_backend():
         chat_template = ""
 
         def apply_chat_template(self, messages, **kwargs):
+            """Return a minimal tokenized multimodal prompt."""
             return [1]
 
         def decode(self, token_ids, *, skip_special_tokens):
+            """Decode the fake token stream into text."""
             del skip_special_tokens
             return "".join(chr(token_id) for token_id in token_ids)
 
@@ -3139,6 +3180,7 @@ def test_multimodal_token_overflow_is_delegated_to_backend():
     }
 
     async def collect():
+        """Collect the multimodal processor stream."""
         return [item async for item in processor.generator(request)]
 
     assert asyncio.run(collect())
