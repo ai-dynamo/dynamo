@@ -740,6 +740,54 @@ def test_mnnvl_and_cpu_hint_providers_cannot_partially_publish_a_shared_domain()
     runtime.set_engine_specific.assert_not_called()
 
 
+def test_tp2_gpu_and_cpu_hints_reject_shared_domain_before_publication(monkeypatch):
+    runtime = MagicMock()
+    layout = SimpleNamespace(
+        parallel_layout_domain=MagicMock(return_value="tp2-domain")
+    )
+    loader = MagicMock(return_value=layout)
+    monkeypatch.setattr(kv_hints, "importlib", SimpleNamespace(import_module=loader))
+    args = _wrapped_engine_args(
+        "MultiConnector",
+        [_gpu_connector(), _kvcr_connector(control_ports=[24124])],
+        router_hint_transfer_domain="gpu-certified-layout-v1",
+    )
+    args.tensor_parallel_size = 2
+
+    with pytest.raises(ValueError, match="CPU-hint runtime domain"):
+        publish_kv_hint_capabilities(runtime, args, WorkerType.Decode)
+
+    runtime.set_engine_specific.assert_not_called()
+    loader.assert_not_called()
+
+
+def test_tp1_gpu_and_cpu_hints_preserve_same_domain_publication():
+    runtime = MagicMock()
+    args = _wrapped_engine_args(
+        "MultiConnector",
+        [_gpu_connector(), _kvcr_connector(control_ports=[24124])],
+        router_hint_transfer_domain="gpu-certified-layout-v1",
+    )
+    args.tensor_parallel_size = 1
+
+    publish_kv_hint_capabilities(runtime, args, WorkerType.Decode)
+
+    fields = {
+        call.args[0]: json.loads(call.args[1])
+        for call in runtime.set_engine_specific.call_args_list
+    }
+    assert fields[KV_HINT_TRANSFER_CAPABILITY_KEY] is True
+    assert fields["router_hint_gpu_direct"] is True
+    assert fields["router_hint_transfer_domain"] == "gpu-certified-layout-v1"
+    domain_calls = [
+        call.args[1]
+        for call in runtime.set_engine_specific.call_args_list
+        if call.args[0] == "router_hint_transfer_domain"
+    ]
+    assert domain_calls
+    assert all(json.loads(value) == "gpu-certified-layout-v1" for value in domain_calls)
+
+
 @pytest.mark.parametrize(
     "changes",
     [

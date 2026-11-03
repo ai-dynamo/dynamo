@@ -322,15 +322,24 @@ def publish_kv_hint_capabilities(
     publish_source_endpoints: bool = True,
 ) -> None:
     """Publish each versioned KV hint capability that vLLM supports."""
-    # The runtime domain key is shared by legacy CPU and GPU hints. MNNVL
-    # deliberately uses its own effective domain, so never partially advertise
-    # an incompatible CPU provider under that same key.
+    # CPU and GPU hints share one domain key. Reject transformed GPU layouts
+    # before publishing a CPU provider under an incompatible domain.
+    tp_size = getattr(engine_args, "tensor_parallel_size", 1)
     if any(
-        tier.get("gpu_transport") == "mnnvl"
-        and KV_HINT_GPU_DIRECT_CAPABILITY_KEY in (tier.get("router_capabilities") or ())
+        KV_HINT_GPU_DIRECT_CAPABILITY_KEY in (tier.get("router_capabilities") or ())
+        and (
+            tier.get("gpu_transport") == "mnnvl"
+            or (
+                tier.get("gpu_transport", "cuda_ipc") == "cuda_ipc"
+                and type(tp_size) is int
+                and tp_size == 2
+            )
+        )
         for tier in _secondary_tiers(engine_args)
     ) and _transfer_hint_tiers(engine_args):
-        raise ValueError("MNNVL GPU reuse cannot share the CPU-hint runtime domain")
+        raise ValueError(
+            "Transformed GPU layout cannot share the CPU-hint runtime domain"
+        )
     _publish_kv_transfer_hint_capability(
         runtime_config,
         engine_args,

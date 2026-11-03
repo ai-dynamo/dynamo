@@ -370,6 +370,7 @@ def test_local_cuda_owner_balances_unused_ipc_export_once(monkeypatch):
 
 
 @pytest.mark.gpu_1
+@pytest.mark.timeout(120)
 def test_cuda_ipc_owner_and_importer_share_payload_without_host_copy():
     engine_id = f"ipc-test-{uuid.uuid4()}"
     region = GPUCacheRegion(engine_id, 4, 256)

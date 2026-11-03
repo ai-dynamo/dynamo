@@ -249,9 +249,14 @@ CLI values override the corresponding environment variables.
 | `--router-transfer-source-gpu-estimated-block-us` | `DYN_ROUTER_TRANSFER_SOURCE_GPU_ESTIMATED_BLOCK_US` | `null` | Independently measured finite positive GPU acquisition/transfer/onboarding cost per missing block; required when GPU reuse is enabled. |
 | `--router-transfer-source-prefill-token-us` | `DYN_ROUTER_TRANSFER_SOURCE_PREFILL_TOKEN_US` | `null` | Conservative finite positive prefill saving per reused token; required when either path is enabled. |
 
-GPU reuse requires same-host, identical raw layouts with one worker per role and
-tensor parallel size one. Native Device overlap and CPU cost estimates cannot
-qualify it. See [Decode-to-Prefill Reuse](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#decode-to-prefill-reuse)
+GPU reuse supports identical raw layouts with one local multiprocessing engine
+per role and tensor parallel size one or two, with data, pipeline and context
+parallel sizes one. Use same-host CUDA IPC or the opt-in MNNVL profile within
+one healthy NVLink fabric and clique. Native Device overlap and CPU cost
+estimates cannot qualify it. See
+[Retained GPU Reuse](../../developer-guide/knowledge-base/modular-components/backends/vllm/native-kv-offloading.md#retained-gpu-decode-to-prefill-reuse)
+for transport requirements and
+[Decode-to-Prefill Reuse](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#decode-to-prefill-reuse)
 for selection and cost semantics.
 
 ### KV state and indexers

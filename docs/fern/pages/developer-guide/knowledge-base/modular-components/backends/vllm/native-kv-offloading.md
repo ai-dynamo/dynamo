@@ -147,12 +147,48 @@ one operation, and ready inventory waits for both model workers to complete
 their stores. A TP2 compatibility suffix separates this inventory from TP1;
 the certified base domain must still identify the exact model and raw layout.
 
-Configure the GPU secondary tier with both
-`"type": "GPUKVCRSecondaryTierManager"` and
-`"module_path": "kvbm.vllm_integration.gpu_offloading"`. The module path is
-required by the tier factory when building Prometheus metric definitions.
-The connector and spec also use the out-of-tree module
-`kvbm.vllm_integration.gpu_offloading`.
+Use the following same-host TP1 `--kv-transfer-config` example. Replace the
+certified domain with the contract for your model and raw cache layout, and
+reserve a distinct control port for each engine on the host. Enable KV event
+publishing with `--kv-events-config` as in the CPU setup above.
+
+```json
+{
+  "kv_connector": "GPUOffloadingConnector",
+  "kv_connector_module_path": "kvbm.vllm_integration.gpu_offloading",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "spec_name": "GPUOffloadingSpec",
+    "spec_module_path": "kvbm.vllm_integration.gpu_offloading",
+    "gpu_bytes_to_use": 2147483648,
+    "offload_prompt_only": false,
+    "self_describing_kv_events": true,
+    "router_hint_transfer_domain": "certified-raw-layout-v1",
+    "secondary_tiers": [
+      {
+        "type": "GPUKVCRSecondaryTierManager",
+        "module_path": "kvbm.vllm_integration.gpu_offloading",
+        "compatibility_domain": "certified-raw-layout-v1",
+        "control_ports": [25123],
+        "router_capabilities": ["router_hint_gpu_direct"]
+      }
+    ]
+  }
+}
+```
+
+The tier requires exactly one integer control port and the exact GPU capability
+list shown above. Its `compatibility_domain` must match the connector's certified
+base domain. The tier's `module_path` is also required when the factory builds
+Prometheus metric definitions. For TP2, add `"gpu_rank_devices": [0, 1]` to the
+extra configuration and run the engine with tensor parallel size two.
+
+Leave `engine_id` unset so vLLM generates a fresh identity for each engine
+lifetime. If supplying it explicitly, use a fresh value for every process
+incarnation. An abrupt exit can leave retained-bank metadata under `TMPDIR`;
+startup rejects an existing bank directory rather than reclaiming uncertain
+native ownership. Automatic orphan recovery is unsupported. Remove leftover
+metadata only after all native peers have quiesced.
 
 On vLLM versions whose `MultiConnector` reconstructs statistics by connector
 name, register the out-of-tree connector in each application/engine process
@@ -183,10 +219,15 @@ blocks and publishes removals. The router requires
 `router_hint_transfer_domain` before emitting `kv.fetch_gpu@1.0`. The domain is
 an operator-supplied layout contract, not automatic model compatibility proof.
 
+Upgrade event publishers, routers, indexers and other typed event consumers
+together before enabling this profile. Older `StorageTier` readers reject the
+new `gpu_direct` value; enabling the profile does not negotiate a downgrade to
+Device or CPU residency.
+
 With the default same-host profile, both workers require a native NIXL/UCX implementation of the strict
 `NIXL_UCX_CUDA_IPC_ONLY=1` policy with `UCX_TLS=cuda_ipc,posix,self` and actual
 CUDA memory support. A stock installation that rejects this profile is not
-compatible. See the [KVCR GPU endpoint contract](https://github.com/ai-dynamo/kvcr#direct-gpu-memory-endpoints)
+compatible. See the [KVCR GPU endpoint contract](https://github.com/ai-dynamo/kvcr/blob/47671498897ef73d0dd5554b0e4c9ec21d9f3928/README.md#direct-gpu-memory-endpoints)
 for registration, dependency and lifetime requirements.
 
 ### MNNVL Profile
