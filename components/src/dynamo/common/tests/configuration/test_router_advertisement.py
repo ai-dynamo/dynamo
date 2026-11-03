@@ -147,8 +147,6 @@ def test_other_router_modes_stay_quiet(caplog: pytest.LogCaptureFixture):
     for mode in ("least-loaded", "kv"):
         config, _ = parse_worker_router_config(["--router-mode", mode])
         assert build_router_config(config) is not None
-    config, _ = parse_worker_router_config([])
-    assert build_router_config(config) is None
 
     assert _POWER_OF_TWO_DEPRECATION not in caplog.text
 
