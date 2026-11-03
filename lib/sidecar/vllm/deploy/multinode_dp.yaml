@@ -84,8 +84,6 @@ spec:
             - 0.0.0.0
             - --grpc-port
             - '30001'
-            - --shutdown-timeout
-            - '30'
             - --data-parallel-hybrid-lb
             - --data-parallel-size
             - '4'
@@ -156,8 +154,6 @@ spec:
             - 0.0.0.0
             - --grpc-port
             - '30001'
-            - --shutdown-timeout
-            - '30'
             - --data-parallel-hybrid-lb
             - --data-parallel-size
             - '4'

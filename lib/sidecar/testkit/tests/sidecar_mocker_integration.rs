@@ -2,11 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_backend_common::testing::mock_context;
-use std::time::Duration;
-
 use dynamo_backend_common::{
-    BackendError, DisaggregationMode, DynamoError, EngineAvailability, ErrorType, FinishReason,
-    GenerateContext, LLMEngine, LLMEngineOutput, PreprocessedRequest,
+    BackendError, DisaggregationMode, DynamoError, ErrorType, FinishReason, GenerateContext,
+    LLMEngine, LLMEngineOutput, PreprocessedRequest,
 };
 use dynamo_llm::protocols::common::preprocessor::PrefillResult;
 use dynamo_sidecar_testkit::assert::{failure, terminal};
@@ -587,123 +585,6 @@ async fn vllm_teardown_terminates_handlers_with_clients_alive() {
     assert!(error.to_string().contains("GenerateStream"));
 }
 
-async fn wait_availability(
-    availability: &mut tokio::sync::watch::Receiver<EngineAvailability>,
-    expected: EngineAvailability,
-) {
-    bounded(
-        "engine availability",
-        availability.wait_for(|state| *state == expected),
-    )
-    .await
-    .expect("availability sender");
-}
-
-/// Regression: the sidecar kept its worker registered after vLLM stopped
-/// serving or went away, and could not connect to a vLLM with `liveness` while
-/// it slept. Covers both health shapes vLLM serves.
-#[tokio::test]
-async fn vllm_health_stream_sets_engine_availability() {
-    for has_liveness in [false, true] {
-        let mut fixture =
-            vllm_fixture::Fixture::start(Controller::default(), FixtureConfig::default()).await;
-        let readiness = if has_liveness {
-            // Asleep: only `liveness` reports SERVING.
-            fixture
-                .set_service_health(vllm_fixture::LIVENESS_SERVICE, Some(true))
-                .await;
-            for service in [
-                vllm_fixture::READINESS_SERVICE,
-                vllm_fixture::INFERENCE_SERVICE,
-            ] {
-                fixture.set_service_health(service, Some(false)).await;
-            }
-            vllm_fixture::READINESS_SERVICE
-        } else {
-            vllm_fixture::INFERENCE_SERVICE
-        };
-        let engine = fixture.engine().await;
-        engine.start(0).await.unwrap();
-        let mut availability = engine.availability().expect("vLLM reports availability");
-
-        if !has_liveness {
-            fixture.set_service_health(readiness, Some(false)).await;
-        }
-        wait_availability(&mut availability, EngineAvailability::NotReady).await;
-        fixture.set_service_health(readiness, Some(true)).await;
-        wait_availability(&mut availability, EngineAvailability::Ready).await;
-        if has_liveness {
-            fixture
-                .set_service_health(vllm_fixture::LIVENESS_SERVICE, Some(false))
-                .await;
-        } else {
-            // vLLM clears its statuses on shutdown, which ends the stream.
-            fixture
-                .set_service_health(vllm_fixture::INFERENCE_SERVICE, None)
-                .await;
-        }
-        wait_availability(&mut availability, EngineAvailability::Lost).await;
-        finish(&mut fixture, &engine).await;
-    }
-}
-
-/// Regression: after its vLLM connection broke, the sidecar kept accepting
-/// requests and never reconnected.
-#[tokio::test]
-async fn vllm_lost_engine_rejects_requests_until_reconnected() {
-    let control = Controller::default();
-    let mut fixture = vllm_fixture::Fixture::start(control.clone(), FixtureConfig::default()).await;
-    let engine = fixture.engine().await;
-    engine.start(0).await.unwrap();
-    let mut availability = engine.availability().expect("vLLM reports availability");
-    healthy(&fixture, &engine, &control).await;
-
-    fixture.server.shutdown().await.unwrap();
-    wait_availability(&mut availability, EngineAvailability::Lost).await;
-    let error = engine
-        .generate(
-            request("mocker-model", vec![1, 2, 3], 3),
-            GenerateContext::new(mock_context(), None),
-        )
-        .await
-        .err()
-        .expect("a lost engine must reject new requests");
-    assert_eq!(
-        error.error_type(),
-        ErrorType::Backend(BackendError::EngineShutdown)
-    );
-
-    // The fixture retries every second within a 5 s startup deadline.
-    let recovery = engine.recover();
-    tokio::pin!(recovery);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(1_200), &mut recovery)
-            .await
-            .is_err(),
-        "recovery must keep retrying while nothing listens"
-    );
-    // vLLM unregisters its health services just before its listener closes.
-    fixture
-        .set_service_health(vllm_fixture::INFERENCE_SERVICE, None)
-        .await;
-    fixture.restart().await;
-    assert!(
-        tokio::time::timeout(Duration::from_millis(1_500), &mut recovery)
-            .await
-            .is_err(),
-        "recovery must keep retrying while vLLM's inference health is unregistered"
-    );
-    fixture
-        .set_service_health(vllm_fixture::INFERENCE_SERVICE, Some(true))
-        .await;
-    bounded("engine recovery", &mut recovery)
-        .await
-        .expect("recover");
-    assert_eq!(*availability.borrow(), EngineAvailability::Ready);
-    healthy(&fixture, &engine, &control).await;
-    finish(&mut fixture, &engine).await;
-}
-
 async fn request_fields<F: ProcessFixture>() {
     let control = Controller::<F::Protocol>::default();
     let mut fixture = F::start(control.clone(), FixtureConfig::default()).await;
@@ -877,6 +758,39 @@ async fn vllm_malformed_terminal_fails_then_recovers() {
         fixture.shutdown().await;
     })
     .await;
+}
+
+/// vLLM reporting NOT_SERVING or dropping its connection after startup resolves `engine_lost`.
+#[tokio::test]
+async fn vllm_engine_lost_on_not_serving_or_disconnect() {
+    let assert_lost = |error: DynamoError| {
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::EngineShutdown)
+        );
+        assert!(error.to_string().contains("vLLM engine lost"), "{error}");
+    };
+
+    let mut fixture =
+        vllm_fixture::Fixture::start(Controller::default(), FixtureConfig::default()).await;
+    let engine = fixture.engine().await;
+    engine.start(0).await.unwrap();
+    let lost = engine.engine_lost();
+    tokio::pin!(lost);
+    tokio::time::timeout(std::time::Duration::from_millis(300), &mut lost)
+        .await
+        .expect_err("a SERVING engine is not lost");
+    fixture.set_inference_serving(false).await;
+    assert_lost(bounded("engine lost on NOT_SERVING", lost).await);
+    finish(&mut fixture, &engine).await;
+
+    let mut fixture =
+        vllm_fixture::Fixture::start(Controller::default(), FixtureConfig::default()).await;
+    let engine = fixture.engine().await;
+    engine.start(0).await.unwrap();
+    fixture.shutdown().await;
+    assert_lost(bounded("engine lost on disconnect", engine.engine_lost()).await);
+    bounded("sidecar cleanup", engine.cleanup()).await.unwrap();
 }
 
 #[tokio::test]

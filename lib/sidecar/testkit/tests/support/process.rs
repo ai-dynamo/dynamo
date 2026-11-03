@@ -23,7 +23,7 @@ use dynamo_sidecar_testkit::{bounded, fixtures};
 use futures::StreamExt;
 use tempfile::TempDir;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Notify, watch};
+use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
@@ -458,7 +458,6 @@ pub struct Gate {
     pub endpoint: String,
     accepted: watch::Receiver<bool>,
     release: watch::Sender<bool>,
-    reset: Arc<Notify>,
     cancel: CancellationToken,
     task: JoinHandle<()>,
 }
@@ -472,14 +471,11 @@ impl Gate {
         let (release, release_rx) = watch::channel(false);
         let cancel = CancellationToken::new();
         let task_cancel = cancel.clone();
-        let reset = Arc::new(Notify::new());
-        let task_reset = reset.clone();
         let task = tokio::spawn(async move {
             let mut connections = JoinSet::new();
             loop {
                 tokio::select! {
                     _ = task_cancel.cancelled() => break,
-                    _ = task_reset.notified() => connections.abort_all(),
                     result = listener.accept() => {
                         let (mut downstream, _) = result.unwrap();
                         accepted_tx.send_replace(true);
@@ -502,7 +498,6 @@ impl Gate {
             endpoint,
             accepted,
             release,
-            reset,
             cancel,
             task,
         }
@@ -518,14 +513,6 @@ impl Gate {
     }
     pub fn release(&self) {
         self.release.send_replace(true);
-    }
-    /// Hold new connections until the next `release`.
-    pub fn hold(&self) {
-        self.release.send_replace(false);
-    }
-    /// Close every proxied connection while the upstream keeps running.
-    pub fn reset(&self) {
-        self.reset.notify_one();
     }
     pub async fn shutdown(mut self) {
         self.cancel.cancel();

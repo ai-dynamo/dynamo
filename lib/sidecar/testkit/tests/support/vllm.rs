@@ -5,7 +5,6 @@ use tonic_health_v14 as tonic_health;
 use tonic_v14 as tonic;
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
@@ -38,11 +37,6 @@ use super::{
     SidecarFixture, WireFixture, fast_engine_args, sidecar_command, wait_scheduler_idle,
 };
 
-pub const INFERENCE_SERVICE: &str = <InferenceServer<ControlledService> as NamedService>::NAME;
-/// Health services added by vllm-project/vllm#63870.
-pub const LIVENESS_SERVICE: &str = "liveness";
-pub const READINESS_SERVICE: &str = "readiness";
-
 pub struct Fixture {
     config: FixtureConfig,
     pub service: VllmMockerService,
@@ -53,52 +47,20 @@ pub struct Fixture {
     readiness: watch::Sender<Option<bool>>,
     health_received: watch::Receiver<bool>,
     health: tonic_health::server::HealthReporter,
-    controlled: ControlledService,
-    is_healthy: watch::Receiver<Option<bool>>,
-    health_requested: watch::Sender<bool>,
 }
 
 impl Fixture {
-    /// What `service`'s health watch reports; `None` unregisters it, as vLLM
-    /// does just before its listener closes.
-    pub async fn set_service_health(&self, service: &str, is_serving: Option<bool>) {
-        let mut health = self.health.clone();
-        match is_serving {
-            Some(true) => {
-                health
-                    .set_service_status(service, tonic_health::ServingStatus::Serving)
-                    .await
-            }
-            Some(false) => {
-                health
-                    .set_service_status(service, tonic_health::ServingStatus::NotServing)
-                    .await
-            }
-            None => health.clear_service_status(service).await,
+    /// Sets what `Watch` reports for `Inference`; `Check` follows `set_health` instead.
+    pub async fn set_inference_serving(&self, is_serving: bool) {
+        if is_serving {
+            self.health
+                .set_serving::<InferenceServer<ControlledService>>()
+                .await;
+        } else {
+            self.health
+                .set_not_serving::<InferenceServer<ControlledService>>()
+                .await;
         }
-    }
-
-    /// Drop every connection, then serve the same engine on the same address.
-    pub async fn restart(&mut self) {
-        let address = self.server.address();
-        self.server.shutdown().await.unwrap();
-        self.server = serve(
-            address,
-            self.controlled.clone(),
-            self.health.clone(),
-            self.is_healthy.clone(),
-            self.health_requested.clone(),
-        )
-        .await;
-    }
-
-    pub async fn kv_event_sources(&self) -> Vec<pb::KvEventSource> {
-        self.service
-            .get_kv_event_sources(Request::new(pb::GetKvEventSourcesRequest {}))
-            .await
-            .unwrap()
-            .into_inner()
-            .sources
     }
 
     pub fn set_reasoning_parser(&self, parser: &str) {
@@ -122,7 +84,7 @@ impl SidecarFixture for Fixture {
     const GENERATE_OPENING: GenerateOpening = GenerateOpening::WaitsForHeaders;
 
     async fn start(control: Controller<Adapter>, config: FixtureConfig) -> Self {
-        let mut args = fast_engine_args(EngineType::Vllm, config.has_kv_events);
+        let mut args = fast_engine_args(EngineType::Vllm);
         args.speedup_ratio = config.speedup_ratio;
         let service = VllmMockerService::new(
             MockerServerConfig {
@@ -148,6 +110,7 @@ impl SidecarFixture for Fixture {
             served_model_name: served_model_name.clone(),
             reasoning_parser: reasoning_parser.clone(),
         };
+        let control_service = controlled.clone();
         let health = tonic_health::server::HealthReporter::new();
         health
             .set_serving::<ControlServer<ControlledService>>()
@@ -157,14 +120,28 @@ impl SidecarFixture for Fixture {
             .await;
         let (readiness, is_healthy) = watch::channel(Some(true));
         let (health_requested, health_received) = watch::channel(false);
-        let server = serve(
-            SocketAddr::from(([127, 0, 0, 1], 0)),
-            controlled.clone(),
-            health.clone(),
-            is_healthy.clone(),
-            health_requested.clone(),
-        )
-        .await;
+        let health_service = HealthServer::new(ControlledHealth {
+            inner: tonic_health::server::HealthService::from_health_reporter(health.clone()),
+            is_healthy,
+            health_requested,
+        });
+        let server = TestServer::start(move |listener, shutdown| async move {
+            tonic::transport::Server::builder()
+                .add_service(
+                    InferenceServer::new(controlled)
+                        .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+                        .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE),
+                )
+                .add_service(ControlServer::new(control_service))
+                .add_service(health_service)
+                .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
+                    let _ = shutdown.await;
+                })
+                .await?;
+            Ok(())
+        })
+        .await
+        .unwrap();
         Self {
             config,
             service,
@@ -175,9 +152,6 @@ impl SidecarFixture for Fixture {
             readiness,
             health_received,
             health,
-            controlled,
-            is_healthy,
-            health_requested,
         }
     }
 
@@ -386,37 +360,6 @@ impl WireFixture for Fixture {
     }
 }
 
-async fn serve(
-    address: SocketAddr,
-    controlled: ControlledService,
-    health: tonic_health::server::HealthReporter,
-    is_healthy: watch::Receiver<Option<bool>>,
-    health_requested: watch::Sender<bool>,
-) -> TestServer {
-    let health_service = HealthServer::new(ControlledHealth {
-        inner: tonic_health::server::HealthService::from_health_reporter(health),
-        is_healthy,
-        health_requested,
-    });
-    TestServer::start_on(address, move |listener, shutdown| async move {
-        tonic::transport::Server::builder()
-            .add_service(
-                InferenceServer::new(controlled.clone())
-                    .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
-                    .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE),
-            )
-            .add_service(ControlServer::new(controlled))
-            .add_service(health_service)
-            .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
-                let _ = shutdown.await;
-            })
-            .await?;
-        Ok(())
-    })
-    .await
-    .unwrap()
-}
-
 #[derive(Clone)]
 struct ControlledService {
     inner: VllmMockerService,
@@ -532,17 +475,6 @@ impl Health for ControlledHealth {
     ) -> Result<Response<HealthCheckResponse>, Status> {
         if request.get_ref().service != InferenceServer::<ControlledService>::NAME {
             return self.inner.check(request).await;
-        }
-        // An unregistered service answers NotFound, as vLLM's does while it
-        // shuts down, and a NOT_SERVING one answers as set.
-        let registered = self
-            .inner
-            .check(Request::new(request.get_ref().clone()))
-            .await?;
-        if registered.get_ref().status
-            != tonic_health::pb::health_check_response::ServingStatus::Serving as i32
-        {
-            return Ok(registered);
         }
         self.health_requested.send_replace(true);
         let mut readiness = self.is_healthy.clone();
