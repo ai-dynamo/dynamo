@@ -13,14 +13,21 @@ REPO_ROOT="$(cd "${MODULE_DIR}/../.." && pwd)"
 CHART_DIR="${REPO_ROOT}/deploy/helm/charts/global-discovery-mcs"
 MANIFESTS="${E2E_DIR}/manifests"
 
+# External providers run the same discovery suite, without the bundled registry tests.
+E2E_PROVIDER="${E2E_PROVIDER:-dynamo}"
+case "${E2E_PROVIDER}" in
+  dynamo) DEFAULT_PHASES="1 2 3"; DEFAULT_PREFIX="mcs-e2e"; DEFAULT_WORK_DIR="e2e" ;;
+  cilium) DEFAULT_PHASES="3"; DEFAULT_PREFIX="mcs-e2e-cilium"; DEFAULT_WORK_DIR="e2e-cilium" ;;
+  *) printf 'e2e: unknown provider %s; use dynamo or cilium\n' "${E2E_PROVIDER}" >&2; exit 2 ;;
+esac
+
 # Phases to run, separated by spaces or commas.
-E2E_PHASES="${E2E_PHASES:-1 2 3}"
+E2E_PHASES="${E2E_PHASES:-${DEFAULT_PHASES}}"
 # 1 keeps the clusters when the run fails; always keeps them after a pass too.
 E2E_KEEP="${E2E_KEEP:-0}"
 # 1 reuses the images that an earlier run built and loaded into Docker.
 E2E_SKIP_BUILD="${E2E_SKIP_BUILD:-0}"
-# Treat a documented behaviour that the Global Discovery Service does not
-# have yet (a known gap) as a failure.
+# Fail on known gaps and skipped cases.
 E2E_STRICT="${E2E_STRICT:-0}"
 # Seconds an assertion polls before it fails.
 E2E_TIMEOUT="${E2E_TIMEOUT:-90}"
@@ -28,7 +35,7 @@ E2E_HELM_TIMEOUT="${E2E_HELM_TIMEOUT:-5m}"
 
 # The kind clusters are <prefix>-hub, <prefix>-a and <prefix>-b. Nothing else
 # is ever touched.
-E2E_PREFIX="${E2E_PREFIX:-mcs-e2e}"
+E2E_PREFIX="${E2E_PREFIX:-${DEFAULT_PREFIX}}"
 E2E_CLUSTERSET="${E2E_CLUSTERSET:-e2e}"
 # Phases 1 and 2 use all three clusters; phase 3 needs only the hub and a, so
 # E2E_PHASES=3 creates two. E2E_CLUSTER_KEYS overrides this (steps that need a
@@ -74,7 +81,7 @@ GDS_IMAGE_TAG=""
 MCS_NAMESPACE="mcs-system"
 MCS_RELEASE="mcs"
 
-E2E_WORK_DIR="${E2E_WORK_DIR:-${MODULE_DIR}/bin/e2e}"
+E2E_WORK_DIR="${E2E_WORK_DIR:-${MODULE_DIR}/bin/${DEFAULT_WORK_DIR}}"
 KUBECONFIG_DIR="${E2E_WORK_DIR}/kubeconfig"
 
 # Set by setup.sh: the registry address the member clusters dial.
@@ -123,6 +130,10 @@ fail() {
 }
 
 skip() {
+  if [ "${E2E_STRICT}" = "1" ]; then
+    fail "$1" "skipping cases is forbidden with E2E_STRICT=1"
+    return
+  fi
   SKIP_COUNT=$((SKIP_COUNT + 1))
   PHASE_SKIP=$((PHASE_SKIP + 1))
   RESULTS+=("SKIP  $1")

@@ -83,7 +83,9 @@ build_image() {
 }
 
 build_images() {
-  MCS_IMAGE_TAG="$(build_image "${MCS_IMAGE_REPO}" "${MODULE_DIR}")"
+  if [ "${E2E_PROVIDER}" = dynamo ]; then
+    MCS_IMAGE_TAG="$(build_image "${MCS_IMAGE_REPO}" "${MODULE_DIR}")"
+  fi
   if phase_selected 3; then
     GDS_IMAGE_TAG="$(build_image "${GDS_IMAGE_REPO}" "${REPO_ROOT}" "${REPO_ROOT}/container/Dockerfile.global-discovery-service")"
   fi
@@ -125,16 +127,22 @@ load_image() {
 # Clusters
 
 create_cluster() {  # create_cluster KEY
-  local key="$1" name config
+  local key="$1" name config created=0 cni_setting="" ready_timeout=180s
   name="$(cluster_name "${key}")"
   if cluster_exists "${key}"; then
     log "reusing kind cluster ${name}"
   else
+    created=1
+    if [ "${E2E_PROVIDER}" = cilium ]; then
+      cni_setting="  disableDefaultCNI: true"
+      ready_timeout=0s
+    fi
     config="${E2E_WORK_DIR}/kind-${key}.yaml"
     cat >"${config}" <<YAML
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 networking:
+${cni_setting}
   podSubnet: "$(pod_subnet_of "${key}")"
   serviceSubnet: "$(service_subnet_of "${key}")"
 nodes:
@@ -142,11 +150,26 @@ nodes:
 YAML
     log "creating kind cluster ${name} (pods $(pod_subnet_of "${key}"), services $(service_subnet_of "${key}"))"
     "${KIND}" create cluster --name "${name}" --image "${KIND_NODE_IMAGE}" --config "${config}" \
-      --kubeconfig "$(kubeconfig_of "${key}")" --wait 180s >"${E2E_WORK_DIR}/kind-create-${key}.log" 2>&1 ||
+      --kubeconfig "$(kubeconfig_of "${key}")" --wait "${ready_timeout}" >"${E2E_WORK_DIR}/kind-create-${key}.log" 2>&1 ||
       { tail -n 20 "${E2E_WORK_DIR}/kind-create-${key}.log" >&2; die "kind create cluster ${name} failed; log ${E2E_WORK_DIR}/kind-create-${key}.log"; }
   fi
   "${KIND}" get kubeconfig --name "${name}" >"$(kubeconfig_of "${key}")" || die "cannot read the kubeconfig of ${name}"
   chmod 600 "$(kubeconfig_of "${key}")"
+  if [ "${created}" = 1 ]; then
+    kc "${key}" annotate node "$(node_container "${key}")" "dynamo.nvidia.com/mcs-e2e-provider=${E2E_PROVIDER}" >/dev/null
+  fi
+}
+
+# Reject foreign clusters before installing the cleanup trap or creating any nodes.
+validate_reused_clusters() {
+  local key provider
+  for key in ${CLUSTER_KEYS}; do
+    cluster_exists "${key}" || continue
+    "${KIND}" get kubeconfig --name "$(cluster_name "${key}")" >"$(kubeconfig_of "${key}")"
+    chmod 600 "$(kubeconfig_of "${key}")"
+    provider="$(kc "${key}" get node "$(node_container "${key}")" -o jsonpath='{.metadata.annotations.dynamo\.nvidia\.com/mcs-e2e-provider}')"
+    [ "${provider}" = "${E2E_PROVIDER}" ] || die "cluster $(cluster_name "${key}") belongs to provider '${provider:-unknown}', expected '${E2E_PROVIDER}'; use a different E2E_PREFIX"
+  done
 }
 
 # route_pod_subnets: on every node, a static route to the pod subnet of each
@@ -188,7 +211,9 @@ create_clusters() {
   done
   route_pod_subnets
   for key in ${CLUSTER_KEYS}; do
-    load_image "${key}" "${MCS_IMAGE_REPO}:${MCS_IMAGE_TAG}"
+    if [ "${E2E_PROVIDER}" = dynamo ]; then
+      load_image "${key}" "${MCS_IMAGE_REPO}:${MCS_IMAGE_TAG}"
+    fi
     load_image "${key}" "${BUSYBOX_IMAGE}"
   done
   if phase_selected 3; then

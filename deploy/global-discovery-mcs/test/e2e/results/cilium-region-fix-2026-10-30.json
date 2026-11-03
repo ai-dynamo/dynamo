@@ -1,0 +1,13 @@
+{
+  "provider": "cilium",
+  "cilium_version": "1.20.4",
+  "gds_image": "global-discovery-service:e2e-78fb0157db6a",
+  "bundled_mcs_image": null,
+  "source_revision": "75875e0b294de59bab2d321a21c8ca4432791aa5",
+  "source_dirty": true,
+  "strict": true,
+  "wall_time_seconds": 158,
+  "upstream_pr": "https://github.com/ai-dynamo/dynamo/pull/17604",
+  "upstream_commit": "b30c06b16cd122e726d0c9da5aa8593f2b4ea193",
+  "summary": "\n===== SUMMARY =====\nPASS  Cilium 1.20.4 installed in hub a; bundled MCS image and chart unused\nPASS  no bundled mcs-registry or mcs-controller in any test cluster\nPASS  Global Discovery Service (--pool-discovery mcs) in the hub, router gr/global-router (2 pods) in the hub, pool demo (2 pods) in a\nPASS  ServiceExport global-router in the hub: Valid=True and Ready=True (1s)\nPASS  ServiceExports demo-pool-relay (v1alpha1) and demo-frontend (v1beta1) in a\nPASS  ServiceExport demo-pool-relay in a (applied as v1alpha1) is Valid=True and Ready=True (4s)\nPASS  ServiceExport demo-frontend in a is Valid=True and Ready=True (0s)\nPASS  ServiceImports demo-pool-relay and demo-frontend in the hub (0s)\nPASS  GET /pools lists one complete pool: cluster_id a, namespace demo, dgd_name demo (demo-frontend is not a pool) (0s)\nPASS  the pool has a location.region (0s)\nPASS  pool location.region is a (0s)\nPASS  pool relay_identities name the relay pods or one bound relay pod by address (1s)\nPASS  GET /routers lists hub/<pod> for the 2 global-router pods, with http://<pod IP>:8080 URLs (0s)\nPASS  scale the relay Deployment demo in a to 0\nPASS  GET /pools no longer lists the pool (5s)\nPASS  GET /routers still lists the 2 routers (0s)\nPASS  scale the relay Deployment demo in a back to 2\nPASS  GET /pools lists the pool again (2s)\nPASS  delete the ServiceExport demo-pool-relay in a\nPASS  GET /pools no longer lists the pool (0s)\nPASS  the ServiceImport demo-pool-relay is gone from the hub (0s)\nPASS  GET /routers still lists the 2 routers (0s)\n---------------------------------------------\nphase 3: 22 passed, 0 failed, 0 known gaps, 0 skipped\n---------------------------------------------\nRESULT: PASS (22 passed, 0 failed, 0 known gaps, 0 skipped)\n"
+}
