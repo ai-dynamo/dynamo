@@ -403,15 +403,26 @@ pub(super) fn media_refusal(
     state: &service_v2::State,
     request: &NvCreateChatCompletionRequest,
 ) -> Option<MediaRefusal> {
+    media_refusal_for_content_type(state, || {
+        crate::preprocessor::request_media_content_types(&request.inner.messages)
+            .first()
+            .copied()
+    })
+}
+
+/// Keep classification lazy so disabled frontends do not scan request content.
+pub(super) fn media_refusal_for_content_type(
+    state: &service_v2::State,
+    content_type: impl FnOnce() -> Option<&'static str>,
+) -> Option<MediaRefusal> {
     let config = state.media_rejection();
     if !config.enabled() {
         return None;
     }
-    let content_types = crate::preprocessor::request_media_content_types(&request.inner.messages);
-    let content_type = content_types.first()?;
+    let content_type = content_type()?;
     let status =
         StatusCode::from_u16(config.status_code()).unwrap_or(StatusCode::UNSUPPORTED_MEDIA_TYPE);
-    let modality = match *content_type {
+    let modality = match content_type {
         "input_audio" => "audio",
         other => other.trim_end_matches("_url"),
     };
@@ -429,7 +440,11 @@ fn reject_media_if_configured(
     state: &service_v2::State,
     request: &NvCreateChatCompletionRequest,
 ) -> Result<(), ErrorResponse> {
-    let Some(MediaRefusal { status, message }) = media_refusal(state, request) else {
+    reject_media(media_refusal(state, request))
+}
+
+fn reject_media(refusal: Option<MediaRefusal>) -> Result<(), ErrorResponse> {
+    let Some(MediaRefusal { status, message }) = refusal else {
         return Ok(());
     };
     record_local_failure(ErrorClass::UnsupportedMedia);
@@ -446,6 +461,37 @@ fn reject_media_if_configured(
             metric_error_type: Some(ErrorType::UnsupportedModality),
         }),
     ))
+}
+
+/// Inspect the native input, including image references and non-user history,
+/// before the Responses-to-chat conversion loses or rejects media.
+fn responses_media_content_type(request: &NvCreateResponse) -> Option<&'static str> {
+    use dynamo_protocols::types::responses::{
+        EasyInputContent, FunctionCallOutput, InputContent, InputItem, InputParam, Item,
+        MessageItem,
+    };
+
+    let InputParam::Items(items) = &request.inner.input else {
+        return None;
+    };
+    items.iter().find_map(|item| {
+        let parts = match item {
+            InputItem::EasyMessage(message) => match &message.content {
+                EasyInputContent::ContentList(parts) => parts,
+                EasyInputContent::Text(_) => return None,
+            },
+            InputItem::Item(Item::Message(MessageItem::Input(message))) => &message.content,
+            InputItem::Item(Item::FunctionCallOutput(output)) => match &output.output {
+                FunctionCallOutput::Content(parts) => parts,
+                FunctionCallOutput::Text(_) => return None,
+            },
+            _ => return None,
+        };
+        parts.iter().find_map(|part| match part {
+            InputContent::InputImage(_) => Some("image_url"),
+            _ => None,
+        })
+    })
 }
 
 /// Extract ErrorType from ErrorResponse for metrics
@@ -522,6 +568,10 @@ pub(crate) fn find_invalid_argument_in_chain<'a>(
         current = e.source();
     }
     None
+}
+
+pub(super) fn error_is_invalid_argument(err: &(dyn std::error::Error + 'static)) -> bool {
+    find_invalid_argument_in_chain(err).is_some()
 }
 
 fn find_queue_rejection_in_chain<'a>(
@@ -636,6 +686,23 @@ impl ErrorMessage {
                 code: code.as_u16(),
                 details: None,
                 metric_error_type: Some(ErrorType::Cancelled),
+            }),
+        )
+    }
+
+    /// Invalid request (400). Recorded as an `InvalidRequest` local failure,
+    /// like the other client-error constructors.
+    pub fn bad_request<T: Display>(msg: T) -> ErrorResponse {
+        let code = StatusCode::BAD_REQUEST;
+        record_local_failure(ErrorClass::InvalidRequest);
+        (
+            code,
+            Json(ErrorMessage {
+                message: msg.to_string(),
+                error_type: bad_request_error_type(),
+                code: code.as_u16(),
+                details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -2775,7 +2842,7 @@ fn unsupported_media_type_error() -> ErrorResponse {
 
 /// Returns the standard error response for a request body that exceeds the
 /// configured size limit.
-fn payload_too_large_error() -> ErrorResponse {
+pub(super) fn payload_too_large_error() -> ErrorResponse {
     ErrorMessage::from_http_error(
         ErrorClass::PayloadTooLarge,
         HttpError {
@@ -3897,6 +3964,7 @@ async fn chat_completions(
             stream_handle,
             activity_rx,
             error_signal,
+            true,
         );
         let terminal = terminal.clone();
         // Arm the cancellation fallback before Axum can take ownership of the
@@ -4315,6 +4383,13 @@ async fn responses(
         return Err(err_response);
     }
 
+    if let Err(err_response) = reject_media(media_refusal_for_content_type(&state, || {
+        responses_media_content_type(&request)
+    })) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+
     // Extract request parameters before into_parts() consumes the request.
     // These are echoed back in the Response object per the OpenAI spec.
     let loaded_tools: Vec<_> =
@@ -4394,10 +4469,6 @@ async fn responses(
             "Invalid responses request",
         );
         inflight_guard.mark_error(ErrorType::Validation);
-        return Err(err_response);
-    }
-    if let Err(err_response) = reject_media_if_configured(&state, &chat_request) {
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
     }
 
