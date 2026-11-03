@@ -23,6 +23,7 @@ pytest.importorskip(
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
+from aisimulate.config.engine import ParallelismRecommendationConfig
 from pydantic import ValidationError
 
 from dynamo.planner.config.planner_config import (
@@ -37,6 +38,7 @@ from dynamo.planner.config.planner_config import (
     live_retune_min_lease_seconds,
 )
 from dynamo.planner.retune.domains import expand_router_domain
+from dynamo.planner.retune.live import dgdr
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -354,7 +356,25 @@ def _rejects_engine(match: str, engine: dict, mode: str = "agg") -> None:
         (
             ("workers", "aggregated", "parallelism", "preset", 0, "expert"),
             1,
-            r"preset\[0\] must set exactly .*unknown=\['expert'\]",
+            r"preset\[0\] must set exactly .*moe_expert and optionally "
+            r"prefill_context: 1 \(P5\); missing=\[\], unknown=\['expert'\]",
+        ),
+        (
+            ("workers", "aggregated", "parallelism", "preset", 0, "decode_context"),
+            1,
+            r"preset\[0\].decode_context is not accepted \(P5\); the pinned "
+            r"AISimulate preset schema has no decode_context",
+        ),
+        (
+            ("workers", "aggregated", "parallelism", "preset", 0, "prefill_context"),
+            2,
+            r"preset\[0\].prefill_context must be 1 or omitted \(P5\); AISimulate "
+            r"recommend rejects context parallelism above 1, got 2",
+        ),
+        (
+            ("workers", "aggregated", "parallelism", "preset", 0, "prefill_context"),
+            0,
+            r"preset\[0\].prefill_context must be a positive integer \(P5\), got 0",
         ),
         (
             ("workers", "aggregated", "scheduler", "max_batched_tokens"),
@@ -474,10 +494,57 @@ def test_p5_accepts_unused_roles_absent_or_null():
     assert _config(_retune(dgdr=_dgdr(engine=engine))).retune is not None
 
 
-def test_p5_accepts_the_context_parallel_preset_knobs():
+def test_p5_accepts_prefill_context_one():
+    engine = _engine()
+    engine["workers"]["aggregated"]["parallelism"]["preset"][0]["prefill_context"] = 1
+    assert _config(_retune(dgdr=_dgdr(engine=engine))).retune is not None
+
+
+def test_p5_rejects_decode_context_on_a_disaggregated_role():
+    engine = _engine("disagg")
+    engine["workers"]["decode"]["parallelism"]["preset"][0]["decode_context"] = 1
+    _rejects_engine(
+        r"engine.workers.decode.parallelism.preset\[0\].decode_context is not "
+        r"accepted \(P5\)",
+        engine,
+        mode="disagg",
+    )
+
+
+def _spec_replicas(mode: str) -> dict[str, int]:
+    return {"aggregated": 2} if mode == "agg" else {"prefill": 1, "decode": 3}
+
+
+def _validate_with_pinned_aisimulate(engine: dict, mode: str) -> None:
+    spec_replicas = _spec_replicas(mode)
+    pinned = dgdr._pinned_engine(engine, spec_replicas, "vllm")
+    for role in spec_replicas:
+        ParallelismRecommendationConfig.model_validate(
+            pinned["workers"][role]["parallelism"]
+        )
+
+
+@pytest.mark.parametrize("mode", ["agg", "disagg"])
+@pytest.mark.parametrize("prefill_context", [None, 1])
+def test_p5_presets_validate_against_the_pinned_aisimulate(mode, prefill_context):
+    engine = _engine(mode)
+    if prefill_context is not None:
+        for role in _spec_replicas(mode):
+            preset = engine["workers"][role]["parallelism"]["preset"]
+            preset[0]["prefill_context"] = prefill_context
+    config = _config(_retune(dgdr=_dgdr(engine=engine)), mode=mode)
+    assert config.retune is not None and config.retune.dgdr is not None
+
+    _validate_with_pinned_aisimulate(config.retune.dgdr.engine, mode)
+
+
+def test_pinned_aisimulate_rejects_decode_context():
+    # Why P5 rejects decode_context; once a pin bump makes this fail, P5 may
+    # admit it.
     engine = _engine()
     engine["workers"]["aggregated"]["parallelism"]["preset"][0]["decode_context"] = 1
-    assert _config(_retune(dgdr=_dgdr(engine=engine))).retune is not None
+    with pytest.raises(ValidationError, match=r"decode_context\s+Extra inputs"):
+        _validate_with_pinned_aisimulate(engine, "agg")
 
 
 # -------------------------------------------------------------- claim paths

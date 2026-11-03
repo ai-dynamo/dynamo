@@ -219,6 +219,8 @@ AISimulate searches by default, would make the Run search engine settings as wel
   `parallelism.preset` to a list of exactly one entry with `tensor`, `pipeline`, `attention_data`,
   `moe_tensor` and `moe_expert`, and sets `scheduler.max_batched_tokens` and
   `scheduler.max_sequences`.
+- The preset entry may also set `prefill_context`, but only to `1`, and must not set
+  `decode_context`: the pinned AISimulate recommendation does not run context parallelism.
 - Do not set `replicas` anywhere: the Planner fills them in from the DGD spec at each launch and
   sets `spec.hardware.gpu.budget` to their GPU total.
 - Write roles the mode does not use as `null`, or leave them out.

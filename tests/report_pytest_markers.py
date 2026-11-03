@@ -117,6 +117,7 @@ STUB_MODULES = [
     "aisimulate.config",
     "aisimulate.config.cli",
     "aisimulate.config.common",
+    "aisimulate.config.engine",
     "aisimulate.config_adapter",
     "aisimulate.generator.api",
     "aisimulate.generator.enumerate",

@@ -1060,7 +1060,13 @@ _DGDR_ENGINE_ROLES = {"agg": ("aggregated",), "disagg": ("prefill", "decode")}
 # ``parallelism.preset`` entry keys: AISimulate requires all of these plus
 # ``replicas``, which the executor sets from the DGD spec at each launch.
 _DGDR_PRESET_KEYS = ("tensor", "pipeline", "attention_data", "moe_tensor", "moe_expert")
-_DGDR_PRESET_OPTIONAL_KEYS = ("prefill_context", "decode_context")
+# The pinned AISimulate recommend runs prefill_context only at 1, and its
+# preset entry schema has no decode_context. When the pin moves, update this
+# tuple together with _validate_dgdr_parallelism (its decode_context branch,
+# the "optionally prefill_context: 1" message and the prefill_context == 1
+# check), test_pinned_aisimulate_rejects_decode_context and the preset rules
+# in docs/fern/pages/kubernetes/auto-deployment/planner-live-retune.md.
+_DGDR_PRESET_OPTIONAL_KEYS = ("prefill_context",)
 # Scheduler knobs AISimulate searches over a default domain when omitted.
 _DGDR_SCHEDULER_KNOBS = ("max_batched_tokens", "max_sequences")
 
@@ -1232,6 +1238,11 @@ def _validate_dgdr_parallelism(parallelism: Any, path: str) -> None:
             "single preset entry (P5)"
         )
     entry = preset[0]
+    if "decode_context" in entry:
+        raise ValueError(
+            f"{path}.preset[0].decode_context is not accepted (P5); the pinned "
+            "AISimulate preset schema has no decode_context"
+        )
     missing = [key for key in _DGDR_PRESET_KEYS if key not in entry]
     unknown = sorted(
         set(entry) - set(_DGDR_PRESET_KEYS) - set(_DGDR_PRESET_OPTIONAL_KEYS)
@@ -1239,6 +1250,7 @@ def _validate_dgdr_parallelism(parallelism: Any, path: str) -> None:
     if missing or unknown:
         raise ValueError(
             f"{path}.preset[0] must set exactly {', '.join(_DGDR_PRESET_KEYS)} "
+            "and optionally prefill_context: 1 "
             f"(P5); missing={missing}, unknown={unknown}"
         )
     for key, value in entry.items():
@@ -1246,6 +1258,12 @@ def _validate_dgdr_parallelism(parallelism: Any, path: str) -> None:
             raise ValueError(
                 f"{path}.preset[0].{key} must be a positive integer (P5), got {value!r}"
             )
+    if entry.get("prefill_context", 1) != 1:
+        raise ValueError(
+            f"{path}.preset[0].prefill_context must be 1 or omitted (P5); "
+            "AISimulate recommend rejects context parallelism above 1, "
+            f"got {entry['prefill_context']!r}"
+        )
 
 
 def _check_dgdr_engine_scalars(value: Any, path: tuple[str, ...]) -> None:
