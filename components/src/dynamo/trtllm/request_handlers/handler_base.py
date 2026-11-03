@@ -1151,7 +1151,7 @@ class HandlerBase(BaseGenerativeHandler):
         # choice and emit only the new slice for each Dynamo chunk.
         output_tokens_per_choice: dict[int, int] = {}
         prompt_logprobs_payload = None
-        prompt_logprobs_sent = False
+        prompt_logprobs_sent: set[int] = set()
         first_output_seen = False
 
         sampling_params = self._override_sampling_params(
@@ -1455,17 +1455,19 @@ class HandlerBase(BaseGenerativeHandler):
                         # Send prompt logprobs with the first token output, not the
                         # terminal: the frontend can match a stop string and cancel
                         # the stream before TRT-LLM's terminal output arrives.
-                        # Prefill keeps them on its single terminal output.
+                        # Send it once per choice: the completions echo path
+                        # reads it per choice index. Prefill keeps them on its
+                        # single terminal output.
                         if (
                             prompt_logprobs_payload is not None
-                            and not prompt_logprobs_sent
+                            and output_idx not in prompt_logprobs_sent
                             and out["token_ids"]
                             and self.disaggregation_mode != DisaggregationMode.PREFILL
                         ):
                             out["engine_data"] = {
                                 "prompt_logprobs": prompt_logprobs_payload
                             }
-                            prompt_logprobs_sent = True
+                            prompt_logprobs_sent.add(output_idx)
 
                         if output.finish_reason:
                             out["finish_reason"] = output.finish_reason
@@ -1492,15 +1494,16 @@ class HandlerBase(BaseGenerativeHandler):
                                     "this indicates a possible bug"
                                 )
 
-                            # Late payload, or prefill: nothing carried it yet.
+                            # Late payload, or prefill: nothing carried it
+                            # to this choice yet.
                             if (
                                 prompt_logprobs_payload is not None
-                                and not prompt_logprobs_sent
+                                and output_idx not in prompt_logprobs_sent
                             ):
                                 out.setdefault("engine_data", {})[
                                     "prompt_logprobs"
                                 ] = prompt_logprobs_payload
-                                prompt_logprobs_sent = True
+                                prompt_logprobs_sent.add(output_idx)
 
                             num_input_tokens = len(request.get("token_ids", []))
                             total_completion_tokens = sum(

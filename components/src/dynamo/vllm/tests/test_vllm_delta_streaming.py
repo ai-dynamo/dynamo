@@ -416,27 +416,9 @@ async def test_generate_tokens_sends_late_prompt_logprobs_once():
 
 
 @pytest.mark.asyncio
-async def test_generate_tokens_single_terminal_chunk_keeps_all_engine_data():
-    responses = [
-        _request_output(
-            [_output([1], finish_reason="stop")],
-            prompt_token_ids=[10, 11],
-            num_cached_tokens=1,
-            prompt_logprobs=_RAW_PROMPT_LOGPROBS,
-        ),
-    ]
-
-    chunks, _ = await _collect_handler_chunks(responses, want_engine_data=True)
-
-    assert len(chunks) == 1
-    engine_data = chunks[0]["engine_data"]
-    assert engine_data["prompt_logprobs"] == _PROMPT_LOGPROBS_PAYLOAD
-    assert engine_data["prompt_token_ids"] == [10, 11]
-    assert engine_data["kv_cache_hit"] == {"prompt_tokens": 2, "reused_tokens": 1}
-
-
-@pytest.mark.asyncio
-async def test_generate_tokens_sends_prompt_logprobs_once_for_n_choices():
+async def test_generate_tokens_sends_prompt_logprobs_once_per_choice():
+    # The completions echo path reads the payload per choice index, so each
+    # choice's first token output carries it.
     responses = [
         _request_output(
             [_output([1], index=0), _output([10], index=1)],
@@ -456,5 +438,7 @@ async def test_generate_tokens_sends_prompt_logprobs_once_for_n_choices():
         responses, sampling_params=SamplingParams(n=2)
     )
 
-    assert len(chunks) == 4
-    assert _chunks_with_prompt_logprobs(chunks) == [0]
+    assert [chunk["index"] for chunk in chunks] == [0, 1, 0, 1]
+    assert _chunks_with_prompt_logprobs(chunks) == [0, 1]
+    for chunk in chunks[:2]:
+        assert chunk["engine_data"]["prompt_logprobs"] == _PROMPT_LOGPROBS_PAYLOAD

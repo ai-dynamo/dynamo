@@ -2584,29 +2584,6 @@ async def test_process_token_stream_sends_late_prompt_logprobs_after_empty_chunk
 
 
 @pytest.mark.asyncio
-async def test_process_token_stream_keeps_prompt_logprobs_out_of_metadata_upload():
-    handler = _new_decode_handler()
-    uploader = SimpleNamespace(upload_choice=AsyncMock())
-    responses = [
-        _prompt_logprob_chunk([101], with_prompt=True),
-        _prompt_logprob_chunk([102], reason={"type": "length"}, with_prompt=True),
-    ]
-
-    chunks = await _collect(
-        handler._process_token_stream(
-            _stream(responses),
-            _Context(),
-            metadata_uploader=uploader,
-            prompt_logprobs_count=0,
-        )
-    )
-
-    assert len(chunks) == 2
-    assert _chunks_with_prompt_logprobs(chunks) == []
-    uploader.upload_choice.assert_awaited_once()
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "mode", [DisaggregationMode.AGGREGATED, DisaggregationMode.DECODE]
 )

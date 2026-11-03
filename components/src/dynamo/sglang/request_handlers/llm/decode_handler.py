@@ -1130,9 +1130,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         request_ids: set[str] = set()
         first_output_seen = False
         usage_metadata_by_index: dict[int, tuple[int, int | None]] = {}
-        # Prompt logprobs are per request; send them once (see below).
+        # Prompt logprobs are the same for every choice; send them once per
+        # choice index (see below).
         prompt_payload: list | None = None
-        prompt_payload_sent = False
+        prompt_payload_sent: set[int] = set()
         async with self._cancellation_monitor(
             request_id_future,
             context,
@@ -1239,10 +1240,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
                 # Send prompt logprobs with the first token output, not the
                 # terminal: the frontend can match a stop string and cancel the
-                # stream before SGLang's terminal output arrives.
-                if prompt_payload is not None and not prompt_payload_sent:
+                # stream before SGLang's terminal output arrives. Send it once
+                # per choice: the completions echo path reads it per choice index.
+                if prompt_payload is not None and output_idx not in prompt_payload_sent:
                     engine_data["prompt_logprobs"] = prompt_payload
-                    prompt_payload_sent = True
+                    prompt_payload_sent.add(output_idx)
 
                 if finish_reason:
                     # Router-facing, so kept even when metadata is uploaded instead.

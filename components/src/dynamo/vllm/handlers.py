@@ -3552,9 +3552,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             raw_sampling_mask_by_output: dict[int, Any] = {}
             # vLLM surfaces prompt_logprobs once (at end-of-prefill) and clears
             # them on subsequent chunks. Capture the first non-None payload and
-            # send it once, on the first output that can carry it.
+            # send it once per choice, on that choice's first output that can
+            # carry it.
             prompt_logprobs_payload: Optional[list] = None
-            prompt_logprobs_sent = False
+            prompt_logprobs_sent: set[int] = set()
             engine_prompt_token_ids: Optional[list[int]] = None
             async for res in gen:
                 # res is vllm's RequestOutput
@@ -3664,17 +3665,18 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                     # Send prompt logprobs with the first token output, not the
                     # terminal: the frontend can match a stop string and cancel
-                    # the stream before vLLM's terminal output arrives. The
-                    # payload is per request, so it is sent once, not per choice.
+                    # the stream before vLLM's terminal output arrives. Send it
+                    # once per choice: the completions echo path reads it per
+                    # choice index.
                     if (
                         prompt_logprobs_payload is not None
-                        and not prompt_logprobs_sent
+                        and output_idx not in prompt_logprobs_sent
                         and (token_ids or finish_reason)
                     ):
                         _attach_prompt_logprobs_engine_data(
                             out, prompt_logprobs_payload
                         )
-                        prompt_logprobs_sent = True
+                        prompt_logprobs_sent.add(output_idx)
 
                     if finish_reason:
                         out["finish_reason"] = normalized_finish_reason
