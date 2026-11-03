@@ -153,7 +153,9 @@ def test_gpu_kvcr_rank_registration_and_failed_start_preserve_bank_owners(
         banks[0]
         if tp_size == 1
         else SimpleNamespace(
-            shape=(spec.num_chunks, spec.logical_row_bytes), banks=banks
+            shape=(spec.num_chunks, spec.logical_row_bytes),
+            strides=(spec.logical_row_bytes, 1),
+            banks=banks,
         )
     )
     listener = MagicMock()
