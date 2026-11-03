@@ -7499,8 +7499,10 @@ mod tests {
     async fn preflight_retains_semantic_422_with_json_diagnostic() {
         use dynamo_runtime::error::{ErrorClass, ErrorReason};
 
-        for (code, expected_message) in [(422, "Invalid request"), (415, "Unsupported Media Type")]
-        {
+        for (code, expected_message) in [
+            (422, "Unprocessable Entity"),
+            (415, "Unsupported Media Type"),
+        ] {
             let error = DynamoError::builder()
                 .class(ErrorClass::InvalidRequest)
                 .reason(ErrorReason::unprocessable_entity())
