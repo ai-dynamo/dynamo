@@ -1768,7 +1768,9 @@ def _assert_strict_xfail_marker(label: str, mark: Any, exception: type) -> None:
     if mark.args:
         raise AssertionError(f"{label} xfail has positional condition {mark.args!r}")
     if "condition" in mark.kwargs:
-        raise AssertionError(f"{label} xfail has condition={mark.kwargs['condition']!r}")
+        raise AssertionError(
+            f"{label} xfail has condition={mark.kwargs['condition']!r}"
+        )
     if mark.kwargs.get("strict") is not True:
         raise AssertionError(
             f"{label} xfail strict={mark.kwargs.get('strict')!r} is not True"
@@ -1778,7 +1780,9 @@ def _assert_strict_xfail_marker(label: str, mark: Any, exception: type) -> None:
             f"{label} xfail raises={mark.kwargs.get('raises')!r} != {exception!r}"
         )
     if mark.kwargs.get("run", True) is not True:
-        raise AssertionError(f"{label} xfail run={mark.kwargs.get('run')!r} is disabled")
+        raise AssertionError(
+            f"{label} xfail run={mark.kwargs.get('run')!r} is disabled"
+        )
 
 
 def _assert_measured_xfail_marker(name: str, mark: Any) -> None:
