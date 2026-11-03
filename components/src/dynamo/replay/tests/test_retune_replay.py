@@ -276,8 +276,8 @@ def test_candidate_replays_share_common_random_numbers(tmp_path):
 
     baseline = evaluate({})
     assert evaluate({}) == baseline
-    # Replay reports no shared cache hits, so this candidate changes no
-    # routing decision: it ties the baseline, and the controller keeps it.
+    # These workers take no KV fetch hints and replay has no shared cache, so
+    # this candidate changes no routing decision: it ties the baseline and is kept.
     assert evaluate({"shared_cache_multiplier": 0.5}) == baseline
     assert evaluate({"router_temperature": 0.0})[0] != baseline[0]
 
