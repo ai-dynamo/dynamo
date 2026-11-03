@@ -285,6 +285,7 @@ areas:
   - lib/llm/src/discovery/
   - lib/llm/src/kernels/
   - lib/llm/src/local_model/
+  - lib/lora/src/huggingface.rs
   - lib/lora/src/routing/
   - lib/lora/tests/
   - lib/llm/src/model_card.rs
