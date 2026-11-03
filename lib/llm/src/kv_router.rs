@@ -81,7 +81,9 @@ pub use plugins::{
 };
 pub use prefill_router::PrefillRouter;
 pub(crate) use request_lease::RequestAttemptRelease;
-pub use routing_host::{KvPushRouter, RoutingHost};
+pub use routing_host::{
+    KvPushRouter, LlmDispatch, MultimodalCache, RoutingHost, RoutingHostBuilder,
+};
 pub use routing_load::{
     ManagedKvRouter, RouterLoadSource, RoutingLoadContext, SchedulerLoadSender,
 };
@@ -399,13 +401,6 @@ pub(crate) fn to_worker_selection_session_context(
     .with_agent_headers(agent_headers.clone())
 }
 
-/// Whether a policy reads the KV index: its overlaps (`CACHE`) or the prefixes
-/// workers could fetch (`KV_TRANSFER`). Each component still reads only the
-/// inputs it declares.
-pub(crate) fn needs_kv_index(inputs: WorkerInputs) -> bool {
-    inputs.contains(WorkerInputs::CACHE) || inputs.contains(WorkerInputs::KV_TRANSFER)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KvEventSourceRequirement {
     NotRequired,
@@ -420,7 +415,7 @@ impl KvEventSourceRequirement {
         config: &KvRouterConfig,
         inputs: WorkerInputs,
     ) -> Self {
-        if !needs_kv_index(inputs) || config.use_remote_indexer || !config.use_kv_events {
+        if !inputs.reads_kv_index() || config.use_remote_indexer || !config.use_kv_events {
             return Self::NotRequired;
         }
 
@@ -762,6 +757,9 @@ impl KvRouter {
         let session_prefix_index = kv_router_config
             .enable_session_prefix_index
             .then(|| Arc::new(SessionPrefixIndexer::new()));
+        if let (Some(cache), Some(index)) = (shared_cache.as_ref(), session_prefix_index.as_ref()) {
+            cache.attach_session_prefix_index(Arc::clone(index));
+        }
 
         let ingress = indexer::RuntimeIngress::start(indexer::RuntimeIngressArgs {
             endpoint: &endpoint,
@@ -1627,7 +1625,7 @@ impl KvRouter {
         self.selection.scheduler().free(request_id).await
     }
 
-    pub(crate) fn affinity_coordinator(
+    pub fn affinity_coordinator(
         &self,
         ttl: std::time::Duration,
         mode: crate::session_affinity::SessionAffinityMode,
@@ -2195,7 +2193,7 @@ mod tests {
         }
 
         fn pick(
-            &mut self,
+            &self,
             _context: &WorkerSelectionContext<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -2218,7 +2216,7 @@ mod tests {
 
     impl WorkerFilter for RejectAll {
         fn keep(
-            &mut self,
+            &self,
             _context: &WorkerSelectionContext<'_>,
             _candidate: WorkerCandidate<'_>,
         ) -> Result<bool, WorkerSelectionPolicyError> {
@@ -2234,7 +2232,7 @@ mod tests {
         }
 
         fn pick(
-            &mut self,
+            &self,
             _context: &WorkerSelectionContext<'_>,
             _input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -3330,7 +3328,7 @@ mod tests {
         }
 
         fn pick(
-            &mut self,
+            &self,
             _context: &WorkerSelectionContext<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {

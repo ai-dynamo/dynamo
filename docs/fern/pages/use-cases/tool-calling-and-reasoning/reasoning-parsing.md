@@ -9,6 +9,8 @@ Some models emit reasoning separately from their final response. Dynamo can spli
 
 ## Configure Reasoning Parsing
 
+Set `DYN_PARSER_VERSION` in the frontend and backend worker environments before startup: `1` selects legacy V1 parsing, `2` requires a compatible unified V2 parser, and unset or `auto` prefers compatible V2 with V1 fallback. See [Parser Generation Routing](troubleshooting-tool-calls.md#parser-generation-routing) for supported configurations and family exceptions.
+
 <Steps>
   <Step title="Launch Dynamo backend">
     Select `--dyn-reasoning-parser` from the supported list below. The backend can be SGLang, TensorRT-LLM, vLLM, or another installed backend.
@@ -176,7 +178,7 @@ Choose a model family, then expand the matching model option to see its parser n
 
 The **Upstream name** column shows where the vLLM or SGLang parser name differs from Dynamo's. This is relevant for engine fallback and when configuring the native structured-output reasoning gate. A blank upstream column means the same name works everywhere. `Dynamo-only` means no upstream parser exists for this format.
 
-Parsers marked **Force-reasoning: Yes** emit reasoning content from token one without requiring an explicit opening tag such as `<think>`. All others require the opening tag in the model output.
+Parsers marked **Force-reasoning: Yes** assume reasoning from the first generated token without an opening marker. Other parsers require a recognized opener, which may be emitted by the model or already supplied by the rendered generation prompt.
 
 <AccordionGroup>
   <Accordion title="Kimi">
@@ -283,11 +285,47 @@ Parsers marked **Force-reasoning: Yes** emit reasoning content from token one wi
       <Accordion title="GLM-4.5 and GLM-4.7">
         **Parser:** `glm45`
 
-        **Upstream name:** <Badge intent="note" minimal>Dynamo-only</Badge>
+        **Upstream name:** vLLM: `glm45`; SGLang: `glm45`
 
         **Force-reasoning:** <Badge intent="note" minimal>No</Badge>
 
-        **Notes:** Alias for `nemotron_deci`. `<think>...</think>`
+        **Notes:** `<think>...</think>`. With the default V2 parser, `glm45` selects
+        the `glm47` unified family; `glm47` is also accepted as a Dynamo selector.
+        With `DYN_PARSER_VERSION=1`, `glm45` uses the legacy `nemotron_deci`
+        implementation.
+
+        GLM does not assume reasoning by default. If the chat template already
+        ends the generation prompt with `<think>`, Dynamo starts parsing inside
+        reasoning without requiring the model to repeat the opening tag.
+
+        Thinking controls such as `chat_template_kwargs: {"enable_thinking": false}`
+        or `chat_template_kwargs: {"thinking": false}` affect the model's chat
+        template, not response visibility. If a GLM model still generates
+        reasoning, Dynamo keeps it in `reasoning_content` and returns the answer
+        in `content`.
+
+        For the default V2 parser on SGLang or vLLM, configure Dynamo's
+        `--dyn-reasoning-parser glm45` (or `glm47`) and the engine's native
+        `--reasoning-parser glm45`. Dynamo reconciles its reasoning state with
+        the rendered generation prompt, even if the request supplied a false
+        thinking flag:
+
+        - An open `<think>` defers JSON answer constraints and required/named-tool
+          constraints until `</think>`.
+        - A closed reasoning block starts in the answer phase, so those
+          constraints apply from the first generated token.
+        - With no generation prompt or no recognized open/closed reasoning
+          suffix, Dynamo retains the request-based decision.
+
+        A `max_thinking_tokens` budget also enables the reasoning gate when the
+        rendered prompt leaves reasoning open, even without JSON or
+        required/named-tool constraints. The budget caps reasoning tokens;
+        JSON and tool constraints still apply in the answer phase. Plain chat
+        without constraints or a thinking budget does not request this gate.
+
+        TensorRT-LLM also supports Dynamo's reasoning/content separation. The
+        native grammar-gate behavior described here is specific to SGLang and
+        vLLM; it does not configure TensorRT-LLM guided decoding.
       </Accordion>
     </AccordionGroup>
   </Accordion>

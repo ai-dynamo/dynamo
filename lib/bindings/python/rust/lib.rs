@@ -12,9 +12,7 @@ use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
-#[cfg(feature = "custom-policy")]
-use pyo3::exceptions::PyRuntimeError;
-use pyo3::exceptions::{PyStopAsyncIteration, PyTimeoutError, PyValueError};
+use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyTimeoutError, PyValueError};
 use pyo3::types::PyCapsule;
 use pyo3::types::{PyDict, PyString};
 use pyo3::{exceptions::PyException, prelude::*};
@@ -324,6 +322,15 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // OTLP export no longer requires a pre-existing runtime, so initialize at import.
     if std::env::var_os(SKIP_PYTHON_LOG_INIT_ENV).is_none() {
         rs::logging::init();
+    }
+
+    let mut formats = dynamo_llm::generate_format::Registry::default();
+    dynamo_generate_format_catalog::register(&mut formats)
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    if !dynamo_llm::generate_format::install(formats) {
+        return Err(PyRuntimeError::new_err(
+            "generate format registry already installed",
+        ));
     }
 
     // Size the runtime the bridge may build for itself.
@@ -835,7 +842,8 @@ fn register_model<'p>(
     // serving.
     let admission_gate = endpoint
         .admission_gate
-        .get_or_create(endpoint.inner.component());
+        .get_or_create(endpoint.inner.component())
+        .map_err(to_pyerr)?;
     endpoint
         .inner
         .set_lifecycle_operation_role(lifecycle_role)
@@ -1268,6 +1276,10 @@ impl ModelType {
     #[classattr]
     const Audios: Self = ModelType {
         inner: llm_rs::model_type::ModelType::Audios,
+    };
+    #[classattr]
+    const Transcriptions: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Transcriptions,
     };
     #[classattr]
     const Videos: Self = ModelType {
@@ -1719,10 +1731,7 @@ impl Endpoint {
         // by `register_model` takes effect from then on, through the gate of
         // the worker this endpoint serves for.
         let backend_role = engine::BackendRole::of(&self.inner);
-        let admission = engine::EndpointAdmission::new(
-            self.admission_gate.clone(),
-            self.inner.component().clone(),
-        );
+        let admission = self.admission_gate.clone();
 
         // Push egress: the handler pushes each response into a Rust channel via
         // its `response_sender` argument, instead of Rust pulling `__anext__`
