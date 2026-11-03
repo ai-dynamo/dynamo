@@ -1026,7 +1026,7 @@ class LoadScalingMixin:
         max_kv = d_caps.max_kv_tokens if d_caps else None
         if not max_kv or max_kv <= 0:
             logger.warning(
-                f"max_kv_tokens not available, skipping easy {mode_label} scaling"
+                "max_kv_tokens not available, skipping easy %s scaling", mode_label
             )
             self._diag_load_metadata_available["decode"] = False
             self._diag_load_reason = "missing_engine_metadata"
@@ -1045,7 +1045,8 @@ class LoadScalingMixin:
                 or self._config.decode_scale_down_kv_rate is None
             ):
                 logger.warning(
-                    f"decode load thresholds not available, skipping {mode_label} scaling"
+                    "decode load thresholds not available, skipping %s scaling",
+                    mode_label,
                 )
                 self._diag_load_reason = "insufficient_data"
                 return None
@@ -1074,9 +1075,15 @@ class LoadScalingMixin:
                 prefill_field = ""
             utils.append(util)
             logger.info(
-                f"Easy {mode_label} {wid}:dp{dp}: sched_kv={sched_kv}, "
-                f"queued_kv={queued_kv}, {prefill_field}max_kv={max_kv}, "
-                f"util={util:.3f}"
+                "Easy %s %s:dp%s: sched_kv=%s, queued_kv=%s, %smax_kv=%s, util=%.3f",
+                mode_label,
+                wid,
+                dp,
+                sched_kv,
+                queued_kv,
+                prefill_field,
+                max_kv,
+                util,
             )
 
         if not utils:
@@ -1085,8 +1092,10 @@ class LoadScalingMixin:
 
         if any(u >= up_thresh if is_load else u > up_thresh for u in utils):
             logger.info(
-                f"Easy {mode_label}: engine(s) above scale-up threshold "
-                f"({up_thresh}), scaling up to {num_workers + 1}"
+                "Easy %s: engine(s) above scale-up threshold (%s), scaling up to %s",
+                mode_label,
+                up_thresh,
+                num_workers + 1,
             )
             return num_workers + 1
 
@@ -1098,8 +1107,10 @@ class LoadScalingMixin:
         if (num_workers > 1 or self._pending_startup("decode")) and scale_down:
             desired = max(num_workers - 1, resolve_min_endpoint(self._config, "decode"))
             logger.info(
-                f"Easy {mode_label}: all engines below scale-down threshold "
-                f"({down_thresh}), -> {desired}"
+                "Easy %s: all engines below scale-down threshold (%s), -> %s",
+                mode_label,
+                down_thresh,
+                desired,
             )
             return self._consolidation_safe_easy_target(
                 desired, num_workers, utils, up_thresh
