@@ -24,6 +24,7 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 MODEL = "Qwen/Qwen3-0.6B"
 CONTEXT_LIMIT = 128
 SGLANG_KV_TOKENS = 2048
+VLLM_KV_CACHE_BYTES = 559_693_824
 
 
 @dataclass(frozen=True)
@@ -75,7 +76,7 @@ PARITY_SPECS = (
         marks=[
             pytest.mark.vllm,
             pytest.mark.profiled_vram_gib(8.0),
-            pytest.mark.requested_vllm_kv_cache_bytes(559_693_824),
+            pytest.mark.requested_vllm_kv_cache_bytes(VLLM_KV_CACHE_BYTES),
         ],
     ),
     pytest.param(
@@ -166,6 +167,7 @@ def _write_trtllm_options(tmp_path: Path) -> Path:
 
 
 def _native_command(spec: BackendParitySpec, port: int, tmp_path: Path) -> list[str]:
+    """Build the native server command with the test's context and KV limits."""
     if spec.framework == "vllm":
         return [
             "vllm",
@@ -179,8 +181,14 @@ def _native_command(spec: BackendParitySpec, port: int, tmp_path: Path) -> list[
             str(CONTEXT_LIMIT),
             "--max-num-seqs",
             "2",
+            # Cap KV by bytes, like the Dynamo worker; fraction-based profiling
+            # exits 1 when co-tenants allocate or free GPU memory during startup.
+            "--kv-cache-memory-bytes",
+            os.environ.get(
+                "_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES", str(VLLM_KV_CACHE_BYTES)
+            ),
             "--gpu-memory-utilization",
-            "0.2",
+            "0.01",
             "--enforce-eager",
         ]
 

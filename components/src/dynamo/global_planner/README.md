@@ -153,6 +153,129 @@ and then misbehaved at request time are now startup failures:
 - `intent_cache_ttl_seconds <= 0` — no cached intent is ever fresh, silently
   disabling all pool pairing.
 
+## Declared GPU Costs
+
+The GPU budget is computed from each pool's `gpu_per_replica`, read from the
+DGD's `resources.limits["nvidia.com/gpu"]`. A pool that requests no GPU has no
+cost to read — and with a budget enabled that fails the whole snapshot, so every
+scale request errors. That rules out **mocker topologies**, which exist to
+exercise a deployment without hardware but could not take part in the budget
+they are meant to help test.
+
+Declare what such a pool costs instead:
+
+```yaml
+gpu_cost:
+  pools:
+    - selector: sachalm/dsv4-**
+      gpu_per_replica: 8
+    - selector: sachalm/gpt-oss-**
+      gpu_per_replica: 4
+```
+
+Selectors work exactly as they do for priorities below — same syntax, same
+most-specific-wins rule, same shared implementation.
+
+**A declared cost is a fallback, not an override.** It applies only where the DGD
+is silent, so a pool that really does request GPUs is always charged what the
+cluster says and a stale config can never make the planner under-count real
+hardware. An explicit `gpu_per_replica: 0` is different from declaring nothing:
+zero keeps a pool out of budget totals, while undeclared leaves it unreadable.
+
+This mirrors the local planner, whose `_initialize_gpu_counts` already falls back
+to configured GPU counts for "mockers that don't specify GPU resources".
+
+## Pool Priorities
+
+Pool priorities declare which pools should be served first when several compete
+for one GPU budget. They are declared at server start, in `--config`:
+
+```yaml
+priority:
+  default: 100                       # pools no selector matches
+  pools:
+    - selector: prod/chat            # participant: every pool under it
+      priority: 900
+    - selector: prod/chat/prefill    # one pool: overrides the line above
+      priority: 950
+    - selector: dev/*                # any deployment in the dev namespace
+      priority: 10
+```
+
+**Higher numbers are more important.** This matches Kubernetes `PriorityClass`
+and `nvext.agent_hints.priority`. It is the opposite of the plugin-stage
+`priority` in `dynamo.planner`, where smaller is more authoritative — that one
+orders pipeline stages, this one orders capacity allocation between pools.
+
+### Selectors
+
+A selector is a slash-separated path matched against `<participant_id>/<sub_type>`
+— today `<k8s namespace>/<deployment>/<sub_type>`, though nothing hard-codes that
+depth.
+
+| Pattern | Matches |
+|---------|---------|
+| `*` | exactly one segment |
+| `**` | any number of segments, including none |
+| a selector shorter than the pool path | everything beneath it |
+
+So `prod/chat` selects every pool of that deployment, `prod/chat/prefill` selects
+one, `dev/*` selects every deployment in `dev`, and `a/*/prefill` matches
+`a/b/prefill` but not `a/b/c/prefill` — a single `*` never spans a `/`. Use `**`
+when you do want it to: `a/**/prefill` matches both. Deeper hierarchies work
+without special-casing, e.g.
+`global-pool/east-coast-regions/*/long-context/*`.
+
+The most specific match wins, independent of the order entries appear in the
+file. Specificity is the number of segments named exactly, then literal
+coverage within wildcard segments, then depth — so
+`prod/chat/prefill` beats `prod/chat`, which beats `prod/*`, which beats `**`.
+Ties fall back to declaration order. Pools matching nothing take
+`priority.default`, which is also what a pool this GlobalPlanner has never seen
+receives.
+
+### Conditional priorities
+
+A policy is always an ordered, first-match-wins list of rules whose final rule is
+unconditional. `priority: <n>` is shorthand for exactly one such rule:
+
+```yaml
+    - selector: prod/chat
+      rules:
+        - priority: 900
+```
+
+Rule *conditions* — "this priority while traffic is above X", "that priority
+while the pool is breaching its SLA" — are not implemented yet, and a config that
+declares one is rejected at startup rather than silently treated as
+always-matching. The structure is in place so adding them does not change the
+declaration surface or any caller.
+
+### How priorities affect scaling
+
+Priorities order **pair-partner selection**, which is how the Global Planner
+moves capacity between pools when one alone would breach the budget band. The
+ordering inverts with the direction of the transfer:
+
+| Request | Partners are | Served first |
+|---------|--------------|--------------|
+| Scale-up (needs GPUs) | donors giving GPUs up | the **least** important pool (lowest number) |
+| Scale-down below the floor (frees GPUs) | recipients taking GPUs on | the **most** important pool (highest number) |
+
+Priority is the leading term. Among equal-priority pools, partners inside the
+requesting DGD are preferred, followed by smaller absolute GPU changes. This
+locality preference also applies when no priorities are configured, since every
+pool then resolves to the same priority. It intentionally changes the previous
+ordering, which preferred smaller absolute GPU changes and used locality only
+to break ties: a same-DGD partner can now precede a cross-DGD partner with a
+smaller GPU change.
+
+Priority does **not** add new denials. Pairing only ever consumes a scale
+*intent a pool already published*, so a high-priority pool never has capacity
+taken from it against its will — it is only paired when it had already decided
+to scale down. Taking capacity from a pool that did not ask to give it up is
+proactive reclaim, which is not implemented.
+
 ## Behavior
 
 - If `managed_namespaces` is set and `caller_namespace` is not authorized, Global Planner returns `error` and does not scale.
@@ -170,7 +293,7 @@ If no packing brings totals into the band, the request is rejected (`REJECTED`) 
 
 When the selected partners span multiple DGDs:
 
-- **Intra-DGD partners** (same DGD as the request) are merged into the request's atomic `set_component_replicas` call — one patch updates request-side and intra-DGD partner pools together.
+- **Intra-DGD partners** (same DGD as the request) share the request's `set_component_replicas` call, which patches component targets separately rather than transactionally.
 - **Cross-DGD partners** (different DGD) get their own per-DGD patch.
 - **Direction-aware order**: scale-down DGDs apply first (freeing GPUs), then scale-up DGDs. If any second-or-later patch fails, the first has already landed and the system self-corrects from the new state on the next tick.
 
