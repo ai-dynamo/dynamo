@@ -2827,11 +2827,19 @@ async fn queued_selection_returns_refreshed_overlap_snapshot() {
     // Freeze time only after async setup so background timers cannot expire the fixture.
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(11)).await;
+    // The indexer answers the refresh on its own thread. A task that keeps yielding keeps this
+    // runtime busy meanwhile, so the paused clock cannot auto-advance to the refresh timeout.
+    let busy = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
     core.free_reservation("occupy-2")
         .await
         .expect("release worker 2");
 
     let response = queued.await.expect("selection task").expect("selection");
+    busy.abort();
     assert_eq!(response.worker_id, 2);
     assert_eq!(response.effective_prefill_tokens, 0);
     assert_eq!(response.overlap.gpu, 8);

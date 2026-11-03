@@ -127,6 +127,10 @@ impl<P: TieredMatchProvider> OverlapScoresRefresh for TieredOverlapRefresher<P> 
 /// Override with `DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS`. A value of `0` disables refresh.
 pub const DEFAULT_OVERLAP_REFRESH_AFTER_SECS: u64 = 10;
 
+/// How long the scheduler queue waits for one overlap refresh before it dispatches the request
+/// with its queued scores.
+pub const OVERLAP_REFRESH_TIMEOUT: Duration = Duration::from_millis(250);
+
 pub fn read_overlap_refresh_after() -> Option<Duration> {
     let raw = match std::env::var("DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS") {
         Ok(v) => v,

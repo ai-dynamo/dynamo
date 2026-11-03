@@ -20,8 +20,8 @@ use super::config::RouterQueuePolicy;
 use super::filter::{RoutingEligibility, worker_config_for_rank};
 use super::overlap::SelectedWorkerTierSnapshot;
 use super::overlap_refresh::{
-    NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap, read_overlap_refresh_after,
-    refresh_overlap, should_refresh_overlap,
+    NoopOverlapScoresRefresh, OVERLAP_REFRESH_TIMEOUT, OverlapScoresRefresh, RefreshedOverlap,
+    read_overlap_refresh_after, refresh_overlap, should_refresh_overlap,
 };
 use super::policy_config::{
     BusyThresholds, FullRankCounts, PolicyClassConfig, PolicyProfile, RejectThresholdsProvider,
@@ -250,6 +250,9 @@ enum RefreshEnd {
     /// Every command sender is gone. The refresh was dropped unfinished, and the actor stops
     /// once the candidate is settled.
     Shutdown,
+    /// The refresh outlasted [`OVERLAP_REFRESH_TIMEOUT`] and was dropped unfinished. The
+    /// candidate keeps its queued scores.
+    TimedOut,
 }
 
 /// What admission needs besides the request, for the direct and queued paths alike.
@@ -2262,13 +2265,17 @@ impl<
         decay_now: Instant,
     ) -> RefreshEnd {
         let refresher = self.overlap_scores_refresh.clone();
-        let refresh = refresh_overlap(
-            refresher.as_deref(),
-            self.overlap_refresh_after,
-            queued.block_hashes.as_deref(),
-            queued.request.retain_kv_transfer_chain,
-            queued.enqueue_at,
-            decay_now,
+        // One timeout for the whole refresh: the events handled below never restart it.
+        let refresh = tokio::time::timeout(
+            OVERLAP_REFRESH_TIMEOUT,
+            refresh_overlap(
+                refresher.as_deref(),
+                self.overlap_refresh_after,
+                queued.block_hashes.as_deref(),
+                queued.request.retain_kv_transfer_chain,
+                queued.enqueue_at,
+                decay_now,
+            ),
         );
         tokio::pin!(refresh);
         let capacity_updates = self.capacity_updates.clone();
@@ -2278,7 +2285,9 @@ impl<
             let response = &mut queued.request.resp_tx;
             let event = tokio::select! {
                 biased;
-                refreshed = &mut refresh => return RefreshEnd::Finished(refreshed),
+                refreshed = &mut refresh => {
+                    return refreshed.map_or(RefreshEnd::TimedOut, RefreshEnd::Finished);
+                }
                 _ = async {
                     if let Some(response) = response {
                         response.closed().await;
@@ -7544,7 +7553,7 @@ policy_classes:
             &queue,
             "expiring",
             "first",
-            Some(start + Duration::from_secs(12)),
+            Some(start + Duration::from_millis(11_100)),
             Some(vec![LocalBlockHash(41)]),
         )
         .await;
@@ -7559,10 +7568,11 @@ policy_classes:
         queue.update().await;
         assert_eq!(refresher.calls.load(Ordering::Relaxed), 1);
 
-        // The refresh is never released. Its candidate is rejected at its due time.
+        // The refresh is never released. Its candidate is rejected at its due time, which comes
+        // before the refresh timeout.
         assert_eq!(
             rejected_after(expiring, start).await,
-            Duration::from_secs(12)
+            Duration::from_millis(11_100)
         );
         queue.update().await;
         // The rejected candidate spent none of its class's credit, so the same class keeps
@@ -7594,7 +7604,7 @@ policy_classes:
     prefill_busy_threshold_frac: 0.0
   - name: budgeted
     quantum: 100
-    slo_ttft_ms: 12000
+    slo_ttft_ms: 11100
     controlled_delay: true
     prefill_busy_threshold_frac: 0.0
 "#,
@@ -7634,12 +7644,12 @@ policy_classes:
         queue.update().await;
         assert_eq!(refresher.calls.load(Ordering::Relaxed), 1);
 
-        // The other queue's timer fires during the stalled refresh. That queue rejects its own
-        // overdue request on time while the refresh keeps running, and the candidate, which has
-        // no due time, is neither expired nor admitted.
+        // The other queue's timer fires during the stalled refresh, before the refresh timeout.
+        // That queue rejects its own overdue request on time while the refresh keeps running, and
+        // the candidate, which has no due time, is neither expired nor admitted.
         assert_eq!(
             rejected_after(budgeted, start).await,
-            Duration::from_secs(12)
+            Duration::from_millis(11_100)
         );
         assert!(matches!(
             candidate.try_recv(),
@@ -7815,6 +7825,103 @@ policy_classes:
         assert_eq!(refresher.calls.load(Ordering::Relaxed), 1);
         assert_eq!(class_outcomes(&queue, 0), (10, 0, 0));
         slots.assert_completely_drained(decay_now());
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_refresh_timeout_runs_from_the_refresh_start_through_scheduler_traffic() {
+        let worker = WorkerWithDpRank::new(0, 0);
+        let refreshed = RefreshedOverlap::from_overlap(OverlapSignals {
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks: FxHashMap::from_iter([(worker, 3.0)]),
+            effective_cached_tokens: FxHashMap::from_iter([(worker, 48)]),
+        });
+        // A lookup released before the timeout supplies its scores. One never released is
+        // dropped at the timeout, counted from the refresh start, and the candidate keeps its
+        // queued scores.
+        for (release, admitted_after, cached_tokens) in [
+            (true, Duration::from_millis(200), 48),
+            (false, OVERLAP_REFRESH_TIMEOUT, 0),
+        ] {
+            let profile = policy_profile(
+                r#"
+default_policy_class: first
+policy_classes:
+  - name: first
+    quantum: 100
+    prefill_busy_threshold_frac: 0.0
+  - name: second
+    quantum: 100
+    prefill_busy_threshold_frac: 0.0
+"#,
+            );
+            let refresher = Arc::new(BlockingRefresher::new(refreshed.clone()));
+            let (queue, slots) = make_queue_with_profile_and_blocking_refresher(
+                2,
+                16,
+                64,
+                profile,
+                Arc::clone(&refresher),
+                ADMISSION_CHANNEL_CAPACITY,
+            );
+            // Admitting the busy requests from the second queue starts the next DRR ring at the
+            // first.
+            for id in ["active-0", "active-1"] {
+                let active = enqueue_to_class(&queue, id, "second", None, None).await;
+                active.await.unwrap().unwrap();
+            }
+            // Neither queued request has a due time, so only the timeout bounds the refresh.
+            let mut candidate = enqueue_to_class(
+                &queue,
+                "candidate",
+                "first",
+                None,
+                Some(vec![LocalBlockHash(42)]),
+            )
+            .await;
+            let mut other = enqueue_to_class(&queue, "other", "second", None, None).await;
+            tokio::time::advance(Duration::from_secs(11)).await;
+            free_requests(&slots, &["active-0"]);
+            queue.update().await;
+            let refresh_start = Instant::now();
+            assert_eq!(refresher.calls.load(Ordering::Relaxed), 1);
+
+            // The other worker frees, and an update arrives every 100 ms. Each is answered while
+            // the refresh holds back both queued requests, the other class's included.
+            free_requests(&slots, &["active-1"]);
+            for _ in 0..2 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                queue.update().await;
+                assert!(matches!(
+                    candidate.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ));
+                assert!(matches!(
+                    other.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ));
+            }
+            if release {
+                refresher.release_one();
+            }
+            // Dispatch held past the timeout fails here rather than waiting on.
+            let bound = refresh_start + OVERLAP_REFRESH_TIMEOUT + Duration::from_millis(1);
+            let admitted = tokio::time::timeout_at(bound, candidate)
+                .await
+                .expect("the candidate was not dispatched by the refresh timeout");
+            assert_eq!(admitted.unwrap().unwrap().cached_tokens, cached_tokens);
+            assert_eq!(Instant::now() - refresh_start, admitted_after);
+            // The drain goes on to the other class at once.
+            tokio::time::timeout_at(bound, other)
+                .await
+                .expect("the other class was not dispatched by the refresh timeout")
+                .unwrap()
+                .unwrap();
+            assert_eq!(Instant::now() - refresh_start, admitted_after);
+            assert_eq!(refresher.calls.load(Ordering::Relaxed), 1);
+            free_requests(&slots, &["candidate", "other"]);
+            assert_eq!(queue.pending_count(), 0);
+            slots.assert_completely_drained(decay_now());
+        }
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
