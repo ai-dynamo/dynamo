@@ -400,11 +400,23 @@ mod tests {
         assert!(validate_runtime_lora_identity("other", "base", source, &key).is_err());
         assert!(validate_runtime_lora_identity("base", "base", source, "wrong").is_err());
         for invalid in ["", "x\n", &"a".repeat(MAX_RUNTIME_SOURCE_URI_BYTES + 1)] {
-            assert!(validate_runtime_lora_identity("base", "base", invalid, &key).is_err());
+            let matching_key = adapter_key("base", invalid);
+            assert!(
+                validate_runtime_lora_identity("base", "base", invalid, &matching_key).is_err()
+            );
         }
         for invalid in ["", "x\0", &"a".repeat(MAX_RUNTIME_BASE_MODEL_BYTES + 1)] {
-            assert!(validate_runtime_lora_identity(invalid, invalid, source, &key).is_err());
+            let matching_key = adapter_key(invalid, source);
+            assert!(
+                validate_runtime_lora_identity(invalid, invalid, source, &matching_key).is_err()
+            );
         }
+        let max_base = "b".repeat(MAX_RUNTIME_BASE_MODEL_BYTES);
+        let max_source = "s".repeat(MAX_RUNTIME_SOURCE_URI_BYTES);
+        let max_key = adapter_key(&max_base, &max_source);
+        assert!(
+            validate_runtime_lora_identity(&max_base, &max_base, &max_source, &max_key).is_ok()
+        );
     }
 
     #[test]

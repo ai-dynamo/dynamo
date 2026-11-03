@@ -44,13 +44,6 @@ pub(crate) fn check_candidate_policy(
     request: &PreprocessedRequest,
     installed: bool,
 ) -> Result<(), Error> {
-    policy(request).check_capability(
-        installed,
-        request
-            .routing
-            .as_ref()
-            .and_then(|routing| routing.lora_name.as_deref()),
-    )?;
     if let Some(routing) = request.routing.as_ref()
         && policy(request).requires_candidate_policy()
     {
@@ -80,6 +73,13 @@ pub(crate) fn check_candidate_policy(
                 .into());
         }
     }
+    policy(request).check_capability(
+        installed,
+        request
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.lora_name.as_deref()),
+    )?;
     Ok(())
 }
 
@@ -389,6 +389,24 @@ mod tests {
         }
         request.routing = Some(complete.clone());
         assert!(check_candidate_policy(&request, true).is_ok());
+        assert!(dynamo_runtime::error::match_error_chain(
+            check_candidate_policy(&request, false)
+                .unwrap_err()
+                .as_ref(),
+            &[dynamo_runtime::error::ErrorType::Unavailable],
+            &[]
+        ));
+        request.routing.as_mut().unwrap().lora_name = None;
+        for installed in [true, false] {
+            assert!(dynamo_runtime::error::match_error_chain(
+                check_candidate_policy(&request, installed)
+                    .unwrap_err()
+                    .as_ref(),
+                &[dynamo_runtime::error::ErrorType::InvalidArgument],
+                &[]
+            ));
+        }
+        request.routing = Some(complete.clone());
         request.routing.as_mut().unwrap().lora_name = Some("wrong-key".into());
         assert!(check_candidate_policy(&request, true).is_err());
         request.routing = Some(complete.clone());

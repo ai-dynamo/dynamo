@@ -138,7 +138,14 @@ async fn builtin_host_constructs_only_declared_capabilities() {
 
     let mut runtime_request = request();
     runtime_request.routing = Some(RoutingHints {
-        lora_name: Some("dyn-lora-test".to_string()),
+        lora_name: Some(crate::lora::runtime::adapter_key(
+            "test",
+            "custom:///opaque",
+        )),
+        base_model_name: Some("test".into()),
+        lora_source_uri: Some(crate::lora::runtime::RuntimeLoraSourceUri::new(
+            "custom:///opaque".into(),
+        )),
         lora_resolution_version: Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION),
         ..Default::default()
     });

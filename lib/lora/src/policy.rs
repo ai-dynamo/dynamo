@@ -296,6 +296,22 @@ mod tests {
     }
 
     #[test]
+    fn hard_session_pin_does_not_expand_runtime_placement() {
+        let filter = LoraFilter::new(
+            crate::LoraRoutingTable::new(),
+            crate::LoraStateTracker::new(),
+        );
+        let eligible = HashSet::from([1, 2]);
+        let placed = RequestPolicy::pin_workers(&filter, "adapter", &eligible, []).unwrap();
+        assert_eq!(placed.len(), 1);
+        let session_worker = eligible.difference(&placed).copied().next().unwrap();
+        let error = RequestPolicy::pin_workers(&filter, "adapter", &eligible, [session_worker])
+            .unwrap_err();
+        assert_eq!(error.error_type(), ErrorType::InvalidArgument);
+        assert!(error.to_string().contains("runtime_lora_affinity_conflict"));
+    }
+
+    #[test]
     fn load_guard_releases_exactly_once() {
         let estimator = Arc::new(LoadEstimator::new());
         let guard = LoadGuard::new(estimator.clone(), "adapter".into());
