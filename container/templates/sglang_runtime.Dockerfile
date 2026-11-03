@@ -34,6 +34,23 @@ COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 ENV PATH=/usr/local/bin/etcd:$PATH
 
 {% if device == "cuda" %}
+# Move the base image's uv-managed CPython to the current 3.12 patch release.
+# The /opt/sglang venv's home is the minor-version link
+# /opt/python/cpython-3.12-linux-<arch>-gnu, so installing the new release moves
+# the venv and the /usr/bin/python3 wrapper with it. Removing the old release drops
+# its directory. The uv in context.dynamo.uv_version predates this CPython build,
+# so a pinned uv runs this step alone, without the shared uv cache, and is
+# removed after.
+COPY --from=ghcr.io/astral-sh/uv:0.13.6 /uv /tmp/uv-python/uv
+RUN export UV_NO_CACHE=1 UV_PYTHON_INSTALL_DIR=/opt/python && \
+    /tmp/uv-python/uv python install --no-bin 3.12.16 && \
+    /tmp/uv-python/uv python uninstall 3.12.15 && \
+    rm -rf /tmp/uv-python && \
+    /opt/sglang/bin/python3 -c 'import sys; print("sglang venv python:", sys.version.split()[0]); sys.exit(0 if sys.version_info[:3] == (3, 12, 16) else 1)' && \
+    test -z "$(ls -d /opt/python/cpython-3.12.15-* 2>/dev/null)"
+{% endif %}
+
+{% if device == "cuda" %}
 # Install the TurboJPEG runtime used by frontend JPEG decoding and bring
 # base-image OS packages up to the current patch releases. --only-upgrade skips
 # anything not already installed while keeping both operations in one layer.
