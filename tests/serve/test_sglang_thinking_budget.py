@@ -21,7 +21,9 @@ MODEL = "Qwen/Qwen3-0.6B"
 @pytest.mark.core
 @pytest.mark.e2e
 @pytest.mark.gpu_1
-@pytest.mark.post_merge
+# TODO: revert to pytest.mark.post_merge after pre_merge validation
+# on this PR (see .ai/ci-guidelines.md).
+@pytest.mark.pre_merge
 @pytest.mark.model(MODEL)
 @pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.timeout(360)  # Measured 34s aggregated and 58s disaggregated.
