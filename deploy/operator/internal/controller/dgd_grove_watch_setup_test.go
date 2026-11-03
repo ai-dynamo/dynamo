@@ -4,6 +4,7 @@
 package controller
 
 import (
+	"cmp"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -59,9 +60,10 @@ func TestGroveWatchMapsOnlyDGDControllerOwnedPodCliques(t *testing.T) {
 
 	want := []ctrl.Request{{Namespace: "workloads", Name: "graph"}}
 	tests := []struct {
-		name   string
-		mutate func(*grovev1alpha1.PodClique, *grovev1alpha1.PodCliqueScalingGroup, *grovev1alpha1.PodCliqueSet) []client.Object
-		want   []ctrl.Request
+		name              string
+		groupOwnerVersion string
+		mutate            func(*grovev1alpha1.PodClique, *grovev1alpha1.PodCliqueScalingGroup, *grovev1alpha1.PodCliqueSet) []client.Object
+		want              []ctrl.Request
 	}{
 		{
 			name: "direct PCS ownership",
@@ -74,20 +76,17 @@ func TestGroveWatchMapsOnlyDGDControllerOwnedPodCliques(t *testing.T) {
 			want: want,
 		},
 		{
-			name: "PCSG-mediated ownership",
+			name:              "PCSG-mediated ownership with alpha PCS owner",
+			groupOwnerVersion: grovev1alpha1.SchemeGroupVersion.String(),
 			mutate: func(_ *grovev1alpha1.PodClique, group *grovev1alpha1.PodCliqueScalingGroup, pcs *grovev1alpha1.PodCliqueSet) []client.Object {
 				return []client.Object{group, pcs}
 			},
 			want: want,
 		},
 		{
-			name: "mixed-version PCSG-mediated ownership",
-			mutate: func(clique *grovev1alpha1.PodClique, group *grovev1alpha1.PodCliqueScalingGroup, pcs *grovev1alpha1.PodCliqueSet) []client.Object {
-				if clique.OwnerReferences[0].APIVersion == grovev1alpha1.SchemeGroupVersion.String() {
-					group.OwnerReferences[0].APIVersion = grovev1beta1.SchemeGroupVersion.String()
-				} else {
-					group.OwnerReferences[0].APIVersion = grovev1alpha1.SchemeGroupVersion.String()
-				}
+			name:              "PCSG-mediated ownership with beta PCS owner",
+			groupOwnerVersion: grovev1beta1.SchemeGroupVersion.String(),
+			mutate: func(_ *grovev1alpha1.PodClique, group *grovev1alpha1.PodCliqueScalingGroup, pcs *grovev1alpha1.PodCliqueSet) []client.Object {
 				return []client.Object{group, pcs}
 			},
 			want: want,
@@ -164,6 +163,7 @@ func TestGroveWatchMapsOnlyDGDControllerOwnedPodCliques(t *testing.T) {
 			t.Run(test.name+"/"+apiVersion, func(t *testing.T) {
 				t.Log("Observe converted Grove children with their original owner-reference versions")
 				clique, group, pcs := newObjects(apiVersion)
+				group.OwnerReferences[0].APIVersion = cmp.Or(test.groupOwnerVersion, apiVersion)
 				objects := test.mutate(clique, group, pcs)
 				reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 				t.Log("Map readiness updates only through the exact DGD-owned resource hierarchy")

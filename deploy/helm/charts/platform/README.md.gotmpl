@@ -187,12 +187,28 @@ release tags and requires the pinned version or later.
 **Action:** Upgrade externally managed Grove and matching CRDs first, with
 `crdInstaller.upgradeCRDs=true`. The platform chart enables this setting for
 bundled Grove, replacing `grove.crdInstaller.enabled`. The API server must be able
-to reach Grove's conversion webhook. Read the
+to reach Grove's conversion webhook. With Grove integration enabled, Dynamo's
+alpha informers depend on that webhook to read beta-stored resources. If it is
+unavailable during initial cache synchronization, the shared Dynamo manager can
+fail to start, affecting non-Grove workloads handled by that manager too. After
+startup, failed LIST/WATCH reconnects can leave Grove observations stale while
+cached reads continue to work. This Grove informer dependency does not apply
+when Grove integration is disabled. Read the
 [Grove upgrade and downgrade guide](https://github.com/ai-dynamo/grove/blob/v0.2.0-beta1/docs/user-guide/upgrading-to-v1beta1-v0.2.0-beta1.md)
 before upgrading. Run the downgrade migration back to `v1alpha1` while the
 `v0.2.0-beta1` operator is still running, then roll back to Grove
-`v0.1.0-alpha.16`, rather than the previously bundled `v0.1.0-alpha.15`.
+`v0.1.0-alpha.16`.
 Earlier CRDs can drop fields written by newer releases.
+
+For bundled Grove, prepare the rollback platform chart with its
+`dynamo.nvidia.com/grove-version` annotation and `grove` dependency pinned to
+`v0.1.0-alpha.16`, then rebuild its dependencies with `helm dependency update`.
+After the migration, deploy that chart with `helm upgrade` to the same release
+and namespace, using saved pre-upgrade values, `global.grove.install=true`, and
+`grove.crdInstaller.enabled=true`. Use client-side apply for this rollback:
+Helm 3 does so by default; with Helm 4, pass `--server-side=false`. Do not roll
+back to an unmodified older platform chart: Dynamo `v1.6.0` bundles `alpha.14`,
+and pre-upgrade `main` bundles `alpha.15`.
 
 **Existing deployments:** Grove converts existing alpha resources without requiring
 manifest changes. An unset clique or scaling-group `scaleConfig.minReplicas` now

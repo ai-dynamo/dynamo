@@ -228,7 +228,7 @@ func TestGetPipelineRequests(t *testing.T) {
 		uid       types.UID
 		want      []string
 	}{
-		{name: "owned requests", namespace: "default", uid: "pcs-uid", want: []string{"first", "last", "beta"}},
+		{name: "owned requests", namespace: "default", uid: "pcs-uid", want: []string{"first", "last"}},
 		{name: "different PCS with the same name", namespace: "default", uid: "other-uid", want: []string{"other-owner"}},
 		{name: "different namespace", namespace: "other", uid: "pcs-uid", want: []string{"other-namespace"}},
 		{name: "no owned requests", namespace: "default", uid: "missing-uid"},
@@ -240,18 +240,24 @@ func TestGetPipelineRequests(t *testing.T) {
 				name, namespace string
 				uid             types.UID
 				apiVersion      string
+				kind            string
+				controller      bool
 			}{
-				{"last", "default", "pcs-uid", grovev1alpha1.SchemeGroupVersion.String()},
-				{"first", "default", "pcs-uid", grovev1alpha1.SchemeGroupVersion.String()},
-				{"beta", "default", "pcs-uid", grovev1beta1.SchemeGroupVersion.String()},
-				{"other-owner", "default", "other-uid", grovev1beta1.SchemeGroupVersion.String()},
-				{"other-namespace", "other", "pcs-uid", grovev1beta1.SchemeGroupVersion.String()},
+				{"last", "default", "pcs-uid", grovev1alpha1.SchemeGroupVersion.String(), "PodCliqueSet", true},
+				{"first", "default", "pcs-uid", grovev1alpha1.SchemeGroupVersion.String(), "PodCliqueSet", true},
+				{"other-owner", "default", "other-uid", grovev1alpha1.SchemeGroupVersion.String(), "PodCliqueSet", true},
+				{"other-namespace", "other", "pcs-uid", grovev1alpha1.SchemeGroupVersion.String(), "PodCliqueSet", true},
+				{"beta", "default", "pcs-uid", grovev1beta1.SchemeGroupVersion.String(), "PodCliqueSet", true},
+				{"foreign-group", "default", "pcs-uid", "foreign.example/v1alpha1", "PodCliqueSet", true},
+				{"unsupported-version", "default", "pcs-uid", "grove.io/v2", "PodCliqueSet", true},
+				{"wrong-kind", "default", "pcs-uid", grovev1alpha1.SchemeGroupVersion.String(), "PodClique", true},
+				{"non-controller", "default", "pcs-uid", grovev1alpha1.SchemeGroupVersion.String(), "PodCliqueSet", false},
 			} {
 				objects = append(objects, &lpxv1alpha1.LPUPipelineRequest{
 					Name: request.name, Namespace: request.namespace,
 					OwnerReferences: []metav1.OwnerReference{{
-						APIVersion: request.apiVersion, Kind: "PodCliqueSet",
-						Name: "pcs", UID: request.uid, Controller: new(true),
+						APIVersion: request.apiVersion, Kind: request.kind,
+						Name: "pcs", UID: request.uid, Controller: new(request.controller),
 					}}})
 			}
 			r := &graphReconciler{Client: newLPXTestClient(t, objects...)}
