@@ -56,7 +56,7 @@ Backend workers expose `dynamo_component_*` only when `DYN_SYSTEM_PORT` is set (
 
 Emitted by `python -m dynamo.frontend` at `/metrics` on the HTTP port (`--http-port`, default `8000`). The frontend serves its [router](#router-metrics) and [runtime](#every-process) metrics on the same port and does not use `DYN_SYSTEM_PORT`. Frontend metrics carry no automatic labels.
 
-- `--metrics-prefix` (`DYN_METRICS_PREFIX`) replaces the `dynamo_frontend` prefix of the `dynamo_frontend_*` metrics, except `dynamo_frontend_stage_*`, `dynamo_frontend_tokenize_seconds`, `dynamo_frontend_template_seconds`, `dynamo_frontend_request_body_seconds`, `dynamo_frontend_detokenize_*`, `dynamo_frontend_tokenizer_cache_*`, `dynamo_frontend_worker_*`, `dynamo_frontend_router_*`, `dynamo_frontend_lora_*`, `dynamo_frontend_event_loop_*`, and `dynamo_frontend_metrics_start_time_seconds`, which keep their names.
+- `--metrics-prefix` (`DYN_METRICS_PREFIX`) replaces the `dynamo_frontend` prefix of the `dynamo_frontend_*` metrics, except `dynamo_frontend_stage_*`, `dynamo_frontend_tokenize_seconds`, `dynamo_frontend_template_seconds`, `dynamo_frontend_detokenize_*`, `dynamo_frontend_tokenizer_cache_*`, `dynamo_frontend_worker_*`, `dynamo_frontend_router_*`, `dynamo_frontend_lora_*`, `dynamo_frontend_event_loop_*`, and `dynamo_frontend_metrics_start_time_seconds`, which keep their names.
 - With `--kserve-grpc-server`, the frontend serves metrics on `DYN_GRPC_METRICS_PORT` (default `8788`) instead. The model configuration, migration, router, and routing overhead metrics are not exposed in that mode.
 
 A detailed entry that does not name its labels carries only a `model` label. For endpoints that canonicalize aliases, that label holds the primary served model name — the first `--served-model-name` value — so a request sent to an alias is counted under the primary. A name the frontend has not registered is counted under `unknown_model`.
@@ -169,7 +169,6 @@ The frontend also records these request and pipeline metrics:
 | `dynamo_frontend_stage_duration_seconds` | histogram | `stage` | Time spent in each pipeline stage: `preprocess`, `route`, or `transport_roundtrip`. | Current |
 | `dynamo_frontend_tokenize_seconds` | histogram | — | Prompt tokenization time per request. | Current |
 | `dynamo_frontend_template_seconds` | histogram | — | Chat template rendering time per request. | Current |
-| `dynamo_frontend_request_body_seconds` | histogram | `phase` | Time to receive a chat or completions request body (`phase="read"`) and to parse it (`phase="parse"`). Behind a gateway that relays the body from an endpoint picker, `read` includes waiting for the relay. | Current |
 | `dynamo_frontend_tokenizer_latency_ms` | histogram | `operation` | Tokenizer latency in milliseconds, for `tokenize` and `detokenize`. | Current |
 | `dynamo_frontend_detokenize_total_us` | counter | — | Total detokenization time in microseconds. | Current |
 | `dynamo_frontend_detokenize_token_count` | counter | — | Tokens detokenized. | Current |
@@ -931,54 +930,6 @@ Requires the client to request usage accounting on streaming calls (`"stream_opt
   Time one routed request spends in each EPP stage, labeled by `stage` (see the table below). Together, `receive_body`, `pick`, `rewrite` and `first_response` split the EPP's part of a request's time to first token.
 </ParamField>
 
-<ParamField path="dynamo_epp_request_body_bytes" type="histogram">
-  Size of each routed request body, labeled `body="received"` for the body the gateway streamed from the client and `body="forwarded"` for the body the EPP returns for the worker. Injecting `nvext.token_data` makes the forwarded body larger than the received one.
-</ParamField>
-
-<ParamField path="dynamo_epp_prompt_tokens" type="histogram">
-  Prompt tokens the EPP routed each request on.
-</ParamField>
-
-<ParamField path="dynamo_epp_picks_in_flight" type="gauge">
-  Requests currently inside the worker pick: being parsed, tokenized or waiting for a worker.
-</ParamField>
-
-<ParamField path="dynamo_epp_runtime_workers" type="gauge">
-  Worker threads of the EPP's async runtime, sampled at scrape time.
-</ParamField>
-
-<ParamField path="dynamo_epp_runtime_alive_tasks" type="gauge">
-  Tasks alive in the EPP's async runtime, sampled at scrape time.
-</ParamField>
-
-<ParamField path="dynamo_epp_runtime_global_queue_depth" type="gauge">
-  Ready tasks waiting in the async runtime's global queue, sampled at scrape time. A value that stays above zero means every worker thread is busy, so other requests' body and token chunks wait for one. A task waiting in a busy worker's LIFO slot does not show here; `dynamo_epp_task_schedule_delay_seconds` catches it.
-</ParamField>
-
-<ParamField path="dynamo_epp_runtime_blocking_threads" type="gauge">
-  Threads in the async runtime's blocking pool, busy or idle, sampled at scrape time. Chat template rendering and tokenization run there.
-</ParamField>
-
-<ParamField path="dynamo_epp_runtime_blocking_queue_depth" type="gauge">
-  Blocking-pool tasks waiting for a thread, sampled at scrape time.
-</ParamField>
-
-<ParamField path="dynamo_epp_runtime_busy_seconds_total" type="counter">
-  Time the async runtime's worker threads spent running tasks. Compare its rate with the container's CPU use to see how much of the EPP's CPU runs on the async workers rather than the blocking pool.
-</ParamField>
-
-<ParamField path="dynamo_epp_ext_proc_connections" type="gauge">
-  Gateway connections to the ext_proc TLS port. Not recorded with `DYN_SECURE_SERVING=false`.
-</ParamField>
-
-<ParamField path="dynamo_epp_ext_proc_streams" type="gauge">
-  Open ext_proc streams: requests the gateway is still relaying through the EPP, including requests whose client has gone away but whose gateway stream is still open.
-</ParamField>
-
-<ParamField path="dynamo_epp_ext_proc_connection_streams" type="histogram">
-  Streams open on a gateway connection when one more starts on it, that one included: how many requests share each request's connection. The gateway multiplexes many streams onto one HTTP/2 connection, so a stall of that connection holds all of them. Not recorded with `DYN_SECURE_SERVING=false`.
-</ParamField>
-
 <ParamField path="dynamo_epp_event_loop_delay_seconds" type="histogram">
   How late a 10 ms sleep on the async runtime wakes. It runs late only when no worker thread services the runtime's timers, so it shows stalls of the whole runtime, not of a single task.
 </ParamField>
@@ -990,8 +941,6 @@ Requires the client to request usage accounting on streaming calls (`"stream_opt
 <ParamField path="dynamo_epp_task_schedule_delay_seconds" type="histogram">
   Waits of at least `DYN_EPP_TASK_METRICS_MIN_US` between a task being woken and being polled, labeled by `task`. Recorded only with `DYN_EPP_TASK_METRICS=1`. Long waits of `task="h2_connection"` mean a gateway connection, and every stream on it, stood still.
 </ParamField>
-
-The EPP also exports the tokenizer prefix-cache counters `dynamo_frontend_tokenizer_cache_hits_total`, `dynamo_frontend_tokenizer_cache_misses_total`, `dynamo_frontend_tokenizer_cache_cached_tokens_total` and `dynamo_frontend_tokenizer_cache_uncached_tokens_total`, which its tokenizer increments as the frontend's does.
 
 The `stage` label of `dynamo_epp_stage_duration_seconds`:
 

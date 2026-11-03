@@ -11,6 +11,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
@@ -21,7 +22,7 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::envoy_helpers::{self, metadata};
 use crate::log_budget::LogBudget;
-use crate::metrics::{self, Connection, OpenStream, Stage};
+use crate::metrics::{self, Stage};
 use crate::picker::{
     CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickTimings, RequestInfo,
     ResponseUsage,
@@ -313,6 +314,85 @@ impl StreamTrace {
     }
 }
 
+static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
+
+/// One gateway connection to the ext_proc TLS port, shared by the task that
+/// serves it and every ext_proc stream on it. Its id and stream counts go into
+/// the connection's log lines and its streams' routing and summary lines.
+#[derive(Debug)]
+pub(crate) struct Connection {
+    id: u64,
+    open_streams: AtomicUsize,
+    streams_served: AtomicU64,
+    peak_streams: AtomicUsize,
+}
+
+impl Connection {
+    pub(crate) fn open() -> Arc<Self> {
+        Arc::new(Self {
+            id: NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed),
+            open_streams: AtomicUsize::new(0),
+            streams_served: AtomicU64::new(0),
+            peak_streams: AtomicUsize::new(0),
+        })
+    }
+
+    /// Process-unique id, for joining a connection's log lines with its
+    /// streams' lines.
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub(crate) fn streams_served(&self) -> u64 {
+        self.streams_served.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn peak_streams(&self) -> usize {
+        self.peak_streams.load(Ordering::Relaxed)
+    }
+}
+
+/// One ext_proc stream, counted on its gateway connection until dropped.
+struct OpenStream {
+    connection: Option<Arc<Connection>>,
+    connection_streams: Option<usize>,
+}
+
+impl OpenStream {
+    /// Start counting a stream. `connection` is `None` on the plaintext
+    /// listener, which does not track connections.
+    fn open(connection: Option<Arc<Connection>>) -> Self {
+        let connection_streams = connection.as_ref().map(|connection| {
+            let open = connection.open_streams.fetch_add(1, Ordering::Relaxed) + 1;
+            connection.streams_served.fetch_add(1, Ordering::Relaxed);
+            connection.peak_streams.fetch_max(open, Ordering::Relaxed);
+            open
+        });
+        Self {
+            connection,
+            connection_streams,
+        }
+    }
+
+    fn connection_id(&self) -> Option<u64> {
+        self.connection.as_ref().map(|connection| connection.id())
+    }
+
+    /// Streams open on this stream's connection when it started, itself
+    /// included: how many requests one stall of that connection holds.
+    fn connection_streams(&self) -> Option<usize> {
+        self.connection_streams
+    }
+}
+
+impl Drop for OpenStream {
+    fn drop(&mut self) {
+        if let Some(connection) = &self.connection {
+            connection.open_streams.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
 fn micros(duration: Duration) -> u64 {
     u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
@@ -502,7 +582,6 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         };
 
         let picked = {
-            let _in_flight = metrics::pick_in_flight();
             let started = Instant::now();
             let picked = picker.pick(&req_info, endpoints).await;
             metrics::observe_stage(Stage::Pick, started.elapsed());
@@ -596,8 +675,6 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             raw_body.clone()
         };
 
-        metrics::observe_body_bytes(metrics::Body::Received, raw_body.len());
-        metrics::observe_body_bytes(metrics::Body::Forwarded, forwarded_body.len());
         ctx.trace.body_bytes_out = forwarded_body.len();
         ctx.req_body_resp = envoy_helpers::build_request_body_responses(&forwarded_body);
         tracing::debug!(
@@ -1307,6 +1384,30 @@ impl ExtProcError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streams_are_counted_on_their_connection_until_dropped() {
+        let connection = Connection::open();
+        let first = OpenStream::open(Some(Arc::clone(&connection)));
+        let second = OpenStream::open(Some(Arc::clone(&connection)));
+        let plaintext = OpenStream::open(None);
+
+        assert_eq!(first.connection_id(), Some(connection.id()));
+        assert_eq!(first.connection_streams(), Some(1));
+        assert_eq!(second.connection_streams(), Some(2));
+        assert_eq!(plaintext.connection_id(), None);
+        assert_eq!(plaintext.connection_streams(), None);
+
+        drop(first);
+        let third = OpenStream::open(Some(Arc::clone(&connection)));
+        assert_eq!(
+            third.connection_streams(),
+            Some(2),
+            "a closed stream frees its slot"
+        );
+        assert_eq!(connection.streams_served(), 3);
+        assert_eq!(connection.peak_streams(), 2);
+    }
     use std::collections::HashSet;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};

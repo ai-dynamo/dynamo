@@ -102,28 +102,6 @@ pub static TEMPLATE_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     .expect("template_seconds histogram")
 });
 
-/// `phase` label values of [`REQUEST_BODY_SECONDS`].
-pub const REQUEST_BODY_READ: &str = "read";
-pub const REQUEST_BODY_PARSE: &str = "parse";
-
-/// Time to receive a chat or completions request body (`phase="read"`) and to
-/// parse it (`phase="parse"`). Behind a gateway that relays the body from an
-/// endpoint picker, `read` includes waiting for the relay.
-pub static REQUEST_BODY_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
-    HistogramVec::new(
-        HistogramOpts::new(
-            frontend_metric_name(frontend_perf::REQUEST_BODY_SECONDS),
-            "Time to read and to parse a chat or completions request body (seconds)",
-        )
-        .buckets(vec![
-            0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0,
-            2.5, 5.0, 10.0,
-        ]),
-        &["phase"],
-    )
-    .expect("request_body_seconds histogram vec")
-});
-
 /// Cumulative detokenization time across all tokens (microseconds).
 /// Use `rate(total) / rate(count)` in Prometheus to derive per-token average.
 pub static DETOKENIZE_TOTAL_US: Lazy<Counter> = Lazy::new(|| {
@@ -193,7 +171,6 @@ fn register_frontend_perf_metrics_prometheus(registry: &Registry) -> Result<(), 
     registry.register(Box::new(STAGE_DURATION_SECONDS.clone()))?;
     registry.register(Box::new(TOKENIZE_SECONDS.clone()))?;
     registry.register(Box::new(TEMPLATE_SECONDS.clone()))?;
-    registry.register(Box::new(REQUEST_BODY_SECONDS.clone()))?;
     registry.register(Box::new(DETOKENIZE_TOTAL_US.clone()))?;
     registry.register(Box::new(DETOKENIZE_TOKEN_COUNT.clone()))?;
     registry.register(Box::new(TOKENIZER_CACHE_HITS_TOTAL.clone()))?;

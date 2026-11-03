@@ -25,9 +25,6 @@ use base64::Engine as _;
 use bytes::Bytes;
 use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
 use dynamo_runtime::error::{DynamoError, ErrorClass};
-use dynamo_runtime::metrics::frontend_perf::{
-    REQUEST_BODY_PARSE, REQUEST_BODY_READ, REQUEST_BODY_SECONDS,
-};
 use dynamo_runtime::telemetry::{
     LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleStage, LifecycleTerminal, LifecycleTrace, TerminalOutcome,
 };
@@ -1203,12 +1200,8 @@ async fn handler_completions(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ErrorResponse> {
-    let body_started = std::time::Instant::now();
     let body = read_json_request_body(&headers, body).await?;
-    let body_read = std::time::Instant::now();
-    observe_request_body(REQUEST_BODY_READ, body_read - body_started);
     let mut request: NvCreateCompletionRequest = parse_json_request("completions", &body)?;
-    observe_request_body(REQUEST_BODY_PARSE, body_read.elapsed());
     if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
         delta_common::force_include_usage(&mut request.inner.stream_options);
     }
@@ -2516,7 +2509,6 @@ async fn handler_chat_completions(
     let request_lifecycle = lifecycle_request.span();
     let terminal = lifecycle_request.terminal();
     let mut handler_terminal = TaskLifecycleTerminal(Some(terminal.clone()));
-    let body_started = std::time::Instant::now();
     let body = match read_json_request_body(&headers, body).await {
         Ok(body) => body,
         Err(error) => {
@@ -2525,8 +2517,6 @@ async fn handler_chat_completions(
             return Err(error);
         }
     };
-    let body_read = std::time::Instant::now();
-    observe_request_body(REQUEST_BODY_READ, body_read - body_started);
     let mut request: NvCreateChatCompletionRequest =
         match parse_json_request("chat completions", &body) {
             Ok(request) => request,
@@ -2536,7 +2526,6 @@ async fn handler_chat_completions(
                 return Err(error);
             }
         };
-    observe_request_body(REQUEST_BODY_PARSE, body_read.elapsed());
     if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
         delta_common::force_include_usage(&mut request.inner.stream_options);
     }
@@ -2666,14 +2655,6 @@ async fn handler_chat_completions(
 }
 
 /// Parse typed JSON with the existing control-character recovery and error mapping.
-/// Record one phase of receiving a chat or completions request body in
-/// `dynamo_frontend_request_body_seconds`.
-fn observe_request_body(phase: &str, elapsed: std::time::Duration) {
-    REQUEST_BODY_SECONDS
-        .with_label_values(&[phase])
-        .observe(elapsed.as_secs_f64());
-}
-
 pub(super) fn parse_json_request<T>(endpoint: &'static str, body: &[u8]) -> Result<T, ErrorResponse>
 where
     T: DeserializeOwned,

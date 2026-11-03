@@ -756,8 +756,6 @@ pub mod frontend_perf {
     pub const TOKENIZE_SECONDS: &str = "tokenize_seconds";
     /// Template application time in preprocessor
     pub const TEMPLATE_SECONDS: &str = "template_seconds";
-    /// Time to read and to parse a chat or completions request body (label: phase = read|parse)
-    pub const REQUEST_BODY_SECONDS: &str = "request_body_seconds";
     /// L1 tokenizer cache hits (cumulative); enabled unless DYN_TOKENIZER_CACHE=0
     pub const TOKENIZER_CACHE_HITS_TOTAL: &str = "tokenizer_cache_hits_total";
     /// L1 tokenizer cache misses (cumulative); enabled unless DYN_TOKENIZER_CACHE=0

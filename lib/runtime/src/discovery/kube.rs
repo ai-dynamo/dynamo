@@ -419,7 +419,7 @@ impl Discovery for KubeDiscoveryClient {
         let instances: Vec<DiscoveryInstance> =
             state.values().flat_map(|m| m.filter(&query)).collect();
 
-        tracing::debug!(
+        tracing::info!(
             "KubeDiscoveryClient::list returning {} instances for query={:?}",
             instances.len(),
             query

@@ -477,7 +477,7 @@ async fn serve<P: crate::EndpointPicker>(
 
                 // `task_id` names this task in "EPP runtime stall" lines, and
                 // `conn_id` names the connection in each stream's log lines.
-                let connection = metrics::Connection::open();
+                let connection = crate::server::Connection::open();
                 let opened = std::time::Instant::now();
                 tracing::info!(
                     conn_id = connection.id(),
@@ -527,7 +527,7 @@ async fn serve<P: crate::EndpointPicker>(
 #[derive(Clone)]
 struct WithConnection<S> {
     inner: S,
-    connection: Arc<metrics::Connection>,
+    connection: Arc<crate::server::Connection>,
 }
 
 impl<S, B> tonic::codegen::Service<tonic::codegen::http::Request<B>> for WithConnection<S>

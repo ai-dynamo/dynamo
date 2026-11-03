@@ -1564,7 +1564,6 @@ impl EndpointPicker for Router {
             .tokenize(body_str, &req.headers)
             .await
             .map_err(|e| PickError::InvalidRequest(e.to_string()))?;
-        metrics::observe_prompt_tokens(tokens.len());
         let policy_class = requested_policy_class(&req.headers)?;
         let reservation_id = Uuid::new_v4().to_string();
         let select_started = Instant::now();
