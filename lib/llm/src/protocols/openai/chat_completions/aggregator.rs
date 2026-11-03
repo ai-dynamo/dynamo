@@ -758,6 +758,7 @@ impl DeltaAggregator {
                     super::unified_parser::UnifiedRequestPolicy {
                         reasoning_disabled: parsing_options.reasoning_disabled,
                         structured_response: parsing_options.structured_response,
+                        ..Default::default()
                     },
                 ) {
                     Ok(parsed) => {

@@ -74,6 +74,7 @@ func (r *graphReconciler) setupWithManager(mgr ctrl.Manager) error {
 
 func pipelineRequestOwnerUID(obj client.Object) []string {
 	owner := metav1.GetControllerOf(obj)
+	// Dynamo authors these references with its alpha PCS client.
 	if owner == nil || owner.APIVersion != grovev1alpha1.SchemeGroupVersion.String() || owner.Kind != podCliqueSetKind {
 		return nil
 	}

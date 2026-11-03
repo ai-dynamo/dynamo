@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use dynamo_mocker::common::protocols::DirectRequest;
 use dynamo_mocker::live::{DeterministicTokenGenerator, stable_request_uuid};
 use dynamo_trtllm_sidecar::proto as pb;
-use prost_types::{Struct, value::Kind};
+use prost_types::{Struct, Value, value::Kind};
 use tonic::Status;
 use uuid::Uuid;
 
@@ -19,6 +19,8 @@ use super::{BoxedStatusResult, MockerServerConfig, ServerMode};
 /// whole integration suite and fail against a real engine.
 const REQUEST_TYPE_KEY: &str = "request_type";
 const CONTEXT_ONLY: &str = "context_only";
+/// TensorRT-LLM's token-only switch, spelled out for the same reason.
+const DETOKENIZE_KEY: &str = "detokenize";
 
 pub(super) const DEFAULT_MAX_NEW_TOKENS: u32 = 20;
 // Bound the synthetic token plan and full-response delivery buffer.
@@ -47,6 +49,7 @@ pub(super) struct PreparedRequest {
     min_output_tokens: usize,
     return_output_logprobs: bool,
     return_prompt_logprobs: bool,
+    needs_text: bool,
     output_candidates: Option<pb::CandidateTokenSelection>,
     prompt_candidates: Option<pb::CandidateTokenSelection>,
 }
@@ -145,6 +148,7 @@ impl PreparedRequest {
             min_output_tokens: stopping.min_tokens.unwrap_or(0) as usize,
             return_output_logprobs: response.return_output_logprobs == Some(true),
             return_prompt_logprobs: response.return_prompt_logprobs == Some(true),
+            needs_text: needs_text(request.extra.as_ref())?,
             output_candidates: response.output_candidates,
             prompt_candidates: response.prompt_candidates,
         })
@@ -214,63 +218,78 @@ impl PreparedRequest {
         with_logprobs: bool,
         selection: Option<&pb::CandidateTokenSelection>,
     ) -> pb::TokenInfo {
+        // The real servicer decodes token strings only for logprob display.
+        if !with_logprobs {
+            return pb::TokenInfo {
+                token_id,
+                ..Default::default()
+            };
+        }
         pb::TokenInfo {
             token_id,
             token: token_text(token_id),
-            logprob: with_logprobs.then(|| selected_logprob(token_id)),
-            rank: with_logprobs.then_some(1),
-            candidates: if with_logprobs {
-                candidates(token_id, selection)
-            } else {
-                Vec::new()
-            },
+            logprob: Some(selected_logprob(token_id)),
+            rank: Some(1),
+            candidates: candidates(token_id, selection),
+        }
+    }
+
+    /// Reports the logprobs the context phase handed off rather than
+    /// regenerating them.
+    fn replayed_token_info(&self, token_id: u32, logprobs: &[pb::LogProb]) -> pb::TokenInfo {
+        let selected = logprobs.iter().find(|entry| entry.token_id == token_id);
+        let selection = self
+            .output_candidates
+            .as_ref()
+            .and_then(|selection| selection.selection.as_ref());
+        let mut candidates: Vec<_> = logprobs
+            .iter()
+            .filter(|entry| match selection {
+                Some(pb::candidate_token_selection::Selection::TopN(count)) => {
+                    entry.rank.is_some_and(|rank| rank <= *count)
+                }
+                Some(pb::candidate_token_selection::Selection::TokenIds(ids)) => {
+                    ids.ids.contains(&entry.token_id)
+                }
+                Some(pb::candidate_token_selection::Selection::All(_)) => true,
+                None => false,
+            })
+            .map(|entry| pb::LogProb {
+                token_id: entry.token_id,
+                logprob: entry.logprob,
+                token: token_text(entry.token_id),
+                rank: entry.rank,
+            })
+            .collect();
+        candidates.sort_by_key(|entry| entry.rank);
+        pb::TokenInfo {
+            token_id,
+            token: token_text(token_id),
+            logprob: selected.map(|entry| entry.logprob),
+            rank: selected.and_then(|entry| entry.rank),
+            candidates,
         }
     }
 
     pub(super) fn token_output(&self, token_id: u32, position: usize) -> pb::TokenOutput {
         let is_replayed = position == 0 && self.replayed_first_token == Some(token_id);
-        let mut info = self.token_info(
-            token_id,
-            self.return_output_logprobs && !is_replayed,
-            self.output_candidates.as_ref(),
-        );
-        if is_replayed
-            && self.return_output_logprobs
-            && let Some(logprobs) = &self.replayed_first_logprobs
-        {
-            if let Some(selected) = logprobs.iter().find(|entry| entry.token_id == token_id) {
-                info.logprob = Some(selected.logprob);
-                info.rank = selected.rank;
+        let info = match &self.replayed_first_logprobs {
+            Some(logprobs) if is_replayed && self.return_output_logprobs => {
+                self.replayed_token_info(token_id, logprobs)
             }
-            info.candidates = logprobs
-                .iter()
-                .filter(|entry| {
-                    match self
-                        .output_candidates
-                        .as_ref()
-                        .and_then(|selection| selection.selection.as_ref())
-                    {
-                        Some(pb::candidate_token_selection::Selection::TopN(count)) => {
-                            entry.rank.is_some_and(|rank| rank <= *count)
-                        }
-                        Some(pb::candidate_token_selection::Selection::TokenIds(ids)) => {
-                            ids.ids.contains(&entry.token_id)
-                        }
-                        Some(pb::candidate_token_selection::Selection::All(_)) => true,
-                        None => false,
-                    }
-                })
-                .cloned()
-                .map(|mut candidate| {
-                    candidate.token = token_text(candidate.token_id);
-                    candidate
-                })
-                .collect();
-            info.candidates.sort_by_key(|entry| entry.rank);
-        }
+            _ => self.token_info(
+                token_id,
+                self.return_output_logprobs && !is_replayed,
+                self.output_candidates.as_ref(),
+            ),
+        };
         pb::TokenOutput {
             output_index: Some(0),
-            text: info.token.clone(),
+            text: if self.needs_text {
+                token_text(token_id)
+            } else {
+                String::new()
+            },
             tokens: vec![info],
         }
     }
@@ -426,6 +445,20 @@ fn is_context_only(extra: Option<&Struct>) -> bool {
         .and_then(|extra| extra.fields.get(REQUEST_TYPE_KEY))
         .and_then(|value| value.kind.as_ref())
         .is_some_and(|kind| matches!(kind, Kind::StringValue(value) if value == CONTEXT_ONLY))
+}
+
+/// `extra.detokenize`, true when absent. A non-boolean is refused, as the real
+/// servicer refuses it, rather than read as true.
+fn needs_text(extra: Option<&Struct>) -> BoxedStatusResult<bool> {
+    match extra.and_then(|extra| extra.fields.get(DETOKENIZE_KEY)) {
+        None => Ok(true),
+        Some(Value {
+            kind: Some(Kind::BoolValue(value)),
+        }) => Ok(*value),
+        Some(_) => Err(Box::new(Status::invalid_argument(
+            "extra.detokenize must be a boolean",
+        ))),
+    }
 }
 
 /// A request's disaggregation role has to agree with the role this process was
