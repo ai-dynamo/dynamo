@@ -15,8 +15,8 @@ readme = "README.md"
 [features]
 default = []
 profile = []
-# Test/benchmark-only deterministic replay plumbing. Production replay never
-# enables this feature and keeps the existing random selector behavior.
+# Benchmark builds for replay parity tooling. Canonical (seeded) replay needs no
+# feature: a caller opts in per replay with ReplayDeterminism::CanonicalV1.
 replay-bench = ["aisimulate-core/replay-bench", "dynamo-kv-router/bench"]
 test-support = []
 zmq-events = ["dep:tmq"]

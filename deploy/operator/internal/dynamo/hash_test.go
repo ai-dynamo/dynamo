@@ -26,7 +26,9 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	runtimefeatures "github.com/ai-dynamo/dynamo/deploy/operator/internal/features/runtime"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -513,18 +515,18 @@ func TestComputeBetaDGDWorkersSpecHash_UsesResolvedRuntimeVersion(t *testing.T) 
 
 func TestRuntimeFeatureGatesDoNotPrecedeVersionHashing(t *testing.T) {
 	tests := []struct {
-		name string
-		gate runtimefeatures.Gate
+		name                  string
+		minimumRuntimeVersion runtimeversion.Version
 	}{
-		{name: "canary health checks", gate: runtimefeatures.CanaryHealthChecks},
-		{name: "frontend startup probe", gate: runtimefeatures.FrontendStartupProbe},
-		{name: "increased worker failure threshold", gate: runtimefeatures.IncreasedWorkerFailureThreshold},
+		{name: "canary health checks", minimumRuntimeVersion: runtimefeatures.CanaryHealthChecks.MinRuntimeVersion},
+		{name: "frontend startup probe", minimumRuntimeVersion: compatibility.FrontendStartupProbe.MinRuntimeVersion},
+		{name: "increased worker failure threshold", minimumRuntimeVersion: runtimefeatures.IncreasedWorkerFailureThreshold.MinRuntimeVersion},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("ensure runtime-gated rendering cannot change a legacy unhashed worker generation")
-			assert.GreaterOrEqual(t, tt.gate.MinRuntimeVersion.Compare(minimumHashedRuntimeVersion), 0)
+			assert.GreaterOrEqual(t, tt.minimumRuntimeVersion.Compare(minimumHashedRuntimeVersion), 0)
 		})
 	}
 }

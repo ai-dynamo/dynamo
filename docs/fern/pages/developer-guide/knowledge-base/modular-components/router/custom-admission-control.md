@@ -78,6 +78,7 @@ use std::time::Duration;
 use dynamo_kv_router::plugins::request_classifier::{
     ClassifierError, ClassifyFuture, ClassifyRequest, RequestClassifier,
 };
+use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 use dynamo_runtime::error::{DynamoError, ErrorClass};
 use tokio::time::Instant;
 
@@ -86,7 +87,7 @@ struct QueueBudget {
 }
 
 impl RequestClassifier for QueueBudget {
-    fn classify(&mut self, mut request: ClassifyRequest) -> ClassifyFuture {
+    fn classify(&mut self, mut request: ClassifyRequest, _workers: WorkerCandidates<'_>) -> ClassifyFuture {
         let deadline = request.ingress_at() + self.budget;
         Box::pin(async move {
             if Instant::now() >= deadline {
@@ -207,9 +208,12 @@ The policy class enables queueing when every eligible worker's active prefill to
 |---|---|
 | `request_id()` | Optional request ID, also used in lifecycle events |
 | `session_context()` | Optional session identity, final marker, input trigger, and captured [agent headers](../../../../use-cases/agents/agent-harnesses.mdx#agent-headers) |
-| `input_tokens()` | Input size used by the scheduler |
+| `isl_tokens()` | Input sequence length in tokens, the size the scheduler uses |
 | `scheduling_cost_tokens()` | Estimated uncached input tokens, or the classifier's override |
 | `policy_class()` | Requested policy class, or the classifier's override |
+| `queue_thresholds()` | Busy thresholds of the policy class the request resolves to now, including the classifier's override. The queue holds the request while every eligible worker is past them |
+| `queue_thresholds_for(name)` | Busy thresholds another policy family or class would apply to this request, or `None` if the router does not know it |
+| `reject_thresholds()` | Router-wide busy thresholds, read when classification started. Selection skips a worker past them and rejects the request when none remains |
 | `ingress_at()` | Original router ingress time |
 | `due_at()` | Queue deadline set by the classifier, if any |
 | `progress().context_tokens()` | Live context high-water mark from input and generated tokens; this measures logical context, not physical KV occupancy |
@@ -223,14 +227,57 @@ The factory receives a `RequestClassifierContext` with router-wide information:
 | `block_size()` | Tokens per KV block |
 | `workers()` | Registered worker ranks from cached discovery information, updated as worker registrations change |
 
-Each entry returned by `workers()` is a `RequestClassifierWorker`:
+Each entry returned by `workers()` is the same `WorkerInfo` that [worker-selection plugins](custom-worker-selection.mdx) read:
 
 | Accessor | Meaning |
 |---|---|
 | `worker()` | Worker ID and data-parallel rank, returned as `WorkerWithDpRank` |
+| `max_num_batched_tokens()` | Advertised prefill tokens per engine step for this rank, or `None` when unavailable |
 | `total_kv_blocks()` | Advertised total KV-block capacity for this rank, or `None` when unavailable; this is not the number of free blocks |
 
-Classifiers do not currently receive the per-worker cache and load views exposed to worker-selection plugins through `WorkerInputs`.
+### Worker Inputs
+
+A classifier can read the per-worker cache and load data that [worker-selection plugins](custom-worker-selection.mdx) receive. Declare the groups in `required_worker_inputs`; `classify` receives them as `workers`:
+
+```rust
+use dynamo_kv_router::plugins::request_classifier::{
+    ClassifyFuture, ClassifyRequest, RequestClassifier,
+};
+use dynamo_kv_router::plugins::worker_selection::{WorkerCandidates, WorkerInputs};
+
+struct LoadAwareClass {
+    max_active_requests: usize,
+}
+
+impl RequestClassifier for LoadAwareClass {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::LOAD
+    }
+
+    fn classify(&mut self, mut request: ClassifyRequest, workers: WorkerCandidates<'_>) -> ClassifyFuture {
+        // Count only observed loads, and require at least one.
+        let mut loads = workers
+            .iter()
+            .filter_map(|worker| worker.load())
+            .filter(|load| load.is_available())
+            .peekable();
+        let saturated = loads.peek().is_some()
+            && loads.all(|load| load.active_requests() >= self.max_active_requests);
+        if saturated {
+            request.set_policy_class("batch");
+        }
+        Box::pin(async move { Ok(request) })
+    }
+}
+```
+
+Dynamo builds these rows with the same code that worker selection uses, so `CACHE`, `LOAD`, and `PREFERRED_TAINT` have the same meaning in both plugins. Dynamo reads `required_worker_inputs` once, when it installs the classifier. With the default `WorkerInputs::NONE`, Dynamo builds no rows and `workers` is empty.
+
+- Rows cover each worker rank that is eligible for the request, including overloaded workers. Row order is unspecified.
+- `workers` is a snapshot taken for this `classify` call and is lent only for its duration. Dynamo frees the rows when `classify` returns, so a deferred classification holds none of them. Copy into the returned future whatever it needs, and do not treat that copy as current load when the request is admitted later.
+- Worker selection takes its own snapshot when it picks a worker, so it can pick a different worker than the classifier expected. Use `set_worker_selection_target` to state a preference.
+
+Every row also returns its `WorkerInfo` from `info()` without a declaration. To ask whether a rank has room, declare `WorkerInputs::LOAD` and call `has_room` on the thresholds with the row's `load()` and `info().capacity()`. Both are rank-level checks on one row, the same ones the router runs: `queue_thresholds().has_room(...)` says whether this rank is within the class's queue thresholds (the queue holds a request only when every eligible rank is past them), and `reject_thresholds().has_room(...)` whether this rank is within the reject thresholds (selection skips a worker only when all of its ranks are past them).
 
 ### Admission Decisions
 

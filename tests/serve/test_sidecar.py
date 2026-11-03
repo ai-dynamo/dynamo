@@ -28,9 +28,11 @@ from tests.utils.payload_builder import (
     chat_logprobs_and_structured_output_payloads,
     disaggregated_kv_routing_payload,
     disaggregated_token_count_payload,
+    forced_tool_call_payloads,
     http_cancellation_payloads,
     kv_routing_payload,
     sglang_generate_cancellation_payloads,
+    stop_string_payloads,
 )
 from tests.utils.payloads import KvTransferPayload, OmittedMaxTokensChatPayload
 from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
@@ -80,11 +82,14 @@ TRTLLM_OPENENGINE_SKIP_REASON = (
 
 CANCELLATION_MAX_TOKENS = 2048
 CANCELLATION_CONTEXT_LEN = 4096
+# Disaggregated configs run two engines on one GPU with a 2048-token context.
+DISAGGREGATED_CANCELLATION_MAX_TOKENS = 1024
 
 
 def _aggregated_payloads(metrics: EngineMetrics):
     return [
         *chat_logprobs_and_structured_output_payloads(),
+        *forced_tool_call_payloads(),
         *http_cancellation_payloads(metrics, max_tokens=CANCELLATION_MAX_TOKENS),
     ]
 
@@ -107,6 +112,10 @@ def _disaggregated_payloads(
             prefill_metrics=prefill_metrics,
             decode_metrics=decode_metrics,
             transfer_metrics=transfer_metrics,
+        ),
+        # Cancel mid-decode: decode stops early and the deployment recovers.
+        *http_cancellation_payloads(
+            decode_metrics, max_tokens=DISAGGREGATED_CANCELLATION_MAX_TOKENS
         ),
     ]
 
@@ -178,10 +187,17 @@ sidecar_configs = {
             "DYN_REQUEST_PLANE": "tcp",
             "MAX_MODEL_LEN": str(CANCELLATION_CONTEXT_LEN),
             "VLLM_DATA_PARALLEL_SIZE": "1",
+            "DYN_TOOL_CALL_PARSER": "hermes",
         },
-        request_payloads=_aggregated_payloads(
-            VllmMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
-        ),
+        request_payloads=[
+            *_aggregated_payloads(
+                VllmMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+            ),
+            # The frontend matches stop strings; vLLM never receives them.
+            *stop_string_payloads(
+                VllmMetricsChecker(port_env="DYN_ENGINE_HTTP_PORT1"),
+            ),
+        ],
     ),
     "sglang_aggregated": SidecarConfig(
         name="sglang_aggregated",
@@ -200,6 +216,7 @@ sidecar_configs = {
             "DYN_REQUEST_PLANE": "tcp",
             "DYN_SGLANG_ENABLE_GENERATE": "1",
             "MAX_MODEL_LEN": str(CANCELLATION_CONTEXT_LEN),
+            "DYN_TOOL_CALL_PARSER": "hermes",
         },
         request_payloads=[
             *_aggregated_payloads(
@@ -245,6 +262,8 @@ sidecar_configs = {
         request_payloads=[
             *chat_logprobs_and_structured_output_payloads(prompt_logprobs=None),
             # Public disconnect/recovery only: no native scheduler observations.
+            # TODO: assert engine-side cleanup once TensorRT-LLM serves metrics
+            # alongside its gRPC server.
             *http_cancellation_payloads(None, max_tokens=CANCELLATION_MAX_TOKENS),
         ],
     ),
@@ -293,7 +312,15 @@ sidecar_configs = {
             "PRTE_ALLOW_RUN_AS_ROOT": "1",
             "PRTE_ALLOW_RUN_AS_ROOT_CONFIRM": "1",
         },
-        request_payloads=[disaggregated_token_count_payload(logprobs=True)],
+        request_payloads=[
+            disaggregated_token_count_payload(logprobs=True),
+            # Public disconnect/recovery only: no native scheduler observations.
+            # TODO: assert engine-side cleanup once TensorRT-LLM serves metrics
+            # alongside its gRPC server.
+            *http_cancellation_payloads(
+                None, max_tokens=DISAGGREGATED_CANCELLATION_MAX_TOKENS
+            ),
+        ],
     ),
     "vllm_disaggregated": SidecarConfig(
         name="vllm_disaggregated",

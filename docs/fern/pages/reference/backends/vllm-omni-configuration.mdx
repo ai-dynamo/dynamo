@@ -54,6 +54,31 @@ These are the vLLM-Omni orchestration flags. The omni worker also accepts the sa
   be positive; FastH3 VSA starts with 64.
 </ParamField>
 
+## Image Edit Capabilities
+
+**Experimental.** The maximum number of input images depends on the loaded
+model, not the model name clients send. Models with unknown metadata accept at
+most one reference; the model must still support image conditioning.
+
+Use an aggregated Omni worker for image edits. Stage-router deployments reject
+edit references and continue to support text-to-image generation.
+
+These limits come from vLLM-Omni 0.31.0rc1 registry metadata and may change with
+the installed version:
+
+| Model pipeline | Maximum input images |
+|---|---:|
+| `Flux2KleinPipeline` | 4 |
+| `QwenImageEditPlusPipeline` | 4 |
+| `HunyuanImage3Pipeline` | 3 |
+| `BooguImagePipeline` | 1 |
+
+Only FLUX.2 Klein 4B has been GPU-qualified for this integration; the other
+limits come from registry metadata, not GPU testing.
+
+See the [Image Edits API](../api/image-edits.mdx) for request formats, input
+budgets, configuration placement, errors, and rolling upgrades.
+
 ## Memory & Performance
 
 <ParamField path="--image-png-compression-level" type="int" default="6">

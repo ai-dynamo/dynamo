@@ -334,6 +334,18 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 
 	// Keep authored role sources available so the shared renderer preserves launch ownership.
 	componentForRendering := dcd.Spec.DynamoComponentDeploymentSharedSpec.DeepCopy()
+
+	// Standalone defaults use immutable DCD origin; graph children keep their inherited origin.
+	if dcd.GetParentGraphDeploymentName() == "" {
+		origin, exists := dcd.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion]
+		for _, template := range dynamo.EnsureComponentPodTemplates(componentForRendering) {
+			delete(template.Annotations, commonconsts.KubeAnnotationDynamoOperatorOriginVersion)
+			if exists {
+				template.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = origin
+			}
+		}
+	}
+
 	if workerHash := dynamo.GetDCDEffectiveWorkerHash(dcd); workerHash != "" && dynamo.IsWorkerComponent(componentType) {
 		for _, podTemplate := range dynamo.EnsureComponentPodTemplates(componentForRendering) {
 			podTemplate.Labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash

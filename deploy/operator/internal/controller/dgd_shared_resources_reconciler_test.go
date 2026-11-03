@@ -73,7 +73,6 @@ func TestDGDSharedResourcesReconciler_ValidatesGMSResourceClaimTemplatesBeforePa
 		nil,
 		nil,
 		nil,
-		nil,
 	)
 	_, err := sharedResources.Reconcile(ctx, dgd)
 
@@ -131,7 +130,6 @@ func TestDGDSharedResourcesReconciler_PreservesCheckpointResultOnLaterFailure(t 
 		events.NewFakeRecorder(10),
 		config,
 		runtimeConfig,
-		nil,
 		nil,
 		nil,
 		nil,

@@ -47,11 +47,11 @@ impl BuiltinWorkerSelector {
         let (worker_ids, occupancy) = input.into_hosted()?;
         if self
             .required_worker_inputs()
-            .contains(WorkerInputs::OCCUPANCY)
+            .contains(WorkerInputs::ACTIVE_REQUESTS)
             && occupancy.is_none()
         {
             return Err(dynamo_kv_router::WorkerSelectionPolicyError::failed(
-                "selector requires hosted OCCUPANCY input",
+                "selector requires hosted ACTIVE_REQUESTS input",
             )
             .into());
         }
@@ -62,7 +62,7 @@ impl BuiltinWorkerSelector {
 impl WorkerSelector<ModelRuntimeConfig> for BuiltinWorkerSelector {
     fn required_worker_inputs(&self) -> WorkerInputs {
         if self.mode.requires_occupancy() {
-            WorkerInputs::OCCUPANCY
+            WorkerInputs::ACTIVE_REQUESTS
         } else {
             WorkerInputs::NONE
         }
@@ -92,6 +92,8 @@ fn selection(worker_id: u64) -> WorkerSelectionResult {
         max_raw_cached_tokens: None,
         selected_raw_cached_tokens: None,
         potential_decode_blocks: 0,
+        kv_transfer_source: None,
+        log_fields: None,
     }
 }
 
@@ -197,12 +199,12 @@ impl RoutingHost {
                 let preferred_worker = preferred_worker()?;
                 if selector
                     .required_worker_inputs()
-                    .contains(WorkerInputs::OCCUPANCY)
+                    .contains(WorkerInputs::ACTIVE_REQUESTS)
                 {
                     let occupancy = self
                         .hosted_occupancy
                         .as_ref()
-                        .expect("OCCUPANCY policy must have hosted occupancy state");
+                        .expect("ACTIVE_REQUESTS policy must have hosted occupancy state");
                     let selection = occupancy.select_and_reserve(
                         &self.inner,
                         selector,
@@ -353,12 +355,14 @@ impl RoutingHost {
         let target_for_worker = |worker_id| {
             AffinityTarget::new(
                 worker_id,
-                soft_affinity_target.and_then(|target| target.dp_rank),
+                soft_affinity_target
+                    .filter(|target| target.worker_id == worker_id)
+                    .and_then(|target| target.dp_rank),
             )
         };
         let uses_occupancy = self
             .required_worker_inputs()
-            .contains(WorkerInputs::OCCUPANCY);
+            .contains(WorkerInputs::ACTIVE_REQUESTS);
         let mut guard: RequestGuard = RequestGuard::new_builtin(
             self.request_metrics.clone(),
             initial_worker,
@@ -374,8 +378,7 @@ impl RoutingHost {
             .observe(request.token_ids.len() as f64);
         drop(route_guard);
 
-        guard.start_dispatch(&phase_label);
-        guard.record_prefill_start(request.content());
+        guard.begin_dispatch(&phase_label, request.content());
         let dispatch_result = if is_direct && !has_affinity_session {
             let target = target_constraint.expect("Direct routing requires an explicit target");
             await_with_cleanup_policy(
@@ -407,7 +410,7 @@ impl RoutingHost {
             let metadata = match prepare(&mut request, target) {
                 Ok(metadata) => metadata,
                 Err(error) => {
-                    guard.abort().await;
+                    guard.abort(Some(error.as_ref())).await;
                     return Err(error);
                 }
             };
@@ -482,7 +485,7 @@ impl RoutingHost {
                     .chain()
                     .find_map(|cause| cause.downcast_ref::<DynamoError>().cloned());
                 guard.record_migration_failure(typed_error);
-                guard.abort().await;
+                guard.abort(Some(error.as_ref())).await;
                 return Err(error);
             }
         };
@@ -520,9 +523,14 @@ impl RoutingHost {
             };
             tracker.record_worker(target.worker_id, target.dp_rank, worker_type);
         }
-        guard.mark_dispatched();
-        let stream = into_monitored_response(response_stream, guard);
-        Ok((metadata, self.bind_affinity(operation, target, stream)?))
+        self.accept_dispatch(
+            &mut guard,
+            operation.take(),
+            target,
+            &response_stream.context(),
+        )
+        .await?;
+        Ok((metadata, into_monitored_response(response_stream, guard)))
     }
 }
 
@@ -562,7 +570,10 @@ mod tests {
     fn occupancy_policies_require_lazy_occupancy_input() {
         for mode in [RouterMode::PowerOfTwoChoices, RouterMode::LeastLoaded] {
             let selector = BuiltinWorkerSelector::new(mode).unwrap();
-            assert_eq!(selector.required_worker_inputs(), WorkerInputs::OCCUPANCY);
+            assert_eq!(
+                selector.required_worker_inputs(),
+                WorkerInputs::ACTIVE_REQUESTS
+            );
             assert!(
                 selector
                     .select_worker(WorkerSelectionInput::hosted(&[10, 20], None))

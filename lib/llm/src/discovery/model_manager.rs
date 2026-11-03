@@ -9,6 +9,8 @@ use std::{
     },
 };
 
+#[cfg(test)]
+use crate::model_card::LoraInfo;
 use arc_swap::ArcSwap;
 use dashmap::{DashMap, mapref::entry::Entry};
 use dynamo_kv_router::{
@@ -21,7 +23,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::worker_monitor::LoadThresholdConfig;
 use super::{
-    GenerateEngineSelection, KvSourceMembershipWatch, Model, RuntimeConfigWatch, WorkerSet,
+    GenerateEngineSelection, KvSourceMembershipWatch, Model, RuntimeConfigWatch,
+    SystemOneExecutionSelection, SystemOneSelectionError, WorkerSet,
     kv_source_watch::KvSourceMembershipCoordinator, runtime_config_watch,
 };
 
@@ -41,9 +44,12 @@ use crate::{
         DisaggregatedEndpoint, ModelRuntimeConfig, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
         topology_taint,
     },
-    lora::state_tracker::LoraWorkerProjection,
-    lora::{LoraFilter, LoraRoutingTable, LoraStateTracker, load_estimator::LoadEstimator},
-    model_card::{LoraInfo, ModelDeploymentCard},
+    lora::state_tracker::{LoraWorkerObservation, LoraWorkerProjection},
+    lora::{
+        LoadEstimatorSubscription, LoraFilter, LoraRoutingTable, LoraStateTracker,
+        load_estimator::LoadEstimator,
+    },
+    model_card::ModelDeploymentCard,
     model_type::ModelType,
     types::{
         RealtimeBidirectionalEngine,
@@ -54,7 +60,9 @@ use crate::{
             classify::OpenAIClassifyStreamingEngine, completions::OpenAICompletionsStreamingEngine,
             embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
             images::OpenAIImagesStreamingEngine, pooling::OpenAIPoolingStreamingEngine,
-            rerank::OpenAIRerankStreamingEngine, videos::OpenAIVideosStreamingEngine,
+            rerank::OpenAIRerankStreamingEngine,
+            transcriptions::OpenAITranscriptionsStreamingEngine,
+            videos::OpenAIVideosStreamingEngine,
         },
     },
     worker_type::WorkerType,
@@ -134,13 +142,6 @@ struct CommittedDiscoveryGroup {
     adapters: HashMap<String, ModelDeploymentCard>,
     representative: ModelDeploymentCard,
     worker_set: Arc<WorkerSet>,
-}
-
-#[derive(Default)]
-struct PendingLoraProjection {
-    base_capacities: Vec<u32>,
-    adapters: HashMap<String, LoraInfo>,
-    is_registration_required: bool,
 }
 
 type EndpointLoraProjection = HashMap<EndpointId, HashMap<WorkerWithDpRank, LoraWorkerProjection>>;
@@ -324,7 +325,7 @@ impl ModelManager {
     }
 
     fn lora_projection_locked(&self) -> EndpointLoraProjection {
-        let mut pending: HashMap<EndpointId, HashMap<WorkerWithDpRank, PendingLoraProjection>> =
+        let mut pending: HashMap<EndpointId, HashMap<WorkerWithDpRank, LoraWorkerObservation>> =
             HashMap::new();
         for group in self.discovery_groups.iter() {
             for (key, card) in &group.cards {
@@ -374,45 +375,10 @@ impl ModelManager {
             .map(|(endpoint_id, workers)| {
                 let workers = workers
                     .into_iter()
-                    .filter_map(|(worker, mut projection)| {
-                        projection.base_capacities.sort_unstable();
-                        projection.base_capacities.dedup();
-                        if projection.base_capacities.len() > 1 {
-                            tracing::warn!(
-                                endpoint = %endpoint_id,
-                                worker_id = worker.worker_id,
-                                capacities = ?projection.base_capacities,
-                                "Base MDCs disagree on LoRA capacity; using the conservative minimum"
-                            );
-                        }
-                        let mut loras = projection.adapters.into_values().collect::<Vec<_>>();
-                        loras.sort_by(|left, right| left.name.cmp(&right.name));
-                        let mut adapter_capacities = loras
-                            .iter()
-                            .filter_map(|lora| lora.max_gpu_lora_count)
-                            .collect::<Vec<_>>();
-                        adapter_capacities.sort_unstable();
-                        adapter_capacities.dedup();
-                        if adapter_capacities.len() > 1 {
-                            tracing::warn!(
-                                endpoint = %endpoint_id,
-                                worker_id = worker.worker_id,
-                                capacities = ?adapter_capacities,
-                                "Adapter MDCs disagree on LoRA capacity; using the conservative minimum"
-                            );
-                        }
-                        let capacity = projection
-                            .base_capacities
-                            .first()
-                            .copied()
-                            .or_else(|| adapter_capacities.first().copied())
-                            .or_else(|| (!loras.is_empty()).then_some(4))
-                            .or_else(|| projection.is_registration_required.then_some(0))?;
-                        Some((worker, LoraWorkerProjection {
-                            capacity,
-                            loras,
-                            is_registration_required: projection.is_registration_required,
-                        }))
+                    .filter_map(|(worker, projection)| {
+                        projection
+                            .into_projection(worker, &endpoint_id)
+                            .map(|projection| (worker, projection))
                     })
                     .collect();
                 (endpoint_id, workers)
@@ -432,18 +398,7 @@ impl ModelManager {
                     endpoint_union.insert(*worker, projection.clone());
                     continue;
                 };
-                existing.capacity = existing.capacity.min(projection.capacity);
-                existing.is_registration_required |= projection.is_registration_required;
-                let mut loras = existing
-                    .loras
-                    .iter()
-                    .chain(&projection.loras)
-                    .map(|lora| (lora.name.clone(), lora.clone()))
-                    .collect::<HashMap<_, _>>()
-                    .into_values()
-                    .collect::<Vec<_>>();
-                loras.sort_by(|left, right| left.name.cmp(&right.name));
-                existing.loras = loras;
+                existing.merge(projection);
             }
         }
         union
@@ -1347,6 +1302,16 @@ impl ModelManager {
             .collect()
     }
 
+    pub fn list_transcriptions_models(&self) -> Vec<String> {
+        self.catalog
+            .load()
+            .models
+            .iter()
+            .filter(|(_, model)| model.has_transcriptions_engine())
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     pub fn list_videos_models(&self) -> Vec<String> {
         self.catalog
             .load()
@@ -1414,6 +1379,8 @@ impl ModelManager {
                 || (model_type.contains(ModelType::Embedding) && model.has_embeddings_engine())
                 || (model_type.contains(ModelType::Images) && model.has_images_engine())
                 || (model_type.contains(ModelType::Audios) && model.has_audios_engine())
+                || (model_type.contains(ModelType::Transcriptions)
+                    && model.has_transcriptions_engine())
                 || (model_type.contains(ModelType::Videos) && model.has_videos_engine())
                 || (model_type.contains(ModelType::TensorBased) && model.has_tensor_engine())
                 || (model_type.contains(ModelType::Realtime) && model.has_realtime_engine())
@@ -1519,6 +1486,20 @@ impl ModelManager {
             .get_images_engine()
     }
 
+    /// Resolve the model before applying its WorkerSet-level edit admission policy.
+    pub(crate) fn select_image_edit_engine(
+        &self,
+        model: &str,
+        count: usize,
+    ) -> Result<Option<super::image_edits::ImageEngineSelection>, ModelManagerError> {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .select_image_edit_engine(count)
+    }
+
     pub fn get_videos_engine(
         &self,
         model: &str,
@@ -1541,6 +1522,18 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_audios_engine()
+    }
+
+    pub fn get_transcriptions_engine(
+        &self,
+        model: &str,
+    ) -> Result<OpenAITranscriptionsStreamingEngine, ModelManagerError> {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_transcriptions_engine()
     }
 
     pub fn get_realtime_engine(
@@ -1593,6 +1586,24 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_generate_engine_for_capability_with_routing(capability)
+    }
+
+    /// Resolve an alias and select all System One execution inputs from one catalog snapshot.
+    pub(crate) fn get_systemone_execution_selection(
+        &self,
+        requested_model: &str,
+    ) -> Result<SystemOneExecutionSelection, SystemOneSelectionError> {
+        let catalog = self.catalog.load();
+        let canonical_model = catalog
+            .aliases
+            .get(requested_model)
+            .map(String::as_str)
+            .unwrap_or(requested_model);
+        if let Some(model) = catalog.models.get(canonical_model) {
+            return model.get_systemone_execution_selection();
+        }
+
+        Err(SystemOneSelectionError::NotFound)
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
@@ -1675,6 +1686,27 @@ impl ModelManager {
         card_checksum: &str,
         engine: OpenAIChatCompletionsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
+        self.add_chat_completions_model_with_card(
+            model,
+            card_checksum,
+            Self::aggregated_local_card(),
+            engine,
+        )
+    }
+
+    /// Like [`Self::add_chat_completions_model`], but the worker set carries `card`, so
+    /// the parsing options the HTTP handlers read (tool-call / reasoning parser, structural
+    /// tag, ...) reflect that card instead of the defaults. The card is still stamped as a
+    /// synthetic aggregated in-process worker.
+    pub fn add_chat_completions_model_with_card(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        mut card: ModelDeploymentCard,
+        engine: OpenAIChatCompletionsStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        card.needs = Vec::new();
         let _reservation = self.reservation_lock.lock();
         self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
@@ -1682,11 +1714,7 @@ impl ModelManager {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
         }
         let namespace = format!("__local_chat_{}", model);
-        let mut ws = WorkerSet::new(
-            namespace.clone(),
-            card_checksum.to_string(),
-            Self::aggregated_local_card(),
-        );
+        let mut ws = WorkerSet::new(namespace.clone(), card_checksum.to_string(), card);
         ws.chat_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
         self.publish_catalog_locked();
@@ -1908,6 +1936,30 @@ impl ModelManager {
         Ok(())
     }
 
+    pub fn add_transcriptions_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: OpenAITranscriptionsStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
+        let model_entry = self.get_or_create_model(model);
+        if model_entry.has_transcriptions_engine() {
+            return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
+        }
+        let namespace = format!("__local_transcriptions_{}", model);
+        let mut ws = WorkerSet::new(
+            namespace.clone(),
+            card_checksum.to_string(),
+            Self::aggregated_local_card(),
+        );
+        ws.transcriptions_engine = Some(engine);
+        model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
+        Ok(())
+    }
+
     pub fn add_realtime_model(
         &self,
         model: &str,
@@ -2059,6 +2111,13 @@ impl ModelManager {
 
     pub fn remove_realtime_model(&self, model: &str) -> Result<(), ModelManagerError> {
         let namespace = format!("__local_realtime_{}", model);
+        self.remove_worker_set(model, &namespace)
+            .map(|_| ())
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
+    }
+
+    pub fn remove_transcriptions_model(&self, model: &str) -> Result<(), ModelManagerError> {
+        let namespace = format!("__local_transcriptions_{}", model);
         self.remove_worker_set(model, &namespace)
             .map(|_| ())
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
@@ -2538,13 +2597,14 @@ impl ModelManager {
             });
         let domain_cancel = cancel_token.child_token();
         *domain.controller_cancel.lock() = Some(domain_cancel.clone());
-        let _handle = crate::lora::LoraController::start_for_endpoint(
+        let _handle = crate::lora::LoraController::start_for_endpoint_with_metrics(
             endpoint_id.clone(),
             config,
             domain.routing_table.clone(),
             domain.state_tracker.clone(),
             domain.load_estimator.clone(),
             domain_cancel,
+            crate::lora::controller_metrics(),
         );
     }
 
@@ -2677,6 +2737,13 @@ impl ModelManager {
     ) -> Option<LoadThresholdConfig> {
         let model_entry = self.models.get(model)?;
         model_entry.load_threshold_config(config)
+    }
+
+    /// See [`Model::accepts_load_thresholds`].
+    pub(crate) fn accepts_load_thresholds(&self, model: &str) -> bool {
+        self.models
+            .get(model)
+            .is_some_and(|model| model.accepts_load_thresholds())
     }
 
     /// Lists all models with worker monitors configured.
@@ -2897,11 +2964,15 @@ mod tests {
         DistributedRuntime, Runtime,
         discovery::{Discovery, DiscoverySpec, MockDiscovery, SharedMockRegistry},
         distributed::DistributedConfig,
-        pipeline::RouterMode,
+        pipeline::{Error, ManyOut, RouterMode, SingleIn},
         transports::event_plane::EventScope,
     };
 
     use crate::model_card::ModelDeploymentCard;
+    use crate::protocols::{
+        Annotated,
+        common::{llm_backend::LLMEngineOutput, preprocessor::PreprocessedRequest},
+    };
     use crate::{
         discovery::{KvEventSource, KvSourceStatus},
         local_model::runtime_config::ModelRuntimeConfig,
@@ -2994,6 +3065,141 @@ mod tests {
             manager
                 .worker_group_available_ids("target", &endpoint)
                 .is_empty()
+        );
+    }
+
+    struct SystemOneStubEngine;
+
+    #[async_trait::async_trait]
+    impl
+        dynamo_runtime::engine::AsyncEngine<
+            SingleIn<PreprocessedRequest>,
+            ManyOut<Annotated<LLMEngineOutput>>,
+            Error,
+        > for SystemOneStubEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            unreachable!("selection test does not dispatch")
+        }
+    }
+
+    fn register_systemone_model(
+        manager: &ModelManager,
+        name: &str,
+    ) -> tokio::sync::watch::Sender<Vec<u64>> {
+        let mut card = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        card.set_name(name);
+        card.worker_type = Some(WorkerType::Aggregated);
+        card.runtime_config.runtime_data.insert(
+            crate::local_model::runtime_config::SGLANG_GENERATE_CAPABILITY.to_string(),
+            true.into(),
+        );
+        card.runtime_config.runtime_data.insert(
+            crate::local_model::runtime_config::SGLANG_SYSTEMONE_SERIAL_V1.to_string(),
+            true.into(),
+        );
+        card.runtime_config.max_num_seqs = Some(1);
+        let preprocessor = crate::preprocessor::OpenAIPreprocessor::new(card.clone()).unwrap();
+        let mut worker_set = WorkerSet::new(name.to_string(), name.to_string(), card);
+        worker_set.generate_engine = Some(Arc::new(SystemOneStubEngine));
+        worker_set.systemone_preprocessor = Some(preprocessor);
+        let (workers, receiver) = tokio::sync::watch::channel(vec![1]);
+        worker_set.set_instance_watcher(receiver);
+        assert!(manager.add_worker_set(name, name, worker_set));
+        workers
+    }
+
+    #[test]
+    fn systemone_model_resolution_requires_registered_aliases() {
+        let manager = ModelManager::new();
+        let _workers = register_systemone_model(&manager, "model-a");
+        for unregistered in ["jev-latest", "default", "typo"] {
+            assert!(matches!(
+                manager.get_systemone_execution_selection(unregistered),
+                Err(SystemOneSelectionError::NotFound)
+            ));
+        }
+        assert!(manager.register_alias("jev-latest", "model-a"));
+        assert_eq!(
+            manager
+                .get_systemone_execution_selection("jev-latest")
+                .unwrap()
+                .canonical_model,
+            "model-a"
+        );
+        assert!(manager.register_alias("public-model", "model-a"));
+        assert_eq!(
+            manager
+                .get_systemone_execution_selection("public-model")
+                .unwrap()
+                .canonical_model,
+            "model-a"
+        );
+        assert!(matches!(
+            manager.get_systemone_execution_selection("typo"),
+            Err(SystemOneSelectionError::NotFound)
+        ));
+        manager.add_worker_set("unsupported", "other", make_worker_set("other", "other"));
+        assert!(matches!(
+            manager.get_systemone_execution_selection("unsupported"),
+            Err(SystemOneSelectionError::Unsupported)
+        ));
+    }
+
+    #[test]
+    fn systemone_default_model_does_not_retarget_during_worker_churn() {
+        let manager = ModelManager::new();
+        let workers_a = register_systemone_model(&manager, "model-a");
+        assert!(manager.register_alias("jev-latest", "model-a"));
+        workers_a.send(vec![]).unwrap();
+        assert!(matches!(
+            manager.get_systemone_execution_selection("jev-latest"),
+            Err(SystemOneSelectionError::Unavailable)
+        ));
+        let _workers_b = register_systemone_model(&manager, "model-b");
+        assert!(matches!(
+            manager.get_systemone_execution_selection("jev-latest"),
+            Err(SystemOneSelectionError::Unavailable)
+        ));
+        assert_eq!(
+            manager
+                .get_systemone_execution_selection("model-b")
+                .unwrap()
+                .canonical_model,
+            "model-b"
+        );
+    }
+
+    #[test]
+    fn systemone_dispatch_rejects_retired_or_missing_admissions() {
+        let manager = ModelManager::new();
+        let workers = register_systemone_model(&manager, "model-a");
+        let selection = manager
+            .get_systemone_execution_selection("model-a")
+            .unwrap();
+        assert_eq!(selection.validate_dispatch(None), Ok(()));
+        assert_eq!(selection.validate_dispatch(Some(1)), Ok(()));
+        assert_eq!(
+            selection.validate_dispatch(Some(2)),
+            Err(SystemOneSelectionError::Unavailable)
+        );
+        workers.send(vec![]).unwrap();
+        assert_eq!(
+            selection.validate_dispatch(None),
+            Err(SystemOneSelectionError::Unavailable)
+        );
+        workers.send(vec![1]).unwrap();
+        drop(workers);
+        assert_eq!(
+            selection.validate_dispatch(Some(1)),
+            Err(SystemOneSelectionError::Unavailable)
         );
     }
 
@@ -3877,11 +4083,50 @@ mod tests {
     fn capture_events<T>(body: impl FnOnce() -> T) -> (T, Vec<CapturedEvent>) {
         use tracing_subscriber::layer::SubscriberExt;
 
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(CaptureLayer(Arc::clone(&captured)));
         let out = tracing::subscriber::with_default(subscriber, body);
         let events = captured.lock().unwrap().clone();
         (out, events)
+    }
+
+    #[test]
+    fn capture_events_keeps_interest_when_another_thread_registers_the_callsite() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::capture_events_keeps_interest_when_another_thread_registers_the_callsite"
+            ),
+            &[],
+        ) {
+            return;
+        }
+        fn shared_callsite() {
+            tracing::info!("capture interest probe");
+        }
+        let ready = Arc::new(std::sync::Barrier::new(2));
+        let first_logged = Arc::new(std::sync::Barrier::new(2));
+        let worker_ready = Arc::clone(&ready);
+        let worker_first_logged = Arc::clone(&first_logged);
+        let worker = std::thread::spawn(move || {
+            capture_events(|| {
+                worker_ready.wait();
+                worker_first_logged.wait();
+                shared_callsite();
+            })
+        });
+        ready.wait();
+        shared_callsite();
+        first_logged.wait();
+        let (_, events) = worker.join().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.message == "capture interest probe")
+                .count(),
+            1
+        );
     }
 
     fn alias_claim_events(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
@@ -4549,6 +4794,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_add_get_remove_transcriptions_model_round_trip() {
+        let mm = ModelManager::new();
+        mm.add_transcriptions_model("stt", "0", Arc::new(UncalledEngine))
+            .unwrap();
+        assert!(mm.list_transcriptions_models().contains(&"stt".to_string()));
+        assert!(mm.get_transcriptions_engine("stt").is_ok());
+
+        mm.remove_transcriptions_model("stt").unwrap();
+        assert!(!mm.list_transcriptions_models().contains(&"stt".to_string()));
+        assert!(matches!(
+            mm.remove_transcriptions_model("stt"),
+            Err(ModelManagerError::ModelNotFound(_))
+        ));
+    }
+
     /// Registers one model that occupies `model_type`. Returns false when this test has no
     /// way to occupy that unit, which is the signal the caller turns into a failure.
     fn register_model_occupying(manager: &ModelManager, model_type: ModelType) -> bool {
@@ -4563,6 +4824,8 @@ mod tests {
             manager.add_images_model(name, "ck", Arc::new(UncalledEngine))
         } else if model_type == ModelType::Audios {
             manager.add_audios_model(name, "ck", Arc::new(UncalledEngine))
+        } else if model_type == ModelType::Transcriptions {
+            manager.add_transcriptions_model(name, "ck", Arc::new(UncalledEngine))
         } else if model_type == ModelType::Videos {
             manager.add_videos_model(name, "ck", Arc::new(UncalledEngine))
         } else if model_type == ModelType::TensorBased {
