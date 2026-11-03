@@ -267,6 +267,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         gpgsm \
         gpgv \
         keyboxd \
+        libbrotli1 \
         libssl3t64 \
         openssl
 
