@@ -11033,6 +11033,63 @@ pub(crate) mod tests {
             }
         }
     }
+
+    /// Scores stay in generation order while raw text and reasoning alternate behind a
+    /// split Qwen opener.
+    #[tokio::test]
+    async fn qwen_queued_reasoning_keeps_source_logprob_order() {
+        fn scored(
+            mut response: Annotated<NvCreateChatCompletionStreamResponse>,
+            token: &str,
+        ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+            response.data.as_mut().unwrap().inner.choices[0].logprobs = Some(
+                serde_json::from_value(serde_json::json!({
+                    "content": [{"token": token, "logprob": -0.5, "bytes": [], "top_logprobs": []}],
+                    "refusal": null
+                }))
+                .unwrap(),
+            );
+            response
+        }
+
+        fn reasoning(text: &str, token: &str) -> Annotated<NvCreateChatCompletionStreamResponse> {
+            let mut source = scored(chunk("", false), token);
+            let choice = &mut source.data.as_mut().unwrap().inner.choices[0];
+            choice.delta.content = None;
+            choice.delta.reasoning_content = Some(text.to_string());
+            source
+        }
+
+        let completed_call = concat!(
+            "ll><function=get_weather><parameter=city>Paris</parameter>",
+            "</function></tool_call>"
+        );
+        let responses = apply_stream(
+            stream::iter(vec![
+                scored(chunk("<tool_", false), "A"),
+                reasoning("first", "B"),
+                scored(chunk("ca", false), "C"),
+                reasoning("second", "D"),
+                scored(chunk(completed_call, true), "E"),
+            ]),
+            Some(weather_tools()),
+            None,
+            false,
+            UnifiedParserStartingState::None,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let tokens: Vec<_> = collect_choices(&responses)
+            .into_iter()
+            .filter_map(|choice| choice.logprobs.as_ref()?.content.as_ref())
+            .flatten()
+            .map(|entry| entry.token.as_str())
+            .collect();
+        assert_eq!(tokens, ["A", "B", "C", "D", "E"]);
+    }
+
     #[tokio::test]
     #[ignore = "Parser 0.7.17 missing-parameter-close recovery delays text across external reasoning; run explicitly to measure ordering"]
     async fn qwen_recovered_parameter_close_restores_opener_ordering_at_every_split() {
