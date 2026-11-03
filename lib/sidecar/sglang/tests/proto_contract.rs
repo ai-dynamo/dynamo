@@ -18,6 +18,21 @@ fn generate_request_keeps_its_released_wire_tags() {
 }
 
 #[test]
+fn engine_state_snapshot_has_stable_wire_tags() {
+    let snapshot = dynamo_sglang_sidecar::proto::EngineStateSnapshot {
+        instance_id: 7,
+        revision: 9,
+        healthy: true,
+        is_pause: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        snapshot.encode_to_vec(),
+        [0x08, 0x07, 0x10, 0x09, 0x18, 0x01, 0x20, 0x01]
+    );
+}
+
+#[test]
 fn release_0522_fields_keep_their_wire_tags() {
     let request = dynamo_sglang_sidecar::proto::GenerateRequest {
         return_text: Some(true),
