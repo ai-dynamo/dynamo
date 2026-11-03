@@ -216,12 +216,12 @@ class GlobalPlannerConfig(BaseModel):
         """Log the effective configuration at startup."""
         logger.info(f"Environment: {self.environment}")
         if self.managed_allocation is not None:
-            policy = self.managed_allocation.policy
+            allocation = self.managed_allocation.policy
             logger.info(
                 "Managed allocation: %s pools, shared GPU band [%s, %s]",
-                len(policy.pools),
-                policy.min_total_gpus,
-                policy.max_total_gpus,
+                len(allocation.pools),
+                allocation.min_total_gpus,
+                allocation.max_total_gpus,
             )
             return
 
