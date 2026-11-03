@@ -476,6 +476,11 @@ Fields retain their normal mode-specific meaning. For example, the explicit queu
 thresholds are used by `optimization_target: load`. Predictor replacement requires
 `optimization_target: sla` with throughput scaling enabled. Scheduling intervals,
 AIS performance models, deployment topology, and other fields are rejected by this API.
+With [live retune](../../kubernetes/auto-deployment/planner-live-retune.md) (`retune.executor: dgdr`),
+an update of `ttft_ms` or `itl_ms` that changes the retune scoring SLA, because `retune.sla_ttft_ms`
+or `retune.sla_itl_ms` is unset, is rejected with HTTP `422`. To change the SLA, restart the
+Planner with the new values; to keep `ttft_ms` and `itl_ms` changeable at runtime, start it with
+both `retune` SLA fields set.
 
 Use the instance ID and revision returned by GET when submitting an update:
 

@@ -55,6 +55,7 @@ from dynamo.planner.monitoring.planner_metrics import PlannerPrometheusMetrics
 from dynamo.planner.offline.trace_data import extract_traffic_observations_from_trace
 from dynamo.planner.reconfiguration import (
     PlannerReconfiguration,
+    live_retune_sla_errors,
     runtime_candidate_errors,
     runtime_configuration_errors,
 )
@@ -583,6 +584,8 @@ class NativePlannerBase:
 
     def validate_runtime_candidate(self, candidate: PlannerConfig) -> None:
         errors = runtime_candidate_errors(candidate, self._build_worker_capabilities())
+        if self._live_retune is not None:
+            errors.extend(live_retune_sla_errors(self.config, candidate))
         if errors:
             raise ValueError("; ".join(errors))
         self._reconfigurable_engine()

@@ -6,7 +6,8 @@
 The retune controller is the recording stub of ``retune_stubs`` (one test
 builds the real one), and the live supervisor is a fake ``LiveRetuneHandle``,
 so these tests cover only the host contract: the disabled state,
-``replace_retune``, the base's supervisor lifecycle and the SIGTERM path.
+``replace_retune``, the base's supervisor lifecycle, its runtime
+configuration API and the SIGTERM path.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ from dynamo.planner.plugins.orchestrator.engine_adapter import (
     OrchestratorEngineAdapter,
     RetuneHooks,
 )
+from dynamo.planner.reconfiguration import ReconfigureRequest, candidate_config
 from dynamo.planner.retune.live.contracts import GateResult
 from dynamo.planner.tests.retune_stubs import (
     ROUTER_MAP,
@@ -48,6 +50,7 @@ from dynamo.planner.tests.retune_stubs import (
     retune_inputs,
     retune_only_config,
 )
+from dynamo.planner.tests.unit.test_live_retune_state import live_config
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -541,6 +544,127 @@ async def test_replace_live_retune_holds_the_config_lock(stub_controller):
         assert controller.phases == [PHASE]
     finally:
         await planner._shutdown_runtime()
+
+
+# ---------------------------------------------------------------------------
+# Runtime reconfiguration
+# ---------------------------------------------------------------------------
+
+
+def _sla_planner(**retune) -> NativePlannerBase:
+    """A planner whose validated dgdr config scores with SLA 500/50 ms by
+    default, with its live retune supervisor installed."""
+
+    config = live_config(
+        ttft_ms=500.0,
+        itl_ms=50.0,
+        retune=retune,
+        metric_reporting_prometheus_port=0,
+        live_dashboard_port=0,
+        control_api_port=0,
+    )
+    planner = _base(config, _Environment())
+    planner._live_retune = FakeLiveRetune([])
+    return planner
+
+
+async def _patch(planner: NativePlannerBase, changes: dict) -> dict:
+    """PATCH ``changes`` through the runtime API; an accepted update is
+    awaited and answered with its operation."""
+
+    reconfiguration = planner.reconfiguration
+    request_id = f"update-{planner._config_generation}"
+    body = ReconfigureRequest(
+        instance_id=reconfiguration.instance_id,
+        expected_revision=planner._config_generation,
+        request_id=request_id,
+        config=changes,
+    ).model_dump()
+    response = await reconfiguration.handle_request(
+        {"method": "PATCH", "path": "config", "body": body}
+    )
+    if response["status"] != 202:
+        return response
+    await reconfiguration._task
+    return {"status": 202, "body": reconfiguration.get_operation(request_id)}
+
+
+@pytest.mark.parametrize(
+    ("retune", "changes", "inherited"),
+    [
+        ({}, {"ttft_ms": 250.0}, "ttft_ms"),
+        ({}, {"itl_ms": 25.0}, "itl_ms"),
+        ({}, {"ttft_ms": 250.0, "itl_ms": 25.0}, "ttft_ms and itl_ms"),
+        ({}, {"ttft_ms": 250.0, "max_gpu_budget": 16}, "ttft_ms"),
+        ({"sla_ttft_ms": 400.0}, {"itl_ms": 25.0}, "itl_ms"),
+    ],
+)
+async def test_live_retune_rejects_a_runtime_change_of_its_inherited_sla(
+    retune, changes, inherited
+):
+    planner = _sla_planner(**retune)
+    # The update passes every other runtime check: only live retune stops it.
+    candidate = candidate_config(planner.config, changes)
+    assert {field: getattr(candidate, field) for field in changes} == changes
+    before = await planner.reconfiguration.get_config()
+
+    response = await _patch(planner, changes)
+
+    assert response["status"] == 422
+    overrides = " and ".join(f"retune.sla_{f}" for f in inherited.split(" and "))
+    assert response["body"]["error"] == (
+        f"cannot change {inherited} at runtime while retune.executor is 'dgdr': "
+        f"live retune inherits its scoring SLA from {inherited} ({overrides} unset); "
+        f"restart the planner with the new {inherited}, or restart it with "
+        f"{overrides} set to keep {inherited} changeable at runtime"
+    )
+    assert await planner.reconfiguration.get_config() == before
+    assert (planner.config.ttft_ms, planner.config.itl_ms) == (500.0, 50.0)
+    await planner._shutdown_runtime()
+
+
+@pytest.mark.parametrize(
+    ("retune", "changes"),
+    [
+        (
+            {"sla_ttft_ms": 400.0, "sla_itl_ms": 40.0},
+            {"ttft_ms": 250.0, "itl_ms": 25.0},
+        ),
+        ({"sla_ttft_ms": 400.0}, {"ttft_ms": 250.0}),
+        ({}, {"ttft_ms": 500.0, "max_gpu_budget": 16}),
+    ],
+)
+async def test_live_retune_accepts_runtime_updates_that_keep_its_scoring_sla(
+    retune, changes
+):
+    planner = _sla_planner(**retune)
+    config = planner.config
+    assert config.retune is not None
+    scoring_sla = config.retune.scoring_sla(config.ttft_ms, config.itl_ms)
+
+    response = await _patch(planner, changes)
+
+    assert response["body"]["state"] == "applied"
+    assert {field: getattr(config, field) for field in changes} == changes
+    assert config.retune.scoring_sla(config.ttft_ms, config.itl_ms) == scoring_sla
+    await planner._shutdown_runtime()
+
+
+async def test_planner_without_live_retune_changes_its_sla_at_runtime():
+    config = PlannerConfig(
+        namespace="test-ns",
+        mode="agg",
+        metric_reporting_prometheus_port=0,
+        live_dashboard_port=0,
+        control_api_port=0,
+    )
+    planner = _base(config, _Environment())
+
+    response = await _patch(planner, {"ttft_ms": 250.0, "itl_ms": 25.0})
+
+    assert response["body"]["state"] == "applied"
+    assert (planner.config.ttft_ms, planner.config.itl_ms) == (250.0, 25.0)
+    await planner._shutdown_runtime()
 
 
 # ---------------------------------------------------------------------------

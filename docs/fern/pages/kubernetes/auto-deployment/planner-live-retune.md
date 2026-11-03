@@ -196,6 +196,13 @@ retune:
 For the other `retune` fields and the limits that `executor: dgdr` adds to them, see the
 [Retune field reference](../../reference/components/planner-configuration.mdx#retune-experimental).
 
+Live retune takes its scoring SLA when it starts: `retune.sla_ttft_ms` and `retune.sla_itl_ms`,
+or the Planner's `ttft_ms` and `itl_ms` where they are unset. An update of `ttft_ms` or `itl_ms`
+through the
+[runtime reconfiguration API](../../reference/components/planner-configuration.mdx#system-port-reconfiguration-api)
+that would change that SLA fails with HTTP `422`. To change the SLA, restart the Planner with the
+new values; to keep `ttft_ms` and `itl_ms` changeable at runtime, set both `retune` SLA fields.
+
 ### Engine section
 
 `retune.dgdr.engine` becomes `spec.aisimulate.inputOverrides.engine` of every Request, so every
