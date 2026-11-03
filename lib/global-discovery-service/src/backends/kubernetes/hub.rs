@@ -135,7 +135,6 @@ fn ready_relays(slice: &EndpointSlice) -> Vec<(String, IpAddr)> {
 
 struct SliceEntry {
     pool: PoolKey,
-    /// From [`mcs::source_region`].
     region: Option<String>,
     relays: Vec<(String, IpAddr)>,
 }
@@ -406,7 +405,6 @@ mod tests {
         Arc::new(SliceCache::new(naming()))
     }
 
-    /// A cache of [`standard_slice`]s.
     fn standard_cache() -> Arc<SliceCache<PoolIndex>> {
         let standard = PoolNaming {
             mcs: McsImplementation::Standard,
