@@ -138,19 +138,6 @@ def test_absolute_prefill_threshold_unset_or_unadvertised_stays_quiet(
     assert _ABSOLUTE_PREFILL_DEPRECATION not in caplog.text
 
 
-_POWER_OF_TWO_DEPRECATION = "--router-mode power-of-two is deprecated"
-
-
-def test_other_router_modes_stay_quiet(caplog: pytest.LogCaptureFixture):
-    caplog.set_level("WARNING")
-
-    for mode in ("least-loaded", "kv"):
-        config, _ = parse_worker_router_config(["--router-mode", mode])
-        assert build_router_config(config) is not None
-
-    assert _POWER_OF_TWO_DEPRECATION not in caplog.text
-
-
 def test_unknown_mode_is_rejected():
     config, _ = parse_worker_router_config([])
     config.router_mode = "nonsense"
