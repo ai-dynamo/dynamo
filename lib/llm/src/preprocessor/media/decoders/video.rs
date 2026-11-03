@@ -724,6 +724,15 @@ mod tests {
         // H.264 fixture: the in-tree FFmpeg decodes only VP8/VP9, so opening
         // must fail -- and with the re-encode guidance, not ffmpeg's bare
         // "Decoder not found".
+        // A distro FFmpeg (the CPU pre-merge runners link Ubuntu's) decodes
+        // H.264, so the premise only holds against the in-tree build. The image
+        // build's codec guard enforces that build's VP8/VP9-only allowlist.
+        if ffmpeg_next::decoder::find(ffmpeg_next::codec::Id::H264).is_some() {
+            eprintln!(
+                "skipping: the linked FFmpeg decodes H.264; only the in-tree build rejects it"
+            );
+            return;
+        }
         let path = format!(
             "{}/tests/data/media/triangle_240p_10_h264.mp4",
             env!("CARGO_MANIFEST_DIR")
