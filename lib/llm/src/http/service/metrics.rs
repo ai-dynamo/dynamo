@@ -3547,6 +3547,17 @@ mod tests {
             let metrics = Arc::new(Metrics::build_with_detail(None, &fake_env(&[]), mode));
             let registry = Registry::new();
             metrics.register(&registry).unwrap();
+            // Registries otherwise share this counter's lazily created label sets
+            // with concurrent error-rendering tests. Keep the same metric schema
+            // in the snapshot, but give each mode its own counter instance.
+            registry
+                .unregister(Box::new(DYNAM_FAILURES_TOTAL.clone()))
+                .unwrap();
+            let failures = new_failure_counter(None);
+            failures
+                .with_label_values(&["InvalidRequest", "request.invalid"])
+                .inc();
+            registry.register(Box::new(failures)).unwrap();
             for emits_token in [false, true] {
                 let mut collector = response_collector(&metrics, "compatibility");
                 let mut request = dynamo_runtime::pipeline::Context::new(());
@@ -6268,6 +6279,14 @@ mod tests {
             .into_iter()
             .find(|family| family.name() == "dynamo_frontend_failures_total")
             .expect("dynamo_frontend_failures_total metric");
+        assert_eq!(
+            family.get_field_type(),
+            prometheus::proto::MetricType::COUNTER
+        );
+        assert_eq!(
+            family.help(),
+            "Total number of terminal semantic request failures"
+        );
         let metric = family
             .get_metric()
             .iter()
