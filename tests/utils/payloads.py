@@ -219,9 +219,9 @@ class HttpCancellationPayload(BasePayload):
             response.raise_for_status()
             deadline = time.monotonic() + self.timeout
             content = ""
-            # Read only the first generated fragment, without buffering a full
-            # response. Closing an unread requests stream closes its connection.
-            for line in response.iter_lines(chunk_size=1):
+            # Keep the stream iterator alive until the explicit response.close().
+            lines = response.iter_lines(chunk_size=1)
+            for line in lines:
                 assert time.monotonic() < deadline, "No content before cancellation"
                 if not line.startswith(b"data:"):
                     continue
@@ -384,6 +384,47 @@ class ChatPayload(BasePayload):
         )
 
 
+@dataclass
+class StopStringChatPayload(ChatPayload):
+    """End a chat completion on its single stop string.
+
+    Checks the finish reason and that the output ends at the stop string,
+    keeping it only with include_stop_str_in_output. With metrics, also
+    requires the engine to stop at the match instead of running to max_tokens.
+    """
+
+    metrics: EngineMetrics | None = field(default=None, kw_only=True)
+    _before: float | None = field(default=None, init=False, repr=False)
+    _completion_progress: float = field(default=0, init=False, repr=False)
+
+    def bind_environment(self, env: dict[str, str]) -> None:
+        if self.metrics is not None:
+            self.metrics.bind_environment(env)
+
+    def before_request(self) -> None:
+        if self.metrics is not None:
+            self._completion_progress = self.metrics.completion_progress(
+                self.body["max_tokens"]
+            )
+            self.metrics.wait_for_scheduler()
+            self._before = self.metrics.progress()
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        (stop,) = self.body["stop"]
+        choice = response.json()["choices"][0]
+        assert choice["finish_reason"] == "stop", choice
+        if self.body.get("include_stop_str_in_output") is True:
+            assert content.endswith(stop), f"Expected output to end with {stop!r}"
+        else:
+            assert stop not in content, f"Expected {stop!r} trimmed from output"
+        if self.metrics is not None:
+            assert self._before is not None, "before_request must run first"
+            self.metrics.assert_cancelled(
+                before=self._before, completion_progress=self._completion_progress
+            )
+
+
 def _validate_chat_token_usage(result: Dict[str, Any]) -> None:
     usage = result.get("usage")
     assert isinstance(usage, dict), f"Missing usage: {result!r}"
@@ -523,7 +564,7 @@ class _KvRoutingPayload(ChatPayload):
         while time.monotonic() < deadline:
             try:
                 response = requests.get(
-                    f"http://{self.host}:{self.port}/health", timeout=5
+                    f"http://{self.host}:{self.port}/health?instances=true", timeout=5
                 )
                 if response.status_code == 200:
                     health = response.json()
@@ -1043,13 +1084,35 @@ class StreamingChatPayload(BasePayload):
         return content
 
 
+def _validate_single_tool_call(call: Dict[str, Any], arguments: Dict[str, Any]) -> None:
+    assert call.get("type") == "function", f"Not a function call: {call}"
+    assert call.get("id"), f"Tool call has no id: {call}"
+    assert (
+        json.loads(call["function"]["arguments"]) == arguments
+    ), f"Wrong arguments: {call}"
+
+
+def _one_value(values: List[Any]) -> Any:
+    # Later stream deltas may repeat a tool call's id, type, or name, but never change it.
+    distinct = {value for value in values if value is not None}
+    assert len(distinct) == 1, f"Expected one value, got {distinct}"
+    return distinct.pop()
+
+
 @dataclass
 class ToolCallingChatPayload(ChatPayload):
     """ChatPayload that validates tool calls in the response."""
 
-    def __init__(self, *args, expected_tool_name: Optional[str] = None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        expected_tool_name: Optional[str] = None,
+        expected_arguments: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.expected_tool_name = expected_tool_name
+        self.expected_arguments = expected_arguments
 
     def validate(self, response, content: str) -> None:
         """Validate that tool calls exist in the response.
@@ -1108,6 +1171,52 @@ class ToolCallingChatPayload(ChatPayload):
                 )
             else:
                 logger.info(f"Found expected keywords in tool args: {found}")
+
+        if self.expected_arguments is not None:
+            assert len(tool_calls) == 1, f"Expected one tool call, got {tool_calls}"
+            assert not (message.get("content") or "").strip(), f"Content: {message}"
+            _validate_single_tool_call(tool_calls[0], self.expected_arguments)
+
+
+@dataclass
+class StreamingToolCallingChatPayload(BasePayload):
+    expected_tool_name: str = field(kw_only=True)
+    expected_arguments: Dict[str, Any] = field(kw_only=True)
+    expected_finish_reason: str = field(kw_only=True)
+    endpoint: str = "/v1/chat/completions"
+    http_stream: bool = True
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        text = response.content.decode("utf-8")
+        events = [
+            line[5:].strip() for line in text.splitlines() if line.startswith("data:")
+        ]
+        assert events[-1:] == ["[DONE]"], "Stream did not end with [DONE]"
+        chunks = parse_sse_json_chunks(text)
+        assert not any("error" in chunk for chunk in chunks), chunks
+        choices = [choice for chunk in chunks for choice in chunk["choices"]]
+        assert all(choice["index"] == 0 for choice in choices), choices
+        deltas = [choice.get("delta") or {} for choice in choices]
+        content = "".join(delta.get("content") or "" for delta in deltas)
+        assert not content.strip(), f"Unexpected content: {content!r}"
+        parts = [part for delta in deltas for part in delta.get("tool_calls") or []]
+        assert {part["index"] for part in parts} == {0}, f"Not one tool call: {parts}"
+        functions = [part.get("function") or {} for part in parts]
+        call = {
+            "id": _one_value([part.get("id") for part in parts]),
+            "type": _one_value([part.get("type") for part in parts]),
+            "function": {
+                "name": _one_value([function.get("name") for function in functions]),
+                "arguments": "".join(f.get("arguments") or "" for f in functions),
+            },
+        }
+        assert call["function"]["name"] == self.expected_tool_name, call
+        _validate_single_tool_call(call, self.expected_arguments)
+        finish_reasons = [choice.get("finish_reason") for choice in choices]
+        assert finish_reasons[-1:] == [self.expected_finish_reason], finish_reasons[-1:]
+        assert not any(finish_reasons[:-1]), f"Choices after the end: {finish_reasons}"
+        return call["function"]["arguments"]
 
 
 @dataclass
@@ -1685,6 +1794,35 @@ class ImagesPayload(BasePayload):
 
     def response_handler(self, response: Any) -> str:
         return ImagesPayload.extract_image(response)
+
+
+@dataclass
+class ImagesAccountingPayload(ImagesPayload):
+    """Image-generation payload that also checks the accounting the sample
+    diffusion engine reports: every requested image in ``data``, null token
+    ``usage``, and ``nvext.usage`` counting the images returned and echoing
+    the step count the request asked for."""
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        result = response.json()
+        requested = int(self.body.get("n", 1))
+        assert (
+            len(result["data"]) == requested
+        ), f"Expected {requested} images in 'data': {len(result['data'])}"
+        assert (
+            result.get("usage") is None
+        ), f"Token usage must stay null without backend token counts: {result['usage']!r}"
+        assert result.get("size") == "1x1", f"Unexpected size: {result.get('size')!r}"
+        assert (
+            result.get("output_format") == "png"
+        ), f"Unexpected output_format: {result.get('output_format')!r}"
+        expected = {"output_images": requested, "input_images": 0}
+        requested_steps = (self.body.get("nvext") or {}).get("num_inference_steps")
+        if requested_steps is not None:
+            expected["num_inference_steps"] = requested_steps
+        accounting = (result.get("nvext") or {}).get("usage")
+        assert accounting == expected, f"Unexpected nvext.usage: {accounting!r}"
 
 
 @dataclass

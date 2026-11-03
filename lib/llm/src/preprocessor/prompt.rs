@@ -239,8 +239,15 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     }
 
     fn messages(&self) -> Value {
-        let messages_json = serde_json::to_value(&self.inner.messages).unwrap();
+        let messages_json = self.template_messages_json();
         Value::from_serialize(&messages_json)
+    }
+
+    fn template_messages_json_override(&self) -> Option<serde_json::Value> {
+        self.responses_tools
+            .as_ref()
+            .filter(|context| !context.history_phases.is_empty())
+            .map(|_| self.template_messages_json())
     }
 
     fn typed_messages(&self) -> Option<&[dynamo_protocols::types::ChatCompletionRequestMessage]> {
@@ -248,22 +255,31 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     }
 
     fn tools(&self) -> Option<Value> {
-        if self.inner.tools.is_none() {
-            None
-        } else {
-            // Try to fix the tool schema if it is missing type and properties
-            Some(may_be_fix_tool_schema(
-                serde_json::to_value(&self.inner.tools).unwrap(),
-            )?)
+        if let Some(tools) = self.declared_template_tools() {
+            return may_be_fix_tool_schema(tools);
         }
+        let tools = self.inner.tools.as_ref()?;
+        // Custom tools use the function schema before template-specific repair.
+        may_be_fix_tool_schema(
+            serde_json::to_value(
+                tools
+                    .iter()
+                    .map(|tool| tool.function_template_tool())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn template_tools(&self) -> Option<minijinja::value::Value> {
+        self.native_template_tools()
     }
 
     fn tool_choice(&self) -> Option<Value> {
-        if self.inner.tool_choice.is_none() {
-            None
-        } else {
-            Some(Value::from_serialize(&self.inner.tool_choice))
-        }
+        self.inner
+            .tool_choice
+            .as_ref()
+            .map(|choice| Value::from_serialize(choice.function_template_choice()))
     }
 
     fn response_format(&self) -> Option<Value> {
@@ -494,22 +510,57 @@ const CONTINUE_FINAL_MESSAGE_NOT_FOUND: &str =
 /// template rewrites or repeats earlier text.
 pub(crate) const CONTINUE_FINAL_MESSAGE_TAG: &str = "CONTINUE_FINAL_MESSAGE_TAG ";
 
+pub(crate) struct FinalMessageTags {
+    pub start: String,
+    pub end: String,
+}
+
+impl FinalMessageTags {
+    pub fn new() -> Self {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        Self {
+            start: format!("DYNAMO_FINAL_MESSAGE_{id}_BEGIN"),
+            end: format!("DYNAMO_FINAL_MESSAGE_{id}_END"),
+        }
+    }
+}
+
 /// Append [`CONTINUE_FINAL_MESSAGE_TAG`] to the last message's text content.
 /// Array content uses the last non-empty `text` part, matching Transformers.
-pub(crate) fn append_continue_final_message_tag(messages: &mut serde_json::Value) -> Result<()> {
+pub(crate) fn append_continue_final_message_tag(
+    messages: &mut serde_json::Value,
+    tags: Option<&FinalMessageTags>,
+) -> Result<()> {
     let Some(last) = messages.as_array_mut().and_then(|arr| arr.last_mut()) else {
         anyhow::bail!(CONTINUE_FINAL_MESSAGE_NOT_FOUND);
     };
     match last.get_mut("content") {
         Some(serde_json::Value::String(text)) if !text.is_empty() => {
+            if let Some(tags) = tags {
+                text.insert_str(text.len() - text.trim_start().len(), &tags.start);
+                text.push_str(&tags.end);
+            }
             text.push_str(CONTINUE_FINAL_MESSAGE_TAG);
             Ok(())
         }
         Some(serde_json::Value::Array(parts)) => {
+            if let Some(tags) = tags {
+                for part in parts.iter_mut() {
+                    if let Some(serde_json::Value::String(text)) = part.get_mut("text")
+                        && !text.is_empty()
+                    {
+                        text.insert_str(text.len() - text.trim_start().len(), &tags.start);
+                        break;
+                    }
+                }
+            }
             for part in parts.iter_mut().rev() {
                 if let Some(serde_json::Value::String(text)) = part.get_mut("text") {
                     if text.is_empty() {
                         continue;
+                    }
+                    if let Some(tags) = tags {
+                        text.push_str(&tags.end);
                     }
                     text.push_str(CONTINUE_FINAL_MESSAGE_TAG);
                     return Ok(());
@@ -548,6 +599,84 @@ pub(crate) fn apply_continue_final_message(prompt: RenderedPrompt) -> Result<Ren
         rendered[..tag_loc].trim_end().len()
     };
     Ok(truncate_rendered_prompt(prompt, end))
+}
+
+/// Recover the rendered content boundary without interpreting marker-looking body data.
+/// Preserve tokenization trust segments when removing the temporary render marker.
+pub(crate) fn resolve_final_message_boundary(
+    prompt: RenderedPrompt,
+    tags: &FinalMessageTags,
+    header_marker: &str,
+) -> Result<(RenderedPrompt, usize)> {
+    let rendered = prompt.as_str();
+    let mut bodies = Vec::new();
+    let mut removals = Vec::new();
+    for (start, _) in rendered.match_indices(&tags.start) {
+        let body_start = start + tags.start.len();
+        let end = body_start
+            + rendered[body_start..]
+                .find(&tags.end)
+                .ok_or_else(|| anyhow::anyhow!(CONTINUE_FINAL_MESSAGE_NOT_FOUND))?;
+        anyhow::ensure!(
+            !rendered[body_start..end].contains(&tags.start),
+            "Final-message markers were reordered by the chat template"
+        );
+        bodies.push(start..end + tags.end.len());
+        removals.push(start..body_start);
+        let mut end_marker_end = end + tags.end.len();
+        if rendered[end_marker_end..].starts_with(CONTINUE_FINAL_MESSAGE_TAG) {
+            end_marker_end += CONTINUE_FINAL_MESSAGE_TAG.len();
+        } else if rendered[end_marker_end..].starts_with(CONTINUE_FINAL_MESSAGE_TAG.trim_end()) {
+            end_marker_end += CONTINUE_FINAL_MESSAGE_TAG.trim_end().len();
+        }
+        removals.push(end..end_marker_end);
+    }
+    let last_body = bodies
+        .last()
+        .ok_or_else(|| anyhow::anyhow!(CONTINUE_FINAL_MESSAGE_NOT_FOUND))?;
+    // A template may repeat content before or within the final turn. Only controls
+    // outside all marked content copies can identify its actual rendered header.
+    let header_end = rendered[..last_body.start]
+        .rmatch_indices(header_marker)
+        .find(|(at, _)| !bodies.iter().any(|body| body.contains(at)))
+        .map(|(at, _)| at + header_marker.len())
+        .unwrap_or(0);
+    let header_end = header_end
+        - removals
+            .iter()
+            .filter(|range| range.end <= header_end)
+            .map(|range| range.len())
+            .sum::<usize>();
+    removals.sort_by_key(|range| range.start);
+    let remove_from = |text: &str, offset: usize| {
+        let mut text = text.to_string();
+        for range in removals.iter().rev() {
+            let from = range.start.saturating_sub(offset).min(text.len());
+            let to = range.end.saturating_sub(offset).min(text.len());
+            if from < to {
+                text.replace_range(from..to, "");
+            }
+        }
+        text
+    };
+    let rendered = if let Some(segments) = prompt.segments() {
+        let mut offset = 0;
+        let segments = segments
+            .iter()
+            .filter_map(|segment| {
+                let text = remove_from(&segment.text, offset);
+                offset += segment.text.len();
+                (!text.is_empty()).then_some(RenderedSegment {
+                    text,
+                    allow_special: segment.allow_special,
+                })
+            })
+            .collect();
+        RenderedPrompt::segmented(segments)
+    } else {
+        RenderedPrompt::text(remove_from(prompt.as_str(), 0))
+    };
+    Ok((rendered, header_end))
 }
 
 /// Truncate `prompt` to the first `end` bytes of `as_str()`, preserving
@@ -592,6 +721,47 @@ fn truncate_rendered_prompt(prompt: RenderedPrompt, end: usize) -> RenderedPromp
 mod tests {
     use super::normalize_tool_call_arguments;
 
+    #[test]
+    fn chat_tool_deferral_reaches_prompt_and_python_request() {
+        use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+        use dynamo_renderer::{ChatTemplate, ContextMixins, PromptFormatter};
+        use serde_json::json;
+
+        let template = include_str!("../../tests/data/muse_spark_open_deferred_tools.jinja");
+        let config: ChatTemplate =
+            serde_json::from_value(json!({"chat_template": template})).unwrap();
+        let PromptFormatter::OAI(formatter) =
+            PromptFormatter::from_parts(config, ContextMixins::new(&[]), true).unwrap();
+
+        for stream in [false, true] {
+            for nested in [false, true] {
+                let mut tool = json!({"type": "function", "function": {
+                    "name": "lookup", "description": "Find support tickets",
+                    "parameters": {"type": "object", "properties": {
+                        "deferred_query": {"type": "string"}
+                    }}
+                }});
+                if nested {
+                    tool["function"]["defer_loading"] = json!(true);
+                } else {
+                    tool["defer_loading"] = json!(true);
+                }
+                let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+                    "model": "muse_spark_open", "stream": stream,
+                    "messages": [{"role": "user", "content": "Find a ticket"}],
+                    "tools": [tool]
+                }))
+                .unwrap();
+                assert!(request.responses_tools.is_none());
+                let rendered = formatter.render(&request).unwrap();
+                assert!(rendered.contains("[deferred: use tool_search to load full schema]"));
+                assert!(!rendered.contains("deferred_query"), "{rendered}");
+                let wire = serde_json::to_value(request).unwrap();
+                assert_eq!(wire["tools"][0]["function"]["defer_loading"], json!(true));
+            }
+        }
+    }
+
     fn make_tool_call_messages(arguments: &str) -> serde_json::Value {
         serde_json::json!([{
             "role": "assistant",
@@ -601,6 +771,43 @@ mod tests {
                 "function": { "name": "f", "arguments": arguments }
             }]
         }])
+    }
+
+    #[test]
+    fn final_message_start_removal_preserves_segments_and_repeated_content() {
+        use dynamo_renderer::{RenderedPrompt, RenderedSegment};
+        let tags = super::FinalMessageTags {
+            start: "BEGIN".into(),
+            end: "FINISH".into(),
+        };
+        let prompt = RenderedPrompt::segmented(vec![
+            RenderedSegment {
+                text: "éHEADERBE".into(),
+                allow_special: true,
+            },
+            RenderedSegment {
+                text: "GINfirstFINISHCONTINUE_FINAL_MESSAGE_TAG BEGINsecondFINISH".into(),
+                allow_special: false,
+            },
+        ]);
+        let (prompt, header_end) =
+            super::resolve_final_message_boundary(prompt, &tags, "HEADER").unwrap();
+        assert_eq!(header_end, "éHEADER".len());
+        assert_eq!(prompt.as_str(), "éHEADERfirstsecond");
+        let segments = prompt.segments().unwrap();
+        assert!(segments[0].allow_special);
+        assert!(!segments[1].allow_special);
+        assert!(super::resolve_final_message_boundary(prompt, &tags, "HEADER").is_err());
+        for malformed in ["HEADERBEGINunfinished", "HEADERBEGINBEGINnestedFINISH"] {
+            assert!(
+                super::resolve_final_message_boundary(
+                    RenderedPrompt::text(malformed.into()),
+                    &tags,
+                    "HEADER"
+                )
+                .is_err()
+            );
+        }
     }
 
     /// Regression: large integers must survive the string→object conversion
@@ -757,7 +964,7 @@ mod tests {
                 {"type": "text", "text": "Design"}
             ]
         }]);
-        super::append_continue_final_message_tag(&mut messages).unwrap();
+        super::append_continue_final_message_tag(&mut messages, None).unwrap();
         assert_eq!(
             messages[0]["content"][1]["text"].as_str().unwrap(),
             format!("Design{}", super::CONTINUE_FINAL_MESSAGE_TAG)
@@ -774,7 +981,7 @@ mod tests {
                 {"type": "text", "text": "Design"}
             ]
         }]);
-        super::append_continue_final_message_tag(&mut messages).unwrap();
+        super::append_continue_final_message_tag(&mut messages, None).unwrap();
         assert_eq!(
             messages[0]["content"][1]["text"].as_str().unwrap(),
             format!("Design{}", super::CONTINUE_FINAL_MESSAGE_TAG)
@@ -814,7 +1021,7 @@ mod tests {
             {"role": "user", "content": "hello"},
             {"role": "assistant", "content": "   "}
         ]);
-        super::append_continue_final_message_tag(&mut messages).unwrap();
+        super::append_continue_final_message_tag(&mut messages, None).unwrap();
         assert_eq!(
             messages[1]["content"].as_str().unwrap(),
             format!("   {}", super::CONTINUE_FINAL_MESSAGE_TAG)
@@ -844,7 +1051,7 @@ mod tests {
     #[test]
     fn continue_final_message_errors_when_final_content_is_empty() {
         let mut messages = serde_json::json!([{"role": "assistant", "content": ""}]);
-        let err = super::append_continue_final_message_tag(&mut messages).unwrap_err();
+        let err = super::append_continue_final_message_tag(&mut messages, None).unwrap_err();
         assert!(
             err.to_string()
                 .contains("not found in the rendered chat template"),

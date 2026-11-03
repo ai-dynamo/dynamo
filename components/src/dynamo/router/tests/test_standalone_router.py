@@ -142,6 +142,7 @@ async def test_get_overlap_scores_forwards_cache_namespace() -> None:
 @pytest.mark.asyncio
 async def test_generate_forwards_request_and_response_fields() -> None:
     handler, router = handler_with_router()
+    context = object()
     worker_output = {
         "token_ids": [5],
         "output_type": "image",
@@ -161,10 +162,11 @@ async def test_generate_forwards_request_and_response_fields() -> None:
         "agent_context": {"session_id": "s"},
     }
 
-    results = [output async for output in handler.generate(request)]
+    results = [output async for output in handler.generate(request, context=context)]
 
     assert results == [worker_output]
-    (forwarded,), _ = router.generate_from_request.call_args
+    (forwarded,), kwargs = router.generate_from_request.call_args
+    assert kwargs == {"context": context}
     assert forwarded == {
         **request,
         "model": "unknown",

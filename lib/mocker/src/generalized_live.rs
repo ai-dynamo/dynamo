@@ -804,6 +804,8 @@ mod tests {
             max_output_tokens: output_len,
             output_token_ids: Some((0..output_len as u32).map(|token| token + 10_000).collect()),
             session_id: None,
+            images: Vec::new(),
+            kv_hint: None,
         }
     }
 
@@ -1944,6 +1946,8 @@ mod tests {
             max_output_tokens: 3,
             output_token_ids: Some(vec![10_000, 10_001, 10_002]),
             session_id: None,
+            images: Vec::new(),
+            kv_hint: None,
         };
 
         // One pass stores both prompts; the FIFO D2H lane finishes the copies

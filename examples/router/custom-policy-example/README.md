@@ -376,3 +376,11 @@ python3 -m dynamo.mocker \
 ```
 
 Send the same `curl` request from a fourth terminal. The frontend log records separate prefill and decode selections. Each worker set runs its own filter, scorer, and picker.
+
+## Runtime Parameters
+
+The `simple-filter-score-pick` provider supports runtime updates to
+`min_device_overlap_blocks`; the other examples remain startup-only. See the
+[runtime policy API](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#runtime-policy-updates).
+A positive threshold requires usable device-overlap data. Cold or replay requests without
+that data, including in the Mocker walkthrough, can have no eligible workers.

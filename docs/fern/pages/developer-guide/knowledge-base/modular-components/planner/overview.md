@@ -181,6 +181,7 @@ is set. The decision logs identify the missing capacity metadata.
 | [Planner Guide](planner-guide.md) | Deployment, configuration, integration |
 | [Planner Design](planner-design.md) | Architecture and algorithm internals |
 | [Planner Examples](planner-examples.md) | Planner-specific configuration examples |
+| [Simulate Planner Decisions with AISimulate](aisimulate-planner-replay.mdx) | Replay a trace through the Planner offline, including the experimental retune |
 | [DGDR Templates](../../../../recipes/kubernetes-templates/dgdr.mdx) | DGDR YAML examples, sample configurations, advanced patterns |
 | [Global Planner Guide](global-planner-guide.md) | Multi-DGD coordination, shared GPU budgets, single-endpoint multi-pool deployments |
 
@@ -208,7 +209,7 @@ DGDR planner features and generated ConfigMaps are materialized into these
 | `decode_min_endpoint` | `null` | Decode replica floor; replaces the decode value from `min_endpoint` when set |
 | `decode_engine_num_gpu` | `null` | GPUs per decode engine; auto-detected from the deployment when unset |
 | `prefill_engine_num_gpu` | `null` | GPUs per prefill engine; auto-detected from the deployment when unset |
-| `advisory` | `false` | Suggestion-only mode. The Planner computes and reports recommended replica counts, but does not execute scaling actions or change the deployment. |
+| `advisory` | `false` | Suggestion-only mode. The Planner computes and reports recommended replica counts, but does not execute scaling actions or change the deployment. Planner-in-the-loop replay honors it too. |
 | **Throughput-based scaling** | | |
 | `enable_throughput_scaling` | `true` | Enable throughput-based scaling |
 | `throughput_adjustment_interval_seconds` | `180` | Seconds between throughput-based scaling decisions |
@@ -293,7 +294,7 @@ Throughput prediction gauges `dynamo_planner_predicted_requests_per_second`, `dy
 
 Set `advisory: true` to run the local Planner in suggestion-only mode. This is recommended when you are evaluating a new Planner configuration, validating SLA targets, or reviewing how the Planner would react to production traffic before allowing it to scale workers.
 
-In advisory mode, the Planner still observes traffic and FPM data, computes recommended prefill and decode replica counts, logs recommendation summaries, exports predicted replica metrics, and includes recommendations in diagnostics reports. The recommendations are not applied as scaling decisions: the Planner does not execute scaling actions, send replica changes to Kubernetes or GlobalPlanner, or mutate the deployment.
+In advisory mode, the Planner still observes traffic and FPM data, computes recommended prefill and decode replica counts, logs recommendation summaries, exports predicted replica metrics, and includes recommendations in diagnostics reports. The recommendations are not applied as scaling decisions: the Planner does not execute scaling actions, send replica changes to Kubernetes or GlobalPlanner, or mutate the deployment. A planner-in-the-loop replay of an advisory configuration keeps the simulated deployment fixed, reports the recommendations, and records [retune](planner-guide.md#periodic-retune-experimental) decisions, which run only in simulation, without applying them; see [Replay in Advisory Mode](aisimulate-planner-replay.mdx#replay-in-advisory-mode).
 
 #### Diagnostics metrics
 

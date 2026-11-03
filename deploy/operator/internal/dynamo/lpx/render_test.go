@@ -18,7 +18,6 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -38,12 +37,17 @@ func renderSelectedForTest(pcs *grovev1alpha1.PodCliqueSet, projections []*Model
 	if err != nil {
 		return nil, err
 	}
+
+	// Projection-only fixtures model a workload with an authored conductor.
+	serving := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXConductor}},
+	}
 	workload := &Workload{
 		modelProjections:     projections,
 		digest:               digest,
 		scalingGroupReplicas: 1,
 	}
-	plan, err := workload.PlanNodeLocalMaterialization(pcs.Name)
+	plan, err := workload.PlanNodeLocalMaterialization(pcs.Name, serving)
 	if err != nil {
 		return nil, err
 	}
@@ -106,11 +110,11 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 				}
 			}
 			template := corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+				Annotations: map[string]string{
 					"user":                         "kept",
 					lpxv1alpha1.PodModelAnnotation: "spoofed",
 					lpxv1alpha1.CompilerSnapshotDigestAnnotation: "stale",
-				}},
+				},
 				Spec: renderTestPodSpec(),
 			}
 			template.Spec.Tolerations = []corev1.Toleration{
@@ -120,9 +124,9 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 			if test.configPath != "" {
 				template.Spec.Volumes = append(template.Spec.Volumes, corev1.Volume{
 					Name: lpuConfigVolumeName,
-					VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-						LocalObjectReference: corev1.LocalObjectReference{Name: "authored-config"}, DefaultMode: ptr.To[int32](0440),
-					}},
+					ConfigMap: &corev1.ConfigMapVolumeSource{
+						Name: "authored-config", DefaultMode: ptr.To[int32](0440),
+					},
 				})
 			}
 			template.Spec.Containers[0].VolumeMounts = slices.DeleteFunc(template.Spec.Containers[0].VolumeMounts,
@@ -250,7 +254,7 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	draft := testLPXComponent(runtimeModelDraft, "draft-build",
 		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: renderTestPodSpec()}},
 	)
-	draft.Replicas = ptr.To(int32(2))
+	draft.Replicas = new(int32(2))
 	target := testLPXComponent(testTargetStageName, "target-build",
 		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: &corev1.PodTemplateSpec{Spec: renderTestPodSpec()}},
 		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: renderTestPodSpec()}},
@@ -269,13 +273,12 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 				}},
 			})
 			spec.InitContainers = append(spec.InitContainers, corev1.Container{Name: "conductor", Image: "setup"})
-			spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "resources", VolumeSource: corev1.VolumeSource{
+			spec.Volumes = append(spec.Volumes, corev1.Volume{Name: "resources",
 				DownwardAPI: &corev1.DownwardAPIVolumeSource{Items: []corev1.DownwardAPIVolumeFile{{
 					Path: "main-memory", ResourceFieldRef: &corev1.ResourceFieldSelector{
 						ContainerName: "main", Resource: "limits.memory",
 					},
-				}}},
-			}})
+				}}}})
 		}
 	}
 
@@ -321,20 +324,31 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	})
 	require.NoError(t, err)
 	pcs := renderTestPCS(false)
-	plan, err := selected.PlanNodeLocalMaterialization(pcs.Name)
+	plan, err := selected.PlanNodeLocalMaterialization(pcs.Name, source.GetComponentByName(selected.ServingComponentName()))
 	require.NoError(t, err)
 	templates, err := RenderNodeLocal(selected, plan, RenderInput{
 		Stages: stages, Conductor: conductorTemplate.DeepCopy(),
 	})
 	require.NoError(t, err)
 
+	t.Log("Preserve companion containers with the workload's model paths before authored references")
+	companions := conductorTemplate.Spec.DeepCopy()
+	for _, containers := range [][]corev1.Container{companions.Containers[1:], companions.InitContainers} {
+		for i := range containers {
+			containers[i].Env = append([]corev1.EnvVar{
+				{Name: "LPX_DRAFT_MODEL_PATH", Value: "/models/draft-build"},
+				{Name: "LPX_TARGET_MODEL_PATH", Value: "/models/target-build"},
+			}, containers[i].Env...)
+		}
+	}
+
 	t.Log("Preserve container identity and references while materializing distinct Pod roles")
 	for _, clique := range templates.Cliques {
 		spec := &clique.Spec.PodSpec
 		require.Equal(t, "main", spec.Containers[0].Name)
 		require.Equal(t, "main", testContainerEnvValue(spec.Containers[0].Env, "CONTAINER_NAME"))
-		require.Equal(t, conductorTemplate.Spec.Containers[1:], spec.Containers[1:])
-		require.Equal(t, conductorTemplate.Spec.InitContainers, spec.InitContainers)
+		require.Equal(t, companions.Containers[1:], spec.Containers[1:])
+		require.Equal(t, companions.InitContainers, spec.InitContainers)
 		require.Contains(t, spec.Volumes, conductorTemplate.Spec.Volumes[len(conductorTemplate.Spec.Volumes)-1])
 		require.Contains(t, []string{lpxv1alpha1.PodRoleAgent, lpxv1alpha1.PodRoleConductor}, clique.Annotations[lpxv1alpha1.PodRoleAnnotation])
 	}
@@ -419,7 +433,7 @@ func renderTestPCS(hybrid bool) *grovev1alpha1.PodCliqueSet {
 			PodSpec: corev1.PodSpec{
 				SchedulerName: corev1.DefaultSchedulerName,
 				Volumes: []corev1.Volume{
-					{Name: "model-storage", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-storage"}}},
+					{Name: "model-storage", PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-storage"}},
 				},
 				Containers: []corev1.Container{{Name: "main", Image: "cyborg", Env: []corev1.EnvVar{
 					{Name: "SERVER_HOSTS_FILE", Value: "/tmp/lpu_servers"},
@@ -429,7 +443,7 @@ func renderTestPCS(hybrid bool) *grovev1alpha1.PodCliqueSet {
 				}}},
 				ResourceClaims: []corev1.PodResourceClaim{{
 					Name:                      "candidate",
-					ResourceClaimTemplateName: ptr.To("candidate"),
+					ResourceClaimTemplateName: new("candidate"),
 				}},
 			},
 		},
@@ -441,14 +455,14 @@ func renderTestPodSpec() corev1.PodSpec {
 	return corev1.PodSpec{
 		Volumes: []corev1.Volume{{
 			Name: "model-storage",
-			VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 				ClaimName: "model-storage",
-			}},
+			},
 		},
-			{Name: "single-v2-ssh-key", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-			{Name: "ssh-secret", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "ssh-secret"}}},
-			{Name: "host-dev", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/dev"}}},
-			{Name: "host-sys", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/sys"}}},
+			{Name: "single-v2-ssh-key", EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			{Name: "ssh-secret", Secret: &corev1.SecretVolumeSource{SecretName: "ssh-secret"}},
+			{Name: "host-dev", HostPath: &corev1.HostPathVolumeSource{Path: "/dev"}},
+			{Name: "host-sys", HostPath: &corev1.HostPathVolumeSource{Path: "/sys"}},
 		},
 		Containers: []corev1.Container{{
 			Name: "main", Image: "runtime",

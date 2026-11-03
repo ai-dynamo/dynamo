@@ -244,7 +244,8 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
         "engine_ports: dynamo_dynamic_ports also allocates per-worker engine "
-        "HTTP/gRPC ports, exported as DYN_ENGINE_{HTTP,GRPC}_PORT{N}",
+        "HTTP/gRPC and vLLM KV replay ports, exported as "
+        "DYN_ENGINE_{HTTP,GRPC}_PORT{N} and DYN_VLLM_KV_REPLAY_PORT{N}",
     )
     config.addinivalue_line(
         "markers",
@@ -1308,8 +1309,9 @@ def dynamo_dynamic_ports(
     - frontend_port: OpenAI-compatible HTTP/gRPC ingress (dynamo.frontend)
     - system_ports: List of worker metrics/system ports (configurable count via num_system_ports)
     - kv_event_ports: one ZMQ port per worker for vLLM KV event publishing
-    - engine_http_ports/engine_grpc_ports: one pair per worker for engines
-      launched out of process (sidecars); only with @pytest.mark.engine_ports
+    - engine_http_ports/engine_grpc_ports/engine_kv_replay_ports: one set per
+      worker for engines launched out of process (sidecars); only with
+      @pytest.mark.engine_ports
     """
     # Track ports as they are allocated so a failure mid-sequence (e.g. NIXL
     # allocation raising) still cleans up earlier reservations via finally,
@@ -1334,6 +1336,7 @@ def dynamo_dynamic_ports(
         all_ports.extend(nixl_side_channel_ports)
         engine_http_ports: list[int] = []
         engine_grpc_ports: list[int] = []
+        engine_kv_replay_ports: list[int] = []
         if request.node.get_closest_marker("engine_ports"):
             engine_http_ports = allocate_ports(
                 num_system_ports, DynamoPortRange.SERVE.value
@@ -1343,6 +1346,11 @@ def dynamo_dynamic_ports(
                 num_system_ports, DynamoPortRange.SERVE.value
             )
             all_ports.extend(engine_grpc_ports)
+            # One block, so a data-parallel engine can replay on the first port + rank.
+            engine_kv_replay_ports = allocate_contiguous_ports(
+                1, num_system_ports, DynamoPortRange.SERVE.value
+            )
+            all_ports.extend(engine_kv_replay_ports)
         yield ServicePorts(
             frontend_port=frontend_port,
             system_ports=system_port_list,
@@ -1351,6 +1359,7 @@ def dynamo_dynamic_ports(
             nixl_side_channel_ports=nixl_side_channel_ports,
             engine_http_ports=engine_http_ports,
             engine_grpc_ports=engine_grpc_ports,
+            engine_kv_replay_ports=engine_kv_replay_ports,
         )
     finally:
         deallocate_ports(all_ports)
