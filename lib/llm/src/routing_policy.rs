@@ -41,6 +41,16 @@ pub(crate) trait CandidatePolicy: Send + Sync {
         pins: &[u64],
     ) -> Result<Option<HashSet<u64>>, Error>;
 
+    fn check_current(
+        &self,
+        request: &PreprocessedRequest,
+        worker: u64,
+        workers: &HashMap<u64, ModelRuntimeConfig>,
+        live: &HashSet<u64>,
+        allowed: Option<HashSet<u64>>,
+        constraints: &RoutingConstraints,
+    ) -> Result<(), Error>;
+
     fn refresh_admission(
         &self,
         request: &SchedulingRequest,

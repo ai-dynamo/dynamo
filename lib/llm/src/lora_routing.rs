@@ -239,6 +239,19 @@ impl CandidatePolicy for LoraCandidatePolicy {
         ))
     }
 
+    fn check_current(
+        &self,
+        request: &PreprocessedRequest,
+        worker: u64,
+        workers: &HashMap<u64, ModelRuntimeConfig>,
+        live: &HashSet<u64>,
+        allowed: Option<HashSet<u64>>,
+        constraints: &RoutingConstraints,
+    ) -> Result<(), Error> {
+        policy(request).check_worker_eligible(worker, Some(workers), live, allowed, constraints)?;
+        Ok(())
+    }
+
     fn check_selected(
         &self,
         request: &PreprocessedRequest,
@@ -253,27 +266,19 @@ impl CandidatePolicy for LoraCandidatePolicy {
                 .routing
                 .as_ref()
                 .ok_or_else(RequestPolicy::capability_error)?;
-            let name = routing
-                .lora_name
-                .as_deref()
-                .ok_or_else(RequestPolicy::capability_error)?;
             let live = live();
             let configs = self.runtime_configs.as_ref().map(|watch| watch.borrow());
             let default_constraints = RoutingConstraints::default();
-            let candidates = policy.candidates(
-                &self.filter,
-                name,
-                live,
-                routing.allowed_worker_ids.as_ref(),
+            policy.check_worker_eligible(
+                worker,
                 configs.as_deref(),
+                &live.into_iter().collect(),
+                routing.allowed_worker_ids.clone(),
                 routing
                     .routing_constraints
                     .as_ref()
                     .unwrap_or(&default_constraints),
             )?;
-            if !candidates.contains(&worker) {
-                return Err(RequestPolicy::capability_error().into());
-            }
         }
         Ok(())
     }
@@ -401,6 +406,113 @@ mod tests {
             )
             .unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn selected_runtime_worker_remains_eligible_after_scale_up() {
+        use crate::protocols::common::preprocessor::RoutingHints;
+
+        let mut config = ModelRuntimeConfig::default();
+        config.taints.insert("dynamo.runtime-lora/v2".into());
+        config
+            .set_engine_specific("supports_runtime_lora_resolution", true)
+            .unwrap();
+        config
+            .set_engine_specific("runtime_lora_protocol_versions", vec![2_u32])
+            .unwrap();
+        config
+            .set_engine_specific("runtime_lora_schemes", vec!["custom"])
+            .unwrap();
+        let (tx, rx) = tokio::sync::watch::channel(HashMap::from([(1, config.clone())]));
+        let filter = Arc::new(LoraFilter::new(
+            LoraRoutingTable::new(),
+            LoraStateTracker::new(),
+        ));
+        let policy = LoraCandidatePolicy::hosted(
+            filter.clone(),
+            Arc::new(LoadEstimator::new()),
+            RouterMode::RoundRobin,
+            Some(rx),
+        )
+        .unwrap();
+        let mut request = PreprocessedRequest::builder()
+            .model("base".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap();
+        let name = (0..1000)
+            .map(|n| format!("adapter-{n}"))
+            .find(|name| filter.filter_worker_ids_for_runtime_lora(name, &[1, 2]) == [2])
+            .unwrap();
+        request.routing = Some(RoutingHints {
+            lora_name: Some(name),
+            base_model_name: Some("base".into()),
+            lora_source_uri: Some(crate::lora::runtime::RuntimeLoraSourceUri::new(
+                "custom:///opaque".into(),
+            )),
+            lora_resolution_version: Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION),
+            ..Default::default()
+        });
+        let selection = policy
+            .select(&request, None, &|| vec![1], &|| vec![1])
+            .unwrap()
+            .unwrap();
+        assert_eq!(selection.worker, 1);
+        let workers = HashMap::from([(1, config.clone()), (2, config.clone())]);
+        tx.send(workers.clone()).unwrap();
+        assert!(
+            policy
+                .check_selected(&request, 1, None, &|| vec![1, 2])
+                .is_ok()
+        );
+        assert!(
+            policy
+                .check_current(
+                    &request,
+                    1,
+                    &workers,
+                    &HashSet::from([1, 2]),
+                    None,
+                    &Default::default()
+                )
+                .is_ok()
+        );
+        assert!(
+            policy
+                .check_current(
+                    &request,
+                    1,
+                    &workers,
+                    &HashSet::from([2]),
+                    None,
+                    &Default::default()
+                )
+                .is_err()
+        );
+        assert!(
+            policy
+                .check_current(
+                    &request,
+                    1,
+                    &workers,
+                    &HashSet::from([1, 2]),
+                    Some(HashSet::from([2])),
+                    &Default::default()
+                )
+                .is_err()
+        );
+        let mut revoked = config;
+        revoked.taints.clear();
+        tx.send(HashMap::from([(1, revoked), (2, workers[&2].clone())]))
+            .unwrap();
+        assert!(
+            policy
+                .check_selected(&request, 1, None, &|| vec![1, 2])
+                .is_err()
+        );
     }
 
     #[test]

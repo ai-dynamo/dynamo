@@ -103,6 +103,22 @@ impl RequestPolicy {
         Self::pin_workers(filter, name, &eligible, pins.iter().copied()).map(Some)
     }
 
+    pub fn check_worker_eligible<C: RuntimeLoraWorkerFacts + WorkerConfigLike>(
+        self,
+        worker: u64,
+        configs: Option<&HashMap<u64, C>>,
+        live: &HashSet<u64>,
+        allowed: Option<HashSet<u64>>,
+        constraints: &RoutingConstraints,
+    ) -> Result<(), DynamoError> {
+        if self.runtime
+            && !Self::runtime_eligible(allowed, live, configs, constraints)?.contains(&worker)
+        {
+            return Err(Self::capability_error());
+        }
+        Ok(())
+    }
+
     fn runtime_eligible<C: RuntimeLoraWorkerFacts + WorkerConfigLike>(
         allowed: Option<HashSet<u64>>,
         live: &HashSet<u64>,

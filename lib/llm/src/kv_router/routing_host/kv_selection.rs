@@ -133,8 +133,9 @@ impl RoutingHost {
         let live = self.inner.client.instance_ids_avail().into_iter().collect();
         let workers = self.kv_router().workers_with_configs.borrow();
         let default_constraints = RoutingConstraints::default();
-        policy.restrict(
+        policy.check_current(
             request,
+            worker,
             &workers,
             &live,
             routing.allowed_worker_ids.clone(),
@@ -142,7 +143,6 @@ impl RoutingHost {
                 .routing_constraints
                 .as_ref()
                 .unwrap_or(&default_constraints),
-            &[worker],
         )?;
         Ok(())
     }
