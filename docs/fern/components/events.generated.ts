@@ -22,9 +22,23 @@ export interface DynamoEvent {
 }
 
 /** Generation date in Pacific, YYYY-MM-DD. The calendar grid treats this as "today". */
-export const GENERATED_ON = "2026-11-02";
+export const GENERATED_ON = "2026-11-03";
 
-export const UPCOMING_EVENTS: DynamoEvent[] = [];
+export const UPCOMING_EVENTS: DynamoEvent[] = [
+  {
+    "title": "SIG Engines — Biweekly Sync",
+    "start": "2026-11-13T01:00:00.000Z",
+    "month": "Nov",
+    "day": "12",
+    "year": "2026",
+    "dateLabel": "Thu, Nov 12, 2026",
+    "timeLabel": "5:00 PM",
+    "isPast": false,
+    "location": null,
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=SIG+Engines+%E2%80%94+Biweekly+Sync&dates=20261113T010000Z%2F20261113T020000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fhha-vzes-szx%0AOr+dial%3A+%28US%29+%2B1+724-505-2767+PIN%3A+501573420%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fhha-vzes-szx%3Fpin%3D9222789232381%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
+  }
+];
 
 export const PAST_EVENTS: DynamoEvent[] = [
   {
