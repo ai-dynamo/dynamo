@@ -8,11 +8,14 @@ from __future__ import annotations
 import asyncio
 import importlib
 import inspect
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
+
+logger = logging.getLogger(__name__)
 
 RUNTIME_LORA_PROTOCOL_VERSION = 2
 _MAX_SOURCE_REVISION_BYTES = 512
@@ -244,15 +247,20 @@ class RuntimeLoRAResolverChain:
                 )
             except asyncio.CancelledError:
                 raise
-            except RuntimeLoRANotFoundError:
-                raise RuntimeLoRANotFoundError(
-                    "runtime LoRA source was not found"
-                ) from None
-            except RuntimeLoRAResolverUnavailableError:
-                raise RuntimeLoRAResolverUnavailableError(
-                    "runtime LoRA resolver unavailable"
-                ) from None
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "Runtime LoRA resolver failed for adapter %s (type=%s)",
+                    context.adapter_key,
+                    type(exc).__name__,
+                )
+                if isinstance(exc, RuntimeLoRANotFoundError):
+                    raise RuntimeLoRANotFoundError(
+                        "runtime LoRA source was not found"
+                    ) from None
+                if isinstance(exc, RuntimeLoRAResolverUnavailableError):
+                    raise RuntimeLoRAResolverUnavailableError(
+                        "runtime LoRA resolver unavailable"
+                    ) from None
                 raise RuntimeLoRAPluginError("runtime LoRA resolver failed") from None
             if result is None:
                 continue
