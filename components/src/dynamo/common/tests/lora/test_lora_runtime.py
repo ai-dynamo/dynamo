@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import logging
 import sys
 import traceback
 import types
@@ -260,11 +261,13 @@ async def test_timeout_cancels_resolver(tmp_path):
     ],
 )
 async def test_provider_exception_details_are_not_exposed(
-    tmp_path, error_type, expected_type, message
+    tmp_path, caplog, error_type, expected_type, message
 ):
+    source_uri = "wandb-artifact:///private/provider?token=provider-secret"
+
     class FailingResolver(Resolver):
         async def resolve(self, *, source_uri, context):
-            raise error_type("credential-for-private-provider")
+            raise error_type(f"credential-for-private-provider: {source_uri}")
 
     chain = RuntimeLoRAResolverChain([FailingResolver()], {"wandb-artifact"})
     context = ResolveContext(
@@ -276,9 +279,12 @@ async def test_provider_exception_details_are_not_exposed(
         request_id="request-id",
     )
 
-    with pytest.raises(expected_type) as exc_info:
+    with (
+        caplog.at_level(logging.WARNING, logger="dynamo.common.lora.runtime"),
+        pytest.raises(expected_type) as exc_info,
+    ):
         await chain.resolve(
-            source_uri="wandb-artifact:///entity/project/adapter:v1",
+            source_uri=source_uri,
             context=context,
         )
 
@@ -288,6 +294,19 @@ async def test_provider_exception_details_are_not_exposed(
     assert "credential-for-private-provider" not in "".join(
         traceback.format_exception(exc_info.value)
     )
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "dynamo.common.lora.runtime"
+    ]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert context.adapter_key in records[0].getMessage()
+    assert error_type.__name__ in records[0].getMessage()
+    assert records[0].exc_info is None
+    assert "credential-for-private-provider" not in caplog.text
+    assert "provider-secret" not in caplog.text
+    assert source_uri not in caplog.text
 
 
 def test_allowlist_must_intersect_declared_schemes():
