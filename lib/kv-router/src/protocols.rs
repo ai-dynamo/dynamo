@@ -950,8 +950,9 @@ impl StorageTier {
         }
     }
 
+    /// Native execution GPU residency, excluding retained transfer storage.
     pub fn is_gpu(self) -> bool {
-        matches!(self, Self::Device | Self::GpuDirect)
+        matches!(self, Self::Device)
     }
 }
 
@@ -1713,7 +1714,10 @@ impl RouterEvent {
         // as a wire placeholder; allow that sentinel without permitting CacheOwner
         // stores or removes in Device.
         if domain == ResidencyDomain::CacheOwner
-            && self.storage_tier.is_gpu()
+            && matches!(
+                self.storage_tier,
+                StorageTier::Device | StorageTier::GpuDirect
+            )
             && (self.storage_tier == StorageTier::GpuDirect
                 || !matches!(self.event.data, KvCacheEventData::Cleared))
         {

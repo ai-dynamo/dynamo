@@ -1,12 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Advisory, bounded decode-source lookup after prefill admission. This path
-//! owns no source bookings, affinity state, buffers, or transport operations.
-//!
-//! CPU and GPU actions use separate inventory, capability and cost gates. A GPU
-//! hint is advisory: only its GPU-only backend endpoint may acquire source
-//! leases and reserve target GPU blocks. The ordinary P-to-D handoff is separate.
+//! Bounded decode-source lookup after prefill admission. CPU and GPU hints have
+//! separate inventory, capability and cost gates; the backend owns GPU leases.
 
 use std::time::Instant;
 
@@ -19,9 +15,7 @@ use uuid::Uuid;
 
 use super::*;
 
-/// Treat an existing same-role donor as free. This deliberately overestimates
-/// the no-decode-transfer alternative, so the new path only wins when its full
-/// calibrated acquisition/transfer/onboarding bound still saves time.
+/// Treat a same-role donor as free so replacing it must beat the full transfer cost.
 fn baseline_prefix_blocks(selection: &WorkerSelection, block_size: u32) -> Option<(usize, usize)> {
     let local = selection
         .selected_raw_cached_tokens

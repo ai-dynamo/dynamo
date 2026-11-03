@@ -11,6 +11,7 @@ import ctypes
 import hashlib
 import json
 import logging
+import sys
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -489,5 +490,8 @@ class FabricAllocation:
                 "FABRIC mapping cleanup failed; retaining it until process exit"
             )
 
-    def __del__(self):
-        self._release_or_retain()
+    def __del__(self, _sys=sys):
+        # CUDA and module globals may already be torn down during finalization.
+        # Process exit reclaims mappings that could not be released earlier.
+        if not _sys.is_finalizing():
+            self._release_or_retain()

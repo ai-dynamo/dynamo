@@ -89,7 +89,11 @@ def pytest_ignore_collect(collection_path, config):
     """
     filename = collection_path.name
     gpu_tiering_test = filename in {"test_gpu_offloading.py", "test_gpu_memory.py"}
-    if filename.startswith("test_vllm_") or gpu_tiering_test:
+    # FABRIC driver tests load only the stdlib helper, without vLLM or CUDA.
+    requires_vllm = (
+        filename.startswith("test_vllm_") and filename != "test_vllm_mnnvl_memory.py"
+    )
+    if requires_vllm or gpu_tiering_test:
         if not _can_import_vllm():
             return True  # vllm not available, skip this file
     if gpu_tiering_test and not _can_import_gpu_tiering():

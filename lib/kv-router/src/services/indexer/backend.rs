@@ -2463,60 +2463,55 @@ mod session_tests {
 
     #[tokio::test]
     async fn lower_tier_session_updates_follow_the_lower_tier_physical_apply() {
-        let (indexer, session_prefix_index) = make_concurrent_session_test_indexer();
-        let worker = WorkerWithDpRank::new(7, 0);
+        for tier in [StorageTier::HostPinned, StorageTier::GpuDirect] {
+            let (indexer, session_prefix_index) = make_concurrent_session_test_indexer();
+            let worker = WorkerWithDpRank::new(7, 0);
 
-        // Fill the host lane with work the session consumer would otherwise outrun.
-        for event_id in 1..=2000u64 {
-            let local_hashes: Vec<u64> = (1..=32).map(|i| 100_000 + event_id * 64 + i).collect();
+            // Fill the lower-tier lane so the session consumer can outrun it.
+            for event_id in 1..=2000u64 {
+                let local_hashes: Vec<u64> =
+                    (1..=32).map(|i| 100_000 + event_id * 64 + i).collect();
+                indexer
+                    .try_apply_event(store_event(7, 0, event_id, &[], &local_hashes, tier))
+                    .await
+                    .unwrap();
+            }
             indexer
-                .try_apply_event(store_event(
-                    7,
-                    0,
-                    event_id,
-                    &[],
-                    &local_hashes,
-                    StorageTier::HostPinned,
-                ))
+                .try_apply_event(
+                    store_event(7, 0, 2001, &[], &[41], StorageTier::Device)
+                        .with_session_id("session-1"),
+                )
                 .await
                 .unwrap();
-        }
-        indexer
-            .try_apply_event(
-                store_event(7, 0, 2001, &[], &[41], StorageTier::Device)
-                    .with_session_id("session-1"),
-            )
-            .await
-            .unwrap();
-        indexer
-            .try_apply_event(store_event(7, 0, 2002, &[], &[41], StorageTier::HostPinned))
-            .await
-            .unwrap();
-        indexer.flush_session_updates().await.unwrap();
+            indexer
+                .try_apply_event(store_event(7, 0, 2002, &[], &[41], tier))
+                .await
+                .unwrap();
+            indexer.flush_session_updates().await.unwrap();
 
-        assert_eq!(
-            session_prefix_index
-                .get_session_block_lineage_in_tier(
-                    "session-1",
-                    SessionResidencyOwner::Worker(worker),
-                    StorageTier::HostPinned,
-                    None
-                )
-                .unwrap()
-                .len(),
-            1
-        );
-        let Indexer::Concurrent { lower_tier, .. } = &indexer else {
-            unreachable!()
-        };
-        let host = lower_tier
-            .get(StorageTier::HostPinned)
-            .expect("host tier allocated");
-        assert_eq!(
-            host.backend()
-                .root_workers(LocalBlockHash(41), &ResidencyProjection::default()),
-            vec![worker],
-            "host residency was reported before the host index applied the store"
-        );
+            assert_eq!(
+                session_prefix_index
+                    .get_session_block_lineage_in_tier(
+                        "session-1",
+                        SessionResidencyOwner::Worker(worker),
+                        tier,
+                        None
+                    )
+                    .unwrap()
+                    .len(),
+                1
+            );
+            let Indexer::Concurrent { lower_tier, .. } = &indexer else {
+                unreachable!()
+            };
+            let lower = lower_tier.get(tier).expect("lower tier allocated");
+            assert_eq!(
+                lower
+                    .backend()
+                    .root_workers(LocalBlockHash(41), &ResidencyProjection::default()),
+                vec![worker],
+                "session residency preceded the lower-tier store"
+            );
+        }
     }
 }

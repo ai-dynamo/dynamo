@@ -22,6 +22,7 @@ pytestmark = [
         ("test_gpu_offloading.py", False, True, 1),
         ("test_gpu_memory.py", False, True, 1),
         ("test_vllm_args.py", False, True, 1),
+        ("test_vllm_mnnvl_memory.py", False, None, 0),
         ("test_kv_hints.py", False, None, 0),
         ("test_gpu_offloading.py", True, None, 1),
         ("test_gpu_memory.py", True, None, 1),

@@ -124,6 +124,67 @@ fn is_noop(event: &PlacementEvent) -> bool {
     matches!(&event.event.data, KvCacheEventData::Removed(remove) if remove.block_hashes.is_empty())
 }
 
+#[test]
+fn native_clear_preserves_gpu_mm_exclusion_until_its_rank_removes_it() {
+    let mut normalizer = engine_owned_normalizer();
+    let other_rank = WorkerWithDpRank::new(A, 1);
+    let gpu = |mut wire: Value| {
+        wire["medium"] = json!("gpu_direct");
+        wire
+    };
+    let image_store = || stored(None, &[block(E_IX, image(IMAGE_X, BLOCK))]);
+    let child_store = || stored(Some(E_IX), &[block(E_KX, text(300))]);
+
+    for rank in [worker(A), other_rank] {
+        assert!(is_noop(&run_on(
+            &mut normalizer,
+            rank,
+            1,
+            gpu(image_store())
+        )));
+    }
+    assert!(is_noop(&run(&mut normalizer, A, 2, image_store())));
+    run(&mut normalizer, A, 3, cleared());
+
+    assert!(store_data(&run(&mut normalizer, A, 4, child_store())).is_some());
+    assert!(is_noop(&run(&mut normalizer, A, 5, gpu(child_store()))));
+    assert!(is_noop(&run_on(
+        &mut normalizer,
+        other_rank,
+        2,
+        gpu(removed(&[E_IX]))
+    )));
+    assert!(store_data(&run_on(&mut normalizer, other_rank, 3, gpu(child_store()))).is_some());
+    assert!(is_noop(&run(&mut normalizer, A, 6, gpu(child_store()))));
+    assert!(is_noop(&run(&mut normalizer, A, 7, gpu(removed(&[E_IX])))));
+    assert!(store_data(&run(&mut normalizer, A, 8, gpu(child_store()))).is_some());
+}
+
+#[test]
+fn native_clear_preserves_gpu_overflow_without_retaining_native_overflow() {
+    let mut normalizer = engine_owned_normalizer().with_engine_mm_excluded_capacity(0);
+    let gpu = |mut wire: Value| {
+        wire["medium"] = json!("gpu_direct");
+        wire
+    };
+    let image_store = stored(None, &[block(E_IX, image(IMAGE_X, BLOCK))]);
+    assert!(is_noop(&run(&mut normalizer, A, 1, gpu(image_store))));
+    run(&mut normalizer, A, 2, cleared());
+
+    let child = || stored(Some(E_IX), &[block(E_KX, text(300))]);
+    assert!(is_noop(&run(&mut normalizer, A, 3, gpu(child()))));
+    assert!(store_data(&run(&mut normalizer, A, 4, child())).is_some());
+    assert!(
+        store_data(&run_on(
+            &mut normalizer,
+            WorkerWithDpRank::new(A, 1),
+            1,
+            gpu(child()),
+        ))
+        .is_some()
+    );
+}
+
 fn hashes(tokens: &[u64], is_eagle: bool) -> Vec<LocalBlockHash> {
     let tokens: Vec<u32> = tokens
         .iter()

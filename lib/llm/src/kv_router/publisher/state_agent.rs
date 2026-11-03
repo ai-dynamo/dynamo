@@ -626,20 +626,17 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
         &mut self,
         placement_events: Vec<PlacementEvent>,
     ) -> Result<()> {
-        let attachment_worker = self
+        let attachment = self
             .attachment
             .as_ref()
-            .context("KV state agent has no framework attachment")?
-            .worker;
+            .context("KV state agent has no framework attachment")?;
+        let (attachment_worker, generation) = (attachment.worker, attachment.generation);
         if placement_events
             .iter()
             .any(|event| event.placement.tier == StorageTier::GpuDirect)
         {
             self.fail_source(
-                self.attachment
-                    .as_ref()
-                    .expect("attachment checked above")
-                    .generation,
+                generation,
                 "retained GPU inventory is unsupported on the versioned state-agent ingress",
             );
             anyhow::bail!("GpuDirect inventory requires the native worker publisher");
@@ -2631,6 +2628,23 @@ mod tests {
                 ResidencyDomain::Worker,
                 ResidencyDomain::CacheOwner,
             ]
+        );
+
+        let publications = coordinator.publisher.publications.load(Ordering::Relaxed);
+        let mut retained = store(worker, ResidencyDomain::Worker, None, 109, 39);
+        retained.placement.tier = StorageTier::GpuDirect;
+        assert!(
+            coordinator
+                .apply_and_publish_chunk(vec![retained])
+                .await
+                .is_err()
+        );
+        assert!(coordinator.source_failed);
+        assert!(coordinator.worker_domain_failed && coordinator.cache_owner_domain_failed);
+        assert!(!coordinator.attachment.as_ref().unwrap().ready);
+        assert_eq!(
+            coordinator.publisher.publications.load(Ordering::Relaxed),
+            publications,
         );
     }
 

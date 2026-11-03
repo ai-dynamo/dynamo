@@ -1160,6 +1160,29 @@ mod tests {
     }
 
     #[test]
+    fn retained_gpu_residency_is_not_a_device_session_frontier() {
+        let indexer = SessionPrefixIndexer::new();
+        let chain = hashes(vec![1, 2]);
+        indexer
+            .update_session_from_stored_blocks_in_tier(
+                "s1",
+                owner(1),
+                StorageTier::GpuDirect,
+                None,
+                &chain,
+            )
+            .unwrap();
+        assert_eq!(indexer.get_session_residency("s1").len(), 1);
+        assert!(indexer.get_session_frontiers("s1").is_empty());
+
+        indexer
+            .update_session_from_stored_blocks("s1", worker(1), None, &chain)
+            .unwrap();
+        assert_eq!(indexer.get_session_frontiers("s1").len(), 1);
+        assert_eq!(indexer.get_session_residency("s1").len(), 2);
+    }
+
+    #[test]
     fn deeper_match_replaces_the_shallower_frontier() {
         let chain = hashes(vec![1, 2, 3]);
         let indexer = SessionPrefixIndexer::new();

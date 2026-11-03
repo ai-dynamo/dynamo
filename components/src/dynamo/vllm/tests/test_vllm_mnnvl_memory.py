@@ -42,6 +42,7 @@ sys.modules[_helper_spec.name] = m
 _helper_spec.loader.exec_module(m)
 
 pytestmark = [
+    pytest.mark.pre_merge,
     pytest.mark.post_merge,
     pytest.mark.unit,
     pytest.mark.vllm,
@@ -392,6 +393,24 @@ def test_failed_local_quiescence_retains_live_mapping_without_forced_reuse(drive
     assert not {"unmap", "free", "release", "release-context"} & {
         r[0] for r in driver.calls
     }
+
+
+def test_interpreter_finalization_does_not_touch_cuda_or_cleared_globals(
+    driver, monkeypatch
+):
+    owner = m.FabricAllocation((1, 8), driver=driver)
+    driver.calls.clear()
+    driver.fail = "sync"
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "is_finalizing", lambda: True)
+        patch.setattr(m, "sys", None, raising=False)
+        patch.setattr(m, "_RETAINED_FAILED_FABRIC_ALLOCATIONS", None)
+        patch.setattr(m, "logger", None)
+        owner.__del__()
+    assert driver.calls == []
+    assert owner._mapped and owner.pointer == 4096 and owner.handle == 90
+    driver.fail = None
+    owner._release()
 
 
 def test_effective_domain_matches_same_clique_not_gpu_uuid_and_separates_other_profiles():

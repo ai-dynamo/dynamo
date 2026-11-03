@@ -176,8 +176,9 @@ class; reject a conflicting registration. Spawned processes need the same
 bootstrap registration. Keep statistics enabled during validation.
 
 The retained tier publishes `gpu_direct` events and has an independent lifetime
-from the model's normal GPU cache. Native cache clears preserve retained
-inventory; retained-cache removals revoke it explicitly. The router requires
+from the model's normal GPU cache. Model Device cache-clear events do not
+revoke retained inventory. Resetting the offloading connector removes its retained
+blocks and publishes removals. The router requires
 `router_hint_gpu_direct`, GPU source endpoints and a matching certified
 `router_hint_transfer_domain` before emitting `kv.fetch_gpu@1.0`. The domain is
 an operator-supplied layout contract, not automatic model compatibility proof.

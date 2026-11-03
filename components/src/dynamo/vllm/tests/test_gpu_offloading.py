@@ -7,6 +7,7 @@ only scalar verdicts return to the host. Remote KVCR/NIXL tests are separate.
 """
 
 import base64
+import json
 import os
 import subprocess
 import sys
@@ -15,6 +16,7 @@ import uuid
 import weakref
 from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -54,6 +56,9 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     make_offload_key,
 )
+
+from dynamo.llm import WorkerType
+from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 
 pytestmark = [
     pytest.mark.post_merge,
@@ -721,12 +726,6 @@ def test_tp2_retained_inventory_waits_for_both_worker_completions():
 @pytest.mark.gpu_0
 @pytest.mark.parametrize("transport", ["cuda_ipc", "mnnvl"])
 def test_tp2_discovery_and_storage_publish_the_same_domain(monkeypatch, transport):
-    import json
-    from unittest.mock import MagicMock
-
-    from dynamo.llm import WorkerType
-    from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
-
     tier = {
         "type": "GPUKVCRSecondaryTierManager",
         "gpu_transport": transport,
