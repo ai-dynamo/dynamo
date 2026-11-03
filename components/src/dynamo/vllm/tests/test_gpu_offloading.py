@@ -31,7 +31,8 @@ from kvbm.vllm_integration.gpu_offloading import (
     GPUTieringManager,
     _GPUFrameworkPinAdapter,
 )
-from kvcr.types import BlockKey
+from kvcr.backends.remote_fw_dram import _RemoteFWDram
+from kvcr.types import BlockKey, QueryStatus
 from vllm.distributed.kv_events import BlockRemoved
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingWorkerMetadata,
@@ -48,6 +49,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
+from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
@@ -603,6 +605,69 @@ def _multipart_tier():
         deliver=lambda blocks, **kwargs: calls.append((blocks, kwargs)) or 91,
     )
     return tier, calls
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_gpu_key_adapter_preserves_group_keys_separately_from_router_hashes():
+    adapter = gpu_offloading._VllmKeyAdapter()
+    block_hash = BlockHash(bytes(range(32)))
+    keys = [make_offload_key(block_hash, group) for group in (0, 7)]
+    canonical = [adapter.decode_from_framework(key) for key in keys]
+    assert canonical == [BlockKey(key) for key in keys]
+    assert len(set(canonical)) == 2
+    assert [adapter.encode_to_framework(key) for key in canonical] == keys
+    router_key = maybe_convert_block_hash(block_hash)
+    assert router_key not in canonical
+    assert [adapter.encode_to_router(key) for key in canonical] == [router_key] * 2
+    with pytest.raises(NotImplementedError, match="group identity"):
+        adapter.decode_from_router(router_key)
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_gpu_lookup_and_delivery_keep_framework_keys_through_router_hint_gate():
+    tier, deliveries = _multipart_tier()
+    block_hash = BlockHash(bytes(range(32)))
+    framework_key = make_offload_key(block_hash, 7)
+    canonical = BlockKey(framework_key)
+    router_key = maybe_convert_block_hash(block_hash)
+    assert canonical != router_key
+    hint = SimpleNamespace(
+        source="donor", failed=False, missing_keys=set(), block_hashes={router_key}
+    )
+    backend = _RemoteFWDram.__new__(_RemoteFWDram)
+    backend._options = SimpleNamespace(opportunistic_query=False)
+    backend._key_adapter = tier._key_adapter
+    backend._request_hints = {"load": hint}
+
+    def query(keys, request_id):
+        assert keys == (canonical,)
+        status = (
+            QueryStatus.FETCHABLE
+            if backend.query(keys[0], request_id)
+            else QueryStatus.MISS
+        )
+        return [(status, None)]
+
+    tier._kvcr.query = query
+    context = ReqContext("load")
+    assert tier.lookup(framework_key, context) is LookupResult.HIT
+    tier.submit_load(
+        SimpleNamespace(
+            job_id=8, keys=[framework_key], chunk_ids=[1], req_context=context
+        )
+    )
+    assert len(deliveries) == 1
+    blocks, kwargs = deliveries[0]
+    assert set(blocks) == {canonical}
+    assert kwargs == {"request_id": "load"}
+    assert [(ref.label, ref.element_index) for ref in blocks[canonical]] == [
+        (":rank0", 1),
+        (":rank1", 1),
+    ]
+    hint.block_hashes = {canonical}
+    assert tier.lookup(framework_key, context) is LookupResult.MISS
 
 
 @pytest.mark.pre_merge

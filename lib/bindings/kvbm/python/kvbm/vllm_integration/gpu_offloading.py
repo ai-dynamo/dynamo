@@ -21,7 +21,7 @@ from dataclasses import replace
 import msgspec
 from kvcr import KVCR, KVCRBindings, ZmqPeerControlChannel
 from kvcr.config import KVCRBackendConfigs, KVCRConfig, RemoteFWGPUOptions
-from kvcr.types import MemoryRef, RegionDescriptor, TransferError
+from kvcr.types import BlockKey, MemoryRef, RegionDescriptor, TransferError
 from vllm.distributed.kv_events import BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
@@ -29,10 +29,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
+from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_offload.base import (
+    OffloadKey,
     OffloadingEvent,
     OffloadingSpec,
     RequestOffloadingContext,
+    get_offload_block_hash,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
@@ -41,7 +44,6 @@ from vllm.v1.kv_offload.tiering.kvcr.manager import (
     KVCRSecondaryTierManager,
     _FrameworkPinAdapter,
     _kvcr_metric_definitions,
-    _VllmKeyAdapter,
 )
 from vllm.v1.kv_offload.tiering.manager import (
     TieringOffloadingManager,
@@ -60,6 +62,29 @@ from .gpu_memory import (
 
 logger = logging.getLogger(__name__)
 _RETAINED_FAILED_GPU_MANAGERS = []
+
+
+class _VllmKeyAdapter:
+    """Keep complete framework keys separate from lossy router hashes."""
+
+    def decode_from_framework(self, framework_key: object) -> BlockKey:
+        if not isinstance(framework_key, bytes):
+            raise TypeError("vLLM offload keys must be bytes")
+        return BlockKey(framework_key)
+
+    def encode_to_framework(self, key: BlockKey) -> OffloadKey:
+        return OffloadKey(self.decode_from_framework(key))
+
+    def encode_to_router(self, key: BlockKey) -> int | bytes:
+        block_hash = BlockHash(get_offload_block_hash(self.encode_to_framework(key)))
+        return maybe_convert_block_hash(block_hash)
+
+    def decode_from_router(self, router_key: int | bytes) -> BlockKey:
+        raise NotImplementedError("A router hash cannot recover the KV group identity")
+
+    # Pinned vLLM lookup and older KVCR versions use the two legacy names.
+    encode = decode_from_framework
+    decode = encode_to_router
 
 
 def _gpu_metric(name):
@@ -329,7 +354,9 @@ class GPUKVCRSecondaryTierManager(KVCRSecondaryTierManager):
         # KVCR owns one operation for all rank parts of each key. A partial
         # transfer cannot publish a logical block or release its primary slot.
         blocks = {
-            self._key_adapter.encode(key): self._make_descriptors(int(chunk_id))
+            self._key_adapter.decode_from_framework(key): self._make_descriptors(
+                int(chunk_id)
+            )
             for key, chunk_id in zip(
                 job_metadata.keys, job_metadata.chunk_ids, strict=True
             )
