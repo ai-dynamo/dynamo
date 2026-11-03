@@ -99,9 +99,8 @@ runs:
         # vCluster HostPath Mapper is installed on the host for checkpoint
         # tests. Remove it explicitly before deleting the namespace so GPU-node
         # DaemonSet pods do not linger until namespace garbage collection.
-        # The release name is namespace-wide; only the VclusterReleaseName value
-        # setup-dynamo-operator sets records which vCluster owns it. In a shared
-        # namespace it may belong to another run, so release it only when it is ours.
+        # vcluster-hpm is namespace-wide and may belong to another run; uninstall it
+        # only when the VclusterReleaseName value set at setup names our vCluster.
         HPM_OWNER=$(helm get values vcluster-hpm --namespace "${NAMESPACE}" -o json 2>/dev/null \
           | jq -r '.VclusterReleaseName // empty' 2>/dev/null || true)
         if [ "${HPM_OWNER}" = "${VCLUSTER_NAME}" ]; then

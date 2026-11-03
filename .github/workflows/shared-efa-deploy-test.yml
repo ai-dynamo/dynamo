@@ -3,9 +3,8 @@
 
 name: EFA Deploy Test
 
-# Called by nightly-ci.yml from one job that holds a fixed concurrency group, so
-# every run's setup -> test -> cleanup lifetime on aws-dev-02 is serialized: the
-# caller job stays in progress until efa-deploy-cleanup below has finished.
+# nightly-ci.yml calls this from one job holding a fixed concurrency group, which
+# stays in progress until efa-deploy-cleanup finishes, so runs never overlap.
 #
 # The only jobs here that run against real EFA hardware. Everything else
 # validates the -efa images statically; these deploy a 1P1D stack on aws-dev-02

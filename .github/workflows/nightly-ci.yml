@@ -727,15 +727,8 @@ jobs:
   # Setup, the vLLM and SGLang tests, and cleanup run in
   # shared-efa-deploy-test.yml; its header explains the job split.
   #
-  # aws-dev-02 has to use the shared dynamo-deploy-test namespace (the Kyverno
-  # policy that schedules GPU pods onto the p5 / EFA nodes matches only that
-  # namespace), and vCluster allows one virtual cluster per host namespace. So
-  # every run of this workflow, on any branch and from schedule or dispatch,
-  # queues on one fixed group for the whole setup -> test -> cleanup lifetime.
-  # A group on each of the inner jobs would release the namespace between setup
-  # and test. cancel-in-progress stays false so a new run never cancels one that
-  # is mid-test, and queue: max keeps a third run waiting instead of replacing
-  # the pending one.
+  # The shared aws-dev-02 namespace holds one vCluster, so all runs queue on one
+  # fixed group for the whole setup -> test -> cleanup lifetime, never cancelling.
   efa-deploy:
     name: EFA Deploy
     needs: [compute-release-mode, operator-build, resolve-source-sha, vllm-efa-build, sglang-efa-build]
