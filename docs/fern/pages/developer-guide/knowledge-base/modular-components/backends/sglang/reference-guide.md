@@ -184,40 +184,32 @@ Dynamo parses and resolves the complete route list during worker startup. Startu
 
 ## Experimental worker withdrawal
 
-Set `DYN_EXPERIMENTAL_WORKER_WITHDRAWAL=1` and enable `DYN_SYSTEM_PORT` on
-`python -m dynamo.sglang` LLM workers to expose reversible, pre-delete withdrawal.
-This applies to aggregated, decode, and prefill handlers with TCP or Velo response
-planes. Startup rejects QUIC when withdrawal is enabled because discovery removal
-currently cancels its active responses. It does not use
+**Experimental.** Enable `DYN_SYSTEM_PORT` on `python -m dynamo.sglang` LLM
+workers to expose reversible, pre-delete withdrawal on the existing system
+listener. No additional worker feature flag is required. This applies to
+aggregated, decode, and prefill handlers. Without a system listener, the worker
+starts normally and does not register these controls.
+
+Withdrawal supports TCP and Velo response planes. QUIC workers start normally,
+but an `unpublish` call returns 409 before changing worker state because discovery
+removal currently cancels active QUIC responses. The operation does not use
 SGLang's `pause_generation`, abort requests, or stop the engine.
 
-Use the same `DYN_EXPERIMENTAL_WORKER_WITHDRAWAL` setting on frontends and workers.
+Frontend recovery is configured separately from endpoint availability. In this
+revision, frontends still use `DYN_EXPERIMENTAL_WORKER_WITHDRAWAL=1` to enable the
+existing three additional drain reselections. Workers do not read this setting.
 It accepts `1`, `true`, or `yes` (case-insensitive) and defaults to disabled.
-On a frontend it enables bounded admission reselection and retains the prompt's
-shared token buffer until the first response data on the final ordinary attempt.
-With the feature disabled, the final attempt releases its replay reference after
-dispatch as before. The setting is read when the model pipeline is constructed,
-not on every request. Workers use it to enable the controls below.
+The frontend reads it when constructing the model pipeline, not on every request.
+An explicit drain-migration limit and its default and budget-exhaustion semantics
+remain under discussion in [PR #17570](https://github.com/ai-dynamo/dynamo/pull/17570).
 
-For DGD deployments, configure it once through the existing graph-level environment:
+With frontend recovery enabled, the final ordinary attempt retains its replay
+reference to the shared prompt-token buffer until first response data. With
+recovery disabled, it releases that reference after dispatch as before.
 
-```yaml
-# Fragment of a nvidia.com/v1beta1 DynamoGraphDeployment
-spec:
-  env:
-    - name: DYN_EXPERIMENTAL_WORKER_WITHDRAWAL
-      value: "1"
-```
-
-The operator propagates this to each component's `main` container, including the
-frontend and aggregated or PD workers, through the existing Grove Pod-template
-path. For `v1alpha1`, use `spec.envs` instead. Component-level entries with the same
-name override the graph value; avoid duplicating this setting there. Workers still
-require the normal `DYN_SYSTEM_PORT` configuration for their system listener.
-
-Environment injection applies to newly created Pods; it does not change running
-processes. Under Grove OnDelete, complete an initial deployment of compatible
-images and this setting before using withdrawal for later releases.
+Environment changes apply to newly created Pods, not running processes. Under
+Grove OnDelete, deploy compatible frontend and worker images and enable frontend
+recovery before using withdrawal for subsequent releases.
 
 Keeping an `Arc` reference does not copy token data, but can extend the allocation's
 lifetime. For `C` requests waiting for first response data, token-buffer retention
@@ -236,17 +228,18 @@ it accessible only to trusted administrators.
 
 | Method | Worker system path | Behavior |
 | --- | --- | --- |
-| `POST` | `/engine/worker_lifecycle/drain` | Withdraw from discovery, allow routing convergence, then close new request admission |
+| `POST` | `/engine/worker_lifecycle/unpublish` | Withdraw from discovery, allow routing convergence, then close new request admission |
 | `GET` | `/engine/worker_lifecycle/status` | Report local withdrawal and admission state |
 | `POST` | `/engine/worker_lifecycle/resume` | Reopen admission and restore discovery registration |
 
 Requests must have no body or an empty JSON object. Invalid methods return 405;
 invalid bodies return 400. Startup and terminal-shutdown conflicts return 409;
-discovery failures return 503. Controls become available only after model readiness
-and observation of this exact endpoint instance's initial registration.
+discovery failures return 503. State-changing operations require model readiness
+and observation of this exact endpoint instance's initial registration. Status
+remains available during startup. Unsupported QUIC withdrawal returns 409.
 
 ```bash
-curl --fail-with-body -X POST "$WORKER_SYSTEM_URL/engine/worker_lifecycle/drain"
+curl --fail-with-body -X POST "$WORKER_SYSTEM_URL/engine/worker_lifecycle/unpublish"
 curl --fail-with-body "$WORKER_SYSTEM_URL/engine/worker_lifecycle/status"
 curl --fail-with-body -X POST "$WORKER_SYSTEM_URL/engine/worker_lifecycle/resume"
 ```

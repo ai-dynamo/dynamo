@@ -128,6 +128,7 @@ def test_withdrawal_survives_stale_discovery_and_healthy_probes(
                     ],
                     env={
                         **env,
+                        "DYN_EXPERIMENTAL_WORKER_WITHDRAWAL": "0",
                         "DYN_SYSTEM_PORT": str(
                             dynamo_dynamic_ports.system_ports[index]
                         ),
@@ -211,7 +212,7 @@ def test_withdrawal_survives_stale_discovery_and_healthy_probes(
                 break
             list(response.iter_lines())
         assert state(0)["held"]
-        drained = control(0, "worker_lifecycle/drain", "POST")
+        drained = control(0, "worker_lifecycle/unpublish", "POST")
         assert drained["state"] == "withdrawing"
         assert drained["accepting_requests"]
         admitted = state(0)["business"]

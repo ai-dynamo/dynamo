@@ -184,7 +184,7 @@ pub mod runtime {
 
 /// Worker lifecycle environment variables
 pub mod worker {
-    /// Opt-in routing withdrawal on workers and admission reselection on frontends.
+    /// Legacy opt-in frontend admission reselection; worker controls do not read it.
     pub const DYN_EXPERIMENTAL_WORKER_WITHDRAWAL: &str = "DYN_EXPERIMENTAL_WORKER_WITHDRAWAL";
 
     /// Graceful shutdown timeout in seconds

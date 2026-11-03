@@ -6,7 +6,6 @@
 import asyncio
 import logging
 
-from dynamo.common.utils.env import env_bool
 from dynamo.common.utils.graceful_shutdown import get_grace_period_seconds
 from dynamo.sglang.drain import DrainConflict, WorkerDrain
 from dynamo.sglang.engine_routes import parse_engine_route_descriptors
@@ -16,15 +15,8 @@ def configure_worker_drain(
     handler, runtime, ready_event, shutdown_event, terminal_event
 ):
     """Enable explicit withdrawal only for the Python LLM serving path."""
-    if not env_bool("DYN_EXPERIMENTAL_WORKER_WITHDRAWAL"):
-        return None
-    if handler.config.dynamo_args.response_plane == "quic":
-        raise ValueError(
-            "worker withdrawal does not support the QUIC response plane: "
-            "discovery removal cancels active responses"
-        )
     if runtime.system_status_server_url() is None:
-        raise ValueError("worker drain requires DYN_SYSTEM_PORT")
+        return None
     for descriptor in parse_engine_route_descriptors(
         handler.config.dynamo_args.engine_routes
     ):
@@ -49,7 +41,7 @@ def configure_worker_drain(
         nonlocal endpoint_started, discovery_client
         action = request["path"].strip("/")
         method = "GET" if action == "status" else "POST"
-        if action not in ("drain", "resume", "status"):
+        if action not in ("unpublish", "resume", "status"):
             return {"status": 404, "body": {"error": "Unknown worker lifecycle route"}}
         if request["method"] != method:
             return {"status": 405, "body": {"error": f"Use {method}"}}
@@ -58,6 +50,17 @@ def configure_worker_drain(
             body = {}
         if not isinstance(body, dict) or body:
             return {"status": 400, "body": {"error": "Expected an empty JSON object"}}
+        if (
+            action == "unpublish"
+            and handler.config.dynamo_args.response_plane == "quic"
+        ):
+            return {
+                "status": 409,
+                "body": {
+                    "error": "worker withdrawal does not support the QUIC response plane: "
+                    "discovery removal cancels active responses"
+                },
+            }
         try:
             if not endpoint_started and ready_event.is_set():
                 async with discovery_lock:
@@ -69,7 +72,9 @@ def configure_worker_drain(
                     )
             if action != "status" and not endpoint_started:
                 raise DrainConflict("worker endpoint is not ready")
-            response = await getattr(controller, action)(body)
+            response = await getattr(
+                controller, "drain" if action == "unpublish" else action
+            )(body)
         except DrainConflict as error:
             return {"status": 409, "body": {"error": str(error)}}
         except Exception as error:

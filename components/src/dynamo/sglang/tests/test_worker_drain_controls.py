@@ -14,7 +14,7 @@ pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
 @pytest.fixture
 def controls(monkeypatch):
-    monkeypatch.setenv("DYN_EXPERIMENTAL_WORKER_WITHDRAWAL", "1")
+    monkeypatch.delenv("DYN_EXPERIMENTAL_WORKER_WITHDRAWAL", raising=False)
     monkeypatch.setenv("DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS", "0")
     handler = SimpleNamespace(
         generate_endpoint=SimpleNamespace(
@@ -40,19 +40,21 @@ def controls(monkeypatch):
     return handler, runtime, ready, terminal
 
 
-def test_controls_are_opt_in_and_require_a_system_listener(controls, monkeypatch):
+@pytest.mark.parametrize("frontend_recovery", ["0", "1"])
+def test_controls_depend_only_on_system_listener(
+    controls, monkeypatch, frontend_recovery
+):
     handler, runtime, ready, terminal = controls
-    monkeypatch.delenv("DYN_EXPERIMENTAL_WORKER_WITHDRAWAL")
+    monkeypatch.setenv("DYN_EXPERIMENTAL_WORKER_WITHDRAWAL", frontend_recovery)
+    runtime.system_status_server_url.return_value = None
     assert (
         configure_worker_drain(handler, runtime, ready, asyncio.Event(), terminal)
         is None
     )
-    runtime.system_status_server_url.assert_not_called()
     runtime.register_engine_http_handler.assert_not_called()
-    monkeypatch.setenv("DYN_EXPERIMENTAL_WORKER_WITHDRAWAL", "1")
-    runtime.system_status_server_url.return_value = None
-    with pytest.raises(ValueError, match="DYN_SYSTEM_PORT"):
-        configure_worker_drain(handler, runtime, ready, asyncio.Event(), terminal)
+    runtime.system_status_server_url.return_value = "system-listener"
+    assert configure_worker_drain(handler, runtime, ready, asyncio.Event(), terminal)
+    runtime.register_engine_http_handler.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -62,15 +64,15 @@ async def test_control_methods_and_withdrawal_failure(controls):
     prefix, control = runtime.register_engine_http_handler.call_args.args
     assert prefix == "worker_lifecycle"
     assert handler._worker_drain is drain
-    response = await control({"path": "drain", "method": "GET", "body": None})
+    response = await control({"path": "unpublish", "method": "GET", "body": None})
     assert response["status"] == 405
     handler.generate_endpoint.unregister_endpoint_instance.assert_not_called()
-    response = await control({"path": "drain", "method": "POST", "body": [1]})
+    response = await control({"path": "unpublish", "method": "POST", "body": [1]})
     assert response["status"] == 400
     handler.generate_endpoint.unregister_endpoint_instance.side_effect = RuntimeError(
         "discovery unavailable"
     )
-    response = await control({"path": "drain", "method": "POST", "body": {}})
+    response = await control({"path": "unpublish", "method": "POST", "body": {}})
     assert response["status"] == 503
     assert (await drain.status({}))["state"] == "serving"
     assert not drain.withdrawn
@@ -81,7 +83,7 @@ async def test_status_reports_withdrawal_and_terminal_resume_conflict(controls):
     handler, runtime, ready, terminal = controls
     configure_worker_drain(handler, runtime, ready, asyncio.Event(), terminal)
     control = runtime.register_engine_http_handler.call_args.args[1]
-    response = await control({"path": "drain", "method": "POST", "body": None})
+    response = await control({"path": "unpublish", "method": "POST", "body": None})
     assert response["status"] == 200
     response = await control({"path": "status", "method": "GET", "body": None})
     assert response["body"]["state"] == "withdrawn"
@@ -119,7 +121,7 @@ async def test_model_ready_does_not_allow_drain_before_own_endpoint_registered(
     drain = configure_worker_drain(handler, runtime, ready, asyncio.Event(), terminal)
     control = runtime.register_engine_http_handler.call_args.args[1]
     responses = await asyncio.gather(
-        control({"path": "drain", "method": "POST", "body": {}}),
+        control({"path": "unpublish", "method": "POST", "body": {}}),
         control({"path": "status", "method": "GET", "body": None}),
     )
     assert responses[0]["status"] == 409
@@ -129,7 +131,7 @@ async def test_model_ready_does_not_allow_drain_before_own_endpoint_registered(
     await control({"path": "status", "method": "GET", "body": None})
     handler.generate_endpoint.client.assert_awaited_once()
     client.instance_ids.return_value = [7, 8]
-    response = await control({"path": "drain", "method": "POST", "body": {}})
+    response = await control({"path": "unpublish", "method": "POST", "body": {}})
     assert response["status"] == 200
     assert drain.withdrawn
     client.instance_ids.return_value = [8]
@@ -137,17 +139,30 @@ async def test_model_ready_does_not_allow_drain_before_own_endpoint_registered(
     assert response["body"]["state"] == "withdrawn"
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-def test_quic_is_rejected_only_when_withdrawal_enabled(controls, monkeypatch, enabled):
+@pytest.mark.asyncio
+async def test_quic_rejects_unpublish_without_changing_worker_state(controls):
     handler, runtime, ready, terminal = controls
     handler.config.dynamo_args.response_plane = "quic"
-    if not enabled:
-        monkeypatch.delenv("DYN_EXPERIMENTAL_WORKER_WITHDRAWAL")
-        assert (
-            configure_worker_drain(handler, runtime, ready, asyncio.Event(), terminal)
-            is None
-        )
-    else:
-        with pytest.raises(ValueError, match="QUIC"):
-            configure_worker_drain(handler, runtime, ready, asyncio.Event(), terminal)
-    runtime.register_engine_http_handler.assert_not_called()
+    drain = configure_worker_drain(handler, runtime, ready, asyncio.Event(), terminal)
+    control = runtime.register_engine_http_handler.call_args.args[1]
+    response = await control({"path": "unpublish", "method": "POST", "body": {}})
+    assert response["status"] == 409
+    assert "QUIC" in response["body"]["error"]
+    handler.generate_endpoint.unregister_endpoint_instance.assert_not_called()
+    handler.generate_endpoint.client.assert_not_called()
+    assert not drain.withdrawn
+    response = await control({"path": "status", "method": "GET", "body": None})
+    assert response["body"]["state"] == "serving"
+    assert response["body"]["accepting_requests"]
+    response = await control({"path": "resume", "method": "POST", "body": {}})
+    assert response["status"] == 200
+
+
+@pytest.mark.asyncio
+async def test_old_drain_route_is_not_exposed(controls):
+    handler, runtime, ready, terminal = controls
+    configure_worker_drain(handler, runtime, ready, asyncio.Event(), terminal)
+    control = runtime.register_engine_http_handler.call_args.args[1]
+    response = await control({"path": "drain", "method": "POST", "body": {}})
+    assert response["status"] == 404
+    handler.generate_endpoint.unregister_endpoint_instance.assert_not_called()
