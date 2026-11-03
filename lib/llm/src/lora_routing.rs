@@ -592,16 +592,17 @@ mod tests {
             .unwrap();
         assert_eq!(selection.worker, 2);
         assert_eq!(selection.fallback, HashSet::from([2]));
-        assert_eq!(estimator.get_current_load().get("adapter"), Some(&1));
+        assert_eq!(estimator.get_inflight_counts().get("adapter"), Some(&1));
         drop(selection);
         assert_eq!(
             estimator
-                .get_current_load()
+                .get_inflight_counts()
                 .get("adapter")
                 .copied()
                 .unwrap_or(0),
             0
         );
+        assert_eq!(estimator.get_raw_arrival_counts().get("adapter"), Some(&1));
         assert!(
             policy
                 .select(&request, None, &|| vec![1], &Vec::new)
@@ -609,12 +610,13 @@ mod tests {
         );
         assert_eq!(
             estimator
-                .get_current_load()
+                .get_inflight_counts()
                 .get("adapter")
                 .copied()
                 .unwrap_or(0),
             0
         );
+        assert_eq!(estimator.get_raw_arrival_counts().get("adapter"), Some(&2));
     }
 
     #[test]

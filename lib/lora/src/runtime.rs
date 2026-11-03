@@ -48,21 +48,13 @@ pub fn runtime_lora_worker_schemes(config: &impl RuntimeLoraWorkerFacts) -> Opti
     {
         return None;
     }
-    let versions: Vec<u32> = serde_json::from_value(
-        config
-            .runtime_value(RUNTIME_LORA_VERSIONS_RUNTIME_KEY)?
-            .clone(),
-    )
-    .ok()?;
+    let versions =
+        Vec::<u32>::deserialize(config.runtime_value(RUNTIME_LORA_VERSIONS_RUNTIME_KEY)?).ok()?;
     if !versions.contains(&u32::from(RUNTIME_LORA_PROTOCOL_VERSION)) {
         return None;
     }
-    let mut schemes: Vec<String> = serde_json::from_value(
-        config
-            .runtime_value(RUNTIME_LORA_SCHEMES_RUNTIME_KEY)?
-            .clone(),
-    )
-    .ok()?;
+    let mut schemes =
+        Vec::<String>::deserialize(config.runtime_value(RUNTIME_LORA_SCHEMES_RUNTIME_KEY)?).ok()?;
     schemes.sort_unstable();
     schemes.dedup();
     (!schemes.is_empty()).then_some(schemes)
@@ -104,6 +96,8 @@ pub fn constrain_runtime_lora_workers<
 
     let mut eligible = allowed_worker_ids.unwrap_or_else(|| live_worker_ids.clone());
     let mut malformed_workers = 0;
+    let mut expected_schemes = None;
+    let mut homogeneous = true;
     eligible.retain(|worker_id| {
         live_worker_ids.contains(worker_id)
             && worker_configs.get(worker_id).is_some_and(|config| {
@@ -112,9 +106,14 @@ pub fn constrain_runtime_lora_workers<
                 {
                     return false;
                 }
-                if runtime_lora_worker_schemes(config).is_none() {
+                let Some(schemes) = runtime_lora_worker_schemes(config) else {
                     malformed_workers += 1;
                     return false;
+                };
+                match &expected_schemes {
+                    Some(expected) if expected != &schemes => homogeneous = false,
+                    None => expected_schemes = Some(schemes),
+                    _ => {}
                 }
                 true
             })
@@ -129,10 +128,7 @@ pub fn constrain_runtime_lora_workers<
             )
         });
     }
-    let eligible_workers = eligible.iter().copied().collect::<Vec<_>>();
-    if !eligible.is_empty()
-        && !runtime_lora_workers_have_homogeneous_resolvers(&eligible_workers, worker_configs)
-    {
+    if !homogeneous {
         static WARNED: std::sync::Once = std::sync::Once::new();
         WARNED.call_once(|| {
             tracing::warn!(
@@ -355,10 +351,11 @@ where
 mod tests {
     use super::*;
 
-    struct TestWorker(serde_json::Value, HashSet<String>);
+    struct TestWorker(serde_json::Value, HashSet<String>, std::cell::Cell<usize>);
 
     impl RuntimeLoraWorkerFacts for TestWorker {
         fn runtime_value(&self, key: &str) -> Option<&serde_json::Value> {
+            self.2.set(self.2.get() + 1);
             self.0.get(key)
         }
     }
@@ -389,6 +386,7 @@ mod tests {
                 "runtime_lora_schemes": schemes,
             }),
             HashSet::from([RUNTIME_LORA_CAPABILITY_TAINT.to_string()]),
+            Default::default(),
         )
     }
 
@@ -430,9 +428,36 @@ mod tests {
             serde_json::json!({"supports_runtime_lora_resolution": "true"}),
             serde_json::json!({"supports_runtime_lora_resolution": true, "runtime_lora_protocol_versions": [65538], "runtime_lora_schemes": ["a"]}),
             serde_json::json!({"supports_runtime_lora_resolution": true, "runtime_lora_protocol_versions": [2, -1], "runtime_lora_schemes": ["a"]}),
+            serde_json::json!({"supports_runtime_lora_resolution": true, "runtime_lora_protocol_versions": [2, 4294967296_u64], "runtime_lora_schemes": ["a"]}),
+            serde_json::json!({"supports_runtime_lora_resolution": true, "runtime_lora_protocol_versions": [2, 2.0], "runtime_lora_schemes": ["a"]}),
             serde_json::json!({"supports_runtime_lora_resolution": true, "runtime_lora_protocol_versions": [2], "runtime_lora_schemes": [null]}),
         ] {
-            assert!(runtime_lora_worker_schemes(&TestWorker(facts, HashSet::new())).is_none());
+            assert!(
+                runtime_lora_worker_schemes(&TestWorker(facts, HashSet::new(), Default::default()))
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_restriction_decodes_each_worker_capability_once() {
+        let configs = HashMap::from([
+            (1, capable_worker(&["a", "b"])),
+            (2, capable_worker(&["b", "a", "a"])),
+        ]);
+        let live = HashSet::from([1, 2]);
+        assert_eq!(
+            constrain_runtime_lora_workers(
+                true,
+                None,
+                &live,
+                &configs,
+                &RoutingConstraints::default()
+            ),
+            Some(live)
+        );
+        for worker in configs.values() {
+            assert_eq!(worker.2.get(), 3, "read each capability field once");
         }
     }
 
