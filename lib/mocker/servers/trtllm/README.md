@@ -27,18 +27,16 @@ cargo run -p dynamo-trtllm-sidecar --bin dynamo-trtllm-sidecar -- \
   --grpc-endpoint http://127.0.0.1:30001 --model-path Qwen/Qwen3-0.6B
 ```
 
-Set the sidecar's `--model-path` to the server's `--model` so the frontend
-registers and routes the name you expect. The server does not enforce it: it
-serves a request naming any model, because the real engine serves whatever it
-was loaded with and rejecting a mismatch would fail requests that work in
-production. An empty model is refused.
+The frontend registers the name supplied to the server's `--model`. The
+sidecar's `--model-path` identifies the tokenizer files and may be different.
+The server serves a request naming any nonempty model, like the real engine;
+it rejects an empty model.
 
 The mocker needs no weights, but the sidecar still resolves `--model-path` to a
-real tokenizer so the frontend can detokenize. Point both at a model that is
-present locally (or in the HuggingFace cache) — for example
-`--model Qwen/Qwen3-0.6B` and `--model-path Qwen/Qwen3-0.6B`. A name that does
-not resolve, such as the default `mocker-model`, fails in the sidecar's model
-fetch rather than anywhere in this server.
+real tokenizer so the frontend can detokenize. Set `--model-path` to a model
+present locally (or in the Hugging Face cache), for example `Qwen/Qwen3-0.6B`.
+A path that does not resolve, such as the default `mocker-model`, fails in the
+sidecar's model fetch rather than anywhere in this server.
 
 ## Disaggregated
 

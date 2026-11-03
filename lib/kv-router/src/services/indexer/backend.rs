@@ -1548,6 +1548,40 @@ mod tests {
         assert!(IndexerPolicy::from_router_config(&side_without_events).is_err());
     }
 
+    /// Offline replay cannot build this indexer, so it asks the config.
+    #[tokio::test]
+    async fn config_predicts_kv_transfer_chain_retention() {
+        for use_kv_events in [true, false] {
+            for router_predicted_ttl_secs in [None, Some(1.0)] {
+                for router_approximate_cache_policy in [
+                    ApproximateCachePolicyKind::Ttl,
+                    ApproximateCachePolicyKind::Lru,
+                ] {
+                    let config = KvRouterConfig {
+                        use_kv_events,
+                        router_predicted_ttl_secs,
+                        router_approximate_cache_policy,
+                        ..Default::default()
+                    };
+                    // Rejected combinations build no indexer.
+                    let Ok(policy) = IndexerPolicy::from_router_config(&config) else {
+                        continue;
+                    };
+                    for num_threads in [1, 2] {
+                        assert_eq!(
+                            policy_indexer(num_threads, policy.clone())
+                                .supports_kv_transfer_chain_retention(),
+                            config.supports_kv_transfer_chain_retention(),
+                            "use_kv_events={use_kv_events}, \
+                             router_predicted_ttl_secs={router_predicted_ttl_secs:?}, \
+                             {router_approximate_cache_policy:?}, {num_threads} threads"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[cfg(feature = "metrics")]
     #[tokio::test]
     async fn acknowledged_clear_records_primary_event_for_both_indexers() {
@@ -1660,8 +1694,8 @@ pub fn create_indexer_with_policy(
 mod session_tests {
     use super::test_util::store_event;
     use super::*;
-    use crate::SessionPrefixIndexer;
     use crate::protocols::{KvCacheEvent, KvCacheRemoveData, StorageTier};
+    use crate::{SessionPrefixIndexer, SessionResidencyOwner};
 
     fn make_session_test_indexer() -> (Indexer, Arc<SessionPrefixIndexer>) {
         let session_prefix_index = Arc::new(SessionPrefixIndexer::new());
@@ -1852,7 +1886,12 @@ mod session_tests {
             };
             let lineage = |tier| {
                 session_prefix_index
-                    .get_session_block_lineage_in_tier("session-1", worker, tier, None)
+                    .get_session_block_lineage_in_tier(
+                        "session-1",
+                        SessionResidencyOwner::Worker(worker),
+                        tier,
+                        None,
+                    )
                     .unwrap()
             };
 
@@ -1921,7 +1960,12 @@ mod session_tests {
             };
             let lineage = |tier| {
                 session_prefix_index
-                    .get_session_block_lineage_in_tier("session-1", worker, tier, None)
+                    .get_session_block_lineage_in_tier(
+                        "session-1",
+                        SessionResidencyOwner::Worker(worker),
+                        tier,
+                        None,
+                    )
                     .unwrap()
             };
 
@@ -2258,7 +2302,12 @@ mod session_tests {
 
             let lineage = |tier| {
                 session_prefix_index
-                    .get_session_block_lineage_in_tier("session-1", worker, tier, None)
+                    .get_session_block_lineage_in_tier(
+                        "session-1",
+                        SessionResidencyOwner::Worker(worker),
+                        tier,
+                        None,
+                    )
                     .unwrap()
             };
             assert_eq!(lineage(StorageTier::Device), vec![block_hashes.clone()]);
@@ -2303,7 +2352,7 @@ mod session_tests {
             session_prefix_index
                 .get_session_block_lineage_in_tier(
                     "session-1",
-                    worker,
+                    SessionResidencyOwner::Worker(worker),
                     StorageTier::HostPinned,
                     None
                 )

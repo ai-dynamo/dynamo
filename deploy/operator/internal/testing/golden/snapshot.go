@@ -13,7 +13,6 @@ import (
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -124,7 +123,7 @@ func manifestObjects(documents []document) ([]unstructured.Unstructured, error) 
 	return objects, nil
 }
 
-// WriteManifests writes concrete API objects without managedFields bookkeeping.
+// WriteManifests writes concrete API objects with stable server metadata.
 func WriteManifests(path string, objects []unstructured.Unstructured) error {
 	var out strings.Builder
 	out.WriteString("# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n# SPDX-License-Identifier: Apache-2.0\n# Generated from observed API objects; do not edit historical inputs.\n")
@@ -132,7 +131,17 @@ func WriteManifests(path string, objects []unstructured.Unstructured) error {
 		if i > 0 {
 			out.WriteString("---\n")
 		}
+
+		// Keep API-assigned metadata stable without changing controller state.
 		object := objects[i].DeepCopy()
+		object.SetUID("00000000-0000-0000-0000-000000000000")
+		object.SetResourceVersion("1")
+		object.Object["metadata"].(map[string]any)["creationTimestamp"] = "2000-01-01T00:00:00Z"
+		refs := object.GetOwnerReferences()
+		for j := range refs {
+			refs[j].UID = object.GetUID()
+		}
+		object.SetOwnerReferences(refs)
 		unstructured.RemoveNestedField(object.Object, "metadata", "managedFields")
 		node, err := objectNode(object.Object)
 		if err != nil {
@@ -151,27 +160,27 @@ func WriteManifests(path string, objects []unstructured.Unstructured) error {
 // starts. The caller owns the namespace and cleans it up on partial failure.
 func ApplySnapshot(ctx context.Context, c client.Client, namespace string, objects []unstructured.Unstructured) error {
 	created := make([]unstructured.Unstructured, len(objects))
-	byUID := map[types.UID]int{}
+
+	// Object identity survives recapture even when every captured UID is the same.
+	type identity struct{ namespace, apiVersion, kind, name string }
+	byIdentity := map[identity]int{}
 	for i := range objects {
 		old := &objects[i]
 		if old.GetNamespace() != namespace || old.GetUID() == "" || old.GetDeletionTimestamp() != nil {
 			return fmt.Errorf("invalid snapshot identity for %s %s/%s", old.GetKind(), old.GetNamespace(), old.GetName())
 		}
-		if _, exists := byUID[old.GetUID()]; exists {
-			return fmt.Errorf("duplicate captured UID %s", old.GetUID())
+		key := identity{old.GetNamespace(), old.GetAPIVersion(), old.GetKind(), old.GetName()}
+		if _, exists := byIdentity[key]; exists {
+			return fmt.Errorf("duplicate captured identity %v", key)
 		}
-		byUID[old.GetUID()] = i
+		byIdentity[key] = i
 	}
 	// Validate ownership before creating anything; an omitted owner is not optional.
 	for i := range objects {
 		for _, owner := range objects[i].GetOwnerReferences() {
-			index, found := byUID[owner.UID]
+			_, found := byIdentity[identity{objects[i].GetNamespace(), owner.APIVersion, owner.Kind, owner.Name}]
 			if !found {
 				return fmt.Errorf("unresolved owner %s %s", owner.Kind, owner.Name)
-			}
-			target := &objects[index]
-			if target.GetName() != owner.Name || target.GetAPIVersion() != owner.APIVersion || target.GetKind() != owner.Kind {
-				return fmt.Errorf("owner identity disagrees with UID %s", owner.UID)
 			}
 		}
 	}
@@ -199,7 +208,9 @@ func ApplySnapshot(ctx context.Context, c client.Client, namespace string, objec
 		object := &created[i]
 		refs := objects[i].GetOwnerReferences()
 		for j := range refs {
-			refs[j].UID = created[byUID[refs[j].UID]].GetUID()
+			owner := refs[j]
+			key := identity{objects[i].GetNamespace(), owner.APIVersion, owner.Kind, owner.Name}
+			refs[j].UID = created[byIdentity[key]].GetUID()
 		}
 		status, found, err := unstructured.NestedMap(objects[i].Object, "status")
 		if err != nil {
