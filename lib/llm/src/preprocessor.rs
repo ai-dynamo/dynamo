@@ -17,6 +17,7 @@ pub mod mm_routing;
 pub mod prompt;
 pub mod speculative_prefill;
 pub(crate) mod structural_tag;
+pub use structural_tag::structural_tag_parser_names;
 pub(crate) mod tool_choice;
 pub mod tools;
 use anyhow::Context;
@@ -282,8 +283,8 @@ fn compact_gpt_oss_prefill(prefix: &str) -> &str {
     };
     if header.contains("to=") || body.contains("<|") {
         // Recipient-owned bodies may contain a partially consumed JSON argument.
-        // TODO: Use parser-owned continuation snapshots to bound retained seeds;
-        // replay still encodes request-sized input and retains parser state per choice.
+        // TODO: Validate argument prefixes incrementally so released bytes no longer
+        // need to remain in the shared per-request continuation body.
         return prefix;
     }
     &prefix[..header.len() + MESSAGE.len()]
@@ -605,15 +606,7 @@ fn drain_router_routing_data(
     let Some(tracker) = tracker else {
         return;
     };
-    if let Some(timing) = routing_data.timing {
-        tracker.set_external_timing(timing);
-    }
-    if let Some(worker_id) = routing_data.worker_id {
-        tracker.set_external_worker_info(worker_id);
-    }
-    if let Some(token_ids) = routing_data.token_ids {
-        tracker.set_external_query_token_ids(token_ids);
-    }
+    tracker.ingest_routing_data(routing_data);
 }
 
 fn attach_metrics_annotation<Resp>(response: &mut Annotated<Resp>, metrics: &LLMMetricAnnotation) {
@@ -1549,6 +1542,24 @@ fn should_hash_decoded_video(
 #[cfg(feature = "mm-routing")]
 fn exact_mm_routing_supports_modality(modality: &str, frontend_decoding: bool) -> bool {
     modality == "image_url" || (modality == "video_url" && frontend_decoding)
+}
+
+#[cfg(any(test, all(feature = "mm-routing", feature = "media-ffmpeg")))]
+fn log_video_routing_capability(model_id: &str, model_type: &str, frontend_video_decoding: bool) {
+    tracing::info!(
+        target: "mm_routing",
+        model = %model_id,
+        model_type,
+        frontend_video_decoding,
+        "video routing processor available; exact routing requires KV router mode and eligible requests"
+    );
+    if !frontend_video_decoding {
+        tracing::info!(
+            target: "mm_routing",
+            model = %model_id,
+            "frontend video decoding disabled; video requests use text-prefix routing"
+        );
+    }
 }
 
 #[cfg(feature = "mm-routing")]
@@ -2973,6 +2984,11 @@ impl OpenAIPreprocessor {
                 )
             });
 
+        #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+        let frontend_video_decoding = mdc
+            .media_decoder
+            .as_ref()
+            .is_some_and(|decoder| decoder.video.is_some());
         let media_loader = match mdc.media_decoder {
             Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
             None => None,
@@ -3162,12 +3178,7 @@ impl OpenAIPreprocessor {
         if video_routing_processor.is_some()
             && let Some((model_id, model_type, _)) = image_token_inputs.as_ref()
         {
-            tracing::info!(
-                target: "mm_routing",
-                model = %model_id,
-                model_type = %model_type,
-                "exact video-aware KV routing enabled"
-            );
+            log_video_routing_capability(model_id, model_type, frontend_video_decoding);
         }
 
         #[cfg(feature = "mm-routing")]
@@ -5797,61 +5808,56 @@ impl OpenAIPreprocessor {
                 None,
                 Some(family),
             );
-            // TODO: Resolve model-specific prefill and guidance through the parser adapter's
-            // UnifiedRequestPolicy and parser capabilities; migrate equivalent batch/stream
-            // branches together while preserving legacy/v2 behavior.
-            let bare_guidance = *family == "gpt_oss"
-                && (tool_choice::has_explicit_guided_decoding(request)
-                    || guided_tool_constraint.installs_guided_json()
-                        && !(self.runtime_config.structural_tag.is_some()
-                            && structural_tag::uses_gpt_oss_required_array(
-                                (
-                                    self.tool_call_parser.as_deref(),
-                                    self.runtime_config.reasoning_parser.as_deref(),
-                                ),
-                                &tool_choice::convert_tool_choice(
-                                    request
-                                        .inner
-                                        .tool_choice
-                                        .as_ref()
-                                        .unwrap_or(&ChatCompletionToolChoiceOption::Auto),
-                                ),
-                                request.inner.parallel_tool_calls,
-                            )));
+            // TODO: Replace family-specific guidance decisions with parser capabilities;
+            // migrate equivalent batch/stream branches together while preserving legacy/v2 behavior.
+            let policy = unified_parser::UnifiedRequestPolicy {
+                reasoning_disabled,
+                structured_response: Self::has_structured_response_format(request),
+                multiple_choices: request.inner.n.unwrap_or(1) > 1,
+            };
+            let prefill = policy.resolve_stream_prefill(
+                family,
+                unified_parser::StreamPrefill {
+                    starting_state: if *family == unified_parser::BEAM_UNIFIED_FAMILY
+                        && (prompt_prefill.response || self.beam_output_is_bare_guidance(request))
+                    {
+                        dynamo_parsers_v2::UnifiedParserStartingState::Response
+                    } else {
+                        prompt_prefill.unified_starting_state.unwrap_or_else(|| {
+                            unified_parser::stream_prefill(family, prompt_injected_reasoning)
+                        })
+                    },
+                    prefix: prompt_prefill.prefix.clone(),
+                },
+                &guided_tool_constraint,
+                tool_choice::has_explicit_guided_decoding(request),
+                || {
+                    self.runtime_config.structural_tag.is_some()
+                        && structural_tag::uses_gpt_oss_required_array(
+                            (
+                                self.tool_call_parser.as_deref(),
+                                self.runtime_config.reasoning_parser.as_deref(),
+                            ),
+                            &tool_choice::convert_tool_choice(
+                                request
+                                    .inner
+                                    .tool_choice
+                                    .as_ref()
+                                    .unwrap_or(&ChatCompletionToolChoiceOption::Auto),
+                            ),
+                            request.inner.parallel_tool_calls,
+                        )
+                },
+            );
             let unified: Pin<Box<dyn Stream<Item = _> + Send>> =
                 Box::pin(unified_parser::apply_stream_with_policy(
                     stream,
                     tool_definitions,
                     guided_tool_constraint,
-                    unified_parser::StreamPrefill {
-                        starting_state: if bare_guidance
-                            || (*family == unified_parser::BEAM_UNIFIED_FAMILY
-                                && (prompt_prefill.response
-                                    || self.beam_output_is_bare_guidance(request)))
-                        {
-                            // Assistant prefill inside Beam's final channel, or bare text
-                            // an explicit `guided_*` constraint owns (no turn grammar, so
-                            // no channel framing): the reply is visible text from its
-                            // first byte and ends on `<|return|>` or at the end of the
-                            // stream.
-                            dynamo_parsers_v2::UnifiedParserStartingState::Response
-                        } else {
-                            prompt_prefill.unified_starting_state.unwrap_or_else(|| {
-                                unified_parser::stream_prefill(family, prompt_injected_reasoning)
-                            })
-                        },
-                        prefix: if bare_guidance {
-                            None
-                        } else {
-                            prompt_prefill.prefix.clone()
-                        },
-                    },
+                    prefill,
                     family,
                     guided_tool_streaming,
-                    unified_parser::UnifiedRequestPolicy {
-                        reasoning_disabled,
-                        structured_response: Self::has_structured_response_format(request),
-                    },
+                    policy,
                 ));
             return Ok(Self::apply_unified_response_policies(
                 unified,
@@ -9546,6 +9552,37 @@ mod tests {
     };
     use std::path::PathBuf;
 
+    #[test]
+    fn video_routing_startup_does_not_claim_active_routing() {
+        use std::io::{Read, Seek, SeekFrom};
+
+        for frontend_video_decoding in [false, true] {
+            let mut output = tempfile::tempfile().unwrap();
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(output.try_clone().unwrap())
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                log_video_routing_capability("test-model", "qwen3_vl", frontend_video_decoding);
+            });
+            output.seek(SeekFrom::Start(0)).unwrap();
+            let mut logs = String::new();
+            output.read_to_string(&mut logs).unwrap();
+
+            assert!(logs.contains("video routing processor available"));
+            assert!(logs.contains("KV router mode and eligible requests"));
+            assert!(logs.contains(&format!(
+                "frontend_video_decoding={frontend_video_decoding}"
+            )));
+            assert!(!logs.contains("exact video-aware KV routing enabled"));
+            assert_eq!(
+                logs.contains("video requests use text-prefix routing"),
+                !frontend_video_decoding
+            );
+        }
+    }
+
     #[tokio::test]
     async fn gpt_oss_disabled_aliases_keep_reasoning_separate() {
         if crate::test_utils::run_isolated(
@@ -9664,17 +9701,19 @@ mod tests {
             "plain message body is irrelevant to the parser seed"
         );
 
-        let structural_prompt = format!("{header}quoted marker <|ghissue|> remains structural");
-        let structural_prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
-            None,
-            Some("gpt_oss"),
-            Some(&structural_prompt),
-        );
-        assert_eq!(
-            structural_prefill.prefix.as_deref().map(str::len),
-            Some(structural_prompt.len()),
-            "marker-bearing bodies must retain their parser state"
-        );
+        for body in ["quoted marker <|ghissue|> remains structural", "partial <|"] {
+            let structural_prompt = format!("{header}{body}");
+            let structural_prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+                None,
+                Some("gpt_oss"),
+                Some(&structural_prompt),
+            );
+            assert_eq!(
+                structural_prefill.prefix.as_deref().map(str::len),
+                Some(structural_prompt.len()),
+                "marker-bearing bodies must retain their parser state"
+            );
+        }
 
         let incomplete_header = "<|start|>assistant to=";
         let incomplete_prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
@@ -10002,33 +10041,32 @@ mod tests {
                 " to=python<|channel|>analysis",
                 "<|channel|>analysis to=python",
             ] {
-                for body in ["Hello", "quoted <|ghissue|>", "partial <|"] {
-                    let prompt = format!(
-                        "<|start|>assistant<|channel|>analysis<|message|>earlier<|end|><|start|>{role}{metadata}<|message|>{body}"
-                    );
-                    let prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
-                        None,
-                        Some("gpt_oss"),
-                        Some(&prompt),
-                    );
-                    assert_eq!(
-                        prefill.prefix.is_some(),
-                        role == "assistant",
-                        "role={role} metadata={metadata} body={body}"
-                    );
-                    assert_eq!(
-                        prefill.unified_starting_state,
-                        (role != "assistant")
-                            .then_some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
-                        "role={role} metadata={metadata}"
-                    );
-                    let reasoning = role == "assistant" && metadata.contains("<|channel|>analysis");
-                    assert_eq!(
-                        prefill.unified, reasoning,
-                        "role={role} metadata={metadata}"
-                    );
-                    assert_eq!(prefill.legacy, reasoning, "role={role} metadata={metadata}");
-                }
+                let body = "Hello";
+                let prompt = format!(
+                    "<|start|>assistant<|channel|>analysis<|message|>earlier<|end|><|start|>{role}{metadata}<|message|>{body}"
+                );
+                let prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+                    None,
+                    Some("gpt_oss"),
+                    Some(&prompt),
+                );
+                assert_eq!(
+                    prefill.prefix.is_some(),
+                    role == "assistant",
+                    "role={role} metadata={metadata} body={body}"
+                );
+                assert_eq!(
+                    prefill.unified_starting_state,
+                    (role != "assistant")
+                        .then_some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
+                    "role={role} metadata={metadata}"
+                );
+                let reasoning = role == "assistant" && metadata.contains("<|channel|>analysis");
+                assert_eq!(
+                    prefill.unified, reasoning,
+                    "role={role} metadata={metadata}"
+                );
+                assert_eq!(prefill.legacy, reasoning, "role={role} metadata={metadata}");
             }
         }
     }
