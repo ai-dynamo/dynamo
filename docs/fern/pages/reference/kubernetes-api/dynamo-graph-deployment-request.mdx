@@ -67,13 +67,52 @@ AISimulate schema yet; invalid or incomplete overrides fail during the Run.
 ```yaml
 spec:
   hardware: {}
-  aisimulate:
+  aisim:
     inputOverrides:
       engine:
         hardware: h200_sxm
       optimization:
         constraints:
           max_candidate_gpus: 8
+```
+
+## v1beta2 AISim Fields
+
+The v1beta2 Request and Run APIs use `spec.aisim.inputOverrides`. Runs report the
+fully lowered input in the controller-owned `status.aisim.input`. These replace
+`spec.aisimulate` and `status.aisimulate`; the old names are no longer schema fields.
+Update manifests and status consumers before using the new CRDs and operator.
+Existing immutable Runs must finish before the upgrade or be recreated afterward;
+there is no automatic migration of stored `aisimulate` values.
+
+`aisim` is optional and has no default. Omitting it preserves typed-input defaults.
+`inputOverrides` remains an RFC 7386 JSON Merge Patch: supplied values win over
+lowered typed fields, and `null` deletes a field. Operator-owned `dgdr_run` fields
+remain forbidden. The upstream AISimulate package, CLI, and input format are unchanged.
+Conversion through v1beta1 and v1alpha1 preserves the new field inside `spec.v1beta2`.
+
+```yaml
+apiVersion: nvidia.com/v1beta2
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: example-search
+spec:
+  model:
+    name: Qwen/Qwen3-32B
+  aisim:
+    inputOverrides:
+      optimizer:
+        max_trials: 32
+```
+
+The corresponding Run exposes its effective input under:
+
+```yaml
+status:
+  aisim:
+    input:
+      optimizer:
+        max_trials: 32
 ```
 
 ## Spec reference

@@ -29,7 +29,7 @@ import (
 )
 
 // Lower returns the effective public recommendation input: the typed underlay and derived defaults, merged
-// with spec.aisimulate.inputOverrides. The spec must already carry its structural defaults;
+// with spec.aisim.inputOverrides. The spec must already carry its structural defaults;
 // lowering repeats none of them.
 func Lower(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 	return LowerWithUnderlay(spec, nil)
@@ -67,16 +67,16 @@ func LowerWithUnderlay(spec *v1beta2.NativeSearchInput, staticUnderlay map[strin
 	return input, nil
 }
 
-// InputOverrides returns spec.aisimulate.inputOverrides as a JSON object, or nil when absent.
+// InputOverrides returns spec.aisim.inputOverrides as a JSON object, or nil when absent.
 func InputOverrides(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
-	if spec.AISimulate == nil || spec.AISimulate.InputOverrides == nil {
+	if spec.AISim == nil || spec.AISim.InputOverrides == nil {
 		return nil, nil
 	}
-	raw := spec.AISimulate.InputOverrides.Raw
-	if len(raw) == 0 && spec.AISimulate.InputOverrides.Object != nil {
+	raw := spec.AISim.InputOverrides.Raw
+	if len(raw) == 0 && spec.AISim.InputOverrides.Object != nil {
 		var err error
-		if raw, err = json.Marshal(spec.AISimulate.InputOverrides.Object); err != nil {
-			return nil, fmt.Errorf("spec.aisimulate.inputOverrides: %w", err)
+		if raw, err = json.Marshal(spec.AISim.InputOverrides.Object); err != nil {
+			return nil, fmt.Errorf("spec.aisim.inputOverrides: %w", err)
 		}
 	}
 	if len(raw) == 0 {
@@ -86,10 +86,10 @@ func InputOverrides(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	if err := decoder.Decode(&value); err != nil {
-		return nil, fmt.Errorf("spec.aisimulate.inputOverrides: %w", err)
+		return nil, fmt.Errorf("spec.aisim.inputOverrides: %w", err)
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return nil, fmt.Errorf("spec.aisimulate.inputOverrides: trailing JSON value")
+		return nil, fmt.Errorf("spec.aisim.inputOverrides: trailing JSON value")
 	}
 	switch typed := value.(type) {
 	case nil:
@@ -97,7 +97,7 @@ func InputOverrides(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 	case map[string]any:
 		return typed, nil
 	default:
-		return nil, fmt.Errorf("spec.aisimulate.inputOverrides: must be a JSON object, got %T", value)
+		return nil, fmt.Errorf("spec.aisim.inputOverrides: must be a JSON object, got %T", value)
 	}
 }
 

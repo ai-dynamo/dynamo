@@ -74,7 +74,7 @@ func withKVRange(spec *v1beta2.DynamoGraphDeploymentRequestSpec) *v1beta2.Dynamo
 }
 
 func withInputOverrides(spec *v1beta2.DynamoGraphDeploymentRequestSpec, overrides string) *v1beta2.DynamoGraphDeploymentRequestSpec {
-	spec.AISimulate = &v1beta2.AISimulateSpec{InputOverrides: &runtime.RawExtension{Raw: []byte(overrides)}}
+	spec.AISim = &v1beta2.AISimSpec{InputOverrides: &runtime.RawExtension{Raw: []byte(overrides)}}
 	return spec
 }
 
@@ -140,8 +140,8 @@ func TestLowerIsDeterministicAndDoesNotMutateTheSpec(t *testing.T) {
 	if first != second {
 		t.Fatalf("not deterministic:\n%s\n%s", first, second)
 	}
-	if string(spec.AISimulate.InputOverrides.Raw) != overrides {
-		t.Fatalf("overrides mutated: %s", spec.AISimulate.InputOverrides.Raw)
+	if string(spec.AISim.InputOverrides.Raw) != overrides {
+		t.Fatalf("overrides mutated: %s", spec.AISim.InputOverrides.Raw)
 	}
 }
 

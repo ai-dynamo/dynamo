@@ -465,8 +465,8 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 
 			t.Log("Verify the Job consumed the immutable input recorded in Run status")
 			require.NotNil(t, completedRun.Status.JobRef, "completed Run has no Job reference")
-			require.NotNil(t, completedRun.Status.AISimulate, "completed Run has no AISimulate status")
-			require.NotNil(t, completedRun.Status.AISimulate.Input, "completed Run has no effective AISimulate input")
+			require.NotNil(t, completedRun.Status.AISim, "completed Run has no AISimulate status")
+			require.NotNil(t, completedRun.Status.AISim.Input, "completed Run has no effective AISimulate input")
 			key := types.NamespacedName{Namespace: env.Namespace(), Name: completedRun.Status.JobRef.Name}
 			var executionConfig corev1.ConfigMap
 			require.NoError(t, env.Client().Get(ctx, key, &executionConfig))
@@ -490,8 +490,8 @@ func TestClusterDynamoGraphDeploymentRequestV1beta2ProducesCandidates(t *testing
 			})
 			configInput, err := dgdrRunStatusInput(executionConfig.Data[dgdrRunInputKey])
 			require.NoError(t, err)
-			require.JSONEq(t, string(completedRun.Status.AISimulate.Input.Raw), string(configInput.Raw))
-			require.Equal(t, int64(8), aisimulateHardwareBudget(t, completedRun.Status.AISimulate.Input.Raw),
+			require.JSONEq(t, string(completedRun.Status.AISim.Input.Raw), string(configInput.Raw))
+			require.Equal(t, int64(8), aisimulateHardwareBudget(t, completedRun.Status.AISim.Input.Raw),
 				"lowered AISimulate input lost the selected-shape budget")
 
 			t.Log("Verify the Candidate is a real API object controlled by the immutable Run")

@@ -361,7 +361,7 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) markRunCreated(
 }
 
 // buildRun freezes the accepted Request input into an immutable Run spec. The Run reconciler lowers
-// this snapshot once, records the effective public recommendation input in status.aisimulate.input,
+// this snapshot once, records the effective public recommendation input in status.aisim.input,
 // and passes that same document to the Job.
 func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) buildRun(
 	request *nvidiacomv1beta2.DynamoGraphDeploymentRequest,

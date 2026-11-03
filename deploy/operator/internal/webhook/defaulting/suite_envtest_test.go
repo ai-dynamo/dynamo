@@ -360,7 +360,7 @@ func TestDynamoGraphDeploymentRequestV1beta2DefaultingAdmission(t *testing.T) {
 				metric := nvidiacomv1beta2.ObjectiveMetric("TTFT")
 				spec.Objective = &nvidiacomv1beta2.ObjectiveSpec{Metric: &metric}
 				spec.Recommendation = &nvidiacomv1beta2.RecommendationSpec{MaxCandidates: 3}
-				spec.AISimulate = &nvidiacomv1beta2.AISimulateSpec{InputOverrides: &runtime.RawExtension{
+				spec.AISim = &nvidiacomv1beta2.AISimSpec{InputOverrides: &runtime.RawExtension{
 					Raw: []byte(`{"engine":{"hardware":"h100_sxm"},"custom":"kept"}`),
 				}}
 			}),
@@ -566,11 +566,11 @@ func expectV1beta2ExplicitValues(t *testing.T, request *nvidiacomv1beta2.DynamoG
 	if request.Spec.Recommendation.MaxCandidates != 3 {
 		t.Fatalf("maxCandidates = %d, want 3", request.Spec.Recommendation.MaxCandidates)
 	}
-	if request.Spec.AISimulate == nil || request.Spec.AISimulate.InputOverrides == nil {
-		t.Fatalf("aisimulate = %#v, want input overrides", request.Spec.AISimulate)
+	if request.Spec.AISim == nil || request.Spec.AISim.InputOverrides == nil {
+		t.Fatalf("aisim = %#v, want input overrides", request.Spec.AISim)
 	}
 	var overrides map[string]any
-	if err := json.Unmarshal(request.Spec.AISimulate.InputOverrides.Raw, &overrides); err != nil {
+	if err := json.Unmarshal(request.Spec.AISim.InputOverrides.Raw, &overrides); err != nil {
 		t.Fatalf("decode input overrides: %v", err)
 	}
 	if overrides["custom"] != "kept" {
