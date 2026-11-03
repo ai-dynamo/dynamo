@@ -30,8 +30,11 @@ from dynamo.runtime import DistributedRuntime
 
 MSG_CONTAINS_ERROR = "This message contains an 400error."
 MSG_CONTAINS_STATUS_ERROR = "This message contains a 415 status error."
+MSG_CONTAINS_UNPROCESSABLE_CODE = "This message contains a 422 code error."
+MSG_CONTAINS_UNPROCESSABLE_STATUS = "This message contains a 422 status error."
 MSG_CONTAINS_INVALID_ARGUMENT = "This message contains an invalid argument."
 MSG_CONTAINS_INTERNAL_ERROR = "This message contains an internal server error."
+RUNTIME_ERROR_PREFIX = "runtime-http-error:"
 
 
 class _StatusLikeError(Exception):
@@ -74,10 +77,17 @@ class MockHttpEngine:
             raise HttpError(code=400, message=MSG_CONTAINS_ERROR)
         elif MSG_CONTAINS_STATUS_ERROR.lower() in user_message.lower():
             raise _StatusLikeError(status=415, message=MSG_CONTAINS_STATUS_ERROR)
+        elif MSG_CONTAINS_UNPROCESSABLE_CODE.lower() in user_message.lower():
+            raise HttpError(code=422, message="private token=secret")
+        elif MSG_CONTAINS_UNPROCESSABLE_STATUS.lower() in user_message.lower():
+            raise _StatusLikeError(status=422, message="private token=secret")
         elif MSG_CONTAINS_INVALID_ARGUMENT.lower() in user_message.lower():
             raise ValueError(MSG_CONTAINS_INVALID_ARGUMENT)
         elif MSG_CONTAINS_INTERNAL_ERROR.lower() in user_message.lower():
             raise RuntimeError("Simulated internal error")
+        elif user_message.startswith(RUNTIME_ERROR_PREFIX):
+            _, status, message = user_message.split(":", 2)
+            raise HttpError(int(status), message)
 
         # Stream a mock response
         created = int(time.time())
@@ -252,6 +262,18 @@ HTTP_ERROR_CASES = (
         "Unsupported Media Type",
     ),
     (
+        MSG_CONTAINS_UNPROCESSABLE_CODE,
+        422,
+        "Unprocessable Entity",
+        "Unprocessable Entity",
+    ),
+    (
+        MSG_CONTAINS_UNPROCESSABLE_STATUS,
+        422,
+        "Unprocessable Entity",
+        "Unprocessable Entity",
+    ),
+    (
         MSG_CONTAINS_INVALID_ARGUMENT,
         400,
         "Invalid request",
@@ -264,6 +286,76 @@ HTTP_ERROR_CASES = (
         "Internal Server Error",
     ),
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("http_server", [True], indirect=True)
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.timeout(60)
+@pytest.mark.forked
+async def test_runtime_http_error_public_symbols(http_server, streaming):
+    base_url, model_name = http_server
+    cases = (
+        (404, "lora_not_found", "lora_not_found"),
+        (422, "invalid_lora_adapter", "invalid_lora_adapter"),
+        (500, "lora_plugin_error", "lora_plugin_error"),
+        (503, "lora_resolver_unavailable", "lora_resolver_unavailable"),
+        (400, "lora_not_found", "Bad Request"),
+        (
+            503,
+            "lora_resolver_unavailable token=secret",
+            "Internal server error",
+        ),
+    )
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=10)
+    ) as session:
+        for status, message, expected in cases:
+            data = {
+                "model": model_name,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": f"{RUNTIME_ERROR_PREFIX}{status}:{message}",
+                    }
+                ],
+                "stream": streaming,
+            }
+            async with session.post(
+                f"{base_url}/v1/chat/completions", json=data
+            ) as response:
+                assert response.status == status
+                body = await response.json()
+                assert body["message"] == expected
+                assert "secret" not in json.dumps(body)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(60)
+@pytest.mark.forked
+async def test_runtime_http_error_public_symbol_after_headers(http_server):
+    base_url, model_name = http_server
+    data = {
+        "model": model_name,
+        "messages": [
+            {"role": "user", "content": f"{RUNTIME_ERROR_PREFIX}404:lora_not_found"}
+        ],
+        "stream": True,
+    }
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=10)
+    ) as session:
+        async with session.post(
+            f"{base_url}/v1/chat/completions", json=data
+        ) as response:
+            assert response.status == 200
+            lines = (await response.text()).splitlines()
+    errors = [
+        json.loads(line[6:])["error"] for line in lines if line.startswith("data: {")
+    ]
+    assert len(errors) == 1
+    assert errors[0]["message"] == "lora_not_found"
+    assert errors[0]["code"] == 404
 
 
 def expected_error_body(status: int, message: str, error_type: str) -> Dict:

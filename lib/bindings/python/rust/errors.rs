@@ -11,7 +11,7 @@
 //! corresponding entry to the macro invocation below to keep Python exceptions
 //! in sync.
 
-use dynamo_runtime::error::{BackendError, DynamoError, ErrorClass};
+use dynamo_runtime::error::{BackendError, DynamoError, ErrorClass, ErrorReason};
 use dynamo_runtime::protocols::annotated::Annotated;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
@@ -240,7 +240,8 @@ fn public_invalid_argument_message(err: &(dyn std::error::Error + 'static)) -> O
 /// SECURITY: `.message` is diagnostic-only. HTTP-like exceptions can wrap remote
 /// fetch failures whose text includes URLs or internal connection details. The
 /// semantic status is preserved, but client renderers use the class catalog
-/// unless the producer raised an explicitly public Dynamo exception.
+/// unless the producer raised an explicitly public Dynamo exception or an exact
+/// registered runtime LoRA status/symbol pair.
 pub fn extract_http_like_error(py: Python<'_>, err: &PyErr) -> Option<(u16, String)> {
     let value = err.value(py);
     let code = value
@@ -289,16 +290,27 @@ pub(crate) fn http_like_error_to_dynamo(py: Python<'_>, err: &PyErr) -> Option<D
 }
 
 fn build_http_like_error(code: u16, message: String) -> DynamoError {
+    let public = dynamo_llm::lora::runtime::public_error_code(code, &message);
     let legacy_message = serde_json::json!({
         "message": message,
         "code": code,
     })
     .to_string();
 
-    DynamoError::builder()
+    let builder = DynamoError::builder()
         .class(error_class_for_http_status(code))
-        .diagnostic(legacy_message)
-        .build()
+        .diagnostic(legacy_message);
+    let builder = if code == 422 {
+        builder.reason(ErrorReason::unprocessable_entity())
+    } else {
+        builder
+    };
+    let builder = if let Some(public) = public {
+        builder.public_message(public)
+    } else {
+        builder
+    };
+    builder.build()
 }
 
 #[cfg(test)]
@@ -424,25 +436,59 @@ mod tests {
     #[test]
     fn http_like_errors_support_semantic_and_legacy_readers() {
         for (code, expected_class) in [
+            (400, ErrorClass::InvalidRequest),
+            (404, ErrorClass::NotFound),
             (409, ErrorClass::Conflict),
             (415, ErrorClass::UnsupportedMedia),
+            (422, ErrorClass::InvalidRequest),
+            (429, ErrorClass::RateLimited),
             (503, ErrorClass::Unavailable),
+            (504, ErrorClass::DeadlineExceeded),
+            (500, ErrorClass::Internal),
         ] {
             let error = build_http_like_error(code, "private backend detail".to_string());
             assert_eq!(error.class(), expected_class);
             assert_eq!(error.public_message(), None);
 
             let wire = serde_json::to_value(&error).expect("serialize DynamoError");
+            if code == 422 {
+                assert_eq!(wire["reason"], "request.invalid");
+                assert_eq!(wire["http_status"], 422);
+            }
             let semantic: DynamoError =
                 serde_json::from_value(wire.clone()).expect("semantic reader");
             assert_eq!(semantic.class(), expected_class);
             assert_eq!(semantic.public_message(), None);
+            if code == 422 {
+                assert_eq!(semantic.reason().as_str(), "request.unprocessable_entity");
+            }
 
             let legacy: LegacyDynamoError = serde_json::from_value(wire).expect("legacy reader");
             let legacy_http: LegacyHttpError =
                 serde_json::from_str(&legacy.message).expect("legacy HTTP payload");
             assert_eq!(legacy_http.code, code);
             assert_eq!(legacy_http.message, "private backend detail");
+        }
+    }
+
+    #[test]
+    fn runtime_public_symbols_are_exact_and_preserve_legacy_status() {
+        for (status, symbol, public) in [
+            (404, "lora_not_found", Some("lora_not_found")),
+            (422, "invalid_lora_adapter", Some("invalid_lora_adapter")),
+            (500, "lora_plugin_error", Some("lora_plugin_error")),
+            (400, "lora_not_found", None),
+            (503, "lora_resolver_unavailable token=secret", None),
+        ] {
+            let error = build_http_like_error(status, symbol.to_string());
+            assert_eq!(error.public_message(), public);
+            let wire = serde_json::to_value(&error).unwrap();
+            let semantic: DynamoError = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(semantic.public_message(), public);
+            let legacy: LegacyDynamoError = serde_json::from_value(wire).unwrap();
+            let payload: LegacyHttpError = serde_json::from_str(&legacy.message).unwrap();
+            assert_eq!(payload.code, status);
+            assert_eq!(payload.message, symbol);
         }
     }
 }
