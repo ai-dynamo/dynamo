@@ -14,6 +14,7 @@ pytest.importorskip("vllm.lora.request")
 pytest.importorskip("zstandard")
 
 from dynamo.artifacts.vllm import capture as capture_mod
+from dynamo.common.lora.manager import LoRAInfo
 from dynamo.common.lora.runtime import ResolvedLoRA
 from dynamo.llm import HttpError
 from dynamo.vllm import handlers as handlers_mod
@@ -35,6 +36,12 @@ class _Context:
 
     def trace_headers(self):
         return None
+
+    def id(self):
+        return "request"
+
+    def notify_first_token(self):
+        pass
 
     def async_killed_or_stopped(self):
         return asyncio.create_task(self.killed.wait())
@@ -168,6 +175,62 @@ async def test_token_path_holds_active_runtime_lease_during_stream(
     assert remaining[-1]["finish_reason"] == "length"
     assert not state_handler._lora_state.runtime_pending_leases
     assert not state_handler._lora_state.runtime_active_leases
+
+
+@pytest.mark.parametrize("public_endpoint", [False, True])
+@pytest.mark.parametrize("empty_output", [False, True])
+@pytest.mark.parametrize("runtime_adapter", [False, True])
+@pytest.mark.asyncio
+async def test_token_stream_close_drains_engine_and_runtime_lease(
+    monkeypatch, tmp_path, empty_output, public_endpoint, runtime_adapter
+):
+    snapshot = _snapshot(tmp_path)
+    state_handler, coordinator = _coordinator(
+        monkeypatch, tmp_path, ResolvedLoRA(snapshot, "digest:immutable")
+    )
+    request = _token_request()
+    if not runtime_adapter:
+        request = {**request, "model": "adapterA", "routing": {}}
+        state_handler._lora_state.loaded_loras["adapterA"] = LoRAInfo(
+            id=123, path=str(snapshot)
+        )
+    handler = _token_handler(state_handler, coordinator, request)
+    handler.use_vllm_tokenizer = False
+    handler._first_token_source = None
+    handler._multimodal_request_processor.validate_multimodal_request = MagicMock()
+    engine_closed = asyncio.Event()
+
+    async def responses(*_args, **_kwargs):
+        try:
+            yield _request_output(
+                [] if empty_output else [_output([1])],
+                prompt_token_ids=request["token_ids"],
+            )
+            await asyncio.Event().wait()
+        finally:
+            engine_closed.set()
+
+    handler.engine_client.generate = responses
+    stream = (
+        handler.generate(request, _Context())
+        if public_endpoint
+        else handler._generate_token_mode(request, _Context(), "request")
+    )
+    try:
+        await anext(stream)
+        assert state_handler._lora_state.active_requests
+        assert bool(state_handler._lora_state.runtime_active_leases) == runtime_adapter
+        if empty_output:
+            assert [chunk async for chunk in stream] == []
+        else:
+            await stream.aclose()
+        assert engine_closed.is_set()
+        assert not state_handler._lora_state.active_requests
+        assert not state_handler._lora_state.runtime_active_leases
+        assert not state_handler._lora_state.runtime_pending_admissions
+    finally:
+        await stream.aclose()
+        await handler.aclose()
 
 
 @pytest.mark.asyncio

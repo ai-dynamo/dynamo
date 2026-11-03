@@ -18,7 +18,13 @@ from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import AsyncExitStack, asynccontextmanager, closing, nullcontext
+from contextlib import (
+    AsyncExitStack,
+    aclosing,
+    asynccontextmanager,
+    closing,
+    nullcontext,
+)
 from typing import (
     Any,
     AsyncIterator,
@@ -3643,6 +3649,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         runtime_lora=False,
         admission_id=None,
     ):
+        gen = None
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
             self._log_with_lora_context(
@@ -3886,6 +3893,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             logger.warning("Initiating Dynamo Runtime shutdown.")
             self.runtime.shutdown()
             os._exit(1)
+        finally:
+            if gen is not None:
+                await gen.aclose()
 
 
 class DecodeWorkerHandler(BaseWorkerHandler):
@@ -3958,16 +3968,20 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # Token-in-token-out mode: internal protocol format
                 generator = self._generate_token_mode(request, context, request_id)
 
-            async for chunk in _translate_vllm_client_errors(generator):
-                if first_token:
-                    decode_timer.stop_interval()
-                    first_token = False
-                if not self.use_vllm_tokenizer and not first_token_output_seen:
-                    token_ids = chunk.get("token_ids") or []
-                    if token_ids:
-                        first_token_output_seen = True
-                        context.notify_first_token()
-                yield chunk
+            async with (
+                aclosing(generator),
+                aclosing(_translate_vllm_client_errors(generator)) as translated,
+            ):
+                async for chunk in translated:
+                    if first_token:
+                        decode_timer.stop_interval()
+                        first_token = False
+                    if not self.use_vllm_tokenizer and not first_token_output_seen:
+                        token_ids = chunk.get("token_ids") or []
+                        if token_ids:
+                            first_token_output_seen = True
+                            context.notify_first_token()
+                    yield chunk
 
     async def _assemble_custom_encoder_prompt(
         self,
@@ -4429,7 +4443,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     accumulated_token_ids: dict[int, list[int]] = {}
                     accumulated_log_probs: dict[int, list[float]] = {}
                     try:
-                        async for tok in self.generate_tokens(
+                        token_generator = self.generate_tokens(
                             prompt,
                             sampling_params,
                             request_id,
@@ -4455,7 +4469,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                                     request, "routed_experts"
                                 )
                             ),
-                        ):
+                        )
+                        await admission_stack.enter_async_context(
+                            aclosing(token_generator)
+                        )
+                        async for tok in token_generator:
                             if abort_guard is not None:
                                 abort_guard.signal_first_token()
                             if artifact_forced_logprobs:
@@ -4673,8 +4691,12 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         # Token-in-token-out mode: internal protocol format
         with time_and_log_code_section(f"[PREFILL] request: {request_id} generate"):
             generator = self._generate_token_mode(request, context, request_id)
-            async for chunk in _translate_vllm_client_errors(generator):
-                yield chunk
+            async with (
+                aclosing(generator),
+                aclosing(_translate_vllm_client_errors(generator)) as translated,
+            ):
+                async for chunk in translated:
+                    yield chunk
 
     def _prefill_kv_protocol(
         self, is_local_probe: bool, sampling_params
@@ -4826,6 +4848,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 self.runtime.shutdown()
                 os._exit(1)
 
+            await admission_stack.enter_async_context(aclosing(gen))
             async for res in gen:
                 logger.debug(f"kv transfer params: {res.kv_transfer_params}")
 
