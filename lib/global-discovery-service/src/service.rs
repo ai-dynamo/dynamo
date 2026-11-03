@@ -12,8 +12,9 @@
 //! - `GET /pools`: the pools a Global Router routes to. `complete` is false
 //!   while the list may be missing pools: for one lease after the service
 //!   starts, while PoolRelays may not have registered yet; and with MCS, also
-//!   while another discovery instance has not answered for a lease, so its
-//!   registrations may be missing, and while the MCS watch keeps failing. A
+//!   while another discovery instance may hold registrations that this one has
+//!   not copied yet (see [`crate::peers`]), and while the MCS watch keeps
+//!   failing. A
 //!   caller that keeps its own list replaces it with a complete list, but
 //!   merges a partial one: it adds new pools and updates changed ones, keeps
 //!   known pools that are missing, and waits for a complete list to remove
@@ -36,7 +37,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::pool_discovery::{
-    Completeness, DiscoveryError, PoolDirectory, PoolRegistrar, PoolRegistration,
+    Completeness, DiscoveryError, Lease, PoolDirectory, PoolRegistrar, PoolRegistration,
     RegistrationExchange, ReplicaDirectory,
 };
 use axum::extract::rejection::JsonRejection;
@@ -70,6 +71,8 @@ pub struct Sharing {
     /// Names this process in `GET /registrations`, so it can skip its own
     /// reply.
     pub(crate) instance: String,
+    /// The registrations' lease, which every instance must share.
+    pub(crate) lease: Lease,
     pub(crate) registrations: Arc<dyn RegistrationExchange>,
     /// Set once this instance has asked every other one. Until then
     /// `GET /healthz` fails, so a new replica does not answer before it has
@@ -198,6 +201,7 @@ async fn shared_registrations(State(backend): State<Arc<PoolDiscoveryBackend>>) 
     };
     Json(SharedRegistrations {
         instance: sharing.instance.clone(),
+        lease: sharing.lease,
         complete: sharing.registrations.holds_every_local_registration(),
         registrations: sharing
             .registrations
@@ -261,8 +265,10 @@ fn error_response(error: DiscoveryError) -> Response {
 /// in `dynamo_global_common`.
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct SharedRegistrations {
-    /// The instance that answered.
     pub(crate) instance: String,
+    /// The answering instance's heartbeat interval and lease. Every instance
+    /// must use the same ones (see [`crate::peers`]).
+    pub(crate) lease: Lease,
     /// The answering instance has heard from every PoolRelay that registers
     /// with it: a lease has passed since it started. A restarted instance's
     /// first replies may lack registrations it has not heard again yet.
@@ -419,6 +425,67 @@ mod tests {
             routers,
             json!({"routers": [{"replica": "aws-ohio/global-router-0", "url": "http://10.42.0.5:50051/"}]})
         );
+        shutdown.cancel();
+    }
+
+    /// The sorted keys of a JSON object.
+    fn keys(value: &Value) -> Vec<&str> {
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    #[tokio::test]
+    async fn registrations_are_shared_in_the_format_other_instances_read() {
+        let lease = Lease::new(1, 3).unwrap();
+        let store = Arc::new(MemoryPoolStore::new(lease));
+        let mut backend = registrations_backend();
+        backend.registrar = Some(store.clone());
+        backend.sharing = Some(Sharing {
+            instance: "a".to_owned(),
+            lease,
+            registrations: store,
+            synced: Arc::new(AtomicBool::new(true)),
+        });
+        let (base, shutdown) = start(backend).await;
+        assert_eq!(
+            post_pool(&base, &registration()).await.0,
+            reqwest::StatusCode::OK
+        );
+
+        // The keys that other instances, maybe of another version during a
+        // rollout, read.
+        let (status, body) = get_json(&base, "/registrations").await;
+        assert_eq!(status, reqwest::StatusCode::OK);
+        assert_eq!(
+            keys(&body),
+            ["complete", "instance", "lease", "registrations"]
+        );
+        assert_eq!(body["instance"], "a");
+        assert_eq!(
+            body["lease"],
+            json!({"heartbeat_interval_s": 1, "lease_duration_s": 3})
+        );
+        let shared = &body["registrations"][0];
+        assert_eq!(keys(shared), ["expires_in_ms", "registration"]);
+        assert_eq!(shared["registration"]["model"], registration()["model"]);
+        assert!(shared["expires_in_ms"].as_u64().unwrap() <= 3000);
+        // The instance may not have heard from all of its PoolRelays until a
+        // lease after it started.
+        assert_eq!(body["complete"], false);
+        tokio::time::sleep(lease.duration()).await;
+        assert_eq!(get_json(&base, "/registrations").await.1["complete"], true);
+        shutdown.cancel();
+
+        // An instance that does not share answers 501.
+        let (base, shutdown) = start(registrations_backend()).await;
+        let response = reqwest::get(format!("{base}/registrations")).await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
         shutdown.cancel();
     }
 

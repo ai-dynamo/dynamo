@@ -152,10 +152,13 @@ struct Args {
     router_port_name: Option<String>,
     /// This service's own Service, exported through MCS. With it, the
     /// instances in every cluster share their registrations, over plain
-    /// HTTP, so not with `--tls-cert-path` yet. The lease must be more than
-    /// twice the heartbeat interval. Other regions then drop a pool whose
-    /// PoolRelay is more than the lease minus two heartbeat intervals late
-    /// (5 s with the defaults); its own region allows the lease minus one.
+    /// HTTP, so not with `--tls-cert-path` yet. The lease must be at least
+    /// three heartbeat intervals, and every instance must use the same
+    /// heartbeat interval and lease. Other regions drop a pool whose PoolRelay
+    /// is more than the lease minus two heartbeat intervals late (5 s with the
+    /// defaults); its own region allows the lease minus one. While another
+    /// instance is listed but does not answer, `GET /pools` says the list is
+    /// not complete, so Global Routers keep pools that may have left.
     #[arg(
         long,
         value_parser = NonEmptyStringValueParser::new(),
@@ -311,15 +314,22 @@ where
             }
         }
     }
-    // A copy from another instance must outlive the time between its
-    // refreshes.
+    // A copy from another instance must outlive a round that times out.
     if parsed.peer_service.is_some()
-        && parsed.lease_duration_secs <= parsed.heartbeat_interval_secs.saturating_mul(2)
+        && parsed.lease_duration_secs < parsed.heartbeat_interval_secs.saturating_mul(3)
     {
         return Err(command.error(
             ErrorKind::ValueValidation,
-            "with --peer-service, --lease-duration-secs must be more than twice \
-             --heartbeat-interval-secs, so that copies stay alive between refreshes",
+            "with --peer-service, --lease-duration-secs must be at least three times \
+             --heartbeat-interval-secs, so that copies outlive a round that times out",
+        ));
+    }
+    // Instances share the registrations that each keeps in memory.
+    if parsed.peer_service.is_some() && parsed.registration_storage != RegistrationStorage::Memory {
+        return Err(command.error(
+            ErrorKind::ArgumentConflict,
+            "--peer-service shares registrations kept in memory, so it works only with \
+             --registration-storage memory",
         ));
     }
     // A Service name must not match both suffixes.
@@ -700,12 +710,12 @@ mod tests {
         ]))
         .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::ArgumentConflict, "{error}");
-        // A lease of at most two heartbeats lets copies expire between
-        // refreshes.
+        // A lease under three heartbeats lets copies lapse after a round
+        // that times out.
         let error = parse_args(karmada(&[
             "--peer-service=gds",
             "--heartbeat-interval-secs=5",
-            "--lease-duration-secs=10",
+            "--lease-duration-secs=14",
         ]))
         .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::ValueValidation, "{error}");
@@ -714,7 +724,7 @@ mod tests {
             parse_args(karmada(&[
                 "--peer-service=gds",
                 "--heartbeat-interval-secs=5",
-                "--lease-duration-secs=11",
+                "--lease-duration-secs=15",
             ]))
             .is_ok()
         );
