@@ -1518,15 +1518,15 @@ mod tests {
         run_stream(c, stream()).await;
     }
 
-    /// add_request: pick() is invoked → registers request with the slot tracker.
+    /// pick() is invoked once per request; the picker books its workers there.
     #[tokio::test]
-    async fn test_add_request_called() {
+    async fn test_pick_called() {
         let t = Arc::new(Tracker::agg());
         run(&mut connect(t.clone()).await).await;
         assert_eq!(t.add.load(Ordering::SeqCst), 1);
     }
 
-    /// mark_prefill_complete: on_prefill_complete() fires exactly once on the first
+    /// on_prefill_complete() fires exactly once on the first
     /// non-empty ResponseBody chunk (the first generated token) in both routing modes.
     #[tokio::test]
     async fn test_mark_prefill_complete_called_once_for_both_routing_modes() {
@@ -1546,7 +1546,7 @@ mod tests {
         }
     }
 
-    /// free_request: on_request_complete() fires when the stream ends.
+    /// on_request_complete() fires when the stream ends.
     #[tokio::test]
     async fn test_free_request_called() {
         let t = Arc::new(Tracker::agg());

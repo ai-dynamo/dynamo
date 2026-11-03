@@ -24,10 +24,11 @@ body and headers. It then keeps each booking instead of dispatching it:
 
 | Stage | Selection | Booking | Released by |
 |---|---|---|---|
-| Prefill | `StageRouter::schedule` on the `PrefillRouter` | `RoutePlan::into_booking`, kept in `prefill_bookings` | The first of the prefill-complete or request-complete callbacks |
+| Prefill | `StageRouter::schedule` on the `PrefillRouter` | `RoutePlan::into_booking`, kept by `PickBookings` under the reservation id | The first of the prefill-complete or request-complete callbacks |
 | Decode | `RoutingHost::plan_route` on a decode host built over the decode `KvRouter` | `RoutePlan::detach_booking`, kept under the reservation id | `mark_prefill_completed`, then `free`, by reservation id from the response callbacks |
 
-With no prefill target, or on any prefill selection error, the request routes aggregated.
+With no prefill target, or on any prefill selection error, the request routes aggregated. A pick
+that fails after selection, such as when the decode worker has no endpoint, aborts both plans.
 
 ### Planned
 
@@ -62,7 +63,7 @@ only some of them. Each row below is one `RouteRequest` input. For what each inp
 | Excluded workers, parked classifier lifecycle | `migration_state` | Not supplied | Not applicable: Migration retries run in the frontend sidecar, after the pick. |
 | Staged KV that only this decode can release | `staged_kv_cleanup` | Not supplied | Not applicable: only the frontend's decode leg after remote prefill carries staged KV. |
 | Query-only selection | `is_query_only` | Not supplied | Not applicable: the EPP always books. |
-| The frontend request (device-aware multimodal cache keys) | `preprocessed` | Not supplied | Not applicable: the EPP's prefill and decode routers are KV-routed. |
+| The frontend request (device-aware multimodal cache keys) | `preprocessed` | Not supplied | **Gap.** A prefill set whose card advertises device-aware routing is weighed by device type only, without multimodal cache hits. Decode is always KV-routed. |
 
 Closing these gaps is part of the Runtime EPP's production readiness,
 [DEP #16595](https://github.com/ai-dynamo/dynamo/issues/16595).

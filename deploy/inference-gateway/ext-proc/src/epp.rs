@@ -13,14 +13,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use dashmap::DashMap;
 use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::{BlockExtraInfo, RoutingConstraints};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::stage_router::StageRouter;
 use dynamo_llm::kv_router::{
-    ManagedKvRouter, PrefillRouter, RouteBooking, RoutePlan, RouteRequest, RoutingHost,
+    KvRouter, PrefillRouter, RouteBooking, RoutePlan, RouteRequest, RoutingHost,
 };
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
@@ -171,12 +171,11 @@ impl RouteRequest for EppRouteRequest<'_> {
 /// without the `block_on` / unsafe FFI overhead.
 pub struct Router {
     prefill_router: Arc<PrefillRouter>,
-    prefill_bookings: DashMap<String, RouteBooking>,
-    decode_router: ManagedKvRouter,
     /// Selects and books decode workers through the frontend's selection
     /// path. The EPP never dispatches through it; the gateway sends the
     /// request to the frontend sidecar, which does.
     decode_host: Arc<RoutingHost>,
+    bookings: PickBookings,
     preprocessor: Arc<OpenAIPreprocessor>,
     runtime: Runtime,
     worker_index: Arc<RwLock<WorkerEndpointIndex>>,
@@ -184,17 +183,81 @@ pub struct Router {
     served_model: String,
 }
 
-/// Remove and release a booking once. Both response lifecycle callbacks use
-/// this helper so terminal completion before first output and duplicate signals
-/// have identical behavior.
-async fn release_prefill_booking(
-    prefill_bookings: &DashMap<String, RouteBooking>,
-    booking_id: &str,
-) {
-    if let Some((_, booking)) = prefill_bookings.remove(booking_id) {
-        booking.release().await;
+/// The id a pick's prefill booking is planned under. The decode booking is
+/// planned under the reservation id itself.
+fn prefill_booking_id(reservation_id: &str) -> String {
+    format!("epp-prefill/{reservation_id}")
+}
+
+/// The bookings of picked requests. The gateway sends each request, so the
+/// EPP keeps a pick's bookings until the response callbacks release them.
+struct PickBookings {
+    /// Prefill bookings, by reservation id.
+    prefill: DashMap<String, RouteBooking>,
+    /// The decode router, which keeps each decode booking under its
+    /// reservation id.
+    decode_router: Arc<KvRouter>,
+}
+
+impl PickBookings {
+    fn new(decode_router: Arc<KvRouter>) -> Self {
+        Self {
+            prefill: DashMap::new(),
+            decode_router,
+        }
+    }
+
+    /// Keep a pick's bookings under `reservation_id`, the id `decode` was
+    /// planned under.
+    fn keep(&self, reservation_id: &str, prefill: Option<RoutePlan>, decode: RoutePlan) {
+        decode.detach_booking();
+        if let Some(plan) = prefill {
+            self.prefill
+                .insert(reservation_id.to_owned(), plan.into_booking());
+        }
+    }
+
+    /// Release the plans of a pick that fails after selection.
+    async fn abandon(prefill: Option<RoutePlan>, decode: RoutePlan) {
+        if let Some(plan) = prefill {
+            plan.abort(None).await;
+        }
+        decode.abort(None).await;
+    }
+
+    /// Prefill finished: release its booking and mark the decode booking's
+    /// prefill complete.
+    async fn prefill_completed(&self, reservation_id: &str) -> Result<()> {
+        self.release_prefill(reservation_id).await;
+        tokio::time::timeout(
+            BOOKKEEPING_TIMEOUT,
+            self.decode_router.mark_prefill_completed(reservation_id),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("mark_prefill_completed timed out"))?
+        .map_err(|e| anyhow::anyhow!("mark_prefill_completed failed: {e}"))
+    }
+
+    /// The response finished, possibly before any output: release both
+    /// bookings. A repeat releases nothing and reports the decode booking
+    /// as not found.
+    async fn request_completed(&self, reservation_id: &str) -> Result<()> {
+        self.release_prefill(reservation_id).await;
+        tokio::time::timeout(BOOKKEEPING_TIMEOUT, self.decode_router.free(reservation_id))
+            .await
+            .map_err(|_| anyhow::anyhow!("free timed out"))?
+            .map_err(|e| anyhow::anyhow!("free failed: {e}"))
+    }
+
+    /// Remove and release a prefill booking once, whichever callback comes
+    /// first.
+    async fn release_prefill(&self, reservation_id: &str) {
+        if let Some((_, booking)) = self.prefill.remove(reservation_id) {
+            booking.release().await;
+        }
     }
 }
+
 impl Router {
     /// Initialize the router from discovery.
     ///
@@ -311,8 +374,7 @@ impl Router {
         // does not tear down any background work.
         Ok(Self {
             prefill_router,
-            prefill_bookings: DashMap::new(),
-            decode_router,
+            bookings: PickBookings::new(Arc::clone(decode_host.kv_router())),
             decode_host,
             preprocessor: bootstrap.preprocessor,
             runtime,
@@ -548,7 +610,7 @@ impl Router {
             .schedule(request)
             .await
             .map(|plan| plan.into_route())
-            .map_err(|e| anyhow::anyhow!("Prefill scheduling failed: {e}"))
+            .context("Prefill scheduling failed")
     }
 
     /// Select and book a decode worker through the decode host's
@@ -570,37 +632,7 @@ impl Router {
         self.decode_host
             .plan_route(request, phase)
             .await
-            .map_err(|e| anyhow::anyhow!("Decode selection failed: {e}"))
-    }
-
-    /// Mark prefill as completed for a request.
-    pub async fn mark_prefill_complete(&self, request_id: &str) -> Result<()> {
-        let decode_router = self.decode_router.clone();
-        let request_id = request_id.to_owned();
-
-        tokio::time::timeout(BOOKKEEPING_TIMEOUT, async {
-            decode_router
-                .mark_prefill_completed(&request_id)
-                .await
-                .map_err(|e| anyhow::anyhow!("mark_prefill_completed failed: {e}"))
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("mark_prefill_complete timed out"))?
-    }
-
-    /// Free a request from the router's bookkeeping.
-    pub async fn free_request(&self, request_id: &str) -> Result<()> {
-        let decode_router = self.decode_router.clone();
-        let request_id = request_id.to_owned();
-
-        tokio::time::timeout(BOOKKEEPING_TIMEOUT, async {
-            decode_router
-                .free(&request_id)
-                .await
-                .map_err(|e| anyhow::anyhow!("free failed: {e}"))
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("free_request timed out"))?
+            .context("Decode selection failed")
     }
 
     pub fn runtime(&self) -> &Runtime {
@@ -1431,11 +1463,10 @@ impl EndpointPicker for Router {
 
         // Try prefill routing first (disaggregated mode).
         //
-        // With no prefill target (no prefill workers discovered yet, or the
-        // target was cleared), or on any prefill selection error, fall back to
-        // aggregated routing.
+        // With no prefill target (no prefill workers discovered yet), or on
+        // any prefill selection error, fall back to aggregated routing.
         let prefill_request = EppRouteRequest::new(
-            format!("epp-prefill/{reservation_id}"),
+            prefill_booking_id(&reservation_id),
             &tokens,
             &routing_hints,
             policy_class.as_deref(),
@@ -1445,7 +1476,7 @@ impl EndpointPicker for Router {
             Ok(plan) => plan,
             Err(e) => {
                 tracing::debug!(
-                    error = %e,
+                    error = %format_args!("{e:#}"),
                     "Prefill routing failed; falling back to aggregated mode"
                 );
                 None
@@ -1465,7 +1496,7 @@ impl EndpointPicker for Router {
         let decode_plan = self
             .route_decode(&decode_request, is_disaggregated)
             .await
-            .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
+            .map_err(|e| PickError::RoutingFailed(format!("{e:#}")))?;
         let decode_worker = decode_plan.target();
 
         // TODO(epp-endpoint-reconciliation): Reconcile Dynamo discovery with the
@@ -1478,8 +1509,7 @@ impl EndpointPicker for Router {
                         worker_id = decode_worker.worker_id,
                         "Selected worker has no resolved endpoint"
                     );
-                    // Dropping the prefill plan releases its booking too.
-                    decode_plan.abort(None).await;
+                    PickBookings::abandon(prefill_plan, decode_plan).await;
                     return Err(PickError::NoEndpoints);
                 }
             }
@@ -1497,16 +1527,11 @@ impl EndpointPicker for Router {
                 })
         };
 
-        // The gateway sends the request, so the EPP keeps both bookings instead
-        // of dispatching: decode under the reservation id, prefill in
-        // `prefill_bookings`. The response callbacks release both.
-        decode_plan.detach_booking();
-        let prefill_worker = prefill_plan.map(|plan| {
-            let target = plan.target();
-            self.prefill_bookings
-                .insert(reservation_id.clone(), plan.into_booking());
-            target
-        });
+        // The gateway sends the request, so the EPP keeps both bookings
+        // instead of dispatching. The response callbacks release them.
+        let prefill_worker = prefill_plan.as_ref().map(RoutePlan::target);
+        self.bookings
+            .keep(&reservation_id, prefill_plan, decode_plan);
         // A KV route always names its DP rank; the decode header has always
         // carried one, so a built-in route without one reports rank 0.
         let decode_dp_rank = decode_worker.dp_rank.unwrap_or(0);
@@ -1586,8 +1611,7 @@ impl EndpointPicker for Router {
         if booking_id.is_empty() {
             return;
         }
-        release_prefill_booking(&self.prefill_bookings, booking_id).await;
-        if let Err(e) = self.mark_prefill_complete(booking_id).await {
+        if let Err(e) = self.bookings.prefill_completed(booking_id).await {
             tracing::debug!(
                 reservation_id = booking_id,
                 error = %e,
@@ -1610,8 +1634,7 @@ impl EndpointPicker for Router {
                 "Request complete with usage"
             );
         }
-        release_prefill_booking(&self.prefill_bookings, booking_id).await;
-        if let Err(e) = self.free_request(booking_id).await {
+        if let Err(e) = self.bookings.request_completed(booking_id).await {
             tracing::debug!(
                 reservation_id = booking_id,
                 error = %e,
@@ -2752,5 +2775,185 @@ mod tests {
             endpoint_in_subset(&endpoint, &candidates, &candidate_ips),
             "bracketed IPv6 endpoint must match its bare-IP candidate"
         );
+    }
+
+    /// A KV routing host over one worker that books but never sends, as the
+    /// EPP's prefill and decode hosts do.
+    async fn kv_host(runtime: &Runtime, namespace: &str) -> RoutingHost {
+        use dynamo_kv_router::config::KvRouterConfig;
+        use dynamo_llm::kv_router::SelectionPolicySource;
+        use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
+        use dynamo_runtime::distributed::DistributedConfig;
+
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace(namespace.to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate");
+        let client = endpoint.client().await.unwrap();
+        let (_workers_tx, workers_rx) =
+            tokio::sync::watch::channel(HashMap::from([(7, ModelRuntimeConfig::default())]));
+        let config = KvRouterConfig {
+            skip_initial_worker_wait: true,
+            use_kv_events: false,
+            router_track_active_blocks: false,
+            ..Default::default()
+        };
+        let chooser = KvRouter::new_with_worker_role(
+            endpoint,
+            client.clone(),
+            workers_rx,
+            None,
+            16,
+            SelectionPolicySource::Registry,
+            Some(config),
+            None,
+            None,
+            "decode",
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        RoutingHost::builder(client, RouterMode::KV)
+            .kv_router(Arc::new(chooser))
+            .build()
+            .await
+            .unwrap()
+    }
+
+    /// Whether `host` still holds any booking.
+    async fn holds_a_booking(host: &RoutingHost) -> bool {
+        host.kv_router()
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap()
+            .iter()
+            .any(|load| load.active_requests > 0 || load.potential_prefill_tokens > 0)
+    }
+
+    /// Plan a pick's prefill and decode routes under the ids `pick` uses.
+    async fn plan_pick(
+        prefill_host: &RoutingHost,
+        decode_host: &RoutingHost,
+        reservation_id: &str,
+    ) -> (RoutePlan, RoutePlan) {
+        let tokens = [1u32; 64];
+        let hints = RoutingHints::default();
+        let prefill = prefill_host
+            .plan_route(
+                &EppRouteRequest::new(
+                    prefill_booking_id(reservation_id),
+                    &tokens,
+                    &hints,
+                    None,
+                    None,
+                ),
+                RequestPhase::Prefill,
+            )
+            .await
+            .unwrap();
+        let decode = decode_host
+            .plan_route(
+                &EppRouteRequest::new(
+                    reservation_id.to_string(),
+                    &tokens,
+                    &hints,
+                    None,
+                    decode_router_config_override(true),
+                ),
+                RequestPhase::Decode,
+            )
+            .await
+            .unwrap();
+        (prefill, decode)
+    }
+
+    struct PickFixture {
+        runtime: Runtime,
+        prefill_host: RoutingHost,
+        decode_host: RoutingHost,
+        bookings: PickBookings,
+    }
+
+    async fn pick_fixture() -> PickFixture {
+        let runtime = Runtime::from_current().unwrap();
+        let prefill_host = kv_host(&runtime, "epp-prefill").await;
+        let decode_host = kv_host(&runtime, "epp-decode").await;
+        let bookings = PickBookings::new(Arc::clone(decode_host.kv_router()));
+        PickFixture {
+            runtime,
+            prefill_host,
+            decode_host,
+            bookings,
+        }
+    }
+
+    /// The prefill-complete callback releases the prefill booking only; the
+    /// request-complete callback then frees decode, and a repeat releases
+    /// nothing.
+    #[tokio::test]
+    async fn kept_pick_bookings_are_released_by_the_response_callbacks() {
+        let fixture = pick_fixture().await;
+        let (prefill, decode) =
+            plan_pick(&fixture.prefill_host, &fixture.decode_host, "pick").await;
+        fixture.bookings.keep("pick", Some(prefill), decode);
+        assert!(holds_a_booking(&fixture.prefill_host).await);
+        assert!(holds_a_booking(&fixture.decode_host).await);
+
+        fixture.bookings.prefill_completed("pick").await.unwrap();
+        assert!(!holds_a_booking(&fixture.prefill_host).await);
+        assert!(holds_a_booking(&fixture.decode_host).await);
+
+        fixture.bookings.request_completed("pick").await.unwrap();
+        assert!(!holds_a_booking(&fixture.decode_host).await);
+        assert!(fixture.bookings.request_completed("pick").await.is_err());
+        assert!(!holds_a_booking(&fixture.decode_host).await);
+
+        fixture.runtime.shutdown();
+    }
+
+    /// A response that ends before its first output never signals prefill
+    /// completion; the request-complete callback releases both bookings.
+    #[tokio::test]
+    async fn request_completion_alone_releases_both_bookings() {
+        let fixture = pick_fixture().await;
+        let (prefill, decode) =
+            plan_pick(&fixture.prefill_host, &fixture.decode_host, "early-end").await;
+        fixture.bookings.keep("early-end", Some(prefill), decode);
+
+        fixture
+            .bookings
+            .request_completed("early-end")
+            .await
+            .unwrap();
+        assert!(!holds_a_booking(&fixture.prefill_host).await);
+        assert!(!holds_a_booking(&fixture.decode_host).await);
+
+        fixture.runtime.shutdown();
+    }
+
+    /// A pick that fails after selection, such as when the decode worker has
+    /// no endpoint, releases both plans.
+    #[tokio::test]
+    async fn abandoned_pick_releases_both_plans() {
+        let fixture = pick_fixture().await;
+        let (prefill, decode) =
+            plan_pick(&fixture.prefill_host, &fixture.decode_host, "no-endpoint").await;
+        assert!(holds_a_booking(&fixture.prefill_host).await);
+        assert!(holds_a_booking(&fixture.decode_host).await);
+
+        PickBookings::abandon(Some(prefill), decode).await;
+        assert!(!holds_a_booking(&fixture.prefill_host).await);
+        assert!(!holds_a_booking(&fixture.decode_host).await);
+
+        fixture.runtime.shutdown();
     }
 }
