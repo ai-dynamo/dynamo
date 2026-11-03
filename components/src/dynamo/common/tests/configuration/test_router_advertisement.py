@@ -51,9 +51,10 @@ def test_kv_tuning_is_carried_not_reset():
     name a mode but not the tuning that goes with it, advertising `kv` would
     quietly discard whatever KV tuning the frontend was configured with.
     """
-    config, _ = parse_worker_router_config(
-        ["--router-mode", "kv", "--router-kv-overlap-score-credit", "2.5"]
-    )
+    with pytest.warns(FutureWarning, match="--router-policy-config"):
+        config, _ = parse_worker_router_config(
+            ["--router-mode", "kv", "--router-kv-overlap-score-credit", "2.5"]
+        )
     router_config = build_router_config(config)
     assert router_config is not None
     assert router_config.kv_router_config.overlap_score_credit == 2.5
@@ -83,6 +84,58 @@ def test_router_arg_group_refuses_to_guess_its_caller():
     """
     with pytest.raises(TypeError):
         RouterArgGroup()  # type: ignore[call-arg]
+
+
+_ABSOLUTE_PREFILL_DEPRECATION = "--active-prefill-tokens-threshold is deprecated"
+
+
+@pytest.mark.parametrize("source", ["cli", "env"])
+def test_deprecated_absolute_prefill_threshold_warns_when_advertised(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    source: str,
+):
+    """A worker forwarding the deprecated threshold must see the migration notice.
+
+    Workers never run the frontend's validation, so the warning has to come
+    from the shared path that builds the advertisement, for the CLI flag and
+    the environment variable alike.
+    """
+    monkeypatch.delenv("DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD", raising=False)
+    argv = ["--router-mode", "kv"]
+    if source == "cli":
+        argv += ["--active-prefill-tokens-threshold", "123"]
+    else:
+        monkeypatch.setenv("DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD", "123")
+    caplog.set_level("WARNING")
+
+    config, _ = parse_worker_router_config(argv)
+    assert config.active_prefill_tokens_threshold == 123
+    assert _ABSOLUTE_PREFILL_DEPRECATION not in caplog.text
+
+    assert build_router_config(config) is not None
+    assert caplog.text.count(_ABSOLUTE_PREFILL_DEPRECATION) == 1
+
+
+def test_absolute_prefill_threshold_unset_or_unadvertised_stays_quiet(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    """No notice without a value, and none when the value is never forwarded.
+
+    A worker that omits --router-mode advertises nothing, so the threshold is
+    dropped along with every other router flag rather than forwarded.
+    """
+    monkeypatch.delenv("DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD", raising=False)
+    caplog.set_level("WARNING")
+
+    config, _ = parse_worker_router_config(["--router-mode", "kv"])
+    assert build_router_config(config) is not None
+
+    config, _ = parse_worker_router_config(["--active-prefill-tokens-threshold", "123"])
+    assert build_router_config(config) is None
+
+    assert _ABSOLUTE_PREFILL_DEPRECATION not in caplog.text
 
 
 def test_unknown_mode_is_rejected():

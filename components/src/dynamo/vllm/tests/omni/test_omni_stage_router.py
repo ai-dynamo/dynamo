@@ -9,7 +9,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from dynamo.common.protocols.image_protocol import NvCreateImageRequest
 from dynamo.common.utils.output_modalities import RequestType
+from dynamo.llm.exceptions import InvalidArgument
 
 try:
     from dynamo.vllm.omni import stage_router
@@ -83,6 +85,7 @@ def test_router_loads_stage_configs_from_model_deploy_config():
         media_output_fs_url=None,
         media_output_http_url=None,
         default_video_fps=16,
+        image_png_compression_level=0,
     )
     stage_configs = [_make_stage_cfg(0)]
 
@@ -100,8 +103,53 @@ def test_router_loads_stage_configs_from_model_deploy_config():
         trust_remote_code=False,
         deploy_config_path="/deploy/glm_image.yaml",
     )
-    output_formatter.assert_called_once()
+    output_formatter.assert_called_once_with(
+        model_name=config.model,
+        media_fs=None,
+        media_http_url=None,
+        default_fps=16,
+        image_png_compression_level=0,
+    )
     assert router.stage_configs == stage_configs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("output_modalities", [["image"], ["IMAGE"], []])
+async def test_stage_router_advertises_no_image_edits(output_modalities):
+    """Stage-router discovery must reject edits, including fallback image output."""
+    config = SimpleNamespace(
+        namespace="test",
+        component="router",
+        endpoint="generate",
+        model="test-model",
+        served_model_name="served-model",
+        output_modalities=output_modalities,
+        stage_configs_path="stages.yaml",
+    )
+    router = _make_router([_make_stage_cfg(0)], {})
+    generate_endpoint = SimpleNamespace(serve_endpoint=AsyncMock())
+    stage_client = SimpleNamespace(wait_for_instances=AsyncMock())
+    stage_endpoint = SimpleNamespace(client=AsyncMock(return_value=stage_client))
+    runtime = MagicMock()
+    runtime.endpoint.side_effect = [generate_endpoint, stage_endpoint]
+    shutdown_endpoints = []
+
+    with (
+        patch.object(stage_router, "OmniStageRouter", return_value=router),
+        patch.object(stage_router, "setup_metrics_collection"),
+        patch.object(
+            stage_router, "register_model", new_callable=AsyncMock
+        ) as register,
+        patch.object(stage_router, "register_model_taint_route"),
+    ):
+        await stage_router.init_omni_stage_router(runtime, config, shutdown_endpoints)
+
+    register.assert_awaited_once()
+    assert register.call_args.kwargs["user_data"] == {
+        "image_edits": {"schema_version": 1, "max_input_images": 0}
+    }
+    assert shutdown_endpoints == [generate_endpoint]
+    generate_endpoint.serve_endpoint.assert_awaited_once()
 
 
 # ── issue-004: opaque router ──────────────────────────────
@@ -252,11 +300,20 @@ async def test_generate_delegates_formatting_to_output_formatter():
         formatter=mock_formatter,
     )
 
-    request = {"prompt": "x", "response_format": "b64_json"}
+    request = {
+        "prompt": "x",
+        "response_format": "b64_json",
+        "output_format": "JPEG",
+    }
     with patch.object(stage_router, "shm_deserialize", return_value=fake_result):
         with patch(
             "dynamo.vllm.omni.stage_router.parse_request_type",
-            return_value=(None, "image_generation"),
+            return_value=(
+                NvCreateImageRequest(
+                    prompt="x", response_format="b64_json", output_format="JPEG"
+                ),
+                RequestType.IMAGE_GENERATION,
+            ),
         ):
             with patch(
                 "dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="req-fmt"
@@ -267,9 +324,63 @@ async def test_generate_delegates_formatting_to_output_formatter():
     mock_formatter.format.assert_awaited_once_with(
         fake_result,
         "req-fmt",
-        request_type="image_generation",
+        request_type=RequestType.IMAGE_GENERATION,
         response_format="b64_json",
+        output_format="jpeg",
     )
+
+
+@pytest.mark.asyncio
+async def test_invalid_image_output_format_is_rejected_before_stage_call():
+    stage_called = False
+
+    async def stage0_handler(request):
+        nonlocal stage_called
+        stage_called = True
+        return {"shm_meta": {"x": 1}, "finished": True}
+
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0)],
+        stage_clients={"stage0": _StageClient(stage0_handler)},
+        output_modalities=["image"],
+    )
+    request = {"prompt": "x", "output_format": "gif"}
+
+    with pytest.raises(InvalidArgument, match="Unsupported output_format"):
+        [chunk async for chunk in router.generate(request, context=None)]
+
+    assert not stage_called
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("modality", ["image", "IMAGE"])
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "https://example.com/image.png?signature=private",
+        "data:image/png;base64,aW1hZ2U=",
+        ["https://example.com/image.png"],
+        ["https://example.com/first.png", "https://example.com/second.png"],
+    ],
+    ids=["url", "data-url", "singleton-array", "multiple-images"],
+)
+async def test_stage_router_rejects_edit_references_before_dispatch(
+    modality, reference
+):
+    """Older frontends must not let image edits reach stages that ignore references."""
+    client = SimpleNamespace(round_robin=AsyncMock())
+    router = _make_router(
+        [_make_stage_cfg(0)], {"stage0": client}, output_modalities=[modality]
+    )
+    with pytest.raises(InvalidArgument) as error:
+        async for _ in router.generate(
+            {"prompt": "edit", "input_reference": reference}, context=None
+        ):
+            pytest.fail("Unsupported image edits must not yield a generation result")
+
+    assert str(error.value) == "Image edits are not supported by the Omni stage router"
+    client.round_robin.assert_not_awaited()
+    router._formatter.format.assert_not_awaited()
 
 
 @pytest.mark.asyncio

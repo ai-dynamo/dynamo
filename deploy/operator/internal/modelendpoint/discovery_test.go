@@ -23,7 +23,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -63,10 +62,8 @@ func TestExtractCandidates(t *testing.T) {
 			endpointSlices: &discoveryv1.EndpointSliceList{
 				Items: []discoveryv1.EndpointSlice{
 					{
-						ObjectMeta: metav1.ObjectMeta{
-							Labels: map[string]string{
-								discoveryv1.LabelServiceName: "my-service",
-							},
+						Labels: map[string]string{
+							discoveryv1.LabelServiceName: "my-service",
 						},
 						Endpoints: []discoveryv1.Endpoint{
 							{
@@ -222,10 +219,8 @@ func TestExtractCandidates(t *testing.T) {
 			endpointSlices: &discoveryv1.EndpointSliceList{
 				Items: []discoveryv1.EndpointSlice{
 					{
-						ObjectMeta: metav1.ObjectMeta{
-							Labels: map[string]string{
-								discoveryv1.LabelServiceName: "service-1",
-							},
+						Labels: map[string]string{
+							discoveryv1.LabelServiceName: "service-1",
 						},
 						Endpoints: []discoveryv1.Endpoint{
 							{
@@ -268,10 +263,8 @@ func TestExtractCandidates(t *testing.T) {
 			endpointSlices: &discoveryv1.EndpointSliceList{
 				Items: []discoveryv1.EndpointSlice{
 					{
-						ObjectMeta: metav1.ObjectMeta{
-							Labels: map[string]string{
-								discoveryv1.LabelServiceName: "my-service",
-							},
+						Labels: map[string]string{
+							discoveryv1.LabelServiceName: "my-service",
 						},
 						Endpoints: []discoveryv1.Endpoint{
 							{
@@ -387,9 +380,9 @@ func TestExtractCandidates(t *testing.T) {
 			endpointSlices: &discoveryv1.EndpointSliceList{
 				Items: []discoveryv1.EndpointSlice{
 					{
-						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+						Labels: map[string]string{
 							discoveryv1.LabelServiceName: "component-service",
-						}},
+						},
 						Endpoints: []discoveryv1.Endpoint{{
 							Addresses:  []string{"10.0.1.5"},
 							Conditions: discoveryv1.EndpointConditions{Ready: &trueVal},
@@ -397,9 +390,9 @@ func TestExtractCandidates(t *testing.T) {
 						}},
 					},
 					{
-						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+						Labels: map[string]string{
 							discoveryv1.LabelServiceName: "base-model-service",
-						}},
+						},
 						Endpoints: []discoveryv1.Endpoint{{
 							Addresses:  []string{"10.0.1.5"},
 							Conditions: discoveryv1.EndpointConditions{Ready: &trueVal},
@@ -429,10 +422,8 @@ func TestExtractCandidates(t *testing.T) {
 			endpointSlices: &discoveryv1.EndpointSliceList{
 				Items: []discoveryv1.EndpointSlice{
 					{
-						ObjectMeta: metav1.ObjectMeta{
-							Labels: map[string]string{
-								discoveryv1.LabelServiceName: "service-1",
-							},
+						Labels: map[string]string{
+							discoveryv1.LabelServiceName: "service-1",
 						},
 						Endpoints: []discoveryv1.Endpoint{
 							{
@@ -448,10 +439,8 @@ func TestExtractCandidates(t *testing.T) {
 						},
 					},
 					{
-						ObjectMeta: metav1.ObjectMeta{
-							Labels: map[string]string{
-								discoveryv1.LabelServiceName: "service-2",
-							},
+						Labels: map[string]string{
+							discoveryv1.LabelServiceName: "service-2",
 						},
 						Endpoints: []discoveryv1.Endpoint{
 							{
@@ -522,10 +511,8 @@ func TestFindModelsForBaseModel(t *testing.T) {
 			indexField:    ".spec.baseModelName",
 			existingModels: []v1alpha1.DynamoModel{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "lora-1",
-						Namespace: "default",
-					},
+					Name:      "lora-1",
+					Namespace: "default",
 					Spec: v1alpha1.DynamoModelSpec{
 						ModelName:     "lora-1",
 						BaseModelName: "llama-2-7b",
@@ -533,10 +520,8 @@ func TestFindModelsForBaseModel(t *testing.T) {
 					},
 				},
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "lora-2",
-						Namespace: "default",
-					},
+					Name:      "lora-2",
+					Namespace: "default",
 					Spec: v1alpha1.DynamoModelSpec{
 						ModelName:     "lora-2",
 						BaseModelName: "llama-2-7b",
@@ -544,10 +529,8 @@ func TestFindModelsForBaseModel(t *testing.T) {
 					},
 				},
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "different-base",
-						Namespace: "default",
-					},
+					Name:      "different-base",
+					Namespace: "default",
 					Spec: v1alpha1.DynamoModelSpec{
 						ModelName:     "different-base",
 						BaseModelName: "gpt-3",
@@ -566,10 +549,8 @@ func TestFindModelsForBaseModel(t *testing.T) {
 			indexField:    ".spec.baseModelName",
 			existingModels: []v1alpha1.DynamoModel{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "lora-1",
-						Namespace: "default",
-					},
+					Name:      "lora-1",
+					Namespace: "default",
 					Spec: v1alpha1.DynamoModelSpec{
 						ModelName:     "lora-1",
 						BaseModelName: "llama-2-7b",
@@ -588,10 +569,8 @@ func TestFindModelsForBaseModel(t *testing.T) {
 			indexField:    ".spec.baseModelName",
 			existingModels: []v1alpha1.DynamoModel{
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "lora-ns1",
-						Namespace: "ns1",
-					},
+					Name:      "lora-ns1",
+					Namespace: "ns1",
 					Spec: v1alpha1.DynamoModelSpec{
 						ModelName:     "lora-ns1",
 						BaseModelName: "llama-2-7b",
@@ -599,10 +578,8 @@ func TestFindModelsForBaseModel(t *testing.T) {
 					},
 				},
 				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "lora-ns2",
-						Namespace: "ns2",
-					},
+					Name:      "lora-ns2",
+					Namespace: "ns2",
 					Spec: v1alpha1.DynamoModelSpec{
 						ModelName:     "lora-ns2",
 						BaseModelName: "llama-2-7b",

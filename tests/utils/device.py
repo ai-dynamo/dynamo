@@ -33,17 +33,17 @@ def get_default_vllm_block_size() -> int:
     return 64 if detect_target_device() == "xpu" else 16
 
 
-def build_nixl_kv_transfer_config() -> dict[str, Any]:
+def build_nixl_kv_transfer_config(role: str) -> dict[str, Any]:
     """Build a runtime-compatible NIXL kv-transfer config for vLLM tests."""
     config: dict[str, Any] = {
         "kv_connector": "NixlConnector",
-        "kv_role": "kv_both",
+        "kv_role": role,
     }
     if detect_target_device() == "xpu":
         config["kv_buffer_device"] = "xpu"
     return config
 
 
-def build_nixl_kv_transfer_config_json() -> str:
+def build_nixl_kv_transfer_config_json(role: str) -> str:
     """JSON-encode the runtime-compatible NIXL kv-transfer config."""
-    return json.dumps(build_nixl_kv_transfer_config())
+    return json.dumps(build_nixl_kv_transfer_config(role))

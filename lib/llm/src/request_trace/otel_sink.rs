@@ -266,6 +266,7 @@ fn event_type_name(event_type: RequestTraceEventType) -> &'static str {
         RequestTraceEventType::ToolEnd => "tool_end",
         RequestTraceEventType::ToolError => "tool_error",
         RequestTraceEventType::RequestPayload => "request_payload",
+        RequestTraceEventType::RouterSelection => "router_selection",
     }
 }
 
@@ -279,6 +280,12 @@ fn request_id(record: &RequestTraceRecord) -> Option<String> {
                 .payload
                 .as_ref()
                 .map(|payload| payload.request_id.clone())
+        })
+        .or_else(|| {
+            record
+                .selection
+                .as_ref()
+                .map(|selection| selection.request_id.clone())
         })
 }
 
@@ -383,6 +390,7 @@ mod tests {
             agent_context: None,
             request: None,
             tool: None,
+            selection: None,
             payload: Some(RequestTracePayload {
                 request_id: "req-otel".to_string(),
                 endpoint: "openai.chat_completion".to_string(),

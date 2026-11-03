@@ -21,10 +21,10 @@ shared AWS EFA template bundle. Its rendered Component includes the generic AWS
 and libfabric parents and names the per-worker EFA request explicitly.
 
 The vLLM command line reads provider-specific values from environment variables
-so overlays can patch individual values without replacing the shared argument
+so overlays can patch individual values without replacing each worker's argument
 list:
 
-- `KV_TRANSFER_CONFIG`
+- `KV_TRANSFER_CONFIG` (`kv_producer` on prefill, `kv_consumer` on decode)
 - `GPU_MEMORY_UTILIZATION`
 - `HF_HOME`
 - transport-specific environment variables such as `UCX_NET_DEVICES` or

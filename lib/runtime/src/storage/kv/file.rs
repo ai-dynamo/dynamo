@@ -535,9 +535,7 @@ impl Bucket for Directory {
             // Keep watcher alive for the duration of the stream
             let _watcher = watcher;
 
-            for (key, value) in initial_entries {
-                yield WatchEvent::Put(KeyValue::new(key, value));
-            }
+            yield WatchEvent::Resync(initial_entries);
 
             while let Some(event_result) = rx.recv().await {
                 let event = match event_result {
@@ -942,6 +940,11 @@ mod tests {
             .await
             .unwrap();
         let entries = bucket.entries().await.unwrap();
+        let mut events = bucket.watch().await.unwrap();
+        let snapshot = tokio::time::timeout(Duration::from_secs(2), events.next())
+            .await
+            .expect("FileStore watcher did not report its snapshot");
+        assert_eq!(snapshot, Some(super::WatchEvent::Resync(entries.clone())));
         let keys: HashSet<Key> = entries.into_keys().collect();
         cancel_token.cancel(); // stop the background thread
 

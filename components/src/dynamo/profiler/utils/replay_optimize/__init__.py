@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from . import aic, bench, engine_args, evaluate, scoring, search, specs
-from .aic import _enumerate_dense_tp_candidates, _load_aiconfigurator_modules
+from .aic import _enumerate_dense_tp_candidates, _load_aisimulate_modules
 from .bench import compare_agg_and_disagg_with_replay, compare_aic_and_replay_disagg
 from .engine_args import (
     _build_agg_candidate_engine_args,
@@ -41,7 +41,7 @@ __all__ = [
     "_iter_agg_worker_states",
     "_iter_budget_edge_worker_states",
     "_iter_tp_states_with_equal_workers",
-    "_load_aiconfigurator_modules",
+    "_load_aisimulate_modules",
     "_pick_best_record",
     "compare_agg_and_disagg_with_replay",
     "compare_aic_and_replay_disagg",

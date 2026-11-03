@@ -14,6 +14,7 @@ import shutil
 import tempfile
 import uuid
 from dataclasses import dataclass, replace
+from enum import Enum
 from typing import Any, AsyncGenerator, Iterator
 
 import torch
@@ -616,12 +617,18 @@ def _uses_nixl_connector(
     if isinstance(runtime, dict) and isinstance(runtime.get("connectors"), dict):
         connectors_list.append(runtime["connectors"])
 
+    for stage in deploy_config.get("stages", []):
+        if isinstance(stage, dict):
+            for key in ("input_connectors", "output_connectors"):
+                if isinstance(stage.get(key), dict):
+                    connectors_list.append(stage[key])
+
     for connectors in connectors_list:
         for connector_config in connectors.values():
             if not isinstance(connector_config, dict):
                 continue
             connector_type = connector_config.get("name", "")
-            if connector_type == "NixlConnector":
+            if connector_type in ("NixlConnector", "DynamoOmniNixlConnector"):
                 return True
 
     return False
@@ -666,6 +673,24 @@ def _ensure_stage_connectors(
     connector_name = "connector_of_shared_memory"
     changed = False
 
+    sections = [deploy_config, deploy_config.get("runtime", {})]
+    sections.extend(
+        {"connectors": stage.get(key, {})}
+        for stage in stages
+        if isinstance(stage, dict)
+        for key in ("input_connectors", "output_connectors")
+    )
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        definitions = section.get("connectors", {})
+        if not isinstance(definitions, dict):
+            continue
+        for connector in definitions.values():
+            if isinstance(connector, dict) and connector.get("name") == "NixlConnector":
+                connector["name"] = "DynamoOmniNixlConnector"
+                changed = True
+
     for stage_config in stage_configs:
         to_stage = int(getattr(stage_config, "stage_id", -1))
         if to_stage < 0:
@@ -706,7 +731,7 @@ def _ensure_stage_connectors(
 
     atexit.register(_cleanup_temp_stage_config, tmp_dir)
     logger.info(
-        "Synthesized default SharedMemoryConnector edges in %s from %s",
+        "Prepared stage connectors in %s from %s",
         tmp_path,
         stage_configs_path,
     )
@@ -936,15 +961,31 @@ def _stage_config_to_dict(stage_config: Any, stage_type: str) -> dict:
 
     def _to_plain(obj: Any) -> Any:
         if OmegaConf.is_config(obj):
-            return OmegaConf.to_container(obj, resolve=True)
+            obj = OmegaConf.to_container(obj, resolve=True)
+        if isinstance(obj, Enum):
+            return obj.value
         if hasattr(obj, "__dict__"):
-            return dict(vars(obj))
+            obj = dict(vars(obj))
+        if isinstance(obj, dict):
+            return {key: _to_plain(value) for key, value in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [_to_plain(value) for value in obj]
         return obj
+
+    engine_args = _to_plain(stage_config.engine_args)
+    execution_type = getattr(stage_config, "execution_type", None)
+    if execution_type is not None:
+        from vllm_omni.config.omni_config import _STAGE_ENGINE_FIELDS_BY_EXECUTION_TYPE
+
+        deploy_fields = _STAGE_ENGINE_FIELDS_BY_EXECUTION_TYPE[execution_type]
+        engine_args = {
+            key: value for key, value in engine_args.items() if key in deploy_fields
+        }
 
     result: dict = {
         "stage_id": 0,
         "stage_type": stage_type,
-        "engine_args": _to_plain(stage_config.engine_args),
+        "engine_args": engine_args,
         "final_output": True,
         "final_output_type": getattr(stage_config, "final_output_type", "text"),
     }

@@ -93,9 +93,17 @@ class RLRouteRegistry:
         runtime: Any,
         *,
         logger_: logging.Logger | None = None,
+        world_size: int | None = None,
     ) -> None:
+        if world_size is not None and (
+            isinstance(world_size, bool)
+            or not isinstance(world_size, int)
+            or world_size < 1
+        ):
+            raise ValueError("world_size must be a positive integer")
         self._runtime = runtime
         self._logger = logger_ or logger
+        self._world_size = world_size
         self.routes: dict[str, RLRouteHandler] = {}
 
     def add_route(self, name: str, handler: RLRouteHandler) -> None:
@@ -116,6 +124,9 @@ class RLRouteRegistry:
             system_url = system_url_fn()
             if system_url:
                 response["system_url"] = system_url
+
+        if self._world_size is not None:
+            response["world_size"] = self._world_size
 
         return response
 

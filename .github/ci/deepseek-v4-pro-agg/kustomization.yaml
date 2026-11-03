@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: dynamo-nightly-dsv4
+resources:
+- ../../../recipes/deepseek-v4/deepseek-v4-pro/vllm/agg/gb200/deploy.yaml
+- ../../../recipes/deepseek-v4/deepseek-v4-pro/vllm/disagg/gb200/perf.yaml
+patches:
+- path: patch-deploy.yaml
+- path: patch-perf.yaml
+  target:
+    kind: Job
+    name: dsv4-pro-disagg-bench
+  options:
+    allowNameChange: true

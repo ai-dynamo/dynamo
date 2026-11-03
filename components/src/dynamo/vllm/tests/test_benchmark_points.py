@@ -100,6 +100,12 @@ def test_rows_are_accepted_at_schema_v3():
     assert parsed.prefill[0].rows == [[6, 4], [2, 0]]
 
 
+def test_explicit_rows_allow_total_kv_below_batch_size():
+    rows = [[1, 0], [1, 1]]
+    parsed = BenchmarkPoints.model_validate(_manifest(_rows_point(rows)))
+    assert parsed.prefill[0].rows == rows
+
+
 @pytest.mark.parametrize("schema_version", [1, 2])
 def test_rows_require_schema_v3(schema_version):
     manifest = _manifest(_rows_point([[6, 4], [2, 0]]), schema_version)

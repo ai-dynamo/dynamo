@@ -9,7 +9,6 @@
 mod active_set;
 pub(crate) mod cleanup;
 pub mod conditional_disagg;
-mod lookup_update;
 
 pub mod identity;
 pub mod indexer;
@@ -26,7 +25,6 @@ pub mod worker_type;
 pub mod zmq_wire;
 
 // Backward-compat re-exports: old top-level module paths still work
-pub use indexer::concurrent_radix_tree;
 pub use indexer::concurrent_radix_tree_compressed;
 pub use indexer::positional as nested_map;
 pub use indexer::pruning as approx;
@@ -48,13 +46,12 @@ pub use self::multi_worker_sequence::{
 };
 pub use self::sequence::{ActiveSequences, RequestId};
 pub use self::sequences::{PrefillTokenDeltas, WorkerLoadProjection};
-pub use concurrent_radix_tree::ConcurrentRadixTree;
 pub use concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 pub use config::{
     ConditionalDisaggPolicyKind, KvRouterConfig, RouterConfigOverride, RouterPrefillLoadModel,
     RouterQueuePolicy, SharedCacheType,
 };
-pub use identity::{DEFAULT_ROUTING_GROUP, DcId, RoutingPartitionId, RoutingPartitionRef};
+pub use identity::{ClusterId, DEFAULT_ROUTING_GROUP, RoutingPartitionId, RoutingPartitionRef};
 #[allow(deprecated)]
 pub use indexer::{
     AnchorAwareBranchShardedIndexer, AnchorRef, AnchorTask, BranchShardedIndexer,
@@ -87,6 +84,7 @@ pub use plugins::worker_selection::{
 };
 pub use session_prefix_index::{
     LogicalNode, NodeId, SessionId, SessionPrefixIndexError, SessionPrefixIndexer,
+    SessionResidencyOwner, SharedCacheBackend,
 };
 pub use tracking_hash::{TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope};
 pub use worker_type::WorkerType;

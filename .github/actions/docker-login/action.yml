@@ -11,6 +11,10 @@ inputs:
   ecr_registry:
     description: 'ECR registry hostname'
     required: false
+  ecr_registry_east:
+    description: 'East ECR registry hostname'
+    required: false
+    default: ''
   azure_acr_hostname:
     description: 'Azure ACR hostname'
     required: false
@@ -30,6 +34,14 @@ runs:
       run: |
         set -euo pipefail
         aws ecr get-login-password --region ${{ inputs.aws_default_region }} | docker login --username AWS --password-stdin "${{ inputs.ecr_registry }}"
+    - name: East ECR Login
+      shell: bash
+      if: ${{ inputs.ecr_registry_east != '' }}
+      env:
+        ECR_REGISTRY_EAST: ${{ inputs.ecr_registry_east }}
+      run: |
+        set -euo pipefail
+        aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin "${ECR_REGISTRY_EAST}"
     - name: NGC Login
       if: ${{ inputs.ngc_ci_access_token != '' }}
       shell: bash

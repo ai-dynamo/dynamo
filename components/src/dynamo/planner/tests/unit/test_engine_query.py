@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for Planner-owned engine queries over AIC forward-pass estimates."""
+"""Unit tests for Planner-owned engine queries over AISimulate forward-pass estimates."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from dynamo.common.forward_pass_metrics import (
 )
 from dynamo.planner.core.perf_model import engine_query
 from dynamo.planner.core.perf_model.engine_query import (
-    AicCoreEnginePerfModel,
+    AISCoreEnginePerfModel,
     EngineCapacityRequest,
     EnginePerfLimits,
 )
@@ -63,9 +63,9 @@ def _model(
     max_num_seqs: int = 16,
     max_kv_tokens: int = 100_000,
     attention_dp_size: int = 1,
-) -> tuple[AicCoreEnginePerfModel, _FakeForwardPassModel]:
+) -> tuple[AISCoreEnginePerfModel, _FakeForwardPassModel]:
     forward_pass_model = _FakeForwardPassModel(estimate)
-    model = AicCoreEnginePerfModel(
+    model = AISCoreEnginePerfModel(
         model=forward_pass_model,
         worker_type=worker_type,  # type: ignore[arg-type]
         limits=EnginePerfLimits(
@@ -88,7 +88,7 @@ def _sum_prefill_ms(metrics_by_rank: list[dict[str, Any]]) -> float:
     )
 
 
-def test_best_available_uses_aic_core_wheel_facade(monkeypatch):
+def test_best_available_uses_ais_core_wheel_facade(monkeypatch):
     sentinel = _FakeForwardPassModel(lambda _metrics: 1.0)
 
     class _FakeAicFacade:
@@ -96,12 +96,11 @@ def test_best_available_uses_aic_core_wheel_facade(monkeypatch):
         last_options = None
 
         @classmethod
-        def best_available(cls, config, options):
+        def best_available(cls, config):
             cls.last_config = config
-            cls.last_options = options
             return sentinel
 
-    monkeypatch.setattr(engine_query, "AicForwardPassPerfModel", _FakeAicFacade)
+    monkeypatch.setattr(engine_query, "AISForwardPassPerfModel", _FakeAicFacade)
     limits = EnginePerfLimits(128, 16, 10_000)
     options = {
         "max_observations": 8,
@@ -111,18 +110,17 @@ def test_best_available_uses_aic_core_wheel_facade(monkeypatch):
         "max_batch_size": 16,
         "max_kv_tokens": 10_000,
     }
-    config = {"schema_version": 1, "model_name": "Qwen/Qwen3-0.6B"}
+    config = {"model": "Qwen/Qwen3-0.6B", "worker_type": "prefill"}
 
-    model = AicCoreEnginePerfModel.best_available(
-        aic_config=config,
+    model = AISCoreEnginePerfModel.best_available(
+        ais_config=config,
         worker_type="prefill",
         limits=limits,
-        options=options,
+        max_observations=options["max_observations"],
         attention_dp_size=1,
     )
 
     assert _FakeAicFacade.last_config is config
-    assert _FakeAicFacade.last_options is options
     assert model.diagnostics()["readiness"] == "ready"
 
 

@@ -14,12 +14,13 @@ from tests.router.common import (
     _test_router_decisions,
     _test_router_decisions_disagg,
     _test_router_indexers_sync,
+    _test_router_lora_isolation,
 )
 from tests.router.helper import generate_random_suffix, managed_runtime
 from tests.router.router_process import FrontendRouterProcess
 from tests.utils.constants import DynamoPortRange
+from tests.utils.output_paths import resolve_test_output_path
 from tests.utils.port_utils import allocate_ports, deallocate_ports
-from tests.utils.test_output import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
 
@@ -406,6 +407,45 @@ def run_cache_salt_isolation_test(
         )
 
 
+def run_lora_isolation_test(
+    *,
+    engine_process_cls,
+    engine_args_name: str,
+    engine_args: dict[str, Any],
+    request,
+    request_plane: str,
+    model_name: str,
+    block_size: int,
+    component_name: str,
+    lora_name: str,
+    lora_uri: str,
+):
+    process = _create_engine_process(
+        engine_process_cls=engine_process_cls,
+        engine_args_name=engine_args_name,
+        engine_args=engine_args,
+        request=request,
+        request_plane=request_plane,
+        default_process_kwargs={"num_workers": 2, "single_gpu": True},
+        engine_process_kwargs=None,
+    )
+    with (
+        process as engine_workers,
+        managed_runtime(request_plane=request_plane) as runtime,
+    ):
+        endpoint = runtime.endpoint(
+            f"{engine_workers.namespace}.{component_name}.generate"
+        )
+        _test_router_lora_isolation(
+            engine_workers,
+            endpoint,
+            model_name,
+            block_size,
+            lora_name,
+            lora_uri,
+        )
+
+
 def run_disagg_router_decisions_test(
     *,
     engine_process_cls,
@@ -423,7 +463,14 @@ def run_disagg_router_decisions_test(
     | None = None,
     test_payload: dict[str, Any] | None = None,
     test_kwargs: dict[str, Any] | None = None,
+    post_check: Callable[[Any, Any], None] | None = None,
 ):
+    """Run the disagg router decisions test against prefill and decode workers.
+
+    ``post_check(prefill_workers, decode_workers)``, if set, runs after the
+    routing assertions while the workers are still up (e.g. to scrape their
+    /metrics).
+    """
     shared_namespace = f"test-namespace-{generate_random_suffix()}"
     frontend_port = allocate_frontend_ports(request, 1)[0]
 
@@ -447,6 +494,8 @@ def run_disagg_router_decisions_test(
             request_plane=request_plane,
             **(test_kwargs or {}),
         )
+        if post_check is not None:
+            post_check(prefill_workers, decode_workers)
 
     if worker_context_factory is not None:
         with worker_context_factory(shared_namespace) as workers:

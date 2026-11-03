@@ -31,6 +31,28 @@ use tokio_util::sync::CancellationToken;
 
 pub type MultipartMessage = Vec<Vec<u8>>;
 
+/// Returns whether `endpoint` needs `ZMQ_IPV6`.
+///
+/// Set the option before each bind or connect; libzmq applies it per connection.
+/// Rejects unbracketed IPv6 literals: without `ZMQ_IPV6`, libzmq resolves them
+/// as IPv4 and retries the connection forever without reporting an error.
+pub fn ipv6_option_for(endpoint: &str) -> Result<bool> {
+    let Some(address) = endpoint.strip_prefix("tcp://") else {
+        return Ok(false);
+    };
+    if address.starts_with('[') {
+        return Ok(true);
+    }
+    if let Some((host, _port)) = address.rsplit_once(':')
+        && host.parse::<std::net::Ipv6Addr>().is_ok()
+    {
+        anyhow::bail!(
+            "Invalid ZMQ endpoint '{endpoint}': IPv6 addresses must be bracketed, for example tcp://[{host}]:<port>"
+        );
+    }
+    Ok(false)
+}
+
 // Core message types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum ControlMessage {
@@ -353,6 +375,30 @@ impl Client {
 mod tests {
     use super::*;
     use tokio::time::timeout;
+
+    #[test]
+    fn ipv6_option_follows_endpoint_address_family() {
+        for (endpoint, expected) in [
+            ("tcp://[::1]:5555", true),
+            ("tcp://[::]:*", true),
+            ("tcp://[2001:db8::10]:5555", true),
+            ("tcp://127.0.0.1:5555", false),
+            ("tcp://0.0.0.0:*", false),
+            ("tcp://localhost:5555", false),
+            ("tcp://*:5555", false),
+            ("inproc://events", false),
+        ] {
+            assert_eq!(ipv6_option_for(endpoint).unwrap(), expected, "{endpoint}");
+        }
+
+        for endpoint in ["tcp://::1:5555", "tcp://2001:db8::10:5555"] {
+            let error = ipv6_option_for(endpoint).unwrap_err().to_string();
+            assert!(
+                error.contains("IPv6 addresses must be bracketed"),
+                "{endpoint}: {error}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn test_basic_communication() -> Result<()> {

@@ -20,7 +20,6 @@ package controller
 import (
 	"context"
 
-	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/types"
@@ -40,26 +39,26 @@ func newGroveRestartProgressResolver(reader client.Reader) *groveRestartProgress
 
 func (r *groveRestartProgressResolver) Resolve(
 	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	req groveReconcileRequest,
 	inProgress []string,
 ) []string {
 	logger := log.FromContext(ctx)
 
 	pcs := &grovev1alpha1.PodCliqueSet{}
-	pcsName := dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components)
-	if err := r.reader.Get(ctx, types.NamespacedName{Name: pcsName, Namespace: dgd.Namespace}, pcs); err != nil {
+	pcsName := dynamo.PCSNameForDGD(req.DGD, req.IsDelegated)
+	if err := r.reader.Get(ctx, types.NamespacedName{Name: pcsName, Namespace: req.DGD.Namespace}, pcs); err != nil {
 		logger.Error(err, "failed to get PodCliqueSet")
 		return inProgress
 	}
 
 	if pcs.Status.ObservedGeneration == nil {
-		logger.Info("PodCliqueSet observedGeneration is nil", "name", dgd.Name)
+		logger.Info("PodCliqueSet observedGeneration is nil", "name", req.DGD.Name)
 		return inProgress
 	}
 	if *pcs.Status.ObservedGeneration < pcs.Generation {
 		logger.Info(
 			"PodCliqueSet not yet reconciled",
-			"name", dgd.Name,
+			"name", req.DGD.Name,
 			"generation", pcs.Generation,
 			"observedGeneration", *pcs.Status.ObservedGeneration,
 		)
@@ -68,12 +67,12 @@ func (r *groveRestartProgressResolver) Resolve(
 
 	updatedInProgress := make([]string, 0, len(inProgress))
 	for _, componentName := range inProgress {
-		component := dgd.GetComponentByName(componentName)
+		component := req.DGD.GetComponentByName(componentName)
 		if component == nil {
 			logger.V(1).Info("component not found in DGD", "componentName", componentName)
 			continue
 		}
-		resourceName := dynamo.GroveComponentResourceName(dgd, componentName)
+		resourceName := dynamo.GroveComponentResourceName(pcsName, componentName)
 
 		var (
 			isReady bool
@@ -87,7 +86,7 @@ func (r *groveRestartProgressResolver) Resolve(
 				ctx,
 				r.reader,
 				resourceName,
-				dgd.Namespace,
+				req.DGD.Namespace,
 				logger,
 			)
 		} else {
@@ -95,7 +94,7 @@ func (r *groveRestartProgressResolver) Resolve(
 				ctx,
 				r.reader,
 				resourceName,
-				dgd.Namespace,
+				req.DGD.Namespace,
 				logger,
 			)
 		}

@@ -71,7 +71,7 @@ class PrefillPointCandidate(_PointCandidate):
     def validate_totals(self) -> PrefillPointCandidate:
         if self.total_prefill_tokens < self.batch_size:
             raise ValueError("total_prefill_tokens must be at least batch_size")
-        if 0 < self.total_kv_read_tokens < self.batch_size:
+        if self.rows is None and 0 < self.total_kv_read_tokens < self.batch_size:
             raise ValueError("total_kv_read_tokens must be zero or at least batch_size")
         if self.rows is not None:
             if self.partition is not None:

@@ -29,21 +29,21 @@ pytestmark = [
 ]
 
 
-def test_estimator_loader_does_not_import_upper_aiconfigurator(monkeypatch):
-    """Planner modeling must remain usable with only the core wheel."""
-    pytest.importorskip("aiconfigurator_core")
+def test_estimator_loader_does_not_import_application_layer(monkeypatch):
+    """Planner modeling must not depend on application orchestration modules."""
+    pytest.importorskip("aisimulate_core")
     real_import = builtins.__import__
 
     def reject_upper_package(name, *args, **kwargs):
-        """Reject accidental imports of the upper AIC distribution."""
-        if name == "aiconfigurator" or name.startswith("aiconfigurator."):
+        """Reject accidental imports of the AISimulate application layer."""
+        if name.startswith(("aisimulate.sdk", "aisimulate.legacy_cli")):
             raise AssertionError(f"planner imported upper package: {name}")
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", reject_upper_package)
-    loaded = aic_estimator._try_import_aiconfigurator_core()
+    loaded = aic_estimator._try_import_aisimulate_core()
 
-    assert loaded.__name__ == "aiconfigurator_core"
+    assert loaded.__name__ == "aisimulate_core"
 
 
 def test_estimator_passes_backend_name_to_model_factory():
@@ -60,7 +60,7 @@ def test_estimator_passes_backend_name_to_model_factory():
 
     with patch.object(
         aic_estimator,
-        "_try_import_aiconfigurator_core",
+        "_try_import_aisimulate_core",
         return_value=aic_core,
     ):
         estimator = aic_estimator.AIConfiguratorPerfEstimator(
@@ -133,7 +133,7 @@ def _patch_estimator(
 class TestPickedToAicKwargs:
     """Verify the pick → AIC ModelConfig kwargs helper for each strategy.
 
-    The invariant AIC enforces for MoE models (aiconfigurator sdk/models.py,
+    The invariant AIC enforces for MoE models (aisimulate_core sdk/models/,
     ~8 assertion sites) is::
 
         tp_size * attention_dp_size == moe_tp_size * moe_ep_size

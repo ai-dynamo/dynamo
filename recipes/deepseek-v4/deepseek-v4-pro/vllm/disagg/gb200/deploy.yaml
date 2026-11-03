@@ -151,7 +151,7 @@ spec:
                 --tokenizer-mode deepseek_v4 \
                 --dyn-reasoning-parser deepseek_v4 \
                 --dyn-tool-call-parser deepseek_v4 \
-                --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+                --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
       replicas: 1
       multinode:
         nodeCount: 2
@@ -254,7 +254,7 @@ spec:
                 --tokenizer-mode deepseek_v4 \
                 --dyn-reasoning-parser deepseek_v4 \
                 --dyn-tool-call-parser deepseek_v4 \
-                --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+                --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
       replicas: 1
       multinode:
         nodeCount: 2

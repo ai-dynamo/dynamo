@@ -78,7 +78,7 @@ class PickedParallelConfig(BaseModel):
         The prior 3-bucket form (``dep{moe_ep}`` / ``tep{moe_tp}`` / ``tp{tp}``)
         collapsed ``(tp=2, moe_ep=2)`` and ``(tp=1, dp=2, moe_ep=2)`` to the
         same ``"dep2"`` string, which corrupted ``thorough.py`` work_dir
-        naming and ``aiconfigurator.sdk.picking`` ``groupby("parallel")``
+        naming and ``aisimulate.sdk.picking`` ``groupby("parallel")``
         dedup.
         """
         parts = [f"tp{self.tp}"]

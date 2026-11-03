@@ -236,7 +236,8 @@ class TestApplyCap(unittest.TestCase):
             with patch.object(power_agent, "pynvml", mock_nvml):
                 with patch("power_agent._persist_managed_gpus"):
                     result = actuator.apply_cap(0, 300)
-        self.assertEqual(result, 300)  # within constraints, no clamp
+        self.assertEqual(result.effective_w, 300)  # within constraints, no clamp
+        self.assertTrue(result.ok)
         mock_nvml.nvmlDeviceSetPowerManagementLimit.assert_called_once_with(
             "handle_0", 300_000
         )
@@ -257,7 +258,8 @@ class TestApplyCap(unittest.TestCase):
             with patch.object(power_agent, "pynvml", mock_nvml):
                 with patch("power_agent._persist_managed_gpus"):
                     result = actuator.apply_cap(0, 900)
-        self.assertEqual(result, 700)
+        self.assertEqual(result.effective_w, 700)
+        self.assertTrue(result.ok)
         mock_nvml.nvmlDeviceSetPowerManagementLimit.assert_called_once_with(
             "handle_0", 700_000
         )
@@ -307,7 +309,7 @@ class TestApplyCap(unittest.TestCase):
                     # 900 W is above max (700) → exactly one clamp.
                     result = actuator.apply_cap(0, 900)
 
-        self.assertEqual(result, 700)
+        self.assertEqual(result.effective_w, 700)
         # Single increment of cap_clamped_total{direction="max"}.
         max_clamp_increments = [
             call

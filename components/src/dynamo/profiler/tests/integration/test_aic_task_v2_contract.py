@@ -6,8 +6,8 @@
 from __future__ import annotations
 
 import pytest
-from aiconfigurator.cli.main import _execute_tasks, build_default_tasks
-from aiconfigurator.sdk.task_v2 import Task
+from aisimulate.legacy_cli.main import _execute_tasks, build_default_tasks
+from aisimulate.sdk.task_v2 import Task
 
 pytestmark = [
     pytest.mark.aiconfigurator,
