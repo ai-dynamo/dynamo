@@ -38,8 +38,13 @@ pub struct LoraInfo {
     pub max_gpu_lora_count: Option<u32>,
 }
 
+/// Worker runtime flag requiring an adapter registration before request routing.
 pub const LORA_REQUIRES_REGISTRATION: &str = "lora_requires_registration";
 
+/// Returns true when LoRA serving is enabled via a truthy `DYN_LORA_ENABLED` env var
+/// (`1`/`true`/`on`/`yes`, case-insensitive). This gates the request-time LoRA filter on
+/// both the KV and non-KV routing paths, so non-LoRA deployments keep the unmodified
+/// routing path with zero added overhead.
 pub fn lora_serving_enabled() -> bool {
     dynamo_runtime::config::env_is_truthy(
         dynamo_runtime::config::environment_names::llm::DYN_LORA_ENABLED,
