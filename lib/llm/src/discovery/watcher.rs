@@ -505,16 +505,11 @@ impl ModelWatcher {
             && card.requires_preprocessing()
             && matches!(card.worker_type, None | Some(WorkerType::Aggregated))
         {
-            match self
-                .manager
-                .get_or_create_runtime_config_watcher(&endpoint)
-                .await
-            {
-                Ok(configs) => worker_set.set_runtime_config_watcher(configs),
-                Err(error) => {
-                    tracing::warn!(%error, "Runtime LoRA capability watch unavailable; runtime LoRA disabled for this worker set")
-                }
-            }
+            worker_set.set_runtime_config_watcher(
+                self.manager
+                    .get_or_create_runtime_config_watcher(&endpoint)
+                    .await?,
+            );
         }
 
         // A surface-less Encode worker is reached only through EncoderRouter.

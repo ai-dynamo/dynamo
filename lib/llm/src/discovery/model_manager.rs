@@ -3775,13 +3775,10 @@ mod tests {
             tokio::sync::watch::channel(HashMap::from([(1, token_card.runtime_config.clone())]));
         token_ws.set_instance_watcher(instance_rx);
         token_ws.set_runtime_config_watcher(config_rx);
-        assert!(mm.add_worker_set("token-base", "tokens", token_ws));
+        let token_ws = Arc::new(token_ws);
+        assert!(mm.add_worker_set_arc("token-base", "tokens", token_ws.clone()));
         assert!(mm.register_alias("base-alias", "token-base"));
-        assert!(mm.add_worker_set_arc(
-            "base-alias",
-            "alias",
-            Arc::new(make_worker_set("alias", "alias")),
-        ));
+        assert!(mm.add_worker_set_arc("base-alias", "tokens", token_ws,));
         let mut adapter_card = token_card.clone();
         adapter_card.lora = Some(crate::model_card::LoraInfo {
             name: "adapter".into(),
