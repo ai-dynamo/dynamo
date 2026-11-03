@@ -336,6 +336,16 @@ def test_snapshot_rejects_invalid_target_metadata(tmp_path, targets):
     _assert_invalid(snapshot, tmp_path)
 
 
+@pytest.mark.parametrize(
+    "parameters", [None, [], "experts", [1], [""], ["x" * 257], ["q\nproj"]]
+)
+@pytest.mark.parametrize("modules", [[], None])
+def test_snapshot_rejects_invalid_parameter_targets(tmp_path, parameters, modules):
+    snapshot = _snapshot(tmp_path, target_modules=modules, target_parameters=parameters)
+
+    _assert_invalid(snapshot, tmp_path)
+
+
 @pytest.mark.parametrize("targets", [".*q_proj", "all-linear"])
 def test_snapshot_accepts_string_target_selectors(tmp_path, targets):
     snapshot = _snapshot(tmp_path, target_modules=targets)
@@ -635,8 +645,18 @@ def test_snapshot_does_not_treat_expert_count_as_lora_rank(tmp_path):
 
 @pytest.mark.parametrize("rank", [16, 32])
 @pytest.mark.parametrize("experts", [2, 4])
-def test_snapshot_bounds_packed_moe_rank_per_expert(tmp_path, rank, experts):
-    snapshot = _snapshot(tmp_path, r=16, target_modules=["experts"])
+@pytest.mark.parametrize("modules", [["experts"], [], None])
+def test_snapshot_bounds_packed_moe_rank_per_expert(tmp_path, rank, experts, modules):
+    snapshot = _snapshot(
+        tmp_path,
+        r=16,
+        target_modules=modules,
+        target_parameters=(
+            ["mlp.experts.gate_up_proj", "mlp.experts.down_proj"]
+            if not modules
+            else None
+        ),
+    )
     header = {}
     offset = 0
     for module, output in [("experts", 2), ("experts.base_layer", 4)]:
