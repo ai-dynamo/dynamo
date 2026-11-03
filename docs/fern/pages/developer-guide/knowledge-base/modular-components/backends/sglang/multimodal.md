@@ -21,8 +21,8 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 > - Aggregated Qwen3-VL and Qwen3.5 workers on CUDA support VP8 and VP9 with
 >   `--frontend-decoding`. Dynamo's Rust frontend decodes and transfers the
 >   sampled frames; SGLang still runs model-specific preprocessing and vision
->   encoding. The multimodal router launcher uses this path for exact
->   video-aware KV routing.
+>   encoding. The multimodal router launcher uses this path for video-aware KV
+>   routing on [compatible SGLang builds](#wide-token-sglang-builds).
 > - Disaggregated Qwen2-family deployments support H.264 and H.265 through the
 >   frontend-facing `--disaggregation-mode encode` worker. NVDEC performs the
 >   decode before the vision encoder produces embeddings.
@@ -91,7 +91,7 @@ SGLang supports EPD, EP/D, E/PD, and E/P/D patterns. See [Multimodal Model Servi
 
 Multimodal KV routing works with SGLang's aggregated worker topology. It is independent of the E/PD and E/P/D encoder-disaggregation patterns described later in this guide.
 
-SGLang RadixAttention includes a per-media `pad_value` token in its prefix-cache key. Dynamo must use that same token in the routing view:
+On SGLang 0.5.22, which Dynamo currently pins, RadixAttention includes a per-media `pad_value` token in its prefix-cache key. Dynamo uses the same token in the routing view:
 
 1. The Rust frontend hashes each image or sampled video and calculates its expanded token count.
 2. It derives `pad_value = MM_PAD_SHIFT_VALUE + (mm_hash % 2^30)`.
@@ -109,6 +109,30 @@ legacy workers, mixed contracts, or a processor override fall back to
 text-prefix routing without failing the request.
 
 Step 4 needs an SGLang build that accepts `mm_hashes`. Dynamo's SGLang image carries the upstream patch that adds it; a custom build without it is still supported, but Dynamo detects the missing argument when the worker starts and routes on the text prefix alone, so media identity no longer contributes to cache overlap.
+
+### Wide-Token SGLang Builds
+
+SGLang builds containing [sgl-project/sglang#43043](https://github.com/sgl-project/sglang/pull/43043) use four wide placeholder values per media item. These no longer match Dynamo's routing tokens, including for processors such as Qwen-VL that still accept `mm_hashes`. Kimi K2.5 and K3 processors also reject caller-supplied image hashes. Dynamo detects that processor capability and omits those overrides for these models.
+
+The fallback below requires Dynamo support for wide KV event tokens and the `engine_owned_mm_identity` source setting.
+
+On these builds, Dynamo accepts the wide values in KV events and indexes only the text blocks before the first block whose hash includes an image or video token. That block and all blocks chained after it are excluded from predicted cache hits, including in subsequent events. Other text stores, evictions, and cache clears continue to update the index. Requests still run, and SGLang continues to manage its own prefix cache, but image- and video-aware routing is unavailable. This applies both to URL passthrough and to `--frontend-decoding`.
+
+Python SGLang workers detect the wide format automatically. A standalone indexer or selection service receiving engine events directly must set `engine_owned_mm_identity: true` in the [indexer source registration](../../router/standalone-indexer.md#multimodal-event-sources) or [selector worker record](../../router/standalone-selection.md#worker-registration). This boolean defaults to `false` for legacy sources. Without it, values that do not fit in 32 bits are still excluded, but smaller values in SGLang's new multimodal range cannot be distinguished from legacy routing tokens.
+
+To check a build before registering a direct source, run this in the SGLang engine's Python environment:
+
+```bash
+python3 -c 'from sglang.srt.managers.schedule_batch import MultimodalDataItem; print("pad_values" in MultimodalDataItem.__struct_fields__)'
+```
+
+`True` identifies a wide-token build and requires the flag above. `False` identifies a legacy build. The result depends on the SGLang build, not the selected model.
+
+The [SGLang sidecar](sidecar.md) cannot inspect the engine build and leaves the flag disabled. It excludes values that do not fit in 32 bits, but does not provide the full multimodal exclusion behavior above. Media-aware routing on wide-token builds is not supported through the sidecar.
+
+Dynamo tracks up to 1,048,576 excluded block IDs per KV event publisher or direct source listener, across cache tiers. At the limit, it logs `Multimodal exclusion state is full` and, for that worker rank, accepts only new root stores (blocks with no parent) until the engine clears its cache. Existing text evictions still apply. Routing may miss additional text-prefix hits until that cache clear.
+
+### Launch an Aggregated Deployment
 
 Launch an aggregated deployment with multimodal KV routing:
 
@@ -131,7 +155,7 @@ and sets `--router-mode kv` with a matching frontend and worker block size.
 
 ### Version Requirements
 
-The Dynamo SGLang image includes both routing prerequisites:
+The pinned Dynamo SGLang image includes these routing prerequisites:
 
 - Dynamo is built with the `mm-routing` Rust feature.
 - SGLang 0.5.13 or later includes `GenerateReqInput.mm_hashes` support. Dynamo currently pins 0.5.22.
@@ -142,7 +166,7 @@ from [sgl-project/sglang#25300](https://github.com/sgl-project/sglang/pull/25300
 Without it, requests still complete but fall back to text-prefix-only routing.
 Prefer upgrading to 0.5.13 or later instead of patching an installed package.
 
-Enable `DYN_LOG=info,mm_routing=debug` to inspect media-token counts, multimodal hashes, the video processor contract, and the selected worker's overlap. A repeated request should select the same worker with high block overlap.
+Enable `DYN_LOG=info,mm_routing=debug` to inspect media-token counts, multimodal hashes, the video processor contract, and the selected worker's overlap. On compatible builds, a repeated request should select the same worker with high block overlap. Builds using the newer identities only predict the text-prefix overlap described above.
 
 For the user-facing workflow, see [Multimodal KV Routing](../../../../../use-cases/multimodal-serving/multimodal-kv-routing.md).
 

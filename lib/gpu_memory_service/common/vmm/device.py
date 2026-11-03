@@ -51,6 +51,10 @@ class VMMDevice(ABC):
         """Return ``(free_bytes, total_bytes)`` for ``device``."""
 
     @abstractmethod
+    def total_memory(self, device: int) -> int:
+        """Total memory in bytes of ``device``, by this process's ordinal."""
+
+    @abstractmethod
     def get_allocation_granularity(self, device: int) -> int:
         """Minimum allocation granularity in bytes for ``device``."""
 
