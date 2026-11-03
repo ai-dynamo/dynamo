@@ -272,10 +272,14 @@ DISK_PRESSURE_MESSAGE = "Pod was rejected: The node had condition: [DiskPressure
 
 
 def fake_pod(
-    name: str, phase: str, reason: str | None = None, message: str | None = None
+    name: str,
+    phase: str,
+    reason: str | None = None,
+    message: str | None = None,
+    uid: str | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        metadata=SimpleNamespace(name=name),
+        metadata=SimpleNamespace(name=name, uid=uid or f"uid-{name}"),
         spec=SimpleNamespace(node_name="node-a"),
         status=SimpleNamespace(phase=phase, reason=reason, message=message),
     )
@@ -341,6 +345,47 @@ async def test_lifecycle_replaces_dgd_pod_evicted_by_disk_pressure(
         "test-namespace",
         label_selector="nvidia.com/dynamo-graph-deployment-name=deployment",
     )
+
+
+@pytest.mark.timeout(30)
+async def test_lifecycle_replaces_recreated_pod_with_same_name(monkeypatch) -> None:
+    manager = deploying_manager(monkeypatch)
+    assert manager.core is not None
+    listings = 0
+
+    async def list_pods(*args, **kwargs):
+        nonlocal listings
+        listings += 1
+        # Each listing returns a new Pod that reuses the evicted Pod's name.
+        return SimpleNamespace(
+            items=[
+                fake_pod(
+                    "worker-0",
+                    "Failed",
+                    "Evicted",
+                    DISK_PRESSURE_MESSAGE,
+                    uid=f"uid-{listings}",
+                )
+            ]
+        )
+
+    manager.core.list_namespaced_pod = AsyncMock(side_effect=list_pods)
+    manager.core.delete_namespaced_pod = AsyncMock()
+    manager.get = AsyncMock(
+        side_effect=[
+            dgdr_status("Deploying"),
+            dgdr_status("Deploying"),
+            dgdr_status("Deployed"),
+        ]
+    )
+
+    await run_lifecycle(
+        manager,
+        {"metadata": {"name": "request"}, "spec": {}},
+        verify_configmap=False,
+    )
+
+    assert manager.core.delete_namespaced_pod.await_count == 2
 
 
 @pytest.mark.timeout(30)

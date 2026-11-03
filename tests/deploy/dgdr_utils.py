@@ -533,7 +533,8 @@ class ManagedDGDR:
         Grove v0.1.0-alpha.15 counts Failed Pods against PodClique replicas and
         never replaces them, so a Pod the kubelet rejects under DiskPressure
         keeps the DGDR in Deploying until the deploy timeout. Only Pods with
-        reason Evicted are deleted; other failures still fail the test.
+        reason Evicted are deleted; other failures still fail the test. Pods
+        are tracked by UID because a recreated Pod can reuse the same name.
         """
         dgd_name = dgdr.get("status", {}).get("dgdName")
         if not dgd_name:
@@ -553,7 +554,7 @@ class ManagedDGDR:
             for pod in pods.items
             if pod.status.phase == "Failed"
             and pod.status.reason == "Evicted"
-            and pod.metadata.name not in replaced
+            and pod.metadata.uid not in replaced
         ]
         if not evicted:
             return
@@ -582,7 +583,7 @@ class ManagedDGDR:
                 pod_name,
                 namespace,
             )
-            replaced.add(pod_name)
+            replaced.add(pod.metadata.uid)
 
     async def get_output_dgd(self, name: str) -> dict[str, Any]:
         self._require_clients()
