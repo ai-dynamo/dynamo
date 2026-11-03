@@ -260,6 +260,7 @@ STUB_MODULES = [
     "vllm.entrypoints.serve.utils",
     "vllm.entrypoints.serve.utils.api_utils",
     "vllm.envs",
+    "vllm.exceptions",
     "vllm.inputs",
     "vllm.logprobs",
     "vllm.lora",
