@@ -1340,10 +1340,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         )
         self._lora_state = LoRAState()
         self._lora_capacity: int | None = None
-        if getattr(self.engine_args, "enable_lora", False):
-            self._lora_capacity = getattr(self.engine_args, "max_cpu_loras", None)
-            if self._lora_capacity is None:
-                self._lora_capacity = getattr(self.engine_args, "max_loras", None)
         self._runtime_lora_coordinator = RuntimeLoRACoordinator(self)
         runtime_lora_settings = self._runtime_lora_coordinator.settings
         if runtime_lora_settings is not None:
@@ -3181,7 +3177,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     if lora is None:
                         yield {
                             "status": "error",
-                            "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self._lora_state.loaded_loras.keys())}",
+                            "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self._lora_state.list_lora_ids())}",
                         }
                         return
 
