@@ -669,14 +669,14 @@ func TestMultinodeSidecarRendering(t *testing.T) {
 										Annotations: map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"},
 										Spec:        v1beta1.DynamoGraphDeploymentSpec{BackendFramework: string(backend.framework), Components: []v1beta1.DynamoComponentDeploymentSharedSpec{*component.DeepCopy()}},
 									}
-									pcs, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
+									pcs, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil, nil)
 									require.NoError(t, err)
 									require.Len(t, pcs.Spec.Template.Cliques, 2)
 
 									t.Log("Rendering the same group without backendFramework is admitted and keeps no startup order")
 									unsetDGD := dgd.DeepCopy()
 									unsetDGD.Spec.BackendFramework = ""
-									unset, err := GenerateGrovePodCliqueSet(t.Context(), unsetDGD, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
+									unset, err := GenerateGrovePodCliqueSet(t.Context(), unsetDGD, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil, nil)
 									require.NoError(t, err)
 									require.Len(t, unset.Spec.Template.Cliques, 2)
 									for i, clique := range pcs.Spec.Template.Cliques {

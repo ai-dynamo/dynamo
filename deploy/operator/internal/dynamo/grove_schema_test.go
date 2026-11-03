@@ -120,7 +120,7 @@ func generateTopologyTestPodCliqueSet(t *testing.T, deploymentPack v1alpha1.Topo
 		&RestartState{},
 		nil,
 		false,
-		nil,
+		nil, nil,
 	)
 	require.NoError(t, err)
 	return pcs

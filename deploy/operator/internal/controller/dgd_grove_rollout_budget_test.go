@@ -52,7 +52,7 @@ func TestGroveRendererRolloutBudgetSurvivesTemplateSeed(t *testing.T) {
 				config := &configv1alpha1.OperatorConfiguration{Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"}}
 				runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true}}
 				secrets := &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }}
-				existing, err := dynamo.GenerateGrovePodCliqueSet(t.Context(), dgd, nil, config, runtimeConfig, nil, secrets, nil, nil, false, nil)
+				existing, err := dynamo.GenerateGrovePodCliqueSet(t.Context(), dgd, nil, config, runtimeConfig, nil, secrets, nil, nil, false, nil, nil)
 				require.NoError(t, err)
 				existing.UID = "pcs-uid"
 				existing.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)}

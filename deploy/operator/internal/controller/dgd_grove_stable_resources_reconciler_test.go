@@ -274,7 +274,7 @@ func TestGroveStableResourcesReconcilerElasticEPServicesSelectRenderedPods(t *te
 				config := &configv1alpha1.OperatorConfiguration{
 					Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 				}
-				pcs, err := dynamo.GenerateGrovePodCliqueSet(t.Context(), dgd, nil, config, &commoncontroller.RuntimeConfig{}, nil, nil, nil, previous, false, nil)
+				pcs, err := dynamo.GenerateGrovePodCliqueSet(t.Context(), dgd, nil, config, &commoncontroller.RuntimeConfig{}, nil, nil, nil, previous, false, nil, nil)
 				require.NoError(t, err)
 				reconciler.config = config
 				_, err = reconciler.Reconcile(t.Context(), groveReconcileRequest{DGD: dgd}, pcs)

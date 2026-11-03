@@ -102,7 +102,7 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesForceScalingGroupFalse(t *te
 	base := betaDGDWithRuntimeVersion(t, "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0", "")
 	base.Spec.Components[0].Experimental = nil
 	omittedHash := mustComputeBetaDGDWorkersSpecHash(t, base)
-	omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), base, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
+	omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), base, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil, nil)
 	require.NoError(t, err)
 
 	t.Log("Compare optional outer objects and explicit false with complete omission")
@@ -120,7 +120,7 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesForceScalingGroupFalse(t *te
 			candidate := base.DeepCopy()
 			candidate.Spec.Components[0].Experimental = tc.experimental
 			original := candidate.DeepCopy()
-			rendered, err := GenerateGrovePodCliqueSet(context.Background(), candidate, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
+			rendered, err := GenerateGrovePodCliqueSet(context.Background(), candidate, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil, nil)
 			require.NoError(t, err)
 			require.Equal(t, omittedRendered.Spec, rendered.Spec, "precondition: effective workload must be identical")
 
@@ -632,9 +632,9 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesDisabledCheckpoint(t *testin
 			original := disabled.DeepCopy()
 
 			t.Log("Verify equal rendered workloads and worker hashes")
-			omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), omitted, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
+			omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), omitted, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil, nil)
 			require.NoError(t, err)
-			disabledRendered, err := GenerateGrovePodCliqueSet(context.Background(), disabled, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
+			disabledRendered, err := GenerateGrovePodCliqueSet(context.Background(), disabled, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil, nil)
 			require.NoError(t, err)
 			require.Equal(t, omittedRendered.Spec, disabledRendered.Spec)
 			assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, omitted), mustComputeBetaDGDWorkersSpecHash(t, disabled))
@@ -660,9 +660,9 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesCompilationCacheMountPath(t 
 	originalOmitted, originalExplicit := omitted.DeepCopy(), explicit.DeepCopy()
 
 	t.Log("Verify equal rendered workloads and worker hashes without mutating either input")
-	omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), omitted, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
+	omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), omitted, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil, nil)
 	require.NoError(t, err)
-	explicitRendered, err := GenerateGrovePodCliqueSet(context.Background(), explicit, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
+	explicitRendered, err := GenerateGrovePodCliqueSet(context.Background(), explicit, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, omittedRendered.Spec, explicitRendered.Spec)
 	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, omitted), mustComputeBetaDGDWorkersSpecHash(t, explicit))

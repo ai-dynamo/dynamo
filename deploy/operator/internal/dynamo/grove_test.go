@@ -974,7 +974,7 @@ func TestEvaluateGroveReadinessUsesDeclaredLayout(t *testing.T) {
 			}
 			reader := newFakeGroveClient(g)
 			pcs, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, &configv1alpha1.OperatorConfiguration{},
-				&controller_common.RuntimeConfig{Gate: features.Gates{DRA: true}}, reader, &mockSecretsRetriever{}, nil, nil, false, nil)
+				&controller_common.RuntimeConfig{Gate: features.Gates{DRA: true}}, reader, &mockSecretsRetriever{}, nil, nil, false, nil, nil)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			t.Log("Prove emitted scaling groups use the component identity")

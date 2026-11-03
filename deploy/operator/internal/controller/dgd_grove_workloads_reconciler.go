@@ -118,7 +118,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	}
 
 	// Defer commit if the PCS was written this reconcile; the informer hasn't caught up yet.
-	if workerHashTransition.needsCommit() && !pcsWasWritten {
+	if workerHashTransition.needsCommit() && !pcsWasWritten && !renderedPodCliqueSet.powerCapPreserved {
 		// Pre-existing legacy PCS without a suffix is the only case where unstamped is valid.
 		isLegacyUnsuffixed := workerHashTransition.noCurrentAnnotation &&
 			renderedPodCliqueSet.existing != nil &&

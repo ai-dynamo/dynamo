@@ -39,6 +39,22 @@ spec:
 
 The DCD spec is `backendFramework` plus the [shared component spec](#shared-component-spec) inlined at the same level.
 
+For workers managed by a DGD, `podTemplate.metadata.annotations` can include
+`dynamo.nvidia.com/gpu-power-limit`, a positive decimal per-GPU cap in watts.
+A no-Planner DGD using Grove or the single-node component pathway can change an
+existing worker cap value without restarting workers. Adding or removing the
+annotation remains forbidden, and cap changes are rejected during pending,
+in-progress, or failed worker rollouts. GPU allocation remains immutable.
+
+For a cap-only DGD edit, the operator retains worker creation templates and identities
+at their previous cap and patches the owned live Pod annotations. Replacement and
+scale-up Pods can briefly carry the retained cap before reconciliation. An unrelated
+worker template edit uses normal rollout behavior with the latest desired cap.
+Template-derived `gpuPowerLimitWatts` status can therefore retain the old value;
+use the DGD's `PowerCapPropagationReady` condition for Pod annotation convergence.
+This does not establish hardware enforcement or budget admission. Standalone DCD
+updates do not gain this DGD-specific propagation behavior.
+
 <ParamField path="backendFramework" type="string">
   Inference backend framework for this component. Drives backend-specific defaults the operator injects into the `spec.podTemplate.spec.containers[name=main]` container.
 

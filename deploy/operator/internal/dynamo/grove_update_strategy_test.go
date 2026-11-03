@@ -44,14 +44,14 @@ func TestGenerateGrovePodCliqueSet_CoherentStrategyPreservesTemplates(t *testing
 			}
 			config := &configv1alpha1.OperatorConfiguration{}
 			runtimeConfig := &controller_common.RuntimeConfig{}
-			oldPCS, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, config, runtimeConfig, nil, &mockSecretsRetriever{}, nil, nil, workerHashSuffix, nil)
+			oldPCS, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, config, runtimeConfig, nil, &mockSecretsRetriever{}, nil, nil, workerHashSuffix, nil, nil)
 			require.NoError(t, err)
 			oldHash, err := ComputeDGDWorkersSpecHash(dgd)
 			require.NoError(t, err)
 
 			t.Log("Explicitly opt into Coherent without changing the workload or worker generation")
 			dgd.Annotations[commonconsts.KubeAnnotationGroveUpdateStrategy] = "Coherent"
-			newPCS, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, config, runtimeConfig, nil, &mockSecretsRetriever{}, nil, nil, workerHashSuffix, nil)
+			newPCS, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, config, runtimeConfig, nil, &mockSecretsRetriever{}, nil, nil, workerHashSuffix, nil, nil)
 			require.NoError(t, err)
 			require.NotNil(t, newPCS.Spec.UpdateStrategy)
 			require.Equal(t, grovev1alpha1.CoherentStrategy, newPCS.Spec.UpdateStrategy.Type)
@@ -98,7 +98,7 @@ func TestGroveUpdateStrategyPolicy(t *testing.T) {
 						original := dgd.DeepCopy()
 
 						t.Log("Only the strategy annotation selects Coherent for ordinary and LPX envelopes")
-						ordinary, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, &mockSecretsRetriever{}, nil, nil, true, nil)
+						ordinary, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, &mockSecretsRetriever{}, nil, nil, true, nil, nil)
 						require.NoError(t, err)
 						lpx, err := RenderLPXPodCliqueSet(t.Context(), dgd, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, "lpx-graph", nil)
 						require.NoError(t, err)
@@ -129,7 +129,7 @@ func TestGroveUpdateStrategyTransitionsWait(t *testing.T) {
 						dgd.Spec.Components[0].Multinode = &v1beta1.MultinodeSpec{NodeCount: 2}
 					}
 					config, runtime := &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}
-					existing, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, config, runtime, nil, &mockSecretsRetriever{}, nil, nil, true, nil)
+					existing, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, config, runtime, nil, &mockSecretsRetriever{}, nil, nil, true, nil, nil)
 					require.NoError(t, err)
 					existing.Spec.UpdateStrategy = nil
 					if observed != "" {
@@ -142,7 +142,7 @@ func TestGroveUpdateStrategyTransitionsWait(t *testing.T) {
 					before := existing.DeepCopy()
 
 					t.Log("Preserve the active strategy for both implicit and explicit transitions")
-					desired, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, config, runtime, nil, &mockSecretsRetriever{}, nil, existing, true, nil)
+					desired, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, config, runtime, nil, &mockSecretsRetriever{}, nil, existing, true, nil, nil)
 					require.NoError(t, err)
 					require.Equal(t, existing.Spec, desired.Spec)
 					lpx, err := RenderLPXPodCliqueSet(t.Context(), dgd, config, runtime, "lpx-graph", existing)
@@ -152,7 +152,7 @@ func TestGroveUpdateStrategyTransitionsWait(t *testing.T) {
 
 					t.Log("Apply the pending intent after Grove finishes the current rollout")
 					existing.Status.UpdateProgress.UpdateEndedAt = new(metav1.Now())
-					desired, err = GenerateGrovePodCliqueSet(t.Context(), dgd, nil, config, runtime, nil, &mockSecretsRetriever{}, nil, existing, true, nil)
+					desired, err = GenerateGrovePodCliqueSet(t.Context(), dgd, nil, config, runtime, nil, &mockSecretsRetriever{}, nil, existing, true, nil, nil)
 					require.NoError(t, err)
 					want := annotation
 					if want == "" {
@@ -193,7 +193,7 @@ func TestGroveMinAvailableMigrationPreservesWorkload(t *testing.T) {
 			}
 			oldHash, err := ComputeDGDWorkersSpecHash(dgd)
 			require.NoError(t, err)
-			oldPCS, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, &mockSecretsRetriever{}, nil, nil, true, nil)
+			oldPCS, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, &mockSecretsRetriever{}, nil, nil, true, nil, nil)
 			require.NoError(t, err)
 
 			t.Log("Move the same minimum to its native owner without rolling worker templates")
@@ -206,7 +206,7 @@ func TestGroveMinAvailableMigrationPreservesWorkload(t *testing.T) {
 			newHash, err := ComputeDGDWorkersSpecHash(dgd)
 			require.NoError(t, err)
 			require.Equal(t, oldHash, newHash)
-			newPCS, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, &mockSecretsRetriever{}, nil, nil, true, nil)
+			newPCS, err := GenerateGrovePodCliqueSet(t.Context(), dgd, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, &mockSecretsRetriever{}, nil, nil, true, nil, nil)
 			require.NoError(t, err)
 			require.Equal(t, oldPCS.Spec.Template, newPCS.Spec.Template)
 			require.Nil(t, newPCS.Spec.UpdateStrategy)

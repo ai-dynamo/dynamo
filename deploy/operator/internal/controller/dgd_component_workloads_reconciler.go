@@ -52,18 +52,26 @@ func newComponentWorkloadsReconciler(
 	}
 }
 
+// Reconcile writes the component graph. retained may be nil for ordinary identity selection.
 func (r *componentWorkloadsReconciler) Reconcile(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	restartState *dynamo.RestartState,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
+	retained *componentPowerCapPreservation,
 ) (ReconcileResult, error) {
 	resources := []Resource{}
 	logger := log.FromContext(ctx)
 
-	rollingUpdateCtx, err := r.rollout.buildRollingUpdateContext(ctx, dgd)
-	if err != nil {
-		return ReconcileResult{}, fmt.Errorf("failed to build rolling update context: %w", err)
+	var rollingUpdateCtx dynamo.RollingUpdateContext
+	var err error
+	if retained != nil {
+		rollingUpdateCtx.NewWorkerHash = retained.hash
+	} else {
+		rollingUpdateCtx, err = r.rollout.buildRollingUpdateContext(ctx, dgd)
+		if err != nil {
+			return ReconcileResult{}, fmt.Errorf("failed to build rolling update context: %w", err)
+		}
 	}
 
 	existingRestartAnnotations, err := r.getExistingRestartAnnotationsDCD(ctx, dgd)
@@ -89,6 +97,11 @@ func (r *componentWorkloadsReconciler) Reconcile(
 	}
 
 	for key, dcd := range dcds {
+		if retained != nil && dcd.Spec.PodTemplate != nil {
+			if cap, present := retained.caps[key]; present {
+				dcd.Spec.PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = cap
+			}
+		}
 		if err := r.applyCheckpointStartupPolicy(dcd, checkpointInfos[key]); err != nil {
 			return ReconcileResult{}, fmt.Errorf("failed to apply checkpoint startup policy for %s: %w", key, err)
 		}

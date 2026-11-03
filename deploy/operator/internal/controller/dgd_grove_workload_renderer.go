@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -29,9 +30,15 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -48,10 +55,11 @@ type groveWorkloadRenderer struct {
 // grovePodCliqueSetRender couples the desired PCS to the exact observation used
 // to decide compatibility and the worker hash suffix.
 type grovePodCliqueSetRender struct {
-	existing        *grovev1alpha1.PodCliqueSet
-	desired         *grovev1alpha1.PodCliqueSet
-	gpuShapes       map[string]dynamo.GPUShape
-	runtimeStatuses map[string]dynamo.ComponentRuntimeStatus
+	existing          *grovev1alpha1.PodCliqueSet
+	desired           *grovev1alpha1.PodCliqueSet
+	gpuShapes         map[string]dynamo.GPUShape
+	runtimeStatuses   map[string]dynamo.ComponentRuntimeStatus
+	powerCapPreserved bool
 }
 
 func newGroveWorkloadRenderer(
@@ -98,7 +106,7 @@ func (r *groveWorkloadRenderer) Render(
 	workerHashSuffix := shouldRenderGroveWorkerHashSuffix(req, existingPodCliqueSet, workerGenerationChanged)
 	desired, err := dynamo.GenerateGrovePodCliqueSet(
 		ctx, req.DGD, req.IsDelegated, r.config, r.runtimeConfig, r.reader,
-		r.dockerSecretRetriever, restartState, existingPodCliqueSet, workerHashSuffix, checkpointInfos,
+		r.dockerSecretRetriever, restartState, existingPodCliqueSet, workerHashSuffix, checkpointInfos, nil,
 	)
 	if err != nil {
 		return nil, err
@@ -111,16 +119,174 @@ func (r *groveWorkloadRenderer) Render(
 		checkpointInfos,
 	)
 
+	// Prove cap-only divergence against the observed PCS before choosing its generation identity.
+	preserved := false
+	if len(desiredWorkerPowerCaps(req.DGD)) > 0 && !powerCapRolloutBlocked(req.DGD.Status.RollingUpdate) && existingPodCliqueSet != nil && metav1.IsControlledBy(existingPodCliqueSet, req.DGD) {
+		retained, applicable := retainedGrovePowerCaps(req, existingPodCliqueSet)
+		if applicable {
+			candidate, renderErr := dynamo.GenerateGrovePodCliqueSet(ctx, req.DGD, req.IsDelegated, r.config, r.runtimeConfig, r.reader, r.dockerSecretRetriever, restartState, existingPodCliqueSet, false, checkpointInfos, &retained)
+			if renderErr != nil {
+				return nil, renderErr
+			}
+			prepareGroveTopologyConstraintUpgrade(candidate, existingPodCliqueSet)
+			preserveGrovePodCliqueSetOrder(candidate, existingPodCliqueSet)
+			preserveGrovePodCliqueSetReplicas(candidate, existingPodCliqueSet, checkpointInfos)
+			composed, composeErr := provideroverride.ComposeGroveOverrides(req.DGD, candidate)
+			if composeErr != nil {
+				return nil, composeErr
+			}
+			comparisonCandidate := &grovev1alpha1.PodCliqueSet{}
+			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(composed.Object, comparisonCandidate); err != nil {
+				return nil, err
+			}
+			if apiequality.Semantic.DeepEqual(grovePowerCapWorkerSpec(comparisonCandidate), grovePowerCapWorkerSpec(existingPodCliqueSet)) {
+				desired, preserved = candidate, true
+			}
+		}
+	}
+
 	gpuShapes, err := dynamo.ResolveGroveGPUShapes(ctx, r.reader, req.DGD, req.IsDelegated, desired)
 	if err != nil {
 		return nil, err
 	}
 	return &grovePodCliqueSetRender{
-		existing:        existingPodCliqueSet,
-		desired:         desired,
-		gpuShapes:       gpuShapes,
-		runtimeStatuses: dynamo.ResolveGroveComponentRuntimeStatuses(req.DGD, desired),
+		existing:          existingPodCliqueSet,
+		desired:           desired,
+		gpuShapes:         gpuShapes,
+		runtimeStatuses:   dynamo.ResolveGroveComponentRuntimeStatuses(req.DGD, desired),
+		powerCapPreserved: preserved,
 	}, nil
+}
+
+// grovePowerCapWorkerSpec compares worker intent using the pinned Grove alpha.15 admission defaults.
+// It retains common PCS settings but excludes independently reconciled nonworker cliques.
+func grovePowerCapWorkerSpec(pcs *grovev1alpha1.PodCliqueSet) grovev1alpha1.PodCliqueSetSpec {
+	spec := *pcs.Spec.DeepCopy()
+	if spec.UpdateStrategy == nil {
+		spec.UpdateStrategy = &grovev1alpha1.PodCliqueSetUpdateStrategy{}
+	}
+	if spec.UpdateStrategy.Type == "" {
+		spec.UpdateStrategy.Type = grovev1alpha1.RollingRecreateStrategy
+	}
+	if spec.Template.TerminationDelay == nil {
+		spec.Template.TerminationDelay = &metav1.Duration{Duration: 4 * time.Hour}
+	}
+	if spec.Template.HeadlessServiceConfig == nil {
+		spec.Template.HeadlessServiceConfig = &grovev1alpha1.HeadlessServiceConfig{PublishNotReadyAddresses: true}
+	}
+
+	// Scaling groups own rolling settings for their member cliques.
+	workers, grouped := map[string]bool{}, map[string]bool{}
+	for _, clique := range spec.Template.Cliques {
+		workers[clique.Name] = dynamo.IsWorkerComponent(clique.Labels[commonconsts.KubeLabelDynamoComponentType])
+	}
+	groups := spec.Template.PodCliqueScalingGroupConfigs[:0]
+	for _, group := range spec.Template.PodCliqueScalingGroupConfigs {
+		hasWorker := false
+		for _, name := range group.CliqueNames {
+			grouped[name] = true
+			hasWorker = hasWorker || workers[name]
+		}
+		if !hasWorker {
+			continue
+		}
+		if group.Replicas == nil {
+			group.Replicas = ptr.To[int32](1)
+		}
+		if group.ScaleConfig != nil && group.ScaleConfig.MinReplicas == nil {
+			group.ScaleConfig.MinReplicas = ptr.To(*group.Replicas)
+		}
+		group.RollingUpdate = defaultPowerCapGroveRollingUpdate(group.RollingUpdate, spec.UpdateStrategy.Type, ptr.Deref(group.MinAvailable, 1))
+		groups = append(groups, group)
+	}
+	spec.Template.PodCliqueScalingGroupConfigs = groups
+
+	// Normalize provider defaults without discarding any authored worker drift.
+	cliques := spec.Template.Cliques[:0]
+	for _, clique := range spec.Template.Cliques {
+		if !workers[clique.Name] {
+			continue
+		}
+		if clique.Spec.Replicas == 0 {
+			clique.Spec.Replicas = 1
+		}
+		if clique.Spec.ScaleConfig != nil && clique.Spec.ScaleConfig.MinReplicas == nil {
+			clique.Spec.ScaleConfig.MinReplicas = ptr.To(clique.Spec.Replicas)
+		}
+		if !grouped[clique.Name] {
+			clique.RollingUpdate = defaultPowerCapGroveRollingUpdate(clique.RollingUpdate, spec.UpdateStrategy.Type, ptr.Deref(clique.Spec.MinAvailable, clique.Spec.Replicas))
+		}
+		template := &corev1.PodTemplateSpec{Spec: clique.Spec.PodSpec}
+		defaultPowerCapTemplate(template)
+		clique.Spec.PodSpec = template.Spec
+		cliques = append(cliques, clique)
+	}
+	spec.Template.Cliques = cliques
+	return spec
+}
+
+// defaultPowerCapGroveRollingUpdate applies only defaults owned by Grove's pinned webhook.
+func defaultPowerCapGroveRollingUpdate(config *grovev1alpha1.RollingUpdateConfiguration, strategy grovev1alpha1.UpdateStrategyType, minAvailable int32) *grovev1alpha1.RollingUpdateConfiguration {
+	if config != nil && config.MaxUnavailable != nil {
+		return config
+	}
+	var unavailable int32
+	switch strategy {
+	case grovev1alpha1.CoherentStrategy:
+		unavailable = minAvailable
+	case grovev1alpha1.RollingRecreateStrategy:
+		unavailable = 1
+	default:
+		return config
+	}
+	if config == nil {
+		config = &grovev1alpha1.RollingUpdateConfiguration{}
+	}
+	config.MaxUnavailable = ptr.To(unavailable)
+	return config
+}
+
+// retainedGrovePowerCaps requires one coherent active worker identity and at least one cap difference.
+func retainedGrovePowerCaps(req groveReconcileRequest, pcs *grovev1alpha1.PodCliqueSet) (dynamo.GroveWorkerIdentity, bool) {
+	retained := dynamo.GroveWorkerIdentity{PowerCaps: map[string]string{}}
+	changed, found := false, false
+	for _, clique := range pcs.Spec.Template.Cliques {
+		component := clique.Labels[commonconsts.KubeLabelDynamoComponent]
+		if !dynamo.IsWorkerComponent(clique.Labels[commonconsts.KubeLabelDynamoComponentType]) {
+			continue
+		}
+		hash := clique.Labels[commonconsts.KubeLabelDynamoWorkerHash]
+		if found && hash != retained.Hash {
+			return retained, false
+		}
+		retained.Hash, found = hash, true
+		for i := range req.DGD.Spec.Components {
+			source := &req.DGD.Spec.Components[i]
+			if source.ComponentName != component {
+				continue
+			}
+			if source.PodTemplate == nil {
+				return retained, false
+			}
+			want, wantPresent := source.PodTemplate.Annotations[commonconsts.KubeAnnotationGPUPowerLimit]
+			old, oldPresent := clique.Annotations[commonconsts.KubeAnnotationGPUPowerLimit]
+			if wantPresent != oldPresent {
+				return retained, false
+			}
+			if oldPresent {
+				if previous, exists := retained.PowerCaps[component]; exists && previous != old {
+					return retained, false
+				}
+				retained.PowerCaps[component] = old
+				changed = changed || old != want
+			}
+		}
+	}
+	current := currentWorkerHashes(req.DGD)
+	if retained.Hash != "" && !current.contains(retained.Hash) {
+		return retained, false
+	}
+	return retained, changed && found
 }
 
 func shouldRenderGroveWorkerHashSuffix(

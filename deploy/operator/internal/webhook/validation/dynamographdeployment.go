@@ -794,6 +794,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentUpdate(
 		&newDGD.Spec,
 		&oldDGD.Spec,
 		field.NewPath("spec"),
+		livePowerCapUpdateDetail(newDGD, oldDGD),
 	)...)
 	if oldDGD.Status.RollingUpdate != nil {
 		phase := oldDGD.Status.RollingUpdate.Phase
@@ -871,6 +872,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 	newSpec *nvidiacomv1beta1.DynamoGraphDeploymentSpec,
 	oldSpec *nvidiacomv1beta1.DynamoGraphDeploymentSpec,
 	fldPath *field.Path,
+	capUpdateDetail string,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 
@@ -940,6 +942,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 			newComponent,
 			oldComponent,
 			componentsPath.Index(i),
+			capUpdateDetail,
 		)...)
 	}
 
@@ -984,14 +987,15 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSharedSpe
 	newComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	oldComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
+	capUpdateDetail string,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	newPowerLimit, newHasPowerLimit := dgdPowerLimit(newComponent)
 	oldPowerLimit, oldHasPowerLimit := dgdPowerLimit(oldComponent)
 
-	// Reject transitions into, out of, or within the power-annotation contract.
+	// Allow only existing worker cap values within the supported graph boundary.
 	if newHasPowerLimit != oldHasPowerLimit ||
-		(newHasPowerLimit && newPowerLimit != oldPowerLimit) {
+		(newHasPowerLimit && newPowerLimit != oldPowerLimit && (capUpdateDetail != "" || !dynamo.IsWorkerComponent(string(oldComponent.ComponentType)) || !dynamo.IsWorkerComponent(string(newComponent.ComponentType)))) {
 		var invalidValue any
 		if newHasPowerLimit {
 			invalidValue = newPowerLimit
@@ -999,12 +1003,12 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSharedSpe
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("podTemplate", "metadata", "annotations").Key(consts.KubeAnnotationGPUPowerLimit),
 			invalidValue,
-			apivalidation.FieldImmutableErrorMsg,
+			powerCapUpdateError(capUpdateDetail),
 		))
 	}
 
 	if oldHasPowerLimit {
-		// Keep the Planner's cached main-container GPU input stable.
+		// GPU allocation changes require worker replacement, independently of live cap propagation.
 		newNumberOfGPUs := effectiveNumberOfGPUsV1Beta1(newComponent, fldPath)
 		oldNumberOfGPUs := effectiveNumberOfGPUsV1Beta1(oldComponent, fldPath)
 		if !newNumberOfGPUs.equal(oldNumberOfGPUs) {
@@ -1016,7 +1020,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSharedSpe
 			return allErrs
 		}
 
-		// Keep auxiliary-container GPU allocations used by the cached per-replica cost stable.
+		// Auxiliary GPU allocation changes also require worker replacement.
 		newPodGPUs, newErr := effectivePodGPUCountV1Beta1(v.ctx, newComponent, fldPath)
 		oldPodGPUs, oldErr := effectivePodGPUCountV1Beta1(v.ctx, oldComponent, fldPath)
 		if newErr == nil && oldErr == nil && !newPodGPUs.equal(oldPodGPUs) {

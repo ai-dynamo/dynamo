@@ -19,11 +19,13 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
@@ -36,6 +38,7 @@ type componentProgram struct {
 	workloads       *componentWorkloadsReconciler
 	scalingAdapters *dgdScalingAdaptersReconciler
 	lwsEnabled      bool
+	powerRenderer   *dcdWorkloadRenderer
 }
 
 // newComponentProgram wires the DCD pathway at the DGD composition root.
@@ -57,6 +60,7 @@ func (r *DynamoGraphDeploymentReconciler) newComponentProgram() *componentProgra
 		workloads:       newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout),
 		scalingAdapters: newDGDScalingAdaptersReconciler(r.Client, r.Recorder),
 		lwsEnabled:      r.RuntimeConfig.Gate.Enabled(features.LWS),
+		powerRenderer:   newDCDWorkloadRenderer(r.Client, r.Config, r.RuntimeConfig, r.DockerSecretRetriever),
 	}
 }
 
@@ -68,6 +72,28 @@ func (p *componentProgram) Reconcile(
 	req workloadProgramRequest,
 ) (programResult workloadProgramResult, retErr error) {
 	programResult = newWorkloadProgramResult(req.DGD)
+	incomingGeneration := programResult.Status.ObservedGeneration
+	caps := desiredWorkerPowerCaps(req.DGD)
+	var capClient client.Client
+	if len(caps) > 0 {
+		capClient = p.rollout.Client
+	}
+
+	// Finalize propagation before classifying any final failure or acknowledging the generation.
+	defer func() {
+		retErr = errors.Join(retErr, reconcilePowerCaps(ctx, capClient, req.DGD, caps, &programResult))
+		if retErr != nil {
+			programResult.Status.ObservedGeneration = incomingGeneration
+			if errors.Is(retErr, reconcile.TerminalError(nil)) {
+				return
+			}
+			reason := reasonFailedToReconcileResources
+			if classified, ok := workloadProgramFailureReason(retErr); ok {
+				reason = classified
+			}
+			programResult.Fail(req.DGD.Generation, reason, retErr)
+		}
+	}()
 	clearComponentGPUShapes(programResult.Status.Components)
 	clearComponentRuntimeStatuses(programResult.Status.Components)
 
@@ -86,18 +112,6 @@ func (p *componentProgram) Reconcile(
 		return programResult, reconcile.TerminalError(err)
 	}
 
-	// Classify failures from normal component reconciliation.
-	defer func() {
-		if retErr == nil {
-			return
-		}
-		reason := reasonFailedToReconcileResources
-		if classified, ok := workloadProgramFailureReason(retErr); ok {
-			reason = classified
-		}
-		programResult.Fail(req.DGD.Generation, reason, retErr)
-	}()
-
 	log.FromContext(ctx).Info(
 		"Reconciling Dynamo components deployments",
 		"hasMultinode", req.DGD.HasAnyMultinodeComponent(),
@@ -105,10 +119,12 @@ func (p *componentProgram) Reconcile(
 	)
 
 	previousRolloutPhase := rollingUpdatePhase(programResult.Status.RollingUpdate)
-	if err := p.reconcileWorkerRollout(ctx, req.DGD, &programResult.Status); err != nil {
-		return programResult, err
+	if len(caps) == 0 {
+		if err := p.reconcileWorkerRollout(ctx, req.DGD, &programResult.Status); err != nil {
+			return programResult, err
+		}
+		p.recordRollingUpdateTransition(req.DGD, previousRolloutPhase, &programResult)
 	}
-	p.recordRollingUpdateTransition(req.DGD, previousRolloutPhase, &programResult)
 	checkpoints, err := p.sharedResources.Reconcile(ctx, req.DGD)
 	if checkpoints.Statuses != nil {
 		programResult.Status.Checkpoints = checkpoints.Statuses
@@ -127,13 +143,25 @@ func (p *componentProgram) Reconcile(
 		)
 		return programResult, failWorkloadProgram(reasonNoMultinodeOrchestrator, err)
 	}
+	// Preview restart-derived templates without committing restart status before rollout.
+	var retained *componentPowerCapPreservation
+	if len(caps) > 0 {
+		preview := p.restart.Resolve(ctx, req.DGD, &programResult.Status, p.restartProgress.Resolve)
+		retained, err = p.workloads.resolvePowerCapPreservation(ctx, req.DGD, preview.State, checkpoints.Infos, p.powerRenderer)
+		if err != nil {
+			return programResult, err
+		}
+		if retained == nil {
+			if err := p.reconcileWorkerRollout(ctx, req.DGD, &programResult.Status); err != nil {
+				return programResult, err
+			}
+		}
+		p.recordRollingUpdateTransition(req.DGD, previousRolloutPhase, &programResult)
+	}
+
+	// Commit restart resolution after the selected rollout decision is reflected in status.
 	previousRestart := programResult.Status.Restart
-	restart := p.restart.Resolve(
-		ctx,
-		req.DGD,
-		&programResult.Status,
-		p.restartProgress.Resolve,
-	)
+	restart := p.restart.Resolve(ctx, req.DGD, &programResult.Status, p.restartProgress.Resolve)
 	recordRestartTransition(previousRestart, restart.Status, &programResult)
 	programResult.Status.Restart = restart.Status
 
@@ -142,6 +170,7 @@ func (p *componentProgram) Reconcile(
 		req.DGD,
 		restart.State,
 		checkpoints.Infos,
+		retained,
 	)
 	if err != nil {
 		// Preserve newly observed component status while leaving the generation unobserved.
