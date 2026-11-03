@@ -689,7 +689,6 @@ impl PoolRelay {
         }
         let discovery_client = config
             .global_discovery_url
-            .clone()
             .map(|url| GlobalDiscoveryClient::new(url, GLOBAL_DISCOVERY_REQUEST_TIMEOUT))
             .transpose()?;
         let publication = ActorPublicationConfig {
@@ -822,7 +821,6 @@ impl PoolRelay {
             topology.clone(),
             supervisor_complete.clone(),
         );
-        // Started last, so a failed start leaves no refresh task running.
         let global_routers = discovery_client.map(|client| {
             RouterCache::spawn(
                 client,
