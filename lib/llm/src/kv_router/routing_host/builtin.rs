@@ -270,7 +270,7 @@ impl RoutingHost {
             (
                 HostedSelection {
                     initial_worker: target,
-                    target_constraint: None,
+                    target_constraint: explicit.filter(|pin| pin.worker_id == target),
                     occupancy_reservation: None,
                     candidate_count: 0,
                     selected_occupancy: None,
