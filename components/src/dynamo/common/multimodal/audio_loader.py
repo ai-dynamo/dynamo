@@ -8,7 +8,13 @@ from urllib.parse import urlparse
 
 import numpy as np
 
-from dynamo.common.http import HttpConfigurationError, HttpStatusError, fetch_bytes
+from dynamo.common.http import (
+    HttpConfigurationError,
+    HttpConnectionError,
+    HttpStatusError,
+    HttpTimeoutError,
+    fetch_bytes,
+)
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -64,10 +70,14 @@ except ImportError:
     AudioMediaIO = None  # type: ignore[assignment]
 
 
+class _VllmAudioMediaUnavailable(RuntimeError):
+    """vLLM's audio media components are not installed: a deployment fault."""
+
+
 def _require_vllm_audio_media() -> tuple[Any, Any]:
     """Return vLLM's audio media components, raising if not installed."""
     if MediaConnector is None or AudioMediaIO is None:
-        raise RuntimeError(
+        raise _VllmAudioMediaUnavailable(
             "vLLM multimodal media components are required to decode `audio_url` "
             "inputs in the vLLM backend."
         )
@@ -166,6 +176,20 @@ class AudioLoader:
             # its type and prevent the frontend from returning a 4xx.
             logger.error(
                 "URL rejected loading audio: '%s'", describe_media_source(audio_url)
+            )
+            raise
+        except (
+            HttpTimeoutError,
+            HttpConnectionError,
+            _VllmAudioMediaUnavailable,
+        ) as exc:
+            # A failed fetch or a missing vLLM says nothing about the audio:
+            # keep the type so it is not reported as a bad request (4xx), which
+            # the ValueError below and the batch's ValueError branch would do.
+            logger.error(
+                "%s loading audio: '%s'",
+                type(exc).__name__,
+                describe_media_source(audio_url),
             )
             raise
         except ImportError as exc:

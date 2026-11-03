@@ -7,7 +7,12 @@ from unittest.mock import AsyncMock
 import numpy as np
 import pytest
 
-from dynamo.common.http import HttpConfigurationError, HttpStatusError
+from dynamo.common.http import (
+    HttpConfigurationError,
+    HttpConnectionError,
+    HttpStatusError,
+    HttpTimeoutError,
+)
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal import audio_loader as audio_loader_module
 from dynamo.common.multimodal.audio_loader import AudioLoader
@@ -245,6 +250,36 @@ async def test_load_audio_batch_value_error_outranks_generic_failure():
         )
 
     assert exc_info.value is value_error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        HttpTimeoutError("Timeout loading https://example.com/bad.wav"),
+        HttpConnectionError("Connection error loading https://example.com/bad.wav"),
+        "vllm_missing",
+    ],
+    ids=["fetch_timeout", "connection_error", "vllm_missing"],
+)
+async def test_load_audio_batch_server_failure_is_not_client_error(
+    monkeypatch, failure
+):
+    """A failed fetch or a missing vLLM says nothing about the audio: it must
+    not take the ValueError branch, which the bindings map to InvalidArgument."""
+    loader = AudioLoader(url_policy=_permissive_http_policy())
+    if failure == "vllm_missing":
+        monkeypatch.setattr(audio_loader_module, "AudioMediaIO", None)
+    else:
+        monkeypatch.setattr(loader, "_create_vllm_audio_io", lambda: object())
+        monkeypatch.setattr(
+            audio_loader_module, "fetch_bytes", AsyncMock(side_effect=failure)
+        )
+
+    with pytest.raises(Exception) as exc_info:
+        await loader.load_audio_batch([{"Url": "https://example.com/bad.wav"}])
+
+    assert type(exc_info.value) is Exception
 
 
 @pytest.mark.asyncio
