@@ -415,8 +415,8 @@ impl RuntimeConfig {
             tracing::warn!(
                 "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS is set. A nonempty JSON list overrides \
                 endpoints that register health check payloads: system /health reports ready only \
-                when every listed endpoint is ready. Unset it to let registered health check \
-                payloads decide readiness."
+                when every listed endpoint is ready. Set it to [] to let registered health check \
+                payloads decide readiness; unsetting it keeps any list set in runtime.toml."
             );
         }
 
