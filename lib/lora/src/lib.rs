@@ -11,6 +11,7 @@ pub mod filter;
 mod huggingface;
 pub mod load_estimator;
 pub mod metrics;
+pub mod policy;
 pub mod predictor;
 pub mod routing;
 pub mod runtime;
