@@ -4928,8 +4928,7 @@ async fn prefill_prepare_failure_releases_the_booking_before_the_request_counts(
             Err(anyhow::anyhow!("prepare failed"))
         })
         .await
-        .err()
-        .expect("a failed prepare must fail the request");
+        .expect_err("a failed prepare must fail the request");
     assert!(format!("{error:#}").contains("prepare failed"));
     assert_eq!(
         router.request_metrics.requests_started_total.get(),

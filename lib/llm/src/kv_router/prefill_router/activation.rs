@@ -1472,11 +1472,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migration_releases_prefill_booking_only_for_committed_retry() {
+    async fn migration_retry_keeps_superseded_prefill_booking_until_it_finishes() {
         // Isolate the process-global TCP request server, as in the routing-hop test above.
         const TEST: &str = concat!(
             module_path!(),
-            "::migration_releases_prefill_booking_only_for_committed_retry"
+            "::migration_retry_keeps_superseded_prefill_booking_until_it_finishes"
         );
         let test_name = TEST.split_once("::").unwrap().1;
         if std::env::var("DYNAMO_ROUTING_HOP_TEST").as_deref() != Ok(test_name) {
@@ -1596,54 +1596,46 @@ mod tests {
         .await
         .expect("prefill target must activate");
 
+        // Requests the scheduler counts against the prefill worker.
+        let prefill_load = || async {
+            router
+                .binding
+                .load_full()
+                .expect("prefill target must be bound")
+                .router
+                .kv_router()
+                .get_potential_loads(&[], None, None, None, None)
+                .await
+                .unwrap()
+                .iter()
+                .map(|load| load.active_requests)
+                .sum::<usize>()
+        };
+
         // Migration retries a failed attempt under the same request ID, starting
         // again from remote prefill. Each attempt's prefill is still in flight
         // when its decode fails, as when a decode worker dies between discovery
         // and dispatch or fails before its first token.
         for streamed in [false, true] {
-            let decode = |failures: u32| UnreachableDecodeHost {
+            let before = prefill_load().await;
+            let decode = UnreachableDecodeHost {
                 stream: streamed,
-                failures: failures.into(),
+                failures: 1.into(),
             };
             let id = uuid::Uuid::new_v4().to_string();
             let tokens =
-                tokio::time::timeout(Duration::from_secs(5), migrate(&router, &id, decode(1)))
+                tokio::time::timeout(Duration::from_secs(5), migrate(&router, &id, decode))
                     .await
                     .expect("retry must not hang")
                     .unwrap_or_else(|error| {
-                        panic!("migration retry must re-book remote prefill: {error:#}")
+                        panic!("migration retry must book its own remote prefill: {error:#}")
                     });
             assert_eq!(tokens, vec![7]);
-
-            // Once retries run out, the last attempt's prefill keeps its booking
-            // while it runs.
-            let id = uuid::Uuid::new_v4().to_string();
-            let error =
-                tokio::time::timeout(Duration::from_secs(5), migrate(&router, &id, decode(2)))
-                    .await
-                    .expect("exhausted migration must not hang")
-                    .expect_err("every decode attempt fails");
-            assert!(
-                crate::migration::is_migratable(error.as_ref()),
-                "decode failure must be migratable: {error:#}"
+            assert_eq!(
+                prefill_load().await,
+                before + 2,
+                "the superseded prefill must keep its load beside the retry's"
             );
-            let rebook = router
-                .generate(
-                    dynamo_runtime::pipeline::Context::with_id_and_metadata(
-                        request(),
-                        id,
-                        Default::default(),
-                    ),
-                    Arc::new(PrefillWorker(7)),
-                )
-                .await;
-            match rebook {
-                Ok(_) => panic!("the final attempt's prefill booking must be retained"),
-                Err(error) => assert!(
-                    format!("{error:#}").contains("already exists"),
-                    "unexpected re-book failure: {error:#}"
-                ),
-            }
         }
         // An unreachable decode worker may still have received the request, so
         // its prefill must stay alive to serve the KV transfer.
@@ -1651,7 +1643,16 @@ mod tests {
             cancellations.try_recv().is_err(),
             "a transport failure must not cancel the remote prefill"
         );
+
+        // Finishing the prefills releases their load.
         held.cancel();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while prefill_load().await > 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a finished prefill must release its load");
         drop(router);
         worker.shutdown().await.unwrap();
         frontend_runtime.shutdown();

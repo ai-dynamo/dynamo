@@ -30,10 +30,7 @@ use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
 use crate::{
-    kv_router::{
-        KvRouter, metrics::RouterRequestMetrics, request_lease::RequestAttemptRelease,
-        to_worker_selection_session_context,
-    },
+    kv_router::{KvRouter, metrics::RouterRequestMetrics, to_worker_selection_session_context},
     lora::{LoadEstimator, LoraFilter},
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -71,12 +68,29 @@ const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
 /// Bounds the wait for a worker's trailing typed error after a terminal frame.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub(crate) struct PrefillDispatch<M> {
-    pub(crate) metadata: M,
-    pub(crate) stream: ManyOut<Annotated<LLMEngineOutput>>,
-    /// Early release for the prefill's scheduler booking, held by `stream`
-    /// until prefill finishes. `None` when the routing policy books nothing.
-    pub(crate) booking: Option<RequestAttemptRelease>,
+const BOOKING_ID_CONTEXT_KEY: &str = "dynamo.llm.kv_router.booking_id";
+
+struct BookingId(String);
+
+/// Books a migration retry's remote prefill under `<request id>#<attempt>`, so an
+/// earlier attempt's prefill keeps its own booking until it finishes.
+pub(crate) fn set_prefill_attempt_booking_id(
+    prefill: &mut SingleIn<PreprocessedRequest>,
+    attempt: u32,
+) {
+    if attempt > 0 {
+        let booking_id = format!("{}#{attempt}", prefill.id());
+        prefill.insert(BOOKING_ID_CONTEXT_KEY, BookingId(booking_id));
+    }
+}
+
+/// The id a migration retry's prefill books under, if `request` is one.
+fn attempt_booking_id(request: &SingleIn<PreprocessedRequest>) -> Option<String> {
+    request
+        .get_optional::<BookingId>(BOOKING_ID_CONTEXT_KEY)
+        .ok()
+        .flatten()
+        .map(|booking_id| booking_id.0.clone())
 }
 
 pub(crate) fn is_cancelled(error: &Error) -> bool {
@@ -378,12 +392,6 @@ impl RoutePlan {
 
     pub(crate) fn worker(&self) -> WorkerWithDpRank {
         self.selection.worker
-    }
-
-    /// Early release for the booking, taken before dispatch so a migration
-    /// retry can free it while the prefill stream still runs.
-    pub(crate) fn attempt_release(&self) -> Option<RequestAttemptRelease> {
-        self.cleanup.attempt_release()
     }
 
     /// Give the route up before dispatch: abort the classifier lifecycle with
@@ -698,7 +706,7 @@ impl RoutingHost {
         &self,
         request: SingleIn<PreprocessedRequest>,
         prepare: F,
-    ) -> Result<PrefillDispatch<M>, Error>
+    ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
@@ -707,14 +715,8 @@ impl RoutingHost {
             RoutingPolicy::Hosted(_)
             | RoutingPolicy::Direct
             | RoutingPolicy::DeviceAwareWeighted => {
-                let (metadata, stream) = self
-                    .select_and_dispatch_builtin(request, RequestPhase::Prefill, prepare)
-                    .await?;
-                Ok(PrefillDispatch {
-                    metadata,
-                    stream,
-                    booking: None,
-                })
+                self.select_and_dispatch_builtin(request, RequestPhase::Prefill, prepare)
+                    .await
             }
         }
     }

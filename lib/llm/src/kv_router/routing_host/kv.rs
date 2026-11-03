@@ -36,6 +36,7 @@ impl RoutingHost {
                 phase,
                 is_query_only,
                 SelectionOptions {
+                    booking_id: attempt_booking_id(request),
                     pinned_target: match self.session_affinity_mode {
                         SessionAffinityMode::Hard => affinity_target,
                         SessionAffinityMode::Soft => None,
@@ -286,7 +287,7 @@ impl RoutingHost {
             phase,
             cleanup: KvRequestCleanup::new(
                 Arc::clone(self.kv_router()),
-                request.context().id().to_string(),
+                attempt_booking_id(request).unwrap_or_else(|| request.context().id().to_string()),
                 selection.worker,
                 selection.booking.take(),
             ),
@@ -645,7 +646,7 @@ impl RoutingHost {
         &self,
         mut request: SingleIn<PreprocessedRequest>,
         prepare: F,
-    ) -> Result<PrefillDispatch<M>, Error>
+    ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
@@ -664,12 +665,7 @@ impl RoutingHost {
                 return Err(error);
             }
         };
-        let booking = plan.attempt_release();
         let stream = self.dispatch_kv_plan(request, plan).await?;
-        Ok(PrefillDispatch {
-            metadata,
-            stream,
-            booking,
-        })
+        Ok((metadata, stream))
     }
 }

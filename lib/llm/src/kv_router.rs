@@ -76,7 +76,6 @@ pub use dynamo_kv_router::scheduling::OverlapScoresResponse;
 pub use encoder_router::EncoderRouter;
 pub use indexer::Indexer;
 pub use prefill_router::PrefillRouter;
-pub(crate) use request_lease::RequestAttemptRelease;
 pub use routing_host::{
     KvPushRouter, LlmDispatch, MultimodalCache, RoutingHost, RoutingHostBuilder,
 };
@@ -1282,6 +1281,7 @@ impl KvRouter {
     ) -> anyhow::Result<AdmittedFindBestMatchOutcome> {
         self.find_best_match_details_with_policy_class_inner(
             context_id,
+            None,
             tokens,
             block_mm_infos,
             router_config_override,
@@ -1307,6 +1307,7 @@ impl KvRouter {
     async fn find_best_match_details_with_policy_class_inner(
         &self,
         context_id: Option<&str>,
+        booking_id: Option<&str>,
         tokens: &[u32],
         block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         router_config_override: Option<&RouterConfigOverride>,
@@ -1329,6 +1330,8 @@ impl KvRouter {
         if update_states && context_id.is_none() {
             anyhow::bail!("context_id must be provided if update_states is true");
         }
+        // Selection traces keep the request id when the booking has its own id.
+        let booking_id = booking_id.or(context_id);
         let is_admitted_routing = matches!(admission, FindBestMatchAdmission::WithAdmission);
         let session_index_context = if is_admitted_routing {
             self.session_prefix_index
@@ -1340,13 +1343,13 @@ impl KvRouter {
         };
         let core_admission = match admission {
             FindBestMatchAdmission::WithAdmission if update_states => SelectionAdmission::Lease {
-                request_id: context_id.expect("validated above").to_string(),
+                request_id: booking_id.expect("validated above").to_string(),
             },
             FindBestMatchAdmission::WithAdmission => SelectionAdmission::Query {
-                request_id: context_id.map(str::to_string),
+                request_id: booking_id.map(str::to_string),
             },
             FindBestMatchAdmission::WithoutAdmission => SelectionAdmission::Advisory {
-                request_id: context_id.map(str::to_string),
+                request_id: booking_id.map(str::to_string),
             },
         };
         let SelectionRun {
@@ -2738,6 +2741,7 @@ mod tests {
             let selected = router
                 .find_best_match_details_with_policy_class_inner(
                     Some(session),
+                    None,
                     &tokens,
                     None,
                     None,
@@ -2928,6 +2932,7 @@ mod tests {
             let admitted = router
                 .find_best_match_details_with_policy_class_inner(
                     Some(&context_id),
+                    None,
                     tokens,
                     None,
                     None,
@@ -3076,6 +3081,7 @@ mod tests {
         let outcome = router
             .find_best_match_details_with_policy_class_inner(
                 Some("cancelled"),
+                None,
                 &prompt,
                 None,
                 None,
