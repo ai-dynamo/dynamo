@@ -237,7 +237,7 @@ Parsers marked **Force-reasoning: Yes** start reasoning without an opening tag. 
 
         **Force-reasoning:** <Badge intent="note" minimal>No</Badge>
 
-        **Notes:** `<mm:think>...</mm:think>`; recovers a prompt-prefilled opener. Alias: `minimax-m3`
+        **Notes:** `<mm:think>...</mm:think>`. Explicit V2 supports prompt-prefilled reasoning; auto uses V1, with an explicit-guided decoding exception described in [routing exceptions](troubleshooting-tool-calls.md#parser-generation-routing). Alias: `minimax-m3`
       </Accordion>
 
       <Accordion title="MiniMax M2 / M2.1 (legacy)">

@@ -194,6 +194,7 @@ Unified routes use the compatible Unified builder; V1 routes use the V1 registry
 - `hermes`, `qwen25`
 - `inkling`
 - `kimi_k2`, `kimi_k3`, `kimi-k3`
+- `minimax_m3` / `minimax-m3` with explicit V2
 - `muse_spark` / `muse_spark_open` on V2
 - `nemotron_nano`, `qwen3_coder`
 

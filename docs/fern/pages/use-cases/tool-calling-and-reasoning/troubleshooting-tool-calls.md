@@ -137,6 +137,7 @@ V2 uses one family grammar for reasoning, text, and tools. Either selector can u
 | GLM 4.7 | `glm47`, `glm45` |
 | Kimi K2 / K2.5 | `kimi_k2`, `kimi_k25` |
 | Kimi K3 | `kimi_k3`, `kimi-k3` |
+| MiniMax M3 | `minimax_m3`, `minimax-m3` |
 | Qwen3 Coder | `qwen3`, `qwen3_coder` |
 | Muse Glimmer | `muse_glimmer`, `muse` |
 | Muse Spark | `muse_spark`, `muse_spark_open` |
@@ -152,7 +153,9 @@ Examples below list the tool-call selector first, then the reasoning selector:
 
 A single tool selector such as `qwen3_coder`, or reasoning selector such as `deepseek_v41`, selects the whole Unified family grammar. The serving layer still enforces tool policy. Family aliases accepted by V2 are not necessarily registered in the corresponding V1 slot.
 
-**Reasoning-only exceptions:** without a tool selector, auto stays on V1 for `qwen3`, `nemotron_v3`, or `nemotron3` reasoning. Qwen thinking/QwQ models can emit Hermes JSON tools rather than Coder XML; a Nemotron reasoning name alone does not identify its tool grammar. Explicit `2` selects the corresponding Unified grammar; use it only for matching output. MiniMax M3 also stays on V1 in auto mode, including with both selectors configured, until Unified explicit-guided output is returned as content rather than reasoning. Select `2` to opt into its Unified route.
+**Reasoning-only exceptions:** without a tool selector, auto stays on V1 for `qwen3`, `nemotron_v3`, or `nemotron3` reasoning. Qwen thinking/QwQ models can emit Hermes JSON tools rather than Coder XML; a Nemotron reasoning name alone does not identify its tool grammar. Explicit `2` selects the corresponding Unified grammar; use it only for matching output.
+
+**MiniMax M3:** auto stays on V1, including with both selectors configured, because Unified explicit-guided output uses `reasoning_content` instead of `content`. Select `2` to opt into Unified.
 
 **Deprecated setting:** replace `DYN_ENABLE_EXPERIMENTAL_PARSERS_V2` with `DYN_PARSER_VERSION`. Legacy `true` means explicit V2; `false` means auto, which now prefers compatible V2. Conflicting pairs (`true` + `1`, `false` + `2`) and malformed booleans reject. For rollback, unset the old variable and use `1` if both selectors exist in V1. Muse Glimmer, Muse Spark, Beam, and DeepSeek V4.1 are Unified-only.
 
@@ -160,7 +163,7 @@ Unified emits reasoning, text, and tools in source order. V1 extracts reasoning 
 
 Unified resolves prompt-prefilled reasoning after template rendering: an opener in the prompt need not recur in generated text. Kimi K3's `<|open|>think<|sep|>` suffix, including supported whitespace between markers, starts reasoning. This is separate from force-reasoning defaults and engine grammar gates.
 
-For legacy MiniMax M3, explicit `guided_json`, `guided_regex`, `guided_choice`, or `guided_grammar` disables thinking and reasoning parsing when no explicit thinking control is supplied. When reasoning parsing remains enabled, it starts unseeded: `</mm:think>` can separate completed reasoning, but truncation before it may return reasoning as `content`. A prompt opener alone does not set the starting channel on this path.
+For legacy MiniMax M3, explicit `guided_json`, `guided_regex`, `guided_choice`, or `guided_grammar` disables thinking and reasoning parsing when no explicit thinking control is supplied. With explicit guided decoding and reasoning parsing enabled, V1 starts unseeded: `</mm:think>` can separate completed reasoning, but truncation before it may return reasoning as `content`. Without explicit guided decoding, prompt-injected reasoning can seed V1.
 
 Forced choices can install guided JSON or family-native structural tags. A mode requiring the V1 jail cannot silently fall back under explicit V2; unsupported combinations are rejected. See [Structural Tags](structural-tag.md) for builder availability and backend activation.
 
