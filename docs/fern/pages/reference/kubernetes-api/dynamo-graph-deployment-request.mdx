@@ -79,13 +79,9 @@ spec:
 ## v1beta2 AISim Fields
 
 The v1beta2 Request and Run APIs use `spec.aisim.inputOverrides`. Runs report the
-fully lowered input in the controller-owned `status.aisim.input`. These replace
-`spec.aisimulate` and `status.aisimulate`; the old names are no longer schema fields.
-Update manifests and status consumers before using the new CRDs and operator.
-Existing immutable Runs must finish before the upgrade or be recreated afterward;
-there is no automatic migration of stored `aisimulate` values. Before upgrading the
-CRDs, export affected Requests and Runs, including Run status, and keep the backups.
-After the schema upgrade, the API may no longer return the old `aisimulate` fields.
+fully lowered input in the controller-owned `status.aisim.input`. Candidates expose
+the evaluated DGD configuration and `parameters` in their spec and `metrics` in their
+status; they have no `aisim` field.
 
 `aisim` is optional and has no default. Omitting it preserves typed-input defaults.
 `inputOverrides` remains an RFC 7386 JSON Merge Patch: supplied values win over

@@ -136,26 +136,6 @@ when they process a hook with this annotation.
 Dynamo. If a preflight Job fails, inspect the retained Job Pod logs. The helm-controller fix
 prevents the panic but does not forward hook output to controller logs or events.
 
-#### DGDR v1beta2 API Breaking Changes
-
-**Change:** Request and Run `spec.aisimulate` is renamed to `spec.aisim`, and Run
-`status.aisimulate` is renamed to `status.aisim`. The old field names are no longer
-in the CRD schemas; they have no compatibility alias or automatic migration.
-
-**Affected:** DGDR v1beta2 manifests, stored Requests and Runs, and clients reading
-Run status, including v1beta2 payloads carried through older API versions.
-
-**Action:** Finish active Runs, then export affected Requests and Runs, including
-Run status, before upgrading the CRDs and operator. Keep these backups: after the
-schema upgrade, the API may no longer return the old `aisimulate` fields. Update
-manifests to `spec.aisim.inputOverrides` and status readers to `status.aisim.input`.
-Recreate Requests and immutable Runs that need to retain overrides stored under
-the old name. Do not rely on unknown-field pruning to migrate those values.
-
-**Existing deployments:** Applied DGDs are unchanged. The optional field, merge
-patch precedence, typed defaults, and operator-owned execution fields keep their
-existing semantics. The AISimulate package and CLI names are unchanged.
-
 #### Runtime Compatibility
 
 ##### Frontend Startup Probe Defaults
