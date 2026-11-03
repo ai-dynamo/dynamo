@@ -17,7 +17,9 @@ use hf_hub::{
 
 use dynamo_runtime::config::environment_names::model as env_model;
 
-use super::is_offline_mode;
+fn is_offline_mode() -> bool {
+    dynamo_runtime::config::env_is_truthy(env_model::huggingface::HF_HUB_OFFLINE)
+}
 
 const LORA_DOWNLOAD_TIMEOUT_SECS: &str = "LORA_DOWNLOAD_TIMEOUT_SECS";
 const DEFAULT_LORA_DOWNLOAD_TIMEOUT_SECS: u64 = 3600;
