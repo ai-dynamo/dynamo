@@ -5,8 +5,6 @@ use std::collections::BTreeMap;
 use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
-#[cfg(not(target_os = "linux"))]
-use std::time::Duration;
 use std::time::Instant;
 
 use dynamo_kv_router::LocalBlockHash;
