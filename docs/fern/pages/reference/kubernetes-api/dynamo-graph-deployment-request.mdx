@@ -76,43 +76,6 @@ spec:
           max_candidate_gpus: 8
 ```
 
-## v1beta2 AISim Fields
-
-The v1beta2 Request and Run APIs use `spec.aisim.inputOverrides`. Runs report the
-fully lowered input in the controller-owned `status.aisim.input`. Candidates expose
-the evaluated DGD configuration and `parameters` in their spec and `metrics` in their
-status; they have no `aisim` field.
-
-`aisim` is optional and has no default. Omitting it preserves typed-input defaults.
-`inputOverrides` remains an RFC 7386 JSON Merge Patch: supplied values win over
-lowered typed fields, and `null` deletes a field. Operator-owned `dgdr_run` fields
-remain forbidden. The upstream AISimulate package, CLI, and input format are unchanged.
-Conversion through v1beta1 and v1alpha1 preserves the new field inside `spec.v1beta2`.
-
-```yaml
-apiVersion: nvidia.com/v1beta2
-kind: DynamoGraphDeploymentRequest
-metadata:
-  name: example-search
-spec:
-  model:
-    name: Qwen/Qwen3-32B
-  aisim:
-    inputOverrides:
-      optimizer:
-        max_trials: 32
-```
-
-The corresponding Run exposes its effective input under:
-
-```yaml
-status:
-  aisim:
-    input:
-      optimizer:
-        max_trials: 32
-```
-
 ## Spec reference
 
 Only `model` is unconditionally required by the schema. Admission rejects a new DGDR whose supplied `spec.image` has no parseable semantic-version tag unless `spec.runtimeVersionOverride` is set. When `spec.image` is omitted, the operator supplies a versioned default as described below.

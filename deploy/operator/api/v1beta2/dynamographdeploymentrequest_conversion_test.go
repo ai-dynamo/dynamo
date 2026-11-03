@@ -132,18 +132,6 @@ func TestV1Beta2RoundTripUsesEnvelope(t *testing.T) {
 		t.Fatal("converted object contains native v1beta1 fields alongside envelopes")
 	}
 
-	t.Log("Verify conversion preserves the new wire name inside the foreign-version envelope.")
-	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal(hub.Spec.V1Beta2.Raw, &envelope); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := envelope["aisim"]; !ok {
-		t.Fatalf("conversion envelope is missing aisim: %s", hub.Spec.V1Beta2.Raw)
-	}
-	if _, ok := envelope["aisimulate"]; ok {
-		t.Fatal("conversion envelope contains the retired aisimulate field")
-	}
-
 	t.Log("Convert the envelope representation back and compare the native payload.")
 	dst := &DynamoGraphDeploymentRequest{}
 	if err := dst.ConvertFrom(hub); err != nil {
@@ -416,44 +404,5 @@ func assertDGDRPayloadEqual(t *testing.T, want, got *v1beta1.DynamoGraphDeployme
 	}
 	if !reflect.DeepEqual(want.Status, got.Status) {
 		t.Fatalf("status changed across round trip\nwant: %#v\n got: %#v", want.Status, got.Status)
-	}
-}
-
-func TestAISimRunWireFields(t *testing.T) {
-	t.Parallel()
-
-	t.Log("Decode a Run snapshot and effective input using the public aisim fields.")
-	const payload = `{"spec":{"aisim":{"inputOverrides":{"optimizer":{"max_trials":32}}}},"status":{"aisim":{"input":{"optimizer":{"max_trials":32}}}}}`
-	var run DynamoGraphDeploymentRun
-	if err := json.Unmarshal([]byte(payload), &run); err != nil {
-		t.Fatal(err)
-	}
-	if run.Spec.AISim == nil || run.Spec.AISim.InputOverrides == nil || run.Status.AISim == nil || run.Status.AISim.Input == nil {
-		t.Fatal("Run lost aisim input overrides or effective input during decoding")
-	}
-
-	t.Log("Encode the Run and verify both fields retain their public wire names and input.")
-	raw, err := json.Marshal(run)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var encoded map[string]map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &encoded); err != nil {
-		t.Fatal(err)
-	}
-	for _, section := range []string{"spec", "status"} {
-		if _, ok := encoded[section]["aisimulate"]; ok {
-			t.Fatalf("%s contains the retired aisimulate field", section)
-		}
-		if _, ok := encoded[section]["aisim"]; !ok {
-			t.Fatalf("%s is missing aisim: %s", section, raw)
-		}
-	}
-	var restored DynamoGraphDeploymentRun
-	if err := json.Unmarshal(raw, &restored); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(run.Spec, restored.Spec) || !reflect.DeepEqual(run.Status, restored.Status) {
-		t.Fatal("Run round trip changed the snapshot or effective input")
 	}
 }
