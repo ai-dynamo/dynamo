@@ -299,11 +299,12 @@ async def test_runtime_http_error_public_symbols(http_server, streaming):
         (404, "lora_not_found", "lora_not_found"),
         (422, "invalid_lora_adapter", "invalid_lora_adapter"),
         (500, "lora_plugin_error", "lora_plugin_error"),
+        (503, "lora_resolver_unavailable", "lora_resolver_unavailable"),
         (400, "lora_not_found", "Bad Request"),
         (
             503,
             "lora_resolver_unavailable token=secret",
-            "Service temporarily unavailable",
+            "Internal server error",
         ),
     )
     async with aiohttp.ClientSession(
