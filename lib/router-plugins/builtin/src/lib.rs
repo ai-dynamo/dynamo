@@ -10,6 +10,7 @@
 
 mod default;
 pub mod router_modes;
+mod sticky_min_load;
 mod thunderagent;
 mod two_tier_cost_fn;
 pub use default::{
@@ -41,6 +42,7 @@ use dynamo_kv_router::plugins::{RouterPluginRegistry, RouterPluginRegistryError}
 /// than overriding it.
 pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginRegistryError> {
     default::register(registry)?;
+    sticky_min_load::register(registry)?;
     two_tier_cost_fn::register(registry)?;
     thunderagent::register(registry)?;
     Ok(())
@@ -94,6 +96,34 @@ worker_selection:
             .unwrap()
             .expect("a configured instance resolves to a factory");
 
+        let partition = RoutingPartitionRef::new("model", "default");
+        for worker_type in [
+            WorkerType::Aggregated,
+            WorkerType::Prefill,
+            WorkerType::Decode,
+        ] {
+            factory(&config, worker_type, partition);
+        }
+    }
+
+    #[test]
+    fn resolves_sticky_min_load_yaml() {
+        let (config, resolved) = resolve(
+            r#"
+worker_selection:
+  aggregated: sticky
+  prefill: sticky
+  decode: sticky
+  instances:
+    - name: sticky
+      type: dynamo-sticky-min-load
+      parameters:
+        max_idle_secs: 600
+"#,
+        );
+        let factory = resolved
+            .unwrap()
+            .expect("a configured instance resolves to a factory");
         let partition = RoutingPartitionRef::new("model", "default");
         for worker_type in [
             WorkerType::Aggregated,

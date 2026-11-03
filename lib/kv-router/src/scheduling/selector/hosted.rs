@@ -5,62 +5,33 @@
 
 use std::cell::OnceCell;
 use std::fmt;
-use std::sync::Arc;
 
 use crate::plugins::worker_selection::{
     ScoredWorkerCandidate, WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext,
 };
-use crate::protocols::{WorkerId, WorkerSelectionResult, WorkerWithDpRank};
-use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
+use crate::protocols::WorkerId;
+use crate::scheduling::types::{KvSchedulerError, WorkerSelectionPolicyError};
 
 /// Request metadata a routing host without the KV path supplies for one selection.
 ///
-/// The picker's [`WorkerSelectionContext`] reads it the way the KV router reads a
-/// scheduling request. Values the host does not set read as the KV router's defaults
-/// for a request without them: no expected output length or temperature override,
-/// zero priorities, and no session metadata.
+/// Only the prompt length and the preview flag are set; every other [`WorkerSelectionContext`] value reads as
+/// the KV router's default for a request without it: no expected output length or
+/// temperature override, zero priorities, a block size of 0, and no session metadata.
+#[derive(Debug)]
 pub struct HostedSelectionRequest {
-    // Built once with every KV-only field empty; selection borrows it in place.
-    request: SchedulingRequest,
-    block_size: u32,
-    router_temperature_override: Option<f64>,
+    isl_tokens: usize,
     preview: bool,
 }
 
 impl HostedSelectionRequest {
     /// `isl_tokens` is the prompt length in tokens, zero when the request carries no
-    /// token IDs. `block_size` is the model's KV block size in tokens; 0 means the card
-    /// never declared one, and then [`WorkerSelectionContext::request_blocks`] is 0.
+    /// token IDs.
     #[inline]
-    pub fn new(isl_tokens: usize, block_size: u32) -> Self {
+    pub fn new(isl_tokens: usize) -> Self {
         Self {
-            request: SchedulingRequest::hosted(isl_tokens),
-            block_size,
-            router_temperature_override: None,
+            isl_tokens,
             preview: false,
         }
-    }
-
-    /// The request's expected output length in tokens, when it supplies one.
-    #[inline]
-    pub fn with_expected_output_tokens(mut self, expected_output_tokens: Option<u32>) -> Self {
-        self.request.expected_output_tokens = expected_output_tokens;
-        self
-    }
-
-    /// The request's scheduler priority boost and strict integer priority.
-    #[inline]
-    pub fn with_priority(mut self, priority_jump: f64, strict_priority: u32) -> Self {
-        self.request.priority_jump = priority_jump;
-        self.request.strict_priority = strict_priority;
-        self
-    }
-
-    /// The request-level router temperature override, when present.
-    #[inline]
-    pub fn with_router_temperature_override(mut self, temperature: Option<f64>) -> Self {
-        self.router_temperature_override = temperature;
-        self
     }
 
     /// Whether this selection only previews a worker, as a peek does; see
@@ -73,41 +44,22 @@ impl HostedSelectionRequest {
 
     fn context(&self) -> WorkerSelectionContext<'_> {
         WorkerSelectionContext {
-            request: &self.request,
-            // `request_blocks` divides by the block size, so an undeclared one reads as 0.
-            request_blocks: if self.block_size == 0 {
-                0
-            } else {
-                self.request.request_blocks(self.block_size)
-            },
-            block_size: self.block_size,
-            track_prefill_tokens: false,
+            #[cfg(any(test, feature = "bench"))]
+            request: None,
+            isl_tokens: self.isl_tokens,
+            session_context: None,
             // The host applies pins and session affinity before selecting.
+            affinity_target: None,
+            expected_output_tokens: None,
+            priority_jump: 0.0,
+            strict_priority: 0,
+            request_blocks: 0,
+            block_size: 0,
+            track_prefill_tokens: false,
             pinned_worker: None,
-            router_temperature_override: self.router_temperature_override,
+            router_temperature_override: None,
             preview: self.preview,
         }
-    }
-}
-
-// The scheduling request implements no `Debug`, so list only the host-set values.
-impl fmt::Debug for HostedSelectionRequest {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("HostedSelectionRequest")
-            .field("isl_tokens", &self.request.isl_tokens)
-            .field("block_size", &self.block_size)
-            .field(
-                "expected_output_tokens",
-                &self.request.expected_output_tokens,
-            )
-            .field("priority_jump", &self.request.priority_jump)
-            .field("strict_priority", &self.request.strict_priority)
-            .field(
-                "router_temperature_override",
-                &self.router_temperature_override,
-            )
-            .field("preview", &self.preview)
-            .finish()
     }
 }
 
@@ -117,12 +69,12 @@ impl fmt::Debug for HostedSelectionRequest {
 /// One instance serves every request for its role, called concurrently from the
 /// routing host's tasks. Selection builds no candidate table and takes no lock.
 pub struct HostedWorkerPicker {
-    picker: Arc<dyn WorkerPicker>,
+    picker: Box<dyn WorkerPicker>,
     inputs: WorkerInputs,
 }
 
 impl HostedWorkerPicker {
-    pub(super) fn new(picker: Arc<dyn WorkerPicker>, inputs: WorkerInputs) -> Self {
+    pub(super) fn new(picker: Box<dyn WorkerPicker>, inputs: WorkerInputs) -> Self {
         Self { picker, inputs }
     }
 
@@ -137,14 +89,14 @@ impl HostedWorkerPicker {
     ///
     /// `active_requests` returns the host's in-flight request count for a worker. It is
     /// required when [`Self::inputs`] contains [`WorkerInputs::ACTIVE_REQUESTS`] and
-    /// ignored otherwise. The result carries only the worker; its cache and load fields
-    /// are zero, because the hosted path tracks neither.
+    /// ignored otherwise. Returns the chosen worker; the hosted path tracks no cache or
+    /// load to report with it.
     pub fn select(
         &self,
         ids: &[WorkerId],
         active_requests: Option<&dyn Fn(WorkerId) -> u64>,
         request: &HostedSelectionRequest,
-    ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+    ) -> Result<WorkerId, KvSchedulerError> {
         self.select_with_rows(ids, active_requests, request, &OnceCell::new())
     }
 
@@ -155,7 +107,7 @@ impl HostedWorkerPicker {
         active_requests: Option<&dyn Fn(WorkerId) -> u64>,
         request: &HostedSelectionRequest,
         rows: &OnceCell<Vec<ScoredWorkerCandidate>>,
-    ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+    ) -> Result<WorkerId, KvSchedulerError> {
         if ids.is_empty() {
             return Err(KvSchedulerError::NoEndpoints);
         }
@@ -179,16 +131,7 @@ impl HostedWorkerPicker {
             }
             .into());
         };
-        Ok(WorkerSelectionResult {
-            worker: WorkerWithDpRank::from_worker_id(worker_id),
-            required_blocks: 0,
-            effective_overlap_blocks: 0.0,
-            cached_tokens: 0,
-            max_raw_cached_tokens: None,
-            selected_raw_cached_tokens: None,
-            potential_decode_blocks: 0,
-            kv_transfer_source: None,
-        })
+        Ok(worker_id)
     }
 }
 
@@ -214,11 +157,9 @@ impl dynamo_runtime::pipeline::InstanceSelector for HostedWorkerPicker {
         active_requests: &dyn Fn(u64) -> u64,
         preview: bool,
     ) -> Option<u64> {
-        let request = HostedSelectionRequest::new(0, 0).with_preview(preview);
+        let request = HostedSelectionRequest::new(0).with_preview(preview);
         let active_requests = self.reads_active_requests().then_some(active_requests);
-        self.select(instance_ids, active_requests, &request)
-            .ok()
-            .map(|selected| selected.worker.worker_id)
+        self.select(instance_ids, active_requests, &request).ok()
     }
 }
 
@@ -234,17 +175,14 @@ mod tests {
     use crate::plugins::worker_selection::{
         RuntimePolicyError, WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerScorer,
     };
+    use crate::protocols::WorkerWithDpRank;
     use crate::scheduling::config::KvRouterConfig;
 
     const _: () = {
-        const fn assert_send_sync<T: Send + Sync + ?Sized>() {}
-        assert_send_sync::<dyn WorkerFilter>();
-        assert_send_sync::<dyn WorkerScorer>();
-        assert_send_sync::<dyn WorkerPicker>();
+        const fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<HostedWorkerPicker>();
     };
 
-    /// Declares `inputs` and picks a fixed row.
     struct RowPicker {
         inputs: WorkerInputs,
         row: usize,
@@ -264,7 +202,6 @@ mod tests {
         }
     }
 
-    /// Picks the row with the fewest active requests.
     struct LeastActivePicker;
 
     impl WorkerPicker for LeastActivePicker {
@@ -331,7 +268,7 @@ mod tests {
     }
 
     fn request() -> HostedSelectionRequest {
-        HostedSelectionRequest::new(64, 16)
+        HostedSelectionRequest::new(64)
     }
 
     #[test]
@@ -466,7 +403,7 @@ mod tests {
         let selected = hosted(LastRowPicker)
             .select_with_rows(&[3, 5, 9], None, &request(), &rows)
             .unwrap();
-        assert_eq!(selected.worker, WorkerWithDpRank::from_worker_id(9));
+        assert_eq!(selected, 9);
         assert!(rows.get().is_none());
     }
 
@@ -492,7 +429,7 @@ mod tests {
         let selected = hosted(CandidatesPicker)
             .select_with_rows(&[3, 5, 9], None, &request(), &rows)
             .unwrap();
-        assert_eq!(selected.worker, WorkerWithDpRank::from_worker_id(5));
+        assert_eq!(selected, 5);
         assert_eq!(rows.get().map(Vec::len), Some(3));
     }
 
@@ -511,7 +448,7 @@ mod tests {
         let selected = hosted(LeastActivePicker)
             .select(&[3, 5, 9], Some(&counts), &request())
             .unwrap();
-        assert_eq!(selected.worker, WorkerWithDpRank::from_worker_id(5));
+        assert_eq!(selected, 5);
         assert_eq!(reads.get(), 3);
 
         struct UndeclaredPicker;
@@ -572,28 +509,6 @@ mod tests {
     }
 
     #[test]
-    fn hosted_select_tolerates_zero_block_size() {
-        struct BlockPicker;
-
-        impl WorkerPicker for BlockPicker {
-            fn pick(
-                &self,
-                context: &WorkerSelectionContext<'_>,
-                _input: WorkerInputView<'_>,
-            ) -> Result<usize, WorkerSelectionPolicyError> {
-                assert_eq!(context.block_size(), 0);
-                assert_eq!(context.request_blocks(), 0);
-                Ok(0)
-            }
-        }
-
-        let selected = hosted(BlockPicker)
-            .select(&[7], None, &HostedSelectionRequest::new(100, 0))
-            .unwrap();
-        assert_eq!(selected.worker, WorkerWithDpRank::from_worker_id(7));
-    }
-
-    #[test]
     fn hosted_select_context_exposes_request_metadata() {
         struct ContextPicker;
 
@@ -604,12 +519,12 @@ mod tests {
                 _input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
                 assert_eq!(context.isl_tokens(), 33);
-                assert_eq!(context.block_size(), 16);
-                assert_eq!(context.request_blocks(), 3);
-                assert_eq!(context.expected_output_tokens(), Some(7));
-                assert_eq!(context.priority_jump(), 1.5);
-                assert_eq!(context.strict_priority(), 2);
-                assert_eq!(context.router_temperature_override(), Some(0.4));
+                assert_eq!(context.block_size(), 0);
+                assert_eq!(context.request_blocks(), 0);
+                assert_eq!(context.expected_output_tokens(), None);
+                assert_eq!(context.priority_jump(), 0.0);
+                assert_eq!(context.strict_priority(), 0);
+                assert_eq!(context.router_temperature_override(), None);
                 assert!(context.pinned_worker().is_none());
                 assert!(context.affinity_target().is_none());
                 assert!(!context.tracks_prefill_tokens());
@@ -618,10 +533,8 @@ mod tests {
             }
         }
 
-        let request = HostedSelectionRequest::new(33, 16)
-            .with_expected_output_tokens(Some(7))
-            .with_priority(1.5, 2)
-            .with_router_temperature_override(Some(0.4));
-        hosted(ContextPicker).select(&[1], None, &request).unwrap();
+        hosted(ContextPicker)
+            .select(&[1], None, &HostedSelectionRequest::new(33))
+            .unwrap();
     }
 }
