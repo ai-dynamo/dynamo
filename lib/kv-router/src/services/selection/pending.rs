@@ -14,6 +14,7 @@ use parking_lot::Mutex;
 
 use crate::identity::RoutingPartitionId;
 use crate::protocols::{LocalBlockHash, WorkerWithDpRank};
+use crate::scheduling::AccountingAttribution;
 
 /// How long a pending selection lives before it is evicted.
 const SELECTION_CACHE_TTL: Duration = Duration::from_secs(120);
@@ -56,6 +57,7 @@ pub(super) struct PendingSelection {
     pub expected_output_tokens: Option<u32>,
     pub track_prefill_tokens: bool,
     pub lora_name: Option<String>,
+    pub accounting_attribution: AccountingAttribution,
     /// Public block hashes retained only when the partition indexer records
     /// routing decisions, so the replayed booking can be recorded too.
     pub routing_hashes: Option<Vec<LocalBlockHash>>,
@@ -268,6 +270,7 @@ mod tests {
 
     fn pending(worker_id: u64) -> PendingSelection {
         PendingSelection {
+            accounting_attribution: Default::default(),
             key: key(),
             worker: WorkerWithDpRank::new(worker_id, 0),
             sequence_hashes: vec![1, 2, 3],

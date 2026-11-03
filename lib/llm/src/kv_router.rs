@@ -1364,6 +1364,7 @@ impl KvRouter {
         } = self
             .selection
             .run_selection(SelectionOperation {
+                accounting_attribution: Default::default(),
                 key: self.selection.partition_key().clone(),
                 prompt: PromptView {
                     token_ids: Some(tokens),
