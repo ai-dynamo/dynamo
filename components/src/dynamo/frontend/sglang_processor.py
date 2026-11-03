@@ -654,6 +654,7 @@ class SglangProcessor:
         structural_tag_schema: str = "auto",
         token_budget: TokenBudget | None = None,
     ):
+        """Initialize chat processing with the worker's token-budget contract."""
         self.tokenizer = tokenizer
         # Detect force_reasoning once from the chat template, matching
         # sglang's template_manager. Per-request overrides still apply

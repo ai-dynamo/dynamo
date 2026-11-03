@@ -2983,6 +2983,8 @@ class TestRuntimeConfigParserName:  # FRONTEND.2 — parser name resolution from
 @pytest.mark.core
 class TestTokenBudgetValidation:
     def test_reads_worker_published_budget(self):
+        """Read a valid token budget from worker runtime metadata."""
+
         class FakeMdc:
             def runtime_config(self):
                 return {
@@ -2998,6 +3000,8 @@ class TestTokenBudgetValidation:
         assert _runtime_token_budget(FakeMdc()) == TokenBudget(1024, True, False)
 
     def test_reads_serialized_budget_published_by_worker(self):
+        """Read the serialized form emitted by the worker publisher."""
+
         class FakeRuntimeConfig:
             def __init__(self):
                 self.runtime_data = {}
@@ -3016,6 +3020,8 @@ class TestTokenBudgetValidation:
         assert _runtime_token_budget(FakeMdc()) == expected
 
     def test_invalid_worker_budget_delegates_to_backend(self, caplog):
+        """Delegate overflow checks when worker metadata is malformed."""
+
         class FakeMdc:
             def runtime_config(self):
                 return {
@@ -3049,6 +3055,8 @@ class TestTokenBudgetValidation:
         reject_total,
         rejected,
     ):
+        """Apply the worker's prompt and total-overflow rejection flags."""
+
         budget = TokenBudget(10, reject_prompt, reject_total)
         if rejected:
             with pytest.raises(InvalidArgument):
@@ -3057,6 +3065,8 @@ class TestTokenBudgetValidation:
             _validate_requested_token_budget(prompt_len, max_tokens, budget)
 
     def test_rejects_before_routed_engine_dispatch(self, tokenizer):
+        """Reject a known text overflow before dispatching to a worker."""
+
         engine = FakeRoutedEngine()
         request = {
             "model": MODEL,
@@ -3090,6 +3100,8 @@ class TestTokenBudgetValidation:
 
 @pytest.mark.multimodal
 def test_multimodal_token_overflow_is_delegated_to_backend():
+    """Leave multimodal overflow validation to the backend."""
+
     class MultimodalTokenizer:
         chat_template = ""
 
