@@ -6,9 +6,7 @@ subtitle: Run Dynamo beside a stock inference engine through its native gRPC API
 ---
 
 > [!WARNING]
-> **Experimental.** Sidecar packaging, launchers, and API coverage are still
-> evolving. The sidecar path does not yet match every feature of the in-process
-> backends.
+> **Experimental.** Sidecar integration is under active development, so this page and the linked support notes may become stale. The sidecar path does not yet match every feature of the in-process backends.
 
 A Dynamo sidecar runs beside the inference engine process. It registers the
 engine with Dynamo discovery, forwards engine events into the Dynamo event
@@ -17,9 +15,9 @@ native gRPC API.
 
 ## Backend Support Matrix
 
-**Legend:** Supported = available through the sidecar; Limited = available with restrictions; Engine-configured = enabled in the native engine; No = unavailable. See the linked backend READMEs for details.
+**Legend:** Supported = available through the sidecar; Limited = available with restrictions; Engine-configured = enabled in the native engine; No = unavailable. See the linked backend support notes for details.
 
-| Capability | [vLLM](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/vllm/README.md#support-notes) | [SGLang](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/README.md#support-notes) | [TensorRT-LLM](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/trtllm/README.md#support-notes) |
+| Capability | [vLLM](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/SUPPORT_NOTES.md#vllm) | [SGLang](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/SUPPORT_NOTES.md#sglang) | [TensorRT-LLM](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/SUPPORT_NOTES.md#tensorrt-llm) |
 |---|---|---|---|
 | Text generation, streaming, and cancellation | Supported | Supported | Supported |
 | Tool calling through the Dynamo frontend | Supported | Supported | Supported |

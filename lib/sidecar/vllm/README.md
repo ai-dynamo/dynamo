@@ -29,13 +29,7 @@ you to.
 | KV routing | Yes |
 | Kubernetes multinode tensor parallelism (TP) and hybrid load balancing (hybrid-LB) data parallelism (DP) | Experimental |
 
-## Support notes
-
-The standard generation path requires `n=1`. It accepts image, video, and audio input, but rejects prompt embeddings and per-request `mm_processor_kwargs`. Basic structured output is implemented with a narrower set of constraint controls than the in-process backend.
-
-Runtime weight updates and sleep/wake controls require the engine to advertise the corresponding capabilities. Configure speculative decoding in the native engine; model, algorithm, routing, disaggregation, and telemetry combinations require separate qualification.
-
-Premature clean stream closure is a non-migratable protocol error. See the [shared operational limits](../README.md#operational-limits) for migration eligibility, observability, planning, cache offloading, and shutdown behavior.
+See [support notes](../SUPPORT_NOTES.md#vllm) for feature restrictions and operational limits.
 
 ## Run locally
 

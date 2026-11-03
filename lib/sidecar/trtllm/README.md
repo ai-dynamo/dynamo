@@ -45,15 +45,7 @@ supported, even when `--context-length` is supplied.
 
 For child-agent context affinity, enable frontend session affinity and TensorRT-LLM conversation affinity. Set `TRTLLM_SUBAGENT_AFFINITY_AUTH_KEY` on the prefill sidecar and set `internal_request_auth_key` to the same private value in the OpenEngine server YAML configuration. The sidecar requires the server to advertise signed affinity support. It sends the child's own conversation ID and a signed parent hint for context requests; decode requests retain the child's identity. The gateway must authorize client parent-session headers before they reach the router.
 
-## Support notes
-
-The standard generation path requires `n=1`. It accepts images, but rejects separate encoder handoffs, video, and audio. Basic structured output is implemented with a narrower set of constraint controls than the in-process backend. Output logprobs are supported; prompt logprobs are not.
-
-The sidecar publishes routing-load snapshots. These differ from the per-iteration Forward Pass Metrics (FPM) required by load-based planning. Premature clean stream closure and KV-session/transfer failures are non-migratable.
-
-Configure speculative decoding in the native engine. The sidecar preserves generation output and native handoffs, but model, algorithm, routing, disaggregation, and telemetry combinations require separate qualification. The aggregated convenience launcher rejects custom config files; merge the required `guided_decoding_backend: xgrammar` setting into your configuration and start the native engine directly.
-
-See the [shared operational limits](../README.md#operational-limits) for migration eligibility, observability, planning, cache offloading, and shutdown behavior.
+See [support notes](../SUPPORT_NOTES.md#tensorrt-llm) for feature restrictions and operational limits.
 
 ## Run locally
 
