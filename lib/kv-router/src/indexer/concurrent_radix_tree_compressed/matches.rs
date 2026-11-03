@@ -85,8 +85,7 @@ impl ConcurrentRadixTreeCompressed {
         >,
         mut kv_transfer_chain: Option<&mut Vec<ExternalSequenceBlockHash>>,
     ) -> MatchWalkResult {
-        let mut active: FxHashSet<WorkerWithDpRank> = FxHashSet::default();
-        let mut active_count: usize = 0;
+        let mut active = WorkerSet::default();
         let mut matched_depth: u32 = 0;
         let mut seq_pos: usize = 0;
         let mut first_node = true;
@@ -111,14 +110,13 @@ impl ConcurrentRadixTreeCompressed {
                 prev_depth: matched_depth,
                 prev_edge_last_hash,
                 active: &mut active,
-                active_count,
                 scores,
                 last_matched_hashes: last_matched_hashes.as_deref_mut(),
                 kv_transfer_chain: kv_transfer_chain.as_deref_mut(),
             });
             let edge_len = outcome.edge_len;
             let edge_match_len = outcome.edge_match_len;
-            active_count = outcome.active_count;
+            let active_count = outcome.active_count;
             next_child = outcome.next_child;
             prev_edge_last_hash = outcome.prev_edge_last_hash;
             if first_node {
@@ -145,9 +143,6 @@ impl ConcurrentRadixTreeCompressed {
         }
     }
 
-    // NOTE(perf): Pre-reserving the output maps in these survivor-recording
-    // helpers did not produce a repeatable throughput improvement. Re-profile
-    // before adding eager capacity here.
     fn record_surviving_details(details: &mut MatchDetails, walk_result: &MatchWalkResult) {
         for worker in &walk_result.active {
             details

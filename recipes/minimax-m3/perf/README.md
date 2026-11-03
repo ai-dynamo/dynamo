@@ -1,0 +1,207 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
+# MiniMax M3 Benchmark Recipe
+
+[`perf.yaml`](perf.yaml) defines a trace-replay Job targeting the MiniMax M3
+disaggregated DGD. The Job waits for the model at `/v1/models`, runs a warmup,
+replays the configured Mooncake trace at one `CONCURRENCY` value, and writes
+JSON summaries and JSONL records to the `shared-model-cache` PVC.
+
+Restart the DGD pods and use a unique `ARTIFACT_DIR` between independent
+concurrency points so server state and result files are not reused.
+
+## Dataset
+
+The benchmark replays a
+[Mooncake-format](https://github.com/kvcache-ai/Mooncake) trace. Each JSONL line
+describes one request with `input_length`, `output_length`, and `hash_ids`.
+AIPerf reads the trace sequentially, caps synthesized requests at `MAX_ISL` and
+`CAP_OSL`, streams responses, ignores EOS, and uses server token counts.
+
+The recipe uses the 64K-ISL / 400-OSL / 90%-KV-reuse agentic trace. The Git
+LFS file is referenced from the Kimi-K2.6 recipe through a symlink under
+[`traces`](traces):
+
+```text
+traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
+  -> ../../../kimi-k2.6/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
+```
+
+The default 15% trace contains 3,541 rows. Its SHA-256 is
+`f20d3f2bc83dd1306cda659fbe34e7c4d85ca5497626c98bc0b1c4d2211379d0`.
+
+## Workflow
+
+```bash
+export NAMESPACE=your-namespace
+```
+
+### 1. Deploy the DGD
+
+See the deployment instructions in the [MiniMax M3 recipe README](../README.md).
+
+Both deployment profiles default to real EAGLE3 verification. This benchmark
+Job does not enable synthetic acceptance. To run a synthetic-acceptance
+experiment, follow the
+[synthetic-acceptance instructions](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/README.md#synthetic-acceptance-for-benchmarks)
+and record that setting with the rendered deployment.
+The performance figures on the Fern recipe page use synthetic acceptance.
+
+### 2. Stage the trace on the PVC
+
+Materialize the Git LFS trace and copy it through a helper pod that mounts the
+`shared-model-cache` PVC:
+
+```bash
+git lfs pull --include='recipes/kimi-k2.6/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl'
+
+kubectl run pvc-helper -n "${NAMESPACE}" \
+  --image=busybox:1.36 --restart=Never \
+  --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.36","command":["sleep","3600"],"volumeMounts":[{"name":"shared-model-cache","mountPath":"/model-cache"}]}],"volumes":[{"name":"shared-model-cache","persistentVolumeClaim":{"claimName":"shared-model-cache"}}]}}' \
+  --command -- sleep 3600
+
+kubectl wait --for=condition=Ready pod/pvc-helper \
+  -n "${NAMESPACE}" --timeout=120s
+
+TRACE_SOURCE="$(git rev-parse --show-toplevel)/recipes/kimi-k2.6/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl"
+kubectl exec -n "${NAMESPACE}" pvc-helper -- mkdir -p /model-cache/traces
+kubectl cp "${TRACE_SOURCE}" \
+  "${NAMESPACE}/pvc-helper:/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl"
+```
+
+Keep `pvc-helper` until you fetch the benchmark artifacts in step 4.
+
+### 3. Run the benchmark
+
+`perf.yaml` defaults to the GB200 disaggregated target at concurrency 64. If
+the DGD name changes, update both `INFERENCE_URL` and the pod-affinity DGD name.
+The required affinity places the benchmark pod with the selected frontend.
+For the aggregated profile, set `INFERENCE_URL` to
+`http://minimax-m3-agg-gb200-agentic-frontend:8000/v1/chat/completions` and the
+affinity's `nvidia.com/dynamo-graph-deployment-name` value to
+`minimax-m3-agg-gb200-agentic`.
+
+Before launching the Job, verify that its runtime user can create files in
+`ARTIFACT_DIR`. A read-write PVC mount does not override filesystem ownership
+or permissions. The image's default user applies unless the Pod or container
+security context overrides it; do not assume it matches the BusyBox helper's
+user.
+
+Run this check from this directory after setting `ARTIFACT_DIR` in `perf.yaml`.
+It requires Python and PyYAML and creates a temporary Pod using the Job's
+image, environment, placement, security context, and PVC mount. It prints the
+runtime UID/GID and tests creating and deleting a file in the output directory:
+
+```bash
+python3 - <<'PY' | kubectl apply -n "${NAMESPACE}" -f -
+import yaml
+
+with open("perf.yaml") as source:
+    job = next(doc for doc in yaml.safe_load_all(source) if doc["kind"] == "Job")
+pod = job["spec"]["template"]
+pod.update(apiVersion="v1", kind="Pod")
+pod.setdefault("metadata", {})["name"] = "aiperf-artifact-check"
+container = pod["spec"]["containers"][0]
+container["command"] = ["/bin/bash", "-lc"]
+container["args"] = ['''set -euo pipefail
+id
+mkdir -p "$ARTIFACT_DIR"
+probe=$(mktemp "$ARTIFACT_DIR/.aiperf-write-check.XXXXXX")
+printf 'write check\n' > "$probe"
+rm "$probe"
+echo "ARTIFACT_DIR is writable: $ARTIFACT_DIR"
+''']
+# The permission check does not need the benchmark ConfigMap.
+container["volumeMounts"] = [v for v in container["volumeMounts"] if v["name"] != "aiperf-config"]
+pod["spec"]["volumes"] = [v for v in pod["spec"]["volumes"] if v["name"] != "aiperf-config"]
+print(yaml.safe_dump(pod))
+PY
+kubectl logs -f pod/aiperf-artifact-check -n "${NAMESPACE}" --pod-running-timeout=300s
+kubectl wait --for=jsonpath='{.status.phase}'=Succeeded \
+  pod/aiperf-artifact-check -n "${NAMESPACE}" --timeout=300s
+kubectl delete pod aiperf-artifact-check -n "${NAMESPACE}"
+```
+
+Proceed only when the check succeeds. If it reports `Permission denied`, have
+the storage owner create the selected output directory and grant the printed
+UID or one of its groups write and directory-traversal permissions. Use
+ownership, group permissions, or an ACL on that directory; avoid recursive
+ownership changes to the shared model cache or making it world-writable.
+For storage that supports it, a Pod-level `fsGroup` can provide group access;
+use the same security context for the check and the benchmark. NFS root
+squashing may require changing permissions on the storage server. Delete the
+check Pod and repeat the check after correcting permissions or changing
+`ARTIFACT_DIR`, the image, or the security context.
+
+Launch the benchmark after the write check passes:
+
+```bash
+kubectl apply -f perf.yaml -n "${NAMESPACE}"
+kubectl logs -n "${NAMESPACE}" \
+  -l job-name=minimax-m3-disagg-gb200-agentic-bench -f
+kubectl wait --for=condition=Complete \
+  job/minimax-m3-disagg-gb200-agentic-bench \
+  -n "${NAMESPACE}" --timeout=10800s
+```
+
+### 4. Fetch artifacts
+
+With the default `ARTIFACT_DIR`:
+
+```bash
+kubectl cp \
+  "${NAMESPACE}/pvc-helper:/model-cache/aiperf-artifacts" \
+  ./results
+```
+
+### 5. Cleanup
+
+```bash
+kubectl delete job minimax-m3-disagg-gb200-agentic-bench -n "${NAMESPACE}"
+kubectl delete configmap minimax-m3-aiperf-config -n "${NAMESPACE}"
+kubectl delete pod pvc-helper -n "${NAMESPACE}"
+```
+
+## Running a concurrency sweep
+
+`perf.yaml` runs one `CONCURRENCY` value. Between points, delete the completed
+Job, restart the DGD pods, and set a unique `ARTIFACT_DIR`:
+
+```bash
+kubectl delete job minimax-m3-disagg-gb200-agentic-bench \
+  -n "${NAMESPACE}" --ignore-not-found
+
+DGD=minimax-m3-disagg-gb200-agentic
+kubectl delete pods -n "${NAMESPACE}" \
+  -l nvidia.com/dynamo-graph-deployment-name="${DGD}"
+kubectl wait --for=condition=Ready pod -n "${NAMESPACE}" \
+  -l nvidia.com/dynamo-graph-deployment-name="${DGD}" \
+  --timeout=7200s
+
+# Update CONCURRENCY and ARTIFACT_DIR in perf.yaml before each run.
+kubectl apply -f perf.yaml -n "${NAMESPACE}"
+kubectl wait --for=condition=Complete \
+  job/minimax-m3-disagg-gb200-agentic-bench \
+  -n "${NAMESPACE}" --timeout=10800s
+```
+
+## Tunable environment variables
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `TARGET_MODEL` | `nvidia/MiniMax-M3-NVFP4` | Must match the served model name |
+| `TOKENIZER` | `nvidia/MiniMax-M3-NVFP4` | Tokenizer repository or cached path |
+| `INFERENCE_URL` | `http://minimax-m3-disagg-gb200-agentic-frontend:8000/v1/chat/completions` | DGD chat-completions endpoint |
+| `TRACE_FILE` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | Mooncake trace on the PVC |
+| `CONCURRENCY` | `64` | Warmup and profiling concurrency |
+| `MAX_ISL` | `1000000` | Maximum synthesized input length |
+| `CAP_OSL` | `12000` | Maximum synthesized output length cap |
+| `ARTIFACT_DIR` | `/model-cache/aiperf-artifacts` | Use a unique directory per run |
+
+## Artifacts
+
+AIPerf writes a JSON summary and JSONL request records beneath
+`ARTIFACT_DIR`.

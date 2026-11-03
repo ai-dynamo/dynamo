@@ -20,7 +20,8 @@ The prefill router is automatically created when:
 Key characteristics of the prefill router:
 - **Always disables active block tracking** (`track_active_blocks=false`) since prefill workers do not perform decode.
 - **Runs between preprocessing and decode routing** and returns handoff metadata for the selected decode worker.
-- **Uses decode-only routing when no prefill router is active.** Once a request has been dispatched to prefill, a prefill or handoff failure is returned to the request; it does not retry through an aggregated decode-only path.
+- **Uses decode-only routing when no prefill service is registered.** Once a request has been dispatched to prefill, a prefill or handoff failure is returned to the request; it does not retry through an aggregated decode-only path.
+- **Rejects requests while the prefill router is activating.** At startup or during a rollout, decode workers can become routable shortly before the frontend finishes setting up the prefill router. Requests in that window get HTTP 503 (`prefill routing for model <model> in namespace <namespace> is still activating`) instead of being sent to decode without prefill, which a disaggregated-only decode worker would reject. The window is usually brief; clients should retry. Frontend [request migration](../../concepts/fault-tolerance/request-migration-architecture.md) does not cover it, because a migrated request is re-dispatched to the same, still-activating route.
 
 Key characteristics of the decode routing stage in disaggregated mode:
 - **Disables overlap scoring** (`overlap_score_credit=0`) because decode routing should not chase prefix reuse.

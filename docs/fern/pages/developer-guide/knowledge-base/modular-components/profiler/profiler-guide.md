@@ -209,7 +209,7 @@ the operator defaults it to
 
 ```yaml
 spec:
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.5.0"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.6.0"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 > [!NOTE]
@@ -241,7 +241,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.5.0"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.6.0"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 **Step 2: Apply the DGDR**
@@ -374,10 +374,10 @@ spec:
 
 **Currently supports:**
 - **Backends**: vLLM, SGLang, TensorRT-LLM
-- **Systems**: H100 SXM, H200 SXM, B200 SXM, GB200 SXM, A100 SXM
 - **Models**: Wide range including GPT, Llama, Mixtral, DeepSeek, Qwen, and more
 
-See the [AIConfigurator compatibility support matrix](https://ai-dynamo.github.io/aiconfigurator/support-matrix/) for the full list.
+See the [AIConfigurator compatibility support matrix](https://ai-dynamo.github.io/aiconfigurator/support-matrix/)
+for current GPU system, backend version, and model coverage.
 
 ### Automatic GPU Discovery
 
@@ -427,7 +427,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.5.0"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.6.0"  # dynamo-frontend for Dynamo < 1.1.0
 
   searchStrategy: rapid  # or thorough
   autoApply: true

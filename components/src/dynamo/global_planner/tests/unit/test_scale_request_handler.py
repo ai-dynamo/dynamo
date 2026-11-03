@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from dynamo.global_planner.orchestrator import PoolIntent
+from dynamo.global_planner.priority import PriorityConfig
 from dynamo.global_planner.scale_handler import ScaleRequestHandler
 from dynamo.planner import KubernetesConnector, SubComponentType, TargetReplica
 from dynamo.planner.connectors.protocol import ScaleRequest
@@ -342,6 +343,23 @@ def _component(name, replicas, gpu, ctype, node_count=None):
     return component
 
 
+def _with_operator_gpu_status(components):
+    statuses = {}
+    for component in components:
+        main = component["podTemplate"]["spec"]["containers"][0]
+        gpu = main["resources"]["limits"]["nvidia.com/gpu"]
+        total_gpu = int(gpu) * component.get("multinode", {}).get("nodeCount", 1)
+        statuses[component["name"]] = {
+            "gpusPerEngine": total_gpu,
+            "gpusPerReplica": total_gpu,
+        }
+    return {
+        "metadata": {"generation": 1},
+        "spec": {"components": components},
+        "status": {"observedGeneration": 1, "components": statuses},
+    }
+
+
 def _dgd_spec(
     prefill_replicas,
     decode_replicas,
@@ -351,26 +369,24 @@ def _dgd_spec(
     decode_node_count=None,
 ):
     """Build a v1beta1 DGD spec with prefill and decode components."""
-    return {
-        "spec": {
-            "components": [
-                _component(
-                    "prefill-svc",
-                    prefill_replicas,
-                    prefill_gpu,
-                    "prefill",
-                    prefill_node_count,
-                ),
-                _component(
-                    "decode-svc",
-                    decode_replicas,
-                    decode_gpu,
-                    "decode",
-                    decode_node_count,
-                ),
-            ]
-        }
-    }
+    return _with_operator_gpu_status(
+        [
+            _component(
+                "prefill-svc",
+                prefill_replicas,
+                prefill_gpu,
+                "prefill",
+                prefill_node_count,
+            ),
+            _component(
+                "decode-svc",
+                decode_replicas,
+                decode_gpu,
+                "decode",
+                decode_node_count,
+            ),
+        ]
+    )
 
 
 def _worker_dgd_spec(
@@ -390,7 +406,7 @@ def _worker_dgd_spec(
     }
     if component_type is not None:
         component["type"] = component_type
-    return {"spec": {"components": [component]}}
+    return _with_operator_gpu_status([component])
 
 
 def _two_worker_dgd_spec(replicas=1, gpu=1):
@@ -401,7 +417,7 @@ def _two_worker_dgd_spec(replicas=1, gpu=1):
             "components"
         ]
     )
-    return deployment
+    return _with_operator_gpu_status(deployment["spec"]["components"])
 
 
 def _install_connector(handler, dgd_key, dgd_spec_dict, parent_dgd_name="my-dgd"):
@@ -607,7 +623,7 @@ async def test_pair_packs_both_partners_when_both_fit(mock_runtime):
     """Multi-partner packing: when same-DGD AND cross-DGD partners both fit
     within the budget band, BOTH are applied (the user's "larger groups of
     scaling decisions" property). Same-DGD partners are merged into the
-    request's DGD's atomic patch; cross-DGD partners get their own patch."""
+    request's DGD's connector call; cross-DGD partners get their own call."""
     handler = ScaleRequestHandler(
         runtime=mock_runtime,
         managed_namespaces=["default-dgd-a", "default-dgd-b"],
@@ -652,8 +668,7 @@ async def test_pair_packs_both_partners_when_both_fit(mock_runtime):
         t.sub_component_type.value: t.desired_replicas
         for t in connector_b.set_component_replicas.call_args[0][0]
     }
-    # DGD-A patch combines the request's prefill change with the same-DGD
-    # decode partner (one atomic call).
+    # DGD-A call includes both targets, but patches each component separately.
     assert a_targets == {"prefill": 2, "decode": 4}
     # DGD-B's cross-DGD partner is a separate patch.
     assert b_targets == {"decode": 4}
@@ -1674,7 +1689,7 @@ async def test_generic_worker_partner_keeps_component_name(mock_runtime):
     assert results[0]["status"] == "success"
     connector_a.set_component_replicas.assert_called_once()
     # The partner's component name rides through to the actual scale call.
-    connector_b.kube_api.update_graph_replicas.assert_called_once_with(
+    connector_b.kube_api.update_dgd_replicas_directly.assert_called_once_with(
         "dgd-b", "worker-svc", 4
     )
 
@@ -1789,3 +1804,99 @@ async def test_untyped_worker_in_other_dgd_counts_toward_budget(mock_runtime):
     )
     assert results[0]["status"] == "rejected"
     connector_a.set_component_replicas.assert_not_called()
+
+
+# ---------------------------------------------------------------------------- #
+# Pool priority, end to end through the scale_request endpoint                 #
+# ---------------------------------------------------------------------------- #
+
+
+def _priority_handler(mock_runtime, pools):
+    """Handler with a fixed 12-GPU budget and a pool priority table."""
+    return ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-prod", "default-batch"],
+        k8s_namespace="default",
+        min_total_gpus=12,
+        max_total_gpus=12,
+        priority_config=PriorityConfig(pools=pools),
+    )
+
+
+async def _run_priority_transfer(mock_runtime, pools):
+    """Drive one over-ceiling scale-up against two equally-sized DGDs.
+
+    Both DGDs hold a pending scale-down, so packing must choose which one
+    absorbs the larger cut. Returns the targets each DGD was patched with.
+    """
+    handler = _priority_handler(mock_runtime, pools)
+    prod = _install_connector(
+        handler,
+        "default/prod",
+        _dgd_spec(prefill_replicas=3, decode_replicas=3),
+        parent_dgd_name="prod",
+    )
+    batch = _install_connector(
+        handler,
+        "default/batch",
+        _dgd_spec(prefill_replicas=3, decode_replicas=3),
+        parent_dgd_name="batch",
+    )
+
+    # Equal pending scale-downs, one per DGD: 3 -> 1 decode replicas.
+    now = time.time()
+    handler.orchestrator._intent_cache["default/prod/decode"] = PoolIntent(
+        last_desired=1, last_seen_at=now
+    )
+    handler.orchestrator._intent_cache["default/batch/decode"] = PoolIntent(
+        last_desired=1, last_seen_at=now
+    )
+
+    # prod wants two more prefill replicas: 14 GPUs standalone, over the ceiling.
+    results = await _run(
+        handler, _scale_req(dgd="prod", caller_ns="default-prod", prefill=5)
+    )
+    assert results[0]["status"] == "success", results[0]
+
+    def targets(connector):
+        return {
+            t.sub_component_type.value: t.desired_replicas
+            for t in connector.set_component_replicas.call_args[0][0]
+        }
+
+    return targets(prod), targets(batch)
+
+
+@pytest.mark.asyncio
+async def test_expendable_pool_absorbs_the_larger_cut(mock_runtime):
+    """End to end: the pool the operator marked expendable gives up more GPUs.
+
+    Both DGDs are identical and both have an equal pending scale-down, so the
+    only thing distinguishing them is the declared priority.
+    """
+    prod, batch = await _run_priority_transfer(
+        mock_runtime,
+        [
+            {"selector": "default/prod", "priority": 900},
+            {"selector": "default/batch", "priority": 10},
+        ],
+    )
+    # prod grows by 2 and gives back only 1 decode replica; batch gives 2.
+    assert prod == {"prefill": 5, "decode": 2}
+    assert batch == {"decode": 1}
+
+
+@pytest.mark.asyncio
+async def test_reversing_priorities_reverses_who_pays(mock_runtime):
+    """Same topology with the priorities swapped moves the cut to the other DGD,
+    which is what proves the outcome is driven by priority and not by
+    participant identity or observation order."""
+    prod, batch = await _run_priority_transfer(
+        mock_runtime,
+        [
+            {"selector": "default/prod", "priority": 10},
+            {"selector": "default/batch", "priority": 900},
+        ],
+    )
+    assert prod == {"prefill": 5, "decode": 1}
+    assert batch == {"decode": 2}

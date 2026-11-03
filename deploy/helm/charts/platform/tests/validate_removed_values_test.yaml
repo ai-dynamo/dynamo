@@ -96,7 +96,6 @@ tests:
       global.kai-scheduler.install: true
     asserts:
       - notFailedTemplate: {}
-
   # --- Default values should render cleanly ---
 
   - it: should render successfully with default values

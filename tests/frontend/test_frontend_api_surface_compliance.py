@@ -772,6 +772,7 @@ def test_request_trace_cursor_excludes_a_partial_prior_line(tmp_path: Path) -> N
 @pytest.mark.gpu_0
 @pytest.mark.pre_merge
 def test_parent_context_requires_observed_parent_session() -> None:
+    """Require a child's parent session to appear in the same trace."""
     records = [
         {
             "agent_context": {
@@ -796,6 +797,7 @@ def _assert_agent_context_in_trace(
     start_index: int,
     timeout_s: float = 30.0,
 ) -> None:
+    """Wait for agent context in trace records added after the cursor."""
     deadline = time.monotonic() + timeout_s
     last_records: list[dict] = []
     while time.monotonic() < deadline:

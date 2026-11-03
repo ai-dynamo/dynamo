@@ -234,7 +234,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::protocols::common::extensions::{AgentCompaction, AgentContext, InputTrigger};
+    use crate::protocols::common::extensions::{AgentContext, InputTrigger};
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use crate::request_trace::BUS;
     use crate::request_trace::RequestTraceEventSource;
@@ -414,7 +414,7 @@ mod tests {
                     session_id: "cancel-timing".to_string(),
                     parent_session_id: None,
                     session_final: None,
-                    compaction: None,
+                    agent_headers: Default::default(),
                     input_trigger: None,
                 },
                 request_model: "test-model".to_string(),
@@ -521,13 +521,11 @@ mod tests {
             session_id: "root".to_string(),
             parent_session_id: None,
             session_final: None,
-            compaction: Some(AgentCompaction {
-                trigger: Some("manual".to_string()),
-                reason: Some("user_requested".to_string()),
-                implementation: Some("responses_compact".to_string()),
-                phase: Some("standalone_turn".to_string()),
-                strategy: Some("memento".to_string()),
-            }),
+            agent_headers: std::collections::BTreeMap::from([(
+                "x-codex-turn-metadata".into(),
+                vec![r#"{"request_kind":"compaction","future":true}"#.into()],
+            )])
+            .into(),
             input_trigger: Some(InputTrigger::ToolResult),
         });
         let mut context = Context::new(());
@@ -572,11 +570,8 @@ mod tests {
         assert_eq!(agent_context.session_id, "root");
         assert_eq!(agent_context.input_trigger, Some(InputTrigger::ToolResult));
         assert_eq!(
-            agent_context
-                .compaction
-                .as_ref()
-                .and_then(|compaction| compaction.strategy.as_deref()),
-            Some("memento")
+            agent_context.agent_headers["x-codex-turn-metadata"],
+            [r#"{"request_kind":"compaction","future":true}"#]
         );
         let request = record.request.as_ref().expect("request payload");
         assert_eq!(request.model.as_deref(), Some("test-model"));
@@ -602,7 +597,7 @@ mod tests {
             session_id: "root".to_string(),
             parent_session_id: None,
             session_final: None,
-            compaction: None,
+            agent_headers: Default::default(),
             input_trigger: None,
         });
         let tracker = Some(Arc::new(RequestTracker::new()));
