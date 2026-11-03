@@ -345,10 +345,14 @@ bulk-credit behavior, see
 
 Class names must be unique within a profile and use metric-safe identifiers
 (`[A-Za-z0-9_.-]+`). `quantum` is a required positive integer, in uncached
-input tokens. `queue_policy` is `edf`, the default, `fcfs`, or `wspt`. Earlier
-releases read an omitted `queue_policy` as `fcfs` and reject `edf`, so while an
-older frontend reads the same policy file, set `queue_policy` to `fcfs` or
-`wspt` explicitly. `slo_ttft_ms` is an optional time-to-first-token budget in
+input tokens. `queue_policy` is `edf`, the default, `fcfs`, or `wspt`. An `edf`
+class ignores the `strict_priority` and soft `priority` request hints when it
+orders its queue; to let these hints reorder a class's queue, set its
+`queue_policy` to `fcfs` or `wspt`. The soft `priority` can still affect a
+backend engine that has priority scheduling enabled. Earlier releases read an
+omitted `queue_policy` as `fcfs` and reject `edf`, so while an older frontend
+reads the same policy file, set `queue_policy` to `fcfs` or `wspt` explicitly.
+`slo_ttft_ms` is an optional time-to-first-token budget in
 whole milliseconds and must be a positive integer of at most `4294967295`
 (about 49.7 days): leaving it unset means the class has no budget, and `0` is
 rejected. An `edf` class orders each request by its router ingress time plus

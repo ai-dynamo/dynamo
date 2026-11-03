@@ -14,6 +14,13 @@ For HTTP requests, send the same values in `x-dynamo-request-priority` and
 `x-dynamo-request-strict-priority`. Header values override the corresponding `nvext.agent_hints`
 fields.
 
+Whether the router queue applies these hints depends on the request's policy class. A class
+configured in a policy file defaults to the `edf` queue policy, which ignores `priority` and
+`strict_priority` when it orders the router queue. To let them reorder a configured class's queue,
+set its `queue_policy` to `fcfs` or `wspt`. Without a policy file, the synthetic class uses
+`--router-queue-policy`, whose default, `fcfs`, applies both. Under any queue policy, `priority`
+can still affect a backend engine that has priority scheduling enabled.
+
 ```json
 {
     "model": "my-model",
