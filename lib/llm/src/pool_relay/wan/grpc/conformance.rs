@@ -476,9 +476,11 @@ async fn accepted_relay_connections_disable_nagle() {
 async fn shutdown_force_closes_connections_with_an_unread_grpc_stream() {
     let fixture = RelayFixture::start(|_| {}).await;
     let connection = TcpStream::connect(fixture.address).await.unwrap();
-    tokio::time::timeout(IO_TIMEOUT, fixture.transport.wait_for_accepted_connection())
-        .await
-        .expect("Relay did not accept the idle connection");
+    let nodelay =
+        tokio::time::timeout(IO_TIMEOUT, fixture.transport.wait_for_accepted_connection())
+            .await
+            .expect("Relay did not accept the idle connection");
+    assert!(nodelay, "accepted idle connection kept Nagle enabled");
 
     let mut client = fixture.client().await;
     let (catalog_stream, producer) = initial_catalog(&mut client).await;

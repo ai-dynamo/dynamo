@@ -20,11 +20,10 @@ use tokio::sync::Notify;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt as _;
-use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 use tonic::codec::CompressionEncoding;
 use tonic::transport::Server;
-use tonic::transport::server::Connected;
+use tonic::transport::server::{Connected, TcpIncoming};
 
 use super::config::PoolRelayGrpcConfig;
 use super::load::{LoadUpdateHub, load_update, run_load_publisher, run_snapshot_publisher};
@@ -52,7 +51,8 @@ pub(crate) struct GrpcTransport {
 }
 
 /// Test hook: signals when tonic first reads an accepted connection and records
-/// whether that connection had `TCP_NODELAY` set.
+/// whether it had `TCP_NODELAY` set. Callers must open only one connection on
+/// a fresh transport before waiting on this shared probe.
 #[cfg(test)]
 #[derive(Default)]
 struct AcceptedConnectionProbe {
@@ -124,6 +124,21 @@ impl AsyncWrite for CancellableIo {
             return Poll::Ready(Err(error));
         }
         Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        if let Err(error) = self.poll_cancelled(cx) {
+            return Poll::Ready(Err(error));
+        }
+        Pin::new(&mut self.stream).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
@@ -235,14 +250,23 @@ impl GrpcTransport {
         let accepted_for_server = accepted.clone();
         let server_task = tokio::spawn(async move {
             let connection_cancel = server_cancel.clone();
-            let incoming = TcpListenerStream::new(listener).map(move |connection| {
-                connection.map(|stream| {
-                    let io = accept_connection(stream, connection_cancel.clone());
-                    #[cfg(test)]
-                    let io = io.notify_when_polled(accepted_for_server.clone());
-                    io
+            let incoming = TcpIncoming::from(listener)
+                .with_nodelay(Some(true))
+                .then(|connection| async move {
+                    if connection.is_err() {
+                        // Avoid spinning when descriptor exhaustion leaves the listener readable.
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    connection
                 })
-            });
+                .map(move |connection| {
+                    connection.map(|stream| {
+                        let io = CancellableIo::new(stream, connection_cancel.child_token());
+                        #[cfg(test)]
+                        let io = io.notify_when_polled(accepted_for_server.clone());
+                        io
+                    })
+                });
             let shutdown = async move {
                 server_cancel.cancelled().await;
                 health_reporter
@@ -292,7 +316,8 @@ impl GrpcTransport {
     }
 
     /// Waits until tonic first reads an accepted connection, then reports whether
-    /// that connection had `TCP_NODELAY` set.
+    /// it had `TCP_NODELAY` set. Callers must use a fresh transport with only one
+    /// connection because the probe is shared by all accepted connections.
     #[cfg(test)]
     pub(crate) async fn wait_for_accepted_connection(&self) -> bool {
         self.accepted.polled.notified().await;
@@ -316,17 +341,6 @@ impl Drop for GrpcTransport {
     fn drop(&mut self) {
         self.cancel.cancel();
     }
-}
-
-/// Prepares one accepted connection for tonic. tonic sets `TCP_NODELAY` only on
-/// listeners it binds itself; this incoming stream is hand-built, so it has to
-/// disable Nagle here or small gRPC replies can wait on the peer's delayed ACK.
-fn accept_connection(stream: TcpStream, cancel: CancellationToken) -> CancellableIo {
-    if let Err(error) = stream.set_nodelay(true) {
-        let peer = stream.peer_addr().ok();
-        tracing::debug!(?peer, %error, "Failed to set TCP_NODELAY");
-    }
-    CancellableIo::new(stream, cancel)
 }
 
 async fn supervise_transport(
@@ -379,6 +393,34 @@ async fn supervise_transport(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    #[tokio::test]
+    async fn connection_vectored_writes_obey_parent_cancellation() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut peer = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            let cancel = CancellationToken::new();
+            let mut connection = CancellableIo::new(stream, cancel.child_token());
+            assert!(connection.is_write_vectored());
+
+            let bufs = [io::IoSlice::new(b"header"), io::IoSlice::new(b"body")];
+            let written = connection.write_vectored(&bufs).await.unwrap();
+            assert!(written > 0);
+            let mut received = vec![0; written];
+            peer.read_exact(&mut received).await.unwrap();
+            assert_eq!(received, &b"headerbody"[..written]);
+
+            cancel.cancel();
+            let error = connection.write_vectored(&bufs).await.unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+        })
+        .await
+        .expect("connection write or cancellation hung");
+    }
 
     #[tokio::test]
     async fn supervised_load_task_failure_cancels_the_relay() {
