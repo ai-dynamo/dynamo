@@ -903,7 +903,9 @@ async fn trtllm_engine_lost_on_liveness_not_serving() {
         dynamo_backend_common::ErrorType::Backend(BackendError::EngineShutdown)
     );
     assert!(
-        error.to_string().contains("TensorRT-LLM engine lost"),
+        error
+            .to_string()
+            .contains("TensorRT-LLM engine lost: liveness reported NOT_SERVING"),
         "{error}"
     );
     finish(&mut fixture, &engine).await;
