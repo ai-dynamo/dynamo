@@ -4,13 +4,12 @@
 """Mock prefill worker that finds decode workers in discovery and connects.
 
 While it serves `prefill.generate`, it reads the model cards that decode
-workers registered, every `--interval` seconds. Each decode worker publishes
+workers registered, every two seconds. Each decode worker publishes
 its side-channel address in its card, so this worker reads it from discovery
 instead of asking the decode worker. It connects to each new decode worker and
 drops the ones that leave.
 """
 
-import argparse
 import asyncio
 
 import uvloop
@@ -19,16 +18,9 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 NAMESPACE = "pd-discovery"
 SIDE_CHANNEL_KEY = "side_channel"
+INTERVAL = 2.0  # seconds between checks
 
 uvloop.install()
-
-
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--interval", type=float, default=2.0, help="Seconds between checks"
-    )
-    return parser.parse_args()
 
 
 async def connect(decode_id: int, address: dict, my_id: int):
@@ -43,9 +35,7 @@ async def connect(decode_id: int, address: dict, my_id: int):
     print(f"prefill {my_id:x}: decode {decode_id:x} at {host}:{port} -> {reply!r}")
 
 
-async def watch_decode_workers(
-    runtime: DistributedRuntime, my_id: int, interval: float
-):
+async def watch_decode_workers(runtime: DistributedRuntime, my_id: int):
     decode = runtime.endpoint(f"{NAMESPACE}.decode.generate")
     known = {}  # (decode instance ID, incarnation) -> address
     while True:
@@ -73,12 +63,11 @@ async def watch_decode_workers(
                 continue
             known[key] = current[key]
 
-        await asyncio.sleep(interval)
+        await asyncio.sleep(INTERVAL)
 
 
 @dynamo_worker()
 async def worker(runtime: DistributedRuntime):
-    args = parse_args()
     endpoint = runtime.endpoint(f"{NAMESPACE}.prefill.generate")
     my_id = endpoint.connection_id()
 
@@ -87,7 +76,7 @@ async def worker(runtime: DistributedRuntime):
 
     # Watch decode workers while serving prefill requests.
     await asyncio.gather(
-        watch_decode_workers(runtime, my_id, args.interval),
+        watch_decode_workers(runtime, my_id),
         endpoint.serve_endpoint(generate_handler),
     )
 

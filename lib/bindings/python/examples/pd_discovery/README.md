@@ -16,11 +16,11 @@ worker. The prefill worker never asks a decode worker for its address.
   `ModelRuntimeConfig.set_engine_specific("side_channel", ...)` and
   `register_model`. A real decode worker already registers its model, so only
   the `set_engine_specific` call is new.
-- `prefill.py` serves `prefill.generate` (mock output). Every `--interval`
-  seconds it calls `model_cards()` on the decode endpoint, which returns the
-  model card of each decode worker from discovery, keyed by instance ID, and
-  reads the address from `card.runtime_config()["runtime_data"]`. It connects
-  to each new decode worker and drops the ones that leave.
+- `prefill.py` serves `prefill.generate` (mock output). Every two seconds it
+  calls `model_cards()` on the decode endpoint, which returns the model card of
+  each decode worker from discovery, keyed by instance ID, and reads the
+  address from `card.runtime_config()["runtime_data"]`. It connects to each new
+  decode worker and drops the ones that leave.
 
 `Endpoint.model_cards()` is new, so a released or nightly `ai-dynamo-runtime`
 may not have it yet. Build the Python bindings from this
@@ -109,7 +109,6 @@ Remove everything with `kubectl delete -f k8s.yaml`.
 - The model card checksum that the frontend compares across the workers of a
   model ignores `runtime_data` keys such as this one, so per-worker values do
   not split the workers into separate sets.
-- `--host` sets the address that the decode worker publishes. The default, the
-  machine's hostname resolved to an IP, works on one machine and is the pod IP
-  on Kubernetes. Across machines, pass an IP that the prefill workers can
-  reach.
+- The decode worker publishes its hostname resolved to an IP, which is the pod
+  IP on Kubernetes. Across machines without Kubernetes, change it to an address
+  that the prefill workers can reach.

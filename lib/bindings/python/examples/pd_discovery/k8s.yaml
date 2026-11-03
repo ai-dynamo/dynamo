@@ -60,9 +60,9 @@ metadata:
 spec:
   selector:
     app: pd-discovery
+  # A Service needs a port; discovery does not use it.
   ports:
-    - name: side-channel
-      port: 9999
+    - port: 9999
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -88,8 +88,7 @@ spec:
         - name: main
           image: pd-discovery:latest
           imagePullPolicy: IfNotPresent
-          # Listen on the Service's port.
-          command: ["python3", "/example/decode.py", "--port", "9999"]
+          command: ["python3", "/example/decode.py"]
           env:
             - { name: DYN_DISCOVERY_BACKEND, value: kubernetes }
             - { name: DYN_LOG, value: warn }

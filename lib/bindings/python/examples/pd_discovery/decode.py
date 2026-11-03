@@ -8,7 +8,6 @@ its model card. Prefill workers read the address from discovery, so they never
 have to ask this worker for it.
 """
 
-import argparse
 import asyncio
 import json
 import socket
@@ -31,23 +30,11 @@ SIDE_CHANNEL_KEY = "side_channel"
 uvloop.install()
 
 
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--host",
-        help="Address that prefill workers use to reach this worker "
-        "(default: this machine's hostname resolved to an IP)",
-    )
-    parser.add_argument(
-        "--port", type=int, default=0, help="Server port; 0 picks a free port"
-    )
-    return parser.parse_args()
-
-
 @dynamo_worker()
 async def worker(runtime: DistributedRuntime):
-    args = parse_args()
-    host = args.host or socket.gethostbyname(socket.gethostname())
+    # The pod IP on Kubernetes. Across machines without Kubernetes, use an
+    # address that the prefill workers can reach.
+    host = socket.gethostbyname(socket.gethostname())
     endpoint = runtime.endpoint(f"{NAMESPACE}.decode.generate")
     my_id = endpoint.connection_id()
 
@@ -60,7 +47,7 @@ async def worker(runtime: DistributedRuntime):
         await writer.drain()
         writer.close()
 
-    server = await asyncio.start_server(on_connect, "0.0.0.0", args.port)
+    server = await asyncio.start_server(on_connect, "0.0.0.0", 0)  # any free port
     port = server.sockets[0].getsockname()[1]
     print(f"decode {my_id:x}: side-channel server on {host}:{port}")
 
