@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Any
 
 from vllm.v1.engine.exceptions import EngineDeadError
 
+from dynamo.llm.exceptions import InvalidArgument
+
 from .generation_policy import StrictRLGenerationObserver
 from .weight_transfer import (
     WeightTransferSession,
@@ -95,7 +97,7 @@ class StrictRLWeightTransferController:
     ) -> StrictRLGenerationObserver:
         """Bind validation to the same native engine that owns the policy."""
         if not isinstance(prompt, dict) or "prompt_token_ids" not in prompt:
-            raise ValueError("strict RL requires a token prompt")
+            raise InvalidArgument("strict RL requires a token prompt")
         return StrictRLGenerationObserver(
             self.engine_client,
             sampling_params,
