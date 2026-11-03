@@ -45,6 +45,9 @@ pub struct VllmSidecarEngine {
     lifecycle: lora::LoraLifecycle,
     routing_image_token_id: OnceCell<Option<u32>>,
     cancel: CancellationToken,
+    /// Cancelled once vLLM stops serving after `start`, with the reason set first.
+    lost: CancellationToken,
+    lost_reason: Arc<std::sync::OnceLock<String>>,
     /// vLLM's reasoning parser decides when Dynamo's tool grammars apply, so
     /// they exclude the reasoning phase; set by `from_discovered`.
     engine_gates_reasoning: bool,
@@ -75,6 +78,8 @@ impl VllmSidecarEngine {
             lifecycle: lora::LoraLifecycle::default(),
             routing_image_token_id: OnceCell::new(),
             cancel: CancellationToken::new(),
+            lost: CancellationToken::new(),
+            lost_reason: Arc::default(),
             engine_gates_reasoning: false,
         }
     }
@@ -818,6 +823,7 @@ impl LLMEngine for VllmSidecarEngine {
             .set(routing_image_token_id)
             .map_err(|_| client::engine_shutdown("vLLM sidecar has already started"))?;
         let connection_count = client.connection_count();
+        let health = client.health_channel();
         self.client
             .set(client)
             .map_err(|_| client::engine_shutdown("vLLM sidecar has already started"))?;
@@ -829,6 +835,18 @@ impl LLMEngine for VllmSidecarEngine {
             mode = %self.mode,
             "vLLM gRPC services are ready"
         );
+        let (stop, lost) = (self.cancel.child_token(), self.lost.clone());
+        let reason = Arc::clone(&self.lost_reason);
+        let open_timeout = self.transport.connect_attempt_timeout;
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = stop.cancelled() => {}
+                why = client::watch_health(health, open_timeout) => {
+                    let _ = reason.set(why);
+                    lost.cancel();
+                }
+            }
+        });
         Ok(engine_config)
     }
 
@@ -1218,6 +1236,12 @@ impl LLMEngine for VllmSidecarEngine {
         self.unpublish_all_loras().await;
         self.cancel.cancel();
         Ok(())
+    }
+
+    async fn engine_lost(&self) -> DynamoError {
+        self.lost.cancelled().await;
+        let reason = self.lost_reason.get().map_or("unknown", String::as_str);
+        client::engine_shutdown(format!("vLLM engine lost: {reason}"))
     }
 
     async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
