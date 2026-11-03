@@ -1112,8 +1112,91 @@ def test_on_round_tolerates_upstream_candidate_objects(
     # pareto_candidate.candidate_id (which Candidate does not carry).
     adapter.on_round(1, [pareto_candidate])
 
-    # The round counter must advance and the adapter must still be accepting.
+    # The round counter must advance, the adapter must still be accepting, and
+    # _live_pareto_front must hold the one point AISimulate passed.
     assert adapter._round_no == 1
+    assert len(adapter._live_pareto_front) == 1
+    assert len(adapter._retained) == 1
+
+
+def test_pareto_live_front_size_exceeds_max_candidates(
+    tmp_path: Path,
+    renders: list[str],
+) -> None:
+    """Live snapshot must report the full Pareto-front cardinality, not the publication cap.
+
+    With maxCandidates=1 and a front of 3 points, the snapshot's paretoFront must be 3
+    (the real front size from AISimulate's on_round payload) and the candidates list must
+    contain at most 1 entry.
+    """
+    from aisimulate.sweeper.config import Candidate as AISCandidate
+
+    t_gpu = [100.0, 50.0, 10.0]
+    t_usr = [10.0, 50.0, 100.0]
+    front = [
+        AISCandidate(
+            config={"backend": "vllm", "backend_version": "0.1", "tag": f"f{i}"},
+            used_gpus=8,
+            score=t_gpu[i],
+            metrics={"throughput_per_gpu": t_gpu[i]},
+            objectives={"throughput_per_gpu": t_gpu[i], "throughput_per_user": t_usr[i]},
+        )
+        for i in range(3)
+    ]
+    adapter = DGDRRunOutputAdapter(
+        make_config(tmp_path, max_candidates=1, is_pareto=True),
+        workload=None,
+    )
+    adapter.on_round(1, front)
+    adapter.close()
+
+    snapshot = load(tmp_path)
+    assert len(snapshot["candidates"]) == 1, "publication subset is bounded by max_candidates=1"
+    assert snapshot["progress"]["paretoFront"] == 3, "paretoFront reports the full front, not the publication cap"
+
+
+def test_pareto_on_round_replaces_dominated_points_with_true_front(
+    tmp_path: Path,
+    renders: list[str],
+) -> None:
+    """on_round for a Pareto search must replace scalar-evicted membership with the true front.
+
+    Scenario: A(tpg=100, tpu=10), B(tpg=90, tpu=9), C(tpg=80, tpu=100).
+    B is dominated by A on both objectives; the true Pareto front is {A, C}.
+    Scalar retention (highest score first) with max_candidates=2 would keep A+B.
+    AISimulate's on_round provides {A, C}, which must override the scalar result.
+    """
+    from aisimulate.sweeper.config import Candidate as AISCandidate
+
+    def ais_point(tag: str, tpg: float, tpu: float) -> AISCandidate:
+        return AISCandidate(
+            config={"backend": "vllm", "backend_version": "0.1", "tag": tag},
+            used_gpus=8,
+            score=tpg,
+            metrics={"throughput_per_gpu": tpg},
+            objectives={"throughput_per_gpu": tpg, "throughput_per_user": tpu},
+        )
+
+    adapter = DGDRRunOutputAdapter(
+        make_config(tmp_path, max_candidates=2, is_pareto=True),
+        workload=None,
+    )
+
+    # on_candidate: scalar eviction with max_candidates=2 keeps A+B (highest scores)
+    adapter.on_candidate(record("A", 100.0, objectives={"throughput_per_gpu": 100.0, "throughput_per_user": 10.0}))
+    adapter.on_candidate(record("B", 90.0, objectives={"throughput_per_gpu": 90.0, "throughput_per_user": 9.0}))
+    adapter.on_candidate(record("C", 80.0, objectives={"throughput_per_gpu": 80.0, "throughput_per_user": 100.0}))
+
+    # on_round provides the true Pareto front {A, C} from AISimulate — must override scalar eviction
+    adapter.on_round(1, [ais_point("A", 100.0, 10.0), ais_point("C", 80.0, 100.0)])
+    adapter.close()
+
+    snapshot = load(tmp_path)
+    snapshot_tags = tags(snapshot)
+    assert "A" in snapshot_tags, "A must be on the Pareto front"
+    assert "C" in snapshot_tags, "C must be on the Pareto front"
+    assert "B" not in snapshot_tags, "B is dominated and must not appear after on_round"
+    assert snapshot["progress"]["paretoFront"] == 2
 
 
 def test_pinned_aisimulate_pareto_lifecycle_live_snapshot_reports_front(
@@ -1189,8 +1272,12 @@ def test_pinned_aisimulate_pareto_lifecycle_live_snapshot_reports_front(
 
     from aisimulate.sweeper.config import Candidate as AISCandidate
 
+    # Config must carry the same search-space parameters as pareto_a so that
+    # on_round can materialize the retained point (fake_render reads config["tag"]).
+    # In production, AISimulate's Candidate objects from on_round always carry the
+    # full search-space config — tag is a search-space dimension here.
     pareto_candidate_obj = AISCandidate(
-        config={"backend": "vllm", "backend_version": "0.1"},
+        config={"backend": "vllm", "backend_version": "0.1", "tag": "a"},
         used_gpus=1,
         score=9.0,
         metrics={"output_throughput_tok_s": 9.0},

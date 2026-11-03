@@ -370,6 +370,10 @@ class DGDRRunOutputAdapter:
         # Latest in-memory desired state. Callbacks mutate it under _lock.
         self._lock = threading.Lock()
         self._retained: dict[str, _Retained] = {}
+        # Full AISimulate Pareto front from the latest on_round, keyed by stable id.
+        # Its size is reported as paretoFront in live snapshots; _retained is the capped
+        # publication subset (bounded by max_candidates).
+        self._live_pareto_front: dict[str, _Retained] = {}
         self._round_no = 0
         self._evaluated = 0
         self._terminal: _Terminal | None = None
@@ -426,11 +430,29 @@ class DGDRRunOutputAdapter:
             self._wake.set()
 
     def on_round(self, round_number: int, candidates: list[Any]) -> None:
-        del candidates  # cumulative feasible list: the adapter tracks its own set
+        # For Pareto searches, AISimulate passes the current non-dominated front.
+        # Process outside the lock so _retain's JSON work does not stall on_candidate.
+        new_front_items: list[_Retained] = []
+        if self._is_pareto:
+            for c in candidates:
+                try:
+                    retained = self._retain(c)
+                except Exception:
+                    logger.exception("dgdr_run: ignoring Pareto-front point that could not be read")
+                    continue
+                if retained is not None:
+                    new_front_items.append(retained)
         with self._lock:
             if not self._accepting:
                 return
             self._round_no = max(self._round_no, round_number)
+            if self._is_pareto:
+                # Replace _live_pareto_front with AISimulate's authoritative non-dominated
+                # set; this is the full cardinality reported as paretoFront. Rebuild
+                # _retained as the bounded publication subset without re-running dominance.
+                new_front = {r.id: r for r in new_front_items}
+                self._live_pareto_front = new_front
+                self._retained = dict(list(new_front.items())[: self._max_candidates])
             self._wake.set()
 
     def report_progress(self, *, evaluated: int, round_no: int = 0) -> None:
@@ -443,13 +465,14 @@ class DGDRRunOutputAdapter:
             self._wake.set()
 
     def _retain(self, record: CandidateRecordLike) -> _Retained | None:
+        parameters = _plain(dict(record.config))
+        label = getattr(record, "candidate_id", None) or candidate_id_for(parameters)
         if record.score is None and not self._is_pareto:
             logger.warning(
                 "dgdr_run: feasible candidate %s has no score; skipped",
-                record.candidate_id,
+                label,
             )
             return None
-        parameters = _plain(dict(record.config))
         score = float(record.score) if record.score is not None else 0.0
         used_gpus = int(record.used_gpus) if record.used_gpus is not None else 0
         # Every measurement AISimulate resolved for the point (throughput, TTFT, ITL, E2E latency,
@@ -462,7 +485,7 @@ class DGDRRunOutputAdapter:
             if reserved in metrics:
                 logger.warning(
                     "dgdr_run: candidate %s reports a metric named %r, which the adapter reserves; replaced",
-                    record.candidate_id,
+                    label,
                     reserved,
                 )
                 del metrics[reserved]
@@ -661,6 +684,7 @@ class DGDRRunOutputAdapter:
                 round_no = self._round_no
                 evaluated = self._evaluated
                 terminal = self._terminal
+                live_pareto_size = len(self._live_pareto_front)
             if render:
                 candidates = tuple(self._materialize(item) for item in ordered)
             else:
@@ -679,7 +703,7 @@ class DGDRRunOutputAdapter:
                     phase=terminal.phase if terminal else RunPhase.RUNNING,
                     round_no=round_no,
                     evaluated=evaluated,
-                    pareto_front=(self._pareto_front_size or len(ordered)) if self._is_pareto else 0,
+                    pareto_front=(self._pareto_front_size or live_pareto_size or len(ordered)) if self._is_pareto else 0,
                     candidates=candidates,
                     message=terminal.message if terminal else "",
                     error=terminal.error if terminal else "",
