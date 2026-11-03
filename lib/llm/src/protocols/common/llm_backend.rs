@@ -519,6 +519,64 @@ mod tests {
         }
     }
 
+    /// An engine output with every optional field set, as the worker sends it.
+    const ENGINE_OUTPUT_WITH_EVERY_FIELD: &str = r#"{
+        "token_ids": [1, 2],
+        "tokens": ["a", null],
+        "text": "ab",
+        "cum_log_probs": -1.5,
+        "log_probs": [-0.5, -1.0],
+        "top_logprobs": [[{"rank": 1, "token_id": 1, "token": "a", "logprob": -0.5}]],
+        "finish_reason": "stop",
+        "stop_reason": "</s>",
+        "index": 0,
+        "disaggregated_params": {"kv_transfer_params": {"remote_engine_id": "e1"}},
+        "encoder_result": {"embeddings": [0.5]},
+        "worker_trace_link": {"trace_id": "0af7651916cd43dd8448eb211c80319c", "span_id": "b7ad6b7169203331"},
+        "extra_args": {"custom": true},
+        "completion_usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+        "engine_data": {"raw": [1, 2, 3]},
+        "routing_data": {"token_ids": [7, 8]}
+    }"#;
+
+    /// Every field of the engine's and the backend's output keeps its JSON shape, whatever
+    /// its type in Rust (a field held in a `Box` serializes as the value itself). These are
+    /// the worker/frontend wire.
+    #[test]
+    fn engine_and_backend_outputs_round_trip_every_field() {
+        let wire: serde_json::Value = serde_json::from_str(ENGINE_OUTPUT_WITH_EVERY_FIELD).unwrap();
+
+        let engine: LLMEngineOutput = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&engine).unwrap(), wire);
+
+        // The backend's output has the same fields, but for `extra_args`.
+        let mut backend_wire = wire.clone();
+        backend_wire.as_object_mut().unwrap().remove("extra_args");
+        let backend: BackendOutput = serde_json::from_value(backend_wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&backend).unwrap(), backend_wire);
+
+        // An absent field stays absent, and an explicit null reads as absent.
+        let mut nulls = serde_json::json!({"token_ids": []});
+        for field in [
+            "disaggregated_params",
+            "encoder_result",
+            "worker_trace_link",
+            "extra_args",
+            "engine_data",
+            "routing_data",
+        ] {
+            nulls
+                .as_object_mut()
+                .unwrap()
+                .insert(field.to_string(), serde_json::Value::Null);
+        }
+        let engine: LLMEngineOutput = serde_json::from_value(nulls).unwrap();
+        assert_eq!(
+            serde_json::to_value(&engine).unwrap(),
+            serde_json::json!({"token_ids": []})
+        );
+    }
+
     /// Decoder checkpoints retain the legacy optional-string wire shape while keeping
     /// pending token IDs strictly in process.
     #[test]
