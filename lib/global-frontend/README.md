@@ -128,8 +128,8 @@ new routers could keep Relays from ever finding them.
 named `dynamo_global_frontend_*`: requests per pool by response status,
 `no_response` when the pool sends no response, or `cancelled` when the client
 leaves before the pool's response headers arrive; requests answered without a
-pool; time to first byte and duration per pool; and requests in flight per
-pool. The `pool` label is the pool's
+pool; time to first byte and duration per pool; requests in flight per
+pool; and the time to select a pool. The `pool` label is the pool's
 `<cluster>/<namespace>/<DGD name>` and `region` its region. On requests, `local`
 says whether the pool is in `--region` (`unknown` without it), which gives the
 share of requests kept in the region. Nothing is labelled from the request
@@ -149,6 +149,13 @@ for each family.
   between bursts. Set `net.ipv4.tcp_slow_start_after_idle=0` on the Global
   Frontend's hosts, or each idle connection starts over with a small send
   window and a long prompt costs extra round trips.
+
+## Router core
+
+With `--use-selection-core`, the Global Frontend selects pools through an
+embedded router core: each pool is a core worker and the policy is a picker
+plugin. Only `round-robin` runs on the core for now, picking as the
+round-robin selector does.
 
 ## Limitations
 

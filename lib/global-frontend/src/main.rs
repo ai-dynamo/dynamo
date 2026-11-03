@@ -11,12 +11,12 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use dynamo_global_common::{PoolIdDeriver, PoolKey, V1PoolIdDeriver};
 use dynamo_global_frontend::{
-    Metrics, PoolSnapshot, RelayGatedPoolCatalog, app, discover_pools, follow_relays,
-    measure_round_trips, serve, serve_relay_views,
+    Metrics, PoolSnapshot, RelayGatedPoolCatalog, app, app_with_selection_core, discover_pools,
+    follow_relays, measure_round_trips, serve, serve_relay_views,
 };
 use dynamo_global_router::{
     AffinitySelector, InFlightTracker, LeastInFlightSelector, Pool, PoolSelector, PoolSignals,
-    RoundRobinSelector,
+    RoundRobinSelector, SelectionCorePolicy, SelectionCoreSelector,
 };
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -67,6 +67,9 @@ struct Args {
     connect_timeout_secs: u64,
     #[arg(long, value_enum, default_value_t = RouterPolicy::RoundRobin)]
     router_policy: RouterPolicy,
+    /// Select pools through the embedded router core (round-robin only for now).
+    #[arg(long)]
+    use_selection_core: bool,
     /// The region this process runs in. Affinity prefers it, and metrics
     /// distinguish local requests from requests sent to other regions.
     #[arg(long, required_if_eq("router_policy", "affinity"))]
@@ -169,6 +172,9 @@ async fn main() -> Result<()> {
     if !(args.headroom_factor >= 1.0 && args.headroom_factor.is_finite()) {
         bail!("--headroom-factor must be at least 1");
     }
+    let selection_core_policy = (args.use_selection_core)
+        .then(|| selection_core_policy(args.router_policy))
+        .transpose()?;
 
     let shutdown = CancellationToken::new();
     let signal = shutdown.clone();
@@ -233,35 +239,47 @@ async fn main() -> Result<()> {
         .build()
         .context("build the pool HTTP client")?;
     let metrics = Metrics::new(args.region.clone(), in_flight.clone());
-    let selector: Arc<dyn PoolSelector> = match args.router_policy {
-        RouterPolicy::RoundRobin => Arc::new(RoundRobinSelector::new()),
-        RouterPolicy::LeastInFlight => Arc::new(LeastInFlightSelector::new(in_flight.clone())),
-        RouterPolicy::Affinity => {
-            let region = args.region.clone().context("--region is required")?;
-            if args.pool_relays.is_empty() && args.relay_view_port.is_none() {
-                tracing::warn!(
-                    "no --pool-relay is given, so affinity knows no pool's load \
-                     and keeps each session on its nearest pool"
-                );
+    let app = if let Some(policy) = selection_core_policy {
+        let selection_core = Arc::new(SelectionCoreSelector::new(policy, in_flight.clone()).await?);
+        // Wait for the first pool snapshot, or early requests get a 503.
+        let (first_snapshot, reconcile) =
+            selection_core.reconcile_catalog(pools.clone(), shutdown.child_token());
+        tokio::spawn(reconcile);
+        first_snapshot
+            .await
+            .context("the router core stopped before taking the first pool snapshot")?;
+        app_with_selection_core(pools, selection_core, in_flight, http, metrics)
+    } else {
+        let selector: Arc<dyn PoolSelector> = match args.router_policy {
+            RouterPolicy::RoundRobin => Arc::new(RoundRobinSelector::new()),
+            RouterPolicy::LeastInFlight => Arc::new(LeastInFlightSelector::new(in_flight.clone())),
+            RouterPolicy::Affinity => {
+                let region = args.region.clone().context("--region is required")?;
+                if args.pool_relays.is_empty() && args.relay_view_port.is_none() {
+                    tracing::warn!(
+                        "no --pool-relay is given, so affinity knows no pool's load \
+                         and keeps each session on its nearest pool"
+                    );
+                }
+                tokio::spawn(measure_round_trips(
+                    pools.clone(),
+                    signals.clone(),
+                    ROUND_TRIP_INTERVAL,
+                    shutdown.child_token(),
+                ));
+                let idle = Duration::from_secs(args.session_idle_secs);
+                let selector = Arc::new(AffinitySelector::new(
+                    signals,
+                    region,
+                    args.headroom_factor,
+                    idle,
+                ));
+                tokio::spawn(sweep_pins(selector.clone(), shutdown.child_token()));
+                selector
             }
-            tokio::spawn(measure_round_trips(
-                pools.clone(),
-                signals.clone(),
-                ROUND_TRIP_INTERVAL,
-                shutdown.child_token(),
-            ));
-            let idle = Duration::from_secs(args.session_idle_secs);
-            let selector = Arc::new(AffinitySelector::new(
-                signals,
-                region,
-                args.headroom_factor,
-                idle,
-            ));
-            tokio::spawn(sweep_pins(selector.clone(), shutdown.child_token()));
-            selector
-        }
+        };
+        app(pools, selector, in_flight, http, metrics)
     };
-    let app = app(pools, selector, in_flight, http, metrics);
     let address = format!("{}:{}", args.host, args.port);
     let listener = tokio::net::TcpListener::bind(&address)
         .await
@@ -283,6 +301,15 @@ async fn main() -> Result<()> {
     } else {
         serve(listener, app, shutdown).await;
         Ok(())
+    }
+}
+
+fn selection_core_policy(policy: RouterPolicy) -> Result<SelectionCorePolicy> {
+    match policy {
+        RouterPolicy::RoundRobin => Ok(SelectionCorePolicy::RoundRobin),
+        RouterPolicy::LeastInFlight | RouterPolicy::Affinity => {
+            bail!("--use-selection-core supports only --router-policy round-robin for now")
+        }
     }
 }
 

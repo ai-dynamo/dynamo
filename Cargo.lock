@@ -2579,10 +2579,18 @@ dependencies = [
 name = "dynamo-global-router"
 version = "1.7.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "dashmap",
  "dynamo-global-common",
+ "dynamo-kv-router",
+ "dynamo-router-policies",
  "parking_lot",
+ "tokio",
+ "tokio-util",
+ "tracing",
  "url",
+ "xxhash-rust",
 ]
 
 [[package]]
