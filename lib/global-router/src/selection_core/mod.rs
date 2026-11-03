@@ -33,6 +33,7 @@ use tokio_util::sync::CancellationToken;
 use crate::frontend_signals::FrontendSignals;
 use crate::load::{InFlightGuard, InFlightTracker};
 use crate::selector::{Cursors, PoolTarget, reachable, target};
+use crate::signals::PoolSignals;
 use crate::{Pool, RoutingRequest};
 use catalog::{PoolCatalogSource, ROUTING_GROUP, worker_id};
 use directory::PoolDirectory;
@@ -43,7 +44,17 @@ pub enum SelectionCorePolicy {
     /// Every pool in turn, as [`crate::RoundRobinSelector`].
     RoundRobin,
     /// As [`crate::LeastInFlightSelector`].
-    LeastInFlight,
+    LeastInFlight(LeastInFlightConfig),
+}
+
+#[derive(Clone, Debug)]
+pub struct LeastInFlightConfig {
+    /// Pool capacities and region round trips.
+    pub signals: Arc<PoolSignals>,
+    /// This process's region.
+    pub region: String,
+    /// Leave the nearest pool only for one with this many times its spare room.
+    pub headroom_factor: f64,
 }
 
 /// Selects a pool through the router core, then rotates over its frontends.
@@ -127,7 +138,7 @@ impl SelectionCoreSelector {
         };
         let in_flight = match self.policy {
             SelectionCorePolicy::RoundRobin => self.counts.start(&pool.id),
-            SelectionCorePolicy::LeastInFlight => {
+            SelectionCorePolicy::LeastInFlight(_) => {
                 self.counts.take_pending(&pool.id, selected.worker_id)
             }
         };
@@ -142,7 +153,7 @@ impl SelectionCoreSelector {
         let request = advisory(model, allowed);
         let selected = match self.policy {
             SelectionCorePolicy::RoundRobin => self.service.select(request).await,
-            SelectionCorePolicy::LeastInFlight => {
+            SelectionCorePolicy::LeastInFlight(_) => {
                 let service = self.service.clone();
                 let select = Box::pin(async move { service.select(request).await });
                 PendingSelect::new(select, self.counts.clone())
@@ -156,7 +167,7 @@ impl SelectionCoreSelector {
     }
 
     fn release(&self, worker: WorkerId) {
-        if let SelectionCorePolicy::LeastInFlight = self.policy {
+        if let SelectionCorePolicy::LeastInFlight(_) = self.policy {
             self.counts.release_pending(worker);
         }
     }
@@ -253,8 +264,8 @@ mod tests {
 
     use url::Url;
 
-    use crate::selector::tests::pool;
-    use crate::{LeastInFlightSelector, PoolSelector, RoundRobinSelector};
+    use crate::selector::{self, tests::pool};
+    use crate::{PoolSelector, RoundRobinSelector};
 
     use super::*;
 
@@ -285,6 +296,19 @@ mod tests {
         .await
         .expect("the pools became the core's workers");
         (selection_core, catalog)
+    }
+
+    fn least_in_flight_weighing(signals: &Arc<PoolSignals>) -> SelectionCorePolicy {
+        SelectionCorePolicy::LeastInFlight(LeastInFlightConfig {
+            signals: signals.clone(),
+            region: "us-east-2".into(),
+            headroom_factor: 2.0,
+        })
+    }
+
+    /// No capacities or round trips known: fewest in flight.
+    fn least_in_flight(in_flight: &Arc<InFlightTracker>) -> SelectionCorePolicy {
+        least_in_flight_weighing(&Arc::new(PoolSignals::new(in_flight.clone())))
     }
 
     /// Same picks per round as the current selector; order within a round may differ.
@@ -344,8 +368,9 @@ mod tests {
         let in_flight = Arc::new(InFlightTracker::new());
         let pools = [blue.clone(), green.clone(), red.clone()];
         let (selection_core, _catalog) =
-            selection_core(SelectionCorePolicy::LeastInFlight, &pools, &in_flight).await;
-        let current = LeastInFlightSelector::new(in_flight.clone());
+            selection_core(least_in_flight(&in_flight), &pools, &in_flight).await;
+        let signals = Arc::new(PoolSignals::new(in_flight.clone()));
+        let current = selector::tests::least_in_flight(&in_flight, &signals);
 
         let mut held = Vec::new();
         for turn in 0..12 {
@@ -373,6 +398,30 @@ mod tests {
         }
     }
 
+    /// Same pool as the current selector: nearest until another region has
+    /// much more room.
+    #[tokio::test]
+    async fn least_in_flight_places_by_region_as_the_current_selector() {
+        let in_flight = Arc::new(InFlightTracker::new());
+        let (ohio, tokyo, signals) = selector::tests::two_regions(&in_flight);
+        let pools = [ohio.clone(), tokyo.clone()];
+        let (selection_core, _catalog) =
+            selection_core(least_in_flight_weighing(&signals), &pools, &in_flight).await;
+        let current = selector::tests::least_in_flight(&in_flight, &signals);
+        let candidates = [&tokyo, &ohio];
+
+        let mut held = Vec::new();
+        for (busy, expected) in [(5, &ohio), (50, &tokyo)] {
+            held.extend((0..busy).map(|_| in_flight.start(&ohio.id)));
+            let request = RoutingRequest::new("qwen");
+            let (target, counted) = selection_core.select(&request, &candidates).await.unwrap();
+            assert_eq!(target.pool.id, expected.id);
+            drop(counted);
+            let from_current = current.select(&request, &candidates).unwrap();
+            assert_eq!(from_current.pool.id, expected.id);
+        }
+    }
+
     /// Concurrent picks see each other's pending picks.
     #[tokio::test]
     async fn concurrent_least_in_flight_picks_see_each_other() {
@@ -381,7 +430,7 @@ mod tests {
         let in_flight = Arc::new(InFlightTracker::new());
         let pools = [blue.clone(), green.clone()];
         let (selection_core, _catalog) =
-            selection_core(SelectionCorePolicy::LeastInFlight, &pools, &in_flight).await;
+            selection_core(least_in_flight(&in_flight), &pools, &in_flight).await;
         let _busy = in_flight.start(&green.id);
 
         // Without pending picks, all three would go to blue.
@@ -407,7 +456,7 @@ mod tests {
         let in_flight = Arc::new(InFlightTracker::new());
         let pools = [blue.clone(), green.clone()];
         let (selection_core, _catalog) =
-            selection_core(SelectionCorePolicy::LeastInFlight, &pools, &in_flight).await;
+            selection_core(least_in_flight(&in_flight), &pools, &in_flight).await;
         let request = RoutingRequest::new("qwen");
         let candidates = [&blue, &green];
 

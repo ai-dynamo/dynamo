@@ -19,15 +19,17 @@ use dynamo_kv_router::services::selection::{
 use dynamo_kv_router::{RoutingPartitionRef, WorkerType};
 use dynamo_router_policies::router_modes;
 
-use super::SelectionCorePolicy;
 use super::directory::PoolDirectory;
+use super::{LeastInFlightConfig, SelectionCorePolicy};
 use crate::frontend_signals::FrontendSignals;
+use crate::placement::{self, Placed};
+use crate::selector::in_flight_load;
 
 impl SelectionCorePolicy {
     fn name(&self) -> &'static str {
         match self {
             Self::RoundRobin => router_modes::ROUND_ROBIN,
-            Self::LeastInFlight => "global-least-in-flight",
+            Self::LeastInFlight(_) => "global-least-in-flight",
         }
     }
 }
@@ -42,11 +44,15 @@ pub(super) fn registry(
     let mut registry = dynamo_router_policies::default_registry();
     let provider = match policy {
         SelectionCorePolicy::RoundRobin => return Ok(registry),
-        SelectionCorePolicy::LeastInFlight => provider(move || LeastInFlightPicker {
-            counts: counts.clone(),
-            directory: directory.clone(),
-            ties: AtomicUsize::new(0),
-        }),
+        SelectionCorePolicy::LeastInFlight(config) => {
+            let config = config.clone();
+            provider(move || LeastInFlightPicker {
+                config: config.clone(),
+                counts: counts.clone(),
+                directory: directory.clone(),
+                ties: AtomicUsize::new(0),
+            })
+        }
     };
     registry.register_worker_selection(policy.name(), provider)?;
     Ok(registry)
@@ -87,10 +93,11 @@ where
     )
 }
 
-/// Fewest in flight, as [`crate::LeastInFlightSelector`]; ties rotate by
-/// starting the scan one candidate later each pick. The pick stays pending
-/// on its pool until the request takes it over. A preview advances nothing.
+/// [`crate::LeastInFlightSelector`]'s rule over the frontend's counts. The
+/// pick stays pending on its pool until the request takes it over. A preview
+/// advances nothing.
 struct LeastInFlightPicker {
+    config: LeastInFlightConfig,
     counts: Arc<FrontendSignals>,
     directory: Arc<PoolDirectory>,
     ties: AtomicUsize,
@@ -103,27 +110,49 @@ impl WorkerPicker for LeastInFlightPicker {
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         let candidates = input.candidates();
-        let count = candidates.len();
-        if count == 0 {
+        let pools = self.directory.snapshot();
+        let signals = &self.config.signals;
+        let round_trips = signals.region_round_trips();
+        // Read each count once: requests start and finish while this runs.
+        let mut placed = candidates
+            .iter()
+            .enumerate()
+            .map(|(row, candidate)| {
+                let worker = candidate.worker().worker_id;
+                match pools.get(&worker) {
+                    Some(pool) => {
+                        let in_flight = self.counts.in_flight(&pool.id, worker);
+                        Placed {
+                            item: row,
+                            load: in_flight_load(in_flight, signals.capacity(&pool.id)),
+                            distance: placement::distance(
+                                &pool.region,
+                                &self.config.region,
+                                &round_trips,
+                            ),
+                            in_flight,
+                        }
+                    }
+                    None => Placed {
+                        item: row,
+                        load: None,
+                        distance: None,
+                        in_flight: u64::MAX,
+                    },
+                }
+            })
+            .collect::<Vec<_>>();
+        placement::order(&mut placed);
+        let tied = placement::leading_ties(&placed);
+        if tied == 0 {
             return Err(WorkerSelectionPolicyError::failed("no candidates"));
         }
-        let start = if context.is_preview() {
+        let default = if context.is_preview() {
             self.ties.load(Ordering::Relaxed)
         } else {
             self.ties.fetch_add(1, Ordering::Relaxed)
-        } % count;
-        let pools = self.directory.snapshot();
-        let (row, _) = (0..count)
-            .map(|offset| (start + offset) % count)
-            .map(|row| {
-                let worker = candidates[row].worker().worker_id;
-                let in_flight = pools
-                    .get(&worker)
-                    .map_or(u64::MAX, |pool| self.counts.in_flight(pool, worker));
-                (row, in_flight)
-            })
-            .min_by_key(|(_, in_flight)| *in_flight)
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("no candidates"))?;
+        } % tied;
+        let row = placed[placement::headroom(&placed, default, self.config.headroom_factor)].item;
         if !context.is_preview() {
             self.counts.add_pending(candidates[row].worker().worker_id);
         }

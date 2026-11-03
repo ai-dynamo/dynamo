@@ -15,8 +15,8 @@ use dynamo_global_frontend::{
     follow_relays, measure_round_trips, serve, serve_relay_views,
 };
 use dynamo_global_router::{
-    AffinitySelector, InFlightTracker, LeastInFlightSelector, Pool, PoolSelector, PoolSignals,
-    RoundRobinSelector, SelectionCorePolicy, SelectionCoreSelector,
+    AffinitySelector, InFlightTracker, LeastInFlightConfig, LeastInFlightSelector, Pool,
+    PoolSelector, PoolSignals, RoundRobinSelector, SelectionCorePolicy, SelectionCoreSelector,
 };
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -32,7 +32,8 @@ const PIN_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 enum RouterPolicy {
     /// Every pool serving the model in turn.
     RoundRobin,
-    /// The pool with the fewest of this process's requests in flight.
+    /// The nearest pool with the fewest requests in flight over its capacity
+    /// (from `--pool-relay`), moving only for much more room.
     LeastInFlight,
     /// Keep each session on one pool, nearest region first, and move it only
     /// for a pool with much more room (see `--headroom-factor`). Reads each
@@ -70,9 +71,13 @@ struct Args {
     /// Select pools through the embedded router core (not yet with affinity).
     #[arg(long)]
     use_selection_core: bool,
-    /// The region this process runs in. Affinity prefers it, and metrics
-    /// distinguish local requests from requests sent to other regions.
-    #[arg(long, required_if_eq("router_policy", "affinity"))]
+    /// The region this process runs in. `affinity` and `least-in-flight`
+    /// prefer it, and metrics distinguish local requests from requests sent
+    /// to other regions.
+    #[arg(
+        long,
+        required_if_eq_any([("router_policy", "affinity"), ("router_policy", "least-in-flight")])
+    )]
     region: Option<String>,
     /// A pool's PoolRelay, which streams the pool's load, as
     /// `<cluster>/<namespace>/<DGD name>=<URL>`. Repeat the flag for each pool;
@@ -80,8 +85,9 @@ struct Args {
     /// everything it watches as one.
     #[arg(long = "pool-relay", value_parser = parse_pool_relay)]
     pool_relays: Vec<(PoolKey, Url)>,
-    /// `affinity`: a request leaves its pool only for one with more than this
-    /// many times its spare capacity, or when its pool is full.
+    /// `affinity` and `least-in-flight`: a request leaves its pool only for
+    /// one with more than this many times its spare capacity, or when its
+    /// pool is full.
     #[arg(long, default_value_t = 2.0)]
     headroom_factor: f64,
     /// `affinity`: how long a session keeps its pool without a request.
@@ -172,9 +178,6 @@ async fn main() -> Result<()> {
     if !(args.headroom_factor >= 1.0 && args.headroom_factor.is_finite()) {
         bail!("--headroom-factor must be at least 1");
     }
-    let selection_core_policy = (args.use_selection_core)
-        .then(|| selection_core_policy(args.router_policy))
-        .transpose()?;
 
     let shutdown = CancellationToken::new();
     let signal = shutdown.clone();
@@ -186,8 +189,9 @@ async fn main() -> Result<()> {
     });
 
     // Keep the explicit catalog sender alive for the static-pool mode.
-    let (_catalog, pools) = watch::channel(Arc::new(PoolSnapshot::new(args.pools)));
-    let pools = if let Some(url) = args.global_discovery_url {
+    let (_catalog, pools) =
+        watch::channel(Arc::new(PoolSnapshot::new(std::mem::take(&mut args.pools))));
+    let pools = if let Some(url) = args.global_discovery_url.take() {
         let client = dynamo_global_discovery_client::GlobalDiscoveryClient::new(
             url,
             Duration::from_secs(5),
@@ -239,7 +243,9 @@ async fn main() -> Result<()> {
         .build()
         .context("build the pool HTTP client")?;
     let metrics = Metrics::new(args.region.clone(), in_flight.clone());
-    let app = if let Some(policy) = selection_core_policy {
+    let load_signals = || load_signals(&args, &pools, &signals, &shutdown);
+    let app = if args.use_selection_core {
+        let policy = selection_core_policy(&args, load_signals)?;
         let selection_core = Arc::new(SelectionCoreSelector::new(policy, in_flight.clone()).await?);
         // Wait for the first pool snapshot, or early requests get a 503.
         let (first_snapshot, reconcile) =
@@ -252,21 +258,15 @@ async fn main() -> Result<()> {
     } else {
         let selector: Arc<dyn PoolSelector> = match args.router_policy {
             RouterPolicy::RoundRobin => Arc::new(RoundRobinSelector::new()),
-            RouterPolicy::LeastInFlight => Arc::new(LeastInFlightSelector::new(in_flight.clone())),
+            RouterPolicy::LeastInFlight => Arc::new(LeastInFlightSelector::new(
+                in_flight.clone(),
+                load_signals(),
+                args.region.clone().context("--region is required")?,
+                args.headroom_factor,
+            )),
             RouterPolicy::Affinity => {
                 let region = args.region.clone().context("--region is required")?;
-                if args.pool_relays.is_empty() && args.relay_view_port.is_none() {
-                    tracing::warn!(
-                        "no --pool-relay is given, so affinity knows no pool's load \
-                         and keeps each session on its nearest pool"
-                    );
-                }
-                tokio::spawn(measure_round_trips(
-                    pools.clone(),
-                    signals.clone(),
-                    ROUND_TRIP_INTERVAL,
-                    shutdown.child_token(),
-                ));
+                let signals = load_signals();
                 let idle = Duration::from_secs(args.session_idle_secs);
                 let selector = Arc::new(AffinitySelector::new(
                     signals,
@@ -304,14 +304,46 @@ async fn main() -> Result<()> {
     }
 }
 
-fn selection_core_policy(policy: RouterPolicy) -> Result<SelectionCorePolicy> {
-    match policy {
+/// `signals` starts the load signals the policy weighs, if any.
+fn selection_core_policy(
+    args: &Args,
+    signals: impl FnOnce() -> Arc<PoolSignals>,
+) -> Result<SelectionCorePolicy> {
+    match args.router_policy {
         RouterPolicy::RoundRobin => Ok(SelectionCorePolicy::RoundRobin),
-        RouterPolicy::LeastInFlight => Ok(SelectionCorePolicy::LeastInFlight),
+        RouterPolicy::LeastInFlight => {
+            Ok(SelectionCorePolicy::LeastInFlight(LeastInFlightConfig {
+                signals: signals(),
+                region: args.region.clone().context("--region is required")?,
+                headroom_factor: args.headroom_factor,
+            }))
+        }
         RouterPolicy::Affinity => {
             bail!("--use-selection-core does not support --router-policy affinity yet")
         }
     }
+}
+
+/// Starts the round-trip probes; the Relay catalog fills the rest.
+fn load_signals(
+    args: &Args,
+    pools: &watch::Receiver<Arc<PoolSnapshot>>,
+    signals: &Arc<PoolSignals>,
+    shutdown: &CancellationToken,
+) -> Arc<PoolSignals> {
+    if args.pool_relays.is_empty() && args.relay_view_port.is_none() {
+        tracing::warn!(
+            "no --pool-relay is given, so no pool's load is known: requests stay on \
+             their nearest pool"
+        );
+    }
+    tokio::spawn(measure_round_trips(
+        pools.clone(),
+        signals.clone(),
+        ROUND_TRIP_INTERVAL,
+        shutdown.child_token(),
+    ));
+    signals.clone()
 }
 
 /// Drops expired session pins once a `PIN_SWEEP_INTERVAL`, off the request
@@ -366,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_pool_relays_and_requires_a_region_for_affinity() {
+    fn parses_pool_relays_and_requires_a_region_for_load_aware_policies() {
         let (key, relay) = parse_pool_relay("ohio/dynamo/blue=http://relay:50051").unwrap();
         assert_eq!(key.dgd_name(), "blue");
         assert_eq!(relay.as_str(), "http://relay:50051/");
@@ -386,6 +418,13 @@ mod tests {
         assert!(Args::try_parse_from(affinity).is_err());
         let args = Args::try_parse_from([&affinity[..], &["--region", "ohio"]].concat()).unwrap();
         assert_eq!(args.router_policy, RouterPolicy::Affinity);
+        let least = [
+            "global-frontend",
+            pool,
+            "--router-policy",
+            "least-in-flight",
+        ];
+        assert!(Args::try_parse_from(least).is_err());
         let args = Args::try_parse_from(["global-frontend", pool]).unwrap();
         assert_eq!(args.router_policy, RouterPolicy::RoundRobin);
     }

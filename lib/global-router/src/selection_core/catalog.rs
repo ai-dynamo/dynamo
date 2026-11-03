@@ -150,7 +150,10 @@ mod tests {
         let first = source.next_snapshot().await.unwrap();
         assert_eq!(ids(&first), [worker_id(&blue.id)]);
         assert_eq!(
-            directory.snapshot().get(&worker_id(&blue.id)),
+            directory
+                .snapshot()
+                .get(&worker_id(&blue.id))
+                .map(|entry| &entry.id),
             Some(&blue.id)
         );
 
@@ -168,7 +171,7 @@ mod tests {
         assert_eq!(ids(&third), [worker_id(&green.id)]);
         catalog.send_replace(Arc::new(vec![green.clone()]));
         source.next_snapshot().await.unwrap();
-        assert_eq!(directory.snapshot().get(&worker_id(&blue.id)), None);
+        assert!(!directory.snapshot().contains_key(&worker_id(&blue.id)));
 
         drop(catalog);
         assert!(source.next_snapshot().await.is_none());

@@ -14,6 +14,7 @@
 mod affinity;
 mod frontend_signals;
 mod load;
+mod placement;
 mod pool;
 mod selection_core;
 mod selector;
@@ -22,7 +23,7 @@ mod signals;
 pub use affinity::AffinitySelector;
 pub use load::{InFlightGuard, InFlightTracker};
 pub use pool::Pool;
-pub use selection_core::{SelectionCorePolicy, SelectionCoreSelector};
+pub use selection_core::{LeastInFlightConfig, SelectionCorePolicy, SelectionCoreSelector};
 pub use selector::{
     LeastInFlightSelector, PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest,
 };
