@@ -61,6 +61,12 @@ func (r *componentWorkloadsReconciler) resolvePowerCapPreservation(ctx context.C
 		}
 	}
 
+	return r.resolveWorkerPowerCapPreservation(ctx, dgd, desired, checkpoints, renderer, hash)
+}
+
+// resolveWorkerPowerCapPreservation compares every worker's DCD intent and live creation template.
+// dgd, renderer, and desired worker entries must be non-nil.
+func (r *componentWorkloadsReconciler) resolveWorkerPowerCapPreservation(ctx context.Context, dgd *v1beta1.DynamoGraphDeployment, desired map[string]*v1beta1.DynamoComponentDeployment, checkpoints map[string]*checkpoint.CheckpointInfo, renderer *dcdWorkloadRenderer, hash string) (*componentPowerCapPreservation, error) {
 	retained := &componentPowerCapPreservation{hash: hash, caps: map[string]string{}}
 	changed := false
 	for name, candidate := range desired {
@@ -197,7 +203,7 @@ func defaultPowerCapContainer(container *corev1.Container) {
 	}
 	if container.ImagePullPolicy == "" {
 		container.ImagePullPolicy = corev1.PullIfNotPresent
-		image := strings.Split(container.Image, "@")[0]
+		image, _, _ := strings.Cut(container.Image, "@")
 		if !strings.Contains(container.Image, "@") && (!strings.Contains(image[strings.LastIndex(image, "/")+1:], ":") || strings.HasSuffix(image, ":latest")) {
 			container.ImagePullPolicy = corev1.PullAlways
 		}

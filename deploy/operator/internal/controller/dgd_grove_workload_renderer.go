@@ -191,10 +191,10 @@ func grovePowerCapWorkerSpec(pcs *grovev1alpha1.PodCliqueSet) grovev1alpha1.PodC
 			continue
 		}
 		if group.Replicas == nil {
-			group.Replicas = ptr.To[int32](1)
+			group.Replicas = new(int32(1))
 		}
 		if group.ScaleConfig != nil && group.ScaleConfig.MinReplicas == nil {
-			group.ScaleConfig.MinReplicas = ptr.To(*group.Replicas)
+			group.ScaleConfig.MinReplicas = new(*group.Replicas)
 		}
 		group.RollingUpdate = defaultPowerCapGroveRollingUpdate(group.RollingUpdate, spec.UpdateStrategy.Type, ptr.Deref(group.MinAvailable, 1))
 		groups = append(groups, group)
@@ -211,7 +211,7 @@ func grovePowerCapWorkerSpec(pcs *grovev1alpha1.PodCliqueSet) grovev1alpha1.PodC
 			clique.Spec.Replicas = 1
 		}
 		if clique.Spec.ScaleConfig != nil && clique.Spec.ScaleConfig.MinReplicas == nil {
-			clique.Spec.ScaleConfig.MinReplicas = ptr.To(clique.Spec.Replicas)
+			clique.Spec.ScaleConfig.MinReplicas = new(clique.Spec.Replicas)
 		}
 		if !grouped[clique.Name] {
 			clique.RollingUpdate = defaultPowerCapGroveRollingUpdate(clique.RollingUpdate, spec.UpdateStrategy.Type, ptr.Deref(clique.Spec.MinAvailable, clique.Spec.Replicas))
@@ -242,7 +242,7 @@ func defaultPowerCapGroveRollingUpdate(config *grovev1alpha1.RollingUpdateConfig
 	if config == nil {
 		config = &grovev1alpha1.RollingUpdateConfiguration{}
 	}
-	config.MaxUnavailable = ptr.To(unavailable)
+	config.MaxUnavailable = new(unavailable)
 	return config
 }
 

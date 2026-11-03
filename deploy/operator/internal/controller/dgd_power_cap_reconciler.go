@@ -121,7 +121,7 @@ func requeuePowerCaps(result *workloadProgramResult) {
 // A missing cached parent is pending; a mismatched UID or foreign chain is not authorized.
 func powerCapPodOwned(ctx context.Context, reader client.Reader, dgd *v1beta1.DynamoGraphDeployment, pod *corev1.Pod) (owned, pending bool, err error) {
 	var object client.Object = pod
-	for depth := 0; depth < 6; depth++ {
+	for range 6 {
 		owner := metav1.GetControllerOf(object)
 		if owner == nil {
 			return false, false, nil

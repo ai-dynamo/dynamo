@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 func powerCapTestDGD(t *testing.T, provider string) *v1beta1.DynamoGraphDeployment {
@@ -56,19 +57,19 @@ func powerCapTestScheme(t *testing.T) *runtime.Scheme {
 
 // powerCapTestOwners constructs fresh complete owner chains for each test.
 func powerCapTestOwners(dgd *v1beta1.DynamoGraphDeployment, provider string) ([]client.Object, *corev1.Pod) {
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-pod", Namespace: dgd.Namespace, UID: "pod-uid", Labels: map[string]string{
+	pod := &corev1.Pod{Name: "worker-pod", Namespace: dgd.Namespace, UID: "pod-uid", Labels: map[string]string{
 		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name, consts.KubeLabelDynamoComponent: "worker", consts.KubeLabelDynamoComponentType: "worker", consts.KubeLabelDynamoSelector: "worker",
-	}, Annotations: map[string]string{consts.KubeAnnotationGPUPowerLimit: "300", "other": "retained"}}}
+	}, Annotations: map[string]string{consts.KubeAnnotationGPUPowerLimit: "300", "other": "retained"}}
 	if provider == "grove" {
-		pcs := &grovev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{Name: "pcs", Namespace: dgd.Namespace, UID: "pcs-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)}}}
-		group := &grovev1alpha1.PodCliqueScalingGroup{ObjectMeta: metav1.ObjectMeta{Name: "group", Namespace: dgd.Namespace, UID: "group-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pcs, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))}}}
-		clique := &grovev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Name: "clique", Namespace: dgd.Namespace, UID: "clique-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(group, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueScalingGroup"))}}}
+		pcs := &grovev1alpha1.PodCliqueSet{Name: "pcs", Namespace: dgd.Namespace, UID: "pcs-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)}}
+		group := &grovev1alpha1.PodCliqueScalingGroup{Name: "group", Namespace: dgd.Namespace, UID: "group-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pcs, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))}}
+		clique := &grovev1alpha1.PodClique{Name: "clique", Namespace: dgd.Namespace, UID: "clique-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(group, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueScalingGroup"))}}
 		pod.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(clique, grovev1alpha1.SchemeGroupVersion.WithKind("PodClique"))}
 		return []client.Object{pcs, group, clique}, pod
 	}
-	dcd := &v1beta1.DynamoComponentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "dcd", Namespace: dgd.Namespace, UID: "dcd-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)}}}
-	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "deployment", Namespace: dgd.Namespace, UID: "deployment-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dcd, v1beta1.DynamoComponentDeploymentGVK)}}}
-	rs := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "rs", Namespace: dgd.Namespace, UID: "rs-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(deployment, appsv1.SchemeGroupVersion.WithKind("Deployment"))}}}
+	dcd := &v1beta1.DynamoComponentDeployment{Name: "dcd", Namespace: dgd.Namespace, UID: "dcd-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)}}
+	deployment := &appsv1.Deployment{Name: "deployment", Namespace: dgd.Namespace, UID: "deployment-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dcd, v1beta1.DynamoComponentDeploymentGVK)}}
+	rs := &appsv1.ReplicaSet{Name: "rs", Namespace: dgd.Namespace, UID: "rs-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(deployment, appsv1.SchemeGroupVersion.WithKind("Deployment"))}}
 	pod.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(rs, appsv1.SchemeGroupVersion.WithKind("ReplicaSet"))}
 	return []client.Object{dcd, deployment, rs}, pod
 }
@@ -227,7 +228,7 @@ func testPowerCapComponentPreservation(t *testing.T, hashKey string) {
 	renderer := newDCDWorkloadRenderer(c, &configv1alpha1.OperatorConfiguration{}, &commoncontroller.RuntimeConfig{}, &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }})
 	template, err := renderer.generatePodTemplateSpec(context.Background(), dcd, dynamo.RoleMain, renderer.containerGPUCount(context.Background(), dcd))
 	require.NoError(t, err)
-	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: dcd.Name, Namespace: dcd.Namespace, UID: "deployment-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dcd, v1beta1.DynamoComponentDeploymentGVK)}}, Spec: appsv1.DeploymentSpec{Template: *template}}
+	deployment := &appsv1.Deployment{Name: dcd.Name, Namespace: dcd.Namespace, UID: "deployment-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dcd, v1beta1.DynamoComponentDeploymentGVK)}, Spec: appsv1.DeploymentSpec{Template: *template}}
 	require.NoError(t, c.Create(context.Background(), deployment))
 	workloads := newComponentWorkloadsReconciler(c, nil, newDGDWorkerRolloutReconciler(c, nil))
 	t.Log("An unchanged graph needs no exception on an operator-only upgrade")
@@ -257,7 +258,7 @@ func testPowerCapComponentPreservation(t *testing.T, hashKey string) {
 	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(dcd), dcd))
 	require.Equal(t, int32(3), *dcd.Spec.Replicas)
 	require.Equal(t, "300", dcd.Spec.PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit])
-	rs := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "scaled-rs", Namespace: dgd.Namespace, UID: "scaled-rs-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(deployment, appsv1.SchemeGroupVersion.WithKind("Deployment"))}}}
+	rs := &appsv1.ReplicaSet{Name: "scaled-rs", Namespace: dgd.Namespace, UID: "scaled-rs-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(deployment, appsv1.SchemeGroupVersion.WithKind("Deployment"))}}
 	require.NoError(t, c.Create(t.Context(), rs))
 	_, survivor := powerCapTestOwners(dgd, "component")
 	survivor.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(rs, appsv1.SchemeGroupVersion.WithKind("ReplicaSet"))}
@@ -374,7 +375,7 @@ func TestPowerCapGrovePreservation(t *testing.T) {
 					synced, _, err := workloads.reconcilePodCliqueSet(t.Context(), dgd, rendered)
 					require.NoError(t, err)
 					require.Equal(t, "300", podCliqueSetCliqueForComponent(synced, "worker").Annotations[consts.KubeAnnotationGPUPowerLimit])
-					child := &grovev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Name: dynamo.GroveComponentResourceName(pcs.Name, "worker"), Namespace: dgd.Namespace, UID: "scale-clique-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pcs, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))}}, Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}}
+					child := &grovev1alpha1.PodClique{Name: dynamo.GroveComponentResourceName(pcs.Name, "worker"), Namespace: dgd.Namespace, UID: "scale-clique-uid", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pcs, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))}, Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1}}
 					require.NoError(t, c.Create(t.Context(), child))
 					_, err = newGroveScaler(c).Reconcile(t.Context(), req, nil, false)
 					require.NoError(t, err)
@@ -417,6 +418,56 @@ func TestPowerCapGrovePreservation(t *testing.T) {
 				require.False(t, rendered.powerCapPreserved)
 			})
 		}
+	}
+}
+
+func TestPowerCapTerminalProgramSkipsPropagation(t *testing.T) {
+	for _, provider := range []string{"component", "grove"} {
+		t.Run(provider, func(t *testing.T) {
+			t.Log("Reject the workload pathway before any power-cap Pod observation or repair")
+			dgd := powerCapTestDGD(t, provider)
+			dgd.Status.ObservedGeneration = 1
+			if provider == "component" {
+				unsupported := *dgd.Spec.Components[0].DeepCopy()
+				unsupported.ComponentName = "external"
+				unsupported.ComponentType = v1beta1.ComponentTypeLPX
+				dgd.Spec.Components = append(dgd.Spec.Components, unsupported)
+			}
+			podLists, podPatches := 0, 0
+			c := fake.NewClientBuilder().WithScheme(powerCapTestScheme(t)).WithInterceptorFuncs(interceptor.Funcs{
+				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if _, ok := list.(*corev1.PodList); ok {
+						podLists++
+						return errors.New("unexpected Pod observation")
+					}
+					return c.List(ctx, list, opts...)
+				},
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if _, ok := obj.(*corev1.Pod); ok {
+						podPatches++
+					}
+					return c.Patch(ctx, obj, patch, opts...)
+				},
+			}).Build()
+			root := &DynamoGraphDeploymentReconciler{Client: c, Config: &configv1alpha1.OperatorConfiguration{}, RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: features.Gates{}}}
+			var program workloadProgram = root.newComponentProgram()
+			wantReason := "UnsupportedComponent"
+			if provider == "grove" {
+				program = root.newGroveProgram()
+				wantReason = string(reasonSelectedWorkloadProviderUnavailable)
+			}
+
+			t.Log("Preserve the terminal rejection without joining a retryable propagation failure")
+			result, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
+			require.True(t, errors.Is(err, reconcile.TerminalError(nil)))
+			require.NotContains(t, err.Error(), "unexpected Pod observation")
+			require.Zero(t, podLists)
+			require.Zero(t, podPatches)
+			require.Zero(t, result.RequeueAfter)
+			require.Equal(t, int64(1), result.Status.ObservedGeneration)
+			require.Equal(t, wantReason, meta.FindStatusCondition(result.Status.Conditions, "Ready").Reason)
+			require.Nil(t, meta.FindStatusCondition(result.Status.Conditions, powerCapPropagationCondition))
+		})
 	}
 }
 
@@ -645,7 +696,7 @@ func TestPowerCapComponentPreservationBoundaries(t *testing.T) {
 				require.NoError(t, c.Create(t.Context(), dcd))
 				template, err := renderer.generatePodTemplateSpec(t.Context(), dcd, dynamo.RoleMain, renderer.containerGPUCount(t.Context(), dcd))
 				require.NoError(t, err)
-				dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: dcd.Name, Namespace: dcd.Namespace, UID: types.UID(name + "-deployment-uid"), OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dcd, v1beta1.DynamoComponentDeploymentGVK)}}, Spec: appsv1.DeploymentSpec{Template: *template}}
+				dep := &appsv1.Deployment{Name: dcd.Name, Namespace: dcd.Namespace, UID: types.UID(name + "-deployment-uid"), OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dcd, v1beta1.DynamoComponentDeploymentGVK)}, Spec: appsv1.DeploymentSpec{Template: *template}}
 				require.NoError(t, c.Create(t.Context(), dep))
 				deployments[name] = dep
 			}

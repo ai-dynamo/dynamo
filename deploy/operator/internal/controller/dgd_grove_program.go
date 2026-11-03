@@ -135,12 +135,12 @@ func (p *groveProgram) Reconcile(
 
 	// Include propagation failures before acknowledging this generation or classifying readiness.
 	defer func() {
+		if errors.Is(retErr, reconcile.TerminalError(nil)) {
+			return
+		}
 		retErr = errors.Join(retErr, reconcilePowerCaps(ctx, capClient, req.DGD, caps, &programResult))
 		if retErr != nil {
 			programResult.Status.ObservedGeneration = incomingGeneration
-			if errors.Is(retErr, reconcile.TerminalError(nil)) {
-				return
-			}
 			reason := reasonFailedToReconcileResources
 			if classified, ok := workloadProgramFailureReason(retErr); ok {
 				reason = classified

@@ -81,12 +81,12 @@ func (p *componentProgram) Reconcile(
 
 	// Finalize propagation before classifying any final failure or acknowledging the generation.
 	defer func() {
+		if errors.Is(retErr, reconcile.TerminalError(nil)) {
+			return
+		}
 		retErr = errors.Join(retErr, reconcilePowerCaps(ctx, capClient, req.DGD, caps, &programResult))
 		if retErr != nil {
 			programResult.Status.ObservedGeneration = incomingGeneration
-			if errors.Is(retErr, reconcile.TerminalError(nil)) {
-				return
-			}
 			reason := reasonFailedToReconcileResources
 			if classified, ok := workloadProgramFailureReason(retErr); ok {
 				reason = classified
