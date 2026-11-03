@@ -189,5 +189,5 @@ fn active_requests_pickers_select_through_the_public_hosted_api() {
     let selected = picker
         .select(&[2, 4, 6], Some(&counts), &HostedSelectionRequest::new(32))
         .unwrap();
-    assert_eq!(selected.worker.worker_id, 4);
+    assert_eq!(selected, 4);
 }

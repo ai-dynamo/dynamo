@@ -9,18 +9,17 @@ use std::fmt;
 use crate::plugins::worker_selection::{
     ScoredWorkerCandidate, WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext,
 };
-use crate::protocols::{WorkerId, WorkerSelectionResult, WorkerWithDpRank};
-use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
+use crate::protocols::WorkerId;
+use crate::scheduling::types::{KvSchedulerError, WorkerSelectionPolicyError};
 
 /// Request metadata a routing host without the KV path supplies for one selection.
 ///
-/// The picker's [`WorkerSelectionContext`] reads it the way the KV router reads a
-/// scheduling request. Only the prompt length is set; every other value reads as the
-/// KV router's default for a request without it: no expected output length or
+/// Only the prompt length is set; every other [`WorkerSelectionContext`] value reads as
+/// the KV router's default for a request without it: no expected output length or
 /// temperature override, zero priorities, a block size of 0, and no session metadata.
+#[derive(Debug)]
 pub struct HostedSelectionRequest {
-    // Built once with every KV-only field empty; selection borrows it in place.
-    request: SchedulingRequest,
+    isl_tokens: usize,
 }
 
 impl HostedSelectionRequest {
@@ -28,30 +27,26 @@ impl HostedSelectionRequest {
     /// token IDs.
     #[inline]
     pub fn new(isl_tokens: usize) -> Self {
-        Self {
-            request: SchedulingRequest::hosted(isl_tokens),
-        }
+        Self { isl_tokens }
     }
 
     fn context(&self) -> WorkerSelectionContext<'_> {
         WorkerSelectionContext {
-            request: &self.request,
+            #[cfg(any(test, feature = "bench"))]
+            request: None,
+            isl_tokens: self.isl_tokens,
+            session_context: None,
+            // The host applies pins and session affinity before selecting.
+            affinity_target: None,
+            expected_output_tokens: None,
+            priority_jump: 0.0,
+            strict_priority: 0,
             request_blocks: 0,
             block_size: 0,
             track_prefill_tokens: false,
-            // The host applies pins and session affinity before selecting.
             pinned_worker: None,
             router_temperature_override: None,
         }
-    }
-}
-
-// The scheduling request implements no `Debug`, so list only the host-set value.
-impl fmt::Debug for HostedSelectionRequest {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("HostedSelectionRequest")
-            .field("isl_tokens", &self.request.isl_tokens)
-            .finish()
     }
 }
 
@@ -81,14 +76,14 @@ impl HostedWorkerPicker {
     ///
     /// `active_requests` returns the host's in-flight request count for a worker. It is
     /// required when [`Self::inputs`] contains [`WorkerInputs::ACTIVE_REQUESTS`] and
-    /// ignored otherwise. The result carries only the worker; its cache and load fields
-    /// are zero, because the hosted path tracks neither.
+    /// ignored otherwise. Returns the chosen worker; the hosted path tracks no cache or
+    /// load to report with it.
     pub fn select(
         &self,
         ids: &[WorkerId],
         active_requests: Option<&dyn Fn(WorkerId) -> u64>,
         request: &HostedSelectionRequest,
-    ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+    ) -> Result<WorkerId, KvSchedulerError> {
         self.select_with_rows(ids, active_requests, request, &OnceCell::new())
     }
 
@@ -99,7 +94,7 @@ impl HostedWorkerPicker {
         active_requests: Option<&dyn Fn(WorkerId) -> u64>,
         request: &HostedSelectionRequest,
         rows: &OnceCell<Vec<ScoredWorkerCandidate>>,
-    ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+    ) -> Result<WorkerId, KvSchedulerError> {
         if ids.is_empty() {
             return Err(KvSchedulerError::NoEndpoints);
         }
@@ -123,16 +118,7 @@ impl HostedWorkerPicker {
             }
             .into());
         };
-        Ok(WorkerSelectionResult {
-            worker: WorkerWithDpRank::from_worker_id(worker_id),
-            required_blocks: 0,
-            effective_overlap_blocks: 0.0,
-            cached_tokens: 0,
-            max_raw_cached_tokens: None,
-            selected_raw_cached_tokens: None,
-            potential_decode_blocks: 0,
-            kv_transfer_source: None,
-        })
+        Ok(worker_id)
     }
 }
 
@@ -156,6 +142,7 @@ mod tests {
     use crate::plugins::worker_selection::{
         RuntimePolicyError, WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerScorer,
     };
+    use crate::protocols::WorkerWithDpRank;
     use crate::scheduling::config::KvRouterConfig;
 
     const _: () = {
@@ -383,7 +370,7 @@ mod tests {
         let selected = hosted(LastRowPicker)
             .select_with_rows(&[3, 5, 9], None, &request(), &rows)
             .unwrap();
-        assert_eq!(selected.worker, WorkerWithDpRank::from_worker_id(9));
+        assert_eq!(selected, 9);
         assert!(rows.get().is_none());
     }
 
@@ -409,7 +396,7 @@ mod tests {
         let selected = hosted(CandidatesPicker)
             .select_with_rows(&[3, 5, 9], None, &request(), &rows)
             .unwrap();
-        assert_eq!(selected.worker, WorkerWithDpRank::from_worker_id(5));
+        assert_eq!(selected, 5);
         assert_eq!(rows.get().map(Vec::len), Some(3));
     }
 
@@ -428,7 +415,7 @@ mod tests {
         let selected = hosted(LeastActivePicker)
             .select(&[3, 5, 9], Some(&counts), &request())
             .unwrap();
-        assert_eq!(selected.worker, WorkerWithDpRank::from_worker_id(5));
+        assert_eq!(selected, 5);
         assert_eq!(reads.get(), 3);
 
         struct UndeclaredPicker;

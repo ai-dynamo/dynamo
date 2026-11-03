@@ -212,7 +212,14 @@ impl<'a> MaterializedSelectionInput<'a> {
             request,
             cache_snapshot: cache_snapshot(request),
             context: WorkerSelectionContext {
-                request,
+                #[cfg(any(test, feature = "bench"))]
+                request: Some(request),
+                isl_tokens: request.isl_tokens,
+                session_context: request.session_context.as_ref(),
+                affinity_target: request.affinity_target,
+                expected_output_tokens: request.expected_output_tokens,
+                priority_jump: request.priority_jump,
+                strict_priority: request.strict_priority,
                 request_blocks: request.request_blocks(block_size),
                 block_size,
                 track_prefill_tokens: request.track_prefill_tokens,
