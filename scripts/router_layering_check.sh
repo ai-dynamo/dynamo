@@ -2,20 +2,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Router crate layering gate. Checks, from `cargo tree` and `cargo metadata`,
-# that every router crate under lib/router has exactly the dependency edges
-# the split design allows, and that the protocol crate carries no executable
-# behavior.
+# Router crate layering gate. Checks, from `cargo metadata` and `cargo tree`,
+# that every router crate has exactly the Dynamo dependency edges the split
+# design allows and reaches none of the crates its layer forbids, that the
+# plugin crates depend on dynamo-kv-router alone, and that the protocol crate
+# carries no executable behavior.
 #
 # Usage: scripts/router_layering_check.sh [--host]
 #
-#   (no flag)  per-crate checks from TABLE below (exact router-dependency set,
-#              forbidden transport crates, exact direct dependencies, the
-#              protocol behavior grep), the composition crate's no-features
-#              tree and direct dependencies, the workspace feature check, and
+#   (no flag)  per-crate checks from TABLE below (exact direct Dynamo
+#              dependencies, forbidden crates anywhere in the closure), the
+#              protocol behavior grep, the composition crate's no-features
+#              tree, the plugin table, the workspace test-feature check, and
 #              the source rules (no #[doc(hidden)], no cross-crate glob
-#              re-export, README/AGENTS/CLAUDE per crate); pre-commit runs this
-#              in about ten seconds.
+#              re-export); pre-commit runs this in about ten seconds.
 #   --host     additionally resolve the host packages in HOSTS and
 #              HOSTS_EXTERNAL and fail if any table crate reaches a heavy
 #              external crate in the host's own graph (feature unification
@@ -30,44 +30,56 @@ export LC_ALL=C
 
 # ---------------------------------------------------------------------------
 # Table. One row per router crate; add a crate by adding one line. Fields are
-# separated by '|' (surrounding spaces ignored); '-' means "none" or "skip".
+# separated by '|' (surrounding spaces ignored); '-' means "none".
 #
-#   1 crate         cargo package name
-#   2 router deps   the EXACT set of ROUTER_FAMILY crates that may appear
-#                   anywhere in its normal dependency tree with default
-#                   features (compared by set equality, not upper bound)
-#   3 forbidden     external crates that must not appear anywhere in its
-#                   normal dependency tree with --all-features
-#   4 direct deps   the EXACT set of direct [dependencies] from Cargo.toml
-#                   (normal and optional, not dev or build), from
-#                   `cargo metadata`; '-' skips the check
-#   5 behavior dir  source directory grepped for executable behavior with
-#                   BEHAVIOR_RE (a line carrying ALLOW_MARK is exempt and
-#                   printed); '-' skips the check
+#   1 crate       cargo package name
+#   2 Dynamo deps the EXACT set of dynamo-* crates in its direct normal
+#                 [dependencies] (optional included, dev and build excluded),
+#                 from `cargo metadata`; the crate's AGENTS.md states the same
+#                 set
+#   3 forbidden   crates that must not appear anywhere in its normal
+#                 dependency tree with --all-features
 # ---------------------------------------------------------------------------
 TABLE=(
-  "dynamo-multimodal | - | dynamo-runtime dynamo-kv-router dynamo-router-protocol dynamo-kv-events dynamo-kv-hashing dynamo-kv-hints dynamo-kv-indexer dynamo-scheduler dynamo-tokens tokio anyhow tracing async-trait derive_builder thiserror prometheus axum hyper reqwest zmq | serde xxhash-rust | -"
-  "dynamo-router-protocol | - | dynamo-runtime dynamo-kv-router dynamo-kv-hashing dynamo-multimodal dynamo-tokens tokio anyhow tracing async-trait derive_builder prometheus axum hyper reqwest zmq | serde serde_json thiserror | lib/router/protocol/src"
-  "dynamo-kv-events | dynamo-router-protocol dynamo-kv-hashing dynamo-multimodal | dynamo-runtime dynamo-kv-router tokio anyhow async-trait prometheus axum hyper reqwest zmq | dynamo-kv-hashing dynamo-multimodal dynamo-router-protocol rmp-serde rustc-hash serde serde_json thiserror tracing | -"
-  "dynamo-kv-hints | dynamo-router-protocol dynamo-kv-events dynamo-kv-hashing dynamo-kv-indexer dynamo-multimodal | dynamo-runtime dynamo-kv-router dynamo-slot-tracker dynamo-session-affinity dynamo-worker-selection dynamo-admission dynamo-scheduler prometheus axum hyper reqwest zmq | dynamo-kv-hashing dynamo-kv-indexer dynamo-router-protocol rustc-hash serde serde_json | -"
-  "dynamo-zmq | - | dynamo-runtime dynamo-kv-router dynamo-router-protocol dynamo-kv-events dynamo-kv-hashing dynamo-multimodal prometheus axum hyper reqwest | anyhow tokio tracing zmq | -"
-  "dynamo-kv-indexer | dynamo-router-protocol dynamo-kv-events dynamo-kv-hashing dynamo-multimodal | dynamo-runtime dynamo-kv-router dynamo-kv-hints dynamo-zmq axum hyper reqwest zmq | anyhow arc-swap async-trait blake3 dashmap dynamo-kv-events dynamo-kv-hashing dynamo-router-protocol dynamo-tokens fastrand flume parking_lot prometheus rustc-hash seqlock serde serde_json slotmap thiserror tokio tokio-util tracing xxhash-rust | -"
-  "dynamo-slot-tracker | dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-kv-events dynamo-kv-hashing dynamo-multimodal dynamo-zmq axum hyper reqwest zmq prometheus | anyhow crossbeam-utils dashmap dynamo-router-protocol dynamo-tokens fastrand indexmap parking_lot rustc-hash seqlock serde slotmap thiserror tokio tokio-util tracing | -"
-  "dynamo-session-affinity | dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-slot-tracker dynamo-kv-events dynamo-kv-hashing dynamo-multimodal dynamo-zmq axum hyper reqwest zmq prometheus | blake3 dashmap dynamo-router-protocol serde thiserror tokio tokio-util tracing | -"
-  "dynamo-worker-selection | dynamo-router-protocol dynamo-slot-tracker | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-session-affinity dynamo-kv-events dynamo-kv-hashing dynamo-multimodal dynamo-zmq axum hyper reqwest zmq prometheus | async-trait crossbeam-queue dynamo-router-protocol dynamo-slot-tracker fastrand parking_lot rustc-hash serde serde_json thiserror tracing | -"
-  "dynamo-admission | dynamo-router-protocol dynamo-slot-tracker | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-session-affinity dynamo-worker-selection dynamo-kv-events dynamo-kv-hashing dynamo-multimodal dynamo-zmq axum hyper reqwest zmq prometheus | async-trait dynamo-router-protocol dynamo-slot-tracker dynamo-tokens futures-util ordered-float parking_lot rustc-hash serde serde_json thiserror tokio tokio-util tracing | -"
-  "dynamo-scheduler | dynamo-router-protocol dynamo-kv-hashing dynamo-kv-events dynamo-kv-hints dynamo-kv-indexer dynamo-slot-tracker dynamo-session-affinity dynamo-worker-selection dynamo-admission dynamo-multimodal | dynamo-runtime dynamo-kv-router dynamo-zmq axum hyper reqwest zmq prometheus | anyhow arc-swap async-trait blake3 crossbeam-queue dashmap derive_builder dynamo-admission dynamo-kv-events dynamo-kv-hashing dynamo-kv-hints dynamo-kv-indexer dynamo-multimodal dynamo-router-protocol dynamo-session-affinity dynamo-slot-tracker dynamo-tokens dynamo-worker-selection fastrand futures-util http once_cell ordered-float parking_lot rmp-serde rustc-hash serde serde_json thiserror tokio tokio-util tracing uuid zeroize | -"
-  "dynamo-error | - | dynamo-runtime dynamo-kv-router dynamo-router-protocol dynamo-kv-events dynamo-kv-hashing dynamo-multimodal dynamo-tokens tokio anyhow thiserror tracing async-trait derive_builder prometheus axum hyper reqwest zmq | serde serde_json | -"
-  "dynamo-kv-hashing | dynamo-multimodal | dynamo-runtime dynamo-kv-router dynamo-router-protocol tokio anyhow tracing async-trait prometheus axum hyper reqwest zmq | derive_builder dynamo-multimodal dynamo-tokens serde serde_json thiserror xxhash-rust | -"
+  "dynamo-error | - | dynamo-runtime dynamo-kv-router dynamo-router-protocol dynamo-kv-events dynamo-kv-hashing dynamo-multimodal dynamo-tokens tokio anyhow thiserror tracing async-trait derive_builder prometheus axum hyper reqwest zmq"
+  "dynamo-multimodal | - | dynamo-runtime dynamo-kv-router dynamo-router-protocol dynamo-kv-events dynamo-kv-hashing dynamo-kv-hints dynamo-kv-indexer dynamo-scheduler dynamo-tokens tokio anyhow tracing async-trait derive_builder thiserror prometheus axum hyper reqwest zmq"
+  "dynamo-router-protocol | - | dynamo-runtime dynamo-kv-router dynamo-kv-hashing dynamo-multimodal dynamo-tokens tokio anyhow tracing async-trait derive_builder prometheus axum hyper reqwest zmq"
+  "dynamo-kv-hashing | dynamo-multimodal dynamo-tokens | dynamo-runtime dynamo-kv-router dynamo-router-protocol tokio anyhow tracing async-trait prometheus axum hyper reqwest zmq"
+  "dynamo-kv-events | dynamo-kv-hashing dynamo-multimodal dynamo-router-protocol | dynamo-runtime dynamo-kv-router tokio anyhow async-trait prometheus axum hyper reqwest zmq"
+  "dynamo-zmq | - | dynamo-runtime dynamo-kv-router dynamo-router-protocol dynamo-kv-events dynamo-kv-hashing dynamo-multimodal prometheus axum hyper reqwest"
+  "dynamo-kv-hints | dynamo-kv-hashing dynamo-kv-indexer dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-slot-tracker dynamo-session-affinity dynamo-worker-selection dynamo-admission dynamo-scheduler prometheus axum hyper reqwest zmq"
+  "dynamo-kv-indexer | dynamo-kv-events dynamo-kv-hashing dynamo-router-protocol dynamo-tokens | dynamo-runtime dynamo-kv-router dynamo-kv-hints dynamo-zmq axum hyper reqwest zmq"
+  "dynamo-slot-tracker | dynamo-router-protocol dynamo-tokens | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-kv-events dynamo-kv-hashing dynamo-multimodal dynamo-zmq axum hyper reqwest zmq prometheus"
+  "dynamo-session-affinity | dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-slot-tracker dynamo-kv-events dynamo-kv-hashing dynamo-multimodal dynamo-zmq axum hyper reqwest zmq prometheus"
+  "dynamo-worker-selection | dynamo-router-protocol dynamo-slot-tracker | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-session-affinity dynamo-kv-events dynamo-kv-hashing dynamo-multimodal dynamo-zmq axum hyper reqwest zmq prometheus"
+  "dynamo-admission | dynamo-router-protocol dynamo-slot-tracker dynamo-tokens | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-session-affinity dynamo-worker-selection dynamo-kv-events dynamo-kv-hashing dynamo-multimodal dynamo-zmq axum hyper reqwest zmq prometheus"
+  "dynamo-scheduler | dynamo-admission dynamo-kv-events dynamo-kv-hashing dynamo-kv-hints dynamo-kv-indexer dynamo-multimodal dynamo-router-protocol dynamo-session-affinity dynamo-slot-tracker dynamo-tokens dynamo-worker-selection | dynamo-runtime dynamo-kv-router dynamo-zmq axum hyper reqwest zmq prometheus"
 )
 
-# Every crate the split produces (SPLIT_V2 3a-final). Column 2 counts any of
-# these found in a tree as a router dependency, so a crate that reaches for the
-# monolith or a sibling fails before that sibling has a row of its own.
+# Every crate the split produces (SPLIT_V2 3a-final). The composition check
+# below compares the ROUTER_FAMILY crates found in dynamo-kv-router's
+# no-features tree against COMPOSITION_ROUTER_DEPS.
 ROUTER_FAMILY="dynamo-multimodal dynamo-error dynamo-kv-hashing dynamo-router-protocol dynamo-kv-events dynamo-kv-hints dynamo-zmq dynamo-kv-indexer dynamo-slot-tracker dynamo-session-affinity dynamo-worker-selection dynamo-admission dynamo-scheduler dynamo-metrics dynamo-kv-router"
 
+# Plugin crates: a statically linked policy or classifier crate depends on
+# dynamo-kv-router alone and imports through plugins::prelude. Each row is the
+# EXACT set of dynamo-* direct normal dependencies (dev-dependencies may name
+# the kernel for tests and benches). The example catalog aggregates its sibling
+# example policies; the EPP example links the catalog into the gateway binary.
+PLUGIN_TABLE=(
+  "dynamo-custom-policy-builtin | dynamo-kv-router"
+  "dynamo-worker-selection-policy-catalog | dynamo-kv-router"
+  "dynamo-custom-policy-example-soft-pin-repin | dynamo-kv-router"
+  "dynamo-custom-policy-example-simple-filter-score-pick | dynamo-kv-router"
+  "dynamo-custom-policy-example-disagg-filter-score-pick | dynamo-kv-router"
+  "dynamo-custom-policy-example-simple-stacked-score-pick | dynamo-kv-router"
+  "dynamo-custom-policy-example-catalog | dynamo-kv-router dynamo-custom-policy-example-soft-pin-repin dynamo-custom-policy-example-simple-filter-score-pick dynamo-custom-policy-example-disagg-filter-score-pick dynamo-custom-policy-example-simple-stacked-score-pick"
+  "dynamo-custom-policy-example-epp | dynamo-kv-router dynamo-custom-policy-example-catalog dynamo-ext-proc"
+)
+
 # Features no normal (non-dev) dependency may enable on a table crate, checked
-# on the workspace graph (`cargo tree --workspace -e normal,features`).
+# on the workspace graph (`cargo tree --workspace -e normal,features`): the
+# protocol crate's chosen-value AttemptId constructors live behind them.
 ROUTER_TEST_FEATURES="testing bench profile"
 
 # --host: packages whose resolved graph must not route a table crate to one of
@@ -83,6 +95,8 @@ HOST_FORBIDDEN="axum hyper reqwest zmq"
 HOST_ADAPTER_EXEMPT="dynamo-zmq:zmq"
 
 # Executable behavior the protocol crate must not contain (SPLIT_V2 G9).
+PROTOCOL_CRATE="dynamo-router-protocol"
+PROTOCOL_BEHAVIOR_DIR="lib/router/protocol/src"
 BEHAVIOR_RE='\bdyn |\basync |std::fs|anyhow|tracing|derive_builder|#\[doc\(hidden\)\][[:space:]]*pub'
 ALLOW_MARK='// layering: allow'
 
@@ -155,34 +169,37 @@ print("\n".join(sorted({d["name"] for d in pkgs[0]["dependencies"] if d["kind"] 
 ' "$1" <"$tmp/meta.json"
 }
 
+# check_dynamo_direct PKG ALLOWED LABEL: the dynamo-* direct normal
+# dependencies of PKG equal ALLOWED (a space-separated set, '-' for none).
+check_dynamo_direct() {
+  local crate="$1" allowed="$2" label="$3"
+  direct_deps "$crate" | grep -E '^dynamo-' | lines >"$tmp/dd_found.txt" || true
+  words "$allowed" >"$tmp/dd_want.txt"
+  if cmp -s "$tmp/dd_found.txt" "$tmp/dd_want.txt"; then
+    ok "$crate: Dynamo deps == $(show <"$tmp/dd_want.txt") ($label)"
+  else
+    bad "$crate: Dynamo deps $(show <"$tmp/dd_found.txt") != allowed $(show <"$tmp/dd_want.txt") ($label)"
+  fi
+}
+
 table_crates=""
 
 # ---------------------------------------------------------------------------
 # Per-crate checks
 # ---------------------------------------------------------------------------
 for row in "${TABLE[@]}"; do
-  IFS='|' read -r crate allowed forbidden direct behavior_dir <<<"$row"
+  IFS='|' read -r crate allowed forbidden <<<"$row"
   crate="$(trim "$crate")"
   allowed="$(trim "$allowed")"
   forbidden="$(trim "$forbidden")"
-  direct="$(trim "$direct")"; : "${direct:=-}"
-  behavior_dir="$(trim "$behavior_dir")"; : "${behavior_dir:=-}"
   table_crates="$table_crates $crate"
 
   in_workspace "$crate" || die "$crate is not a workspace package (root Cargo.toml members)"
 
-  # Column 2: router dependencies, default features, exact set.
-  tree "$crate" "$crate" >"$tmp/tree.txt"
-  awk -v c="$crate" '$1 != c { print $1 }' "$tmp/tree.txt" | lines >"$tmp/names.txt"
-  comm -12 "$tmp/names.txt" <(words "$ROUTER_FAMILY") >"$tmp/found.txt"
-  words "$allowed" >"$tmp/want.txt"
-  if cmp -s "$tmp/found.txt" "$tmp/want.txt"; then
-    ok "$crate: router deps == $(show <"$tmp/want.txt") (default features)"
-  else
-    bad "$crate: router deps $(show <"$tmp/found.txt") != allowed $(show <"$tmp/want.txt") (default features)"
-  fi
+  # Column 2: direct Dynamo dependencies, exact set.
+  check_dynamo_direct "$crate" "$allowed" "direct"
 
-  # Column 3: forbidden external crates anywhere in the --all-features closure.
+  # Column 3: forbidden crates anywhere in the --all-features closure.
   tree "$crate" "$crate" --all-features >"$tmp/tree_all.txt"
   awk '{ print $1 }' "$tmp/tree_all.txt" | lines >"$tmp/names_all.txt"
   comm -12 "$tmp/names_all.txt" <(words "$forbidden") >"$tmp/hits.txt"
@@ -191,50 +208,38 @@ for row in "${TABLE[@]}"; do
   else
     bad "$crate: forbidden crates in its --all-features tree: $(show <"$tmp/hits.txt")"
   fi
-
-  # Column 4: direct dependency set, exact.
-  if [ "$direct" != "-" ]; then
-    direct_deps "$crate" | lines >"$tmp/direct.txt"
-    words "$direct" >"$tmp/direct_want.txt"
-    if cmp -s "$tmp/direct.txt" "$tmp/direct_want.txt"; then
-      ok "$crate: direct deps == $(show <"$tmp/direct_want.txt")"
-    else
-      bad "$crate: direct deps $(show <"$tmp/direct.txt") != required $(show <"$tmp/direct_want.txt")"
-    fi
-  fi
-
-  # Column 5: no executable behavior in the source tree.
-  if [ "$behavior_dir" != "-" ]; then
-    [ -d "$behavior_dir" ] || die "$crate: behavior directory $behavior_dir does not exist"
-    mapfile -t rs_files < <(find "$behavior_dir" -type f -name '*.rs' | sort)
-    [ "${#rs_files[@]}" -gt 0 ] || die "$crate: no .rs files under $behavior_dir"
-
-    rc=0
-    grep -nE -- "$BEHAVIOR_RE" "${rs_files[@]}" >"$tmp/grep.txt" || rc=$?
-    case $rc in 0|1) ;; *) die "grep failed ($rc) under $behavior_dir" ;; esac
-    # Attribute on its own line followed by a pub item: the single-line regex
-    # above cannot see it.
-    awk -v mark="$ALLOW_MARK" '
-      FNR == 1 { prev = "" }
-      prev ~ /^[[:space:]]*#\[doc\(hidden\)\][[:space:]]*$/ && $0 ~ /^[[:space:]]*pub/ \
-        && index(prev, mark) == 0 { print FILENAME ":" FNR ":" $0 }
-      { prev = $0 }
-    ' "${rs_files[@]}" >>"$tmp/grep.txt"
-
-    grep -F -- "$ALLOW_MARK" "$tmp/grep.txt" >"$tmp/grep_allowed.txt" || true
-    grep -vF -- "$ALLOW_MARK" "$tmp/grep.txt" >"$tmp/grep_bad.txt" || true
-    if [ -s "$tmp/grep_allowed.txt" ]; then
-      echo "note  $crate: lines exempted by '$ALLOW_MARK':"
-      sed 's/^/        /' "$tmp/grep_allowed.txt"
-    fi
-    if [ ! -s "$tmp/grep_bad.txt" ]; then
-      ok "$crate: no executable behavior under $behavior_dir (${#rs_files[@]} files, $(wc -l <"$tmp/grep_allowed.txt") exempt lines)"
-    else
-      bad "$crate: executable behavior under $behavior_dir ($(wc -l <"$tmp/grep_bad.txt") lines):"
-      sed 's/^/        /' "$tmp/grep_bad.txt"
-    fi
-  fi
 done
+
+# ---------------------------------------------------------------------------
+# Protocol: no executable behavior in the source tree (SPLIT_V2 G9). A line
+# carrying ALLOW_MARK is exempt and printed for the reviewer.
+# ---------------------------------------------------------------------------
+[ -d "$PROTOCOL_BEHAVIOR_DIR" ] || die "$PROTOCOL_CRATE: behavior directory $PROTOCOL_BEHAVIOR_DIR does not exist"
+mapfile -t rs_files < <(find "$PROTOCOL_BEHAVIOR_DIR" -type f -name '*.rs' | sort)
+[ "${#rs_files[@]}" -gt 0 ] || die "$PROTOCOL_CRATE: no .rs files under $PROTOCOL_BEHAVIOR_DIR"
+rc=0
+grep -nE -- "$BEHAVIOR_RE" "${rs_files[@]}" >"$tmp/grep.txt" || rc=$?
+case $rc in 0|1) ;; *) die "grep failed ($rc) under $PROTOCOL_BEHAVIOR_DIR" ;; esac
+# Attribute on its own line followed by a pub item: the single-line regex
+# above cannot see it.
+awk -v mark="$ALLOW_MARK" '
+  FNR == 1 { prev = "" }
+  prev ~ /^[[:space:]]*#\[doc\(hidden\)\][[:space:]]*$/ && $0 ~ /^[[:space:]]*pub/ \
+    && index(prev, mark) == 0 { print FILENAME ":" FNR ":" $0 }
+  { prev = $0 }
+' "${rs_files[@]}" >>"$tmp/grep.txt"
+grep -F -- "$ALLOW_MARK" "$tmp/grep.txt" >"$tmp/grep_allowed.txt" || true
+grep -vF -- "$ALLOW_MARK" "$tmp/grep.txt" >"$tmp/grep_bad.txt" || true
+if [ -s "$tmp/grep_allowed.txt" ]; then
+  echo "note  $PROTOCOL_CRATE: lines exempted by '$ALLOW_MARK':"
+  sed 's/^/        /' "$tmp/grep_allowed.txt"
+fi
+if [ ! -s "$tmp/grep_bad.txt" ]; then
+  ok "$PROTOCOL_CRATE: no executable behavior under $PROTOCOL_BEHAVIOR_DIR (${#rs_files[@]} files, $(wc -l <"$tmp/grep_allowed.txt") exempt lines)"
+else
+  bad "$PROTOCOL_CRATE: executable behavior under $PROTOCOL_BEHAVIOR_DIR ($(wc -l <"$tmp/grep_bad.txt") lines):"
+  sed 's/^/        /' "$tmp/grep_bad.txt"
+fi
 
 # ---------------------------------------------------------------------------
 # Composition crate: its adapters live behind features, so with no features it
@@ -258,44 +263,16 @@ if [ ! -s "$tmp/comp_hits.txt" ]; then
 else
   bad "$COMPOSITION: transport crates in its no-features tree: $(show <"$tmp/comp_hits.txt")"
 fi
-COMPOSITION_DIRECT_DEPS="anyhow arc-swap async-trait axum blake3 chrono crossbeam-queue dashmap derive_builder dynamo-admission dynamo-kv-events dynamo-kv-hashing dynamo-kv-hints dynamo-kv-indexer dynamo-multimodal dynamo-router-protocol dynamo-scheduler dynamo-session-affinity dynamo-slot-tracker dynamo-tokens dynamo-truthy dynamo-worker-selection dynamo-zmq fastrand flume futures-util http parking_lot prometheus reqwest rmp-serde rustc-hash serde serde_json serde_yaml thiserror tokio tokio-util tracing tracing-appender uuid xxhash-rust zeroize zmq"
-direct_deps "$COMPOSITION" | lines >"$tmp/comp_direct.txt"
-words "$COMPOSITION_DIRECT_DEPS" >"$tmp/comp_direct_want.txt"
-if cmp -s "$tmp/comp_direct.txt" "$tmp/comp_direct_want.txt"; then
-  ok "$COMPOSITION: direct deps == the $(wc -l <"$tmp/comp_direct_want.txt") listed (normal and optional)"
-else
-  bad "$COMPOSITION: direct deps $(show <"$tmp/comp_direct.txt") != required $(show <"$tmp/comp_direct_want.txt")"
-fi
 
 # ---------------------------------------------------------------------------
-# Plugin crates: a statically linked policy or classifier crate depends on
-# dynamo-kv-router alone and imports through plugins::prelude. Each row is the
-# EXACT set of dynamo-* direct normal dependencies (dev-dependencies may name
-# the kernel for tests and benches). The example catalog aggregates its sibling
-# example policies; the EPP example links the catalog into the gateway binary.
+# Plugin crates: dynamo-kv-router is the one Dynamo crate they name.
 # ---------------------------------------------------------------------------
-PLUGIN_TABLE=(
-  "dynamo-custom-policy-builtin | dynamo-kv-router"
-  "dynamo-worker-selection-policy-catalog | dynamo-kv-router"
-  "dynamo-custom-policy-example-soft-pin-repin | dynamo-kv-router"
-  "dynamo-custom-policy-example-simple-filter-score-pick | dynamo-kv-router"
-  "dynamo-custom-policy-example-disagg-filter-score-pick | dynamo-kv-router"
-  "dynamo-custom-policy-example-simple-stacked-score-pick | dynamo-kv-router"
-  "dynamo-custom-policy-example-catalog | dynamo-kv-router dynamo-custom-policy-example-soft-pin-repin dynamo-custom-policy-example-simple-filter-score-pick dynamo-custom-policy-example-disagg-filter-score-pick dynamo-custom-policy-example-simple-stacked-score-pick"
-  "dynamo-custom-policy-example-epp | dynamo-kv-router dynamo-custom-policy-example-catalog dynamo-ext-proc"
-)
 for row in "${PLUGIN_TABLE[@]}"; do
   IFS='|' read -r crate allowed <<<"$row"
   crate="$(trim "$crate")"
   allowed="$(trim "$allowed")"
   in_workspace "$crate" || die "$crate is not a workspace package (root Cargo.toml members)"
-  direct_deps "$crate" | grep -E '^dynamo-' | lines >"$tmp/plugin_found.txt" || true
-  words "$allowed" >"$tmp/plugin_want.txt"
-  if cmp -s "$tmp/plugin_found.txt" "$tmp/plugin_want.txt"; then
-    ok "$crate: Dynamo deps == $(show <"$tmp/plugin_want.txt") (plugin rule)"
-  else
-    bad "$crate: Dynamo deps $(show <"$tmp/plugin_found.txt") != allowed $(show <"$tmp/plugin_want.txt") (plugin rule)"
-  fi
+  check_dynamo_direct "$crate" "$allowed" "plugin rule"
 done
 
 words "$table_crates" >"$tmp/table_crates.txt"
@@ -323,10 +300,9 @@ fi
 
 # ---------------------------------------------------------------------------
 # Source rules over every router crate (SPLIT_V2 G10): no #[doc(hidden)] (an
-# item is documented or absent), no cross-crate glob re-export, and the
-# README.md / AGENTS.md / CLAUDE.md trio per crate. The composition crate is
-# exempt for its one remaining glob: `test_utils` over the kernel's test
-# helpers, compiled for tests and the `bench` feature only.
+# item is documented or absent) and no cross-crate glob re-export. The
+# composition crate is exempt for its one remaining glob: `test_utils` over
+# the kernel's test helpers, compiled for tests and the `bench` feature only.
 # ---------------------------------------------------------------------------
 ROUTER_CRATE_DIRS="lib/multimodal lib/error lib/router/protocol lib/router/kv-indexer lib/router/slot-tracker lib/router/session-affinity lib/router/worker-selection lib/router/admission lib/router/scheduler lib/kv-router lib/kv-events lib/kv-hashing lib/kv-hints lib/zmq"
 GLOB_EXEMPT_DIRS="lib/kv-router"
@@ -354,22 +330,6 @@ if [ ! -s "$tmp/globs.txt" ]; then
 else
   bad "router crates: cross-crate glob re-exports ($(wc -l <"$tmp/globs.txt") lines):"
   sed 's/^/        /' "$tmp/globs.txt"
-fi
-: >"$tmp/guides_bad.txt"
-for d in $ROUTER_CRATE_DIRS; do
-  [ -f "$d/README.md" ] || echo "$d/README.md missing" >>"$tmp/guides_bad.txt"
-  [ -f "$d/AGENTS.md" ] || echo "$d/AGENTS.md missing" >>"$tmp/guides_bad.txt"
-  if [ ! -f "$d/CLAUDE.md" ]; then
-    echo "$d/CLAUDE.md missing" >>"$tmp/guides_bad.txt"
-  elif [ "$(tr -d '[:space:]' <"$d/CLAUDE.md")" != "@AGENTS.md" ]; then
-    echo "$d/CLAUDE.md must contain exactly @AGENTS.md" >>"$tmp/guides_bad.txt"
-  fi
-done
-if [ ! -s "$tmp/guides_bad.txt" ]; then
-  ok "router crates: README.md, AGENTS.md, CLAUDE.md (@AGENTS.md) present in all $(words "$ROUTER_CRATE_DIRS" | wc -l) crates"
-else
-  bad "router crates: agent guides:"
-  sed 's/^/        /' "$tmp/guides_bad.txt"
 fi
 
 # ---------------------------------------------------------------------------
