@@ -126,6 +126,54 @@ def test_gpu_spec_rejects_uncertified_parallelism():
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
+def test_gpu_kvcr_port_probe_is_local_and_closed_before_native_start(monkeypatch):
+    spec = GPUOffloadingSpec(make_config())
+    region = SimpleNamespace(
+        shape=(spec.num_chunks, spec.row_bytes),
+        strides=(spec.row_bytes, 1),
+        tensor=SimpleNamespace(device=SimpleNamespace(index=0), data_ptr=lambda: 4096),
+    )
+    listener = MagicMock()
+    listener.__enter__.return_value = listener
+    listener.getsockname.return_value = ("127.0.0.1", 49152)
+    socket_factory = MagicMock(return_value=listener)
+    control = object()
+    control_factory = MagicMock(return_value=control)
+    client = object()
+    forwarded = []
+
+    def create_kvcr(config, bindings, backends):
+        listener.__exit__.assert_called_once_with(None, None, None)
+        assert config.nixl_listen_port == 49152
+        assert bindings.framework_control is control
+        forwarded.append(backends)
+        return client
+
+    monkeypatch.setattr(gpu_offloading.socket, "socket", socket_factory)
+    monkeypatch.setattr(gpu_offloading, "ZmqPeerControlChannel", control_factory)
+    monkeypatch.setattr(gpu_offloading, "KVCR", create_kvcr)
+    manager = GPUKVCRSecondaryTierManager(
+        spec,
+        region,
+        {
+            "compatibility_domain": spec.base_domain,
+            "control_ports": [49153],
+            "control_host": "0.0.0.0",
+            "control_advertise_host": "gpu-cache.example",
+            "router_capabilities": ["router_hint_gpu_direct"],
+        },
+    )
+
+    socket_factory.assert_called_once_with()
+    listener.bind.assert_called_once_with(("127.0.0.1", 0))
+    listener.getsockname.assert_called_once_with()
+    control_factory.assert_called_once_with("0.0.0.0", 49153, "gpu-cache.example")
+    assert manager._kvcr is client
+    assert forwarded[0].framework_regions[0].addr == 4096
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
 def test_gpu_inventory_has_its_own_medium(monkeypatch):
     event = BlockRemoved(block_hashes=[123], medium="CPU")
     monkeypatch.setattr(OffloadingConnector, "take_events", lambda self: iter([event]))

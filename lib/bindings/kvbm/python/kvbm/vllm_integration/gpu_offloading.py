@@ -263,7 +263,7 @@ class GPUKVCRSecondaryTierManager(KVCRSecondaryTierManager):
             config.get("control_advertise_host") or socket.gethostname(),
         )
         with socket.socket() as listener:
-            listener.bind(("", 0))
+            listener.bind(("127.0.0.1", 0))
             native_port = listener.getsockname()[1]
         try:
             self._kvcr = KVCR(
