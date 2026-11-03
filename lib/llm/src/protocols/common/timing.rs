@@ -215,6 +215,19 @@ pub struct RoutingData {
 }
 
 impl RequestTracker {
+    /// Apply metadata forwarded by a standalone router to this request's tracker.
+    pub(crate) fn ingest_routing_data(&self, data: RoutingData) {
+        if let Some(timing) = data.timing {
+            self.set_external_timing(timing);
+        }
+        if let Some(worker_id) = data.worker_id {
+            self.set_external_worker_info(worker_id);
+        }
+        if let Some(token_ids) = data.token_ids {
+            self.set_external_query_token_ids(token_ids);
+        }
+    }
+
     /// Create a new request tracker, capturing the current time as request received.
     pub fn new() -> Self {
         let now = Instant::now();

@@ -242,6 +242,7 @@ impl pb::control_server::Control for FakeTrtllm {
             } else {
                 Some(4096)
             },
+            supports_multimodal: Some(false),
             ..Default::default()
         }))
     }

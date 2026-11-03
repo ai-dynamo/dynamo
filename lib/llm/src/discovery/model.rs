@@ -858,24 +858,36 @@ impl Model {
 
     // -- Worker monitoring (aggregated across WorkerSets) --
 
-    /// Get load threshold config from the first WorkerSet with a threshold handle.
-    /// When `config` is Some, updates every handle. WorkerSets may share a handle.
+    /// Get load threshold config from the first WorkerSet with a threshold handle,
+    /// preferring an enabled one. When `config` is Some, updates every handle.
+    /// WorkerSets may share a handle.
     pub fn load_threshold_config(
         &self,
         config: Option<&LoadThresholdConfig>,
     ) -> Option<LoadThresholdConfig> {
-        let mut result = None;
-        for worker_set in self.worker_sets.load().values() {
-            if let Some(ref thresholds) = worker_set.load_thresholds {
-                if let Some(cfg) = config {
-                    thresholds.update(cfg);
-                }
-                if result.is_none() {
-                    result = Some(thresholds.get());
-                }
-            }
+        let worker_sets = self.worker_sets.load();
+        let handles: Vec<_> = worker_sets
+            .values()
+            .filter_map(|worker_set| worker_set.load_thresholds.as_ref())
+            .collect();
+        if let Some(cfg) = config {
+            handles.iter().for_each(|handle| handle.update(cfg));
         }
-        result
+        handles
+            .iter()
+            .find(|handle| handle.is_enabled())
+            .or(handles.first())
+            .map(|handle| handle.get())
+    }
+
+    /// Whether any WorkerSet has an enabled threshold handle.
+    pub(crate) fn accepts_load_thresholds(&self) -> bool {
+        self.worker_sets.load().values().any(|worker_set| {
+            worker_set
+                .load_thresholds
+                .as_ref()
+                .is_some_and(|thresholds| thresholds.is_enabled())
+        })
     }
 
     /// Total worker count across all WorkerSets.
