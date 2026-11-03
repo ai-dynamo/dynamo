@@ -492,15 +492,15 @@ impl ModelManager {
         views
     }
 
-    /// Return the canonical name only when the published catalog has one base model.
-    /// Alias mirrors and models containing only preloaded LoRA adapters are not candidates.
-    pub(crate) fn unique_committed_canonical_base_model(&self) -> Option<String> {
+    /// Infer a bare source only from runtime-capable text generation bases.
+    pub(crate) fn unique_runtime_lora_base_model(&self) -> Option<String> {
         let catalog = self.catalog.load();
         let mut bases = catalog
             .models
             .iter()
             .filter(|(name, model)| {
-                !catalog.aliases.contains_key(name.as_str()) && model.has_base_deployment()
+                !catalog.aliases.contains_key(name.as_str())
+                    && model.has_runtime_lora_base_deployment()
             })
             .map(|(name, _)| name.clone());
         let base = bases.next()?;
@@ -3734,94 +3734,70 @@ mod tests {
     }
 
     #[test]
-    fn unique_committed_base_ignores_aliases_and_rejects_multiple_primaries() {
-        let mm = ModelManager::new();
-        let mut base_card = ModelDeploymentCard::default();
-        base_card.model_input = crate::model_type::ModelInput::Tokens;
-        assert!(mm.add_worker_set(
-            "base-a",
-            "ns1",
-            WorkerSet::new("ns1".to_string(), "abc".to_string(), base_card),
-        ));
-        assert!(mm.register_alias("base-a-alias", "base-a"));
-        assert!(mm.add_worker_set_arc(
-            "base-a-alias",
-            "ns1",
-            Arc::new(make_worker_set("ns1", "abc")),
-        ));
-        assert_eq!(
-            mm.unique_committed_canonical_base_model().as_deref(),
-            Some("base-a")
-        );
-
-        let mut adapter_card = ModelDeploymentCard::with_name_only("adapter");
-        adapter_card.lora = Some(crate::model_card::LoraInfo {
-            name: "adapter".to_string(),
-            max_gpu_lora_count: None,
-        });
-        assert!(mm.add_worker_set(
-            "adapter",
-            "adapter-ns",
-            WorkerSet::new(
-                "adapter-ns".to_string(),
-                adapter_card.mdcsum().to_string(),
-                adapter_card,
-            ),
-        ));
-        assert_eq!(
-            mm.unique_committed_canonical_base_model().as_deref(),
-            Some("base-a")
-        );
-
-        let mut second_base_card = ModelDeploymentCard::default();
-        second_base_card.model_input = crate::model_type::ModelInput::Tokens;
-        assert!(mm.add_worker_set(
-            "base-b",
-            "ns2",
-            WorkerSet::new("ns2".to_string(), "def".to_string(), second_base_card,),
-        ));
-        assert_eq!(mm.unique_committed_canonical_base_model(), None);
-    }
-
-    #[test]
-    fn runtime_lora_base_requires_frontend_preprocessing() {
+    fn runtime_lora_base_inference_uses_live_eligible_generation_workers() {
         let mm = ModelManager::new();
         assert!(mm.add_worker_set("text-base", "text", make_worker_set("text", "abc")));
-        assert_eq!(
-            mm.unique_committed_canonical_base_model().as_deref(),
-            Some("text-base")
-        );
-        assert!(
-            !mm.get_committed_model("text-base")
-                .unwrap()
-                .has_runtime_lora_base_deployment()
-        );
-
         let mut token_card = ModelDeploymentCard::default();
         token_card.model_input = crate::model_type::ModelInput::Tokens;
-        assert!(mm.add_worker_set(
-            "token-base",
-            "tokens",
-            WorkerSet::new("tokens".to_string(), "def".to_string(), token_card),
+        token_card
+            .runtime_config
+            .taints
+            .insert("dynamo.runtime-lora/v2".into());
+        token_card
+            .runtime_config
+            .set_engine_specific("supports_runtime_lora_resolution", true)
+            .unwrap();
+        token_card
+            .runtime_config
+            .set_engine_specific("runtime_lora_protocol_versions", vec![2_u32])
+            .unwrap();
+        token_card
+            .runtime_config
+            .set_engine_specific("runtime_lora_schemes", vec!["custom"])
+            .unwrap();
+        let mut token_ws = WorkerSet::new("tokens".into(), "def".into(), token_card.clone());
+        token_ws.chat_engine = Some(make_chat_engine());
+        let (_instances, instance_rx) = tokio::sync::watch::channel(vec![1]);
+        let (configs, config_rx) =
+            tokio::sync::watch::channel(HashMap::from([(1, token_card.runtime_config.clone())]));
+        token_ws.set_instance_watcher(instance_rx);
+        token_ws.set_runtime_config_watcher(config_rx);
+        assert!(mm.add_worker_set("token-base", "tokens", token_ws));
+        assert!(mm.register_alias("base-alias", "token-base"));
+        assert!(mm.add_worker_set_arc(
+            "base-alias",
+            "alias",
+            Arc::new(make_worker_set("alias", "alias")),
         ));
-        assert_eq!(mm.unique_committed_canonical_base_model(), None);
-
-        assert!(
-            mm.get_committed_model("token-base")
-                .unwrap()
-                .has_runtime_lora_base_deployment()
+        assert_eq!(
+            mm.unique_runtime_lora_base_model().as_deref(),
+            Some("token-base")
         );
         assert!(mm.add_worker_set(
             "token-base",
             "mixed-text",
             make_worker_set("mixed-text", "ghi"),
         ));
-        assert_eq!(mm.unique_committed_canonical_base_model(), None);
-        assert!(
-            !mm.get_committed_model("token-base")
-                .unwrap()
-                .has_runtime_lora_base_deployment()
+        assert_eq!(
+            mm.unique_runtime_lora_base_model().as_deref(),
+            Some("token-base")
         );
+        let mut second_ws = WorkerSet::new("second".into(), "second".into(), token_card.clone());
+        second_ws.chat_engine = Some(make_chat_engine());
+        let (_second_instances, second_instance_rx) = tokio::sync::watch::channel(vec![2]);
+        let (_second_configs, second_config_rx) =
+            tokio::sync::watch::channel(HashMap::from([(2, token_card.runtime_config)]));
+        second_ws.set_instance_watcher(second_instance_rx);
+        second_ws.set_runtime_config_watcher(second_config_rx);
+        assert!(mm.add_worker_set("other-base", "second", second_ws));
+        assert_eq!(mm.unique_runtime_lora_base_model(), None);
+        mm.remove_worker_set("other-base", "second");
+        assert_eq!(
+            mm.unique_runtime_lora_base_model().as_deref(),
+            Some("token-base")
+        );
+        configs.send_replace(HashMap::new());
+        assert_eq!(mm.unique_runtime_lora_base_model(), None);
     }
 
     #[test]

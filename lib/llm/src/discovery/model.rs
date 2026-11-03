@@ -258,28 +258,13 @@ impl Model {
         self.worker_sets.load().values().cloned().collect()
     }
 
-    /// Whether this catalog model has at least one non-LoRA deployment.
-    pub(crate) fn has_base_deployment(&self) -> bool {
-        self.worker_sets
-            .load()
-            .values()
-            .any(|worker_set| worker_set.card().lora.is_none())
-    }
-
     /// Whether this catalog model can carry request-time LoRA metadata through
     /// frontend preprocessing to a non-LoRA base deployment.
     pub(crate) fn has_runtime_lora_base_deployment(&self) -> bool {
-        let mut has_base_deployment = false;
-        for worker_set in self.worker_sets.load().values() {
-            let card = worker_set.card();
-            if card.lora.is_none() {
-                has_base_deployment = true;
-                if !card.requires_preprocessing() {
-                    return false;
-                }
-            }
-        }
-        has_base_deployment
+        self.worker_sets.load().values().any(|worker_set| {
+            (worker_set.has_chat_engine() || worker_set.has_completions_engine())
+                && worker_set.supports_runtime_lora()
+        })
     }
 
     /// Build an immutable membership snapshot for request-plane publication.
@@ -1189,6 +1174,13 @@ mod tests {
         let expected: OpenAIChatCompletionsStreamingEngine = StubServingEngine::new();
         let expected_completions: OpenAICompletionsStreamingEngine = StubServingEngine::new();
         let mut capable = WorkerSet::new("new".to_string(), "new".to_string(), card);
+        let (_instances, instance_rx) = watch::channel(vec![1]);
+        let (_configs, config_rx) = watch::channel(std::collections::HashMap::from([(
+            1,
+            capable.card().runtime_config.clone(),
+        )]));
+        capable.set_instance_watcher(instance_rx);
+        capable.set_runtime_config_watcher(config_rx);
         capable.chat_engine = Some(expected.clone());
         capable.completions_engine = Some(expected_completions.clone());
         model.add_worker_set("new".to_string(), Arc::new(capable));

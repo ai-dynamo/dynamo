@@ -1246,7 +1246,7 @@ fn runtime_lora_selection(
         || {
             let canonical = state
                 .manager()
-                .unique_committed_canonical_base_model()
+                .unique_runtime_lora_base_model()
                 .ok_or(RuntimeLoraError::BaseModelRequired)?;
             if state
                 .manager()
@@ -1489,11 +1489,7 @@ async fn completions_single(
         // Same pre-commit check as chat_completions: a backend error before
         // the first item maps to its HTTP status instead of an SSE frame
         // behind an HTTP 200.
-        let error_check = if runtime_lora.is_some() {
-            BackendErrorCheck::UntilFirstEvent
-        } else {
-            state.streaming_backend_error_check()
-        };
+        let error_check = state.streaming_backend_error_check();
         let stream =
             until_client_disconnects(check_for_backend_error_info(stream, error_check), &ctx)
                 .await
@@ -1834,9 +1830,7 @@ async fn completions_batch(
         all_streams.push(remapped_stream);
     }
 
-    let check = if runtime_lora.is_some() {
-        BackendErrorCheck::UntilFirstEvent
-    } else if streaming {
+    let check = if streaming {
         state.streaming_backend_error_check()
     } else {
         BackendErrorCheck::UntilFirstEvent
@@ -3869,11 +3863,7 @@ async fn chat_completions(
         // `UntilFirstEvent` ends on the first event or on the client
         // disconnecting, and on nothing else.
         let stream = custom_tools.stream(stream);
-        let error_check = if runtime_lora.is_some() {
-            BackendErrorCheck::UntilFirstEvent
-        } else {
-            state.streaming_backend_error_check()
-        };
+        let error_check = state.streaming_backend_error_check();
         let stream =
             until_client_disconnects(check_for_backend_error_info(stream, error_check), &ctx)
                 .await
@@ -10251,6 +10241,29 @@ mod tests {
         );
         assert_eq!(returned[0].event.as_deref(), Some(ANNOTATION_REQUEST_ID));
         assert_eq!(returned[1].id.as_deref(), Some("msg-1"));
+    }
+
+    #[tokio::test]
+    async fn bounded_precommit_preserves_late_backend_error_for_sse() {
+        use futures::StreamExt;
+
+        let stream = async_stream::stream! {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            yield Annotated::<serde_json::Value>::from_error("backend failure");
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            check_for_backend_error_info(
+                stream,
+                BackendErrorCheck::Bounded(std::time::Duration::from_millis(5)),
+            ),
+        )
+        .await
+        .expect("bounded precommit must return before a silent backend");
+        let Ok(mut stream) = result else {
+            panic!("the late error must be delivered in the stream");
+        };
+        assert!(stream.next().await.unwrap().error.is_some());
     }
 
     #[tokio::test]

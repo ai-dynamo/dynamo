@@ -249,6 +249,9 @@ pub struct WorkerSet {
     /// None for in-process models (http/grpc) which don't have a discovery client.
     instance_count_rx: Option<watch::Receiver<Vec<u64>>>,
 
+    /// Live capability metadata for the endpoint, not the representative card.
+    runtime_configs: Option<super::RuntimeConfigWatch>,
+
     /// Cancels background work created while materializing this WorkerSet.
     lifecycle_cancellation: Option<CancellationToken>,
 
@@ -259,15 +262,29 @@ pub struct WorkerSet {
 
 impl WorkerSet {
     pub(crate) fn supports_runtime_lora(&self) -> bool {
-        crate::lora::runtime::supports_runtime_lora(
-            &self.card.runtime_config,
-            self.card.lora.is_none(),
-            self.card.requires_preprocessing(),
-            matches!(
-                self.card.worker_type,
-                None | Some(crate::worker_type::WorkerType::Aggregated)
-            ),
-        )
+        let Some(configs) = &self.runtime_configs else {
+            return false;
+        };
+        let Some(available) = self.available_worker_ids() else {
+            return false;
+        };
+        if configs.has_changed().is_err() {
+            return false;
+        }
+        let configs = configs.borrow();
+        available.into_iter().any(|id| {
+            configs.get(&id).is_some_and(|config| {
+                crate::lora::runtime::supports_runtime_lora(
+                    config,
+                    self.card.lora.is_none(),
+                    self.card.requires_preprocessing(),
+                    matches!(
+                        self.card.worker_type,
+                        None | Some(crate::worker_type::WorkerType::Aggregated)
+                    ),
+                )
+            })
+        })
     }
     /// Create an unbound set; engines and discovery admission are installed later.
     pub fn new(namespace: String, mdcsum: String, card: ModelDeploymentCard) -> Self {
@@ -296,6 +313,7 @@ impl WorkerSet {
             prefill_router: None,
             encoder_router: None,
             instance_count_rx: None,
+            runtime_configs: None,
             lifecycle_cancellation: None,
             allocator_trim: None,
             allocator_trim_wrapped: false,
@@ -502,6 +520,10 @@ impl WorkerSet {
         self.instance_count_rx = Some(rx);
     }
 
+    pub(crate) fn set_runtime_config_watcher(&mut self, rx: super::RuntimeConfigWatch) {
+        self.runtime_configs = Some(rx);
+    }
+
     pub(crate) fn decision_admissions(&self) -> Option<&watch::Receiver<Vec<u64>>> {
         self.topology_target
             .as_ref()
@@ -617,6 +639,7 @@ impl WorkerSet {
             prefill_router: self.prefill_router.clone(),
             encoder_router: self.encoder_router.clone(),
             instance_count_rx: self.instance_count_rx.clone(),
+            runtime_configs: self.runtime_configs.clone(),
             lifecycle_cancellation: self
                 .lifecycle_cancellation
                 .as_ref()
@@ -671,6 +694,40 @@ mod tests {
             mdcsum.to_string(),
             ModelDeploymentCard::default(),
         )
+    }
+
+    #[test]
+    fn runtime_lora_capabilities_follow_live_worker_configs() {
+        let mut card = ModelDeploymentCard::default();
+        card.model_input = crate::model_type::ModelInput::Tokens;
+        let mut capable = card.runtime_config.clone();
+        capable.taints.insert("dynamo.runtime-lora/v2".into());
+        capable
+            .set_engine_specific("supports_runtime_lora_resolution", true)
+            .unwrap();
+        capable
+            .set_engine_specific("runtime_lora_protocol_versions", vec![2_u32])
+            .unwrap();
+        capable
+            .set_engine_specific("runtime_lora_schemes", vec!["custom"])
+            .unwrap();
+        let mut workers = WorkerSet::new("ns".into(), "model".into(), card);
+        let (instances, instance_rx) = watch::channel(vec![1]);
+        let (configs, config_rx) = watch::channel(std::collections::HashMap::new());
+        workers.set_instance_watcher(instance_rx);
+        workers.set_runtime_config_watcher(config_rx);
+        assert!(!workers.supports_runtime_lora());
+        configs.send_replace(std::collections::HashMap::from([(2, capable.clone())]));
+        assert!(!workers.supports_runtime_lora());
+        instances.send_replace(vec![1, 2]);
+        assert!(workers.supports_runtime_lora());
+        configs.send_replace(std::collections::HashMap::from([
+            (2, capable.clone()),
+            (1, capable),
+        ]));
+        assert!(workers.supports_runtime_lora());
+        configs.send_replace(std::collections::HashMap::new());
+        assert!(!workers.supports_runtime_lora());
     }
 
     #[test]
