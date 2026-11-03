@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Global Discovery Service with pools from Karmada, applied directly to the hub
-# cluster (not through Karmada). Replace IMAGE with the pushed image, for example:
-#   sed "s#IMAGE#<registry>/global-discovery-service:<tag>#" global-discovery-service.yaml | kubectl apply -f -
+# cluster (not through Karmada). Replace IMAGE with the pushed image, for example
+# from the repository root:
+#   sed "s#IMAGE#<registry>/global-discovery-service:<tag>#" container/global-discovery-service.yaml | kubectl apply -f -
 # It needs only read access to EndpointSlices. PoolRelays register their pools
 # with it (POST /pools), and it lists a pool while its registration is live and
 # Karmada imports a Ready endpoint of its `<DGD name>-pool-relay` Service. The

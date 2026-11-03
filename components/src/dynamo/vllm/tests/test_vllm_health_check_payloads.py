@@ -9,7 +9,10 @@ overrides. No vllm handler branches on the marker today; this is wire-format
 parity with trtllm/sglang for any future marker-gated behavior.
 """
 
+import base64
+import io
 import json
+import wave
 
 import pytest
 
@@ -19,11 +22,13 @@ from dynamo.vllm.health_check import (
     VllmHealthCheckPayload,
     VllmOmniHealthCheckPayload,
     VllmPrefillHealthCheckPayload,
+    VllmTranscriptionHealthCheckPayload,
 )
 
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -32,6 +37,10 @@ PAYLOAD_FACTORIES = [
     pytest.param(VllmHealthCheckPayload, id="VllmHealthCheckPayload"),
     pytest.param(VllmPrefillHealthCheckPayload, id="VllmPrefillHealthCheckPayload"),
     pytest.param(VllmOmniHealthCheckPayload, id="VllmOmniHealthCheckPayload"),
+    pytest.param(
+        VllmTranscriptionHealthCheckPayload,
+        id="VllmTranscriptionHealthCheckPayload",
+    ),
     pytest.param(
         VllmEmbeddingHealthCheckPayload,
         id="VllmEmbeddingHealthCheckPayload",
@@ -89,3 +98,19 @@ def test_embedding_payload_omits_model_when_no_name():
     assert "model" not in payload
     assert payload.get("input") == "probe"
     assert payload.get(HEALTH_CHECK_KEY) is True
+
+
+def test_transcription_payload_contains_valid_short_wav():
+    payload = VllmTranscriptionHealthCheckPayload(model_name="whisper").to_dict()
+
+    assert payload.get("model") == "whisper"
+    assert payload.get("language") == "en"
+    assert payload.get("response_format") == "json"
+    assert payload.get(HEALTH_CHECK_KEY) is True
+
+    audio = base64.b64decode(payload["audio_b64"], validate=True)
+    with wave.open(io.BytesIO(audio), "rb") as wav:
+        assert wav.getnchannels() == 1
+        assert wav.getsampwidth() == 2
+        assert wav.getframerate() == 16_000
+        assert wav.getnframes() == 1_600

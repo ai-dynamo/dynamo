@@ -239,6 +239,12 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
             self.router_mode = "kv"
         self.apply_router_config()
 
+        # Fail at startup on an invalid DYN_MM_* value, not on every request.
+        # Imported here: dynamo.common.http imports this configuration package.
+        from dynamo.common.http.url_validator import UrlValidationPolicy
+
+        UrlValidationPolicy.from_env()
+
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
             raise ValueError(
                 "--tls-cert-path and --tls-key-path must be provided together"
@@ -350,7 +356,9 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
         if self.conditional_disagg_enabled and not self.use_kv_events:
             raise ValueError("--router-conditional-disagg requires --router-kv-events")
         self.validate_rejection_thresholds()
-        self.log_rejection_thresholds()
+        # Direct mode ignores the thresholds.
+        if self.router_mode != "direct":
+            self.log_rejection_thresholds()
 
 
 @register_encoder(FrontendConfig)
