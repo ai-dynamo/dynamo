@@ -53,7 +53,7 @@ See the [feature support matrix](../../reference/general/compatibility.mdx#featu
 ## Resolve Adapters at Request Time
 
 > [!NOTE]
-> These instructions require a build containing the protocol-version-2 frontend routing, common Python resolver, and vLLM integration. Confirm those capabilities in your build; environment variables alone do not add them.
+> Request-time resolution is under review and is not available on `main` or in released builds. These instructions require a custom build containing the protocol-version-2 frontend routing, common Python resolver, and vLLM integration; environment variables alone do not add them.
 
 **Experimental.** Protocol version 2 supports aggregated vLLM workers using Dynamo frontend tokenization. Disaggregated vLLM workers and `--use-vllm-tokenizer` reject this configuration at startup. SGLang and TensorRT-LLM do not implement this plugin integration; a frontend with no compatible worker rejects runtime requests.
 
