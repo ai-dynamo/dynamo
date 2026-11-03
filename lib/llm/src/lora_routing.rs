@@ -197,7 +197,10 @@ impl CandidatePolicy for LoraCandidatePolicy {
         };
         Ok(Some(CandidateSelection {
             worker,
-            fallback: candidates.into_iter().collect(),
+            fallback: match pin {
+                Some(_) => HashSet::from([worker]),
+                None => candidates.into_iter().collect(),
+            },
             lease,
         }))
     }

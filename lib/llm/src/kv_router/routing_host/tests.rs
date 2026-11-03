@@ -702,12 +702,20 @@ async fn runtime_lora_pin_is_rechecked_after_transport_fallback() {
     let dispatch = Arc::new(CompletedBuiltinDispatch::default());
     let host = RoutingHost::builder(client, RouterMode::RoundRobin)
         .load_context(load_context)
-        .candidate_policy(Some(policy))
+        .candidate_policy(Some(policy.clone()))
         .dispatch(dispatch.clone() as LlmDispatch)
         .build()
         .await
         .unwrap();
     for pinned_worker in [101, 202] {
+        let selected = policy
+            .select(&input, Some(pinned_worker), &|| vec![101, 202], &|| {
+                vec![101, 202]
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.worker, pinned_worker);
+        assert_eq!(selected.fallback, HashSet::from([pinned_worker]));
         let mut pinned = input.clone();
         pinned.routing_mut().backend_instance_id = Some(pinned_worker);
         let mut stream = host.generate(Context::new(pinned)).await.unwrap();
@@ -759,7 +767,11 @@ async fn runtime_lora_pin_is_rechecked_after_transport_fallback() {
         )
         .unwrap();
     let error = host.generate(Context::new(input)).await.unwrap_err();
-    assert!(error.to_string().contains("runtime_lora_affinity_conflict"));
+    assert!(match_error_chain(
+        error.as_ref(),
+        &[ErrorType::CannotConnect],
+        &[]
+    ));
     assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[101, 202]);
     drop(host);
     runtime.shutdown();
