@@ -55,6 +55,10 @@ impl VllmClient {
         self.pool.len()
     }
 
+    pub(crate) fn health_channel(&self) -> Channel {
+        self.pool.next_channel()
+    }
+
     pub(crate) fn control_client(&self) -> pb::control_client::ControlClient<Channel> {
         pb::control_client::ControlClient::new(self.pool.next_channel())
             .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
@@ -249,6 +253,34 @@ impl VllmClient {
 
 pub(crate) fn protocol_error(message: impl Into<String>) -> DynamoError {
     dynamo_sidecar_common::protocol_error("vLLM", message)
+}
+
+/// Follows vLLM's overall gRPC health (`""`) until vLLM stops serving, and
+/// returns why. vLLM changes it only on engine failure or shutdown, never while
+/// paused or asleep.
+pub(crate) async fn watch_health(channel: Channel, open_timeout: Duration) -> String {
+    let request = HealthCheckRequest {
+        service: String::new(),
+    };
+    let mut stream =
+        match tokio::time::timeout(open_timeout, HealthClient::new(channel).watch(request)).await {
+            Ok(Ok(response)) => response.into_inner(),
+            Ok(Err(status)) => return format!("health watch failed: {status}"),
+            Err(_) => return format!("health watch did not open in {open_timeout:?}"),
+        };
+    loop {
+        match stream.message().await {
+            Ok(Some(response)) => {
+                let status =
+                    ServingStatus::try_from(response.status).unwrap_or(ServingStatus::Unknown);
+                if status != ServingStatus::Serving {
+                    return format!("health reported {}", status.as_str_name());
+                }
+            }
+            Ok(None) => return "health stream ended".to_string(),
+            Err(status) => return format!("health stream failed: {status}"),
+        }
+    }
 }
 
 // Bound how long a stalled RPC can hold the lifecycle lock.
