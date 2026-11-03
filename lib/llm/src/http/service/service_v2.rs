@@ -123,21 +123,39 @@ fn close_draining_connection(
     response
 }
 
+/// Error protocol of a mounted inference route, used when the readiness gate
+/// rejects a request before the route's own error handling runs.
+#[derive(Clone, Copy)]
+enum MountedProtocol {
+    Decision(dynamo_decisions::Dialect),
+    Anthropic,
+}
+
 struct InferenceReadinessState {
     state: Arc<State>,
-    decision_dialects: HashMap<String, dynamo_decisions::Dialect>,
+    mounted_protocols: HashMap<String, MountedProtocol>,
 }
 
 impl InferenceReadinessState {
     fn rejection(&self, request: &axum::extract::Request) -> axum::response::Response {
+        // Records the unavailable failure once; the protocol bodies below must not record again.
         let unavailable = super::openai::ErrorMessage::_service_unavailable();
-        let dialect = request
+        let protocol = request
             .extensions()
             .get::<axum::extract::MatchedPath>()
             .filter(|_| request.method() == axum::http::Method::POST)
-            .and_then(|path| self.decision_dialects.get(path.as_str()));
-        let Some(&dialect) = dialect else {
-            return draining_inference_response(request.version());
+            .and_then(|path| self.mounted_protocols.get(path.as_str()));
+        let dialect = match protocol {
+            Some(&MountedProtocol::Decision(dialect)) => dialect,
+            Some(MountedProtocol::Anthropic) => {
+                let response = super::anthropic::readiness_rejection_response(
+                    request.headers(),
+                    unavailable.0,
+                    unavailable.1.0.message(),
+                );
+                return close_draining_connection(response, request.version());
+            }
+            None => return draining_inference_response(request.version()),
         };
         let error = dynamo_decisions::DecisionError::new(
             dialect,
@@ -1740,17 +1758,22 @@ impl HttpServiceConfigBuilder {
             systemone_enabled,
             config.enable_batch_endpoints && config.batch_gateway_url.is_none(),
         )?;
-        let decision_dialects = endpoint_routes
+        // Route docs carry the resolved paths, including custom Anthropic bases.
+        let mounted_protocols = endpoint_routes
             .iter()
-            .filter(|(endpoint, _, _)| *endpoint == EndpointType::SystemOne)
-            .flat_map(|(_, docs, _)| docs)
-            .map(|doc| {
-                let dialect = if doc.path() == super::systemone::DECISIONS_PATH {
-                    dynamo_decisions::Dialect::OpenAi
-                } else {
-                    dynamo_decisions::Dialect::Jev
+            .flat_map(|(endpoint, docs, _)| docs.iter().map(move |doc| (*endpoint, doc)))
+            .filter_map(|(endpoint, doc)| {
+                let protocol = match endpoint {
+                    EndpointType::SystemOne if doc.path() == super::systemone::DECISIONS_PATH => {
+                        MountedProtocol::Decision(dynamo_decisions::Dialect::OpenAi)
+                    }
+                    EndpointType::SystemOne => {
+                        MountedProtocol::Decision(dynamo_decisions::Dialect::Jev)
+                    }
+                    EndpointType::AnthropicMessages => MountedProtocol::Anthropic,
+                    _ => return None,
                 };
-                (doc.path().to_owned(), dialect)
+                Some((doc.path().to_owned(), protocol))
             })
             .collect();
         let mut inference_router = axum::Router::new();
@@ -1766,7 +1789,7 @@ impl HttpServiceConfigBuilder {
         inference_router = inference_router.layer(axum::middleware::from_fn_with_state(
             Arc::new(InferenceReadinessState {
                 state: state.clone(),
-                decision_dialects,
+                mounted_protocols,
             }),
             track_inflight_inference,
         ));
@@ -4242,6 +4265,91 @@ mod tests {
                         .await
                         .unwrap();
                     assert_eq!(unmatched.status(), axum::http::StatusCode::NOT_FOUND);
+                    assert_eq!(service.state().inflight_count(), 0);
+                },
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn anthropic_readiness_rejections_preserve_envelope_and_request_ids() {
+        use tower::ServiceExt;
+
+        for configured_path in [None, Some("/custom/messages")] {
+            temp_env::async_with_vars(
+                [(HTTP_SVC_ANTHROPIC_PATH_ENV, configured_path)],
+                async move {
+                    let service = HttpService::builder()
+                        .enable_anthropic_endpoints(true)
+                        .build()
+                        .unwrap();
+                    service.state().start_draining();
+                    let base = configured_path.unwrap_or("/v1/messages");
+                    let count_tokens = format!("{base}/count_tokens");
+                    for path in [base, count_tokens.as_str()] {
+                        for client_id in [Some("anthropic-readiness"), None] {
+                            let mut request = axum::http::Request::post(path)
+                                .header("content-type", "application/json")
+                                .header("anthropic-version", "2023-06-01");
+                            if let Some(client_id) = client_id {
+                                request = request.header("x-request-id", client_id);
+                            }
+                            let response = service
+                                .router
+                                .clone()
+                                .oneshot(request.body(Body::from("{}")).unwrap())
+                                .await
+                                .unwrap();
+                            assert_eq!(
+                                response.status(),
+                                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                "{path}"
+                            );
+                            assert_eq!(response.headers()[header::CONNECTION], "close");
+                            let request_id = response.headers()["request-id"]
+                                .to_str()
+                                .unwrap()
+                                .to_owned();
+                            // The server owns `request-id`; clients correlate with `x-request-id`.
+                            assert!(uuid::Uuid::parse_str(&request_id).is_ok());
+                            if let Some(client_id) = client_id {
+                                assert_eq!(response.headers()["x-request-id"], client_id);
+                            }
+                            let body = axum::body::to_bytes(response.into_body(), 4096)
+                                .await
+                                .unwrap();
+                            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                            assert_eq!(body["type"], "error", "{path}: {body}");
+                            assert_eq!(body["error"]["type"], "overloaded_error");
+                            assert_eq!(body["error"]["message"], "Service is not ready");
+                            assert_eq!(body["request_id"], request_id.as_str());
+                        }
+                    }
+
+                    // Other inference routes keep the OpenAI body.
+                    let control = service
+                        .router
+                        .clone()
+                        .oneshot(
+                            axum::http::Request::post("/v1/chat/completions")
+                                .header("content-type", "application/json")
+                                .body(Body::from("{}"))
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        control.status(),
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE
+                    );
+                    let body = axum::body::to_bytes(control.into_body(), 4096)
+                        .await
+                        .unwrap();
+                    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(body["code"], 503);
+                    assert_ne!(body["type"], "error");
                     assert_eq!(service.state().inflight_count(), 0);
                 },
             )

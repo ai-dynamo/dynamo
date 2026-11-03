@@ -1503,6 +1503,35 @@ fn anthropic_error_unrecorded(status: StatusCode, error_type: &str, message: &st
         .into_response()
 }
 
+/// Returns the Anthropic error for a request the readiness gate rejects.
+///
+/// The gate runs outside `anthropic_error_middleware`, so this adds the same
+/// `request-id` header and body field. The caller has already recorded the failure.
+pub(crate) fn readiness_rejection_response(
+    headers: &HeaderMap,
+    status: StatusCode,
+    message: &str,
+) -> Response {
+    let request_id = get_or_create_request_id(headers);
+    let mut body = serde_json::to_value(AnthropicErrorResponse {
+        object_type: "error".to_string(),
+        error: AnthropicErrorBody {
+            error_type: anthropic_error_type_for_status(status, "api_error").to_string(),
+            message: message.to_string(),
+        },
+    })
+    .expect("Anthropic error is serializable");
+    body["request_id"] = serde_json::Value::String(request_id.clone());
+    let mut response = (status, Json(body)).into_response();
+    response.headers_mut().insert(
+        "request-id",
+        request_id
+            .parse()
+            .expect("assigned request ID is a valid header"),
+    );
+    response
+}
+
 /// Returns an Anthropic-compatible JSON `404` error response for an unmatched route.
 /// Anthropic clients expect the nested `{"type": "error", "error": {...}}`
 pub(crate) fn unmatched_route_response(method: &Method, uri: &Uri) -> Response {
