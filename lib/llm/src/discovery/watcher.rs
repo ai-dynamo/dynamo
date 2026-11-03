@@ -770,6 +770,7 @@ impl ModelWatcher {
                     anyhow::anyhow!("chat pipeline requires preprocessed routing")
                 })?;
                 let chat_engine = if let Some(ref factory) = self.chat_engine_factory {
+                    worker_set.uses_custom_chat_processor = true;
                     let routed_engine = routing
                         .build_preprocessed_pipeline(
                             card,

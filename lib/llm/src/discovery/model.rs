@@ -1203,12 +1203,18 @@ mod tests {
         );
         let expected: OpenAIChatCompletionsStreamingEngine = StubServingEngine::new();
         let expected_completions: OpenAICompletionsStreamingEngine = StubServingEngine::new();
+        let mut custom = WorkerSet::new("custom".into(), "custom".into(), card.clone());
+        custom.chat_engine = Some(StubServingEngine::new());
+        custom.uses_custom_chat_processor = true;
         let mut capable = WorkerSet::new("new".to_string(), "new".to_string(), card);
         let (_instances, instance_rx) = watch::channel(vec![1]);
         let (_configs, config_rx) = watch::channel(std::collections::HashMap::from([(
             1,
             capable.card().runtime_config.clone(),
         )]));
+        custom.set_instance_watcher(instance_rx.clone());
+        custom.set_runtime_config_watcher(config_rx.clone());
+        model.add_worker_set("custom".into(), Arc::new(custom));
         capable.set_instance_watcher(instance_rx);
         capable.set_runtime_config_watcher(config_rx);
         capable.chat_engine = Some(expected.clone());
@@ -1217,7 +1223,7 @@ mod tests {
 
         for _ in 0..100 {
             let (selected, _) = model
-                .get_chat_engine_with_parsing_where(WorkerSet::supports_runtime_lora)
+                .get_chat_engine_with_parsing_where(WorkerSet::supports_runtime_lora_chat)
                 .unwrap();
             assert!(Arc::ptr_eq(&selected, &expected));
             let (selected, _) = model
@@ -1229,7 +1235,7 @@ mod tests {
         assert!(model.get_chat_engine_with_parsing().is_ok());
         assert!(model.get_completions_engine_with_parsing().is_ok());
         assert!(matches!(
-            model.get_chat_engine_with_parsing_where(WorkerSet::supports_runtime_lora),
+            model.get_chat_engine_with_parsing_where(WorkerSet::supports_runtime_lora_chat),
             Err(ModelManagerError::ModelUnavailable(_))
         ));
     }

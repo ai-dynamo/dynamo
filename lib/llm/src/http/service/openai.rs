@@ -2645,7 +2645,7 @@ async fn handler_chat_completions(
         state.manager(),
         state.runtime_lora_config(),
         resolved_model,
-        WorkerSet::has_chat_engine,
+        WorkerSet::has_runtime_lora_chat_engine,
     ) {
         Ok(selection) => selection,
         Err(error) => {
@@ -3763,7 +3763,7 @@ async fn chat_completions(
     let (engine, parsing_options) = state
         .manager()
         .get_chat_completions_engine_with_parsing_where(&model, |worker_set| {
-            runtime_lora.is_none() || worker_set.supports_runtime_lora()
+            runtime_lora.is_none() || worker_set.supports_runtime_lora_chat()
         })
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
@@ -10517,6 +10517,70 @@ mod tests {
         assert_eq!(response.0, StatusCode::NOT_FOUND);
         assert_eq!(response.1.0.message, "model_not_found");
         assert!(!response.1.0.message.contains("opaque-secret-reference"));
+    }
+
+    #[test]
+    fn runtime_lora_rejects_custom_chat_processors_without_affecting_completions() {
+        use crate::engines::{StreamingEngineAdapter, make_echo_engine};
+        use crate::model_card::ModelDeploymentCard;
+        use crate::model_type::{ModelInput, ModelType};
+        use crate::worker_type::WorkerType;
+
+        for custom_processor in [false, true] {
+            let manager = ModelManager::new();
+            let mut card = ModelDeploymentCard::default();
+            card.model_input = ModelInput::Tokens;
+            card.model_type = ModelType::Chat | ModelType::Completions;
+            card.worker_type = Some(WorkerType::Aggregated);
+            card.runtime_config
+                .taints
+                .insert("dynamo.runtime-lora/v2".into());
+            for (key, value) in [
+                ("supports_runtime_lora_resolution", serde_json::json!(true)),
+                ("runtime_lora_protocol_versions", serde_json::json!([2])),
+                ("runtime_lora_schemes", serde_json::json!(["custom"])),
+            ] {
+                card.runtime_config.set_engine_specific(key, value).unwrap();
+            }
+            let mut workers = WorkerSet::new("workers".into(), "checksum".into(), card.clone());
+            workers.chat_engine = Some(Arc::new(StreamingEngineAdapter::new(make_echo_engine())));
+            workers.completions_engine =
+                Some(Arc::new(StreamingEngineAdapter::new(make_echo_engine())));
+            workers.uses_custom_chat_processor = custom_processor;
+            let (_instances, instance_rx) = tokio::sync::watch::channel(vec![1]);
+            let (_configs, config_rx) = tokio::sync::watch::channel(
+                std::collections::HashMap::from([(1, card.runtime_config)]),
+            );
+            workers.set_instance_watcher(instance_rx);
+            workers.set_runtime_config_watcher(config_rx);
+            assert!(manager.add_worker_set("base", "workers", workers));
+            let config = RuntimeLoraConfig { enabled: true };
+            let chat_surface = WorkerSet::has_runtime_lora_chat_engine;
+            let result =
+                runtime_lora_selection(&manager, &config, "base|custom:///adapter", chat_surface);
+            if custom_processor {
+                let error = result.unwrap_err();
+                assert_eq!(error.0, StatusCode::BAD_REQUEST);
+                assert_eq!(error.1.0.message, "runtime_lora_unsupported");
+            } else {
+                assert!(result.unwrap().is_some());
+            }
+            assert!(
+                runtime_lora_selection(&manager, &config, "base", chat_surface)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                runtime_lora_selection(
+                    &manager,
+                    &config,
+                    "base|custom:///adapter",
+                    WorkerSet::has_completions_engine,
+                )
+                .unwrap()
+                .is_some()
+            );
+        }
     }
 
     #[test]

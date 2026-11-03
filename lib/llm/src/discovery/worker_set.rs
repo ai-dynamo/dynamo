@@ -215,6 +215,7 @@ pub struct WorkerSet {
 
     // Engines — each WorkerSet owns its own pipelines
     pub(crate) chat_engine: Option<OpenAIChatCompletionsStreamingEngine>,
+    pub(crate) uses_custom_chat_processor: bool,
     pub(crate) completions_engine: Option<OpenAICompletionsStreamingEngine>,
     pub(crate) embeddings_engine: Option<OpenAIEmbeddingsStreamingEngine>,
     pub(crate) classify_engine: Option<OpenAIClassifyStreamingEngine>,
@@ -295,6 +296,7 @@ impl WorkerSet {
             mdcsum,
             card,
             chat_engine: None,
+            uses_custom_chat_processor: false,
             completions_engine: None,
             embeddings_engine: None,
             classify_engine: None,
@@ -362,6 +364,14 @@ impl WorkerSet {
 
     pub fn has_chat_engine(&self) -> bool {
         self.chat_engine.is_some()
+    }
+
+    pub(crate) fn has_runtime_lora_chat_engine(&self) -> bool {
+        !self.uses_custom_chat_processor && self.has_chat_engine()
+    }
+
+    pub(crate) fn supports_runtime_lora_chat(&self) -> bool {
+        self.has_runtime_lora_chat_engine() && self.supports_runtime_lora()
     }
 
     pub fn has_completions_engine(&self) -> bool {
@@ -619,6 +629,7 @@ impl WorkerSet {
             mdcsum: self.mdcsum.clone(),
             card,
             chat_engine: lora_context_engine(&self.chat_engine, &lora_name),
+            uses_custom_chat_processor: self.uses_custom_chat_processor,
             completions_engine: lora_context_engine(&self.completions_engine, &lora_name),
             embeddings_engine: lora_context_engine(&self.embeddings_engine, &lora_name),
             classify_engine: lora_context_engine(&self.classify_engine, &lora_name),
