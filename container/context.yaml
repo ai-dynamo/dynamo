@@ -167,6 +167,7 @@ sglang:
     # the framework default, so a framework-level bump made for sglang-cuda
     # cannot silently retarget the less-exercised XPU build.
     nixl_ref: v1.5.0
+    nixl_ucx_ref: v1.23.0-rc1
   # Builds the NIXL C++ SDK in wheel_builder so the dev stage can link nixl-sys
   # (see templates/dev.Dockerfile). Runtime stays on the upstream lmsysorg/sglang
   # NIXL Python stack — its wheel COPY is narrowed to ai_dynamo*.whl so the SDK
