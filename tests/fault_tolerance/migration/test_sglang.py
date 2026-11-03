@@ -551,9 +551,7 @@ def test_request_migration_sglang_aggregated(
 
 
 @pytest.mark.timeout(SGLANG_MIGRATION_TEST_TIMEOUT_S)
-# TODO: revert to pytest.mark.nightly after pre_merge validation
-# on this PR (see .ai/ci-guidelines.md).
-@pytest.mark.pre_merge
+@pytest.mark.nightly
 @pytest.mark.profiled_vram_gib(9.0)  # 8.2 GiB NVML peak with three workers
 @pytest.mark.requested_sglang_kv_tokens(1024)
 @KV_TRANSFER_MIGRATION_PARAMETERS
