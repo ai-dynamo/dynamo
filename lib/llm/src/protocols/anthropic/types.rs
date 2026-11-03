@@ -127,7 +127,11 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             .tool_choice
             .as_ref()
             .map(convert_anthropic_tool_choice)
-            .transpose()?;
+            .transpose()?
+            // vLLM rejects explicit auto without tools; use the backend default.
+            .filter(|choice| {
+                tools.is_some() || !matches!(choice, ChatCompletionToolChoiceOption::Auto)
+            });
         let parallel_tool_calls = req
             .tool_choice
             .as_ref()
@@ -1497,6 +1501,66 @@ mod tests {
                     assert_eq!(named.function.name, "get_weather");
                 }
                 (_, actual) => panic!("unexpected converted tool choice for {label}: {actual:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_tool_choice_without_tools() {
+        for tools in [serde_json::Value::Null, serde_json::json!([])] {
+            for choice in [
+                serde_json::Value::Null,
+                serde_json::json!({"type": "auto"}),
+                serde_json::json!({"type": "none"}),
+            ] {
+                let mut payload = serde_json::json!({
+                    "model": "test-model",
+                    "max_tokens": 100,
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "tool_choice": choice
+                });
+                if !tools.is_null() {
+                    payload["tools"] = tools.clone();
+                }
+                let req: AnthropicCreateMessageRequest = serde_json::from_value(payload).unwrap();
+                let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+                assert!(chat_req.inner.tools.is_none());
+                if choice["type"] == "none" {
+                    assert_eq!(
+                        chat_req.inner.tool_choice,
+                        Some(ChatCompletionToolChoiceOption::None)
+                    );
+                } else {
+                    assert_eq!(
+                        chat_req.inner.tool_choice, None,
+                        "tools={tools}, choice={choice}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_forced_tool_choice_without_tools_is_invalid() {
+        for tools in [serde_json::Value::Null, serde_json::json!([])] {
+            for choice in [
+                serde_json::json!({"type": "any"}),
+                serde_json::json!({"type": "tool", "name": "missing"}),
+            ] {
+                let mut payload = serde_json::json!({
+                    "model": "test-model",
+                    "max_tokens": 100,
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "tool_choice": choice
+                });
+                if !tools.is_null() {
+                    payload["tools"] = tools.clone();
+                }
+                let req: AnthropicCreateMessageRequest = serde_json::from_value(payload).unwrap();
+                let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+                let error = crate::engines::ValidateRequest::validate(&chat_req).unwrap_err();
+                assert!(error.to_string().contains("tool_choice"), "{error}");
+                assert!(error.to_string().contains("tools"), "{error}");
             }
         }
     }
