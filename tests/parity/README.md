@@ -5,27 +5,25 @@ SPDX-License-Identifier: Apache-2.0
 
 # Parser parity / conformance moved to frontend-crates
 
-The cross-implementation parity harness and the HTML table generator that used to live here (`generate_parity_table.py`, the engine adapters, fixtures, and the `tests/parity/**` Python tests) have moved to the standalone **[ai-dynamo/frontend-crates](https://github.com/ai-dynamo/frontend-crates)** repo, under `conformance/`. Dynamo now consumes the published `dynamo-parsers` crate instead of an in-tree `lib/parsers`, so parser conformance is owned and run there. Nothing in this directory is generated or run from dynamo anymore.
+The cross-implementation parity harness, fixture authoring and HTML table generator are owned by **[ai-dynamo/frontend-crates](https://github.com/ai-dynamo/frontend-crates)**, under `conformance/`. Dynamo consumes the parser crates and checks their external conformance integration through the standalone consumer in [`unified/`](unified/Cargo.toml).
 
-See `conformance/README.md` in frontend-crates for the full layout. Quick reference:
+## Verify the external Rust runner
 
-## Rendering the tables (from a frontend-crates checkout)
+The consumer pins both dependencies to commit `8095dc76a8620cec0b65845b8fef05c675375ab9` from [frontend-crates PR #532](https://github.com/ai-dynamo/frontend-crates/pull/532):
 
-- **v1 parity HTML** (the old Dynamo parity table — v1 parser code + v1 Dynamo-synced fixtures): `conformance/utils/render_table_v1.sh` — writes `conformance/utils/.stage/tests/parity/PARITY_v1.html`.
-- **v2 conformance HTML** (bridge table: `TC batch (v1)` + reasoning tabs use v1 parser code; `TC batch-on-stream (v2)` + `TC stream (v2)` use the parser-v2 code): `conformance/utils/render_table_v2.sh` — writes `conformance/CONFORMANCE.html` (accepts `--output PATH`). No engines needed.
+| Crate | Version |
+| --- | --- |
+| `dynamo-conformance-fixtures-v2` | `0.1.0` |
+| `dynamo-parsers-v2` | `0.9.6` |
 
-## Running the conformance tests (from a frontend-crates checkout)
+The runner is unpublished, so its version is paired with an immutable Git revision and a committed lockfile. The parser version matches Dynamo's root workspace pin. This independent Cargo workspace reads the authored corpus from Cargo's dependency checkout and keeps the serving dependency graph separate.
 
-Use the repo's pinned toolchain (Rust 1.96.1 via rustup):
+Run from the Dynamo root:
 
 ```bash
-# v1 batch tool-calling parity, all families:
-cargo test --locked -p dynamo-conformance-fixtures-v2 --test parity_toolcalling
-# v2 batch-on-stream and stream:
-cargo test --locked -p dynamo-conformance-fixtures-v2 --test parity_toolcalling_batch_via_stream
-cargo test --locked -p dynamo-conformance-fixtures-v2 --test parity_toolcalling_stream
-# whole workspace (what frontend-crates CI runs):
-cargo test --workspace
+cargo test --locked --manifest-path tests/parity/unified/Cargo.toml --tests -- --nocapture
 ```
 
-These run pure-Rust against the fixtures (no vLLM/SGLang engine launch). The dynamo-side parser tests that consume the crate still live in dynamo at `lib/llm/tests/` (`test_jail.rs`, `test_reasoning_parser.rs`, `test_streaming_tool_parsers.rs`, etc.).
+The native test runs eight existing Qwen3 cases covering reasoning, visible text, one and two tool calls, guided output, and prefilled reasoning. The runner compares authored GOLDEN, every valid UTF-8 two-chunk split, stream/batch output, and seven adjacent stream pairs. A second test checks explicit unsupported reporting for generation constraints. A separate test process registers a parser implemented here that returns tool syntax as visible text and requires the runner to report a GOLDEN mismatch with failure status.
+
+The root Rust test job in `.github/workflows/pre-merge.yml` runs this consumer's formatting, Clippy and tests. These are selected integration cases; see frontend-crates' `conformance/README.md` for the complete corpus, capture and report workflows.
