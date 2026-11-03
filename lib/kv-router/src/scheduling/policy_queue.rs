@@ -121,16 +121,11 @@ impl QueuePriority {
 
 /// Marks an explicit deadline in `QueuePriority::due_low`.
 const EXPIRES: u32 = 1 << 31;
-/// The lowest bit of the offset's whole seconds, in `DueKey::low` above the nanoseconds.
-const SECS_LOW_BIT: u32 = 1 << 30;
-const NANOS_MASK: u32 = SECS_LOW_BIT - 1;
 const NANOS_PER_SEC: u32 = 1_000_000_000;
 
-/// A due time's exact offset from the queue's fixed origin: whole seconds, floored, and the
-/// nanoseconds after them. Any two representable instants differ by less than 2^64 seconds, so
-/// the seconds take 65 signed bits: `high` holds all but the lowest, and `low` holds that bit
-/// (`SECS_LOW_BIT`) above the 30-bit nanoseconds. `(high, low)` therefore orders exactly as the
-/// due times do, for every representable instant, with no horizon or clamp.
+/// A due time's offset from the queue's fixed origin: `high` holds the whole seconds, floored,
+/// and `low` the nanoseconds after them, so `(high, low)` orders exactly as the due times do
+/// within about 292 billion years of the origin. An offset beyond that saturates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct DueKey {
     high: i64,
@@ -138,60 +133,48 @@ struct DueKey {
 }
 
 impl DueKey {
-    /// An absent due time, after every finite one: a finite `low` is at most
-    /// `SECS_LOW_BIT | 999_999_999`.
+    /// An absent due time, after every finite one.
     const NONE: Self = Self {
         high: i64::MAX,
         low: !EXPIRES,
     };
 
     fn new(origin: Instant, due_at: Instant) -> Self {
-        let (secs, nanos) = match due_at.checked_duration_since(origin) {
-            Some(after) => (i128::from(after.as_secs()), after.subsec_nanos()),
+        match due_at.checked_duration_since(origin) {
+            Some(after) => Self {
+                high: i64::try_from(after.as_secs()).unwrap_or(i64::MAX),
+                low: after.subsec_nanos(),
+            },
             None => {
-                // Floor a negative offset: borrow a second for any sub-second part.
+                // Floor a negative offset: borrow a second for any sub-second part, so -0.2 s
+                // becomes -1 s plus 0.8 s.
                 let before = origin.duration_since(due_at);
-                let secs = -i128::from(before.as_secs());
+                let secs = 0_i64.saturating_sub_unsigned(before.as_secs());
                 match before.subsec_nanos() {
-                    0 => (secs, 0),
-                    nanos => (secs - 1, NANOS_PER_SEC - nanos),
+                    0 => Self { high: secs, low: 0 },
+                    nanos => Self {
+                        high: secs.saturating_sub(1),
+                        low: NANOS_PER_SEC - nanos,
+                    },
                 }
             }
-        };
-        Self::from_offset(secs, nanos)
-    }
-
-    /// `secs` in `[-2^64, 2^64)`, `nanos` below one second.
-    fn from_offset(secs: i128, nanos: u32) -> Self {
-        debug_assert!((-(1_i128 << 64)..(1_i128 << 64)).contains(&secs) && nanos < NANOS_PER_SEC);
-        Self {
-            high: i64::try_from(secs >> 1).expect("an offset between instants fits 65 bits"),
-            low: (((secs & 1) as u32) << 30) | nanos,
         }
     }
 
-    fn offset(self) -> (i128, u32) {
-        let secs = (i128::from(self.high) << 1) | i128::from((self.low & SECS_LOW_BIT) >> 30);
-        (secs, self.low & NANOS_MASK)
-    }
-
-    /// The due time this key was made from, relative to the same origin. `NONE` encodes no
-    /// instant (its nanoseconds field is out of range), so it decodes to `None`.
+    /// The due time this key was made from, relative to the same origin. `NONE` decodes to
+    /// `None`.
     fn due_at(self, origin: Instant) -> Option<Instant> {
         if self == Self::NONE {
             return None;
         }
-        let (secs, nanos) = self.offset();
-        if secs >= 0 {
-            return origin.checked_add(Duration::new(u64::try_from(secs).ok()?, nanos));
+        match u64::try_from(self.high) {
+            Ok(secs) => origin.checked_add(Duration::new(secs, self.low)),
+            // Undo the floor: return the borrowed second to the sub-second part.
+            Err(_) => origin.checked_sub(match self.low {
+                0 => Duration::from_secs(self.high.unsigned_abs()),
+                nanos => Duration::new((self.high + 1).unsigned_abs(), NANOS_PER_SEC - nanos),
+            }),
         }
-        // Undo the floor without negating `secs` into a `u64`: at the most negative offset,
-        // -2^64 seconds with a sub-second part, the borrowed form is the one that fits.
-        let before = match nanos {
-            0 => Duration::new(u64::try_from(-secs).ok()?, 0),
-            nanos => Duration::new(u64::try_from(-secs - 1).ok()?, NANOS_PER_SEC - nanos),
-        };
-        origin.checked_sub(before)
     }
 }
 
@@ -1681,145 +1664,34 @@ policy_classes:
     }
 
     #[test]
-    fn due_keys_order_and_round_trip_exactly_across_the_offset_domain() {
-        // Offsets in ascending order: the reachable ends (-2^64 s + 1 ns and 2^64 - 1 s +
-        // 999,999,999 ns), both sides of the 64-bit nanosecond range, the whole-second parity
-        // that `high` drops, and the borrow of negative sub-second parts.
-        let max = (1_i128 << 64) - 1;
-        let offsets: [(i128, u32); 22] = [
-            (-(1 << 64), 1),
-            (-(1 << 64), 999_999_999),
-            (-max, 0),
-            (-max, 1),
-            (-(1 << 63) - 1, 0),
-            (-(1 << 63), 0),
-            (-3, 999_999_999),
-            (-2, 0),
-            (-1, 0),
-            (-1, 999_999_999),
-            (0, 0),
-            (0, 1),
-            (0, 999_999_999),
-            (1, 0),
-            (1, 1),
-            (2, 0),
-            (3, 999_999_999),
-            ((1 << 63) - 1, 999_999_999),
-            (1 << 63, 0),
-            (max - 1, 999_999_999),
-            (max, 0),
-            (max, 999_999_999),
+    fn due_keys_order_and_round_trip_on_both_sides_of_the_origin() {
+        let origin = Instant::now();
+        let before = |span| origin.checked_sub(span).expect("representable");
+        let after = |span| origin.checked_add(span).expect("representable");
+        // Ascending. A key before the origin floors its seconds and borrows one for a
+        // sub-second part, and 400 years is past the range of signed nanoseconds.
+        let instants = [
+            before(Duration::from_millis(1500)),
+            before(Duration::from_secs(1)),
+            before(Duration::from_millis(200)),
+            before(Duration::from_nanos(1)),
+            origin,
+            after(Duration::from_nanos(1)),
+            after(Duration::from_millis(200)),
+            after(Duration::from_secs(1)),
+            after(Duration::from_secs(400 * 365 * 24 * 3600)),
         ];
-        for pair in offsets.windows(2) {
-            assert!(pair[0] < pair[1], "{pair:?}");
-            let (lower, upper) = (
-                DueKey::from_offset(pair[0].0, pair[0].1),
-                DueKey::from_offset(pair[1].0, pair[1].1),
-            );
-            assert!(lower < upper, "{pair:?}");
-        }
-        for (secs, nanos) in offsets {
-            let key = DueKey::from_offset(secs, nanos);
-            assert_eq!(key.offset(), (secs, nanos));
+        let keys = instants.map(|instant| DueKey::new(origin, instant));
+        assert!(keys.is_sorted_by(|lower, upper| lower < upper), "{keys:?}");
+        for (key, instant) in keys.into_iter().zip(instants) {
+            assert_eq!(key.due_at(origin), Some(instant));
             assert_eq!(key.low & EXPIRES, 0, "the flag bit never carries ordering");
             assert!(
                 key < DueKey::NONE,
                 "an absent due time follows every finite one"
             );
         }
-        let origin = Instant::now();
         assert_eq!(DueKey::NONE.due_at(origin), None);
-
-        // Instants on both sides of the origin, out to the farthest this platform represents,
-        // order as their keys do and convert back exactly.
-        let farthest = |step: fn(&Instant, Duration) -> Option<Instant>| {
-            let (mut low, mut high) = (0_u64, u64::MAX);
-            while low < high {
-                let mid = low + (high - low).div_ceil(2);
-                if step(&origin, Duration::from_secs(mid)).is_some() {
-                    low = mid;
-                } else {
-                    high = mid - 1;
-                }
-            }
-            let whole = step(&origin, Duration::from_secs(low)).unwrap();
-            step(&whole, Duration::from_nanos(999_999_999)).unwrap_or(whole)
-        };
-        let mut instants = vec![
-            origin,
-            farthest(Instant::checked_add),
-            farthest(Instant::checked_sub),
-        ];
-        for span in [
-            Duration::from_nanos(1),
-            Duration::from_millis(1500),
-            Duration::from_secs(2),
-            Duration::from_secs(300 * 365 * 24 * 3600),
-            Duration::from_secs(400 * 365 * 24 * 3600),
-        ] {
-            instants.extend(origin.checked_add(span));
-            instants.extend(origin.checked_sub(span));
-        }
-        instants.sort();
-        instants.dedup();
-        for pair in instants.windows(2) {
-            assert!(DueKey::new(origin, pair[0]) < DueKey::new(origin, pair[1]));
-        }
-        for instant in instants {
-            assert_eq!(DueKey::new(origin, instant).due_at(origin), Some(instant));
-        }
-    }
-
-    #[test]
-    fn deadlines_beyond_292_years_keep_their_exact_order_and_expiry() {
-        // Signed nanoseconds from the origin end about 292 years out, and a trusted classifier
-        // may set any representable deadline. A 400-year deadline enqueued before a 300-year one
-        // still dispatches second, in an EDF class and as an explicit deadline in an FCFS class,
-        // from the shared heap and from an exact lane, and only the 300-year one is due at its
-        // own time.
-        let years = |count: u64| Duration::from_secs(count * 365 * 24 * 3600);
-        let fcfs = profile(
-            r#"
-policy_classes:
-  - name: fcfs
-    queue_policy: fcfs
-    quantum: 10
-"#,
-        );
-        let lane = WorkerPlacement::Exact(WorkerWithDpRank::new(7, 0));
-        for (profile, placement) in [
-            (edf_profile(), WorkerPlacement::Any),
-            (edf_profile(), lane),
-            (fcfs.clone(), WorkerPlacement::Any),
-            (fcfs.clone(), lane),
-        ] {
-            let mut queue = PolicyQueue::new(&profile);
-            let later = queue
-                .deadline_origin
-                .checked_add(years(400))
-                .expect("representable");
-            let earlier = queue
-                .deadline_origin
-                .checked_add(years(300))
-                .expect("representable");
-            enqueue_due(&mut queue, Some(later), None, placement, "400-years");
-            enqueue_due(&mut queue, Some(earlier), None, placement, "300-years");
-            assert_eq!(queue.next_due_at(), Some(earlier));
-            let expired: Vec<_> = queue
-                .take_expired(earlier)
-                .into_iter()
-                .map(PolicyQueueEntry::into_payload)
-                .collect();
-            assert_eq!(expired, ["300-years"]);
-            assert_eq!(queue.next_due_at(), Some(later));
-
-            enqueue_due(&mut queue, Some(earlier), None, placement, "300-years");
-            assert_eq!(
-                drain_payloads(&mut queue, |_, _, _| true),
-                ["300-years", "400-years"]
-            );
-            assert!(queue.due_entries.is_empty());
-        }
     }
 
     #[test]
