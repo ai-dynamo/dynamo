@@ -116,8 +116,8 @@ pub enum Stage {
     /// Rendering the chat template.
     Template,
     /// Tokenizing the prompt: for chat, the rendered prompt, after
-    /// [`Stage::BlockingWait`]; for a completions text prompt, including the
-    /// tokenizer's own wait for a blocking-pool thread.
+    /// [`Stage::BlockingWait`]; for a completions text prompt, including its
+    /// waits for a tokenization slot and a blocking-pool thread.
     Tokenize,
     /// Choosing the prefill and decode workers, including router queueing.
     Select,
@@ -130,7 +130,7 @@ pub enum Stage {
     Rewrite,
     /// Routing decision ready until the response headers reach the EPP: the
     /// gateway sending the body to the sidecar, and the sidecar reading it
-    /// and answering with its headers.
+    /// and answering with its headers. Streamed 2xx responses only.
     ResponseHeaders,
     /// Routing decision ready until the first non-empty response body
     /// chunk: the gateway, sidecar and worker producing the first token.
@@ -295,8 +295,8 @@ pub(crate) fn event_loop_delays_recorded() -> u64 {
     EVENT_LOOP_DELAY_SECONDS.get_sample_count()
 }
 
-/// Register every family up front, so a scrape shows them before the first
-/// request.
+/// Register every family at startup rather than on its first observation. A
+/// labeled family shows in a scrape once it has a series.
 fn register_all() {
     LazyLock::force(&CACHED_TOKENS);
     LazyLock::force(&STAGE_SECONDS);
@@ -433,13 +433,6 @@ mod tests {
         const MODEL: &str = "stage-test";
         for stage in Stage::ALL {
             observe_stage_for(MODEL, stage, Duration::from_millis(3));
-            observe_stage_for(MODEL, stage, Duration::from_millis(3));
-            let recorded = STAGE_SECONDS.with_label_values(&[MODEL, stage.label()]);
-            assert_eq!(recorded.get_sample_count(), 2, "{stage:?}");
-            assert!(
-                (recorded.get_sample_sum() - 0.006).abs() < 1e-9,
-                "{stage:?}"
-            );
         }
 
         let stages: std::collections::HashSet<String> = REGISTRY

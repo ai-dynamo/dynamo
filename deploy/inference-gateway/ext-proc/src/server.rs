@@ -284,6 +284,9 @@ struct StreamTrace {
     routed: Option<Duration>,
     /// The response headers' arrival.
     response_headers: Option<Duration>,
+    /// Whether the response streams. A unary response's headers wait for
+    /// the whole generation.
+    streamed: bool,
     /// The first non-empty response chunk's arrival.
     first_chunk: Option<Duration>,
     rewrite: Option<Duration>,
@@ -309,17 +312,18 @@ impl StreamTrace {
     }
 
     /// Whether the stream stalled somewhere the EPP can see: a response chunk
-    /// held back, a slow trip from the routing decision to the response
-    /// headers, or a slow body or pick. `end` is the stream's end, which
-    /// bounds a pick that never finished, because the request was cancelled
-    /// or failed while it waited.
+    /// held back, a slow trip from the routing decision to a streamed
+    /// response's headers, or a slow body or pick. `end` is the stream's end,
+    /// which bounds a pick that never finished, because the request was
+    /// cancelled or failed while it waited.
     fn is_slow(&self, end: Option<Duration>) -> bool {
         let elapsed = |from: Option<Duration>, to: Option<Duration>| {
             from.zip(to).map(|(from, to)| to.saturating_sub(from))
         };
         let pick = elapsed(self.body_eos, self.routed.or(end));
         self.max_chunk_gap >= SLOW_GAP
-            || elapsed(self.routed, self.response_headers).is_some_and(|d| d >= SLOW_GAP)
+            || (self.streamed
+                && elapsed(self.routed, self.response_headers).is_some_and(|d| d >= SLOW_GAP))
             || self.body_eos.is_some_and(|d| d >= SLOW_PHASE)
             || pick.is_some_and(|d| d >= SLOW_PHASE)
     }
@@ -462,6 +466,7 @@ fn log_stream_summary(ctx: &RequestContext) {
                 body_eos_us = trace.body_eos.map(micros),
                 routed_us = trace.routed.map(micros),
                 resp_headers_us = trace.response_headers.map(micros),
+                streamed = trace.streamed,
                 first_chunk_us = trace.first_chunk.map(micros),
                 end_us = end.map(micros),
                 rewrite_us = trace.rewrite.map(micros),
@@ -1014,10 +1019,16 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                         Some(processing_request::Request::RequestTrailers(_)) => {}
                         Some(processing_request::Request::ResponseHeaders(ref hdr)) => {
                             ExtProcServer::<P>::handle_response_headers(&mut ctx, hdr);
-                            if let Some(routed) = ctx.routed_at {
+                            // Like the first-token stages: a unary response's
+                            // headers wait for the whole generation.
+                            if ctx.model_server_streaming
+                                && ctx.response_succeeded()
+                                && let Some(routed) = ctx.routed_at
+                            {
                                 metrics::observe_stage(Stage::ResponseHeaders, routed.elapsed());
                             }
                             ctx.trace.response_headers = ctx.since_headers();
+                            ctx.trace.streamed = ctx.model_server_streaming;
                         }
                         Some(processing_request::Request::ResponseBody(ref body)) => {
                             ctx.trace.record_chunk(Instant::now());
@@ -1244,8 +1255,7 @@ fn validate_protocol_config(
 /// The body is never parsed into a `Value` tree. Untouched top-level members
 /// are borrowed and re-emitted byte for byte, only `nvext` is parsed when
 /// tokens are injected, and the token ids are written straight from the
-/// slice. A tree costs an allocation per message part and per token: for a
-/// 64K-token prompt that was most of the rewrite's time.
+/// slice. A tree would cost an allocation per message part and per token.
 fn rewrite_forwarded_body(
     body: &[u8],
     strip_nvext: bool,
@@ -2224,8 +2234,8 @@ mod tests {
         );
     }
 
-    /// The rewrite produces the same JSON as the `Value`-tree rewrite it
-    /// replaced, for every combination of inputs it serves.
+    /// The rewrite produces the same JSON as a `Value`-tree rewrite, for
+    /// every combination of inputs it serves.
     #[test]
     fn rewrite_forwarded_body_matches_a_value_tree_rewrite() {
         fn by_tree(
@@ -2317,12 +2327,21 @@ mod tests {
             body_eos: Some(ms(body_eos)),
             routed: Some(ms(routed)),
             response_headers: Some(ms(response_headers)),
+            streamed: true,
             ..Default::default()
         };
         assert!(!trace(5, 20, 30).is_slow(None));
         assert!(
             trace(5, 20, 150).is_slow(None),
             "slow trip to the sidecar and back"
+        );
+        let unary = StreamTrace {
+            streamed: false,
+            ..trace(5, 20, 5_000)
+        };
+        assert!(
+            !unary.is_slow(None),
+            "a unary response's headers wait for the generation"
         );
         assert!(trace(5, 1_200, 1_210).is_slow(None), "slow pick");
         assert!(

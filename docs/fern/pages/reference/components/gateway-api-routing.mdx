@@ -134,6 +134,22 @@ Gateway topology.
   Includes active prompt-side prefill tokens in worker load accounting.
 </ParamField>
 
+The following settings add diagnostics for tracing latency through the EPP. The metrics they control are in [Endpoint Picker Metrics](../observability/metrics-catalog.mdx#endpoint-picker-metrics).
+
+<ParamField path="DYN_EPP_TASK_METRICS" type="boolean" default="false">
+  Records `dynamo_epp_task_poll_seconds` and `dynamo_epp_task_schedule_delay_seconds`, and logs an "EPP runtime stall" warning for each task poll, task wait or event-loop delay of 20 ms or more, with the task's kind, spawn site and id. A watcher task writes these lines, never the task that stalled, at most 10 per second. Adds clock reads to every task wake and poll. Takes effect in a binary that builds its runtime with `dynamo_ext_proc::build_runtime()`, as `dynamo-ext-proc` does; any other binary logs a warning instead.
+</ParamField>
+
+<ParamField path="DYN_EPP_TASK_METRICS_MIN_US" type="integer" default="1000">
+  The shortest task poll or wait the task metrics record, in microseconds.
+</ParamField>
+
+<ParamField path="DYN_EPP_STREAM_SUMMARY" type="string" default="slow">
+  Chooses which ext_proc streams get an "ext_proc stream summary" line at INFO: `slow` for streams with a response-chunk gap of 100 ms or more, a streamed response whose headers came 100 ms or more after routing, or a body receipt or pick of 1 s or more (a pick that never finished counts until the stream ends), at most 20 lines per second; `all` for every stream, as a benchmark wants; `off` for none. Other streams' summaries are logged at DEBUG.
+</ParamField>
+
+The summary line carries the request's `x-request-id` as `request_id`, its gateway connection (`conn_id`, `conn_streams`), its outcome, its body sizes, and offsets in microseconds from the request headers' arrival to the end of the body, the routing decision, the response headers, the first response chunk and the end of the stream, plus its largest response-chunk gap. The "Request routed" line carries the same `request_id` and the time each step of the pick took. The "ext_proc connection opened" and "ext_proc connection closed" lines name each connection's `conn_id`, peer and `task_id`.
+
 For the full shared configuration surface and tuning guidance, see
 [Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md).
 

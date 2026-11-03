@@ -19,7 +19,8 @@
 //!   by task kind, in `dynamo_epp_task_poll_seconds` and
 //!   `dynamo_epp_task_schedule_delay_seconds`. A slow poll names the task
 //!   that held a worker; a schedule delay names a task that waited for one.
-//!   Each of 20 ms or more is also logged as "EPP runtime stall".
+//!   Each of 20 ms or more, and each event-loop delay of 20 ms or more, is
+//!   also logged as "EPP runtime stall".
 
 use std::cell::Cell;
 use std::future::Future;
@@ -42,8 +43,8 @@ pub const TASK_METRICS_MIN_US_ENV: &str = "DYN_EPP_TASK_METRICS_MIN_US";
 
 const DEFAULT_TASK_METRICS_MIN: Duration = Duration::from_millis(1);
 
-/// Polls, schedule delays and event-loop delays at least this long are
-/// logged as "EPP runtime stall".
+/// With the task metrics on, polls, schedule delays and event-loop delays at
+/// least this long are logged as "EPP runtime stall".
 const STALL_LOG_THRESHOLD: Duration = Duration::from_millis(20);
 
 /// Stall lines per second, at most.
@@ -65,10 +66,10 @@ pub(crate) enum TaskKind {
     /// One gateway connection: TLS and every HTTP/2 frame of every stream
     /// on it.
     H2Connection,
-    /// hyper's task for each HTTP/2 request, which hands an ext_proc
-    /// stream's responses to its connection. Requests to the health and
-    /// metrics servers run here too.
-    H2Stream,
+    /// A task hyper-util spawns: one per HTTP/2 request the EPP serves,
+    /// which hands an ext_proc stream's responses to its connection, and
+    /// the connection tasks of the EPP's own HTTP and gRPC clients.
+    Hyper,
     /// The 1 Hz scan for prefill workers.
     PrefillWatcher,
     /// Anything else.
@@ -80,13 +81,13 @@ impl TaskKind {
         match self {
             TaskKind::ExtProcStream => "ext_proc_stream",
             TaskKind::H2Connection => "h2_connection",
-            TaskKind::H2Stream => "h2_stream",
+            TaskKind::Hyper => "hyper",
             TaskKind::PrefillWatcher => "prefill_watcher",
             TaskKind::Other => "other",
         }
     }
 
-    /// Where [`spawn`] last spawned a task of this kind.
+    /// Where [`spawn`] first spawned a task of this kind.
     fn spawn_site(self) -> Option<&'static OnceLock<&'static Location<'static>>> {
         static EXT_PROC_STREAM: OnceLock<&'static Location<'static>> = OnceLock::new();
         static H2_CONNECTION: OnceLock<&'static Location<'static>> = OnceLock::new();
@@ -95,12 +96,12 @@ impl TaskKind {
             TaskKind::ExtProcStream => Some(&EXT_PROC_STREAM),
             TaskKind::H2Connection => Some(&H2_CONNECTION),
             TaskKind::PrefillWatcher => Some(&PREFILL_WATCHER),
-            TaskKind::H2Stream | TaskKind::Other => None,
+            TaskKind::Hyper | TaskKind::Other => None,
         }
     }
 
-    /// The kind of a task spawned at `spawned_at`. hyper spawns its
-    /// per-request tasks from hyper-util's executor.
+    /// The kind of a task spawned at `spawned_at`. hyper spawns its tasks
+    /// from hyper-util's executor.
     fn of(spawned_at: &Location<'_>) -> Self {
         for kind in [
             TaskKind::ExtProcStream,
@@ -116,7 +117,7 @@ impl TaskKind {
             }
         }
         if spawned_at.file().contains("hyper-util") {
-            TaskKind::H2Stream
+            TaskKind::Hyper
         } else {
             TaskKind::Other
         }
@@ -153,14 +154,12 @@ where
 pub(crate) fn off_runtime<T>(f: impl FnOnce() -> T) -> T {
     match tokio::runtime::Handle::try_current().map(|handle| handle.runtime_flavor()) {
         Ok(tokio::runtime::RuntimeFlavor::MultiThread) => {
-            let started = TASK_METRICS_MIN.get().map(|_| Instant::now());
-            let result = tokio::task::block_in_place(f);
-            // The worker's queue ran on another thread meanwhile, so the poll
-            // hooks leave this time out of the poll.
-            if let Some(started) = started {
-                OFF_RUNTIME.set(OFF_RUNTIME.get().saturating_add(started.elapsed()));
+            // The thread rarely gets the queue back, so the poll hooks count
+            // this poll only up to here.
+            if TASK_METRICS_MIN.get().is_some() && HANDED_OFF_AT.get().is_none() {
+                HANDED_OFF_AT.set(Some(Instant::now()));
             }
-            result
+            tokio::task::block_in_place(f)
         }
         _ => f(),
     }
@@ -217,9 +216,9 @@ fn build_runtime_with(
 thread_local! {
     /// When the task on this worker thread started its current poll.
     static POLL_STARTED: Cell<Option<Instant>> = const { Cell::new(None) };
-    /// Time the current poll spent in [`off_runtime`], with the worker's
-    /// queue handed to another thread: not time the task held a worker.
-    static OFF_RUNTIME: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    /// When the current poll first handed its worker's queue to another
+    /// thread in [`off_runtime`]. The task holds no worker after that.
+    static HANDED_OFF_AT: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
 struct TaskHooks {
@@ -236,7 +235,7 @@ impl TaskHooks {
             metrics::observe_task_schedule_delay(kind, delay);
             self.report(StallKind::ScheduleDelay, kind, meta, delay);
         }
-        OFF_RUNTIME.set(Duration::ZERO);
+        HANDED_OFF_AT.set(None);
         POLL_STARTED.set(Some(Instant::now()));
     }
 
@@ -244,7 +243,10 @@ impl TaskHooks {
         let Some(started) = POLL_STARTED.take() else {
             return;
         };
-        let poll = started.elapsed().saturating_sub(OFF_RUNTIME.take());
+        let poll = HANDED_OFF_AT.take().map_or_else(
+            || started.elapsed(),
+            |at| at.saturating_duration_since(started),
+        );
         if poll >= self.min {
             let kind = TaskKind::of(meta.spawned_at());
             metrics::observe_task_poll(kind, poll);
@@ -291,18 +293,24 @@ struct Stall {
     duration: Duration,
 }
 
-/// Time a 10 ms sleep forever, recording how late each one wakes, and log
-/// the stalls the task hooks queue. Runs for the life of the EPP, whether or
-/// not the metrics server does.
+/// Time a 10 ms sleep forever, recording how late each one wakes, and, with
+/// the task metrics on, log the stalls. Runs for the life of the EPP, whether
+/// or not the metrics server does.
 pub(crate) async fn watch_event_loop() {
     let stalls = STALL_EVENTS
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .take();
+    let log_stalls = TASK_METRICS_MIN.get().is_some();
     if let Some(min) = TASK_METRICS_MIN.get() {
         tracing::info!(
             min_us = min.as_micros(),
             "Recording slow task polls and schedule delays ({TASK_METRICS_ENV})"
+        );
+    } else if task_metrics_min_from_env().is_some() {
+        tracing::warn!(
+            "{TASK_METRICS_ENV} is set, but this runtime has no task hooks: \
+             build it with dynamo_ext_proc::build_runtime()"
         );
     }
     loop {
@@ -310,7 +318,8 @@ pub(crate) async fn watch_event_loop() {
         tokio::time::sleep(EVENT_LOOP_TICK).await;
         let late = slept.elapsed().saturating_sub(EVENT_LOOP_TICK);
         metrics::observe_event_loop_delay(late);
-        if late >= STALL_LOG_THRESHOLD
+        if log_stalls
+            && late >= STALL_LOG_THRESHOLD
             && let Some(suppressed) = STALL_LOG_BUDGET.take()
         {
             tracing::warn!(
@@ -387,26 +396,32 @@ mod tests {
             .await
             .expect("task runs");
         });
+        // Tokio wakes a task's JoinHandle before its after-poll hook runs;
+        // shutting the runtime down waits for the hooks.
+        drop(runtime);
 
         assert!(metrics::task_polls_recorded(TaskKind::PrefillWatcher) > watcher_before);
         assert!(metrics::task_polls_recorded(TaskKind::Other) > other_before);
     }
 
-    /// Time in `off_runtime`, with the worker's queue on another thread, is
-    /// not a slow poll.
+    /// A poll counts only until `off_runtime` hands the worker's queue to
+    /// another thread: neither the work in `off_runtime` nor the rest of the
+    /// poll holds a worker.
     #[test]
-    fn time_off_the_runtime_is_not_a_slow_poll() {
+    fn time_after_handing_off_the_worker_is_not_a_slow_poll() {
         let _recording = RECORDING.lock().unwrap_or_else(PoisonError::into_inner);
         let runtime = build_runtime_with(Some(Duration::from_millis(10))).expect("runtime builds");
         let before = metrics::task_polls_recorded(TaskKind::PrefillWatcher);
 
         runtime.block_on(async {
             spawn_watcher(async {
-                off_runtime(|| std::thread::sleep(Duration::from_millis(50)));
+                off_runtime(|| std::thread::sleep(Duration::from_millis(30)));
+                std::thread::sleep(Duration::from_millis(30));
             })
             .await
             .expect("task runs");
         });
+        drop(runtime);
 
         assert_eq!(
             metrics::task_polls_recorded(TaskKind::PrefillWatcher),
@@ -430,8 +445,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn off_runtime_runs_the_work_on_the_multi_thread_runtime() {
-        assert_eq!(off_runtime(|| 6 * 7), 42);
+    async fn off_runtime_runs_the_work_from_a_worker_thread() {
+        let answer = tokio::spawn(async { off_runtime(|| 6 * 7) })
+            .await
+            .expect("task runs");
+        assert_eq!(answer, 42);
     }
 
     #[tokio::test]
@@ -443,8 +461,13 @@ mod tests {
     async fn event_loop_watcher_records_its_delay() {
         let before = metrics::event_loop_delays_recorded();
         let watcher = tokio::spawn(watch_event_loop());
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        let recorded = tokio::time::timeout(Duration::from_secs(5), async {
+            while metrics::event_loop_delays_recorded() <= before {
+                tokio::time::sleep(EVENT_LOOP_TICK).await;
+            }
+        })
+        .await;
         watcher.abort();
-        assert!(metrics::event_loop_delays_recorded() > before);
+        assert!(recorded.is_ok(), "no event-loop delay recorded in 5 s");
     }
 }

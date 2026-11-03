@@ -79,15 +79,21 @@ struct TokenizeTimings {
     tokenize: Option<Duration>,
 }
 
-/// Chat renders and tokenizations that may run at once: one per core, as the
-/// frontend's runtime caps its blocking pool at the core count. The EPP's
-/// runtime keeps tokio's default of 512 blocking threads, so without this a
-/// burst could tokenize hundreds of prompts at once and take the CPU from the
-/// async workers that relay every other stream.
+/// Tokenizations, with any chat template render before them, that may run at
+/// once: one per core, as the frontend's runtime caps its blocking pool at the
+/// core count. The EPP's runtime keeps tokio's default of 512 blocking
+/// threads, so without this a burst could tokenize hundreds of prompts at once
+/// and take the CPU from the async workers that relay every other stream.
 static TOKENIZE_SLOTS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| {
     let cores = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
     Arc::new(Semaphore::new(cores))
 });
+
+/// The EPP's own tokenization could not run because the runtime is shutting
+/// down: not the client's fault, so the pick answers 503.
+#[derive(Debug, thiserror::Error)]
+#[error("tokenization was cancelled: the EPP is shutting down")]
+struct TokenizationCancelled;
 
 /// The encoding's token ids, taking the buffer when the encoder already holds
 /// one, as the frontend's preprocessor does.
@@ -96,6 +102,56 @@ fn into_token_ids(encoding: Encoding) -> Vec<u32> {
         Encoding::Sp(token_ids) => token_ids,
         encoding => encoding.token_ids().to_vec(),
     }
+}
+
+/// Render the chat template and tokenize the prompt on the blocking pool, as
+/// the frontend's preprocessor tokenizes: a long prompt takes tens of
+/// milliseconds of CPU, which would otherwise hold an async worker that
+/// relays other streams. At most one runs per core (see [`TOKENIZE_SLOTS`]).
+/// A pick cancelled while it waits for a slot never starts; one cancelled
+/// later lets the work finish and drops the result.
+async fn render_and_tokenize(
+    preprocessor: Arc<OpenAIPreprocessor>,
+    request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
+) -> Result<(Vec<u32>, TokenizeTimings)> {
+    let queued = Instant::now();
+    let slot = Arc::clone(&TOKENIZE_SLOTS)
+        .acquire_owned()
+        .await
+        .map_err(|_| TokenizationCancelled)?;
+    tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        let started = Instant::now();
+        let blocking_wait = started - queued;
+        metrics::observe_stage(Stage::BlockingWait, blocking_wait);
+        let prompt = preprocessor.apply_template(&request)?;
+        let rendered = Instant::now();
+        let template = rendered - started;
+        metrics::observe_stage(Stage::Template, template);
+        let encoding = match prompt {
+            Some(prompt) => preprocessor.tokenize_rendered_prompt(&prompt),
+            None => preprocessor.tokenize(""),
+        };
+        let tokenize = rendered.elapsed();
+        metrics::observe_stage(Stage::Tokenize, tokenize);
+        let timings = TokenizeTimings {
+            parse: Duration::ZERO,
+            blocking_wait: Some(blocking_wait),
+            template: Some(template),
+            tokenize: Some(tokenize),
+        };
+        // Take the ids here, so a large encoding is freed on this thread
+        // rather than on the async worker.
+        encoding.map(|encoding| (into_token_ids(encoding), timings))
+    })
+    .await
+    .map_err(|e| match e.try_into_panic() {
+        // A tokenizer panic is a bug, not a bad request: re-raise it rather
+        // than answer the client 400.
+        Ok(panic) => std::panic::resume_unwind(panic),
+        // Only a runtime shutting down cancels a blocking task.
+        Err(_) => anyhow::Error::new(TokenizationCancelled),
+    })?
 }
 
 /// Validate `DYN_KUBE_DISCOVERY_MODE` and report whether *container* discovery
@@ -366,15 +422,8 @@ impl Router {
         Ok(result)
     }
 
-    /// Tokenize a `/v1/chat/completions` body via the chat template.
-    ///
-    /// Rendering and tokenizing a long prompt takes tens of milliseconds of
-    /// CPU, so it runs on the blocking pool, as the frontend's preprocessor
-    /// does. Inline, it held an async worker that also streams other requests'
-    /// bodies and response tokens through this EPP. At most one render per
-    /// core runs at a time (see [`TOKENIZE_SLOTS`]). A pick cancelled while it
-    /// waits for a slot never starts its render; one cancelled during the
-    /// render lets it finish and drops the result.
+    /// Tokenize a `/v1/chat/completions` body via the chat template, on the
+    /// blocking pool (see [`render_and_tokenize`]).
     async fn tokenize_chat(
         &self,
         request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
@@ -388,41 +437,8 @@ impl Router {
         let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
         let cache_namespace = cache_namespace_from_request(&request, headers);
 
-        let preprocessor = Arc::clone(&self.preprocessor);
-        let queued = Instant::now();
-        let slot = Arc::clone(&TOKENIZE_SLOTS).acquire_owned().await?;
-        let (tokens, timings) = tokio::task::spawn_blocking(move || {
-            let _slot = slot;
-            let started = Instant::now();
-            let blocking_wait = started - queued;
-            metrics::observe_stage(Stage::BlockingWait, blocking_wait);
-            let prompt = preprocessor.apply_template(&request)?;
-            let rendered = Instant::now();
-            let template = rendered - started;
-            metrics::observe_stage(Stage::Template, template);
-            let encoding = match prompt {
-                Some(prompt) => preprocessor.tokenize_rendered_prompt(&prompt),
-                None => preprocessor.tokenize(""),
-            };
-            let tokenize = rendered.elapsed();
-            metrics::observe_stage(Stage::Tokenize, tokenize);
-            let timings = TokenizeTimings {
-                parse: Duration::ZERO,
-                blocking_wait: Some(blocking_wait),
-                template: Some(template),
-                tokenize: Some(tokenize),
-            };
-            // Take the ids here, so a large encoding is freed on this thread
-            // rather than on the async worker.
-            encoding.map(|encoding| (into_token_ids(encoding), timings))
-        })
-        .await
-        .map_err(|e| match e.try_into_panic() {
-            // A tokenizer panic is a bug, not a bad request: re-raise it as
-            // inline tokenization did, rather than answer the client 400.
-            Ok(panic) => std::panic::resume_unwind(panic),
-            Err(cancelled) => anyhow::anyhow!("tokenization task was cancelled: {cancelled}"),
-        })??;
+        let (tokens, timings) =
+            render_and_tokenize(Arc::clone(&self.preprocessor), request).await?;
         Ok(TokenizeResult {
             tokens,
             cache_namespace,
@@ -503,6 +519,13 @@ impl Router {
     ) -> Result<Vec<u32>> {
         let prompt = std::mem::replace(&mut request.inner.prompt, Prompt::String(String::new()));
         request.inner.prompt = Prompt::String(completion_prompt_routing_text(prompt));
+        // `gather_tokens` tokenizes on the blocking pool; the slot bounds it
+        // with chat tokenization. A pick cancelled meanwhile frees its slot
+        // before the tokenizer ends.
+        let _slot = TOKENIZE_SLOTS
+            .acquire()
+            .await
+            .map_err(|_| TokenizationCancelled)?;
         let (tokens, _annotations) = self
             .preprocessor
             .gather_tokens(&request, None, None)
@@ -1362,11 +1385,10 @@ fn spawn_prefill_discovery_watcher(
         );
 
         loop {
-            // Listing clones every model instance, and each card is then
-            // deserialized: tens of milliseconds of CPU per pass at a thousand
-            // workers, every second for as long as no prefill worker exists.
-            // Run the pass on the blocking pool so it never holds an async
-            // worker that also drives gateway connections.
+            // Each pass clones every model instance and deserializes each
+            // card, every second until a prefill worker appears. Run it on the
+            // blocking pool so it never holds an async worker that drives
+            // gateway connections.
             let pass = {
                 let discovery = Arc::clone(&discovery);
                 let target_namespace = target_namespace.clone();
@@ -1594,10 +1616,13 @@ impl EndpointPicker for Router {
             routing_constraints,
             tokens_safe_to_inject,
             timings: tokenize_timings,
-        } = self
-            .tokenize(body_str, &req.headers)
-            .await
-            .map_err(|e| PickError::InvalidRequest(e.to_string()))?;
+        } = self.tokenize(body_str, &req.headers).await.map_err(|e| {
+            if e.is::<TokenizationCancelled>() {
+                PickError::TokenizerUnavailable
+            } else {
+                PickError::InvalidRequest(e.to_string())
+            }
+        })?;
         let policy_class = requested_policy_class(&req.headers)?;
         let reservation_id = Uuid::new_v4().to_string();
         let select_started = Instant::now();
@@ -2986,5 +3011,46 @@ mod tests {
         );
         let components: Vec<&str> = found.iter().map(|w| w.component.as_str()).collect();
         assert_eq!(components, ["prefill-a", "prefill-b"]);
+    }
+
+    /// Chat tokenization on the blocking pool gives the tokens that rendering
+    /// and tokenizing inline gives, and times each step.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chat_tokens_from_the_blocking_pool_match_inline_tokenization() {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../../lib/llm/tests/data/sample-models/TinyLlama_v1.1"
+            ),
+            None,
+        )
+        .expect("load fixture model card");
+        let preprocessor =
+            OpenAIPreprocessor::new(mdc).expect("build preprocessor from fixture card");
+        let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "The capital of France is"}],
+            }))
+            .expect("chat request parses");
+
+        let prompt = preprocessor
+            .apply_template(&request)
+            .expect("template renders")
+            .expect("the fixture has a chat template");
+        let inline = preprocessor
+            .tokenize_rendered_prompt(&prompt)
+            .expect("prompt tokenizes")
+            .token_ids()
+            .to_vec();
+
+        let (tokens, timings) = render_and_tokenize(Arc::clone(&preprocessor), request)
+            .await
+            .expect("tokenization runs");
+        assert!(!tokens.is_empty());
+        assert_eq!(tokens, inline);
+        assert!(timings.blocking_wait.is_some());
+        assert!(timings.template.is_some());
+        assert!(timings.tokenize.is_some());
     }
 }
