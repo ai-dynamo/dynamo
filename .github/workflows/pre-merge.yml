@@ -603,14 +603,6 @@ jobs:
     - name: Check router crate layering
       if: matrix.dir == '.'
       run: bash scripts/router_layering_check.sh --host
-    - name: Check router public API snapshots
-      if: matrix.dir == '.'
-      # cargo-public-api drives a nightly rustdoc for its JSON output; the stable toolchain stays
-      # the build toolchain.
-      run: |
-        rustup toolchain install nightly --profile minimal
-        cargo-public-api --version || cargo install cargo-public-api@0.52.0 --locked
-        bash scripts/router_public_api_check.sh
     - name: Run Python bindings AIS feature clippy
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}

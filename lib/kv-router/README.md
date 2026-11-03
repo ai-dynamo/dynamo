@@ -96,10 +96,6 @@ cargo clippy -p dynamo-kv-router --all-targets --features http,ingest-zmq,replic
 bash scripts/router_features_check.sh
 ```
 
-The crate's public surface is a committed snapshot, `public-api.txt`; `bash
-scripts/router_public_api_check.sh` regenerates it with `cargo-public-api` and fails on a
-difference (`--update` rewrites it; review the diff in the PR).
-
 ## Removed paths (migration map)
 
 `dynamo-kv-router` is the composition crate. Every path below was a shim over a stage, the
