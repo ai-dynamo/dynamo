@@ -3022,19 +3022,33 @@ async fn kv_route_booking_holds_until_released_or_dropped() {
 #[serial_test::serial]
 async fn detached_kv_booking_is_freed_by_its_request_id() {
     let (router, runtime) = router(None).await;
-    let request = Context::new(request());
-    let request_id = request.context().id().to_string();
+    let detached = Context::new(request());
+    let request_id = detached.context().id().to_string();
 
     router
-        .plan_route(&request, RequestPhase::Decode)
+        .plan_route(&detached, RequestPhase::Decode)
         .await
         .unwrap()
         .detach_booking();
-    // Give a wrongly armed lease the chance to release on drop.
-    tokio::task::yield_now().await;
+    // Releases reach the scheduler in order, so once a later plan's
+    // drop-release lands, a wrongly armed detached lease has released too.
+    drop(
+        router
+            .plan_route(&Context::new(request()), RequestPhase::Decode)
+            .await
+            .unwrap(),
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while active_requests_for(&potential_loads(&router).await, 7, 0) > 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the dropped plan must release its booking");
     assert_eq!(
         active_requests_for(&potential_loads(&router).await, 7, 0),
-        1
+        1,
+        "the detached booking must survive its plan"
     );
 
     router
