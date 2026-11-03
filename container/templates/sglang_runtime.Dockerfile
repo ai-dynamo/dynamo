@@ -218,7 +218,9 @@ RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compl
 {% else %}
 # mooncake and PyNvVideoCodec are CUDA-only. The mooncake floor names the CUDA 13
 # distribution, and PyNvVideoCodec decodes on NVDEC through libnvcuvid, so both
-# are inert on the XPU image and neither is present in its base. The patterns are
+# are inert on the XPU image and neither is present in its base. The diffusers pin
+# is stripped too: the XPU framework stage installs its own diffusion extra, and
+# this pin is tested on CUDA only. The patterns are
 # anchored to the line start so they cannot match inside another requirement, and
 # the checks fail the build if either package arrives by another route -- a filter
 # that silently stopped matching would otherwise look like success. Both checks
@@ -231,7 +233,7 @@ RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compl
 RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tmp/requirements.sglang.txt \
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
-    grep -v -e '^PyNvVideoCodec' -e '^mooncake-transfer-engine-cuda13' \
+    grep -v -e '^PyNvVideoCodec' -e '^mooncake-transfer-engine-cuda13' -e '^diffusers' \
         /tmp/requirements.sglang.txt > /tmp/requirements.sglang.nonvidia.txt && \
     pip install --break-system-packages --force-reinstall --no-deps \
         --requirement /tmp/requirements.sglang.nonvidia.txt && \
