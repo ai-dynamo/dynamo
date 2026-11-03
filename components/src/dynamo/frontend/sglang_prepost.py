@@ -33,6 +33,7 @@ from dynamo.common.utils.engine_response import trailing_stop_prefix_len
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
+from .responses_history import responses_history_recipients, responses_tools_request
 from .structural_tag_policy import (
     ToolChoiceKind,
     effective_tool_strict,
@@ -224,17 +225,24 @@ def convert_tools(
     sglang_tools = []
     for tool in tools:
         func = tool.get("function", {})
+        # Retain the chat extension when rebuilding tools for template rendering.
+        # An explicit function-level false takes precedence over the wrapper alias.
+        defer_loading = func.get("defer_loading")
+        if defer_loading is None:
+            defer_loading = tool.get("defer_loading")
         strict = func.get("strict", False)
         if structural_tag_schema is not None:
             strict = effective_tool_strict(func.get("strict"), structural_tag_schema)
         sglang_tools.append(
             SglangTool(
                 type=tool.get("type", "function"),
+                defer_loading=tool.get("defer_loading"),
                 function=SglangFunction(
                     name=func.get("name", ""),
                     description=func.get("description"),
                     parameters=func.get("parameters"),
                     strict=strict,
+                    defer_loading=defer_loading,
                 ),
             )
         )
@@ -439,11 +447,16 @@ def _filter_template_tools(
 
     if _is_named_tool_choice(tool_choice):
         chosen_name = tool_choice["function"]["name"]
-        return [
+        selected = [
             tool.model_dump()
             for tool in sglang_tools
             if tool.function.name == chosen_name
         ]
+        # The forced function renders eagerly, matching the Rust preprocessor.
+        for tool in selected:
+            tool.pop("defer_loading", None)
+            tool["function"].pop("defer_loading", None)
+        return selected
 
     return [tool.model_dump() for tool in sglang_tools]
 
@@ -887,9 +900,25 @@ def preprocess_chat_request(
 
     Synchronous -- suitable for both main-process and worker-process execution.
     """
+    resolved_responses_template = None
+    if request.get("responses_native_tools") and not (
+        exclude_tools_when_tool_choice_none and request.get("tool_choice") == "none"
+    ):
+        resolved_responses_template = tokenizer.get_chat_template(
+            chat_template=request.get("chat_template"), tools=request.get("tools")
+        )
+        request = responses_tools_request(request, resolved_responses_template)
     request = _with_thinking_template_kwargs(request, default_thinking_mode)
     legacy_guidance = legacy_guided_decoding(request)
     messages = _materialize_messages(request.get("messages", []))
+    # Materialization copied caller-owned messages. Restore Responses phases by
+    # assistant ordinal, including tool-only messages, before template rendering.
+    recipients = responses_history_recipients(request.get("responses_history_phases"))
+    for index, message in enumerate(
+        m for m in messages if m.get("role") == "assistant"
+    ):
+        if recipient := recipients.get(str(index)):
+            message["recipient"] = recipient
 
     # Generation mode is independent of whether the client wants reasoning
     # separated into reasoning_content or retained in content.
@@ -955,8 +984,12 @@ def preprocess_chat_request(
             "add_generation_prompt": True,
             "tokenize": True,
         }
+        if resolved_responses_template is not None:
+            template_kwargs["chat_template"] = resolved_responses_template
         if template_tools:
-            template_kwargs["tools"] = template_tools
+            template_kwargs["tools"] = request.get(
+                "responses_template_tools", template_tools
+            )
 
         chat_template_kwargs = (
             request.get("chat_template_kwargs")

@@ -1,0 +1,266 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# AIPerf video benchmark for the Cosmos3 Nano Reasoner recipe.
+# The Job generates deterministic synthetic videos with FFmpeg; no external
+# dataset or credentials are required.
+apiVersion: v1
+kind: Service
+metadata:
+  name: cosmos3-nano-reasoner-perf-videos
+  labels:
+    app.kubernetes.io/name: cosmos3-nano-reasoner
+    app.kubernetes.io/component: benchmark-video-server
+spec:
+  selector:
+    app.kubernetes.io/name: cosmos3-nano-reasoner
+    app.kubernetes.io/component: benchmark
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cosmos3-nano-reasoner-perf
+  labels:
+    app.kubernetes.io/name: cosmos3-nano-reasoner
+    app.kubernetes.io/component: benchmark
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 14400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cosmos3-nano-reasoner
+        app.kubernetes.io/component: benchmark
+    spec:
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: benchmark
+          image: python:3.12-slim@sha256:ec948fa5f90f4f8907e89f4800cfd2d2e91e391a4bce4a6afa77ba265bc3a2fe
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          ports:
+            - name: http
+              containerPort: 8080
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              apt-get update
+              apt-get install -y --no-install-recommends build-essential curl ffmpeg jq
+              apt-get clean
+              pip install --no-cache-dir "aiperf==0.12.0"
+
+              export COLUMNS=200
+              epoch="$(date +%s)"
+              run_root="${ARTIFACT_ROOT}/${BENCHMARK_VARIANT}/${epoch}_${JOB_NAME}"
+              input_file="${run_root}/video_requests.jsonl"
+              dataset_dir=/workspace/videos
+              mkdir -p "$run_root" "$dataset_dir/$DATASET_SUBDIR"
+              {
+                python3 --version
+                pip freeze
+                ffmpeg -version | head -n 1
+              } >"$run_root/runtime_versions.txt"
+
+              # Seeded Game of Life frames give every video distinct, reproducible
+              # content; the bitrate cap keeps file size close to real 640x640 clips.
+              for ((i = 0; i < VIDEO_POOL_SIZE; i++)); do
+                ffmpeg -hide_banner -loglevel error -y -f lavfi \
+                  -i "life=s=${VIDEO_SIZE}:r=${VIDEO_FPS}:seed=${i}:ratio=0.3:mold=10:life_color=#4caf50:death_color=#202020:mold_color=#e0a030" \
+                  -t "$VIDEO_DURATION_SECONDS" -c:v libx264 -b:v 1200k -maxrate 1200k \
+                  -bufsize 2400k -pix_fmt yuv420p -movflags +faststart \
+                  "$(printf '%s/%s/vid-%04d.mp4' "$dataset_dir" "$DATASET_SUBDIR" "$i")"
+              done
+              echo "Generated $VIDEO_POOL_SIZE synthetic videos in $dataset_dir/$DATASET_SUBDIR"
+
+              DATASET_DIR="$dataset_dir" INPUT_FILE="$input_file" python3 - <<'PY'
+              import json
+              import os
+              from pathlib import Path
+              from urllib.parse import quote
+
+              root = Path(os.environ["DATASET_DIR"])
+              preferred = root / os.environ["DATASET_SUBDIR"]
+              search_root = preferred if preferred.is_dir() else root
+              videos = sorted(search_root.rglob("*.mp4"))
+              if not videos:
+                  raise SystemExit(f"No MP4 videos found under {search_root}")
+
+              pool_size = min(int(os.environ["VIDEO_POOL_SIZE"]), len(videos))
+              request_count = int(os.environ["TOTAL_REQUEST_COUNT"])
+              questions_per_video = int(os.environ["QUESTIONS_PER_VIDEO"])
+              videos = videos[:pool_size]
+              expected_requests = pool_size * questions_per_video
+              if request_count != expected_requests:
+                  raise SystemExit(
+                      f"TOTAL_REQUEST_COUNT={request_count} must equal "
+                      f"VIDEO_POOL_SIZE ({pool_size}) * QUESTIONS_PER_VIDEO "
+                      f"({questions_per_video})"
+                  )
+              questions = [
+                  "Describe the main actions and events in this video.",
+                  "Identify the main subjects and objects visible in this video.",
+                  "Explain how the scene changes from the beginning to the end.",
+                  "Describe any interactions between people, animals, or objects.",
+                  "Summarize the sequence of events in chronological order.",
+                  "Describe the setting and environment shown in this video.",
+                  "What is the most important event in this video, and why?",
+                  "Describe the camera viewpoint and any camera motion in this video.",
+                  "List the colors and materials of the most prominent objects in this video.",
+                  "Estimate how many distinct people or animals appear in this video.",
+                  "Describe the motion of the fastest-moving subject in this video.",
+                  "What happens in the first five seconds of this video?",
+                  "What happens in the last five seconds of this video?",
+                  "Describe the lighting conditions and time of day in this video.",
+                  "Identify any text, signs, or symbols visible in this video.",
+                  "Describe the spatial layout of the scene in this video.",
+                  "What might happen immediately after this video ends?",
+                  "Describe any safety hazards or unusual events in this video.",
+                  "Explain the likely purpose or intent of the main subject in this video.",
+                  "Write a one-sentence caption for this video.",
+              ]
+              if questions_per_video > len(questions):
+                  raise SystemExit(
+                      f"QUESTIONS_PER_VIDEO cannot exceed {len(questions)}"
+                  )
+              server = os.environ["VIDEO_SERVER_URL"].rstrip("/")
+              output = Path(os.environ["INPUT_FILE"])
+              with output.open("w") as stream:
+                  for video in videos:
+                      relative = quote(video.relative_to(root).as_posix())
+                      session_id = f"{os.environ['DATASET_SUBDIR']}:{video.name}"
+                      for question in questions[:questions_per_video]:
+                          row = {
+                              "session_id": session_id,
+                              "text": question,
+                              "videos": [f"{server}/{relative}"],
+                          }
+                          stream.write(
+                              json.dumps(row, separators=(",", ":")) + "\n"
+                          )
+              print(
+                  f"Wrote {request_count} requests using {pool_size} videos and "
+                  f"{questions_per_video} questions per video to {output}"
+              )
+              PY
+
+              python3 -m http.server 8080 --bind 0.0.0.0 --directory "$dataset_dir" &
+              video_server_pid=$!
+              cleanup() { kill "$video_server_pid" 2>/dev/null || true; }
+              trap cleanup EXIT
+              until curl -fsS http://127.0.0.1:8080/ >/dev/null; do sleep 1; done
+              until curl -fsS "$VIDEO_SERVER_URL/" >/dev/null; do sleep 1; done
+
+              echo "Waiting for model '$TARGET_MODEL' at http://$ENDPOINT/v1/models"
+              until curl -fsS "http://$ENDPOINT/v1/models" |
+                  jq -e --arg model "$TARGET_MODEL" '.data[]? | select(.id == $model)' >/dev/null; do
+                sleep 5
+              done
+
+              cat >"$run_root/run_config.json" <<JSON
+              {
+                "aiperf_version": "0.12.0",
+                "benchmark_image": "python:3.12-slim@sha256:ec948fa5f90f4f8907e89f4800cfd2d2e91e391a4bce4a6afa77ba265bc3a2fe",
+                "serving_image": "nvcr.io/nim/nvidia/cosmos3:2.1.0@sha256:2add946b316a0baf72a15be4da85132d127c34da22d2fe4e9c4bd146ad8c4020",
+                "target_model": "$TARGET_MODEL",
+                "endpoint": "$ENDPOINT",
+                "dataset_subdir": "$DATASET_SUBDIR",
+                "video_size": "$VIDEO_SIZE",
+                "video_fps": $VIDEO_FPS,
+                "video_duration_seconds": $VIDEO_DURATION_SECONDS,
+                "video_pool_size": $VIDEO_POOL_SIZE,
+                "questions_per_video": $QUESTIONS_PER_VIDEO,
+                "conversation_count": $VIDEO_POOL_SIZE,
+                "total_request_count": $TOTAL_REQUEST_COUNT,
+                "concurrency_levels": "$CONCURRENCY_LEVELS",
+                "warmup_request_count": $WARMUP_REQUEST_COUNT,
+                "output_tokens": $OUTPUT_TOKENS,
+                "routing_workload": "$BENCHMARK_VARIANT",
+                "session_header": $([ "$SESSION_AFFINITY" = "1" ] && printf '"X-Dynamo-Session-ID"' || printf 'null')
+              }
+              JSON
+
+              session_args=()
+              if [[ "$SESSION_AFFINITY" == "1" ]]; then
+                session_args=(--session-header X-Dynamo-Session-ID)
+              fi
+
+              for concurrency in $CONCURRENCY_LEVELS; do
+                artifact_dir="${run_root}/c${concurrency}"
+                mkdir -p "$artifact_dir"
+                aiperf profile \
+                  --model "$TARGET_MODEL" \
+                  --input-file "$input_file" \
+                  --custom-dataset-type single_turn \
+                  --url "http://$ENDPOINT" \
+                  --streaming \
+                  --use-server-token-count \
+                  --tokenizer builtin \
+                  --conversation-num "$VIDEO_POOL_SIZE" \
+                  --concurrency "$concurrency" \
+                  --warmup-request-count "$WARMUP_REQUEST_COUNT" \
+                  --random-seed 620 \
+                  --extra-inputs "ignore_eos:true" \
+                  --extra-inputs "min_tokens:${OUTPUT_TOKENS}" \
+                  --extra-inputs "max_tokens:${OUTPUT_TOKENS}" \
+                  --request-timeout-seconds 600 \
+                  "${session_args[@]}" \
+                  --ui simple \
+                  --artifact-dir "$artifact_dir"
+              done
+              echo "Benchmark artifacts: $run_root"
+          envFrom:
+            - configMapRef:
+                name: cosmos3-nano-reasoner-perf-profile
+          env:
+            - name: TARGET_MODEL
+              value: nvidia/cosmos3-nano-reasoner
+            - name: DATASET_SUBDIR
+              value: synthetic-2fps-30s
+            - name: VIDEO_SIZE
+              value: 640x640
+            - name: VIDEO_FPS
+              value: "2"
+            - name: VIDEO_DURATION_SECONDS
+              value: "30"
+            - name: ARTIFACT_ROOT
+              value: /shared-model-cache/perf/cosmos3-nano-reasoner
+            - name: VIDEO_SERVER_URL
+              value: http://cosmos3-nano-reasoner-perf-videos:8080
+            - name: VIDEO_POOL_SIZE
+              value: "200"
+            - name: QUESTIONS_PER_VIDEO
+              value: "20"
+            - name: TOTAL_REQUEST_COUNT
+              value: "4000"
+            - name: CONCURRENCY_LEVELS
+              value: "1 2 4 8 16"
+            - name: WARMUP_REQUEST_COUNT
+              value: "4"
+            - name: OUTPUT_TOKENS
+              value: "128"
+            - name: JOB_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['job-name']
+          resources:
+            requests:
+              cpu: "8"
+              memory: 16Gi
+            limits:
+              cpu: "16"
+              memory: 32Gi
+          volumeMounts:
+            - name: shared-model-cache
+              mountPath: /shared-model-cache
+      volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache

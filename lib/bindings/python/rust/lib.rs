@@ -12,9 +12,7 @@ use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
-#[cfg(feature = "custom-policy")]
-use pyo3::exceptions::PyRuntimeError;
-use pyo3::exceptions::{PyStopAsyncIteration, PyTimeoutError, PyValueError};
+use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyTimeoutError, PyValueError};
 use pyo3::types::PyCapsule;
 use pyo3::types::{PyDict, PyString};
 use pyo3::{exceptions::PyException, prelude::*};
@@ -326,6 +324,15 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         rs::logging::init();
     }
 
+    let mut formats = dynamo_llm::generate_format::Registry::default();
+    dynamo_generate_format_catalog::register(&mut formats)
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    if !dynamo_llm::generate_format::install(formats) {
+        return Err(PyRuntimeError::new_err(
+            "generate format registry already installed",
+        ));
+    }
+
     // Size the runtime the bridge may build for itself.
     //
     // `DistributedRuntime::new` gives the bridge a configured runtime, but only when it gets
@@ -396,6 +403,8 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionService>()?;
     #[cfg(feature = "select-service")]
+    m.add_class::<llm::kv::SessionBindingStream>()?;
+    #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionCacheConfig>()?;
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
     m.add_class::<llm::kv::MultimodalEmbeddingCachePublisher>()?;
@@ -421,7 +430,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ModelInput>()?;
     m.add_class::<WorkerType>()?;
     m.add_class::<llm::kv::KvRouter>()?;
-    m.add_class::<llm::kv_dc_relay::KvDcRelay>()?;
+    m.add_class::<llm::pool_relay::PoolRelay>()?;
     m.add_class::<llm::kv_state_agent::KvStateAgentHost>()?;
     m.add_class::<llm::kv_state_agent::KvStateAttachmentOwner>()?;
     m.add_class::<llm::routed_engine::RoutedEngine>()?;
@@ -556,9 +565,10 @@ fn resolve_response_plane_mode(
     match response_plane {
         Some("tcp") => Ok(Some(ResponsePlaneMode::Tcp)),
         Some("quic") => Ok(Some(ResponsePlaneMode::Quic)),
+        Some("velo") => Ok(Some(ResponsePlaneMode::Velo)),
         Some("") | None => Ok(None),
         Some(other) => Err(PyValueError::new_err(format!(
-            "Invalid response_plane value '{other}'. Valid values: 'tcp', 'quic'"
+            "Invalid response_plane value '{other}'. Valid values: 'tcp', 'quic', 'velo'"
         ))),
     }
 }
@@ -832,7 +842,8 @@ fn register_model<'p>(
     // serving.
     let admission_gate = endpoint
         .admission_gate
-        .get_or_create(endpoint.inner.component());
+        .get_or_create(endpoint.inner.component())
+        .map_err(to_pyerr)?;
     endpoint
         .inner
         .set_lifecycle_operation_role(lifecycle_role)
@@ -1267,6 +1278,10 @@ impl ModelType {
         inner: llm_rs::model_type::ModelType::Audios,
     };
     #[classattr]
+    const Transcriptions: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Transcriptions,
+    };
+    #[classattr]
     const Videos: Self = ModelType {
         inner: llm_rs::model_type::ModelType::Videos,
     };
@@ -1416,7 +1431,6 @@ impl DistributedRuntime {
         };
         let request_plane: RequestPlaneMode = request_plane.parse().map_err(to_pyerr)?;
         let response_plane = resolve_response_plane_mode(response_plane.as_deref())?;
-        let explicit_event_plane = event_plane.as_deref().filter(|value| !value.is_empty());
         let event_transport_kind =
             resolve_event_transport_kind(&discovery_backend_config, event_plane.as_deref())?;
 
@@ -1448,9 +1462,7 @@ impl DistributedRuntime {
             || matches!(
                 event_transport_kind,
                 dynamo_runtime::discovery::EventTransportKind::Nats
-            )
-            || (explicit_event_plane.is_none()
-                && std::env::var(config::environment_names::nats::NATS_SERVER).is_ok());
+            );
 
         let runtime_config = DistributedConfig {
             discovery_backend: discovery_backend_config,
@@ -1719,10 +1731,7 @@ impl Endpoint {
         // by `register_model` takes effect from then on, through the gate of
         // the worker this endpoint serves for.
         let backend_role = engine::BackendRole::of(&self.inner);
-        let admission = engine::EndpointAdmission::new(
-            self.admission_gate.clone(),
-            self.inner.component().clone(),
-        );
+        let admission = self.admission_gate.clone();
 
         // Push egress: the handler pushes each response into a Rust channel via
         // its `response_sender` argument, instead of Rust pulling `__anext__`

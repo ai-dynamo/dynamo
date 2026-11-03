@@ -5,18 +5,21 @@
 //! servers.
 
 use std::num::{NonZeroU32, NonZeroUsize};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
     AsyncEngineContext, DynamoError, EngineConfig, GenerateContext, LLMEngine, LLMEngineOutput,
-    LLMEngineOutputExt, PreprocessedRequest, RuntimeConfig, WorkerConfig, usage,
+    LLMEngineOutputExt, MetricsBindings, MetricsCtx, PreprocessedRequest, RuntimeConfig,
+    WorkerConfig, usage,
 };
 use dynamo_sidecar_common::{
     EngineBootstrapResult, GrpcEndpoint, GrpcTransportConfig, SidecarStartupError, startup_deadline,
 };
 use futures::stream::BoxStream;
 use tokio::sync::OnceCell;
+use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
@@ -25,6 +28,7 @@ use crate::convert::{
     DispatchFailure, ResponseState, build_generate_request, build_handoff_cleanup_request,
     dispatch_failure, stream_status, trace_headers,
 };
+use crate::load;
 use crate::model::{DiscoveredEngine, engine_label, expected_role, role_name};
 
 const ALREADY_STARTED: &str = "the LPX sidecar has already started";
@@ -32,7 +36,7 @@ const ALREADY_STARTED: &str = "the LPX sidecar has already started";
 /// What the sidecar executable runs, chosen from its arguments.
 pub enum Launch<S> {
     /// Serve the engine with the runtime settings and engine bootstrap that
-    /// [`dynamo_sidecar_common::run`] takes.
+    /// [`crate::serve`] takes.
     Serve(S),
     /// Stand by as this rank of a multi-Pod engine, through
     /// [`crate::run_standby`]; only rank 0 serves.
@@ -59,7 +63,12 @@ pub struct LpxSidecarEngine {
     /// The configured connection pool, opened by `start` and named after the
     /// identified engine. The bootstrap uses only a one-connection probe.
     client: OnceCell<Arc<OpenEngineClient>>,
+    /// Also stops the load poll.
     cancel: CancellationToken,
+    /// Cancelled once the engine's load has stayed unavailable too long.
+    load_lost: CancellationToken,
+    /// The load poll `setup_metrics` starts; `cleanup` joins it.
+    load_poll: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl LpxSidecarEngine {
@@ -76,7 +85,19 @@ impl LpxSidecarEngine {
             engine_config,
             client: OnceCell::new(),
             cancel: CancellationToken::new(),
+            load_lost: CancellationToken::new(),
+            load_poll: Arc::default(),
         }
+    }
+
+    /// Resolves, with the error the sidecar exits with, once the engine's
+    /// load has stayed unavailable for [`load::STALENESS_LIMIT`].
+    pub(crate) async fn load_lost(&self) -> DynamoError {
+        self.load_lost.cancelled().await;
+        engine_shutdown(format!(
+            "Routing load remained unavailable for {} seconds; withdrawing worker",
+            load::STALENESS_LIMIT.as_secs_f64()
+        ))
     }
 
     /// Parses the process arguments. A nonzero `--node-rank` selects standby;
@@ -116,7 +137,8 @@ impl LpxSidecarEngine {
 
     /// Parses `argv` as the executable does, but only serves: a nonzero
     /// `--node-rank`, which the executable runs as a standby, is refused.
-    /// Discovery runs when the returned future is polled.
+    /// Discovery runs when the returned future is polled; [`crate::serve`]
+    /// runs it as the executable does.
     pub fn try_from_args_async(
         argv: Vec<String>,
     ) -> Result<
@@ -164,8 +186,8 @@ fn validate_args(args: &Args) -> Result<(), DynamoError> {
 }
 
 /// Waits for the engine to be ready, identifies it, checks any
-/// `--served-model-name` against the name it reports, and builds the
-/// registration.
+/// `--served-model-name` against the name it reports, asks for its load, and
+/// builds the registration.
 ///
 /// It holds one probe connection through the wait and drops it here; `start`
 /// opens the configured pool, named after the identified engine.
@@ -192,10 +214,14 @@ async fn discover(args: Args) -> Result<(LpxSidecarEngine, WorkerConfig), Dynamo
         .wait_for_model_info(deadline, transport.retry_interval, client::RPC_TIMEOUT)
         .await?;
     let server_info = probe.server_info(deadline).await?;
-    drop(probe);
-
     let discovered = DiscoveredEngine::check(server_info, model_info, mode)?;
     discovered.check_served_name(args.served_model_name.as_deref())?;
+    let load = probe
+        .load(deadline.min(Instant::now() + load::GET_LOAD_TIMEOUT))
+        .await?;
+    drop(probe);
+
+    let discovered = discovered.with_load(load)?;
     let engine_config = discovered.engine_config();
     let worker_config = discovered.worker_config(args);
     let engine = LpxSidecarEngine::new(endpoint, transport, discovered, engine_config);
@@ -234,6 +260,7 @@ impl LLMEngine for LpxSidecarEngine {
             kv_block_size = ?discovered.kv_block_size,
             total_kv_blocks = ?discovered.total_kv_blocks,
             max_running_requests = ?discovered.max_running_requests,
+            reports_load = discovered.load.is_some(),
             connections,
             "LPX OpenEngine server identified"
         );
@@ -402,7 +429,34 @@ impl LLMEngine for LpxSidecarEngine {
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
         self.cancel.cancel();
+        // The poll stops at its next await, which watches the cancellation first.
+        let poll = self.load_poll.lock().expect("load poll mutex").take();
+        if let Some(poll) = poll {
+            let _ = poll.await;
+        }
         tracing::info!("LPX sidecar shutdown complete");
         Ok(())
+    }
+
+    /// Polls the load of an engine that reported load at startup, publishing
+    /// the startup answer first if it is still fresh.
+    async fn setup_metrics(&self, _ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
+        let Some(startup) = self.discovered.load.clone() else {
+            return Ok(MetricsBindings::default());
+        };
+        let client = Arc::clone(self.connected()?);
+        let (shutdown, lost) = (self.cancel.clone(), self.load_lost.clone());
+        let slot = Arc::clone(&self.load_poll);
+        Ok(MetricsBindings {
+            dp_ranks: vec![load::RANK],
+            on_publisher_ready: Some(Box::new(move |publisher| {
+                if let Ok(snapshot) = load::snapshot(client.peer(), startup) {
+                    publisher.publish(load::RANK, snapshot);
+                }
+                let poll = tokio::spawn(load::poll(client, publisher, shutdown, lost));
+                *slot.lock().expect("load poll mutex") = Some(poll);
+                Ok(())
+            })),
+        })
     }
 }

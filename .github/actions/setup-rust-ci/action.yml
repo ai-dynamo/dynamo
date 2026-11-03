@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: 'Set up Rust CI'
+description: 'Install protoc, restore the cargo cache, and add rustup components'
+
+inputs:
+  components:
+    description: 'Space-separated rustup components to add'
+    required: false
+    default: ''
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install protoc
+      uses: ./.github/actions/setup-protoc
+    - name: Cache cargo artifacts
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-cargo-
+    - name: Add rustup components
+      if: inputs.components != ''
+      shell: bash
+      env:
+        COMPONENTS: ${{ inputs.components }}
+      run: rustup component add $COMPONENTS
