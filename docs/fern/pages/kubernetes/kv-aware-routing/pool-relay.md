@@ -398,12 +398,17 @@ The `DynamoPoolRelay` owns these exports, so deleting it deletes them. They foll
 Service: the operator withdraws them whenever it withdraws that Service, for example when the DGD is
 deleted or has no workers, as the relay's `Ready` condition reports, and exports a DGD created again
 under the relay's name. Renaming or removing a frontend component withdraws that component's export.
-The operator restores the DGD label and the owner of an export it created if someone changes them,
-and leaves a `ServiceExport` of the same name that it did not create alone; once that one is
-deleted, the operator creates its own. Without a configured implementation, nothing is exported.
+While the relay is an export's controller, the operator restores the export's DGD label and
+controller reference if someone changes them. The operator leaves alone any `ServiceExport` that the
+relay does not control: one that a user created, or one whose controller reference someone removed
+or replaced. Such an export stays when the pool is withdrawn, and is not deleted with the relay; once
+it is deleted, the operator creates its own. Without a configured implementation, nothing is
+exported.
 
-With a standard MCS implementation, set `clusterId` to the cluster's ID in its ClusterSet, which the
-About API's `ClusterProperty` `cluster.clusterset.k8s.io` holds.
+Set `clusterId` to the name that the MCS implementation gives this cluster, because the Global
+Discovery Service matches the pool's registration to its imports by that name: with standard MCS,
+the cluster's ID in its ClusterSet, which the About API's `ClusterProperty`
+`cluster.clusterset.k8s.io` holds; with Karmada, this cluster's member cluster name.
 
 The MCS implementation reports on each export in the export's status, with the conditions `Valid`,
 `Ready` and `Conflict`; Karmada writes none. The operator records the problems that only it can see
@@ -411,10 +416,10 @@ as Warning events on the `DynamoPoolRelay`, which `kubectl describe dynamopoolre
 
 | Reason | Meaning |
 | --- | --- |
-| `InvalidServiceName` | No Service can have a name that the pool needs, so that Service is not exported. For example, a DGD whose name has a dot has no PoolRelay Service. |
+| `InvalidServiceName` | No Service can have a name that the pool needs, so that Service is not exported. For example, a frontend component's Service name, `<dgd>-<component name>`, is longer than 63 characters. |
 | `ServiceNameTooLong` | With `karmada`, a Service name is longer than 55 characters, which Karmada cannot import, so that Service is not exported. |
 | `NoFrontend` | The DGD has no frontend component, so the Global Router has nowhere to send the pool's requests. |
-| `ClusterIDMismatch` | With `mcs`, the relay's `clusterId` differs from the cluster's ID in its ClusterSet. The Global Discovery Service lists the pool only when they match. The operator watches the property, so creating, changing or deleting it checks every pool again. It skips the check when the cluster does not serve the About API or has no such property. |
+| `ClusterIDMismatch` | With `mcs`, the relay's `clusterId` differs from the cluster's ID in its ClusterSet. The Global Discovery Service lists the pool only when they match. The operator watches the property, so creating, changing or deleting it checks every pool again. It skips the check when the cluster has no such property, or did not serve the About API when the operator started. |
 | `ExportFailed` | Listing, creating, repairing or deleting an export failed. The operator retries with backoff. |
 
 ## Optional mTLS Sidecar

@@ -232,19 +232,19 @@ func ClusterPropertyValue(property *unstructured.Unstructured) string {
 	return value
 }
 
-// ReadClusterID returns the cluster's ID in its ClusterSet, from the About API's
-// ClusterProperty named ClusterIDProperty, or "" when the cluster has no such
-// property or does not serve the About API. Any other failure, such as a missing
-// permission, is an error. reader should be the manager's cache, which a watch of
-// ClusterProperties fills.
-func ReadClusterID(ctx context.Context, reader client.Reader) (string, error) {
+// ReadClusterIDProperty returns the About API's ClusterProperty named
+// ClusterIDProperty, whose value is the cluster's ID in its ClusterSet, or nil
+// when the cluster has no such property or does not serve the About API. Any
+// other failure, such as a missing permission, is an error. reader should be the
+// manager's cache, which a watch of ClusterProperties fills.
+func ReadClusterIDProperty(ctx context.Context, reader client.Reader) (*unstructured.Unstructured, error) {
 	property := NewClusterProperty()
 	err := reader.Get(ctx, client.ObjectKey{Name: ClusterIDProperty}, property)
 	if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
-		return "", nil
+		return nil, nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("failed to read ClusterProperty %s: %w", ClusterIDProperty, err)
+		return nil, fmt.Errorf("failed to read ClusterProperty %s: %w", ClusterIDProperty, err)
 	}
-	return ClusterPropertyValue(property), nil
+	return property, nil
 }

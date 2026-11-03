@@ -52,6 +52,13 @@ const exportFieldManager = "dynamo-pool-relay"
 // pool's exports. Apart from a failure, they report the problems that only the
 // operator can see; the MCS implementation reports on each export in the export's
 // own status.
+//
+// Each event that the controller records on a Relay names a related object: the
+// export it created, repaired or deleted, or the DGD or ClusterProperty that a
+// problem is about, at the version read. The events API counts an event with the
+// same object, reason, action and related object as a repeat, whatever its note,
+// so without one the events of a Relay's two exports would merge into one, and a
+// problem with new details would keep its old note.
 const (
 	reasonInvalidServiceName = "InvalidServiceName"
 	reasonServiceNameTooLong = "ServiceNameTooLong"
@@ -275,7 +282,7 @@ func (r *reconciler) createExport(
 		}
 		return fmt.Errorf("failed to create ServiceExport %s: %w", name, err)
 	}
-	r.exports.recorder.Eventf(relay, nil, corev1.EventTypeNormal, "CreateServiceExport", "Create",
+	r.exports.recorder.Eventf(relay, serviceExport, corev1.EventTypeNormal, "CreateServiceExport", "Create",
 		"Exported Service %s through MCS implementation %s", name, r.exports.config.MultiCluster.MCSImplementation)
 	return nil
 }
@@ -315,7 +322,7 @@ func (r *reconciler) repairExport(
 	if err != nil {
 		return fmt.Errorf("failed to repair ServiceExport %s: %w", current.Name, err)
 	}
-	r.exports.recorder.Eventf(relay, nil, corev1.EventTypeNormal, "RepairServiceExport", "Apply",
+	r.exports.recorder.Eventf(relay, desired, corev1.EventTypeNormal, "RepairServiceExport", "Apply",
 		"Restored the DGD label and controller reference of the export of Service %s", current.Name)
 	return nil
 }
@@ -356,7 +363,10 @@ func (r *reconciler) withdrawExport(ctx context.Context, relay *v1alpha1.DynamoP
 		}
 		return fmt.Errorf("failed to delete ServiceExport %s: %w", export.Name, err)
 	}
-	r.exports.recorder.Eventf(relay, nil, corev1.EventTypeNormal, "DeleteServiceExport", "Delete",
+	// The event names the export deleted.
+	serviceExport.SetUID(export.UID)
+	serviceExport.SetResourceVersion(export.ResourceVersion)
+	r.exports.recorder.Eventf(relay, serviceExport, corev1.EventTypeNormal, "DeleteServiceExport", "Delete",
 		"Withdrew the export of Service %s", export.Name)
 	return nil
 }
@@ -373,15 +383,15 @@ func (r *reconciler) reportExportProblems(
 ) error {
 	recorder := r.exports.recorder
 	if names, detail := unexportedNames(unexported, multicluster.NameInvalid); len(names) > 0 {
-		recorder.Eventf(relay, nil, corev1.EventTypeWarning, reasonInvalidServiceName, "Export",
+		recorder.Eventf(relay, dgd, corev1.EventTypeWarning, reasonInvalidServiceName, "Export",
 			"No Service can be named %s, so it is not exported: %s", strings.Join(names, ", "), detail)
 	}
 	if names, detail := unexportedNames(unexported, multicluster.NameTooLong); len(names) > 0 {
-		recorder.Eventf(relay, nil, corev1.EventTypeWarning, reasonServiceNameTooLong, "Export",
+		recorder.Eventf(relay, dgd, corev1.EventTypeWarning, reasonServiceNameTooLong, "Export",
 			"%s, so %s is not exported; shorten the DGD or component name", detail, strings.Join(names, ", "))
 	}
 	if len(multicluster.FrontendServiceNames(dgd)) == 0 {
-		recorder.Eventf(relay, nil, corev1.EventTypeWarning, reasonNoFrontend, "Export",
+		recorder.Eventf(relay, dgd, corev1.EventTypeWarning, reasonNoFrontend, "Export",
 			"DGD %s has no frontend component, so the Global Router has nowhere to send the pool's requests", dgd.Name)
 	}
 
@@ -391,12 +401,12 @@ func (r *reconciler) reportExportProblems(
 	if !r.exports.clusterPropertyWatched {
 		return nil
 	}
-	clusterID, err := multicluster.ReadClusterID(ctx, r.exports.cache)
-	if err != nil {
+	property, err := multicluster.ReadClusterIDProperty(ctx, r.exports.cache)
+	if err != nil || property == nil {
 		return err
 	}
-	if clusterID != "" && clusterID != relay.Spec.ClusterID {
-		recorder.Eventf(relay, nil, corev1.EventTypeWarning, reasonClusterIDMismatch, "Export",
+	if clusterID := multicluster.ClusterPropertyValue(property); clusterID != "" && clusterID != relay.Spec.ClusterID {
+		recorder.Eventf(relay, property, corev1.EventTypeWarning, reasonClusterIDMismatch, "Export",
 			"clusterId %q differs from the ID %q that ClusterProperty %s gives this cluster in its ClusterSet; "+
 				"the Global Discovery Service lists the pool only when they match",
 			relay.Spec.ClusterID, clusterID, multicluster.ClusterIDProperty)

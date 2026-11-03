@@ -203,7 +203,11 @@ func TestReadClusterID(t *testing.T) {
 	}{
 		{name: "the cluster's ID in its ClusterSet", aboutAPI: true, objects: []client.Object{property, otherProperty}, want: "west"},
 		{name: "no cluster ID property", aboutAPI: true, objects: []client.Object{otherProperty}},
-		{name: "no About API"},
+		{
+			// A cache cannot match a kind that the cluster does not serve.
+			name:     "no About API",
+			getError: &meta.NoKindMatchError{GroupKind: ClusterPropertyGVK.GroupKind(), SearchedVersions: []string{ClusterPropertyGVK.Version}},
+		},
 		{
 			name: "no permission is an error, not a missing ID", aboutAPI: true, wantError: true,
 			getError: apierrors.NewForbidden(schema.GroupResource{Group: "about.k8s.io", Resource: "clusterproperties"}, ClusterIDProperty, failure),
@@ -229,10 +233,14 @@ func TestReadClusterID(t *testing.T) {
 				WithInterceptorFuncs(funcs).
 				Build()
 
-			t.Log("Read the cluster's ID in its ClusterSet")
-			got, err := ReadClusterID(context.Background(), reader)
+			t.Log("Read the property that holds the cluster's ID in its ClusterSet")
+			property, err := ReadClusterIDProperty(context.Background(), reader)
+			got := ""
+			if property != nil {
+				got = ClusterPropertyValue(property)
+			}
 			if (err != nil) != tc.wantError || got != tc.want {
-				t.Errorf("ReadClusterID = %q, %v, want %q with error %v", got, err, tc.want, tc.wantError)
+				t.Errorf("ReadClusterIDProperty = %q, %v, want %q with error %v", got, err, tc.want, tc.wantError)
 			}
 			if tc.wantError && !strings.Contains(err.Error(), ClusterIDProperty) {
 				t.Errorf("error %q does not name the property", err)

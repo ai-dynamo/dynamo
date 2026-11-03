@@ -26,7 +26,9 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/multicluster"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -34,8 +36,10 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -44,9 +48,9 @@ import (
 )
 
 // testCRD returns a CustomResourceDefinition that serves kind in group at
-// v1alpha1 and keeps any field: a stand-in for the MCS and About APIs, whose
+// version only and keeps any field: a stand-in for the MCS and About APIs, whose
 // CRDs the operator does not ship.
-func testCRD(group, kind, plural string, scope apiextensionsv1.ResourceScope) *apiextensionsv1.CustomResourceDefinition {
+func testCRD(group, kind, plural, version string, scope apiextensionsv1.ResourceScope) *apiextensionsv1.CustomResourceDefinition {
 	return &apiextensionsv1.CustomResourceDefinition{
 		Name: plural + "." + group,
 		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
@@ -56,7 +60,7 @@ func testCRD(group, kind, plural string, scope apiextensionsv1.ResourceScope) *a
 			},
 			Scope: scope,
 			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{
-				Name: "v1alpha1", Served: true, Storage: true,
+				Name: version, Served: true, Storage: true,
 				Schema: &apiextensionsv1.CustomResourceValidation{OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
 					Type: "object", XPreserveUnknownFields: new(true),
 				}},
@@ -69,14 +73,14 @@ func testCRD(group, kind, plural string, scope apiextensionsv1.ResourceScope) *a
 }
 
 // startExportAPIServer starts an API server with the operator's CRDs and
-// stand-ins for the ServiceExport and ClusterProperty APIs. It runs no garbage
-// collector.
-func startExportAPIServer(t *testing.T) *rest.Config {
+// stand-ins for the ServiceExport API, served at serviceExportVersion only, and
+// for the About API's ClusterProperty. It runs no garbage collector.
+func startExportAPIServer(t *testing.T, serviceExportVersion string) *rest.Config {
 	t.Helper()
 	// about.k8s.io is a protected API group, so its CRD needs the approval
 	// annotation that the About API's own CRD has.
 	clusterProperties := testCRD(multicluster.ClusterPropertyGVK.Group, multicluster.ClusterPropertyGVK.Kind,
-		"clusterproperties", apiextensionsv1.ClusterScoped)
+		"clusterproperties", multicluster.ClusterPropertyGVK.Version, apiextensionsv1.ClusterScoped)
 	clusterProperties.Annotations = map[string]string{
 		apiextensionsv1.KubeAPIApprovedAnnotation: "https://github.com/kubernetes/enhancements/pull/3084",
 	}
@@ -84,7 +88,7 @@ func startExportAPIServer(t *testing.T) *rest.Config {
 		CRDDirectoryPaths: []string{filepath.Join("..", "..", "..", "config", "crd", "bases")},
 		CRDs: []*apiextensionsv1.CustomResourceDefinition{
 			testCRD(multicluster.ServiceExportGroupKind.Group, multicluster.ServiceExportGroupKind.Kind,
-				"serviceexports", apiextensionsv1.NamespaceScoped),
+				"serviceexports", serviceExportVersion, apiextensionsv1.NamespaceScoped),
 			clusterProperties,
 		},
 		ErrorIfCRDPathMissing: true,
@@ -101,36 +105,50 @@ func startExportAPIServer(t *testing.T) *rest.Config {
 	return config
 }
 
+// relayControllerOptions configures the Relay controller that a test starts.
+type relayControllerOptions struct {
+	// version is the multicluster.x-k8s.io version that the gate resolved: the
+	// one at which the API server serves ServiceExports.
+	version string
+	// restricted is the namespace that a namespace-restricted operator manages,
+	// or empty for an operator that manages every namespace.
+	restricted string
+	// wrap, when set, wraps the manager's client.
+	wrap func(client.Client) client.Client
+}
+
 // startRelayController starts a manager that runs the Relay controller with the
 // pool's exports on, for standard MCS, and returns a function that stops the
-// manager and waits for it. wrap, when set, wraps the manager's client.
-func startRelayController(
-	t *testing.T,
-	config *rest.Config,
-	wrap func(client.Client) client.Client,
-) func() {
+// manager and waits for it.
+func startRelayController(t *testing.T, config *rest.Config, options relayControllerOptions) func() {
 	t.Helper()
-	manager, err := ctrl.NewManager(config, ctrl.Options{
+	managerOptions := ctrl.Options{
 		Scheme:  newExportTestScheme(t),
 		Metrics: server.Options{BindAddress: "0"},
 		// A test can start managers one after another, with the same controllers.
 		Controller: ctrlconfig.Controller{SkipNameValidation: new(true)},
-		NewClient: func(restConfig *rest.Config, options client.Options) (client.Client, error) {
-			c, err := client.New(restConfig, options)
-			if err != nil || wrap == nil {
+		NewClient: func(restConfig *rest.Config, clientOptions client.Options) (client.Client, error) {
+			c, err := client.New(restConfig, clientOptions)
+			if err != nil || options.wrap == nil {
 				return c, err
 			}
-			return wrap(c), nil
+			return options.wrap(c), nil
 		},
-	})
+	}
+	if options.restricted != "" {
+		// As cmd/main.go configures a namespace-restricted operator's cache.
+		managerOptions.Cache.DefaultNamespaces = map[string]cache.Config{options.restricted: {}}
+	}
+	manager, err := ctrl.NewManager(config, managerOptions)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := Setup(manager, &configv1alpha1.OperatorConfiguration{
 		Discovery:    configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 		MultiCluster: configv1alpha1.MultiClusterConfiguration{MCSImplementation: configv1alpha1.MCSImplementationStandard},
+		Namespace:    configv1alpha1.NamespaceConfiguration{Restricted: options.restricted},
 	}, &commoncontroller.RuntimeConfig{
-		Gate: features.Gates{MultiClusterExport: true, ServiceExportVersion: exportTestVersion},
+		Gate: features.Gates{MultiClusterExport: true, ServiceExportVersion: options.version},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -290,18 +308,59 @@ func waitForDeletion(t *testing.T, c client.Client, obj client.Object) {
 	})
 }
 
+// markRelayListenersAvailable reports the Relay's Deployment as rolled out, as
+// the Deployment controller would if envtest ran it, and waits until the Relay
+// is Ready. The controller requeues a Relay that is not Ready every 15 seconds;
+// a Ready Relay is requeued only by watch events.
+func markRelayListenersAvailable(t *testing.T, c client.Client, relay *v1alpha1.DynamoPoolRelay) {
+	t.Helper()
+	ctx := context.Background()
+	key := types.NamespacedName{Namespace: relay.Namespace, Name: serviceName(relay.Name)}
+	eventually(t, "the Relay's Deployment", func() (bool, error) {
+		err := c.Get(ctx, key, &appsv1.Deployment{})
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return err == nil, err
+	})
+	replicas := ptr.Deref(relay.Spec.Replicas, 2)
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		deployment := &appsv1.Deployment{}
+		if err := c.Get(ctx, key, deployment); err != nil {
+			return err
+		}
+		deployment.Status = appsv1.DeploymentStatus{
+			ObservedGeneration: deployment.Generation,
+			Replicas:           replicas,
+			UpdatedReplicas:    replicas,
+			ReadyReplicas:      replicas,
+			AvailableReplicas:  replicas,
+		}
+		return c.Status().Update(ctx, deployment)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the Relay to be Ready", func() (bool, error) {
+		current := &v1alpha1.DynamoPoolRelay{}
+		if err := c.Get(ctx, client.ObjectKeyFromObject(relay), current); err != nil {
+			return false, err
+		}
+		return meta.IsStatusConditionTrue(current.Status.Conditions, "Ready"), nil
+	})
+}
+
 //nolint:gocyclo // This test follows one Relay through the replacement of its DGD against the API server.
 func TestRelayControllerFollowsAReplacedDGD(t *testing.T) {
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
 		t.Skip("KUBEBUILDER_ASSETS is needed for the controller API test")
 	}
 	ctx := context.Background()
-	config := startExportAPIServer(t)
+	config := startExportAPIServer(t, exportTestVersion)
 	apiClient, err := client.New(config, client.Options{Scheme: newExportTestScheme(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	stop := startRelayController(t, config, nil)
+	stop := startRelayController(t, config, relayControllerOptions{version: exportTestVersion})
 
 	t.Log("Create a DGD with a frontend component, and its DynamoPoolRelay from the checked-in sample")
 	relay := readSampleRelay(t)
@@ -389,7 +448,7 @@ func TestRelayControllerFollowsAReplacedDGD(t *testing.T) {
 	}
 	waitForDeletion(t, apiClient, second)
 	createDGD(t, apiClient, relay, "Api")
-	startRelayController(t, config, nil)
+	startRelayController(t, config, relayControllerOptions{version: exportTestVersion})
 	waitForExports(t, apiClient, relay, poolRelayExport, relay.Name+"-api")
 	waitForRelayService(t, apiClient, relay, true)
 }
@@ -417,19 +476,21 @@ func TestRelayControllerRetriesFailedExports(t *testing.T) {
 		t.Skip("KUBEBUILDER_ASSETS is needed for the controller API test")
 	}
 	ctx := context.Background()
-	config := startExportAPIServer(t)
+	config := startExportAPIServer(t, exportTestVersion)
 	apiClient, err := client.New(config, client.Options{Scheme: newExportTestScheme(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	failing := &failingCreates{}
-	failing.remaining.Store(2)
-	startRelayController(t, config, func(c client.Client) client.Client {
-		failing.Client = c
-		return failing
+	startRelayController(t, config, relayControllerOptions{
+		version: exportTestVersion,
+		wrap: func(c client.Client) client.Client {
+			failing.Client = c
+			return failing
+		},
 	})
 
-	t.Log("Create a pool whose DGD reports a terminal workload failure, while the API server refuses the first exports")
+	t.Log("Create a pool whose DGD reports a terminal workload failure, and wait until its Relay is Ready")
 	relay := readSampleRelay(t)
 	createNamespace(t, apiClient, relay.Namespace)
 	dgd := createDGD(t, apiClient, relay, "Frontend")
@@ -437,10 +498,148 @@ func TestRelayControllerRetriesFailedExports(t *testing.T) {
 	if err := apiClient.Create(ctx, relay); err != nil {
 		t.Fatal(err)
 	}
+	frontendExport := relay.Name + "-frontend"
+	waitForExports(t, apiClient, relay, serviceName(relay.Name), frontendExport)
+	markRelayListenersAvailable(t, apiClient, relay)
 
-	t.Log("The controller retries on its own, and the exports converge with no other change")
-	waitForExports(t, apiClient, relay, serviceName(relay.Name), relay.Name+"-frontend")
-	if attempts := failing.attempts.Load(); attempts <= 2 {
-		t.Fatalf("the exports converged after %d create attempts, without retrying the 2 refused ones", attempts)
+	t.Log("The API server refuses the next two ServiceExport creates, and a user deletes the frontend export")
+	failing.attempts.Store(0)
+	failing.remaining.Store(2)
+	deleted := exportsByName(t, apiClient, relay.Namespace)[frontendExport]
+	if err := apiClient.Delete(ctx, deleted); err != nil {
+		t.Fatal(err)
 	}
+
+	t.Log("Only the retries of the failed reconciles requeue the Ready Relay: the export is created again, with no other change")
+	waitForExports(t, apiClient, relay, serviceName(relay.Name), frontendExport)
+	if exportsByName(t, apiClient, relay.Namespace)[frontendExport].GetUID() == deleted.GetUID() {
+		t.Fatal("the frontend export was not created again")
+	}
+	if attempts := failing.attempts.Load(); attempts <= 2 {
+		t.Fatalf("the export was created after %d attempts, without retrying the 2 refused ones", attempts)
+	}
+}
+
+func TestRelayControllerWorksAtTheResolvedVersion(t *testing.T) {
+	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		t.Skip("KUBEBUILDER_ASSETS is needed for the controller API test")
+	}
+	ctx := context.Background()
+	// A version other than the one the other tests' clusters serve.
+	const version = "v1beta1"
+	config := startExportAPIServer(t, version)
+	apiClient, err := client.New(config, client.Options{Scheme: newExportTestScheme(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startRelayController(t, config, relayControllerOptions{version: version})
+
+	t.Log("Create a pool in a cluster that serves ServiceExports only at " + version)
+	relay := readSampleRelay(t)
+	createNamespace(t, apiClient, relay.Namespace)
+	createDGD(t, apiClient, relay, "Frontend")
+	if err := apiClient.Create(ctx, relay); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Log("The controller watches and writes ServiceExports at that version, so it exports the pool")
+	poolRelayExport := func() *unstructured.Unstructured {
+		items := listServiceExports(t, apiClient, version, relay.Namespace)
+		for i := range items {
+			if items[i].GetName() == serviceName(relay.Name) && ownedByRelay(&items[i], relay) {
+				return &items[i]
+			}
+		}
+		return nil
+	}
+	eventually(t, "the PoolRelay export at "+version, func() (bool, error) {
+		return poolRelayExport() != nil, nil
+	})
+	markRelayListenersAvailable(t, apiClient, relay)
+
+	t.Log("Delete the export: only the watch at " + version + " requeues the Ready Relay, which exports its Service again")
+	deleted := poolRelayExport()
+	if err := apiClient.Delete(ctx, deleted); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "a new PoolRelay export", func() (bool, error) {
+		export := poolRelayExport()
+		return export != nil && export.GetUID() != deleted.GetUID(), nil
+	})
+}
+
+func TestNamespaceRestrictedRelayControllerFollowsTheClusterID(t *testing.T) {
+	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		t.Skip("KUBEBUILDER_ASSETS is needed for the controller API test")
+	}
+	ctx := context.Background()
+	config := startExportAPIServer(t, exportTestVersion)
+	scheme := newExportTestScheme(t)
+	if err := eventsv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	apiClient, err := client.New(config, client.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay := readSampleRelay(t)
+	startRelayController(t, config, relayControllerOptions{version: exportTestVersion, restricted: relay.Namespace})
+
+	t.Log("Create a pool in the namespace that a namespace-restricted operator manages, in a cluster with no ID in its ClusterSet")
+	createNamespace(t, apiClient, relay.Namespace)
+	createDGD(t, apiClient, relay, "Frontend")
+	if err := apiClient.Create(ctx, relay); err != nil {
+		t.Fatal(err)
+	}
+	waitForExports(t, apiClient, relay, serviceName(relay.Name), relay.Name+"-frontend")
+
+	t.Log("Each export's creation is an event of its own, though both events regard the Relay at one version")
+	eventually(t, "a CreateServiceExport event for each export", func() (bool, error) {
+		notes := strings.Join(relayEventNotes(t, apiClient, relay, "CreateServiceExport"), "\n")
+		return strings.Contains(notes, "Service "+serviceName(relay.Name)+" ") &&
+			strings.Contains(notes, "Service "+relay.Name+"-frontend "), nil
+	})
+	markRelayListenersAvailable(t, apiClient, relay)
+
+	t.Log("Give the cluster an ID in its ClusterSet that differs from the Relay's clusterId")
+	property := newClusterIDProperty(relay.Spec.ClusterID + "-east")
+	if err := apiClient.Create(ctx, property); err != nil {
+		t.Fatal(err)
+	}
+	mismatchWith := func(clusterID string) func() (bool, error) {
+		return func() (bool, error) {
+			for _, note := range relayEventNotes(t, apiClient, relay, reasonClusterIDMismatch) {
+				if strings.Contains(note, fmt.Sprintf("ID %q", clusterID)) {
+					return true, nil
+				}
+			}
+			return false, nil
+		}
+	}
+
+	t.Log("The cluster-scoped property's event reaches the restricted controller, which reports the mismatch on the Relay")
+	eventually(t, "a ClusterIDMismatch event on the Relay", mismatchWith(relay.Spec.ClusterID+"-east"))
+
+	t.Log("Change the cluster's ID: the new mismatch is an event of its own, not a repeat of the old one")
+	property.Object["spec"] = map[string]any{"value": relay.Spec.ClusterID + "-west"}
+	if err := apiClient.Update(ctx, property); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "a ClusterIDMismatch event with the new ID", mismatchWith(relay.Spec.ClusterID+"-west"))
+}
+
+// relayEventNotes returns the notes of the events with reason that regard relay.
+func relayEventNotes(t *testing.T, c client.Client, relay *v1alpha1.DynamoPoolRelay, reason string) []string {
+	t.Helper()
+	recorded := &eventsv1.EventList{}
+	if err := c.List(context.Background(), recorded, client.InNamespace(relay.Namespace)); err != nil {
+		t.Fatal(err)
+	}
+	var notes []string
+	for i := range recorded.Items {
+		if recorded.Items[i].Reason == reason && recorded.Items[i].Regarding.Name == relay.Name {
+			notes = append(notes, recorded.Items[i].Note)
+		}
+	}
+	return notes
 }
