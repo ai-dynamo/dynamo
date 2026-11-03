@@ -493,14 +493,17 @@ impl ModelManager {
     }
 
     /// Infer a bare source only from runtime-capable text generation bases.
-    pub(crate) fn unique_runtime_lora_base_model(&self) -> Option<String> {
+    pub(crate) fn unique_runtime_lora_base_model(
+        &self,
+        supports_surface: fn(&WorkerSet) -> bool,
+    ) -> Option<String> {
         let catalog = self.catalog.load();
         let mut bases = catalog
             .models
             .iter()
             .filter(|(name, model)| {
                 !catalog.aliases.contains_key(name.as_str())
-                    && model.has_runtime_lora_base_deployment()
+                    && model.has_runtime_lora_base_deployment(supports_surface)
             })
             .map(|(name, _)| name.clone());
         let base = bases.next()?;
@@ -3770,7 +3773,8 @@ mod tests {
             Arc::new(make_worker_set("alias", "alias")),
         ));
         assert_eq!(
-            mm.unique_runtime_lora_base_model().as_deref(),
+            mm.unique_runtime_lora_base_model(WorkerSet::has_chat_engine)
+                .as_deref(),
             Some("token-base")
         );
         assert!(mm.add_worker_set(
@@ -3779,25 +3783,59 @@ mod tests {
             make_worker_set("mixed-text", "ghi"),
         ));
         assert_eq!(
-            mm.unique_runtime_lora_base_model().as_deref(),
+            mm.unique_runtime_lora_base_model(WorkerSet::has_chat_engine)
+                .as_deref(),
             Some("token-base")
         );
         let mut second_ws = WorkerSet::new("second".into(), "second".into(), token_card.clone());
-        second_ws.chat_engine = Some(make_chat_engine());
+        second_ws.completions_engine = Some(Arc::new(crate::engines::StreamingEngineAdapter::new(
+            crate::engines::make_echo_engine(),
+        )));
         let (_second_instances, second_instance_rx) = tokio::sync::watch::channel(vec![2]);
         let (_second_configs, second_config_rx) =
-            tokio::sync::watch::channel(HashMap::from([(2, token_card.runtime_config)]));
+            tokio::sync::watch::channel(HashMap::from([(2, token_card.runtime_config.clone())]));
         second_ws.set_instance_watcher(second_instance_rx);
         second_ws.set_runtime_config_watcher(second_config_rx);
         assert!(mm.add_worker_set("other-base", "second", second_ws));
-        assert_eq!(mm.unique_runtime_lora_base_model(), None);
+        assert_eq!(
+            mm.unique_runtime_lora_base_model(WorkerSet::has_chat_engine)
+                .as_deref(),
+            Some("token-base")
+        );
+        assert_eq!(
+            mm.unique_runtime_lora_base_model(WorkerSet::has_completions_engine)
+                .as_deref(),
+            Some("other-base")
+        );
+        let mut third_ws = WorkerSet::new("third".into(), "third".into(), token_card.clone());
+        third_ws.chat_engine = Some(make_chat_engine());
+        let (_third_instances, third_instance_rx) = tokio::sync::watch::channel(vec![3]);
+        let (_third_configs, third_config_rx) =
+            tokio::sync::watch::channel(HashMap::from([(3, token_card.runtime_config)]));
+        third_ws.set_instance_watcher(third_instance_rx);
+        third_ws.set_runtime_config_watcher(third_config_rx);
+        assert!(mm.add_worker_set("third-base", "third", third_ws));
+        assert_eq!(
+            mm.unique_runtime_lora_base_model(WorkerSet::has_chat_engine),
+            None
+        );
+        assert_eq!(
+            mm.unique_runtime_lora_base_model(WorkerSet::has_completions_engine)
+                .as_deref(),
+            Some("other-base")
+        );
+        mm.remove_worker_set("third-base", "third");
         mm.remove_worker_set("other-base", "second");
         assert_eq!(
-            mm.unique_runtime_lora_base_model().as_deref(),
+            mm.unique_runtime_lora_base_model(WorkerSet::has_chat_engine)
+                .as_deref(),
             Some("token-base")
         );
         configs.send_replace(HashMap::new());
-        assert_eq!(mm.unique_runtime_lora_base_model(), None);
+        assert_eq!(
+            mm.unique_runtime_lora_base_model(WorkerSet::has_chat_engine),
+            None
+        );
     }
 
     #[test]

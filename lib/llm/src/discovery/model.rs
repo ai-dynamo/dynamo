@@ -260,11 +260,14 @@ impl Model {
 
     /// Whether this catalog model can carry request-time LoRA metadata through
     /// frontend preprocessing to a non-LoRA base deployment.
-    pub(crate) fn has_runtime_lora_base_deployment(&self) -> bool {
-        self.worker_sets.load().values().any(|worker_set| {
-            (worker_set.has_chat_engine() || worker_set.has_completions_engine())
-                && worker_set.supports_runtime_lora()
-        })
+    pub(crate) fn has_runtime_lora_base_deployment(
+        &self,
+        supports_surface: fn(&WorkerSet) -> bool,
+    ) -> bool {
+        self.worker_sets
+            .load()
+            .values()
+            .any(|worker_set| supports_surface(worker_set) && worker_set.supports_runtime_lora())
     }
 
     /// Build an immutable membership snapshot for request-plane publication.

@@ -55,6 +55,7 @@ use super::{
     },
     service_v2::{self, BackendErrorCheck},
 };
+use crate::discovery::WorkerSet;
 use crate::engines::ValidateRequest;
 use crate::lora::runtime::{RuntimeLoraError, RuntimeLoraSelection, resolve_runtime_lora_model};
 use crate::preprocessor::{
@@ -1213,6 +1214,7 @@ fn runtime_lora_error_response(error: RuntimeLoraError) -> ErrorResponse {
 fn runtime_lora_selection(
     state: &service_v2::State,
     requested_model: &str,
+    supports_surface: fn(&WorkerSet) -> bool,
 ) -> Result<Option<RuntimeLoraSelection>, ErrorResponse> {
     if !state.runtime_lora_config().enabled {
         return Ok(None);
@@ -1240,18 +1242,18 @@ fn runtime_lora_selection(
             state
                 .manager()
                 .get_committed_model(&canonical)
-                .filter(|model| model.has_runtime_lora_base_deployment())
+                .filter(|model| model.has_runtime_lora_base_deployment(supports_surface))
                 .map(|_| canonical)
         },
         || {
             let canonical = state
                 .manager()
-                .unique_runtime_lora_base_model()
+                .unique_runtime_lora_base_model(supports_surface)
                 .ok_or(RuntimeLoraError::BaseModelRequired)?;
             if state
                 .manager()
                 .get_committed_model(&canonical)
-                .is_some_and(|model| model.has_runtime_lora_base_deployment())
+                .is_some_and(|model| model.has_runtime_lora_base_deployment(supports_surface))
             {
                 Ok(canonical)
             } else {
@@ -1295,7 +1297,11 @@ async fn handler_completions(
     // Match chat-completions precedence: process readiness is authoritative
     // before model parsing or runtime-LoRA selection.
     check_ready(&state)?;
-    let runtime_lora = runtime_lora_selection(&state, &request.inner.model)?;
+    let runtime_lora = runtime_lora_selection(
+        &state,
+        &request.inner.model,
+        WorkerSet::has_completions_engine,
+    )?;
     let serving_model = runtime_lora
         .as_ref()
         .map(|selection| selection.base_model_name.as_str())
@@ -1486,9 +1492,8 @@ async fn completions_single(
     let stream = stream::iter(annotations).chain(stream);
 
     if streaming {
-        // Same pre-commit check as chat_completions: a backend error before
-        // the first item maps to its HTTP status instead of an SSE frame
-        // behind an HTTP 200.
+        // Honor the configured peek window. Later backend errors are SSE frames
+        // behind HTTP 200, including runtime LoRA resolution failures.
         let error_check = state.streaming_backend_error_check();
         let stream =
             until_client_disconnects(check_for_backend_error_info(stream, error_check), &ctx)
@@ -2641,14 +2646,15 @@ async fn handler_chat_completions(
         return Err(error);
     }
     let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
-    let runtime_lora = match runtime_lora_selection(&state, resolved_model) {
-        Ok(selection) => selection,
-        Err(error) => {
-            lifecycle_request.record_session(&request_id, None);
-            terminal.finish(terminal_outcome_for_error_response(&error));
-            return Err(error);
-        }
-    };
+    let runtime_lora =
+        match runtime_lora_selection(&state, resolved_model, WorkerSet::has_chat_engine) {
+            Ok(selection) => selection,
+            Err(error) => {
+                lifecycle_request.record_session(&request_id, None);
+                terminal.finish(terminal_outcome_for_error_response(&error));
+                return Err(error);
+            }
+        };
     let serving_model = runtime_lora
         .as_ref()
         .map(|selection| selection.base_model_name.as_str())
