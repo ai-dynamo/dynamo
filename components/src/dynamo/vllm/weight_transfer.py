@@ -10,15 +10,21 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 
+class WeightTransferValidationError(ValueError):
+    """Reject a protocol request before invoking an engine operation."""
+
+
 def _body(value: Any, keys: set[str]) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != keys:
-        raise ValueError("request body has missing or unsupported fields")
+        raise WeightTransferValidationError(
+            "request body has missing or unsupported fields"
+        )
     return value
 
 
 def _identifier(value: Any) -> str:
     if not isinstance(value, str) or not value.strip() or len(value) > 256:
-        raise ValueError(
+        raise WeightTransferValidationError(
             "session and version identifiers must be nonempty strings (max 256)"
         )
     return value
@@ -70,16 +76,19 @@ class WeightTransferSession:
 
     def _healthy(self) -> None:
         if self._state.failed:
-            raise ValueError("weight-transfer session failed; restart the worker")
+            raise WeightTransferValidationError(
+                "weight-transfer session failed; restart the worker"
+            )
 
     def _require_paused(self) -> None:
         self._healthy()
         if not self._state.paused:
-            raise ValueError(
+            raise WeightTransferValidationError(
                 "engine must be explicitly paused with drain/abort semantics"
             )
 
     async def _mutate(self, operation: Callable[[], Awaitable[Any]]) -> Any:
+        """Fence the session if an operation fails, times out, or is cancelled."""
         try:
             async with asyncio.timeout(self._timeout_s):
                 return await operation()
@@ -90,7 +99,9 @@ class WeightTransferSession:
     async def pause(self, rpc: Callable, mode: str) -> None:
         """Drain or abort generation before changing a policy, even after failure."""
         if mode not in ("wait", "abort"):
-            raise ValueError("strict RL pause requires wait/abort semantics")
+            raise WeightTransferValidationError(
+                "strict RL pause requires wait/abort semantics"
+            )
         await self._mutate(lambda: rpc(mode=mode, clear_cache=False))
         self._state = replace(self._state, paused=True)
 
@@ -98,34 +109,40 @@ class WeightTransferSession:
         """Reopen generation only after a complete install and cache reset."""
         self._healthy()
         if self._state.phase != "ready":
-            raise ValueError(
+            raise WeightTransferValidationError(
                 "completed install and successful cache reset required before resume"
             )
         await self._mutate(rpc)
         self._state = replace(self._state, paused=False)
 
     async def initialize(self, body: Any, rpc: Callable) -> None:
+        """Initialize the transfer backend while generation is paused."""
         self._require_paused()
         payload = _body(body, {"init_info"})
         if not isinstance(payload["init_info"], dict):
-            raise ValueError("init_info must be an object")
+            raise WeightTransferValidationError("init_info must be an object")
         if self._state.phase != "uninitialized":
-            raise ValueError("weight transfer is already initialized")
+            raise WeightTransferValidationError(
+                "weight transfer is already initialized"
+            )
         await self._mutate(lambda: rpc(payload["init_info"]))
         self._state = replace(self._state, phase="idle")
 
     def begin(self, body: Any) -> None:
+        """Reserve unique session and policy identities before receiving updates."""
         self._require_paused()
         payload = _body(body, {"session_id", "weight_version"})
         session_id = _identifier(payload["session_id"])
         version = _identifier(payload["weight_version"])
         state = self._state
         if state.phase not in ("idle", "ready"):
-            raise ValueError(
+            raise WeightTransferValidationError(
                 "initialize and complete the previous session before begin"
             )
         if session_id in state.used_sessions or version in state.used_versions:
-            raise ValueError("session and policy version identifiers must be unique")
+            raise WeightTransferValidationError(
+                "session and policy version identifiers must be unique"
+            )
         self._state = replace(
             state,
             phase="prepared",
@@ -144,32 +161,39 @@ class WeightTransferSession:
         )
         state = self._state
         if state.phase != phase or payload["session_id"] != state.pending_session_id:
-            raise ValueError("invalid weight-transfer session or lifecycle ordering")
+            raise WeightTransferValidationError(
+                "invalid weight-transfer session or lifecycle ordering"
+            )
         seq = payload["seq"]
         if isinstance(seq, bool) or not isinstance(seq, int) or seq != state.seq:
-            raise ValueError(
+            raise WeightTransferValidationError(
                 "weight-transfer sequence must match the next expected integer"
             )
         return payload
 
     async def start(self, body: Any, rpc: Callable) -> None:
+        """Start the prepared transfer at its first sequence number."""
         self._sequence(body, phase="prepared")
         await self._mutate(rpc)
         self._state = replace(self._state, phase="started", seq=1)
 
     async def update(self, body: Any, rpc: Callable, synchronize: Callable) -> None:
+        """Synchronize an update before acknowledging its sequence number."""
         payload = self._sequence(body, phase="started", update=True)
         if not isinstance(payload["update_info"], dict):
-            raise ValueError("update_info must be an object")
+            raise WeightTransferValidationError("update_info must be an object")
         await self._mutate(lambda: rpc(payload["update_info"]))
         await self._mutate(synchronize)
         self._state = replace(self._state, seq=self._state.seq + 1)
 
     async def finish(self, body: Any, rpc: Callable, synchronize: Callable) -> None:
+        """Commit the policy identity after the final engine synchronization."""
         self._sequence(body, phase="started")
         state = self._state
         if state.seq == 1:
-            raise ValueError("at least one update chunk is required before finish")
+            raise WeightTransferValidationError(
+                "at least one update chunk is required before finish"
+            )
         await self._mutate(lambda: rpc(state.pending_weight_version))
         await self._mutate(synchronize)
         self._state = replace(
@@ -183,9 +207,12 @@ class WeightTransferSession:
         )
 
     async def flush(self, rpc: Callable) -> None:
+        """Require a successful cache reset before reopening admission."""
         self._require_paused()
         if self._state.phase != "finished":
-            raise ValueError("cache reset requires a successfully finished install")
+            raise WeightTransferValidationError(
+                "cache reset requires a successfully finished install"
+            )
         result = await self._mutate(rpc)
         if result is not True:
             self.fail()
@@ -193,6 +220,7 @@ class WeightTransferSession:
         self._state = replace(self._state, phase="ready")
 
     def require_generation(self) -> str:
+        """Return the installed policy identity only while admission is open."""
         self._healthy()
         if self._state.phase != "ready" or self._state.version is None:
             raise ValueError(
