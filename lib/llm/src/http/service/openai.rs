@@ -2765,7 +2765,7 @@ pub(super) async fn read_json_request_body(
         })
 }
 
-fn is_json_content_type(content_type: &str) -> bool {
+pub(super) fn is_json_content_type(content_type: &str) -> bool {
     let media_type = content_type.split(';').next().unwrap_or_default().trim();
     let Some((media_type, subtype)) = media_type.split_once('/') else {
         return false;
