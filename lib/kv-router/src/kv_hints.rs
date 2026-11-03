@@ -67,8 +67,11 @@ const KV_FETCH_ACTION_VERSION: &str = "1.0";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KvSourceLocationsPayload {
     pub source_control_endpoint: String,
-    /// Root-aligned source-side KV block hashes. `block_hashes[i]`
-    /// corresponds to request block `i`; the target decides which suffix to fetch.
+    /// Root-aligned request hashes through the fetchable end. `block_hashes[i]`
+    /// corresponds to request block `i`; the target fetches its missing suffix.
+    /// With fetch continuation, the source need not hold the target's local prefix.
+    /// If that prefix has been evicted, the receiver must use actual fetch
+    /// results and recompute from any remaining gap; the hint is not a pin.
     pub block_hashes: Vec<ExternalSequenceBlockHash>,
 }
 
@@ -186,10 +189,22 @@ impl From<WorkerWithDpRank> for KvTransferCandidateSource {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One source's contiguous coverage of request blocks `[start, end)`.
+/// A destination can use it only when its actual local prefix reaches `start`.
+/// `start` may be clamped to the first destination frontier that needs the source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KvTransferSourceInterval {
+    pub source: KvTransferCandidateSource,
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KvTransferCandidates {
     pub block_hashes: Vec<ExternalSequenceBlockHash>,
     pub owner_prefix_blocks: Vec<(KvTransferCandidateSource, usize)>,
+    /// Suffix-only coverage that can extend an original device+host prefix.
+    pub source_intervals: Vec<KvTransferSourceInterval>,
     pub routing_snapshot: Option<Arc<ResidencyRoutingSnapshot>>,
 }
 
@@ -316,6 +331,7 @@ mod tests {
                 (excluded.into(), 3),
                 (worker_a.into(), 3),
             ],
+            source_intervals: Vec::new(),
             routing_snapshot: None,
         };
 
@@ -349,6 +365,7 @@ mod tests {
                 (farther.into(), 4),
                 (excluded.into(), 4),
             ],
+            source_intervals: Vec::new(),
             routing_snapshot: None,
         };
         let rank = |preferred: WorkerWithDpRank| {
@@ -366,10 +383,32 @@ mod tests {
     }
 
     #[test]
+    fn cross_role_source_requires_root_coverage_despite_longer_continuation() {
+        let root = WorkerWithDpRank::new(7, 0).into();
+        let suffix = WorkerWithDpRank::new(8, 0).into();
+        let candidates = KvTransferCandidates {
+            block_hashes: (101..=104).map(ExternalSequenceBlockHash).collect(),
+            owner_prefix_blocks: vec![(root, 3)],
+            source_intervals: vec![KvTransferSourceInterval {
+                source: suffix,
+                start: 1,
+                end: 4,
+            }],
+            routing_snapshot: None,
+        };
+
+        let (source, hashes) = candidates.best_source(0, |_| true).unwrap();
+        assert_eq!(source, root);
+        assert_eq!(hashes.len(), 3);
+        assert!(candidates.best_source(3, |_| true).is_none());
+    }
+
+    #[test]
     fn best_source_fails_closed_on_invalid_prefix_length() {
         let candidates = KvTransferCandidates {
             block_hashes: vec![ExternalSequenceBlockHash(101)],
             owner_prefix_blocks: vec![(WorkerWithDpRank::new(7, 0).into(), 2)],
+            source_intervals: Vec::new(),
             routing_snapshot: None,
         };
 
@@ -388,6 +427,7 @@ mod tests {
                 ExternalSequenceBlockHash(104),
             ],
             owner_prefix_blocks: vec![(worker_a.into(), 3), (worker_b.into(), 4)],
+            source_intervals: Vec::new(),
             routing_snapshot: None,
         };
 

@@ -125,6 +125,7 @@ fn candidates(source: KvTransferCandidateSource) -> KvTransferCandidates {
             .map(ExternalSequenceBlockHash)
             .collect(),
         owner_prefix_blocks: vec![(source, 3)],
+        source_intervals: Vec::new(),
         routing_snapshot: None,
     }
 }
@@ -305,6 +306,7 @@ fn preferred_topology_ranks_shorter_near_prefix_before_longer_far_prefix() {
     let candidates = KvTransferCandidates {
         block_hashes: (101..=104).map(ExternalSequenceBlockHash).collect(),
         owner_prefix_blocks: vec![(near, 3), (far, 4)],
+        source_intervals: Vec::new(),
         routing_snapshot: None,
     };
     let result = transfer_source_for_target(&configs, &target, &candidates).unwrap();
