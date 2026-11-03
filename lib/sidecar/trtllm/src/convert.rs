@@ -693,8 +693,8 @@ pub(crate) struct ResponseState {
     prompt_tokens: u32,
     completion_tokens: u32,
     output_logprobs: Option<u32>,
-    /// Hold a trailing stop until terminal usage arrives. The frontend decoder
-    /// can terminate on hidden or visible stops before reading that usage.
+    /// For text and media requests, hold a trailing stop until terminal usage arrives.
+    /// The frontend can terminate on hidden or visible stops before reading that usage.
     held_stop_ids: BTreeSet<u32>,
     /// See [`retained_hidden_stop_ids`]. Dropped when the terminal matched it.
     hidden_stop_ids: BTreeSet<u32>,

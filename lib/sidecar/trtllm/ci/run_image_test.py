@@ -8,7 +8,6 @@ import argparse
 import base64
 import importlib.metadata
 import json
-import math
 import os
 import signal
 import socket
@@ -71,24 +70,22 @@ def run_test(binary, test, env, results):
         raise RuntimeError(f"{test} did not execute exactly once")
 
 
-def routing_fixture(model_path):
+def routing_fixture():
     # Keep CPU harness tests importable without model-processing dependencies.
-    from PIL import Image, ImageOps
-    from transformers import AutoProcessor
+    from PIL import Image, ImageOps, PngImagePlugin
 
     encoded = "iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAIAAAD9b0jDAAAAK0lEQVR4nGP8z0AsYGQgVi0T0WaSAEYNHTV01NBRQ0cNHTV01NBRQwefoQBvcAI3xbX7+QAAAABJRU5ErkJggg=="
     image = Image.open(BytesIO(base64.b64decode(encoded))).convert("RGB")
-    processor = AutoProcessor.from_pretrained(model_path, local_files_only=True)
-    image_processor = processor.image_processor
-    grid = image_processor(images=[image], return_tensors="pt")["image_grid_thw"][0]
-    count = math.prod(int(value) for value in grid) // image_processor.merge_size**2
-    if count < 1:
-        raise ValueError("Expected a nonempty expanded image placeholder")
+    alias = BytesIO()
+    metadata = PngImagePlugin.PngInfo()
+    metadata.add_text("cache-alias", "same pixels, different URI")
+    image.save(alias, format="PNG", pnginfo=metadata)
     changed = BytesIO()
     ImageOps.mirror(image).save(changed, format="PNG")
-    return count, "data:image/png;base64," + base64.b64encode(
-        changed.getvalue()
-    ).decode("ascii")
+    return tuple(
+        "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+        for buffer in (alias, changed)
+    )
 
 
 def validate_image_response(caption, response, expected_ids, colors=("red", "blue")):
@@ -199,10 +196,11 @@ def run(args, results):
         if routing:
             import zmq
 
-            count, changed = routing_fixture(model_path)
+            alias, changed = routing_fixture()
             env_extra = {
                 "TRTLLM_E2E_IMAGE_ROUTING": "1",
-                "TRTLLM_E2E_IMAGE_TOKEN_COUNT": str(count),
+                "TRTLLM_E2E_ALIAS_IMAGE": alias,
+                "TRTLLM_E2E_MODEL_PATH": str(model_path),
                 "TRTLLM_E2E_CHANGED_IMAGE": changed,
             }
             context = zmq.Context()

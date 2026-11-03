@@ -67,10 +67,7 @@ pub(super) fn normalize(
             match token {
                 Token::Digest(digest) => {
                     let key = keys.next()?;
-                    if digest != key.hash
-                        || digest.len() != 64
-                        || !digest.bytes().all(|b| b.is_ascii_hexdigit())
-                    {
+                    if digest != key.hash {
                         return None;
                     }
                     let pad = key_pad(&key)?;
