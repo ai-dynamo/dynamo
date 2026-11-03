@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: TRT-LLM Sidecar Upstream Nightly Image
+name: TRT-LLM Sidecar Upstream Nightly Media
 
 on:
   workflow_call:
@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   build:
-    name: Build image integration client
+    name: Build media integration client
     runs-on: prod-builder-v3
     timeout-minutes: 60
     outputs:
@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           persist-credentials: false
-      - name: Test nightly selection
+      - name: Test nightly selection and media harness
         run: python3 -m unittest discover -s lib/sidecar/trtllm/ci/tests -v
       - name: Resolve latest upstream nightly
         id: config
@@ -63,7 +63,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [image, image-routing]
+        scenario: [image, video, image-routing]
     needs: build
     runs-on: [gpu-1, amd64, v2, us-west-2]
     timeout-minutes: 30
@@ -92,7 +92,11 @@ jobs:
           set -euo pipefail
           source lib/sidecar/trtllm/launch/common.sh
           trtllm_ensure_openengine_bindings python3
-      - name: Run live image integration test
+      - name: Install TRT-LLM video decoder
+        if: matrix.scenario == 'video'
+        run: >-
+          python3 components/src/dynamo/common/utils/install_media_decoders.py trtllm
+      - name: Run live ${{ matrix.scenario }} integration test
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           SCENARIO: ${{ matrix.scenario }}

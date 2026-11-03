@@ -21,18 +21,19 @@ SPEC.loader.exec_module(runner)
 class RoutingHarnessTests(unittest.TestCase):
     def test_changed_image_requires_reversed_colors_and_authoritative_usage(self):
         response = {"prompt_tokens": 82, "completion_tokens": 20}
-        runner.validate_image_response(
-            "Blue, then red.", response, range(19), ("blue", "red")
+        runner.validate_response(
+            "image", "Blue, then red.", response, 19, ("blue", "red")
         )
         with self.assertRaisesRegex(AssertionError, "Expected"):
-            runner.validate_image_response(
-                "Red, then blue.", response, range(19), ("blue", "red")
+            runner.validate_response(
+                "image", "Red, then blue.", response, 19, ("blue", "red")
             )
         with self.assertRaisesRegex(AssertionError, "usage"):
-            runner.validate_image_response(
+            runner.validate_response(
+                "image",
                 "Blue, then red.",
                 {"prompt_tokens": 19, "completion_tokens": 0},
-                range(19),
+                19,
                 ("blue", "red"),
             )
 
@@ -53,7 +54,9 @@ class RoutingHarnessTests(unittest.TestCase):
                         RuntimeError, "did not execute exactly once"
                     ),
                 ):
-                    runner.run_test(Path("binary"), "event_conversion", {}, Path(tmp))
+                    runner.run_rust_test(
+                        Path("binary"), {}, "event_conversion", Path(tmp)
+                    )
 
     def test_missing_routing_support_reports_a_failure_instead_of_a_skip(self):
         with tempfile.TemporaryDirectory() as tmp:
