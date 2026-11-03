@@ -64,6 +64,7 @@ def runtime_lora_server(tmp_path, dynamo_dynamic_ports, predownload_models):
         "DYN_LORA_MAX_CONCURRENT_RESOLUTIONS": "2",
         "DYN_LORA_MAX_PENDING_ADMISSIONS": "2",
         "DYN_LORA_RESOLVE_TIMEOUT_SECONDS": "5",
+        "DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS": "0",
         "DYN_SYSTEM_ENABLED": "true",
         "DYN_SYSTEM_PORT": str(dynamo_dynamic_ports.system_ports[0]),
         "DYNAMO_TEST_LORA_ADAPTER": adapter,
@@ -180,6 +181,25 @@ def _assert_chat(base_url, model, **kwargs):
         assert body["choices"][0]["message"]["content"]
 
 
+def _assert_error(response, status, model, *, streaming=False, frontend=False):
+    body = response.text
+    if streaming and not frontend:
+        assert response.status_code == 200, body
+        events = [line[6:] for line in body.splitlines() if line.startswith("data: ")]
+        assert events[-1] == "[DONE]"
+        errors = [
+            item["error"]
+            for event in events[:-1]
+            if "error" in (item := json.loads(event))
+        ]
+        assert len(errors) == 1
+        assert errors[0]["code"] == status
+    else:
+        assert response.status_code == status, body
+    assert model not in body
+    assert "test provider private reference" not in body
+
+
 def _calls(path):
     return Counter(json.loads(line)["source"] for line in path.read_text().splitlines())
 
@@ -253,9 +273,13 @@ def test_runtime_lora_plugin_serving_and_recovery(runtime_lora_server, request):
     ):
         for streaming in (False, True):
             with _request(base_url, model, stream=streaming) as response:
-                assert response.status_code == status, response.text
-                assert model not in response.text
-                assert "test provider private reference" not in response.text
+                _assert_error(
+                    response,
+                    status,
+                    model,
+                    streaming=streaming,
+                    frontend=model.startswith("unknown/base|"),
+                )
         _assert_chat(base_url, source_a)
 
     with _request(
@@ -265,7 +289,7 @@ def test_runtime_lora_plugin_serving_and_recovery(runtime_lora_server, request):
         stream=True,
         nvext={"annotations": ["request_id"] * 17},
     ) as response:
-        assert response.status_code == 404, response.text
+        _assert_error(response, 404, ERROR_SOURCE_PREFIX + "missing", streaming=True)
 
     _assert_chat(base_url, CHANGED_SOURCE)
     _assert_chat(base_url, source_b)
