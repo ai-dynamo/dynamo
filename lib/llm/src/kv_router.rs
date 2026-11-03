@@ -66,11 +66,12 @@ pub mod plugins;
 pub mod prefill_router;
 pub mod publisher;
 mod request_lease;
+pub mod route_request;
 mod routing_host;
 pub(crate) mod routing_load;
 pub mod sequence;
 pub mod shared_cache;
-pub(crate) mod stage_router;
+pub mod stage_router;
 
 pub use dynamo_kv_router::scheduling::OverlapScoresResponse;
 // TODO(v1.7): Remove these compatibility aliases; use kv_router::plugins instead.
@@ -82,8 +83,10 @@ pub use plugins::{
 };
 pub use prefill_router::PrefillRouter;
 pub(crate) use request_lease::RequestAttemptRelease;
+pub use route_request::RouteRequest;
 pub use routing_host::{
-    KvPushRouter, LlmDispatch, MultimodalCache, RoutingHost, RoutingHostBuilder,
+    KvPushRouter, LlmDispatch, MultimodalCache, RouteBooking, RoutePlan, RoutingHost,
+    RoutingHostBuilder,
 };
 pub use routing_load::{
     ManagedKvRouter, RouterLoadSource, RoutingLoadContext, SchedulerLoadSender,

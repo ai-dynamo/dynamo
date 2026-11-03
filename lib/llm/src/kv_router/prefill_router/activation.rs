@@ -662,9 +662,10 @@ mod tests {
     use crate::discovery::CommittedWorkerSetTarget;
     use crate::entrypoint::RouterConfig;
     use crate::kv_router::prefill_router::PrefillRouterLifecycle;
+    use crate::kv_router::route_request::TestRouteRequest;
+    use crate::kv_router::stage_router::StageRouter;
     use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
     use dynamo_kv_router::config::KvRouterConfig;
-    use dynamo_kv_router::protocols::RoutingConstraints;
     use dynamo_runtime::protocols::annotated::Annotated;
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
@@ -767,6 +768,21 @@ mod tests {
             .output_options(Default::default())
             .build()
             .unwrap()
+    }
+
+    /// The prefill worker `schedule` books, released again at once.
+    async fn scheduled_prefill_worker(
+        router: &PrefillRouter,
+        request_id: &str,
+    ) -> anyhow::Result<crate::session_affinity::AffinityTarget> {
+        let route = router
+            .schedule(&TestRouteRequest::new(request_id, &[1; 128]))
+            .await?
+            .into_route()
+            .ok_or_else(|| anyhow::anyhow!("no prefill target"))?;
+        let target = route.target();
+        route.abort(None).await;
+        Ok(target)
     }
 
     async fn prefilled_worker(router: &PrefillRouter) -> u32 {
@@ -970,46 +986,20 @@ mod tests {
         for _ in 0..6 {
             assert_eq!(prefilled_worker(&router).await, 0);
         }
-        let reservation = router
-            .reserve_prefill_worker(
-                "committed-prefill",
-                &[1; 128],
-                None,
-                None,
-                None,
-                0.0,
-                0,
-                None,
-                None,
-                RoutingConstraints::default(),
-            )
+        let committed = scheduled_prefill_worker(&router, "committed-prefill")
             .await
             .unwrap();
-        assert_eq!(reservation.worker_id(), ids[0]);
-        assert_eq!(reservation.dp_rank(), Some(0));
-        reservation.release().await.unwrap();
+        assert_eq!(committed.worker_id, ids[0]);
+        assert_eq!(committed.dp_rank, Some(0));
 
         admissions.send_replace(vec![ids[0], ids[1]]);
         admissions.send_replace(vec![ids[1]]);
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let reservation = router
-                    .reserve_prefill_worker(
-                        "admitted-probe",
-                        &[1; 128],
-                        None,
-                        None,
-                        None,
-                        0.0,
-                        0,
-                        None,
-                        None,
-                        RoutingConstraints::default(),
-                    )
+                let worker_id = scheduled_prefill_worker(&router, "admitted-probe")
                     .await
-                    .expect("prefill reservation must remain routable");
-                let worker_id = reservation.worker_id();
-                reservation.release().await.unwrap();
+                    .expect("prefill schedule must remain routable")
+                    .worker_id;
                 assert!(
                     ids[..2].contains(&worker_id),
                     "rejected prefill worker became selectable"

@@ -17,6 +17,7 @@ use crate::{
     preprocessor::PreprocessedRequest,
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+        preprocessor::RoutingHints,
         timing::RequestPhase,
     },
 };
@@ -285,7 +286,15 @@ pub fn explicit_target(
     request: &PreprocessedRequest,
     phase: RequestPhase,
 ) -> Result<Option<AffinityTarget>, Error> {
-    let Some(routing) = request.routing.as_ref() else {
+    explicit_routing_target(request.routing.as_ref(), phase)
+}
+
+/// The worker `routing` names for `phase`, if any.
+pub(crate) fn explicit_routing_target(
+    routing: Option<&RoutingHints>,
+    phase: RequestPhase,
+) -> Result<Option<AffinityTarget>, Error> {
+    let Some(routing) = routing else {
         return Ok(None);
     };
     let (worker_id, dp_rank) = match phase {

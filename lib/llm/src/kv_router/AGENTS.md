@@ -18,6 +18,8 @@ and the booking lifecycle these rules protect.
 - `sequence.rs`, `sequence/`: runtime glue for active-sequence tracking and its replica sync.
 - `request_lease.rs`: one request-liveness coordinator and reaper per `KvRouter`. Holds booking
   leases and releases them on completion or expiry.
+- `route_request.rs`: `RouteRequest`, what worker selection reads from a request. Planning takes
+  it, so the Runtime EPP selects without building a `PreprocessedRequest`.
 - `routing_load.rs`: the load context shared by a worker set's scheduler and its load metrics.
 - `routing_host.rs`: `RoutingHost`, the pipeline's terminal engine. Owns selection, dispatch,
   and response cleanup for one worker set.
@@ -36,10 +38,12 @@ and the booking lifecycle these rules protect.
   - `admission.rs`: consumes the prefill stream, in the foreground or as a background task.
   - `handoff.rs`: keeps prefill running while decode runs and reports prefill failures.
   - `conditional_bypass.rs`: conditional disaggregation's decision to skip remote prefill.
-  - `query.rs`: `reserve_prefill_worker`, the prefill-only booking used by the Runtime EPP.
-  - `stage.rs`: `PrefillRouter` as a `StageRouter`, and the helpers `generate` is composed from.
+  - `stage.rs`: `PrefillRouter` as a `StageRouter`, `PrefillPlan`, and the helpers `generate`
+    is composed from.
+  - `schedule_tests.rs`: `schedule` as the Runtime EPP uses it, and binding availability.
 - `stage_router.rs`: `StageRouter`, the `schedule` / `preview` / `dispatch` interface shared by
-  single-stage routers. `PrefillRouter` implements it so far.
+  single-stage routers. `PrefillRouter` implements it so far. The frontend calls all three; the
+  Runtime EPP calls only `schedule`.
 - `encoder_router.rs`: `EncoderRouter`, the optional encode hop for multimodal inputs.
 - `plugins.rs`: installs the linked router plugin registry.
 - `shared_cache.rs`: the HiCache shared KV cache client (SGLang + Mooncake).
@@ -49,8 +53,8 @@ and the booking lifecycle these rules protect.
 - `KvRouter` never dispatches. `RoutingHost` dispatches decode, aggregated, and prefill requests
   (the prefill hop through the prefill set's own `RoutingHost`); `EncoderRouter` dispatches
   encode requests through a round-robin `PushRouter`.
-- Each booking has exactly one owner at a time (`RoutePlan`, then `RequestGuard`, or a detached
-  lease) and is released exactly once.
+- Each booking has exactly one owner at a time (`RoutePlan`, then `RequestGuard`, a
+  `RouteBooking`, or a lease detached under its request id) and is released exactly once.
 - A preview never books capacity and never creates an affinity binding.
 - Validate request-supplied worker pins only at initial selection. A pinned worker that
   disappears after a preview or at dispatch is a service failure, not a client error.
@@ -60,8 +64,17 @@ and the booking lifecycle these rules protect.
   cleanup budget runs out.
 - Fail closed while the prefill target is `Pending`. Pass through only when `Untargeted`.
 - Do not let clients request a conditional bypass.
-- When you add a selection input, add it to the inputs table in `README.md` and decide whether
-  the Runtime EPP (`deploy/inference-gateway/ext-proc/src/epp.rs`) must supply it too.
+- Selection reads a request only through `RouteRequest`. When you add a selection input, add a
+  method to it, implement it for `SingleIn<PreprocessedRequest>`, add it to the inputs table in
+  `README.md`, and decide whether the Runtime EPP
+  (`deploy/inference-gateway/ext-proc/src/epp.rs`) must supply it too. Record that decision as
+  a row in the EPP's routing parity table
+  (`deploy/inference-gateway/ext-proc/README.md`).
+- The Runtime EPP selects only through the planning interface: `PrefillRouter::schedule` for
+  prefill and `RoutingHost::plan_route` on its decode host for decode. It never dispatches, so
+  it keeps each booking with `RoutePlan::into_booking` (prefill) or `detach_booking` (decode,
+  freed by reservation id from the response callbacks). Do not add an EPP-only selection path
+  into `KvRouter`.
 - The Runtime EPP builds its own decode scoring override (`decode_router_config_override` in
   `epp.rs`). Change it together with `build_decode_router_override` in
   `prefill_router/mod.rs`, or the two hosts score decode differently.

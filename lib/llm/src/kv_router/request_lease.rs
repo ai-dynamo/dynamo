@@ -145,6 +145,21 @@ impl RequestLeaseManagerInner {
             .cloned()
     }
 
+    /// Make an already-registered record reachable by its request id.
+    fn track_request_id(&self, record: &Arc<RequestLeaseRecord>) {
+        let attempt_id = record.booking.attempt_id;
+        let mut active = self.active.lock();
+        if active
+            .by_attempt
+            .get(&attempt_id)
+            .is_some_and(|current| Arc::ptr_eq(current, record))
+        {
+            active
+                .current_by_request
+                .insert(record.booking.request_id.clone(), attempt_id);
+        }
+    }
+
     fn current_record(&self, request_id: &str) -> Option<Arc<RequestLeaseRecord>> {
         let active = self.active.lock();
         let attempt_id = active.current_by_request.get(request_id)?;
@@ -273,6 +288,7 @@ impl RequestLeaseManager {
         RequestAttemptLease {
             manager: self.clone(),
             record,
+            armed: true,
         }
     }
 
@@ -432,6 +448,8 @@ impl ReplicaRequestLeaseObserver for WeakRequestLeaseObserver {
 pub(crate) struct RequestAttemptLease {
     manager: RequestLeaseManager,
     record: Arc<RequestLeaseRecord>,
+    /// Cleared by `detach`, after which dropping the handle releases nothing.
+    armed: bool,
 }
 
 impl RequestAttemptLease {
@@ -456,6 +474,14 @@ impl RequestAttemptLease {
             manager: self.manager.clone(),
             record: Arc::clone(&self.record),
         }
+    }
+
+    /// Hand the booking to its request id, for a host that releases it by id
+    /// (`KvRouter::free`) instead of through this handle. The manager keeps
+    /// it until then or until the lease expires.
+    pub(crate) fn detach(mut self) {
+        self.manager.inner.track_request_id(&self.record);
+        self.armed = false;
     }
 }
 
@@ -487,7 +513,9 @@ impl std::fmt::Debug for RequestAttemptRelease {
 
 impl Drop for RequestAttemptLease {
     fn drop(&mut self) {
-        self.manager.enqueue_completion(&self.record);
+        if self.armed {
+            self.manager.enqueue_completion(&self.record);
+        }
     }
 }
 

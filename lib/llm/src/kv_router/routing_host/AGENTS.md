@@ -17,6 +17,12 @@ parent [`AGENTS.md`](../AGENTS.md) guardrails apply here too.
   dispatch, the `RequestGuard` takes over. Do not add a path that selects and sends without
   a plan. Guarded by `builtin_route_plan_holds_its_reservation_until_aborted` and
   `planned_dispatch_transfers_the_reservation_to_request_cleanup`.
+- **A host that never sends ends the plan with `into_booking` or `detach_booking`.** A
+  `RouteBooking` owns the KV booking, or the lease manager keeps it under the request id until
+  `KvRouter::free`. Built-in occupancy is not keyed by request and is released at once.
+  Guarded by `kv_route_booking_holds_until_released_or_dropped`,
+  `detached_kv_booking_is_freed_by_its_request_id`, and
+  `builtin_route_booking_releases_its_reservation`.
 - **A KV send is exact.** Never retarget a KV guard. Only the built-in plane uses transport
   fallback.
 - **`prepare` runs once, with the final worker.** A built-in send can move to another
@@ -29,7 +35,9 @@ parent [`AGENTS.md`](../AGENTS.md) guardrails apply here too.
   the normal path.
 - **Validate request-supplied worker pins at selection only.** A worker that disappears later
   is a service failure.
-- **A preview never books.** `preview_kv_route` and `peek_next_worker` hold nothing.
+- **A preview never books.** `preview_kv_route` holds nothing. The built-in plane has no
+  preview: its plan selects, which advances a round-robin cursor even if the plan is never
+  sent.
 - **Only Decode and Aggregated KV routes start the classifier lifecycle.** A prefill route
   must leave a parked decode lifecycle alone.
 

@@ -28,18 +28,6 @@ impl BuiltinWorkerSelector {
         Some(Self { mode, picker })
     }
 
-    pub(super) fn peek_worker(
-        &self,
-        input: WorkerSelectionInput<'_, ModelRuntimeConfig>,
-    ) -> Result<u64, KvSchedulerError> {
-        let (worker_ids, occupancy) = self.hosted_inputs(input)?;
-        self.picker
-            .peek_worker(worker_ids, |worker_id| {
-                occupancy.map_or(0, |occupancy| occupancy(worker_id))
-            })
-            .ok_or(KvSchedulerError::NoEndpoints)
-    }
-
     fn hosted_inputs<'a>(
         &self,
         input: WorkerSelectionInput<'a, ModelRuntimeConfig>,
@@ -101,16 +89,12 @@ use super::*;
 impl RoutingHost {
     fn select_lora_target(
         &self,
-        request: &PreprocessedRequest,
+        routing: Option<&RoutingHints>,
     ) -> Result<Option<LoraSelection>, Error> {
         let Some(lora) = self.lora.as_ref() else {
             return Ok(None);
         };
-        let Some(lora_name) = request
-            .routing
-            .as_ref()
-            .and_then(|routing| routing.lora_name.clone())
-        else {
+        let Some(lora_name) = routing.and_then(|routing| routing.lora_name.clone()) else {
             return Ok(None);
         };
         let load_guard = LoraLoadGuard::new(Arc::clone(&lora.load_estimator), lora_name.clone());
@@ -167,7 +151,7 @@ impl RoutingHost {
 
     pub(super) fn select_hosted_worker(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         target_constraint: Option<AffinityTarget>,
         affinity_target: Option<AffinityTarget>,
     ) -> Result<HostedSelection, Error> {
@@ -252,7 +236,7 @@ impl RoutingHost {
             RoutingPolicy::DeviceAwareWeighted => {
                 let preferred_worker = preferred_worker()?;
                 let selection = self.inner.select_device_aware_and_reserve(
-                    request.content(),
+                    request.preprocessed(),
                     target_constraint
                         .map(|target| target.worker_id)
                         .or(preferred_worker),
@@ -278,37 +262,39 @@ impl RoutingHost {
     }
 
     /// Select a built-in route without sending it: check the request's worker
-    /// targets, acquire the session-affinity hold, pick the worker (advancing a
-    /// round-robin cursor or reserving occupancy), and start the request guard.
+    /// targets, acquire the session-affinity hold, and pick the worker
+    /// (advancing a round-robin cursor or reserving occupancy). The request
+    /// counts as started only at dispatch, where the request guard begins.
     pub(super) async fn plan_builtin_route(
         &self,
-        request: &SingleIn<PreprocessedRequest>,
+        request: &dyn RouteRequest,
         phase: RequestPhase,
     ) -> Result<BuiltinRoutePlan, Error> {
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
-        let explicit = explicit_target(request.content(), phase)?;
-        let has_affinity_session = self.affinity.is_some() && affinity_id(request)?.is_some();
+        let routing = request.routing_hints();
+        let explicit = explicit_routing_target(routing, phase)?;
+        let has_affinity_session =
+            self.affinity.is_some() && request.session_affinity_id()?.is_some();
         let is_direct = matches!(&self.policy, RoutingPolicy::Direct);
         if is_direct && explicit.is_none() && !has_affinity_session {
             return Err(invalid_argument(format!(
                 "worker ID required for {phase} request in Direct routing mode"
             )));
         }
-        let is_query_only = request.get_annotation_value("query_instance_id").is_some();
+        let is_query_only = request.is_query_only();
         // Declared before worker selection because the session-affinity wait is
         // the first stage that can spend it.
         let budget = CleanupBudget::default();
-        let (lora_target, lora_fallback, lora_load) =
-            match self.select_lora_target(request.content())? {
-                Some(selection) => (
-                    Some(selection.target),
-                    Some(selection.allowed_fallback),
-                    Some(selection.load_guard),
-                ),
-                None => (None, None, None),
-            };
-        let (mut selection, affinity) = if let Some(target) = lora_target {
+        let (lora_target, lora_fallback, lora_load) = match self.select_lora_target(routing)? {
+            Some(selection) => (
+                Some(selection.target),
+                Some(selection.allowed_fallback),
+                Some(selection.load_guard),
+            ),
+            None => (None, None, None),
+        };
+        let (selection, affinity) = if let Some(target) = lora_target {
             (
                 HostedSelection {
                     initial_worker: target,
@@ -321,7 +307,7 @@ impl RoutingHost {
                 None,
             )
         } else {
-            self.validate_explicit_worker(request.content(), phase)?;
+            self.validate_explicit_worker(routing, phase)?;
             self.select_with_session_affinity(request, phase, is_query_only, &budget, |target| {
                 let pinned_target = explicit.or(match self.session_affinity_mode {
                     SessionAffinityMode::Hard => target,
@@ -341,28 +327,17 @@ impl RoutingHost {
         } else {
             None
         };
-        let guard = RequestGuard::new_builtin(
-            self.request_metrics.clone(),
-            selection.initial_worker,
-            selection.occupancy_reservation.take(),
-            lora_load,
-            request,
-        );
-        self.request_metrics
-            .input_sequence_tokens
-            .with_label_values(&[request.phase().as_str(), &request.model])
-            .observe(request.token_ids.len() as f64);
         drop(route_guard);
         Ok(BuiltinRoutePlan {
             phase,
             direct: is_direct && !has_affinity_session,
             selection,
             lora_fallback,
+            lora_load,
             soft_affinity_target,
             uses_occupancy: self
                 .required_worker_inputs()
                 .contains(WorkerInputs::OCCUPANCY),
-            guard,
             affinity,
             budget,
         })
@@ -387,18 +362,31 @@ impl RoutingHost {
                 HostedSelection {
                     initial_worker,
                     target_constraint,
+                    occupancy_reservation,
                     candidate_count,
                     selected_occupancy,
                     device_aware_telemetry,
-                    ..
                 },
             lora_fallback,
+            lora_load,
             soft_affinity_target,
             uses_occupancy,
-            mut guard,
             affinity: mut operation,
             budget,
         } = plan;
+        // The request counts as started here, as a KV route does when its
+        // plan is tracked. A plan that is never sent counts nothing.
+        let mut guard = RequestGuard::new_builtin(
+            self.request_metrics.clone(),
+            initial_worker,
+            occupancy_reservation,
+            lora_load,
+            &request,
+        );
+        self.request_metrics
+            .input_sequence_tokens
+            .with_label_values(&[request.phase().as_str(), &request.model])
+            .observe(request.token_ids.len() as f64);
         let phase_label = phase.to_string();
         let staged_kv = StagedKv::for_request(request.content());
         let target_for_worker = |worker_id| {
@@ -569,20 +557,20 @@ impl RoutingHost {
 }
 
 /// A built-in route selected but not sent, from
-/// [`RoutingHost::plan_builtin_route`]. It holds the request guard (with any
-/// occupancy reservation and LoRA load), and the session-affinity hold, until
-/// [`RoutingHost::dispatch_builtin_plan`] sends it or [`Self::abort`] gives it
-/// up. Dropping it also releases them.
-pub(crate) struct BuiltinRoutePlan {
+/// [`RoutingHost::plan_builtin_route`]. It holds the occupancy reservation,
+/// the LoRA load and the session-affinity hold until
+/// [`RoutingHost::dispatch_builtin_plan`] moves them into a request guard, or
+/// dropping the plan releases them.
+pub struct BuiltinRoutePlan {
     phase: RequestPhase,
     /// Direct mode with no affinity session: send to the explicit target.
     direct: bool,
-    /// The selection, its occupancy reservation already moved into `guard`.
+    /// The selection, with its occupancy reservation.
     selection: HostedSelection,
     lora_fallback: Option<HashSet<u64>>,
+    lora_load: Option<LoraLoadGuard>,
     soft_affinity_target: Option<AffinityTarget>,
     uses_occupancy: bool,
-    guard: RequestGuard,
     affinity: Option<Hold>,
     budget: CleanupBudget,
 }
@@ -599,12 +587,6 @@ impl BuiltinRoutePlan {
                     .and_then(|target| target.dp_rank),
             )
         })
-    }
-
-    /// Give the route up before dispatch: release the guard's reservations
-    /// and drop the affinity hold.
-    pub(crate) async fn abort(mut self, error: Option<&Error>) {
-        self.guard.abort(error.map(|error| error.as_ref())).await;
     }
 }
 

@@ -14,8 +14,9 @@ users, and each one relies on a different part of its interface:
    request can skip the prefill hop and run on its decode worker.
 2. **Discovery** creates one router per WorkerSet and moves its prefill target
    as prefill workers come and go.
-3. **The inference-gateway EPP** reserves a prefill worker without dispatching
-   to it, then hands the choice to the frontend in a request header.
+3. **The inference-gateway EPP** schedules a prefill worker
+   (`StageRouter::schedule`) and keeps its booking without dispatching, then
+   hands the choice to the frontend in a request header.
 
 This file records the router's side of each contract and why it behaves the
 way it does. The step order of one frontend request lives in the doc comment on
@@ -36,9 +37,10 @@ and the router knowledge-base pages).
   or an error.
 - `handoff.rs`: keeps consuming prefill while decode runs and merges prefill
   failures into the decode stream.
-- `query.rs`: `reserve_prefill_worker` and `PrefillReservation`.
 - `stage.rs`: `PrefillRouter` as a `StageRouter` (`schedule`, `preview`,
-  `dispatch`), and the helpers `generate` is composed from.
+  `dispatch`), `PrefillPlan`, and the helpers `generate` is composed from.
+- `schedule_tests.rs`: tests of `schedule` as the EPP uses it, and of the
+  binding's worker availability.
 
 ## Core: Target, Binding, and Activation
 
@@ -55,11 +57,11 @@ before its binding does.
 
 Each user handles the states as follows:
 
-| State | Frontend `generate` | Discovery `available_worker_ids_for` | EPP `reserve_prefill_worker` |
+| State | Frontend `generate` | Discovery `available_worker_ids_for` | EPP `schedule` |
 |---|---|---|---|
-| `Active` | Runs the prefill hop. | The binding's available workers. | Reserves a prefill worker. |
-| `Pending` | Fails closed: migratable `WorkerUnavailable` (HTTP 503). | Empty set. | `NotActivated`. The EPP falls back to aggregated. |
-| `Untargeted` | Forwards to decode unchanged. | `None`. | `NotActivated`. The EPP falls back to aggregated. |
+| `Active` | Runs the prefill hop. | The binding's available workers. | Books a prefill worker (`PrefillPlan::Booked`). |
+| `Pending` | Fails closed: migratable `WorkerUnavailable` (HTTP 503). | Empty set. | Migratable `WorkerUnavailable`. The EPP falls back to aggregated. |
+| `Untargeted` | Forwards to decode unchanged. | `None`. | `PrefillPlan::Untargeted`. The EPP routes aggregated. |
 
 Known gap: the EPP column does not fail closed during `Pending`. See
 [Use 3](#use-3-the-inference-gateway-epp).
@@ -225,25 +227,31 @@ deployment. The router handles the activation window itself.
 | Item | Caller | Purpose |
 |---|---|---|
 | `new` | `deploy/inference-gateway/ext-proc/src/epp.rs`, sidecar testkit | Public constructor. Activates once from `activation_rx`. |
-| `reserve_prefill_worker` | EPP, sidecar testkit | Select and book a prefill worker without dispatching to it. |
-| `PrefillReservation::{worker_id, dp_rank, release}` | EPP | The booking. |
+| `StageRouter::schedule` | EPP, sidecar testkit | Select and book a prefill worker, the same selection `generate` runs, without dispatching to it. Takes a `RouteRequest`, so the EPP builds no `PreprocessedRequest`. |
+| `PrefillPlan::into_route` | EPP | The booked `RoutePlan`, or `None` with no prefill target. The EPP reads its `target` and keeps it with `RoutePlan::into_booking`. |
 
 ### Activation is one-shot
 
 `new` takes a one-shot `activation_rx`. When the EPP discovers a prefill
 worker, it sends the endpoint and the router sets a `Legacy` target once.
 Nothing clears that target later, so an EPP router never returns to
-`Untargeted`. When prefill workers leave, reservations fail with "No workers
-available for prefill" instead.
+`Untargeted`. When prefill workers leave, scheduling fails because no worker
+is available instead.
 
-### Reservations own their cleanup
+### Kept bookings own their cleanup
 
-A KV-routed reservation holds the exact scheduler booking it admitted. Dropping
-it enqueues cleanup, and `release` waits for the scheduler to acknowledge it.
-Cleanup is tied to that booking, not to the current binding, so a later rebind
-cannot release a newer booking that reused the same request ID and worker.
-Built-in router modes return an untracked, advisory reservation whose release
-does nothing. Reservations do not advance the round-robin dispatch cursor.
+The EPP keeps a KV-routed plan's booking as a `RouteBooking`, which holds the
+exact scheduler booking it admitted. Dropping it enqueues cleanup, and
+`release` waits for the scheduler to acknowledge it. Cleanup is tied to that
+booking, not to the current binding, so a later rebind cannot release a newer
+booking that reused the same request ID and worker. Guarded by
+`kept_prefill_booking_releases_exactly_after_rebind`.
+
+A built-in mode selects at `schedule` as it does for a dispatched request: a
+round-robin cursor advances, and a load-based mode reserves occupancy.
+Occupancy is not keyed by request, so keeping the booking releases it at once
+(`kept_prefill_booking_releases_builtin_occupancy`), and the cursor stays
+advanced (`rr_prefill_schedule_advances_the_dispatch_cursor`).
 
 The EPP releases each booking once, from whichever response lifecycle callback
 runs first.
@@ -257,13 +265,13 @@ with a preselected prefill worker also skips conditional disaggregation.
 
 ### Known gap: errors fall back to aggregated
 
-`reserve_prefill_worker` returns `PrefillError::NotActivated` for both
-`Pending` and `Untargeted`, and every error is an untyped `anyhow::Error`. The
-EPP falls back to aggregated routing on any error, including `Pending`, a
-policy-class queue rejection, and "No workers available". During `Pending` this
-may send aggregated requests to decode-only workers, which is the failure
-ai-dynamo/dynamo#16736 fixed for the frontend. A typed error that separates
-these cases would let the EPP fail closed where the frontend does.
+`schedule` separates the cases: `Untargeted` is `PrefillPlan::Untargeted`, and
+`Pending` is a migratable `WorkerUnavailable` error. The EPP still falls back
+to aggregated routing on any error, including `Pending`, a policy-class queue
+rejection, and no available worker. During `Pending` this may send aggregated
+requests to decode-only workers, which is the failure ai-dynamo/dynamo#16736
+fixed for the frontend. Failing closed on `WorkerUnavailable` would let the EPP
+behave as the frontend does.
 
 ## Cross-Use Invariants
 

@@ -40,7 +40,8 @@ impl Endpoint {
 #[derive(Debug, Clone)]
 pub struct RequestInfo {
     /// Unique request ID (from `x-request-id` header or generated UUID).
-    /// Used for router bookkeeping (add_request / free_request).
+    /// Used for router bookkeeping: the bookings a pick keeps until its
+    /// response callbacks release them.
     pub request_id: String,
     /// HTTP request headers, preserved as ordered pairs so that repeated
     /// header keys (valid in HTTP) are not silently collapsed.
