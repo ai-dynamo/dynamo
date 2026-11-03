@@ -28,7 +28,8 @@ pub use dynamo_llm::protocols::common::llm_backend::{
 };
 pub use dynamo_llm::protocols::common::preprocessor::{
     BootstrapInfo, KV_HINT_TRANSFER_CAPABILITY_KEY, KvHint, KvHintAction, KvSourceLocationsPayload,
-    MultimodalData, MultimodalDataMap, PrefillResult, PreprocessedRequest, RoutingHints,
+    MultimodalData, MultimodalDataMap, MultimodalItemRef, PrefillResult, PreprocessedRequest,
+    RoutingHints,
 };
 pub use dynamo_llm::protocols::common::{
     FinishReason, GuidedDecodingOptions, OutputOptions, SamplingOptions, StopConditions,
