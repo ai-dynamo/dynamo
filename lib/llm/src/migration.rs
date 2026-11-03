@@ -464,6 +464,10 @@ where
             }
             retries_left = 0;
         }
+        if !crate::routing_policy::execution_requirements(&preprocessed_request).allows_replay {
+            retries_left = 0;
+            preprocessed_request.migration_state = None;
+        }
         if retries_left > 0 {
             preprocessed_request.migration_state = Some(Default::default());
         }
@@ -1944,6 +1948,41 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(responses.len(), 1);
         assert!(responses[0].error.is_none());
+    }
+
+    #[tokio::test]
+    async fn runtime_lora_request_does_not_retry_on_another_worker() {
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let mock_engine = Arc::new(MockEngine::new(
+            MockBehavior::FailThenSuccess,
+            1,
+            100,
+            context_id.clone(),
+        ));
+        let calls = mock_engine.call_count.clone();
+        let mut request = create_mock_request(1);
+        request.routing = Some(RoutingHints {
+            lora_name: Some("dyn-lora-0123456789abcdef0123456789abcdef".to_string()),
+            lora_resolution_version: Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION),
+            ..Default::default()
+        });
+        let context = Arc::new(Controller::new(context_id));
+
+        let result = RetryManager::build(
+            context,
+            BTreeMap::new(),
+            request,
+            mock_engine,
+            3,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            Arc::new(Metrics::new()),
+            None,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
