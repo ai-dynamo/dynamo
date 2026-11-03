@@ -24,19 +24,22 @@ running pod:
   annotation value could also be or create an option ("dangerous"), as
   could a ``$(VAR)`` the env leaves undefined that an ``envFrom`` source
   may define (its ``prefix`` plus a ConfigMap or Secret key). Any other
-  ``fieldRef`` (the operator's ``POD_*`` among them) and a
-  ``resourceFieldRef`` never start with ``-`` or hold whitespace, so they
-  stay unreadable values but never stand for an option ("inert").
-  ``envFrom`` sources are otherwise assumed to set no router env;
-  ``evaluate_premises`` warns about them, and P14 compares the routers'
-  policy parameters with the parsed startup.
+  ``fieldRef`` (the operator's ``POD_*`` among them), a
+  ``resourceFieldRef`` and the operator env of ``_operator_inert_env``
+  (``DYN_NAMESPACE`` among them) never start with ``-`` or hold
+  whitespace, so they stay unreadable values but never stand for an option
+  ("inert"). ``envFrom`` sources are otherwise assumed to set no router
+  env; ``evaluate_premises`` warns about them, and P14 compares the
+  routers' policy parameters with the parsed startup.
 - ``evaluate_premises`` checks P4 and P7-P10 and warns on P6 and P7; P14
   is the router actuator's. P4 also parses every worker component's router
-  flags and env the same way (``_worker_router_errors``): a worker that
-  resolves a router mode advertises its own router configuration, which
-  replaces the frontend's for its worker set, and one where dangerous env
-  could stand for an option fails too. ``p4_ok`` alone decides whether a
-  retune controller can be built.
+  flags and env the same way (``_worker_router_errors``), each role's pod
+  template for a component that has only those, and skips a component
+  with a native ``runtime`` sidecar, whose main runs the engine: a worker
+  that resolves a router mode advertises its own router configuration,
+  which replaces the frontend's for its worker set, and one where
+  dangerous env could stand for an option fails too. ``p4_ok`` alone
+  decides whether a retune controller can be built.
 
 Every function is pure (a dict in, a value out, no Kubernetes calls) and
 never reads the planner's own environment.
@@ -87,21 +90,31 @@ DEFAULT_FRONTEND_COMMAND = ("python3",)
 DEFAULT_FRONTEND_ARGS = ("-m", "dynamo.frontend")
 FRONTEND_MODULE = "dynamo.frontend"
 # The operator's worker invocation (component_common.go getCommonContainer),
-# kept by graph.go's merge under an empty authored command. A native-sidecar
-# main, one whose pod template has an init container named RUNTIME_CONTAINER,
-# skips that base container (graph.go: native-sidecar engines retain their
-# image entrypoint), so its args stay an exec-form argv.
+# kept by graph.go's merge under an empty authored command.
 DEFAULT_WORKER_COMMAND = ("/bin/sh", "-c")
-# consts.go RuntimeContainerName.
+# consts.go RuntimeContainerName: an init container of this name makes the
+# component a native sidecar, whose main runs the engine.
 RUNTIME_CONTAINER = "runtime"
-# Worker options known to take exactly one value, so an unreadable value
-# right after one is that value: were it itself an option, the listed one
-# would lack its value and the worker would fail at startup. The worker's
-# router parser knows only the router flags, not the arity of engine or
-# runtime flags (--enforce-eager takes none, --connector a variable number),
-# so only these exempt a value; the recipes need no other. Before adding an
-# option, check its nargs and action in every backend that accepts it.
-_WORKER_VALUE_OPTIONS = frozenset({"--speculative-config"})
+# runtime_status.go ResolveComponentRuntimeStatus, in its priority order.
+_MODEL_FLAGS = ("--served-model-name", "--model-name", "--model", "--model-path")
+# Worker options known to take at least one value, so an unreadable value
+# right after one is a value: were it itself an option, the listed one would
+# lack its value and the worker would fail at startup. The worker's router
+# parser knows only the router flags, not the arity of engine or runtime
+# flags (--enforce-eager takes none, --connector a variable number), so only
+# these exempt a value. Checked arities: vLLM --model (one) and
+# --served-model-name (nargs "+", whose first value this is);
+# SGLang --model-path and --served-model-name (one); TensorRT-LLM --model,
+# --model-path and --served-model-name (one); the mocker's --model-path and
+# --model-name (one); --speculative-config (one JSON value). Before adding
+# an option, check its nargs and action in every backend that accepts it.
+_WORKER_VALUE_OPTIONS = frozenset({"--speculative-config", *_MODEL_FLAGS})
+# Left-over frontend options known to take exactly one value, in the sglang
+# chat processor and in vLLM's. Other left-over options go to the chat
+# processor too, where some take none (vLLM's --enable-auto-tool-choice).
+_FRONTEND_VALUE_OPTIONS = frozenset(
+    {"--chat-template", "--reasoning-parser", "--tool-call-parser"}
+)
 
 # Env the operator injects into every component (component_common.go
 # getCommonContainer); user env of the same name overrides it.
@@ -112,6 +125,27 @@ _OPERATOR_FIELD_REF_ENV = {
     "POD_NAMESPACE": "metadata.namespace",
     "POD_UID": "metadata.uid",
 }
+# Operator env whose value the planner does not compute but which never
+# starts with "-" or holds whitespace: getCommonContainer's Dynamo namespace
+# and component type; on a worker, component_worker.go GetBaseContainer's
+# system server, health check, NIXL telemetry and forward-pass metric
+# settings; on a multinode component, graph.go addMultinodeTopologyEnvVars'
+# leader hostname and rank. Container env wins over envFrom, so no envFrom
+# source defines them. Names the operator sets only in some configurations
+# (NATS_SERVER, ETCD_ENDPOINTS, DYN_DISCOVERY_BACKEND, CONTAINER_NAME, the
+# TLS paths) are not modeled.
+_OPERATOR_INERT_ENV = ("DYN_COMPONENT", "DYN_NAMESPACE")
+_OPERATOR_WORKER_INERT_ENV = (
+    "DYN_FORWARDPASS_METRIC_PORT",
+    "DYN_HEALTH_CHECK_ENABLED",
+    "DYN_SYSTEM_ENABLED",
+    "DYN_SYSTEM_PORT",
+    "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS",
+    "NIXL_TELEMETRY_ENABLE",
+    "NIXL_TELEMETRY_EXPORTER",
+    "NIXL_TELEMETRY_PROMETHEUS_PORT",
+)
+_OPERATOR_MULTINODE_INERT_ENV = ("DYNAMO_LEADER_ADDRESS", "DYNAMO_RANK")
 
 # The frontend's request trace recipe (P10).
 ENV_POD_NAME = "DYN_POD_NAME"
@@ -194,8 +228,6 @@ _RELEVANT_DESTS = frozenset(
         "conditional_disagg_config",
     }
 )
-# runtime_status.go ResolveComponentRuntimeStatus, in its priority order.
-_MODEL_FLAGS = ("--served-model-name", "--model-name", "--model", "--model-path")
 _SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ash", "ksh"})
 # Shell option letters that take the next argument (-o pipefail, -O extglob),
 # and bash's long options that do.
@@ -231,6 +263,8 @@ _SHELL_DECLARATIONS = frozenset({"declare", "export", "local", "readonly", "type
 # Commands that parse a quoted word again or turn it into env, so that one
 # word can still reach the worker's options or env.
 _SHELL_REPARSING = frozenset({".", "env", "eval", "export", "source"})
+# Commands that run their first operand as the command.
+_SHELL_LAUNCHERS = frozenset({"builtin", "command", "exec", "nohup"})
 
 
 class FrontendParseError(ValueError):
@@ -293,7 +327,8 @@ def served_model_names(
     Uses the operator's ``status.components[<name>].servedModelName`` while
     the status is current, else the first of ``--served-model-name``,
     ``--model-name``, ``--model`` and ``--model-path`` in the main
-    container's command and args (the operator's order), after Kubernetes
+    container's command and args (the operator's order; of each role's pod
+    template, for a component with role templates only), after Kubernetes
     ``$(VAR)`` expansion against the component's env, skipping values that
     reference env the planner cannot read.
     """
@@ -306,7 +341,7 @@ def served_model_names(
             continue
         name = str(component.get("name", ""))
         model = (projected.get(name) or {}).get("servedModelName") or _flag_model(
-            _model_flags(component, _component_env(dgd, component))
+            _component_model_flags(dgd, component)
         )
         if model:
             models[name] = str(model)
@@ -645,12 +680,14 @@ def _parse(
         for arg in args
     ]
     namespace, unknown = parser.parse_known_args(expanded)
-    hidden_flag = _opaque_flag_position(unknown)
+    hidden_flag = _opaque_flag_position(unknown, value_options=_FRONTEND_VALUE_OPTIONS)
     if hidden_flag is not None:
         original = dict(zip(expanded, args)).get(hidden_flag, hidden_flag)
         raise FrontendParseError(
             f"P4: frontend arg {original!r} references env the planner cannot "
-            "read and is not the value of a frontend flag, so it could set a "
+            "read and is neither attached to an option nor the value of a "
+            "frontend flag or of one known to take a value "
+            f"({', '.join(sorted(_FRONTEND_VALUE_OPTIONS))}), so it could set a "
             "router flag"
         )
     unresolved = sorted(
@@ -841,29 +878,36 @@ def _frontend_args(argv: Sequence[str]) -> list[str]:
 def _component_env(dgd: Mapping[str, Any], spec: Mapping[str, Any]) -> _Env:
     """Merge a component's env the way the operator renders it.
 
-    The operator injects ``DYN_PARENT_DGD_K8S_*`` and ``POD_*``, MergeEnvs
-    overlays graph ``env`` and the main container's ``env`` and sorts the
-    result by name; Kubernetes expands ``$(VAR)`` against earlier names and
-    every ``envFrom`` key.
+    The operator injects ``DYN_PARENT_DGD_K8S_*``, ``POD_*`` and the inert
+    names of ``_operator_inert_env``, except into a native-sidecar main,
+    which gets no base container; MergeEnvs overlays graph ``env`` and the
+    main container's ``env`` and sorts the result by name; Kubernetes
+    expands ``$(VAR)`` against earlier names and every ``envFrom`` key.
     """
 
     metadata = dgd.get("metadata") or {}
-    entries: dict[str, Mapping[str, Any]] = {
-        ENV_PARENT_DGD_NAME: {
+    entries: dict[str, Mapping[str, Any]] = {}
+    operator_inert: set[str] = set()
+    if not _native_sidecar(spec):
+        entries[ENV_PARENT_DGD_NAME] = {
             "name": ENV_PARENT_DGD_NAME,
             "value": str(metadata.get("name", "")),
-        },
-        ENV_PARENT_DGD_NAMESPACE: {
+        }
+        entries[ENV_PARENT_DGD_NAMESPACE] = {
             "name": ENV_PARENT_DGD_NAMESPACE,
             "value": str(metadata.get("namespace", "")),
-        },
-    }
-    for name, path in _OPERATOR_FIELD_REF_ENV.items():
-        entries[name] = {"name": name, "valueFrom": {"fieldRef": {"fieldPath": path}}}
+        }
+        for name, path in _OPERATOR_FIELD_REF_ENV.items():
+            entries[name] = {
+                "name": name,
+                "valueFrom": {"fieldRef": {"fieldPath": path}},
+            }
+        operator_inert.update(_operator_inert_env(spec))
     main = _main_container(spec)
     for entry in [*_graph_env(dgd), *(main.get("env") or [])]:
         if isinstance(entry, Mapping) and entry.get("name"):
             entries[str(entry["name"])] = entry
+            operator_inert.discard(str(entry["name"]))
     env_from = tuple(
         source for source in main.get("envFrom") or [] if isinstance(source, Mapping)
     )
@@ -872,7 +916,11 @@ def _component_env(dgd: Mapping[str, Any], spec: Mapping[str, Any]) -> _Env:
     values: dict[str, str] = {}
     opaque: set[str] = set()
     inert: set[str] = set()
-    for name in sorted(entries):
+    for name in sorted({*entries, *operator_inert}):
+        if name in operator_inert:
+            opaque.add(name)
+            inert.add(name)
+            continue
         entry = entries[name]
         source = entry.get("valueFrom")
         if source is not None:
@@ -903,6 +951,23 @@ def _component_env(dgd: Mapping[str, Any], spec: Mapping[str, Any]) -> _Env:
         inert=frozenset(inert),
         env_from=env_from,
     )
+
+
+def _operator_inert_env(spec: Mapping[str, Any]) -> list[str]:
+    """The ``_OPERATOR_*INERT_ENV`` names the operator sets on a component.
+
+    The worker names need an explicit worker type (component_common.go
+    ComponentDefaultsFactory gives an untyped component the common base
+    container only), the multinode ones a ``multinode`` component, whose
+    ``nodeCount`` defaults to 2.
+    """
+
+    names = list(_OPERATOR_INERT_ENV)
+    if _type(spec) and _type(spec) in WORKER_TYPES:
+        names.extend(_OPERATOR_WORKER_INERT_ENV)
+    if isinstance(spec.get("multinode"), Mapping):
+        names.extend(_OPERATOR_MULTINODE_INERT_ENV)
+    return names
 
 
 def _inert_source(source: Any) -> bool:
@@ -982,7 +1047,7 @@ def _expand(
 
 
 def _opaque_flag_position(
-    unknown: Sequence[str], *, value_options: Optional[frozenset[str]] = None
+    unknown: Sequence[str], *, value_options: frozenset[str]
 ) -> Optional[str]:
     """A left-over argument whose dangerous env could stand for a flag.
 
@@ -993,29 +1058,22 @@ def _opaque_flag_position(
     whose name is unreadable always could. Inert env never stands for a
     flag, and ``--option=$(VAR)`` is the option's value whatever it holds.
 
-    A reference expands to exactly one argument, so it is a value after an
-    option that takes exactly one: one that starts with ``-`` makes that
-    option's own parser fail at startup. With ``value_options`` unset, every
-    left-over option counts as one (the frontend hands them to its chat
-    processor); a worker passes the options known to take one value, since
-    its router parser cannot tell an engine flag that takes none
-    (``--enforce-eager``) or optional values (``--connector``), which the
-    worker would let the reference follow as a flag.
+    A reference expands to exactly one argument, so right after one of
+    ``value_options``, the left-over options known to take a value, it is
+    that value: one that starts with ``-`` makes that option's own parser
+    fail at startup. After any other left-over option it could be parsed as
+    a flag: the frontend hands its left-over options to its chat processor
+    and a worker to its engine, and both have flags that take no value
+    (vLLM's ``--enable-auto-tool-choice``, ``--enforce-eager``) or
+    optional values (``--connector``).
     """
-
-    def takes_value(option: Optional[str]) -> bool:
-        if option is None:
-            return False
-        if value_options is not None:
-            return option in value_options
-        return option.startswith("-") and "=" not in option
 
     previous: Optional[str] = None
     for token in unknown:
         if token.startswith("-"):
             if _UNREADABLE in token.split("=", 1)[0]:
                 return token
-        elif token.startswith(_OPAQUE) and not takes_value(previous):
+        elif token.startswith(_OPAQUE) and previous not in value_options:
             return token
         previous = token
     return None
@@ -1024,7 +1082,12 @@ def _opaque_flag_position(
 def _env_from_note(
     reference: Optional[str], opaque: frozenset[str], prefixes: Sequence[str]
 ) -> str:
-    """Says why a reference is unreadable when only an envFrom source may define it."""
+    """Says why a reference to env (``$(NAME)``, ``$NAME``) is unreadable.
+
+    Empty unless the name is not opaque env and an envFrom source may
+    define it. A script variable's reference, which names its source
+    (``$NAME(=<source>)``), never gets the note.
+    """
 
     name = (reference or "").strip("$()")
     if name in opaque or not _env_from_may_define(name, prefixes):
@@ -1235,35 +1298,51 @@ def _worker_router_errors(
     after one of ``_WORKER_VALUE_OPTIONS``; in shell form any dangerous
     ``$(VAR)``, which Kubernetes substitutes before the shell parses, and
     the script references ``_shell_expand`` marks.
+
+    A component with role pod templates and no component ``podTemplate``
+    is checked role by role, each role's template as its pods run it. A
+    component with a native ``runtime`` sidecar is skipped: its main runs
+    the engine with its image entrypoint, and the sidecar registers no
+    router configuration.
     """
 
     errors: list[str] = []
     env_from: list[str] = []
     for component in components:
-        if _type(component) not in WORKER_TYPES:
+        if _type(component) not in WORKER_TYPES or _native_sidecar(component):
             continue
         name = str(component.get("name", ""))
-        env = _component_env(dgd, component)
-        argv, shell = _worker_argv(component, env)
-        detail = _worker_router_cached(
-            canonical_json(
-                {
-                    "argv": argv,
-                    "shell": shell,
-                    "values": dict(env.values),
-                    "opaque": sorted(env.opaque),
-                    "env_from_prefixes": list(env.env_from_prefixes),
-                }
+        roles = [
+            (role, spec, _component_env(dgd, spec))
+            for role, spec in _role_specs(component)
+        ]
+        for role, spec, env in roles:
+            argv, shell = _worker_argv(spec, env)
+            detail = _worker_router_cached(
+                canonical_json(
+                    {
+                        "argv": argv,
+                        "shell": shell,
+                        "values": dict(env.values),
+                        "opaque": sorted(env.opaque),
+                        "env_from_prefixes": list(env.env_from_prefixes),
+                    }
+                )
             )
-        )
-        if detail is not None:
-            errors.append(
-                f"P4: worker component {name} {detail}; a worker's router "
-                "configuration replaces the frontend's for its workers, so set "
-                f"--router-mode and {ENV_ROUTER_MODE} on the frontend only (a "
-                "graph-level env entry reaches every worker)"
-            )
-        if any(_env_from_may_set_router_env(source) for source in env.env_from):
+            if detail is not None:
+                label = name if role is None else f"{name} (role {role})"
+                errors.append(
+                    f"P4: worker component {label} {detail}; a worker's router "
+                    "configuration replaces the frontend's for its workers, so set "
+                    f"--router-mode and {ENV_ROUTER_MODE} on the frontend only (a "
+                    "graph-level env entry reaches every worker)"
+                )
+                break
+        if any(
+            _env_from_may_set_router_env(source)
+            for _, _, env in roles
+            for source in env.env_from
+        ):
             env_from.append(name)
     if env_from:
         warnings.append(
@@ -1337,47 +1416,73 @@ def _worker_router_mode(
         opaque_word = next((word for word in argv if _OPAQUE in word), None)
         if opaque_word is None:
             return None
-        reference = _opaque_reference(opaque_word)
+        reference = _opaque_reference(opaque_word) or ""
+        note = _env_from_note(reference, opaque, env_from_prefixes)
+        if reference.startswith("$("):
+            return (
+                f"has a shell script that references {reference}, which "
+                "Kubernetes substitutes into the script before the shell parses "
+                "it, so its value could become an option wherever it stands, and "
+                f"the planner cannot read it{note}, so it could select a router "
+                "mode; give the value literally or use the shell's own reference "
+                f'attached to its option (--option="${reference[2:-1]}")'
+            )
         return (
-            f"has a shell script that references {reference} where it could "
-            "become an option, and the planner cannot read it"
-            f"{_env_from_note(reference, opaque, env_from_prefixes)}, so it could "
-            "select a router mode; give the value literally, quote the reference "
-            '("$VAR") outside the worker\'s arguments, or attach it to its '
-            'option (--option="$VAR")'
+            f"has a shell script that references {_describe_reference(reference)} "
+            f"where it could become an option, and the planner cannot read it{note}, "
+            "so it could select a router mode; give the value literally, quote the "
+            'reference ("$VAR") outside the worker\'s arguments, or attach it to '
+            'its option (--option="$VAR")'
         )
     hidden_flag = _opaque_flag_position(remainder, value_options=_WORKER_VALUE_OPTIONS)
     if hidden_flag is None:
         return None
     reference = _opaque_reference(hidden_flag)
+    note = _env_from_note(reference, opaque, env_from_prefixes)
+    if hidden_flag.startswith("-"):
+        return (
+            f"has an option whose name references {reference}, which the planner "
+            f"cannot read{note}, so it could select a router mode; spell the "
+            "option's name literally"
+        )
     return (
         f"has an argument that references {reference}, which the planner cannot "
-        f"read{_env_from_note(reference, opaque, env_from_prefixes)} and which "
-        "is neither attached to an option nor the value of one known to take a value "
+        f"read{note} and which is neither attached to an option nor the value of "
+        "one known to take a value "
         f"({', '.join(sorted(_WORKER_VALUE_OPTIONS))}), so it could select a "
         "router mode; give the value literally or attach it to its option "
         "(--option=$(VAR))"
     )
 
 
+def _describe_reference(reference: str) -> str:
+    """A shell reference as a message shows it, with its source when it has one.
+
+    ``_ShellScan`` writes a script variable assigned from dangerous env as
+    ``$NAME(=<source>)``, since a marker holds no whitespace.
+    """
+
+    match = re.fullmatch(r"(\$[A-Za-z_][A-Za-z0-9_]*)\(=(.*)\)", reference)
+    if match is None:
+        return reference
+    return f"{match.group(1)} (assigned from {match.group(2)})"
+
+
 def _worker_argv(component: Mapping[str, Any], env: _Env) -> tuple[list[str], bool]:
     """A worker's argv after ``$(VAR)`` expansion, and whether a shell runs it.
 
-    An empty command is the operator's ``/bin/sh -c``, except for a
-    native-sidecar main, which keeps its image entrypoint and so runs its
-    args. A shell runs the command when it starts with one, or when a
-    shell's ``-c`` follows a launcher (``env bash -c``, ``tini -- sh -c``);
-    then its script's own references are resolved (``_shell_expand``) and
-    every part is split into words, so the flags of the commands it runs are
-    seen. Unreadable ``$(VAR)`` references stay marked. A standalone ``--``
-    is dropped: a launcher consumes it, while the router parser would read
-    every later flag as a positional.
+    An empty command is the operator's ``/bin/sh -c``. A shell runs the
+    command when it starts with one, or when a shell's ``-c`` follows a
+    launcher (``env bash -c``, ``tini -- sh -c``); then its script's own
+    references are resolved (``_shell_expand``) and every part is split
+    into words, so the flags of the commands it runs are seen. Unreadable
+    ``$(VAR)`` references stay marked. A standalone ``--`` is dropped: a
+    launcher consumes it, while the router parser would read every later
+    flag as a positional.
     """
 
     main = _main_container(component)
-    command = list(main.get("command") or [])
-    if not command and not _native_sidecar(component):
-        command = list(DEFAULT_WORKER_COMMAND)
+    command = list(main.get("command") or []) or list(DEFAULT_WORKER_COMMAND)
     parts = [env.expand(str(part)) for part in [*command, *(main.get("args") or [])]]
     script = _shell_script_index(parts)
     shell = script is not None or (
@@ -1413,6 +1518,31 @@ def _native_sidecar(component: Mapping[str, Any]) -> bool:
         for template in templates
         for container in _pod_spec(template).get("initContainers") or []
     )
+
+
+def _role_specs(
+    component: Mapping[str, Any],
+) -> list[tuple[Optional[str], Mapping[str, Any]]]:
+    """The component as each of its pods runs it, with the role's name.
+
+    v1beta1_helpers.go EffectiveComponentForRole: a component ``podTemplate``,
+    or no role ``podTemplate``, serves every pod (role ``None`` here);
+    otherwise each role with a ``podTemplate`` runs that template. The
+    roles stay in each copy, so ``_native_sidecar`` still reads the
+    leader's.
+    """
+
+    roles = [
+        role
+        for role in component.get("roles") or []
+        if isinstance(role, Mapping) and isinstance(role.get("podTemplate"), Mapping)
+    ]
+    if isinstance(component.get("podTemplate"), Mapping) or not roles:
+        return [(None, component)]
+    return [
+        (str(role.get("name", "")), {**component, "podTemplate": role["podTemplate"]})
+        for role in roles
+    ]
 
 
 def _shell_script_index(parts: Sequence[str]) -> Optional[int]:
@@ -1463,16 +1593,23 @@ def _shell_expand(script: str, env: _Env) -> str:
 
     - literal env becomes its value as the shell passes it on (split into
       words when unquoted), so the router parser sees an option it holds;
-    - dangerous env becomes ``_OPAQUE`` where its value could be or create
-      an option of the worker: unquoted, which the shell splits into words;
-      anywhere in an argument of ``eval`` or of a shell given ``-c`` (also
-      behind a launcher), which parse it again; or quoted as a whole
-      argument of the command that runs the worker (``-m dynamo.<x>``) or
-      of one that turns it into code or env (source, env, export, a shell),
-      unless it follows one of ``_WORKER_VALUE_OPTIONS``. An assignment
-      neither splits nor passes it on, but leaves its variable dangerous;
+    - dangerous env (a ConfigMap, Secret or annotation ``valueFrom``, or a
+      name the container's env leaves to an ``envFrom`` source, which with
+      an unprefixed source includes image env such as ``PATH``) becomes
+      ``_OPAQUE`` where its value could be or create an option of the
+      worker: unquoted, which the shell splits into words; anywhere in an
+      argument of ``eval`` or of a shell given ``-c`` (also behind a
+      launcher), which parse it again; or quoted as a whole argument of the
+      command that runs the worker (``-m dynamo.<x>``) or of one that turns
+      it into code or env (source, env, export, a shell, named by path or
+      behind exec, nohup, command or builtin), unless it follows one of
+      ``_WORKER_VALUE_OPTIONS``. A redirection target other than a
+      here-string names a file and never counts. An assignment neither
+      splits nor passes it on, but leaves its variable dangerous, and a
+      reference to that variable names the env it was assigned from;
     - other unreadable env becomes ``_INERT``;
-    - script variables, image env and special parameters stay as written;
+    - script variables, special parameters and image env that no
+      ``envFrom`` source may define stay as written;
     - a default or alternate word is scanned in their place wherever the
       shell may use it.
 
@@ -1480,11 +1617,12 @@ def _shell_expand(script: str, env: _Env) -> str:
     it leaves literal env and explicit dangerous env of its name, and a
     dangerous earlier assignment, in place. Command substitution, backticks
     and arithmetic are neither evaluated nor rejected, and neither are
-    scripts the worker sources or runs, or literal text that ``eval`` or a
-    nested shell parses again; a script variable counts as dangerous only
-    when the script assigns it from dangerous env directly (not through an
-    array, positional parameters, a function argument or a command's
-    output).
+    scripts the worker sources or runs, literal text that ``eval`` or a
+    nested shell parses again, text that a shell or ``xargs`` reads from a
+    heredoc, a here-string or a pipe, or a script ``su -c`` runs; a script
+    variable counts as dangerous only when the script assigns it from
+    dangerous env directly (not through an array, positional parameters, a
+    function argument or a command's output).
     """
 
     return _ShellScan(script, env).run()
@@ -1510,9 +1648,14 @@ class _ShellScan:
         self.command: Optional[str] = None
         self.command_dangerous = False
         self.redirect = False
+        self.here_string = False
         self.heredocs: list[tuple[str, bool]] = []
         # Script variables, and whether each was assigned dangerous env.
         self.variables: dict[str, bool] = {}
+        # The first dangerous reference in the current word, and the one
+        # each dangerous script variable was assigned from.
+        self.source: Optional[str] = None
+        self.sources: dict[str, str] = {}
 
     def run(self) -> str:
         while self.index < len(self.script):
@@ -1521,8 +1664,13 @@ class _ShellScan:
             char = script[self.index]
             if char == "\x00":
                 end = script.find("\x00", self.index + 1)
-                self.dangerous |= script.startswith(_OPAQUE, self.index)
-                self.emit(len(script) if end == -1 else end + 1, "")
+                end = len(script) if end == -1 else end + 1
+                if script.startswith(_OPAQUE, self.index):
+                    self.dangerous = True
+                    self.source = self.source or _opaque_reference(
+                        script[self.index : end]
+                    )
+                self.emit(end, "")
             elif not self.quoted and char in _SHELL_BLANKS:
                 self.end_word()
                 self.copy(self.index + 1)
@@ -1572,7 +1720,7 @@ class _ShellScan:
         word = self.word
         self.command_dangerous |= self.dangerous
         if self.redirect:
-            self.redirect = False
+            self.redirect = self.here_string = False
         else:
             match = _SHELL_ASSIGNMENT.match(word)
             if match and (self.assignment or self.command in _SHELL_DECLARATIONS):
@@ -1595,12 +1743,13 @@ class _ShellScan:
             False,
             False,
         )
+        self.source = None
 
     def end_command(self) -> None:
         if self.command == "for" and len(self.words) > 1 and self.command_dangerous:
             self.variables[self.words[1]] = True
         self.words, self.command = [], None
-        self.command_dangerous = self.redirect = False
+        self.command_dangerous = self.redirect = self.here_string = False
 
     def assign(self, name: str, dangerous: bool) -> None:
         # The scan does not follow control flow, so the assignment may not
@@ -1612,6 +1761,8 @@ class _ShellScan:
             or self.variables.get(name, False)
             or (name in env.opaque and name not in env.inert)
         )
+        if dangerous and self.source is not None:
+            self.sources.setdefault(name, self.source)
 
     def operator(self) -> None:
         script, index = self.script, self.index
@@ -1623,10 +1774,12 @@ class _ShellScan:
             self.copy(end)
             return
         if script[index] in "<>" or script.startswith("&>", index):
-            # A redirection, whose target is no argument.
+            # A redirection, whose target is never an argument of the
+            # command, unless a here-string feeds it the target's text.
             end = index + 1
             while end < len(script) and script[end] in "<>&|":
                 end += 1
+            self.here_string = script.startswith("<<<", index)
             self.copy(end)
             self.redirect = True
             return
@@ -1716,8 +1869,14 @@ class _ShellScan:
         else:
             dangerous = kind == "dangerous"
             self.dangerous |= dangerous
+            # A marker holds no whitespace: _worker_argv splits the script.
+            shown = f"${name}"
+            if self.variables.get(name) and name in self.sources:
+                shown += f"(={self.sources[name]})"
+            if dangerous:
+                self.source = self.source or shown
             marker = _OPAQUE if dangerous and self.option_position() else _INERT
-            self.emit(end, "", f"{marker}${name}\x00")
+            self.emit(end, "", f"{marker}{shown}\x00")
 
     def kind(self, name: str) -> str:
         env = self.env
@@ -1758,6 +1917,9 @@ class _ShellScan:
 
         if self.in_word and self.assignment:
             return False
+        if self.redirect and not self.here_string:
+            # A redirection target names a file or descriptor.
+            return False
         if not self.quoted or self.reparses():
             return True
         lead = self.word if self.in_word else ""
@@ -1769,10 +1931,8 @@ class _ShellScan:
         if self.command is None:
             # The command's name: one word, a program to run.
             return False
-        if (
-            self.command in _SHELL_REPARSING
-            or posixpath.basename(self.command) in _SHELLS
-        ):
+        launched = self.launched()
+        if launched in _SHELL_REPARSING or launched in _SHELLS:
             return True
         words = self.words
         for word, following in zip(words, [*words[1:], ""]):
@@ -1783,15 +1943,26 @@ class _ShellScan:
                 return True
         return False
 
+    def launched(self) -> str:
+        """The current command's name by basename, past ``_SHELL_LAUNCHERS``."""
+
+        if self.command is None:
+            return ""
+        for word in self.words[self.words.index(self.command) :]:
+            name = posixpath.basename(word)
+            if not word.startswith("-") and name not in _SHELL_LAUNCHERS:
+                return name
+        return ""
+
     def reparses(self) -> bool:
         """Whether the current command parses its arguments again as a script.
 
-        ``eval`` does, and so does a shell given ``-c``, also behind a
-        launcher (``exec``, ``nohup``, ``env``), whose positional parameters
-        its script may expand unquoted.
+        ``eval`` does, also behind ``_SHELL_LAUNCHERS``, and so does a shell
+        given ``-c``, also behind a launcher (``exec``, ``nohup``, ``env``),
+        whose positional parameters its script may expand unquoted.
         """
 
-        return self.command == "eval" or _shell_script_index(self.words) is not None
+        return self.launched() == "eval" or _shell_script_index(self.words) is not None
 
 
 def _backtick_end(script: str, index: int) -> int:
@@ -2181,6 +2352,18 @@ def _model_flags(
     return found
 
 
+def _component_model_flags(
+    dgd: Mapping[str, Any], component: Mapping[str, Any]
+) -> list[tuple[str, Optional[str]]]:
+    """``_model_flags`` of every pod template the component runs (``_role_specs``)."""
+
+    return [
+        flag
+        for _, spec in _role_specs(component)
+        for flag in _model_flags(spec, _component_env(dgd, spec))
+    ]
+
+
 def _flag_model(flags: Sequence[tuple[str, Optional[str]]]) -> Optional[str]:
     """The operator's served model: the first flag of ``_MODEL_FLAGS`` given."""
 
@@ -2206,7 +2389,7 @@ def _worker_model_names(
         )
         if served:
             names.add(str(served))
-        for _, value in _model_flags(component, _component_env(dgd, component)):
+        for _, value in _component_model_flags(dgd, component):
             if value:
                 names.update(part for part in re.split(r"[\s,]+", value) if part)
     return names

@@ -587,6 +587,14 @@ OPAQUE_PORT = {"valueFrom": {"configMapKeyRef": {"name": "c", "key": "port"}}}
             "$(HTTP_PORT)",
         ),
         (*KV_ARGS, "--dyn-chat-processor", "vllm", "--tool-call-parser=$(HTTP_PORT)"),
+        # Attached to an option that takes no value, it is the option's value.
+        (
+            *KV_ARGS,
+            "--dyn-chat-processor",
+            "vllm",
+            "--enable-auto-tool-choice",
+            "--some-vllm-opt=$(HTTP_PORT)",
+        ),
     ],
 )
 def test_opaque_reference_in_a_typed_non_router_arg_is_fine(args):
@@ -620,6 +628,31 @@ def test_opaque_reference_in_a_typed_non_router_arg_is_fine(args):
         ((*KV_ARGS, "--$(HTTP_PORT)=1"), "could set a router flag"),
         (
             (*KV_ARGS, "--tool-call-parser", "--$(HTTP_PORT)", "$(HTTP_PORT)"),
+            "could set a router flag",
+        ),
+        # The chat processor's flag takes no value, so the frontend would
+        # parse what follows it as its own flag.
+        (
+            (
+                *KV_ARGS,
+                "--dyn-chat-processor",
+                "vllm",
+                "--enable-auto-tool-choice",
+                "$(HTTP_PORT)",
+            ),
+            "could set a router flag",
+        ),
+        (
+            (
+                *KV_ARGS,
+                "--dyn-chat-processor",
+                "vllm",
+                "--tool-call-parser",
+                "hermes",
+                "--enable-auto-tool-choice",
+                "--trust-remote-code",
+                "$(HTTP_PORT)",
+            ),
             "could set a router flag",
         ),
         # Inert env is still unreadable as a router value or an option name.
@@ -1221,17 +1254,30 @@ def minimax_prefill_worker(*router_args: str) -> dict[str, Any]:
         (
             ("--$(A_MODE)=kv",),
             [{"name": "A_MODE", **SECRET}],
-            "has an argument that references $(A_MODE)",
+            "has an option whose name references $(A_MODE)",
         ),
         (
             ("--router-$(A_MODE)", "kv"),
             [{"name": "A_MODE", **SECRET}],
-            "has an argument that references $(A_MODE)",
+            "has an option whose name references $(A_MODE)",
+        ),
+        # Inert env could still spell an option's name.
+        (
+            ("--x-$(MY_POD)=1",),
+            [field_ref_env("MY_POD", "metadata.name")],
+            "has an option whose name references $(MY_POD)",
         ),
         (
             ("--speculative-config", "$(A_SECRET)", "$(A_SECRET)"),
             [{"name": "A_SECRET", **SECRET}],
             "has an argument that references $(A_SECRET)",
+        ),
+        # Only the first value of --served-model-name (nargs "+") is exempt:
+        # a later one starting with "-" is parsed as a flag.
+        (
+            ("--served-model-name", "x", "$(ROUTER_ARG)"),
+            router_arg_env(),
+            "has an argument that references $(ROUTER_ARG)",
         ),
         # After an engine flag that takes no value or optional values, the
         # worker would read "--router-mode=kv" as a flag.
@@ -1273,6 +1319,9 @@ def test_p4_rejects_a_worker_that_advertises_a_router_config(args, env, match):
         (("--router-temperature", "$(A_SECRET)"), [{"name": "A_SECRET", **SECRET}]),
         (("--speculative-config", "$(A_SECRET)"), [{"name": "A_SECRET", **SECRET}]),
         (("--speculative-config", "$(ROUTER_ARG)"), router_arg_env()),
+        (("--model", "$(ROUTER_ARG)"), router_arg_env()),
+        (("--model-path", "$(ROUTER_ARG)"), router_arg_env()),
+        (("--served-model-name", "$(ROUTER_ARG)"), router_arg_env()),
         (("--some-opt=$(ROUTER_ARG)",), router_arg_env()),
         # Inert env never stands for an option.
         (("$(POD_NAME)",), None),
@@ -1285,66 +1334,140 @@ def test_p4_accepts_workers_that_advertise_nothing(args, env):
 
 
 @pytest.mark.parametrize(
-    ("command", "args", "env_from", "match"),
+    ("args", "env_from", "match"),
     [
         # A Secret or ConfigMap key may define what env leaves undefined.
         (
-            ("python3",),
             ("$(ROUTER_ARG)",),
             ENV_FROM,
             "references $(ROUTER_ARG), which the planner cannot read (the "
             "container's env leaves it to an envFrom source)",
         ),
-        (("/bin/sh", "-c"), ("$(ROUTER_ARG)",), ENV_FROM, "references $(ROUTER_ARG)"),
-        (None, ("$(ROUTER_ARG)",), ENV_FROM, "references $(ROUTER_ARG)"),
-        # Image env too, which a shell splits unless quoted; a script's own
-        # assignment overrides what such a source may define.
         (
-            ("/bin/sh", "-c"),
-            (f"export LD_LIBRARY_PATH=/opt/lib:$LD_LIBRARY_PATH; exec {WORKER}",),
-            ENV_FROM,
-            "references $LD_LIBRARY_PATH where it could become an option, and "
-            "the planner cannot read it (the container's env leaves it to an "
-            "envFrom source)",
-        ),
-        (
-            ("/bin/sh", "-c"),
-            (f'export LD_LIBRARY_PATH="/opt/lib:$LD_LIBRARY_PATH"; exec {WORKER}',),
-            ENV_FROM,
-            None,
-        ),
-        (("/bin/sh", "-c"), (f"ARGS=; exec {WORKER} $ARGS",), ENV_FROM, None),
-        (
-            ("python3",),
             ("$(APP_ROUTER_ARG)",),
             [{**ENV_FROM[0], "prefix": "APP_"}],
             "references $(APP_ROUTER_ARG)",
         ),
-        # A prefix that cannot produce the name, and the worker's own env.
-        (("python3",), ("$(ROUTER_ARG)",), [{**ENV_FROM[0], "prefix": "APP_"}], None),
-        (("python3",), ("--model", "$(MODEL_ID)"), ENV_FROM, None),
+        # A prefix that cannot produce the name, the worker's own env, and
+        # the value of an option known to take one.
+        (("$(ROUTER_ARG)",), [{**ENV_FROM[0], "prefix": "APP_"}], None),
+        (("--model", "$(MODEL_ID)"), ENV_FROM, None),
+        (("--model", "$(MODEL_NAME)"), ENV_FROM, None),
+        # The operator sets these on the container, whose env wins over
+        # envFrom, and none of them holds an option.
+        (("--draft-endpoint", "$(DYN_NAMESPACE)/backend/generate"), ENV_FROM, None),
+        (("--x", "$(DYN_COMPONENT)", "$(DYN_SYSTEM_PORT)"), ENV_FROM, None),
+        # The operator sets this one only for some discovery configurations.
+        (("$(NATS_SERVER)",), ENV_FROM, "references $(NATS_SERVER)"),
     ],
 )
-def test_p4_worker_reference_an_env_from_source_may_define(
-    command, args, env_from, match
-):
-    component = worker()
-    main = component["podTemplate"]["spec"]["containers"][0]
-    main.update(
-        args=["-m", "dynamo.vllm", *args] if command == ("python3",) else list(args),
-        env=[{"name": "MODEL_ID", "value": MODEL}],
-        envFrom=env_from,
+def test_p4_worker_reference_an_env_from_source_may_define(args, env_from, match):
+    component = router_worker(
+        *args, env=[{"name": "MODEL_ID", "value": MODEL}], env_from=env_from
     )
-    if command is None:
-        del main["command"]
-    else:
-        main["command"] = list(command)
     report = evaluate(dgd(frontend(), component, planner()))
     rejected = reasons_matching(report, "P4: worker component agg ")
     if match is None:
         assert report.p4_ok, report.reasons
     else:
         assert any(match in reason for reason in rejected), report.reasons
+
+
+@pytest.mark.parametrize(
+    ("command", "script", "match"),
+    [
+        (("/bin/sh", "-c"), "$(ROUTER_ARG)", "references $(ROUTER_ARG)"),
+        (None, "$(ROUTER_ARG)", "references $(ROUTER_ARG)"),
+        # Image env too, which a shell splits unless quoted; a script's own
+        # assignment overrides what such a source may define.
+        (
+            ("/bin/sh", "-c"),
+            f"export LD_LIBRARY_PATH=/opt/lib:$LD_LIBRARY_PATH; exec {WORKER}",
+            "references $LD_LIBRARY_PATH where it could become an option, and "
+            "the planner cannot read it (the container's env leaves it to an "
+            "envFrom source)",
+        ),
+        (
+            ("/bin/sh", "-c"),
+            f'export LD_LIBRARY_PATH="/opt/lib:$LD_LIBRARY_PATH"; exec {WORKER}',
+            None,
+        ),
+        (("/bin/sh", "-c"), f"ARGS=; exec {WORKER} $ARGS", None),
+        # A redirection target is a file, never an argument.
+        (("/bin/sh", "-c"), f'exec {WORKER} > "$HOME/worker.log" 2>&1', None),
+        # Operator env the container's env defines.
+        (None, f"echo $DYN_NAMESPACE $DYN_COMPONENT; exec {WORKER}", None),
+        (None, f"exec {WORKER} --endpoint dyn://$DYN_NAMESPACE.backend.generate", None),
+        (None, f"echo $DYN_SYSTEM_PORT; exec {WORKER}", None),
+    ],
+)
+def test_p4_worker_script_reference_an_env_from_source_may_define(
+    command, script, match
+):
+    component = shell_worker(
+        script,
+        command=command,
+        env=[{"name": "MODEL_ID", "value": MODEL}],
+        env_from=ENV_FROM,
+    )
+    report = evaluate(dgd(frontend(), component, planner()))
+    rejected = reasons_matching(report, "P4: worker component agg ")
+    if match is None:
+        assert report.p4_ok, report.reasons
+    else:
+        assert any(match in reason for reason in rejected), report.reasons
+
+
+@pytest.mark.parametrize(
+    "env_from", [ENV_FROM, [{**ENV_FROM[0], "prefix": "APP_"}]], ids=["bare", "APP_"]
+)
+def test_p4_names_the_env_a_dangerous_script_variable_holds(env_from):
+    component = shell_worker(
+        f"X=$ROUTER_ARG; exec {WORKER} $X", env=router_arg_env(), env_from=env_from
+    )
+    report = evaluate(dgd(frontend(), component, planner()))
+    (reason,) = reasons_matching(report, "P4: worker component agg ")
+    assert "references $X (assigned from $ROUTER_ARG) where" in reason
+    assert "envFrom source" not in reason
+
+
+@pytest.mark.parametrize(
+    ("env", "match"),
+    [
+        (None, None),
+        # User env of an operator name overrides the operator's.
+        (
+            [
+                {
+                    "name": "DYN_NAMESPACE",
+                    "valueFrom": {"configMapKeyRef": {"name": "c", "key": "ns"}},
+                }
+            ],
+            "references $(DYN_NAMESPACE)",
+        ),
+    ],
+)
+def test_p4_user_env_overrides_operator_env(env, match):
+    component = router_worker(
+        "--draft-endpoint", "$(DYN_NAMESPACE)/backend/generate", env=env
+    )
+    report = evaluate(dgd(frontend(), component, planner()))
+    rejected = reasons_matching(report, "P4: worker component agg ")
+    if match is None:
+        assert report.p4_ok, report.reasons
+    else:
+        assert any(match in reason for reason in rejected), report.reasons
+
+
+def test_p4_untyped_component_gets_no_worker_operator_env():
+    # ComponentDefaultsFactory gives an untyped component the common base
+    # container only, so an envFrom source may define DYN_SYSTEM_PORT.
+    component = router_worker("$(DYN_SYSTEM_PORT)", env_from=ENV_FROM, type_="")
+    report = evaluate(dgd(frontend(), component, planner()))
+    assert any(
+        "references $(DYN_SYSTEM_PORT)" in reason
+        for reason in reasons_matching(report, "P4: worker component agg ")
+    ), report.reasons
 
 
 def test_p4_checks_an_untyped_worker():
@@ -1506,7 +1629,7 @@ def test_p4_shell_wrapped_worker(command, script, match):
         ),
         (
             f"X=$ROUTER_ARG; exec {WORKER} $X",
-            "has a shell script that references $X",
+            "has a shell script that references $X (assigned from $ROUTER_ARG)",
         ),
         # An assignment may not run, so it clears neither env nor an
         # earlier dangerous value.
@@ -1554,6 +1677,48 @@ def test_p4_shell_wrapped_worker(command, script, match):
             f"exec bash -c 'exec {WORKER} $@' bash \"$ROUTER_ARG\"",
             "has a shell script that references $ROUTER_ARG",
         ),
+        # source, env, export and a shell turn one quoted word into code or
+        # env, also by path and behind exec, nohup, command or builtin.
+        (
+            f'env "$ROUTER_ARG" {WORKER}',
+            "has a shell script that references $ROUTER_ARG",
+        ),
+        (
+            f'exec env "$ROUTER_ARG" {WORKER}',
+            "has a shell script that references $ROUTER_ARG",
+        ),
+        (
+            f'exec env A=1 "$ROUTER_ARG" {WORKER}',
+            "has a shell script that references $ROUTER_ARG",
+        ),
+        (
+            f'/usr/bin/env "$ROUTER_ARG" {WORKER}',
+            "has a shell script that references $ROUTER_ARG",
+        ),
+        (
+            f'nohup env "$ROUTER_ARG" {WORKER}',
+            "has a shell script that references $ROUTER_ARG",
+        ),
+        (
+            f'command export "$ROUTER_ARG"; exec {WORKER}',
+            "has a shell script that references $ROUTER_ARG",
+        ),
+        (
+            'command eval "$ROUTER_ARG"',
+            "has a shell script that references $ROUTER_ARG",
+        ),
+        (f'cp -r /cfg/. "$ROUTER_ARG"; exec {WORKER}', None),
+        # A redirection target names a file, unless a here-string feeds
+        # its text to the command.
+        (f'exec {WORKER} > "$CFG" 2>&1', None),
+        (f"exec {WORKER} 2>$CFG", None),
+        (
+            f'exec {WORKER} > "$CFG" "$ROUTER_ARG"',
+            "has a shell script that references $ROUTER_ARG",
+        ),
+        ("exec bash <<< $ROUTER_ARG", "has a shell script that references $ROUTER_ARG"),
+        # The value of an option known to take one.
+        ('exec python3 -m dynamo.vllm --model "$ROUTER_ARG"', None),
         (f'{WORKER} --speculative-config="${{SPECULATIVE_CONFIG}}"', None),
         (f'{WORKER} --speculative-config "$SPECULATIVE_CONFIG"', None),
         (f'{WORKER} "--some-opt=$ROUTER_ARG"', None),
@@ -1638,32 +1803,126 @@ def test_p4_worker_behind_a_launcher(command, args, match):
         assert any(match in reason for reason in rejected), report.reasons
 
 
-@pytest.mark.parametrize("native_sidecar", [True, False])
-def test_p4_native_sidecar_main_keeps_its_args_as_exec_form(native_sidecar):
-    # The main keeps its image entrypoint instead of the operator's
-    # /bin/sh -c, so an option's attached value is not a shell script.
+MODEL_FROM_CONFIG_MAP = [
+    {"name": "MODEL", "valueFrom": {"configMapKeyRef": {"name": "c", "key": "model"}}}
+]
+RUNTIME_SIDECAR = {"name": "runtime", "restartPolicy": "Always"}
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        (None, ["--model-path", "$(MODEL)", "--tp", "2"]),
+        (["python3", "-m", "tensorrt_llm.commands.serve"], ["$(MODEL)"]),
+        (None, ["--model-path=$(MODEL)", "--router-mode", "kv"]),
+    ],
+)
+@pytest.mark.parametrize("leader_only", [False, True], ids=["component", "leader"])
+def test_p4_skips_native_sidecar_mains(command, args, leader_only):
+    # The main runs the engine with its image entrypoint, and the runtime
+    # sidecar registers no router configuration.
     component = worker()
     spec = component["podTemplate"]["spec"]
     main = spec["containers"][0]
-    del main["command"]
-    main.update(
-        args=["--model-path=$(MODEL)", "--tp", "2"],
-        env=[
+    main.update(args=args, env=MODEL_FROM_CONFIG_MAP)
+    if command is None:
+        del main["command"]
+    else:
+        main["command"] = command
+    if leader_only:
+        component["multinode"] = {"nodeCount": 2}
+        component["roles"] = [
             {
-                "name": "MODEL",
-                "valueFrom": {"configMapKeyRef": {"name": "c", "key": "model"}},
+                "name": "leader",
+                "podTemplate": {"spec": {"initContainers": [RUNTIME_SIDECAR]}},
             }
-        ],
-    )
-    if native_sidecar:
-        spec["initContainers"] = [{"name": "runtime", "restartPolicy": "Always"}]
+        ]
+    else:
+        spec["initContainers"] = [RUNTIME_SIDECAR]
     report = evaluate(dgd(frontend(), component, planner()))
-    if native_sidecar:
+    assert report.p4_ok, report.reasons
+
+
+def test_p4_reads_an_omitted_command_without_a_native_sidecar_as_a_script():
+    component = worker()
+    main = component["podTemplate"]["spec"]["containers"][0]
+    del main["command"]
+    main.update(args=["--model-path=$(MODEL)", "--tp", "2"], env=MODEL_FROM_CONFIG_MAP)
+    report = evaluate(dgd(frontend(), component, planner()))
+    (reason,) = reasons_matching(report, "P4: worker component agg ")
+    # Quoting or attaching never helps a $(VAR): Kubernetes substitutes it
+    # before the shell parses the script.
+    assert "has a shell script that references $(MODEL), which Kubernetes" in reason
+    assert '(--option="$MODEL")' in reason
+    assert "quote the reference" not in reason
+
+
+def role_worker(
+    leader: dict[str, Any], worker_: dict[str, Any], **extra: Any
+) -> dict[str, Any]:
+    """A multinode worker whose launches are only in its role pod templates."""
+
+    roles = []
+    for name, main in (("leader", leader), ("worker", worker_)):
+        container = {"name": "main", "command": ["python3", "-m", "dynamo.vllm"]}
+        container.update(main)
+        roles.append(
+            {"name": name, "podTemplate": {"spec": {"containers": [container]}}}
+        )
+    return {
+        "name": "agg",
+        "type": "worker",
+        "replicas": 1,
+        "multinode": {"nodeCount": 2},
+        "roles": roles,
+        **extra,
+    }
+
+
+ROLE_ARGS = ["--model", MODEL, "--tensor-parallel-size", "16"]
+
+
+@pytest.mark.parametrize(
+    ("leader", "worker_", "match"),
+    [
+        (
+            {"args": [*ROLE_ARGS, "--router-mode", "kv"]},
+            {"args": ROLE_ARGS},
+            "agg (role leader) advertises its own router configuration",
+        ),
+        (
+            {"args": ROLE_ARGS},
+            {"args": ROLE_ARGS, "env": [{"name": "DYN_ROUTER_MODE", "value": "kv"}]},
+            "agg (role worker) advertises its own router configuration",
+        ),
+        (
+            {"args": [*ROLE_ARGS, "$(ROUTER_ARG)"], "env": router_arg_env()},
+            {"args": ROLE_ARGS},
+            "agg (role leader) has an argument that references $(ROUTER_ARG)",
+        ),
+        ({"args": ROLE_ARGS}, {"args": ROLE_ARGS}, None),
+        # The operator sets the rank, so envFrom cannot.
+        (
+            {"args": ROLE_ARGS, "envFrom": ENV_FROM},
+            {
+                "args": [*ROLE_ARGS, "--node-rank", "$(DYNAMO_RANK)"],
+                "envFrom": ENV_FROM,
+            },
+            None,
+        ),
+    ],
+)
+def test_p4_checks_each_role_pod_template(leader, worker_, match):
+    report = evaluate(dgd(frontend(), role_worker(leader, worker_), planner()))
+    if match is None:
         assert report.p4_ok, report.reasons
+        assert fc.served_model_names(dgd(role_worker(leader, worker_)))[0] == {
+            "agg": MODEL
+        }
     else:
         assert any(
-            "has a shell script that references $(MODEL)" in reason
-            for reason in reasons_matching(report, "P4: worker component agg ")
+            match in reason
+            for reason in reasons_matching(report, "P4: worker component ")
         ), report.reasons
 
 
