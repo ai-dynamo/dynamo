@@ -546,10 +546,11 @@ async fn forwards_the_request_as_sent() {
     assert!(!seen[0].contains_key("transfer-encoding"));
 }
 
-/// Records the session each request carried, and routes round robin.
+/// Records the session each request carried and how many prefix keys, and
+/// routes round robin.
 #[derive(Default)]
 struct SessionRecorder {
-    sessions: Mutex<Vec<Option<String>>>,
+    sessions: Mutex<Vec<(Option<String>, usize)>>,
     inner: RoundRobinSelector,
 }
 
@@ -560,8 +561,15 @@ impl PoolSelector for SessionRecorder {
         candidates: &[&'a Pool],
     ) -> Option<PoolTarget<'a>> {
         let session = request.session.map(str::to_owned);
-        self.sessions.lock().unwrap().push(session);
+        self.sessions
+            .lock()
+            .unwrap()
+            .push((session, request.prefix.len()));
         self.inner.select(request, candidates)
+    }
+
+    fn uses_sessions(&self) -> bool {
+        true
     }
 }
 
@@ -573,17 +581,29 @@ async fn the_selector_sees_the_session() {
     let in_flight = Arc::new(InFlightTracker::new());
     let global = global_frontend_with(vec![blue], recorder.clone(), in_flight).await;
 
-    for session in [Some("session-123"), None] {
+    for header in [
+        Some(("x-dynamo-session-id", "session-123")),
+        Some(("x-claude-code-session-id", "claude-456")),
+        None,
+    ] {
         let mut request = client()
             .post(global.server.url.join("v1/chat/completions").unwrap())
             .json(&chat(MODEL, "hi", false));
-        if let Some(session) = session {
-            request = request.header("x-dynamo-session-id", session);
+        if let Some((name, session)) = header {
+            request = request.header(name, session);
         }
         ok_json(request.send().await.unwrap()).await;
     }
+    // Without a session, the selector gets the input's prefix keys instead.
     let sessions = recorder.sessions.lock().unwrap();
-    assert_eq!(*sessions, [Some("session-123".to_owned()), None]);
+    assert_eq!(
+        *sessions,
+        [
+            (Some("session-123".to_owned()), 0),
+            (Some("claude-456".to_owned()), 0),
+            (None, 1),
+        ]
+    );
 }
 
 #[tokio::test]
