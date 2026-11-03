@@ -10,17 +10,17 @@
 //!
 //! Deliberately elsewhere: KV event types, their engine codec, and the residency vocabulary
 //! (`dynamo-kv-events`), KV transfer hints and the worker transfer keys (`dynamo-kv-hints`),
-//! the block hash identities and the hash functions (`dynamo-kv-hashing`), multimodal
-//! identity (`dynamo-multimodal`), the scheduling request, eligibility, and host hooks
-//! (`dynamo-scheduler`), candidate rows (`dynamo-worker-selection`), queue rejection
-//! (`dynamo-admission`), the fullness rule and the scheduler-load replica wire
-//! (`dynamo-slot-tracker`), and the active-load message workers publish on the event
-//! plane (`dynamo-llm`, `kv_router::ActiveLoad`: its publisher and every reader live there).
+//! the cache-owner hint-source metadata (`dynamo-kv-indexer`), the block hash identities and
+//! the hash functions (`dynamo-kv-hashing`), multimodal identity (`dynamo-multimodal`), the
+//! scheduling request, eligibility, and host hooks (`dynamo-scheduler`), candidate rows
+//! (`dynamo-worker-selection`), queue rejection (`dynamo-admission`), the fullness rule and
+//! the scheduler-load replica wire (`dynamo-slot-tracker`), and the active-load message
+//! workers publish on the event plane (`dynamo-llm`, `kv_router::ActiveLoad`: its publisher
+//! and every reader live there).
 
 pub mod attempt;
 pub mod columns;
 pub mod identity;
-pub mod metadata;
 pub mod session;
 pub mod worker;
 pub mod worker_type;

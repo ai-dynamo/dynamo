@@ -4,11 +4,13 @@
 //! Residency owners projected onto workers: the compact owner key, the exact-owner
 //! projection, and the per-lookup routing snapshot the lower tiers pin.
 
+use std::collections::HashMap;
+
 use rustc_hash::FxHashMap;
+use serde::{Deserialize, Serialize};
 
 use dynamo_kv_events::residency::ResidencyOwner;
 use dynamo_router_protocol::identity::CacheOwnerId;
-use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 
 use crate::kv_hints::CacheOwnerKvTransferKeys;
@@ -126,6 +128,20 @@ impl ResidencyProjection {
     }
 }
 
+/// Persistent source metadata used to resolve a cache owner into a router hint.
+///
+/// This is advisory discovery metadata. Endpoint health and ownership takeover
+/// are guaranteed by the persistent cache implementation, not probed by Dynamo.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouterHintSourceMetadata {
+    pub source_control_endpoint: String,
+    pub worker_type: String,
+    /// Topology labels of the cache, like a worker's `topology_domains`. Hint
+    /// targets with a `kv_transfer_domain` only fetch from the same island.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub topology_domains: HashMap<String, String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedRouterHintSource {
     pub metadata: RouterHintSourceMetadata,
@@ -201,4 +217,21 @@ pub enum ResidencyProjectionError {
         existing: WorkerWithDpRank,
         proposed: WorkerWithDpRank,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn router_hint_source_topology_is_optional_on_the_wire() {
+        let without_topology = serde_json::json!({
+            "source_control_endpoint": "tcp://owner:23280",
+            "worker_type": "prefill",
+        });
+        let metadata: RouterHintSourceMetadata =
+            serde_json::from_value(without_topology.clone()).unwrap();
+        assert!(metadata.topology_domains.is_empty());
+        assert_eq!(serde_json::to_value(&metadata).unwrap(), without_topology);
+    }
 }

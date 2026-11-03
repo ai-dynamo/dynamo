@@ -210,8 +210,9 @@ mod summary_tests {
     use dynamo_kv_events::residency::ResidencyOwner;
     use dynamo_kv_hashing::ExternalSequenceBlockHash;
     use dynamo_kv_hints::KvHintTransferWorkerMetadata;
-    use dynamo_kv_indexer::residency::{ResidencyProjection, ResidencyRoutingSnapshot};
-    use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
+    use dynamo_kv_indexer::residency::{
+        ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
+    };
 
     struct Worker;
 

@@ -19,10 +19,9 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use dynamo_kv_hashing::ExternalSequenceBlockHash;
-use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 
-use crate::residency::{ResidencyOwnerKey, ResidencyRoutingSnapshot};
+use crate::residency::{ResidencyOwnerKey, ResidencyRoutingSnapshot, RouterHintSourceMetadata};
 
 /// Who holds a KV prefix a target could fetch: a worker rank, or a cache owner known by its
 /// compact residency key. Produced by the indexer, consumed by worker selection.

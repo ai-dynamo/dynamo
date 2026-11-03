@@ -36,7 +36,9 @@ pub use crate::pruning::PruneConfig;
 pub use crate::radix_tree::RadixTree;
 pub use crate::recording::ApproximateRequestLease;
 pub use crate::registry::IndexRegistry;
-pub use crate::residency::{ResidencyOwnerKeyExt, ResidencyProjection, ResidencyRoutingSnapshot};
+pub use crate::residency::{
+    ResidencyOwnerKeyExt, ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
+};
 pub use crate::session_prefix_index::{
     SessionPrefixIndexer, SessionResidencyOwner, SharedCacheBackend,
 };

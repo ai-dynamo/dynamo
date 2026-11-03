@@ -3377,8 +3377,9 @@ fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
         RoutingScopeId, StableDpSlotId,
     };
     use dynamo_kv_events::residency::ResidencyOwner;
-    use dynamo_kv_indexer::residency::{ResidencyProjection, ResidencyRoutingSnapshot};
-    use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
+    use dynamo_kv_indexer::residency::{
+        ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
+    };
     let mut stale = hint_config("prefill", &[(0, "tcp://stale-worker:23280")]);
     stale.kv_event_source_mode = Some("state_agent_v2".to_string());
     let configs = HashMap::from([(7, hint_config("prefill", &[])), (8, stale)]);
@@ -3532,8 +3533,9 @@ fn cache_owner_island_is_published_or_taken_from_its_attached_worker() {
         RoutingScopeId, StableDpSlotId,
     };
     use dynamo_kv_events::residency::ResidencyOwner;
-    use dynamo_kv_indexer::residency::{ResidencyProjection, ResidencyRoutingSnapshot};
-    use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
+    use dynamo_kv_indexer::residency::{
+        ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
+    };
     let owner = |slot: u8| {
         CacheOwnerId::new(
             PoolId::new(

@@ -11,10 +11,9 @@ use std::collections::HashSet;
 
 use dynamo_kv_indexer::host::{
     KvStateAgentIdentity, KvStateAgentStatus, KvStateProtocolVersion, KvStateRecoveryReceipt,
-    ResidencyProjection, ResidencyProjectionError,
+    ResidencyProjection, ResidencyProjectionError, RouterHintSourceMetadata,
 };
 use dynamo_router_protocol::identity::{CacheOwnerId, IndexerDomainId};
-use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::component::Instance;
 use serde::{Deserialize, Serialize};

@@ -38,9 +38,9 @@ use dynamo_kv_events::zmq_wire::{KvEventOwnership, ZmqEventFilterReason, ZmqEven
 use dynamo_kv_indexer::host::{
     CanonicalIdentityMaterial, ExplicitIdentityMap, KvIndexerMetrics, KvStateAgentIdentity,
     KvStateAgentStatus, KvStateAttachmentStatus, KvStateProtocolVersion, LocalKvIndexer,
+    RouterHintSourceMetadata,
 };
 use dynamo_router_protocol::identity::{CacheOwnerId, StableDpSlotId};
-use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::{
     component::{Component, Endpoint, StartedEndpoint},

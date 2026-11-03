@@ -811,11 +811,11 @@ fn host_discovery_id(instance_id: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use dynamo_kv_indexer::host::RouterHintSourceMetadata;
     use dynamo_router_protocol::identity::{
         CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
     };
-    use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
     use dynamo_router_protocol::worker::WorkerWithDpRank;
     use dynamo_runtime::component::{Instance, TransportType};
     use dynamo_runtime::discovery::DiscoveryInstanceId;

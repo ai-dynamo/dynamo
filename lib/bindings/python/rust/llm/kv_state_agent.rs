@@ -106,7 +106,7 @@ struct AttachmentDescriptorInput {
     #[serde(default)]
     video_token_id: Option<u32>,
     #[serde(default)]
-    router_hint_source: Option<dynamo_router_protocol::metadata::RouterHintSourceMetadata>,
+    router_hint_source: Option<dynamo_kv_indexer::host::RouterHintSourceMetadata>,
 }
 
 #[pyclass]

@@ -134,6 +134,7 @@ pub use metrics::*;
 #[cfg(feature = "bench")]
 pub use observation::*;
 pub use radix_tree::RadixTree;
+pub use residency::RouterHintSourceMetadata;
 pub use session_prefix_index::{SessionPrefixIndexer, SessionResidencyOwner, SharedCacheBackend};
 pub use thread_pool::*;
 pub use traits::*;

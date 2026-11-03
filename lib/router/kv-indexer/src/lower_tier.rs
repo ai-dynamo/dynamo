@@ -1613,13 +1613,13 @@ mod tests {
         ResidencyDomain, ResidencyOwner, ResidencyProjection, ResidencyRoutingSnapshot,
         RouterEvent, StorageTier, WireResidencyDomain, WorkerWithDpRank,
     };
+    use crate::residency::RouterHintSourceMetadata;
     use crate::testing::{remove_event, router_event, stored_blocks_with_sequence_hashes};
     use crate::{KvIndexerInterface, ThreadPoolIndexer};
     use dynamo_router_protocol::identity::{
         CacheOwnerId, CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId,
         RoutingScopeId, StableDpSlotId,
     };
-    use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
 
     fn local_hashes(values: &[u64]) -> Vec<LocalBlockHash> {
         values.iter().copied().map(LocalBlockHash).collect()

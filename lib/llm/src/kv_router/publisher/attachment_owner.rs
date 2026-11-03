@@ -13,9 +13,8 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use dynamo_kv_indexer::host::KvStateProtocolVersion;
+use dynamo_kv_indexer::host::{KvStateProtocolVersion, RouterHintSourceMetadata};
 use dynamo_router_protocol::identity::{CacheOwnerId, IndexerDomainId};
-use dynamo_router_protocol::metadata::RouterHintSourceMetadata;
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_runtime::{
     component::{Endpoint, Instance, build_transport_type},
