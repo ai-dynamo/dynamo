@@ -66,8 +66,8 @@ aisimulate-core = { version = "=0.13.0-dev.202610240000000082" }
 dynamo-runtime = { path = "lib/runtime", version = "1.7.0" }
 dynamo-llm = { path = "lib/llm", version = "1.7.0", default-features = false }
 dynamo-rl = { path = "lib/rl", version = "1.7.0" }
-dynamo-tokenizers = { version = "=3.1.3" }
-dynamo-renderer = { version = "=8.0.3" }
+dynamo-tokenizers = { version = "=4.0.0" }
+dynamo-renderer = { version = "=9.0.2" }
 dynamo-tokens = { path = "lib/tokens", version = "1.7.0" }
 dynamo-truthy = { path = "lib/truthy", version = "1.7.0" }
 dynamo-data-gen = { path = "lib/data-gen", version = "1.7.0" }
@@ -75,8 +75,8 @@ dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.7.0" }
 dynamo-memory = { path = "lib/memory", version = "1.7.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.7.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.7.0" }
-dynamo-protocols = { version = "=8.4.1" }
-dynamo-parsers = { version = "=10.2.2" }
+dynamo-protocols = { version = "=9.1.0" }
+dynamo-parsers = { version = "=10.2.4" }
 
 # Published on crates.io. To see all available versions:
 #   web:          https://crates.io/crates/dynamo-parsers-v2/versions
@@ -225,7 +225,3 @@ lto = "thin"
 inherits = "release"
 debug = true
 strip = false
-
-# Temporary prerequisite: replace with its published release before merging.
-[patch.crates-io]
-dynamo-protocols = { git = "https://github.com/maheshrbapatu/frontend-crates", rev = "893b8efd3b6af33216befb2907d89a8b816a9bda" }

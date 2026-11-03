@@ -63,7 +63,7 @@ request-trace-s3 = ["dynamo-llm/request-trace-s3"]
 aisimulate-core = { version = "=0.13.0-dev.202610240000000082", optional = true, features = ["python"] }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
-dynamo-parsers = { version = "=10.2.2" }
+dynamo-parsers = { version = "=10.2.4" }
 dynamo-backend-common = { path = "../../backend-common" }
 dynamo-sidecar-common = { path = "../../sidecar/common" }
 dynamo-sglang-sidecar = { path = "../../sidecar/sglang" }
@@ -138,7 +138,3 @@ tracing-subscriber = { version = "0.3", features = ["registry"] }
 inherits = "release"
 debug = true
 strip = false
-
-# Independent workspace: keep this protocol patch aligned with the root manifest.
-[patch.crates-io]
-dynamo-protocols = { git = "https://github.com/maheshrbapatu/frontend-crates", rev = "893b8efd3b6af33216befb2907d89a8b816a9bda" }
