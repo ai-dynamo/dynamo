@@ -923,7 +923,7 @@ impl ErrorMessage {
 
     /// Parse first, so a code outside the HTTP status space cannot reach the
     /// response, then let [`BackendStatusAction::triage`] decide. A 5xx keeps
-    /// its own status only when it is 503 or the configured overload code,
+    /// its own status only when it is 503, 504 or the configured overload code,
     /// which is what makes a deliberate load shed distinguishable from an
     /// internal error. The body text is sanitized either way.
     pub fn from_http_error(class: ErrorClass, err: HttpError) -> ErrorResponse {
@@ -1018,21 +1018,20 @@ fn unprocessable_error_message(body: &[u8]) -> (String, bool) {
     }
 }
 
-// Problem: Currently we are using JSON from axum as the request validator. Whenever there is an invalid JSON, it will return a 422.
-// But all the downstream apps that relies on openai based APIs, expects to get 400 for all these cases otherwise they fail badly
-// Solution: Intercept the response from handlers and convert ANY 422 status codes to 400 with the actual error message.
+// Normalize raw extractor rejections to OpenAI's 400 convention, not deliberate backend errors.
 pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> Response {
     let response = next.run(request).await;
 
     if response.status() == StatusCode::UNPROCESSABLE_ENTITY {
-        let (_parts, body) = response.into_parts();
+        let (parts, body) = response.into_parts();
         let body_bytes = axum::body::to_bytes(body, get_body_limit())
             .await
             .unwrap_or_default();
         let (error_message, already_recorded) = unprocessable_error_message(&body_bytes);
-        if !already_recorded {
-            record_local_failure(ErrorClass::InvalidRequest);
+        if already_recorded {
+            return Response::from_parts(parts, Body::from(body_bytes));
         }
+        record_local_failure(ErrorClass::InvalidRequest);
         (
             StatusCode::BAD_REQUEST,
             Json(ErrorMessage {
@@ -2985,7 +2984,13 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
             return Some(BackendErrorInfo {
                 message,
                 status: code,
-                semantic: if overloaded { semantic.cloned() } else { None },
+                semantic: semantic
+                    .filter(|error| {
+                        overloaded
+                            || (code == StatusCode::UNPROCESSABLE_ENTITY
+                                && error.reason().as_str() == "request.unprocessable_entity")
+                    })
+                    .cloned(),
                 sanitized: overloaded.then_some(SanitizedError::Overloaded),
                 metric_error_type,
             });
@@ -6891,6 +6896,81 @@ mod tests {
         assert!(!already_recorded);
     }
 
+    #[tokio::test]
+    #[serial_test::serial(failure_metrics)]
+    async fn json_error_middleware_preserves_semantic_422_and_normalizes_extractors() {
+        use dynamo_runtime::error::{DynamoError, ErrorClass, ErrorReason};
+        use tower::ServiceExt;
+
+        let router = Router::new()
+            .route(
+                "/semantic",
+                axum::routing::get(|| async {
+                    ErrorMessage::from_anyhow(
+                        DynamoError::builder()
+                            .class(ErrorClass::InvalidRequest)
+                            .reason(ErrorReason::unprocessable_entity())
+                            .diagnostic("private token=secret")
+                            .build()
+                            .into(),
+                        "failed",
+                    )
+                }),
+            )
+            .route(
+                "/http",
+                axum::routing::get(|| async {
+                    ErrorMessage::from_backend_http_error(HttpError {
+                        code: 422,
+                        message: "private token=secret".to_string(),
+                    })
+                }),
+            )
+            .route(
+                "/extractor",
+                axum::routing::post(|Json(_): Json<Vec<u32>>| async {}),
+            )
+            .route(
+                "/raw",
+                axum::routing::get(|| async {
+                    (StatusCode::UNPROCESSABLE_ENTITY, "raw validator rejection")
+                }),
+            )
+            .layer(middleware::from_fn(smart_json_error_middleware));
+
+        for (path, expected) in [
+            ("/semantic", 422),
+            ("/http", 422),
+            ("/extractor", 400),
+            ("/raw", 400),
+        ] {
+            let mut request = Request::builder().uri(path);
+            let body = if path == "/extractor" {
+                request = request
+                    .method("POST")
+                    .header("content-type", "application/json");
+                Body::from("{\"valid\":true}")
+            } else {
+                Body::empty()
+            };
+            let response = router
+                .clone()
+                .oneshot(request.body(body).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), expected, "{path}");
+            let bytes = axum::body::to_bytes(response.into_body(), get_body_limit())
+                .await
+                .unwrap();
+            let body: ErrorMessage = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body.code, expected, "{path}");
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains("secret"),
+                "{path}"
+            );
+        }
+    }
+
     #[test]
     fn test_check_ready_rejects_draining_service() {
         let service = service_v2::HttpService::builder().build().unwrap();
@@ -7050,7 +7130,7 @@ mod tests {
         // The client sees a generic 500 while the asserted status survives in
         // `details`. 507 is a WebDAV code no Dynamo component emits; 501 is
         // what the previous blanket pass-through forwarded verbatim.
-        for code in [501u16, 502, 504, 507] {
+        for code in [501u16, 502, 507] {
             let response = ErrorMessage::from_http_error(
                 ErrorClass::InvalidRequest,
                 HttpError {
@@ -7344,6 +7424,176 @@ mod tests {
 
         assert_eq!(response.0.as_u16(), 499);
         assert_eq!(response.1.message, "Request cancelled");
+    }
+
+    #[test]
+    #[serial_test::serial(failure_metrics)]
+    fn explicit_backend_status_survives_semantic_wire_and_legacy_rendering() {
+        use dynamo_runtime::error::{
+            BackendError, DynamoError, ErrorClass, ErrorReason, ErrorType,
+        };
+
+        let message = "private backend detail token=secret";
+        for (code, class) in [
+            (400, ErrorClass::InvalidRequest),
+            (404, ErrorClass::NotFound),
+            (422, ErrorClass::InvalidRequest),
+            (429, ErrorClass::RateLimited),
+            (503, ErrorClass::Unavailable),
+            (504, ErrorClass::DeadlineExceeded),
+            (500, ErrorClass::Internal),
+        ] {
+            let diagnostic = serde_json::json!({"message": message, "code": code}).to_string();
+            let builder = DynamoError::builder().class(class).diagnostic(&diagnostic);
+            let builder = if code == 422 {
+                builder.reason(ErrorReason::unprocessable_entity())
+            } else {
+                builder
+            };
+            let wire = serde_json::to_value(builder.build()).unwrap();
+            if code == 422 {
+                assert_eq!(wire["reason"], "request.invalid");
+                assert_eq!(wire["http_status"], 422);
+            }
+            let semantic: DynamoError = serde_json::from_value(wire).unwrap();
+            let unary = ErrorMessage::from_anyhow(anyhow::Error::new(semantic.clone()), "failed");
+            let streaming = |error| {
+                let event = Annotated::<NvCreateChatCompletionStreamResponse> {
+                    data: None,
+                    id: None,
+                    event: Some("error".to_string()),
+                    comment: None,
+                    error: Some(error),
+                };
+                backend_error_response(extract_backend_error_if_present(&event).unwrap(), false)
+            };
+            let legacy = DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(diagnostic)
+                .build();
+            let direct = ErrorMessage::from_backend_http_error(HttpError {
+                code,
+                message: message.to_string(),
+            });
+            for (path, response) in [
+                ("semantic unary", unary),
+                ("semantic streaming", streaming(semantic)),
+                ("legacy streaming", streaming(legacy)),
+                ("direct HTTP", direct),
+            ] {
+                assert_eq!(response.0.as_u16(), code, "{path} {code}");
+                assert_eq!(response.1.code, code, "{path} {code}");
+                if code == 422 {
+                    assert!(response.1.details.is_none(), "{path} {code}");
+                }
+                assert!(
+                    !serde_json::to_string(&response.1.0)
+                        .unwrap()
+                        .contains("secret"),
+                    "{path} {code}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(failure_metrics)]
+    fn direct_unprocessable_reason_is_read_without_a_compatibility_marker() {
+        let error: DynamoError = serde_json::from_value(serde_json::json!({
+            "class": "InvalidRequest",
+            "reason": "request.unprocessable_entity",
+            "diagnostic": "private token=secret",
+        }))
+        .unwrap();
+        assert_eq!(error.reason().as_str(), "request.unprocessable_entity");
+        let response = ErrorMessage::from_anyhow(error.into(), "failed");
+        assert_eq!(response.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response.1.code, 422);
+        assert!(
+            !serde_json::to_string(&response.1.0)
+                .unwrap()
+                .contains("secret")
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(failure_metrics)]
+    async fn preflight_retains_semantic_422_with_json_diagnostic() {
+        use dynamo_runtime::error::{ErrorClass, ErrorReason};
+
+        for (code, expected_message) in [
+            (422, "Unprocessable Entity"),
+            (415, "Unsupported Media Type"),
+        ] {
+            let error = DynamoError::builder()
+                .class(ErrorClass::InvalidRequest)
+                .reason(ErrorReason::unprocessable_entity())
+                .diagnostic(
+                    serde_json::json!({"code":code,"message":"private validation detail"})
+                        .to_string(),
+                )
+                .build();
+            let event = Annotated::<NvCreateChatCompletionStreamResponse> {
+                data: None,
+                id: None,
+                event: Some("error".into()),
+                comment: None,
+                error: Some(error),
+            };
+            let extracted = extract_backend_error_if_present(&event).unwrap();
+            assert_eq!(extracted.semantic.is_some(), code == 422);
+            let response = match check_for_backend_error(
+                futures::stream::iter([event]),
+                BackendErrorCheck::UntilFirstEvent,
+            )
+            .await
+            {
+                Err(response) => response,
+                Ok(_) => panic!("validation must fail preflight"),
+            };
+            assert_eq!(response.0.as_u16(), code);
+            assert_eq!(response.1.message, expected_message);
+            assert_ne!(response.1.metric_error_type, Some(ErrorType::Overload));
+        }
+    }
+
+    #[test]
+    fn backend_resolver_timeout_keeps_sanitized_gateway_status() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+
+        let message = "private timeout at /srv/provider.py token=secret";
+        let unary = ErrorMessage::from_backend_http_error(HttpError {
+            code: 504,
+            message: message.to_string(),
+        });
+        let event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::Unknown))
+                    .message(serde_json::json!({"message": message, "code": 504}).to_string())
+                    .build(),
+            ),
+        };
+        let streaming = backend_error_response(
+            extract_backend_error_if_present(&event).expect("backend timeout envelope"),
+            false,
+        );
+        for response in [unary, streaming] {
+            assert_eq!(response.0, StatusCode::GATEWAY_TIMEOUT);
+            assert_eq!(response.1.code, 504);
+            assert_eq!(response.1.error_type, "Gateway Timeout");
+            assert_eq!(response.1.message, "Internal server error");
+            assert!(response.1.details.is_none());
+            assert!(
+                !serde_json::to_string(&response.1.0)
+                    .unwrap()
+                    .contains("secret")
+            );
+        }
     }
 
     #[test]
@@ -9584,6 +9834,7 @@ mod tests {
             (501, 500),
             (507, 500),
             (503, 503),
+            (504, 504),
         ] {
             let error_json =
                 format!(r#"{{"message":"engine failed at /srv/engine.py:88","code":{code}}}"#);
