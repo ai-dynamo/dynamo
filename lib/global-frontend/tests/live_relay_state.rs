@@ -73,6 +73,95 @@ async fn publisher(
     (sender, task)
 }
 
+fn pool_listing(name: &str, model: Option<&str>, frontend: &str) -> serde_json::Value {
+    serde_json::json!({
+        "key": {"cluster_id": "east", "namespace": "dynamo", "dgd_name": name},
+        "location": {"region": "east"}, "model": model, "frontends": [frontend]
+    })
+}
+
+#[tokio::test]
+async fn discovery_projects_partial_updates_and_complete_removals() {
+    let listing = |complete, pools| {
+        serde_json::from_value::<PoolsResponse>(serde_json::json!({
+            "complete": complete, "pools": pools
+        }))
+        .unwrap()
+    };
+    let (answer, answers) = tokio::sync::watch::channel(listing(
+        false,
+        vec![
+            pool_listing("red", Some("qwen"), "http://red:8000"),
+            pool_listing("blue", Some("qwen"), "http://blue:8000"),
+            pool_listing("unknown", None, "http://unknown:8000"),
+        ],
+    ));
+    let gds = Router::new().route(
+        "/pools",
+        get(move || {
+            let listed = answers.borrow().clone();
+            async move { Json(listed) }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap())
+        .parse()
+        .unwrap();
+    let _gds = AbortOnDropHandle::new(tokio::spawn(async move {
+        axum::serve(listener, gds).await.unwrap()
+    }));
+    let cancel = CancellationToken::new();
+    let mut discovered = discover_pools(
+        GlobalDiscoveryClient::new(url, Duration::from_secs(1)).unwrap(),
+        Duration::from_millis(20),
+        cancel.clone(),
+    );
+    // The first partial list is useful immediately, but an unknown model is
+    // not a routing candidate. Cache map iteration must not reorder candidates.
+    until(|| discovered.borrow().pools().len() == 2).await;
+    assert_eq!(discovered.borrow().pools()[0].name, "east/dynamo/blue");
+    assert_eq!(discovered.borrow().pools()[1].name, "east/dynamo/red");
+
+    answer.send_replace(listing(
+        false,
+        vec![
+            pool_listing("green", Some("llama"), "http://green:8000"),
+            pool_listing("blue", Some("qwen-updated"), "http://blue-new:8000"),
+        ],
+    ));
+    until(|| {
+        let snapshot = discovered.borrow();
+        snapshot.pools().len() == 3 && snapshot.pools()[0].model == "qwen-updated"
+    })
+    .await;
+    {
+        let snapshot = discovered.borrow();
+        assert_eq!(
+            snapshot.pools()[0].frontends[0].host_str(),
+            Some("blue-new")
+        );
+        assert_eq!(snapshot.pools()[1].model, "llama");
+        assert_eq!(snapshot.pools()[2].name, "east/dynamo/red");
+    }
+
+    answer.send_replace(listing(
+        true,
+        vec![pool_listing("green", Some("llama"), "http://green:8000")],
+    ));
+    until(|| discovered.borrow().pools().len() == 1).await;
+    assert_eq!(discovered.borrow().pools()[0].name, "east/dynamo/green");
+
+    // Cancellation closes the projected channel as well as its source cache.
+    discovered.borrow_and_update();
+    cancel.cancel();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), discovered.changed())
+            .await
+            .unwrap()
+            .is_err()
+    );
+}
+
 #[tokio::test]
 async fn cached_discovery_does_not_keep_a_disconnected_relay_routable() {
     let listed: PoolsResponse = serde_json::from_value(serde_json::json!({

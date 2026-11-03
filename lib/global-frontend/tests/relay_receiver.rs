@@ -207,7 +207,7 @@ async fn two_routers_forward_only_while_a_relay_is_live_and_reconnect_recovers()
                 .unwrap()
                 .unwrap()
                 .unwrap();
-            server.await.unwrap().unwrap();
+            server.await.unwrap();
             let _ = pending.await.unwrap();
         }
         pool_server.abort();

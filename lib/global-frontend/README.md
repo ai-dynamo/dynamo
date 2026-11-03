@@ -109,8 +109,9 @@ sources to that DGD. Each `GET /routers` endpoint must address a replica's gRPC
 receiving port. Relays send a fresh catalog/readiness/load snapshot on every
 connection, then updates. Separate Relay views keep active-active reports from
 being summed; loss of the last view removes the pool even when a failed GDS read
-leaves its candidate list cached. A complete GDS list withdraws omitted pools;
-a failed or partial list keeps the previous candidates.
+leaves its candidate list cached. The shared `PoolCache` adds and updates pools
+from partial GDS lists while retaining omitted pools. Only a complete list
+withdraws omitted pools; failed reads keep the last known candidates.
 
 `--relay-view-port` also works with explicit `--pool` candidates. It cannot be
 combined with `--pool-relay`; affinity reads the incoming Relay load in this mode.
