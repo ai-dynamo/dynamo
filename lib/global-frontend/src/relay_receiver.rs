@@ -11,7 +11,9 @@ use dynamo_global_common::grpc::pool_view_frame::Event;
 use dynamo_global_common::grpc::pool_view_receiver_server::{
     PoolViewReceiver, PoolViewReceiverServer,
 };
-use dynamo_global_common::grpc::{Hello, PoolState, PoolViewFrame, PublishResult};
+use dynamo_global_common::grpc::{
+    Hello, MAX_POOL_VIEW_FRAME_BYTES, PoolState, PoolViewFrame, PublishResult,
+};
 use dynamo_global_common::{PoolId, PoolIdDeriver, PoolKey, V1PoolIdDeriver};
 use dynamo_global_router::RelaySource;
 use dynamo_llm::pool_relay::wan::grpc::protocol::{
@@ -23,8 +25,6 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
-
-const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 
 /// Routing coordinates and replica identity claimed in the first frame.
 struct RelayHello {
@@ -197,8 +197,8 @@ pub async fn serve_relay_views(
         catalog,
         shutdown: shutdown.clone(),
     })
-    .max_decoding_message_size(MAX_FRAME_BYTES)
-    .max_encoding_message_size(MAX_FRAME_BYTES);
+    .max_decoding_message_size(MAX_POOL_VIEW_FRAME_BYTES)
+    .max_encoding_message_size(MAX_POOL_VIEW_FRAME_BYTES);
     Server::builder()
         .http2_keepalive_interval(Some(Duration::from_secs(10)))
         .http2_keepalive_timeout(Some(Duration::from_secs(5)))

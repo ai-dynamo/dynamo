@@ -139,7 +139,8 @@ async fn attach(
         .connect()
         .await
         .context("connect to Global Router")?;
-    let mut client = grpc::pool_view_receiver_client::PoolViewReceiverClient::new(channel);
+    let mut client = grpc::pool_view_receiver_client::PoolViewReceiverClient::new(channel)
+        .max_encoding_message_size(grpc::MAX_POOL_VIEW_FRAME_BYTES);
     let (sender, mut frames) = mpsc::channel::<Frame<PoolId, Arc<grpc::PoolState>>>(16);
     let transport = tokio::spawn(async move {
         let stream = async_stream::stream! {
