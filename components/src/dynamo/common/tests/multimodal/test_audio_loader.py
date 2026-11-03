@@ -196,6 +196,99 @@ async def test_load_audio_batch_prioritizes_typed_client_error(client_error):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_result",
+    [
+        RuntimeError("Error opening <_io.BytesIO>: Format not recognised."),
+        (np.array([], dtype=np.float32), 16000.0),
+    ],
+    ids=["undecodable", "empty_waveform"],
+)
+async def test_load_audio_batch_preserves_invalid_audio_value_error(bad_result):
+    """Bad client audio must stay a ValueError through the batch: the bindings
+    map ValueError to InvalidArgument (4xx), the generic aggregate to Unknown."""
+    good = (np.zeros(8000, dtype=np.float32), 16000.0)
+
+    async def _fetch(url):
+        if url.endswith("good.wav"):
+            return good
+        if isinstance(bad_result, Exception):
+            raise bad_result
+        return bad_result
+
+    loader = AudioLoader(url_policy=_permissive_http_policy())
+    loader._load_audio_with_vllm = _fetch  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="Failed to"):
+        await loader.load_audio_batch(
+            [
+                {"Url": "https://example.com/good.wav"},
+                {"Url": "https://example.com/bad.wav"},
+            ]
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "typed_error",
+    [
+        HttpStatusError(415, "Unsupported Media Type", "https://example.com/x.wav"),
+        UrlValidationError("blocked host"),
+        audio_loader_module.audio_decoder_missing("vllm"),
+    ],
+    ids=["http_status", "url_validation", "missing_decoder"],
+)
+async def test_load_audio_batch_typed_error_outranks_value_error(typed_error):
+    loader = AudioLoader()
+    loader.load_audio = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[ValueError("Decoded waveform is empty."), typed_error]
+    )
+
+    with pytest.raises(type(typed_error)) as exc_info:
+        await loader.load_audio_batch(
+            [
+                {"Url": "https://example.com/empty.wav"},
+                {"Url": "https://example.com/typed.wav"},
+            ]
+        )
+
+    assert exc_info.value is typed_error
+
+
+@pytest.mark.asyncio
+async def test_load_audio_batch_value_error_outranks_generic_failure():
+    loader = AudioLoader()
+    value_error = ValueError("Decoded waveform is empty.")
+    loader.load_audio = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[RuntimeError("nixl read failed"), value_error]
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        await loader.load_audio_batch(
+            [
+                {"Url": "https://example.com/one.wav"},
+                {"Url": "https://example.com/empty.wav"},
+            ]
+        )
+
+    assert exc_info.value is value_error
+
+
+@pytest.mark.asyncio
+async def test_load_audio_batch_non_value_error_stays_generic():
+    """Server-side failures must not be relabelled as invalid input."""
+    loader = AudioLoader()
+    loader.load_audio = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("nixl read failed")
+    )
+
+    with pytest.raises(Exception, match="nixl read failed") as exc_info:
+        await loader.load_audio_batch([{"Url": "https://example.com/one.wav"}])
+
+    assert type(exc_info.value) is Exception
+
+
+@pytest.mark.asyncio
 async def test_load_audio_batch_rejects_decoded_variant_without_frontend_decoding():
     loader = AudioLoader(enable_frontend_decoding=False)
 

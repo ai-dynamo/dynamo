@@ -251,6 +251,7 @@ class AudioLoader:
         status_error: HttpStatusError | None = None
         url_error: UrlValidationError | None = None
         decoder_error: MissingMediaDecoderError | None = None
+        value_error: ValueError | None = None
         for media_item, result in zip(audio_mm_items, results, strict=True):
             if isinstance(result, BaseException):
                 if isinstance(result, asyncio.CancelledError):
@@ -270,6 +271,8 @@ class AudioLoader:
                     result, MissingMediaDecoderError
                 ):
                     decoder_error = result
+                elif value_error is None and isinstance(result, ValueError):
+                    value_error = result
                 continue
             loaded_audio.append(result)
 
@@ -282,6 +285,10 @@ class AudioLoader:
             # it, and a missing decoder is deployment configuration handlers
             # must be able to distinguish from a bad request.
             raise decoder_error
+        if value_error is not None:
+            # Bad client audio: the bindings map ValueError to InvalidArgument
+            # (4xx); the generic aggregate below would become Unknown (5xx).
+            raise value_error
 
         if collective_exceptions:
             raise Exception("".join(collective_exceptions))
