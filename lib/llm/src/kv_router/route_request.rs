@@ -95,8 +95,9 @@ pub trait RouteRequest: Send + Sync {
     /// The frontend request, for the inputs only it carries: the multimodal
     /// cache keys device-aware routing reads, and the fields the LoRA
     /// candidate and admission policies read. `None` for a host that has no
-    /// `PreprocessedRequest`; device-aware routing then fails, and the LoRA
-    /// policies apply as `routing_policy::policy_request` describes.
+    /// `PreprocessedRequest`; device-aware routing then weighs device types
+    /// without cache hits, and the LoRA policies apply as
+    /// `routing_policy::policy_request` describes.
     fn preprocessed(&self) -> Option<&PreprocessedRequest> {
         None
     }

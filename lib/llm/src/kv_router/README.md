@@ -162,7 +162,7 @@ meaning "not supplied".
 | Excluded workers, parked classifier lifecycle | `migration_state` | `PreprocessedRequest::migration_state` |
 | Staged KV that only this decode can release | `staged_kv_cleanup` | `PreprocessedRequest::staged_kv_cleanup` |
 | Query-only selection | `is_query_only` | annotation `query_instance_id` in `PreprocessedRequest::annotations` |
-| Multimodal cache keys (device-aware mode), LoRA candidate and admission policies | `preprocessed` | the whole `PreprocessedRequest`; without it device-aware routing fails, and the LoRA policies fail closed for a request whose routing hints require them and are skipped otherwise |
+| Multimodal cache keys (device-aware mode), LoRA candidate and admission policies | `preprocessed` | the whole `PreprocessedRequest`; without it, device-aware routing weighs device types without cache hits, and the LoRA policies fail closed for a request whose routing hints require them and are skipped otherwise |
 
 Worker sampling options are unaffected by the conservative prompt-logprob accounting rule.
 
