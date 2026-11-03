@@ -9,6 +9,10 @@ This guide covers setting up RDMA over AWS Elastic Fabric Adapter (EFA) on EKS f
 
 Without RDMA, disaggregated inference falls back to TCP with severe performance degradation (~98s TTFT vs ~1s with EFA on Llama-3.1-8B at ISL 8000). See [RDMA Setup](overview.md) for the transport overview.
 
+<Tip title="Deploying a Dynamo recipe on EFA?">
+This guide sets up the cluster. To adapt a disaggregated recipe's `DynamoGraphDeployment` for EFA (image, LIBFABRIC backend, and EFA device count per worker), follow [AWS EFA](../../../recipes/cloud-fabrics/aws-efa.mdx) in the Recipes tab.
+</Tip>
+
 ## Prerequisites
 
 **Recommended GPU EC2 instance types with EFA:**
