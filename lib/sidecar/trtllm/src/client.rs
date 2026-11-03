@@ -18,6 +18,8 @@ use dynamo_sidecar_common::{
     connection_timeout,
 };
 use tonic::transport::Channel;
+use tonic_health::pb::health_check_response::ServingStatus;
+use tonic_health::pb::{HealthCheckRequest, health_client::HealthClient};
 
 pub(crate) use dynamo_sidecar_common::{
     cancelled, engine_shutdown, invalid_argument, status_to_dynamo,
@@ -78,6 +80,10 @@ impl TrtllmClient {
 
     pub(crate) fn connection_count(&self) -> usize {
         self.pool.len()
+    }
+
+    pub(crate) fn health_channel(&self) -> Channel {
+        self.pool.next_channel()
     }
 
     fn inference(&self) -> InferenceClient<Channel> {
@@ -389,6 +395,46 @@ fn is_terminal_discovery_error(status: &tonic::Status) -> bool {
 
 pub(crate) fn protocol_error(message: impl Into<String>) -> DynamoError {
     dynamo_sidecar_common::protocol_error("TensorRT-LLM", message)
+}
+
+/// Follows TensorRT-LLM's `liveness` gRPC health until TensorRT-LLM stops
+/// serving, and returns why. Never returns for an engine without `liveness`.
+pub(crate) async fn watch_liveness(channel: Channel, open_timeout: Duration) -> String {
+    let request = HealthCheckRequest {
+        service: "liveness".to_string(),
+    };
+    let mut stream =
+        match tokio::time::timeout(open_timeout, HealthClient::new(channel).watch(request)).await {
+            Ok(Ok(response)) => response.into_inner(),
+            // Images before NVIDIA/TensorRT-LLM#20437 do not serve `liveness`.
+            Ok(Err(status))
+                if matches!(
+                    status.code(),
+                    tonic::Code::NotFound | tonic::Code::Unimplemented
+                ) =>
+            {
+                tracing::warn!(
+                    code = ?status.code(),
+                    "TensorRT-LLM does not serve gRPC liveness health; not watching it"
+                );
+                return std::future::pending().await;
+            }
+            Ok(Err(status)) => return format!("liveness watch failed: {status}"),
+            Err(_) => return format!("liveness watch did not open in {open_timeout:?}"),
+        };
+    loop {
+        match stream.message().await {
+            Ok(Some(response)) => {
+                let status =
+                    ServingStatus::try_from(response.status).unwrap_or(ServingStatus::Unknown);
+                if status != ServingStatus::Serving {
+                    return format!("liveness reported {}", status.as_str_name());
+                }
+            }
+            Ok(None) => return "liveness stream ended".to_string(),
+            Err(status) => return format!("liveness stream failed: {status}"),
+        }
+    }
 }
 
 /// A generation failure the engine reported in-band via an `EngineError` event

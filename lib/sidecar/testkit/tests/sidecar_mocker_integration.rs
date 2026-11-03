@@ -883,6 +883,32 @@ async fn trtllm_malformed_terminal_fails_then_recovers() {
     .await;
 }
 
+/// TensorRT-LLM reporting `liveness` NOT_SERVING after startup resolves
+/// `engine_lost`; the process test covers a dropped connection.
+#[tokio::test]
+async fn trtllm_engine_lost_on_liveness_not_serving() {
+    let mut fixture =
+        support::trtllm::Fixture::start(Controller::default(), FixtureConfig::default()).await;
+    let engine = fixture.engine().await;
+    engine.start(0).await.unwrap();
+    let lost = engine.engine_lost();
+    tokio::pin!(lost);
+    tokio::time::timeout(std::time::Duration::from_millis(300), &mut lost)
+        .await
+        .expect_err("a SERVING engine is not lost");
+    fixture.set_liveness_serving(false).await;
+    let error = bounded("engine lost on liveness NOT_SERVING", lost).await;
+    assert_eq!(
+        error.error_type(),
+        dynamo_backend_common::ErrorType::Backend(BackendError::EngineShutdown)
+    );
+    assert!(
+        error.to_string().contains("TensorRT-LLM engine lost"),
+        "{error}"
+    );
+    finish(&mut fixture, &engine).await;
+}
+
 fn http_request() -> PreprocessedRequest {
     let mut req = request("mocker-model", vec![11, 22, 33], 2);
     req.extra_args = Some(json!({"sglang_tito": {"sampling_params": {"max_new_tokens": 2}}}));

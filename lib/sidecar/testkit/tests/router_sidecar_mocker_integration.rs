@@ -1393,6 +1393,54 @@ async fn trtllm_native_errors_reach_http_and_recover() {
 }
 
 #[tokio::test]
+async fn trtllm_engine_loss_withdraws_worker_and_fails_the_process() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        liveness_loss_withdraws_worker_and_fails_the_process(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+/// A TensorRT-LLM engine lost after startup ends its `liveness` watch, which
+/// withdraws the worker, and the sidecar then exits with an error.
+async fn liveness_loss_withdraws_worker_and_fails_the_process() {
+    let env = Environment::new().await;
+    let mut peer = support::trtllm::Fixture::start(
+        Controller::default(),
+        FixtureConfig {
+            model: env.model.clone(),
+            ..Default::default()
+        },
+    )
+    .await;
+    // The grace keeps the withdrawn process up while the test observes it.
+    let mut child = env.spawn_with_grace::<support::trtllm::Fixture>(
+        &peer.endpoint(),
+        DisaggregationMode::Aggregated,
+        5,
+    );
+    let router = env.ready("backend").await;
+    peer.shutdown().await;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while !env.registrations("backend").await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("engine loss did not withdraw the worker\n{}", child.logs()));
+    env.withdrawn("backend", &router).await;
+    assert!(child.is_running(), "withdrawal must precede process exit");
+    // 1 is the engine-loss error; a forced shutdown (exit 911) would read 143.
+    assert_eq!(child.exit().await.code(), Some(1), "{}", child.logs());
+    assert!(
+        child.logs().contains("TensorRT-LLM engine lost"),
+        "{}",
+        child.logs()
+    );
+}
+
+#[tokio::test]
 async fn lpx_native_errors_reach_http_and_recover() {
     tokio::time::timeout(
         Duration::from_secs(60),
