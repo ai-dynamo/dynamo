@@ -173,6 +173,9 @@ pub(crate) fn build_generate_request(
         max_thinking_tokens: request.stop_conditions.max_thinking_tokens,
         kv_hints,
         return_text: None,
+        image_data: Vec::new(),
+        video_data: Vec::new(),
+        audio_data: Vec::new(),
         disaggregated_params: resolve_disaggregated_params(
             request,
             mode,
