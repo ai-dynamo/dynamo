@@ -35,8 +35,7 @@ use tokio_util::sync::CancellationToken;
 use crate::adapter::{EngineAdapter, RawEngineAdapter};
 use crate::disagg::DisaggregationMode;
 use crate::engine::{
-    EngineAvailability, EngineConfig, KvEventSource, LLMEngine, MetricsBindings, MetricsCtx,
-    RawEngine,
+    EngineConfig, KvEventSource, LLMEngine, MetricsBindings, MetricsCtx, RawEngine,
 };
 use crate::error::{BackendError, DynamoError, ErrorType};
 use crate::publisher::{PublisherHandles, setup_publishers};
@@ -60,8 +59,6 @@ const DRAIN_HEARTBEAT_INTERVAL_S: f64 = 5.0;
 /// Budget reserved for `cleanup()` so the drain loop can't consume the whole
 /// graceful-shutdown deadline and trip the hard-exit that skips cleanup.
 const CLEANUP_RESERVE_S: f64 = 5.0;
-/// Delay before the serve loop retries a failed endpoint sync.
-const SYNC_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Operator override for the health-check canary, mirrors the Python helper
 /// in `lib/bindings/python/src/dynamo/health_check.py`.
@@ -299,69 +296,6 @@ enum EngineRouteLifecycle {
     ShuttingDown,
 }
 
-/// The worker's discovery registration, shared by serving, operator pause and
-/// engine recovery. The lock is held across discovery writes but never across
-/// engine calls. A write can be dropped with its HTTP request, so each write
-/// records its state as unknown until it returns.
-struct Registration {
-    /// Whether the endpoint instance is in discovery; `None` after a failed write.
-    endpoint: Option<bool>,
-    /// Whether the base model card is in discovery; `None` after a failed write.
-    card: Option<bool>,
-    is_paused: bool,
-    engine: EngineAvailability,
-    is_shutting_down: bool,
-    /// Caller-managed taints, restored when recovery re-registers the model card.
-    taints: Option<HashSet<String>>,
-}
-
-impl Default for Registration {
-    fn default() -> Self {
-        Self {
-            endpoint: None,
-            card: None,
-            is_paused: false,
-            engine: EngineAvailability::Ready,
-            is_shutting_down: false,
-            taints: None,
-        }
-    }
-}
-
-impl Registration {
-    fn is_routable(&self) -> bool {
-        !self.is_shutting_down && !self.is_paused && self.engine == EngineAvailability::Ready
-    }
-
-    /// Register or withdraw the endpoint to match `is_routable`, skipping the
-    /// write when discovery already matches, and publish readiness to match.
-    async fn sync_endpoint(
-        &mut self,
-        endpoint: &dynamo_runtime::component::Endpoint,
-    ) -> anyhow::Result<()> {
-        let is_routable = self.is_routable();
-        let mut result = Ok(());
-        if self.endpoint != Some(is_routable) {
-            // Unknown until the write returns: an HTTP route's future can be
-            // dropped after discovery commits.
-            self.endpoint = None;
-            result = if is_routable {
-                endpoint.register_endpoint_instance().await
-            } else {
-                endpoint.unregister_endpoint_instance().await
-            };
-            self.endpoint = result.is_ok().then_some(is_routable);
-        }
-        let status = if self.endpoint == Some(true) {
-            HealthStatus::Ready
-        } else {
-            HealthStatus::NotReady
-        };
-        set_worker_health(endpoint, status);
-        result
-    }
-}
-
 /// The engine a [`Worker`] drives, tagged by request modality. Both variants
 /// share the lifecycle (driven via the forwarders below); they differ only in
 /// the serve-loop adapter: `Llm` → token pipeline ([`EngineAdapter`]), `Raw` →
@@ -400,6 +334,14 @@ impl EngineKind {
         match self {
             EngineKind::Llm(e) => e.setup_metrics(ctx).await,
             EngineKind::Raw(e) => e.setup_metrics(ctx).await,
+        }
+    }
+
+    /// See [`LLMEngine::engine_lost`].
+    async fn engine_lost(&self) -> DynamoError {
+        match self {
+            EngineKind::Llm(e) => e.engine_lost().await,
+            EngineKind::Raw(_) => std::future::pending().await,
         }
     }
 
@@ -484,30 +426,6 @@ impl EngineKind {
         }
     }
 
-    fn availability(&self) -> Option<tokio::sync::watch::Receiver<EngineAvailability>> {
-        match self {
-            EngineKind::Llm(e) => e.availability(),
-            EngineKind::Raw(_) => None,
-        }
-    }
-
-    async fn recover(&self) -> Result<EngineConfig, DynamoError> {
-        match self {
-            EngineKind::Llm(e) => e.recover().await,
-            EngineKind::Raw(_) => Err(err(
-                ErrorType::Backend(BackendError::EngineShutdown),
-                "raw engines do not support recovery",
-            )),
-        }
-    }
-
-    async fn on_recovered(&self) -> Result<(), DynamoError> {
-        match self {
-            EngineKind::Llm(e) => e.on_recovered().await,
-            EngineKind::Raw(_) => Ok(()),
-        }
-    }
-
     /// Raw media engines (image/video/audio) register name-only — the engine
     /// loads the model itself and the model has no LLM artifacts (tokenizer /
     /// chat template / config.json) for Dynamo to fetch.
@@ -533,7 +451,6 @@ pub struct Worker {
     /// Serializes controls that mutate discovery registration and shutdown's
     /// final transition, preventing a resume from re-registering a stale worker.
     engine_route_mutation: Arc<tokio::sync::Mutex<()>>,
-    registration: Arc<tokio::sync::Mutex<Registration>>,
     /// Signals in-flight Rust administrative route futures to stop. Engine
     /// adapters that detach work (such as a separately scheduled language
     /// runtime task) remain responsible for cancelling that work themselves.
@@ -572,7 +489,6 @@ impl Worker {
                 EngineRouteLifecycle::Starting,
             )),
             engine_route_mutation: Arc::new(tokio::sync::Mutex::new(())),
-            registration: Arc::default(),
             engine_route_shutdown: CancellationToken::new(),
             publishers: None,
             lifecycle: None,
@@ -691,14 +607,25 @@ impl Worker {
         // grace-period sleep, which is a fixed wait rather than a hang
         // risk), otherwise we exit(911). Healthy long-running workers
         // never hit this — the timer only starts after `shutdown_token`
-        // is cancelled.
+        // is cancelled. A lost engine starts the same shutdown.
+        let engine = self.engine.clone();
         let outcome = {
             let inner_fut = self.run_inner(runtime.clone(), drt, &shutdown_token);
             tokio::pin!(inner_fut);
 
-            tokio::select! {
-                result = &mut inner_fut => result,
-                _ = shutdown_token.cancelled() => {
+            let (finished, lost) = tokio::select! {
+                biased;
+                result = &mut inner_fut => (Some(result), None),
+                _ = shutdown_token.cancelled() => (None, None),
+                error = engine.engine_lost() => (None, Some(error)),
+            };
+            match finished {
+                Some(result) => result,
+                None => {
+                    if let Some(error) = &lost {
+                        tracing::error!(%error, "Engine lost; shutting down the worker");
+                        shutdown_token.cancel();
+                    }
                     runtime.mark_shutting_down();
                     let timeout = graceful_shutdown_timeout();
                     let grace = grace_period_secs();
@@ -709,7 +636,7 @@ impl Worker {
                         timeout.as_secs(),
                         grace,
                     );
-                    match tokio::time::timeout(deadline, &mut inner_fut).await {
+                    let result = match tokio::time::timeout(deadline, &mut inner_fut).await {
                         Ok(result) => result,
                         Err(_) => {
                             tracing::error!(
@@ -719,6 +646,15 @@ impl Worker {
                             );
                             std::process::exit(911);
                         }
+                    };
+                    match lost {
+                        Some(error) => {
+                            if let Err(stopped) = result {
+                                tracing::warn!(error = %stopped, "Worker shutdown failed");
+                            }
+                            Err(error)
+                        }
+                        None => result,
                     }
                 }
             }
@@ -947,7 +883,6 @@ impl Worker {
                 endpoint.clone(),
                 self.engine_route_lifecycle.clone(),
                 self.engine_route_mutation.clone(),
-                self.registration.clone(),
                 self.engine_route_shutdown.clone(),
             );
             // Namespace control routes under `/engine/control/<name>` so they
@@ -1008,7 +943,6 @@ impl Worker {
     async fn begin_engine_route_shutdown(&self) {
         self.engine_route_shutdown.cancel();
         let _mutation = self.engine_route_mutation.lock().await;
-        self.registration.lock().await.is_shutting_down = true;
         let mut lifecycle = self.engine_route_lifecycle.write().await;
         *lifecycle = EngineRouteLifecycle::ShuttingDown;
     }
@@ -1023,7 +957,6 @@ impl Worker {
             model_taint_update_callback(
                 endpoint.clone(),
                 self.engine_route_lifecycle.clone(),
-                self.registration.clone(),
                 self.engine_route_shutdown.clone(),
             ),
         );
@@ -1034,14 +967,11 @@ impl Worker {
     /// pre-serve (mid-start signal) and the serve loop's signal arm.
     async fn orchestrator_steps(&mut self, endpoint: &dynamo_runtime::component::Endpoint) {
         endpoint.drt().runtime().mark_shutting_down();
-        let mut registration = self.registration.lock().await;
-        registration.is_shutting_down = true;
-        if let Err(e) = registration.sync_endpoint(endpoint).await {
+        if let Err(e) = endpoint.unregister_endpoint_instance().await {
             tracing::warn!(error = %e, "discovery unregister failed");
         } else {
             tracing::info!("Endpoint unregistered from discovery");
         }
-        drop(registration);
         self.run_engine_shutdown_steps().await;
     }
 
@@ -1158,7 +1088,7 @@ impl Worker {
                 self.config.model_input,
                 None,
                 Some(worker_type),
-                needs.clone(),
+                needs,
             )
             .await
             .map_err(|e| {
@@ -1167,7 +1097,6 @@ impl Worker {
                     format!("model attach: {e}"),
                 )
             })?;
-        self.registration.lock().await.card = Some(true);
         tracing::debug!("model registered with discovery");
 
         self.register_engine_controls(&endpoint).await?;
@@ -1324,7 +1253,6 @@ impl Worker {
                 return Ok(());
             }
         };
-        self.registration.lock().await.endpoint = Some(true);
 
         // A signal can arrive while primary registration is in flight. Keep
         // routes closed and tear the endpoint back down rather than briefly
@@ -1390,77 +1318,36 @@ impl Worker {
         // ready before this point; drop it here, because the write below
         // publishes readiness through the very signal it suppresses.
         drop(readiness_hold);
-        // A pause control may already have withdrawn the endpoint.
-        let mut resync = sync_failed(
-            self.registration
-                .lock()
-                .await
-                .sync_endpoint(&endpoint)
-                .await,
-        );
+        set_worker_health(&endpoint, HealthStatus::Ready);
 
         let serve_fut = primary_endpoint.wait();
         tokio::pin!(serve_fut);
 
-        // Apply the engine's current availability first, then each change.
-        let mut availability = self.engine.availability();
-        if let Some(receiver) = availability.as_mut() {
-            receiver.mark_changed();
-        }
-        let serve_result = loop {
-            tokio::select! {
-                biased;
-                result = &mut serve_fut => break endpoint_exit(result),
-                _ = shutdown.cancelled() => {
-                    tracing::info!("Received shutdown signal; running graceful orchestration");
-                    break Ok(());
-                }
-                state = next_availability(&mut availability) => {
-                    if state != EngineAvailability::Lost {
-                        let mut registration = self.registration.lock().await;
-                        registration.engine = state;
-                        resync = sync_failed(registration.sync_endpoint(&endpoint).await);
-                        continue;
+        let serve_result = tokio::select! {
+            biased;
+            result = &mut serve_fut => {
+                match result {
+                    // Endpoint exited cleanly (e.g. DRT primary token
+                    // cancelled it) — run the orchestrator so drain/cleanup
+                    // don't race transport teardown.
+                    Ok(()) => {
+                        tracing::info!(
+                            "Endpoint completed gracefully; running shutdown orchestration"
+                        );
+                        Ok(())
                     }
-                    self.withdraw_lost_engine(&endpoint).await;
-                    let engine_config = tokio::select! {
-                        biased;
-                        result = &mut serve_fut => break endpoint_exit(result),
-                        _ = shutdown.cancelled() => {
-                            tracing::info!("Received shutdown signal; running graceful orchestration");
-                            break Ok(());
-                        }
-                        result = self.engine.recover() => match result {
-                            Ok(engine_config) => engine_config,
-                            Err(error) => break Err(error),
-                        },
-                    };
-                    let recovered = self
-                        .register_recovered_engine(
-                            &endpoint,
-                            engine_config,
-                            model_type,
-                            worker_type,
-                            &needs,
-                        )
-                        .await;
-                    if let Err(error) = recovered {
-                        break Err(error);
-                    }
-                    // Re-apply whatever the engine reports now.
-                    if let Some(receiver) = availability.as_mut() {
-                        receiver.mark_changed();
+                    // Serve errored; cleanup_once in run() is the safety net.
+                    Err(e) => {
+                        Err(err(
+                            ErrorType::Backend(BackendError::Unknown),
+                            format!("serve: {e}"),
+                        ))
                     }
                 }
-                _ = tokio::time::sleep(SYNC_RETRY_INTERVAL), if resync => {
-                    resync = sync_failed(
-                        self.registration
-                            .lock()
-                            .await
-                            .sync_endpoint(&endpoint)
-                            .await,
-                    );
-                }
+            }
+            _ = shutdown.cancelled() => {
+                tracing::info!("Received shutdown signal; running graceful orchestration");
+                Ok(())
             }
         };
 
@@ -1481,77 +1368,6 @@ impl Worker {
 
         self.orchestrator_steps(&endpoint).await;
         serve_result
-    }
-
-    /// Withdraw the endpoint and model card after engine loss; in-flight
-    /// requests keep running.
-    async fn withdraw_lost_engine(&self, endpoint: &dynamo_runtime::component::Endpoint) {
-        tracing::warn!("Engine lost; withdrawing worker from discovery until it recovers");
-        let mut registration = self.registration.lock().await;
-        registration.engine = EngineAvailability::Lost;
-        if let Err(error) = registration.sync_endpoint(endpoint).await {
-            tracing::warn!(%error, "failed to withdraw endpoint after engine loss");
-        }
-        if registration.card != Some(false) {
-            let result = LocalModel::detach_from_endpoint(endpoint, None).await;
-            registration.card = result.is_ok().then_some(false);
-            if let Err(error) = result {
-                tracing::warn!(%error, "failed to withdraw model card after engine loss");
-            }
-        }
-    }
-
-    /// Register a fresh model card from [`LLMEngine::recover`] with the
-    /// caller's taints. The endpoint stays withdrawn until the serve loop sees
-    /// the engine `Ready`.
-    async fn register_recovered_engine(
-        &mut self,
-        endpoint: &dynamo_runtime::component::Endpoint,
-        engine_config: EngineConfig,
-        model_type: ModelType,
-        worker_type: WorkerType,
-        needs: &[Vec<WorkerType>],
-    ) -> Result<(), DynamoError> {
-        let mut local_model =
-            build_local_model(&self.config, &engine_config, self.engine.is_raw()).await?;
-
-        let mut registration = self.registration.lock().await;
-        local_model
-            .attach(
-                endpoint,
-                model_type,
-                self.config.model_input,
-                None,
-                Some(worker_type),
-                needs.to_vec(),
-            )
-            .await
-            .map_err(|e| {
-                err(
-                    ErrorType::Backend(BackendError::Unknown),
-                    format!("model attach after engine recovery: {e}"),
-                )
-            })?;
-        registration.card = Some(true);
-        if let Some(taints) = registration.taints.clone() {
-            update_model_taints(endpoint, taints).await.map_err(|e| {
-                err(
-                    ErrorType::Backend(BackendError::Unknown),
-                    format!("restore model taints after engine recovery: {e}"),
-                )
-            })?;
-        }
-        drop(registration);
-        if matches!(self.engine, EngineKind::Llm(_)) {
-            self.admission_gate
-                .get()?
-                .record_model_card(local_model.card());
-        }
-        if let Err(error) = self.engine.on_recovered().await {
-            tracing::warn!(%error, "engine on_recovered failed");
-        }
-        tracing::info!(model = %engine_config.model, "Engine recovered; model card re-registered");
-        Ok(())
     }
 
     /// Engine-facing shutdown sequence: grace period sleep → drain loop on
@@ -1592,11 +1408,7 @@ impl Worker {
     /// expires. Budget = `DYN_PREFILL_DRAIN_TIMEOUT_S` capped at
     /// `graceful_shutdown_timeout - CLEANUP_RESERVE_S`.
     async fn drain_until_idle_or_deadline(&self) {
-        // A lost engine can't report quiescence, and its KV memory lives in its
-        // own process, which this worker's cleanup doesn't free.
-        if !self.config.disaggregation_mode.is_prefill()
-            || self.registration.lock().await.engine == EngineAvailability::Lost
-        {
+        if !self.config.disaggregation_mode.is_prefill() {
             return;
         }
         let configured = drain_timeout_secs();
@@ -1649,42 +1461,6 @@ impl Worker {
             tokio::time::sleep(Duration::from_secs_f64(DRAIN_POLL_INTERVAL_S)).await;
         }
     }
-}
-
-fn endpoint_exit(result: anyhow::Result<()>) -> Result<(), DynamoError> {
-    match result {
-        // Endpoint exited cleanly (e.g. DRT primary token cancelled it) — run
-        // the orchestrator so drain/cleanup don't race transport teardown.
-        Ok(()) => {
-            tracing::info!("Endpoint completed gracefully; running shutdown orchestration");
-            Ok(())
-        }
-        // Serve errored; cleanup_once in run() is the safety net.
-        Err(e) => Err(err(
-            ErrorType::Backend(BackendError::Unknown),
-            format!("serve: {e}"),
-        )),
-    }
-}
-
-/// Log a failed serve-loop endpoint sync; true when it needs a retry.
-fn sync_failed(result: anyhow::Result<()>) -> bool {
-    if let Err(error) = &result {
-        tracing::warn!(%error, "failed to sync endpoint registration; retrying");
-    }
-    result.is_err()
-}
-
-/// The engine's next availability change; pending forever without one.
-async fn next_availability(
-    availability: &mut Option<tokio::sync::watch::Receiver<EngineAvailability>>,
-) -> EngineAvailability {
-    if let Some(receiver) = availability
-        && receiver.changed().await.is_ok()
-    {
-        return *receiver.borrow_and_update();
-    }
-    std::future::pending().await
 }
 
 /// Publish worker readiness on both layers the runtime's health route reads.
@@ -2010,13 +1786,11 @@ fn parse_model_taint_update_request(body: serde_json::Value) -> anyhow::Result<H
 fn model_taint_update_callback(
     endpoint: dynamo_runtime::component::Endpoint,
     route_lifecycle: Arc<tokio::sync::RwLock<EngineRouteLifecycle>>,
-    registration: Arc<tokio::sync::Mutex<Registration>>,
     route_shutdown: CancellationToken,
 ) -> EngineRouteCallback {
     Arc::new(move |body| {
         let endpoint = endpoint.clone();
         let route_lifecycle = route_lifecycle.clone();
-        let registration = registration.clone();
         let route_shutdown = route_shutdown.clone();
         Box::pin(async move {
             let taints = parse_model_taint_update_request(body)?;
@@ -2025,20 +1799,13 @@ fn model_taint_update_callback(
                     Ok(lifecycle) => lifecycle,
                     Err(response) => return Ok(response),
                 };
-            let mut registration = tokio::select! {
+            tokio::select! {
                 biased;
                 _ = route_shutdown.cancelled() => {
                     return Ok(engine_route_lifecycle_error(EngineRouteLifecycle::ShuttingDown));
                 }
-                registration = registration.lock() => registration,
-            };
-            // Recorded first so a dropped request cannot leave an older set to
-            // restore; while recovery has the card withdrawn, they apply on re-registration.
-            registration.taints = Some(taints.clone());
-            if registration.card != Some(false) {
-                update_model_taints(&endpoint, taints.clone()).await?;
+                result = update_model_taints(&endpoint, taints.clone()) => result?,
             }
-            drop(registration);
 
             let mut response_taints: Vec<_> = taints.into_iter().collect();
             response_taints.sort();
@@ -2096,7 +1863,6 @@ fn engine_update_callback(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn wrap_engine_control_callback(
     control_name: String,
     callback: EngineRouteCallback,
@@ -2104,7 +1870,6 @@ fn wrap_engine_control_callback(
     endpoint: dynamo_runtime::component::Endpoint,
     route_lifecycle: Arc<tokio::sync::RwLock<EngineRouteLifecycle>>,
     route_mutation: Arc<tokio::sync::Mutex<()>>,
-    registration: Arc<tokio::sync::Mutex<Registration>>,
     route_shutdown: CancellationToken,
 ) -> EngineRouteCallback {
     let policy = engine_control_policy(&control_name);
@@ -2115,7 +1880,6 @@ fn wrap_engine_control_callback(
         let control_name = control_name.clone();
         let route_lifecycle = route_lifecycle.clone();
         let route_mutation = route_mutation.clone();
-        let registration = registration.clone();
         let route_shutdown = route_shutdown.clone();
         Box::pin(async move {
             if let Some(response) = control_request_body_error(&body) {
@@ -2153,27 +1917,23 @@ fn wrap_engine_control_callback(
                             Ok(lifecycle) => lifecycle,
                             Err(response) => return Ok(response),
                         };
-                    let mut registration = tokio::select! {
+                    let unregister_result = tokio::select! {
                         biased;
                         _ = route_shutdown.cancelled() => {
                             return Ok(engine_route_lifecycle_error(EngineRouteLifecycle::ShuttingDown));
                         }
-                        registration = registration.lock() => registration,
+                        result = endpoint.unregister_endpoint_instance() => result,
                     };
-                    registration.is_paused = true;
-                    if let Err(e) = registration.sync_endpoint(&endpoint).await {
-                        registration.is_paused = false;
-                        if let Err(error) = registration.sync_endpoint(&endpoint).await {
-                            tracing::warn!(%error, "failed to restore endpoint after a failed pause");
-                        }
+                    if let Err(e) = unregister_result {
                         return Ok(control_error_response(format!(
                             "failed to unregister endpoint before /engine/control/{control_name}: {e}"
                         )));
                     }
                     // Out of discovery, so no longer routable. Whether the
-                    // control itself then succeeds or fails, the endpoint and
-                    // readiness stay withdrawn until a resume control succeeds.
-                    drop(registration);
+                    // control itself then succeeds or fails, the endpoint is
+                    // left unregistered, so readiness stays withdrawn until a
+                    // resume control re-registers it.
+                    set_worker_health(&endpoint, HealthStatus::NotReady);
 
                     let callback_result = tokio::select! {
                         biased;
@@ -2231,16 +1991,14 @@ fn wrap_engine_control_callback(
                         }
                         return Ok(response);
                     }
-                    let mut registration = tokio::select! {
+                    let register_result = tokio::select! {
                         biased;
                         _ = route_shutdown.cancelled() => {
                             return Ok(engine_route_lifecycle_error(EngineRouteLifecycle::ShuttingDown));
                         }
-                        registration = registration.lock() => registration,
+                        result = endpoint.register_endpoint_instance() => result,
                     };
-                    registration.is_paused = false;
-                    // A lost or recovering engine registers once it is ready again.
-                    if let Err(e) = registration.sync_endpoint(&endpoint).await {
+                    if let Err(e) = register_result {
                         // The engine is serving-safe but absent from discovery. The
                         // operation is idempotent: retrying /engine/control/{control_name}
                         // re-registers without repeating the wake/resume work (the
@@ -2250,6 +2008,7 @@ fn wrap_engine_control_callback(
                             "engine resumed but re-registration failed after /engine/control/{control_name}: {e}; retry /engine/control/{control_name} to rejoin discovery"
                         )));
                     }
+                    set_worker_health(&endpoint, HealthStatus::Ready);
                     Ok(response)
                 }
             }
@@ -4316,7 +4075,6 @@ mod handoff_and_lifecycle_tests {
             endpoint.clone(),
             worker.engine_route_lifecycle.clone(),
             worker.engine_route_mutation.clone(),
-            worker.registration.clone(),
             worker.engine_route_shutdown.clone(),
         );
         let request = tokio::spawn(async move { callback(serde_json::json!({})).await.unwrap() });
@@ -4375,7 +4133,6 @@ mod handoff_and_lifecycle_tests {
             endpoint.clone(),
             worker.engine_route_lifecycle.clone(),
             worker.engine_route_mutation.clone(),
-            worker.registration.clone(),
             worker.engine_route_shutdown.clone(),
         );
         let resume_request =
@@ -4391,7 +4148,6 @@ mod handoff_and_lifecycle_tests {
             endpoint,
             worker.engine_route_lifecycle.clone(),
             worker.engine_route_mutation.clone(),
-            worker.registration.clone(),
             worker.engine_route_shutdown.clone(),
         );
         let response = tokio::time::timeout(
@@ -4625,6 +4381,109 @@ mod handoff_and_lifecycle_tests {
         worker.begin_engine_route_shutdown().await;
     }
 
+    /// A lost engine withdraws the serving worker, runs cleanup, and makes the
+    /// worker return the engine's error.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn lost_engine_withdraws_the_worker_and_returns_its_error() {
+        struct LostEngine {
+            lost: CancellationToken,
+            cleanup_calls: std::sync::atomic::AtomicUsize,
+        }
+
+        #[async_trait]
+        impl LLMEngine for LostEngine {
+            async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+                Ok(EngineConfig {
+                    model: "lost-mock".to_string(),
+                    ..EngineConfig::default()
+                })
+            }
+
+            async fn generate(
+                &self,
+                _request: PreprocessedRequest,
+                _ctx: crate::engine::GenerateContext,
+            ) -> Result<
+                BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
+                DynamoError,
+            > {
+                unreachable!("not used in engine-loss tests")
+            }
+
+            async fn cleanup(&self) -> Result<(), DynamoError> {
+                self.cleanup_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+
+            async fn engine_lost(&self) -> DynamoError {
+                self.lost.cancelled().await;
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+                    .message("synthetic engine loss")
+                    .build()
+            }
+        }
+
+        let runtime = dynamo_runtime::Runtime::from_current().unwrap();
+        let config = dynamo_runtime::distributed::DistributedConfig::process_local();
+        let drt = DistributedRuntime::new(runtime, config).await.unwrap();
+        let engine = Arc::new(LostEngine {
+            lost: CancellationToken::new(),
+            cleanup_calls: Default::default(),
+        });
+        let config = WorkerConfig::default();
+        let query = DiscoveryQuery::Endpoint {
+            namespace: config.namespace.clone(),
+            component: config.component.clone(),
+            endpoint: config.endpoint.clone(),
+        };
+        let shutdown = CancellationToken::new();
+        let run = tokio::spawn(
+            Worker::new(engine.clone(), config).run_with_drt(drt.clone(), shutdown.clone()),
+        );
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while drt
+                .discovery()
+                .list(query.clone())
+                .await
+                .unwrap()
+                .is_empty()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("worker registers its endpoint");
+
+        engine.lost.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(30), run)
+            .await
+            .expect("a lost engine stops the worker")
+            .unwrap()
+            .expect_err("a lost engine fails the worker");
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::EngineShutdown)
+        );
+        assert!(
+            error.to_string().contains("synthetic engine loss"),
+            "{error}"
+        );
+        assert!(
+            drt.discovery().list(query).await.unwrap().is_empty(),
+            "a lost engine must leave no endpoint"
+        );
+        assert_eq!(
+            engine
+                .cleanup_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert!(shutdown.is_cancelled(), "engine loss uses the SIGTERM path");
+    }
+
     /// Ensures a payload-free Rust backend publishes readiness while it is
     /// serviceable and withdraws it again on shutdown.
     #[tokio::test]
@@ -4856,301 +4715,5 @@ mod handoff_and_lifecycle_tests {
             routes.get(MODEL_TAINT_UPDATE_ROUTE).is_none(),
             "model taint updates must not be registered after a fatal handoff"
         );
-    }
-
-    /// Engine whose availability the test drives. `recover` waits for the test
-    /// and reports a new context length, so re-registration must carry it.
-    struct RecoveringEngine {
-        availability: tokio::sync::watch::Sender<EngineAvailability>,
-        release_recovery: Notify,
-        is_recovered: std::sync::atomic::AtomicBool,
-    }
-
-    fn recovering_config(context_length: u32) -> EngineConfig {
-        EngineConfig {
-            model: "recovering-mock".to_string(),
-            llm: Some(crate::engine::LlmRegistration {
-                context_length: Some(context_length),
-                ..Default::default()
-            }),
-            ..EngineConfig::default()
-        }
-    }
-
-    #[async_trait]
-    impl LLMEngine for RecoveringEngine {
-        async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
-            Ok(recovering_config(1024))
-        }
-
-        async fn generate(
-            &self,
-            _request: PreprocessedRequest,
-            _ctx: crate::engine::GenerateContext,
-        ) -> Result<
-            BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
-            DynamoError,
-        > {
-            unreachable!("not used in recovery tests")
-        }
-
-        async fn cleanup(&self) -> Result<(), DynamoError> {
-            Ok(())
-        }
-
-        async fn supported_controls(&self) -> Result<Vec<String>, DynamoError> {
-            Ok(vec![
-                "pause_generation".to_string(),
-                "resume_generation".to_string(),
-            ])
-        }
-
-        async fn engine_control(
-            &self,
-            _control: String,
-            _body: serde_json::Value,
-        ) -> Result<serde_json::Value, DynamoError> {
-            Ok(serde_json::json!({"status": "ok"}))
-        }
-
-        fn availability(&self) -> Option<tokio::sync::watch::Receiver<EngineAvailability>> {
-            Some(self.availability.subscribe())
-        }
-
-        async fn recover(&self) -> Result<EngineConfig, DynamoError> {
-            self.release_recovery.notified().await;
-            self.availability.send_replace(EngineAvailability::Ready);
-            Ok(recovering_config(2048))
-        }
-
-        async fn on_recovered(&self) -> Result<(), DynamoError> {
-            self.is_recovered
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }
-    }
-
-    struct RecoveryHarness {
-        engine: Arc<RecoveringEngine>,
-        drt: DistributedRuntime,
-        shutdown: CancellationToken,
-        run: tokio::task::JoinHandle<Result<(), DynamoError>>,
-        _discovery_dir: tempfile::TempDir,
-    }
-
-    impl RecoveryHarness {
-        async fn start() -> Self {
-            use dynamo_runtime::distributed::{DiscoveryBackend, DistributedConfig};
-
-            let discovery_dir = tempfile::tempdir().unwrap();
-            let config = DistributedConfig {
-                discovery_backend: DiscoveryBackend::KvStore(
-                    dynamo_runtime::storage::kv::Selector::File(discovery_dir.path().to_owned()),
-                ),
-                ..DistributedConfig::process_local()
-            };
-            let drt = DistributedRuntime::new(Runtime::from_current().unwrap(), config)
-                .await
-                .unwrap();
-            let engine = Arc::new(RecoveringEngine {
-                availability: tokio::sync::watch::Sender::new(EngineAvailability::Ready),
-                release_recovery: Notify::new(),
-                is_recovered: Default::default(),
-            });
-            let worker = Worker::new(
-                engine.clone(),
-                WorkerConfig {
-                    enable_kv_routing: false,
-                    ..WorkerConfig::default()
-                },
-            );
-            let shutdown = CancellationToken::new();
-            let run = tokio::spawn(worker.run_with_drt(drt.clone(), shutdown.clone()));
-            let harness = Self {
-                engine,
-                drt,
-                shutdown,
-                run,
-                _discovery_dir: discovery_dir,
-            };
-            harness.wait_for(1, Some(1024)).await;
-            harness
-        }
-
-        async fn discovered(&self) -> (usize, Option<serde_json::Value>) {
-            use dynamo_runtime::discovery::DiscoveryInstance;
-
-            let discovery = self.drt.discovery();
-            let config = WorkerConfig::default();
-            let endpoints = discovery
-                .list(DiscoveryQuery::Endpoint {
-                    namespace: config.namespace.clone(),
-                    component: config.component.clone(),
-                    endpoint: config.endpoint.clone(),
-                })
-                .await
-                .unwrap();
-            let models = discovery
-                .list(DiscoveryQuery::EndpointModels {
-                    namespace: config.namespace,
-                    component: config.component,
-                    endpoint: config.endpoint,
-                })
-                .await
-                .unwrap();
-            let card = models.into_iter().find_map(|model| match model {
-                DiscoveryInstance::Model { card_json, .. } => Some(card_json),
-                _ => None,
-            });
-            (endpoints.len(), card)
-        }
-
-        /// `context_length: None` waits for no model card.
-        async fn wait_for(
-            &self,
-            endpoints: usize,
-            context_length: Option<u32>,
-        ) -> Option<serde_json::Value> {
-            let mut last = None;
-            for _ in 0..200 {
-                let (count, card) = self.discovered().await;
-                let card_context = card.as_ref().map(|card| {
-                    card["runtime_config"]["context_length"]
-                        .as_u64()
-                        .unwrap_or_default()
-                });
-                if count == endpoints && card_context == context_length.map(u64::from) {
-                    return card;
-                }
-                last = Some((count, card_context));
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-            panic!("expected {endpoints} endpoints and card {context_length:?}; last saw {last:?}");
-        }
-
-        async fn route(&self, name: &str, body: serde_json::Value) -> serde_json::Value {
-            let callback = self.drt.engine_routes().get(name).unwrap();
-            let response = callback(body).await.unwrap();
-            assert!(!control_response_is_error(&response), "{name}: {response}");
-            response
-        }
-
-        async fn stop(self) {
-            self.shutdown.cancel();
-            tokio::time::timeout(Duration::from_secs(30), self.run)
-                .await
-                .expect("worker must shut down")
-                .unwrap()
-                .expect("worker must exit cleanly");
-        }
-    }
-
-    /// Regression: a worker kept advertising an engine that had stopped
-    /// serving or gone away. `NotReady` must withdraw only the endpoint; `Lost`
-    /// must also withdraw the model card until recovery registers fresh metadata.
-    #[tokio::test]
-    async fn engine_loss_withdraws_until_recovery_registers_fresh_metadata() {
-        let harness = RecoveryHarness::start().await;
-
-        harness
-            .engine
-            .availability
-            .send_replace(EngineAvailability::NotReady);
-        harness.wait_for(0, Some(1024)).await;
-        harness
-            .engine
-            .availability
-            .send_replace(EngineAvailability::Ready);
-        harness.wait_for(1, Some(1024)).await;
-
-        harness
-            .engine
-            .availability
-            .send_replace(EngineAvailability::Lost);
-        harness.wait_for(0, None).await;
-        harness.engine.release_recovery.notify_one();
-        harness.wait_for(1, Some(2048)).await;
-        assert!(
-            harness
-                .engine
-                .is_recovered
-                .load(std::sync::atomic::Ordering::SeqCst)
-        );
-
-        harness.stop().await;
-    }
-
-    /// Regression: a runtime shutdown during engine recovery left the worker
-    /// waiting on `recover()` instead of shutting down.
-    #[tokio::test]
-    async fn runtime_shutdown_stops_engine_recovery() {
-        let harness = RecoveryHarness::start().await;
-        harness
-            .engine
-            .availability
-            .send_replace(EngineAvailability::Lost);
-        harness.wait_for(0, None).await;
-
-        harness.drt.shutdown();
-        tokio::time::timeout(Duration::from_secs(30), harness.run)
-            .await
-            .expect("worker must shut down while recovery is pending")
-            .unwrap()
-            .expect("worker must exit cleanly");
-    }
-
-    /// Regression: recovery could re-register a worker the operator had paused,
-    /// or drop the caller's taints when it re-registered the model card.
-    #[tokio::test]
-    async fn operator_pause_and_taints_survive_engine_recovery() {
-        let harness = RecoveryHarness::start().await;
-        harness
-            .route(
-                MODEL_TAINT_UPDATE_ROUTE,
-                serde_json::json!({"taints": ["capacity/fast"]}),
-            )
-            .await;
-        harness
-            .route("control/pause_generation", serde_json::json!({}))
-            .await;
-        harness.wait_for(0, Some(1024)).await;
-
-        harness
-            .engine
-            .availability
-            .send_replace(EngineAvailability::Lost);
-        harness.wait_for(0, None).await;
-        harness.engine.release_recovery.notify_one();
-        harness.wait_for(0, Some(2048)).await;
-        let has_taint = |card: &serde_json::Value| {
-            card["runtime_config"]["taints"]
-                .as_array()
-                .is_some_and(|taints| taints.contains(&serde_json::json!("capacity/fast")))
-        };
-        let mut card = None;
-        for _ in 0..200 {
-            card = harness.discovered().await.1;
-            if card.as_ref().is_some_and(has_taint) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        assert!(
-            card.as_ref().is_some_and(has_taint),
-            "recovery must restore caller taints: {card:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert_eq!(
-            harness.discovered().await.0,
-            0,
-            "a paused worker must stay withdrawn after recovery"
-        );
-
-        harness
-            .route("control/resume_generation", serde_json::json!({}))
-            .await;
-        harness.wait_for(1, Some(2048)).await;
-
-        harness.stop().await;
     }
 }
