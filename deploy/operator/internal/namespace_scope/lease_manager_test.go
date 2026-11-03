@@ -55,12 +55,10 @@ func TestLeaseManager_CreateOrUpdateLease(t *testing.T) {
 			namespace:       testNamespace,
 			operatorVersion: testOperatorVersion,
 			existingLease: &coordinationv1.Lease{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      LeaseName,
-					Namespace: testNamespace,
-				},
+				Name:      LeaseName,
+				Namespace: testNamespace,
 				Spec: coordinationv1.LeaseSpec{
-					HolderIdentity:       ptr.To("old-holder"),
+					HolderIdentity:       new("old-holder"),
 					LeaseDurationSeconds: ptr.To[int32](60),
 					AcquireTime:          &metav1.MicroTime{Time: time.Now().Add(-2 * time.Minute)},
 					RenewTime:            &metav1.MicroTime{Time: time.Now().Add(-1 * time.Minute)},
@@ -159,12 +157,10 @@ func TestLeaseManager_Stop(t *testing.T) {
 
 	// Create fake client with existing lease
 	existingLease := &coordinationv1.Lease{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      LeaseName,
-			Namespace: namespace,
-		},
+		Name:      LeaseName,
+		Namespace: namespace,
 		Spec: coordinationv1.LeaseSpec{
-			HolderIdentity:       ptr.To("namespace-restricted-operator-v1.0.0"),
+			HolderIdentity:       new("namespace-restricted-operator-v1.0.0"),
 			LeaseDurationSeconds: ptr.To[int32](30),
 		},
 	}
@@ -300,12 +296,10 @@ func TestLeaseManager_FailureTracking_SendsErrorOnMaxFailures(t *testing.T) {
 
 	// Create existing lease
 	existingLease := &coordinationv1.Lease{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      LeaseName,
-			Namespace: namespace,
-		},
+		Name:      LeaseName,
+		Namespace: namespace,
 		Spec: coordinationv1.LeaseSpec{
-			HolderIdentity:       ptr.To("namespace-restricted-operator-v1.0.0"),
+			HolderIdentity:       new("namespace-restricted-operator-v1.0.0"),
 			LeaseDurationSeconds: ptr.To[int32](30),
 			RenewTime:            &metav1.MicroTime{Time: time.Now()},
 		},
@@ -371,12 +365,10 @@ func TestLeaseManager_FailureTracking_ResetsOnSuccess(t *testing.T) {
 
 	// Create fake client with existing lease
 	existingLease := &coordinationv1.Lease{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      LeaseName,
-			Namespace: namespace,
-		},
+		Name:      LeaseName,
+		Namespace: namespace,
 		Spec: coordinationv1.LeaseSpec{
-			HolderIdentity:       ptr.To("namespace-restricted-operator-v1.0.0"),
+			HolderIdentity:       new("namespace-restricted-operator-v1.0.0"),
 			LeaseDurationSeconds: ptr.To[int32](30),
 			RenewTime:            &metav1.MicroTime{Time: time.Now()},
 		},

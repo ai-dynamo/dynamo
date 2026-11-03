@@ -50,10 +50,14 @@ pub(crate) fn build_generate_request(
             .map_err(|_| client::invalid_request("min_tokens does not fit in i32"))?
     };
 
+    // SGLang keeps a matched stop token in `output_ids` and trims only text,
+    // which is never requested, so visible stops (e.g. Harmony's `<|call|>`)
+    // reach the frontend decoder.
     let mut stop_token_ids = Vec::new();
     for tokens in [
         request.stop_conditions.stop_token_ids.as_ref(),
         request.stop_conditions.stop_token_ids_hidden.as_ref(),
+        request.stop_conditions.stop_token_ids_visible.as_ref(),
     ]
     .into_iter()
     .flatten()
@@ -168,6 +172,7 @@ pub(crate) fn build_generate_request(
         require_reasoning: Some(request.require_reasoning),
         max_thinking_tokens: request.stop_conditions.max_thinking_tokens,
         kv_hints,
+        return_text: None,
         disaggregated_params: resolve_disaggregated_params(
             request,
             mode,
@@ -246,6 +251,16 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
             "beam search is not represented by SGLang's native gRPC proto",
         ));
     }
+    if request
+        .sampling_options
+        .logit_bias
+        .as_ref()
+        .is_some_and(|bias| !bias.is_empty())
+    {
+        return Err(client::invalid_request(
+            "logit_bias is not represented by SGLang's native gRPC proto",
+        ));
+    }
     if let Some(penalty) = request.sampling_options.length_penalty
         && (penalty - 1.0).abs() > f32::EPSILON
     {
@@ -260,16 +275,6 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
     {
         return Err(client::invalid_request(
             "include_stop_str_in_output is not represented by SGLang's native gRPC proto",
-        ));
-    }
-    if request
-        .stop_conditions
-        .stop_token_ids_visible
-        .as_ref()
-        .is_some_and(|tokens| !tokens.is_empty())
-    {
-        return Err(client::invalid_request(
-            "visible stop-token semantics are not represented by SGLang's native gRPC proto",
         ));
     }
     if let Some(guided) = request.sampling_options.guided_decoding.as_ref() {

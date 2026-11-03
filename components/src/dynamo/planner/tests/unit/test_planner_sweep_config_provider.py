@@ -666,6 +666,28 @@ def test_fpm_bucket_range_keeps_only_perfect_square_choices() -> None:
         )
 
 
+def test_independent_float_range_includes_exact_endpoint() -> None:
+    # Float accumulation would reach 0.30000000000000004 and drop the 0.3
+    # endpoint.
+    plan = create_provider().compile_recommendation(
+        {
+            "policy": "enabled",
+            "load_predictor": {"preset": False, "type": "kalman"},
+            "kalman_r": {"range": {"min": 0.1, "max": 0.3, "step": 0.1}},
+        },
+        RecommendationAdapterContext(
+            engine={},
+            traffic={},
+            evaluation={"sla": {"ttft_ms": 2000.0, "itl_ms": 30.0}},
+            optimization={"target": "goodput"},
+            sweep=_sweep_context(target="goodput"),
+        ),
+    )
+
+    presets = plan.state["search_space"]["load_predictor"]["preset"]
+    assert sorted({preset["kalman_r"] for preset in presets}) == [0.1, 0.2, 0.3]
+
+
 def test_custom_fpm_preset_validation_ignores_prometheus_environment(
     monkeypatch, tmp_path
 ) -> None:

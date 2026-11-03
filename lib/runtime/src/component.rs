@@ -462,7 +462,9 @@ impl Endpoint {
         Ok(())
     }
 
-    pub(crate) fn lifecycle_operation_role(
+    /// The cell holding this endpoint's topology role, shared by every clone of
+    /// it: empty until a role is recorded, then fixed.
+    pub fn lifecycle_operation_role(
         &self,
     ) -> Arc<OnceLock<crate::telemetry::LifecycleOperationRole>> {
         self.lifecycle_operation_role.clone()
@@ -470,6 +472,16 @@ impl Endpoint {
 
     pub async fn client(&self) -> anyhow::Result<client::Client> {
         client::Client::new(self.clone()).await
+    }
+
+    /// Like [`Self::client`], but a worker reported down stays out of routing for
+    /// `inhibited_duration` instead of `DYN_RUNTIME_INHIBITED_DURATION_SECS`. Zero
+    /// disables local inhibition.
+    pub async fn client_with_inhibited_duration(
+        &self,
+        inhibited_duration: Duration,
+    ) -> anyhow::Result<client::Client> {
+        client::Client::with_reconcile_interval(self.clone(), inhibited_duration).await
     }
 
     /// Like [`Self::client`], but the returned `Client`'s background

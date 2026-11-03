@@ -6,6 +6,8 @@ import contextlib
 
 import pytest
 
+from dynamo._core import InvalidArgument
+
 pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
@@ -140,13 +142,16 @@ async def test_python_request_plane_plain_annotated_error_and_malformed_frames(
         {"sequence": sequence} for sequence in range(64)
     ]
 
-    for kind, message in [
-        ("error", "direct adapter test error"),
-        ("malformed", "failed serializing Python response"),
+    for kind, error_type, message in [
+        # The handler's ValueError is classified InvalidRequest without a
+        # public message: the stream boundary raises a typed InvalidArgument
+        # with the generic label; the private diagnostic stays server-side.
+        ("error", InvalidArgument, "Invalid request"),
+        ("malformed", ValueError, "failed serializing Python response"),
     ]:
         stream = await request_plane_client.generate(
             {"kind": kind, "expected_metadata": {}}
         )
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(error_type, match=message):
             async for _ in stream:
                 pass

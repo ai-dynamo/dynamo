@@ -330,6 +330,6 @@ func normalizeDGDStableServiceSpec(spec *corev1.ServiceSpec) {
 		}
 	}
 	if spec.Type == corev1.ServiceTypeLoadBalancer && spec.AllocateLoadBalancerNodePorts == nil {
-		spec.AllocateLoadBalancerNodePorts = ptr.To(true)
+		spec.AllocateLoadBalancerNodePorts = new(true)
 	}
 }

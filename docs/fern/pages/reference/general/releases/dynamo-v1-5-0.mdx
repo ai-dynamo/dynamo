@@ -557,7 +557,7 @@ Between v1.4.2 and v1.5.0 the project merged 658 PRs from 123 contributors, 40 o
 
 - **DaoCloud:** [@bzsuni](https://github.com/bzsuni), [@carlory](https://github.com/carlory), [@flpanbin](https://github.com/flpanbin), [@muma378](https://github.com/muma378), [@panpan0000](https://github.com/panpan0000), [@weizhoublue](https://github.com/weizhoublue), [@windsonsea](https://github.com/windsonsea), [@yankay](https://github.com/yankay).
 - **CoreWeave:** [@alexeldeib](https://github.com/alexeldeib), [@houshengbo](https://github.com/houshengbo), [@Rexwang8](https://github.com/Rexwang8), [@ritazh](https://github.com/ritazh).
-- **Intel:** [@Spycsh](https://github.com/Spycsh), [@tthakkal](https://github.com/tthakkal), [@VincyZhang](https://github.com/VincyZhang).
+- **Intel:** @Spycsh, [@tthakkal](https://github.com/tthakkal), [@VincyZhang](https://github.com/VincyZhang).
 - **Aliyun:** [@xianlubird](https://github.com/xianlubird).
 - **Amazon:** [@AineshSootha](https://github.com/AineshSootha), [@jlonge4](https://github.com/jlonge4), [@YiqiuLiu](https://github.com/YiqiuLiu).
 - **Arizona State University:** [@Change72](https://github.com/Change72).

@@ -320,7 +320,17 @@ class PrometheusAPIClient:
                 )
                 if request_result:
                     router_request_count = float(request_result[0]["value"][1])
-                    if not math.isnan(router_request_count):
+                    if math.isfinite(router_request_count):
+                        if router_request_count == 0:
+                            # A completed-only series can hide requests still in flight.
+                            completed_only = self.prom.custom_query(
+                                query=(
+                                    f"{router_requests_total}{{{ns_filter}}} "
+                                    "unless ignoring(__name__) "
+                                    f"increase({router_requests_started}{{{ns_filter}}}[{interval}])"
+                                )
+                            )
+                            return None if completed_only else 0.0
                         return router_request_count
             except (
                 PrometheusApiClientException,
@@ -352,13 +362,16 @@ class PrometheusAPIClient:
                 completed_result = self.prom.custom_query(query=completed_query)
                 if not completed_result:
                     logger.warning(
-                        "No Prometheus metric data available for %s; using 0",
+                        "No Prometheus metric data available for %s; demand is unavailable",
                         router_requests_total,
                     )
-                    return 0
+                    return None
                 router_completed_count = float(completed_result[0]["value"][1])
                 return (
-                    0 if math.isnan(router_completed_count) else router_completed_count
+                    router_completed_count
+                    if math.isfinite(router_completed_count)
+                    and router_completed_count > 0
+                    else None
                 )
             except (
                 PrometheusApiClientException,
@@ -366,7 +379,7 @@ class PrometheusAPIClient:
                 RequestsTimeout,
             ) as e:
                 logger.error("Error getting completed router request count: %s", e)
-                return 0
+                return None
             except Exception:
                 logger.exception("Unexpected error parsing completed router requests")
                 raise
@@ -407,7 +420,11 @@ class PrometheusAPIClient:
                     self.dynamo_namespace,
                 )
                 return None
-            return completed_count
+            return (
+                completed_count
+                if math.isfinite(completed_count) and completed_count > 0
+                else None
+            )
         except Exception:
             # Never propagate: the tick loop catches only GPUShapeUnavailableError
             # (core/base.py:1042), so anything else here shuts the planner down.
@@ -611,12 +628,14 @@ class PrometheusAPIClient:
             result = self.prom.custom_query(query=f"absent({metric}{{{ns_filter}}})")
             if result:
                 logger.warning(
-                    f"[throughput_metrics_source=router] No '{metric}' series found "
-                    f"for namespace '{ns}' in Prometheus. "
-                    "Router metrics will read as zero until scraping is working. "
+                    "[throughput_metrics_source=router] No '%s' series found "
+                    "for namespace '%s' in Prometheus. "
+                    "Router demand is unavailable until scraping is working. "
                     "Check: (1) PodMonitor 'dynamo-router' is installed in the operator namespace, "
                     "(2) LocalRouter pods have DYN_SYSTEM_PORT=9090, "
-                    "(3) pods have label nvidia.com/metrics-enabled=true."
+                    "(3) pods have label nvidia.com/metrics-enabled=true.",
+                    metric,
+                    ns,
                 )
         except Exception as e:
             logger.warning(f"Could not check router scraping status: {e}")

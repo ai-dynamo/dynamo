@@ -8,6 +8,7 @@ import logging
 from typing import Optional
 
 from dynamo.common.forward_pass_metrics import ForwardPassMetrics
+from dynamo.common.forward_pass_metrics import decode as decode_fpm
 from dynamo.planner.config.defaults import SubComponentType
 from dynamo.planner.connectors.base import WorkerInfoProvider
 from dynamo.planner.connectors.mdc import MdcEntry, select_entry, worker_info_from_mdc
@@ -38,6 +39,7 @@ class RuntimeFpmProvider(FpmMetricsProvider, WorkerInfoProvider):
         runtime: DistributedRuntime,
         state_source: Optional[DeploymentStateSource] = None,
         namespace_source: Optional[RuntimeNamespaceSource] = None,
+        max_fpm_age_seconds: float = 15.0,
     ) -> None:
         self.require_prefill = require_prefill
         self.require_decode = require_decode
@@ -46,6 +48,8 @@ class RuntimeFpmProvider(FpmMetricsProvider, WorkerInfoProvider):
         self.runtime = runtime
         self.state_source = state_source
         self.namespace_source = namespace_source
+        self.max_fpm_age_seconds = max_fpm_age_seconds
+        self._unjoined_workers: dict[str, tuple[str, ...]] = {}
         self._prefill_fpm_sub = None
         self._decode_fpm_sub = None
 
@@ -69,22 +73,31 @@ class RuntimeFpmProvider(FpmMetricsProvider, WorkerInfoProvider):
     def collect_fpm(self) -> FpmObservations:
         prefill_stats = None
         decode_stats = None
+        unavailable_reasons: dict[str, str] = {}
 
         if self._prefill_fpm_sub is not None:
-            stats = self._decode_fpm_bytes(self._prefill_fpm_sub)
+            stats, reason = self._collect_healthy_fpm(self._prefill_fpm_sub, "prefill")
+            if reason:
+                unavailable_reasons["prefill"] = reason
             if stats:
                 for (wid, dp), fpm in stats.items():
                     _log_fpm(wid, dp, fpm, "prefill")
                 prefill_stats = stats
 
         if self._decode_fpm_sub is not None:
-            stats = self._decode_fpm_bytes(self._decode_fpm_sub)
+            stats, reason = self._collect_healthy_fpm(self._decode_fpm_sub, "decode")
+            if reason:
+                unavailable_reasons["decode"] = reason
             if stats:
                 for (wid, dp), fpm in stats.items():
                     _log_fpm(wid, dp, fpm, "decode")
                 decode_stats = stats
 
-        return FpmObservations(prefill=prefill_stats, decode=decode_stats)
+        return FpmObservations(
+            prefill=prefill_stats,
+            decode=decode_stats,
+            unavailable_reasons=unavailable_reasons,
+        )
 
     def get_worker_info(
         self,
@@ -158,7 +171,7 @@ class RuntimeFpmProvider(FpmMetricsProvider, WorkerInfoProvider):
             f"{runtime_namespace}.{worker_info.component_name}.{worker_info.endpoint}"
         )
         sub = FpmEventSubscriber(endpoint)
-        sub.start_tracking()
+        sub.start_tracking(max_age_seconds=self.max_fpm_age_seconds)
         logger.info(
             "FPM tracker started for %s.%s.%s",
             runtime_namespace,
@@ -174,21 +187,34 @@ class RuntimeFpmProvider(FpmMetricsProvider, WorkerInfoProvider):
             self._decode_fpm_sub.shutdown()
         self._prefill_fpm_sub = None
         self._decode_fpm_sub = None
+        self._unjoined_workers.clear()
 
-    def _decode_fpm_bytes(
-        self, subscriber
-    ) -> dict[tuple[str, int], ForwardPassMetrics]:
-        # Match the subscriber's lazy binding path; decoding is optional at startup.
-        from dynamo.common.forward_pass_metrics import decode as decode_fpm
-
-        if subscriber is None:
-            return {}
+    def _collect_healthy_fpm(
+        self, subscriber, component: str
+    ) -> tuple[dict[tuple[str, int], ForwardPassMetrics], Optional[str]]:
+        health = subscriber.get_recent_stats_with_health()
+        identities = tuple(health.unjoined_worker_ids)
+        if identities and identities != self._unjoined_workers.get(component):
+            logger.warning("FPM worker join failure for %s: %s", component, identities)
+        self._unjoined_workers[component] = identities
+        if identities:
+            reason = "worker_join_failure"
+        elif health.stale_rank_count:
+            reason = "stale_fpm"
+        elif health.missing_rank_count:
+            reason = "missing_fpm"
+        else:
+            reason = None
+        if reason:
+            # A fresh subset, especially one DP rank, cannot prove the pool is idle.
+            return {}, reason
         result = {}
-        for key, raw_bytes in subscriber.get_recent_stats().items():
+        for key, raw_bytes in health.snapshot.items():
             fpm = decode_fpm(raw_bytes)
-            if fpm is not None:
-                result[key] = fpm
-        return result
+            if fpm is None:
+                return {}, "invalid_fpm"
+            result[key] = fpm
+        return result, reason
 
 
 def _mdc_entries_from_subscriber(subscriber) -> list[MdcEntry]:

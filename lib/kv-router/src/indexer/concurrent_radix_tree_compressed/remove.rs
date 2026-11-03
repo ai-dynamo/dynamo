@@ -198,6 +198,11 @@ impl ConcurrentRadixTreeCompressed {
         op: KvCacheRemoveData,
         id: u64,
     ) -> Result<(), KvCacheEventError> {
+        // An empty removal is a no-op, even for a worker this lane has not seen:
+        // normalizers emit one for a dropped store to keep event ids contiguous.
+        if op.block_hashes.is_empty() {
+            return Ok(());
+        }
         if !lookup.contains_worker(worker) {
             return Err(KvCacheEventError::BlockNotFound);
         }

@@ -188,3 +188,6 @@ pub fn context_only_extra() -> prost_types::Struct {
         .collect(),
     }
 }
+
+#[cfg(test)]
+mod tests;

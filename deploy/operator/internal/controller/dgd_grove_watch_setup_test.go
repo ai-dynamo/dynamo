@@ -13,7 +13,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -29,38 +28,35 @@ func TestGroveWatchMapsOnlyDGDControllerOwnedPodCliques(t *testing.T) {
 			Kind:       kind,
 			Name:       name,
 			UID:        uid,
-			Controller: ptr.To(true),
+			Controller: new(true),
 		}
 	}
 
 	newObjects := func() (*grovev1alpha1.PodClique, *grovev1alpha1.PodCliqueScalingGroup, *grovev1alpha1.PodCliqueSet) {
-		pcs := &grovev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{
+		pcs := &grovev1alpha1.PodCliqueSet{
 			Name:      "engine-pcs",
 			Namespace: "workloads",
 			UID:       "pcs-uid",
 			OwnerReferences: []metav1.OwnerReference{controllerRef(
 				nvidiacomv1beta1.GroupVersion.String(), "DynamoGraphDeployment", "graph", "dgd-uid",
-			)},
-		}}
-		group := &grovev1alpha1.PodCliqueScalingGroup{ObjectMeta: metav1.ObjectMeta{
+			)}}
+		group := &grovev1alpha1.PodCliqueScalingGroup{
 			Name:      "engine-group",
 			Namespace: "workloads",
 			UID:       "group-uid",
 			OwnerReferences: []metav1.OwnerReference{controllerRef(
 				grovev1alpha1.SchemeGroupVersion.String(), "PodCliqueSet", pcs.Name, pcs.UID,
-			)},
-		}}
-		clique := &grovev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{
+			)}}
+		clique := &grovev1alpha1.PodClique{
 			Name:      "role",
 			Namespace: "workloads",
 			OwnerReferences: []metav1.OwnerReference{controllerRef(
 				grovev1alpha1.SchemeGroupVersion.String(), "PodCliqueScalingGroup", group.Name, group.UID,
-			)},
-		}}
+			)}}
 		return clique, group, pcs
 	}
 
-	want := []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: "workloads", Name: "graph"}}}
+	want := []ctrl.Request{{Namespace: "workloads", Name: "graph"}}
 	tests := []struct {
 		name   string
 		mutate func(*grovev1alpha1.PodClique, *grovev1alpha1.PodCliqueScalingGroup, *grovev1alpha1.PodCliqueSet) []client.Object
