@@ -931,10 +931,8 @@ class NixlReadEmbeddingReceiver(AbstractEmbeddingReceiver):
             descriptor = self.warmedup_descriptors.get()
             # Slide view of pre-allocated tensor
             original_descriptor_size = descriptor._data_size
-            # No transfer can start before begin_read, so a failure here (for
-            # example a request larger than the pooled buffer) returns the
-            # descriptor. Do not extend this past begin_read: NIXL may still
-            # write into the buffer once a read has been created.
+            # Return the descriptor only on failures before begin_read: once a
+            # read exists, NIXL may still write into the buffer.
             try:
                 descriptor._data_size = tensor_size_bytes
                 assert descriptor._data_ref is not None
