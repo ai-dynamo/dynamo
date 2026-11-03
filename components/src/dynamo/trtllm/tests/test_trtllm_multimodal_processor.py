@@ -13,9 +13,11 @@ import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import numpy as np
 import pytest
 import pytest_asyncio
 import torch
+from PIL import Image
 from safetensors.torch import save as safetensors_save
 
 # multimodal_processor imports tensorrt_llm, whose import needs CUDA. -m selection
@@ -223,6 +225,173 @@ async def test_h264_video_routes_through_nvdec(monkeypatch) -> None:
     nvdec.assert_called_once()  # the NVDEC transform ran ...
     assert nvdec.call_args.args[0] == b"h264 bytes"
     load_video.assert_not_awaited()  # ... and the vendor decoder was bypassed
+
+
+def _decoded_frames(n: int = 2, h: int = 4, w: int = 5) -> np.ndarray:
+    """(N, H, W, 3) uint8 RGB frames, as a video decoder returns them."""
+    # Mod in the default int dtype, then cast (NumPy 2.x / NEP 50).
+    return (np.arange(n * h * w * 3) % 256).astype(np.uint8).reshape(n, h, w, 3)
+
+
+def _pt_video(frames_u8: np.ndarray):
+    """VideoData in the float [0,1] (C, H, W) form both decode paths return."""
+    nchw = torch.from_numpy(frames_u8.astype("float32") * (1.0 / 255.0)).permute(
+        0, 3, 1, 2
+    )
+    return mmp.VideoData(
+        frames=list(torch.unbind(nchw.contiguous(), dim=0)),
+        metadata={
+            "total_num_frames": 24,
+            "fps": 12.0,
+            "duration": 2.0,
+            "frames_indices": list(range(len(frames_u8))),
+        },
+        audio=None,
+    )
+
+
+def _image_video_processor(video_format: str | None):
+    """A processor whose image loader returns one PIL image and whose input
+    processor asks for ``video_format`` video (None: no preference)."""
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    image = Image.new("RGB", (5, 4), (200, 30, 30))
+    processor.image_loader.load_image_batch = AsyncMock(return_value=[image])
+    ip = MagicMock()
+    ip.get_mm_token_ids.return_value = None
+    ip.get_num_tokens_per_image.return_value = 4
+    ip.get_preferred_media_io_kwargs.return_value = (
+        {"image": {"format": "np"}, "video": {"format": video_format}}
+        if video_format
+        else {}
+    )
+    processor.input_processor = ip
+    return processor, image
+
+
+def _route_video(monkeypatch, path: str, video) -> None:
+    """Send the next video through NVDEC or the vendor loader, returning ``video``."""
+    monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+    monkeypatch.setattr(mmp, "fetch_bytes", AsyncMock(return_value=b"video bytes"))
+    monkeypatch.setattr(mmp, "probe_video_codec", lambda content: "h264")
+    monkeypatch.setattr(mmp, "should_use_nvdec", lambda codec: path == "nvdec")
+    monkeypatch.setattr(mmp, "_nvdec_video_data", MagicMock(return_value=video))
+    monkeypatch.setattr(mmp, "async_load_video", AsyncMock(return_value=video))
+
+
+def _request(image: bool = True, video: bool = True) -> dict:
+    mm_data = {}
+    if image:
+        mm_data["image_url"] = [{"Url": "http://169.254.169.254/i.png"}]
+    if video:
+        mm_data["video_url"] = [{"Url": "http://169.254.169.254/v.mp4"}]
+    return {"multi_modal_data": mm_data, "token_ids": [1, 2, 3]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["nvdec", "vendor"])
+async def test_video_next_to_an_image_is_handed_over_as_uint8(
+    path, monkeypatch
+) -> None:
+    """Qwen3-VL rescales images and videos together and rejects a PIL image
+    next to float [0,1] video frames. With an image in the request, videos go
+    over as the uint8 (N, H, W, 3) array the model asks for, holding exactly
+    the decoded pixels; the image and the metadata are untouched."""
+    processor, image = _image_video_processor("np")
+    frames_u8 = _decoded_frames()
+    source = _pt_video(frames_u8)
+    _route_video(monkeypatch, path, source)
+
+    processed = await processor.process_openai_request(
+        _request(), embeddings=None, ep_disaggregated_params=None
+    )
+
+    mm_data = processed["multi_modal_data"]
+    assert mm_data["image"] == [image]
+    (video,) = mm_data["video"]
+    assert isinstance(video.frames, np.ndarray)
+    assert video.frames.dtype == np.uint8
+    assert np.array_equal(video.frames, frames_u8)
+    assert video.metadata == source.metadata
+    assert isinstance(source.frames[0], torch.Tensor)  # the input is not modified
+
+
+@pytest.mark.asyncio
+async def test_image_only_request_keeps_pil_images(monkeypatch) -> None:
+    processor, image = _image_video_processor("np")
+
+    processed = await processor.process_openai_request(
+        _request(video=False), embeddings=None, ep_disaggregated_params=None
+    )
+
+    assert processed["multi_modal_data"] == {"image": [image]}
+    processor.input_processor.get_preferred_media_io_kwargs.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_video_only_request_keeps_float_frames(monkeypatch) -> None:
+    processor, _ = _image_video_processor("np")
+    source = _pt_video(_decoded_frames())
+    _route_video(monkeypatch, "nvdec", source)
+
+    processed = await processor.process_openai_request(
+        _request(image=False), embeddings=None, ep_disaggregated_params=None
+    )
+
+    assert processed["multi_modal_data"]["video"] == [source]
+    processor.input_processor.get_preferred_media_io_kwargs.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_uint8_video_next_to_an_image_is_passed_through(monkeypatch) -> None:
+    processor, _ = _image_video_processor("np")
+    source = mmp.VideoData(
+        frames=_decoded_frames(), metadata={"total_num_frames": 2}, audio=None
+    )
+    _route_video(monkeypatch, "nvdec", source)
+
+    processed = await processor.process_openai_request(
+        _request(), embeddings=None, ep_disaggregated_params=None
+    )
+
+    assert processed["multi_modal_data"]["video"][0] is source
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("video_format", [None, "pt"])
+async def test_video_next_to_an_image_keeps_float_frames_without_np_preference(
+    video_format, monkeypatch
+) -> None:
+    """Models that do not ask for uint8 video (Nemotron-H takes PIL or tensor
+    frames only) get the frames as decoded."""
+    processor, _ = _image_video_processor(video_format)
+    source = _pt_video(_decoded_frames())
+    _route_video(monkeypatch, "nvdec", source)
+
+    processed = await processor.process_openai_request(
+        _request(), embeddings=None, ep_disaggregated_params=None
+    )
+
+    assert processed["multi_modal_data"]["video"] == [source]
+
+
+def test_video_frames_to_uint8_round_trips_every_value() -> None:
+    """Every uint8 value survives the 1/255 scaling both decode paths apply."""
+    levels = np.arange(256, dtype=np.uint8).reshape(1, 16, 16, 1)
+    frames_u8 = np.repeat(levels, 3, axis=3)
+    source = _pt_video(frames_u8)
+    before = [f.clone() for f in source.frames]
+
+    video = mmp._video_frames_to_uint8(source)
+
+    assert video.frames.shape == (1, 16, 16, 3)
+    assert np.array_equal(video.frames, frames_u8)
+    assert video.metadata == source.metadata and video.audio is source.audio
+    assert all(torch.equal(a, b) for a, b in zip(before, source.frames))
 
 
 @pytest.mark.asyncio

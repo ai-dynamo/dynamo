@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import dataclasses
 import logging
 import tempfile
 import time
@@ -80,6 +81,20 @@ def _nvdec_video_data(content: bytes, num_frames: int) -> VideoData:
         "frames_indices": meta["frames_indices"],
     }
     return VideoData(frames=frames_pt, metadata=metadata, audio=None)
+
+
+def _video_frames_to_uint8(video: VideoData) -> VideoData:
+    """Return ``video`` with its float [0,1] ``(C, H, W)`` tensor frames as one
+    uint8 ``(N, H, W, 3)`` array, TRT-LLM's ``format="np"`` video form.
+
+    Both decode paths scale uint8 frames by 1/255, so rounding back recovers
+    the decoded pixels exactly. Other fields are kept.
+    """
+    stacked = torch.stack(list(video.frames))
+    frames_u8 = stacked.mul(255.0).round_().clamp_(0, 255).to(torch.uint8)
+    return dataclasses.replace(
+        video, frames=frames_u8.permute(0, 2, 3, 1).contiguous().numpy()
+    )
 
 
 class TokenizerProtocol(Protocol):
@@ -182,9 +197,11 @@ class MultimodalRequestProcessor:
         self.num_video_frames = max(1, VideoLoader.NUM_FRAMES_DEFAULT)
         self._url_policy = UrlValidationPolicy.from_env()
 
-        # Input processor used only to size an omitted max_tokens (see
-        # _expanded_prompt_len). Optional: unavailable for models without a
-        # registered processor, in which case max_tokens sizing is left to the engine.
+        # Input processor used to size an omitted max_tokens (see
+        # _expanded_prompt_len) and to read the model's preferred video format
+        # (see _prefers_np_video). Optional: unavailable for models without a
+        # registered processor, in which case max_tokens sizing is left to the
+        # engine and videos keep their decoded format.
         self.input_processor = None
         try:
             from tensorrt_llm.inputs import create_input_processor
@@ -216,6 +233,19 @@ class MultimodalRequestProcessor:
         except Exception as e:
             logging.warning("Could not compute expanded prompt length: %s", e)
             return None
+
+    def _prefers_np_video(self) -> bool:
+        """True when the model's input processor asks for uint8 numpy video
+        (``get_preferred_media_io_kwargs``, which trtllm-serve applies).
+
+        Only multimodal input processors define the method; the processor may
+        also be missing (None) or TRT-LLM's text-only DefaultInputProcessor.
+        """
+        get_prefs = getattr(self.input_processor, "get_preferred_media_io_kwargs", None)
+        if get_prefs is None:
+            return False
+        prefs = get_prefs() or {}
+        return prefs.get("video", {}).get("format") == "np"
 
     def is_url(self, path: str) -> bool:
         """Check if a path is a URL."""
@@ -674,6 +704,18 @@ class MultimodalRequestProcessor:
                         source,
                     ) from e
             if videos:
+                # Images reach the model as PIL (not rescaled) and both video
+                # decode paths give float [0,1] tensors (rescaled). A processor
+                # that rescales the two together (Qwen3-VL) rejects that mix,
+                # so next to an image, hand videos over as uint8 when the model
+                # asks for that format. Video-only requests are unchanged.
+                if "image" in processed_mm_data and self._prefers_np_video():
+                    videos = [
+                        _video_frames_to_uint8(v)
+                        if isinstance(v.frames[0], torch.Tensor)
+                        else v
+                        for v in videos
+                    ]
                 processed_mm_data["video"] = videos
                 logging.info("Loaded %d video(s)", len(videos))
 
