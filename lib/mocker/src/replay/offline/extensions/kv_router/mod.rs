@@ -18,8 +18,8 @@ use dynamo_kv_router::indexer::{
 };
 use dynamo_kv_router::plugins::worker_selection::WorkerCapacity;
 use dynamo_kv_router::protocols::{
-    BlockHashOptions, KvCacheEventData, PrefillLoadHint, RouterEvent, RoutingConstraints, WorkerId,
-    WorkerWithDpRank, compute_block_hash_for_seq,
+    BlockHashOptions, ExternalSequenceBlockHash, KvCacheEventData, PrefillLoadHint, RouterEvent,
+    RoutingConstraints, StorageTier, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
 };
 use dynamo_kv_router::scheduling::{
     OverlapAnalysis, OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot,
@@ -38,7 +38,7 @@ use dynamo_kv_router::{
 use dynamo_tokens::SequenceHash;
 use futures::executor::block_on;
 use futures::future::try_join_all;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::time::Instant;
 use uuid::Uuid;
 
@@ -249,6 +249,85 @@ struct SyncReplayIndexer {
     has_indexed_events: bool,
     /// Logical lineage uses the production index, while residency remains in `tree`.
     session_prefix_index: Option<SessionPrefixIndexer>,
+    /// Router-visible lower-tier residency, used only to validate the event stream.
+    lower_tier_residency: LowerTierResidency,
+}
+
+/// Router-visible lower-tier (for example G2 `HostPinned`) residency per
+/// worker rank and tier.
+///
+/// Offline replay delivers each native KV event exactly once, in engine order;
+/// `kv_event_lag_ms` delays whole batches FIFO without reordering them. A stream
+/// that stores a block its rank already holds, or removes one the rank never
+/// stored, therefore signals a duplicated, lost, or reordered event. Such a stream
+/// is rejected instead of being absorbed into a silently divergent router view.
+#[derive(Default)]
+struct LowerTierResidency {
+    blocks: FxHashMap<(StorageTier, WorkerWithDpRank), FxHashSet<ExternalSequenceBlockHash>>,
+}
+
+impl LowerTierResidency {
+    fn validate_and_apply(&mut self, event: &RouterEvent) -> Result<()> {
+        let key = (
+            event.storage_tier,
+            WorkerWithDpRank::new(event.worker_id, event.event.dp_rank),
+        );
+        match &event.event.data {
+            KvCacheEventData::Stored(stored) => {
+                let resident = self.blocks.entry(key).or_default();
+                if let Some(block) = stored
+                    .blocks
+                    .iter()
+                    .find(|block| resident.contains(&block.block_hash))
+                {
+                    return Err(anyhow!(
+                        "{:?} block {:?} is already resident on this rank; the KV event stream was duplicated or reordered",
+                        event.storage_tier,
+                        block.block_hash
+                    ));
+                }
+                resident.extend(stored.blocks.iter().map(|block| block.block_hash));
+            }
+            KvCacheEventData::Removed(removed) => {
+                let resident = self.blocks.entry(key).or_default();
+                if let Some(hash) = removed
+                    .block_hashes
+                    .iter()
+                    .find(|hash| !resident.contains(*hash))
+                {
+                    return Err(anyhow!(
+                        "{:?} block {hash:?} is not resident on this rank; its store event was lost or reordered",
+                        event.storage_tier
+                    ));
+                }
+                for hash in &removed.block_hashes {
+                    resident.remove(hash);
+                }
+            }
+            KvCacheEventData::Cleared => {
+                self.blocks.remove(&key);
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_worker(&mut self, worker_id: WorkerId) {
+        self.blocks
+            .retain(|(_, rank), _| rank.worker_id != worker_id);
+    }
+
+    #[cfg(test)]
+    fn resident_blocks(&self, tier: StorageTier) -> Vec<(usize, usize)> {
+        let mut by_worker = HashMap::<usize, usize>::new();
+        for ((block_tier, rank), blocks) in &self.blocks {
+            if *block_tier == tier {
+                *by_worker.entry(rank.worker_id as usize).or_default() += blocks.len();
+            }
+        }
+        let mut by_worker = by_worker.into_iter().collect::<Vec<_>>();
+        by_worker.sort_unstable();
+        by_worker
+    }
 }
 
 impl SyncReplayIndexer {
@@ -259,6 +338,7 @@ impl SyncReplayIndexer {
             lower_tier: None,
             has_indexed_events: false,
             session_prefix_index: None,
+            lower_tier_residency: LowerTierResidency::default(),
         }
     }
 
@@ -318,6 +398,9 @@ impl SyncReplayIndexer {
                 }
                 continue;
             }
+            self.lower_tier_residency
+                .validate_and_apply(&event)
+                .with_context(|| format!("invalid replay KV event {label}"))?;
             let block_size = self.block_size;
             let indexer = self
                 .lower_tier
@@ -341,6 +424,7 @@ impl SyncReplayIndexer {
 
     fn remove_worker(&mut self, worker_id: WorkerId) {
         self.tree.remove_worker(worker_id);
+        self.lower_tier_residency.remove_worker(worker_id);
         if let Some(index) = &self.session_prefix_index {
             index.clear_worker_id_frontiers(worker_id);
         }
@@ -1555,8 +1639,8 @@ mod tests {
     use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel, RouterQueuePolicy};
     use dynamo_kv_router::protocols::{
         BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData,
-        KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier,
-        WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
+        KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, RouterEvent,
+        StorageTier, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     };
     use dynamo_kv_router::{PrefillLoadEstimator, TrackingHashAlgorithm};
     use rustc_hash::FxHashMap;
@@ -2338,6 +2422,136 @@ mod tests {
                 isl_blocks: 4,
             }]
         );
+    }
+
+    /// Worker 1's G2 residency may attract the prompt only once its
+    /// `HostPinned` store is router-visible. An arrival at exactly the
+    /// visibility time observes the event: due events apply before placement.
+    #[test]
+    fn host_pinned_store_moves_placement_only_once_visible() {
+        let target = request_with_priorities(1, 7, 256, 0, 0);
+        let place = |arrival_ms: f64| {
+            let mut router =
+                OfflineReplayRouter::new(&replay_args(), Some(router_config()), None, 2)
+                    .expect("router construction");
+            router.set_kv_event_lag_ms(10.0).unwrap();
+            let local_hashes = compute_block_hash_for_seq(
+                &target.tokens,
+                router.block_size,
+                BlockHashOptions::default(),
+            );
+            router
+                .on_kv_events_at(
+                    vec![prompt_store_event(
+                        1,
+                        1,
+                        &local_hashes,
+                        StorageTier::HostPinned,
+                    )],
+                    5.0,
+                )
+                .unwrap();
+            router
+                .on_request_arrival(&target, None, arrival_ms)
+                .unwrap()
+                .admissions
+        };
+
+        for arrival_ms in [5.0, 14.999] {
+            let admissions = place(arrival_ms);
+            assert_eq!(admissions.len(), 1);
+            assert_eq!(admissions[0].overlap_blocks, 0, "arrival {arrival_ms}");
+            assert_eq!(admissions[0].best_available_overlap_blocks, 0);
+        }
+        for arrival_ms in [15.0, 50.0] {
+            assert_eq!(
+                place(arrival_ms),
+                vec![WorkerAdmission {
+                    uuid: Uuid::from_u128(1),
+                    worker_idx: 1,
+                    overlap_blocks: 3,
+                    best_available_overlap_blocks: 3,
+                    isl_blocks: 4,
+                }],
+                "arrival {arrival_ms}"
+            );
+        }
+    }
+
+    fn removed_event(
+        worker_id: WorkerId,
+        event_id: u64,
+        block_hash: u64,
+        storage_tier: StorageTier,
+    ) -> RouterEvent {
+        RouterEvent::with_storage_tier(
+            worker_id,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: vec![ExternalSequenceBlockHash(block_hash)],
+                }),
+                dp_rank: 0,
+            },
+            storage_tier,
+        )
+    }
+
+    /// `store_event` uses the event id as the block hash, so equal ids store
+    /// the same block.
+    #[test]
+    fn lower_tier_event_stream_rejects_duplicated_lost_or_reordered_events() {
+        let mut indexer = SyncReplayIndexer::new(64);
+        let host = StorageTier::HostPinned;
+        indexer.apply_event(store_event(7, 1, 101, host)).unwrap();
+        // The same block on another worker, or in G1, is independent residency.
+        indexer.apply_event(store_event(8, 1, 101, host)).unwrap();
+        indexer
+            .apply_event(store_event(7, 1, 101, StorageTier::Device))
+            .unwrap();
+
+        let duplicate = indexer
+            .apply_event(store_event(7, 1, 101, host))
+            .unwrap_err();
+        assert!(
+            format!("{duplicate:#}").contains("already resident on this rank"),
+            "{duplicate:#}"
+        );
+        // A removal that overtakes its store, or follows a lost store, names the block.
+        let unmatched = indexer
+            .apply_event(removed_event(7, 2, 2, host))
+            .unwrap_err();
+        assert!(
+            format!("{unmatched:#}").contains("not resident on this rank"),
+            "{unmatched:#}"
+        );
+
+        // In-order eviction and re-store, then Cleared and worker removal, stay valid.
+        indexer.apply_event(removed_event(7, 3, 1, host)).unwrap();
+        indexer.apply_event(store_event(7, 1, 101, host)).unwrap();
+        assert_eq!(
+            indexer.lower_tier_residency.resident_blocks(host),
+            vec![(7, 1), (8, 1)]
+        );
+        indexer
+            .apply_event(RouterEvent::with_storage_tier(
+                7,
+                KvCacheEvent {
+                    event_id: 4,
+                    data: KvCacheEventData::Cleared,
+                    dp_rank: 0,
+                },
+                host,
+            ))
+            .unwrap();
+        indexer.remove_worker(8);
+        assert!(
+            indexer
+                .lower_tier_residency
+                .resident_blocks(host)
+                .is_empty()
+        );
+        indexer.apply_event(store_event(8, 1, 101, host)).unwrap();
     }
 
     #[test]
