@@ -926,7 +926,7 @@ These checks validate admission. Backend forwarding and enforcement are describe
 
 #### Reasoning Controls
 
-Builds containing [#17375](https://github.com/ai-dynamo/dynamo/issues/17375) forward
+Dynamo forwards
 `output_config.effort` (`low`, `medium`, `high`, `xhigh`, or `max`) as the existing
 `reasoning_effort` field. Enabled-thinking `budget_tokens` becomes
 `thinking_token_budget`, which feeds the existing thinking stop condition. Explicit
