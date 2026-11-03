@@ -154,7 +154,7 @@ Attached by the Prometheus scraper, not present in the exposition text the proce
 </ParamField>
 
 <ParamField path="container" type="string">
-  `[Kubernetes]` Container name inside the pod (usually `main`). Example: `main`.
+  `[Kubernetes]` Container name inside the pod. `main` for integrated workers and for engine series scraped in sidecar mode; `runtime` for the Dynamo sidecar's own series. Example: `main`.
 </ParamField>
 
 <ParamField path="namespace" type="string">
@@ -168,6 +168,17 @@ Attached by the Prometheus scraper, not present in the exposition text the proce
 <ParamField path="endpoint" type="string">
   `[Kubernetes]` Named port on the Kubernetes Service that Prometheus scraped. **Not** the same as `dynamo_endpoint`. Example: `system`.
 </ParamField>
+
+## Sidecar mode
+
+In [sidecar mode](../../developer-guide/knowledge-base/concepts/system-architecture/sidecar-backends.md), Prometheus scrapes the runtime and the engine as two targets of the same pod, and their series carry different label sets.
+
+| Series | Scraped from | Runtime-injected labels | Added by the PodMonitor |
+|---|---|---|---|
+| `dynamo_component_*` | `runtime` container, port `system` | `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, `worker_id`, as above | `dynamo_component_type` and the scraper labels, with `container="runtime"` |
+| Engine families (`vllm:*`, `sglang:*`) | `main` container, opt-in port `engine-metrics` | None. The engine emits its native labels, such as `model_name` and vLLM's `engine` | `dynamo_namespace` joined from the `nvidia.com/dynamo-namespace` and `nvidia.com/dynamo-worker-hash` pod labels, `dynamo_component_type`, `model` copied from `model_name` when the engine does not set it, and the scraper labels, with `container="main"` |
+
+Engine series in sidecar mode carry no `dynamo_component`, `dynamo_endpoint`, or `worker_id`. Join runtime and engine series on `namespace` and `pod`. The engine series' `dynamo_namespace` keeps its hyphens, while the runtime sanitizes its own value to underscores, so filter each family with its own form. The chart setting that enables the engine target is described in [Scrape Engine Metrics in Sidecar Mode](../../kubernetes/operations/observability.mdx#scrape-engine-metrics-in-sidecar-mode).
 
 ## Label collisions
 

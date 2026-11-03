@@ -40,6 +40,10 @@ spec:
         containers:
         - name: main
           image: lmsysorg/sglang:v0.5.22
+          # Scraped by the platform chart's dynamo-worker PodMonitor (podMonitors.engineMetrics, default true).
+          ports:
+          - name: engine-metrics
+            containerPort: 30000
           securityContext:
             capabilities:
               add: ["IPC_LOCK"]
@@ -98,6 +102,8 @@ spec:
           - --grpc-port
           - "30001"
           - --incremental-streaming-output
+          # /metrics needs --enable-metrics; --host 0.0.0.0 exposes it on the pod IP for the PodMonitor.
+          - --enable-metrics
           - --disaggregation-mode
           - prefill
           - --disaggregation-bootstrap-port
@@ -127,6 +133,10 @@ spec:
         containers:
         - name: main
           image: lmsysorg/sglang:v0.5.22
+          # Scraped by the platform chart's dynamo-worker PodMonitor (podMonitors.engineMetrics, default true).
+          ports:
+          - name: engine-metrics
+            containerPort: 30000
           securityContext:
             capabilities:
               add: ["IPC_LOCK"]
@@ -183,6 +193,8 @@ spec:
           - --grpc-port
           - "30001"
           - --incremental-streaming-output
+          # /metrics needs --enable-metrics; --host 0.0.0.0 exposes it on the pod IP for the PodMonitor.
+          - --enable-metrics
           - --disaggregation-mode
           - decode
           - --disaggregation-bootstrap-port

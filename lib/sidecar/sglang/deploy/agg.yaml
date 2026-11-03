@@ -39,6 +39,10 @@ spec:
         # Engine must be named `main`; it owns the GPU and model lifecycle.
         - name: main
           image: lmsysorg/sglang:v0.5.22
+          # Scraped by the platform chart's dynamo-worker PodMonitor (podMonitors.engineMetrics, default true).
+          ports:
+          - name: engine-metrics
+            containerPort: 30000
           # All probes pass only for HealthCheckResponse.healthy=true;
           # its raw protobuf encoding is 0x08 0x01.
           startupProbe:
@@ -87,10 +91,12 @@ spec:
           - --model-path
           - Qwen/Qwen3-0.6B
           - --host
-          - 127.0.0.1
+          - 0.0.0.0
           - --port
           - "30000"
           - --grpc-port
           - "30001"
           - --incremental-streaming-output
+          # /metrics needs --enable-metrics; --host 0.0.0.0 exposes it on the pod IP for the PodMonitor.
+          - --enable-metrics
   backendFramework: sglang
