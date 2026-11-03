@@ -94,6 +94,7 @@ pub enum WorkerSource {
 #[derive(Debug, Clone, Serialize)]
 pub struct ListenerInfo {
     endpoint: String,
+    engine_owned_mm_identity: bool,
     status: ListenerStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_error: Option<String>,
@@ -144,6 +145,7 @@ struct ListenerRuntime {
 pub struct ListenerRecord {
     endpoint: String,
     replay_endpoint: Option<String>,
+    engine_owned_mm_identity: bool,
     block_size: u32,
     indexer: Indexer,
     watermark: Arc<AtomicU64>,
@@ -154,6 +156,7 @@ impl ListenerRecord {
     fn new(
         endpoint: String,
         replay_endpoint: Option<String>,
+        engine_owned_mm_identity: bool,
         block_size: u32,
         indexer: Indexer,
         watermark: Arc<AtomicU64>,
@@ -161,6 +164,7 @@ impl ListenerRecord {
         Self {
             endpoint,
             replay_endpoint,
+            engine_owned_mm_identity,
             block_size,
             indexer,
             watermark,
@@ -179,6 +183,10 @@ impl ListenerRecord {
 
     pub(super) fn replay_endpoint(&self) -> Option<&str> {
         self.replay_endpoint.as_deref()
+    }
+
+    pub(super) fn engine_owned_mm_identity(&self) -> bool {
+        self.engine_owned_mm_identity
     }
 
     pub(super) fn block_size(&self) -> u32 {
@@ -292,6 +300,7 @@ impl ListenerRecord {
         let runtime = self.runtime.lock();
         ListenerInfo {
             endpoint: self.endpoint.clone(),
+            engine_owned_mm_identity: self.engine_owned_mm_identity,
             status: runtime.status,
             last_error: runtime.last_error.clone(),
         }
@@ -434,6 +443,7 @@ impl WorkerRegistry {
         routing_group: String,
         block_size: u32,
         replay_endpoint: Option<String>,
+        engine_owned_mm_identity: bool,
     ) -> Result<()> {
         let key = RoutingPartitionId::new(model_name, routing_group);
         let registration = self.indexer_lifecycle.lock().await;
@@ -494,6 +504,7 @@ impl WorkerRegistry {
         let record = Arc::new(ListenerRecord::new(
             endpoint,
             replay_endpoint,
+            engine_owned_mm_identity,
             bs,
             indexer,
             watermark,
@@ -922,6 +933,7 @@ mod tests {
                 "default".into(),
                 1,
                 None,
+                false,
             )
             .await
             .unwrap();
@@ -969,6 +981,7 @@ mod tests {
                 "default".into(),
                 1,
                 None,
+                false,
             )
             .await
             .unwrap();
@@ -999,6 +1012,7 @@ mod tests {
                 "default".into(),
                 1,
                 None,
+                false,
             )
             .await
             .unwrap();
@@ -1013,6 +1027,7 @@ mod tests {
             "default".into(),
             1,
             None,
+            false,
         );
         tokio::pin!(registration);
         assert!(matches!(
@@ -1075,6 +1090,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_records_engine_owned_mm_identity_per_listener() {
+        let registry = test_registry();
+        for (dp_rank, engine_owned) in [(0, false), (1, true)] {
+            registry
+                .register(
+                    1,
+                    format!("tcp://127.0.0.1:{}", 15570 + dp_rank),
+                    dp_rank,
+                    "test-model".to_string(),
+                    "default".to_string(),
+                    1,
+                    None,
+                    engine_owned,
+                )
+                .await
+                .unwrap();
+        }
+
+        let entry = registry.workers.get(&1).unwrap();
+        assert!(!entry.listeners[&0].engine_owned_mm_identity());
+        assert!(entry.listeners[&1].engine_owned_mm_identity());
+        drop(entry);
+        let listed = serde_json::to_value(registry.list()).unwrap();
+        assert_eq!(
+            listed[0]["listeners"]["1"]["engine_owned_mm_identity"],
+            true
+        );
+        registry.root_cancel_token.cancel();
+    }
+
+    #[tokio::test]
     async fn deregister_dp_rank_removes_watermark() {
         let registry = test_registry();
         registry.signal_ready();
@@ -1088,6 +1134,7 @@ mod tests {
                 "default".to_string(),
                 1,
                 None,
+                false,
             )
             .await
             .unwrap();
@@ -1101,6 +1148,7 @@ mod tests {
                 "default".to_string(),
                 1,
                 None,
+                false,
             )
             .await
             .unwrap();
@@ -1137,6 +1185,7 @@ mod tests {
                 "default".to_string(),
                 1,
                 None,
+                false,
             )
             .await
             .unwrap();
@@ -1161,6 +1210,7 @@ mod tests {
                 "default".to_string(),
                 1,
                 None,
+                false,
             )
             .await
             .unwrap();
@@ -1182,6 +1232,7 @@ mod tests {
                 "default".to_string(),
                 1,
                 None,
+                false,
             )
             .await
             .unwrap();
@@ -1213,6 +1264,7 @@ mod tests {
                 "default".to_string(),
                 1,
                 None,
+                false,
             )
             .await
             .unwrap();
@@ -1244,6 +1296,7 @@ mod tests {
                 "acme".to_string(),
                 4,
                 None,
+                false,
             )
             .await
             .unwrap();
@@ -1257,6 +1310,7 @@ mod tests {
                 "other-group".to_string(),
                 8,
                 None,
+                false,
             )
             .await
             .unwrap();
