@@ -211,6 +211,8 @@ enum AdmissionCommand {
         lease: Option<Box<RequestLifecycleLease>>,
         ack_tx: oneshot::Sender<Option<Box<RequestLifecycleLease>>>,
     },
+    /// Production advisory selections run on the caller's task; tests compare against this.
+    #[cfg(test)]
     SelectWithoutAdmission {
         request: SchedulingRequest,
         resp_tx: oneshot::Sender<Result<AdvisorySchedulingResponse, KvSchedulerError>>,
@@ -563,6 +565,168 @@ impl Drop for RequestLifecycleLease {
     }
 }
 
+/// What one selection reads. The admission actor and an advisory selection on
+/// the caller's task both build one, so both run the same selection.
+struct SelectionView<'a, C: WorkerConfigLike, Sel> {
+    workers_with_configs: &'a watch::Receiver<HashMap<WorkerId, C>>,
+    selector: &'a Mutex<Sel>,
+    available_worker_provider: Option<&'a WorkerAvailabilityProvider>,
+    overloaded_worker_provider: Option<&'a OverloadedWorkerProvider>,
+    workers_generation: &'a AtomicU64,
+    selection_trace: &'a OnceLock<SelectionTraceSpec>,
+    non_max_overlap_selection_observer: &'a OnceLock<NonMaxOverlapSelectionObserver>,
+    block_size: u32,
+    full_ranks: &'a FullRankCounts,
+}
+
+impl<C: WorkerConfigLike, Sel: WorkerSelector<C>> SelectionView<'_, C, Sel> {
+    fn select(
+        &self,
+        request: &SchedulingRequest,
+        admitted: bool,
+        prepared: Option<Box<PreparedAdmission>>,
+    ) -> Result<SelectedWorkerForRequest, KvSchedulerError> {
+        let available_worker_ids = self
+            .available_worker_provider
+            .and_then(|provider| provider(request));
+
+        {
+            let workers = self.workers_with_configs.borrow();
+            let selector = self.selector.lock();
+            let overloaded_worker_ids = self
+                .overloaded_worker_provider
+                .and_then(|provider| provider());
+            let eligibility = selection_eligibility(
+                request,
+                &workers,
+                overloaded_worker_ids.as_deref(),
+                available_worker_ids.as_deref(),
+                Some(self.full_ranks),
+                selector.uses_exclusive_affinity_target(),
+            );
+            // Checked under the borrow selection uses: a change since the actor
+            // last advanced the generation is not counted in it yet. Prepared rows
+            // never skip full ranks, so any full rank means rebuilding them.
+            let prepared = prepared
+                .filter(|_| !workers.has_changed() && self.full_ranks.is_empty())
+                .and_then(|prepared| {
+                    prepared.into_current(
+                        self.workers_generation.load(AtomicOrdering::Relaxed),
+                        available_worker_ids.as_ref(),
+                        overloaded_worker_ids.as_ref(),
+                    )
+                });
+            let trace = if admitted {
+                self.selection_trace.get().copied()
+            } else {
+                None
+            };
+            selector
+                .select_worker_prepared(
+                    WorkerSelectionInput::configured(
+                        &workers,
+                        request,
+                        eligibility,
+                        self.block_size,
+                    ),
+                    prepared,
+                    trace,
+                )
+                .map(|(selection, selection_trace)| {
+                    let non_max_overlap_selection = if request.mode.is_tracked()
+                        && self.non_max_overlap_selection_observer.get().is_some()
+                    {
+                        non_max_overlap_selection(
+                            &workers,
+                            request,
+                            eligibility,
+                            selection.worker,
+                            selection.effective_overlap_blocks,
+                        )
+                    } else {
+                        None
+                    };
+                    let config = workers
+                        .get(&selection.worker.worker_id)
+                        .expect("selected worker config must exist");
+                    let selected_worker_tiers = request
+                        .overlap
+                        .selected_worker_tiers(selection.worker, config);
+                    let worker_load = request.worker_load_for(selection.worker);
+                    let capacity = WorkerCapacity::of(config);
+                    let selected_worker_load = AdvisoryWorkerLoad {
+                        active_prefill_tokens: worker_load.active_prefill_tokens,
+                        prefill_token_capacity: capacity.prefill_budget() as usize,
+                        // TODO(rank-aware-kv-capacity): resolve the selected DP rank and preserve
+                        // capacity quality. Estimated fallbacks must not authorize load-based
+                        // admission/bypass decisions that require an exact or conservative bound.
+                        total_kv_blocks: capacity.total_kv_blocks().map(|blocks| blocks as usize),
+                    };
+                    SelectedWorkerForRequest {
+                        selection,
+                        selection_trace,
+                        selected_worker_tiers,
+                        selected_worker_load,
+                        non_max_overlap_selection,
+                    }
+                })
+        }
+    }
+}
+
+/// Fill `request.worker_loads` from `slots`. The host's reject thresholds are
+/// judged in the same pass that projects each rank's load, so selection only
+/// consults the ranks found full: no second read per rank.
+fn project_worker_loads<P: SequencePublisher + 'static>(
+    slots: &ActiveSequencesMultiWorker<P>,
+    reject_thresholds: Option<&RejectThresholdsProvider>,
+    request: &mut SchedulingRequest,
+    decay_now: Instant,
+    full_ranks: &mut FullRankCounts,
+) {
+    let full_ranks = match reject_thresholds
+        .map(|provider| provider())
+        .filter(BusyThresholds::is_configured)
+    {
+        Some(limits) => {
+            full_ranks.reset(limits);
+            Some(full_ranks)
+        }
+        None => {
+            full_ranks.clear();
+            None
+        }
+    };
+    slots.project_worker_loads_into(
+        request.token_seq.as_deref(),
+        decay_now,
+        &mut request.worker_loads,
+        full_ranks,
+    );
+}
+
+fn advisory_response(
+    selected: SelectedWorkerForRequest,
+    request: &mut SchedulingRequest,
+) -> AdvisorySchedulingResponse {
+    AdvisorySchedulingResponse {
+        selected_worker_load: selected.selected_worker_load,
+        response: SchedulingResponse {
+            best_worker: selected.selection.worker,
+            effective_overlap_blocks: selected.selection.effective_overlap_blocks,
+            cached_tokens: selected.selection.cached_tokens,
+            max_raw_cached_tokens: selected.selection.max_raw_cached_tokens,
+            selected_raw_cached_tokens: selected.selection.selected_raw_cached_tokens,
+            selected_worker_tiers: selected.selected_worker_tiers,
+            kv_transfer_source: selected.selection.kv_transfer_source,
+            kv_transfer_candidates: request.kv_transfer_candidates.take(),
+            potential_decode_blocks: selected.selection.potential_decode_blocks,
+            selection_trace: selected.selection_trace,
+            log_fields: selected.selection.log_fields,
+        },
+    }
+}
+
 struct SchedulerQueueActor<
     P: SequencePublisher,
     C: WorkerConfigLike,
@@ -592,7 +756,9 @@ struct SchedulerQueueActor<
     /// counted per worker. Refilled by `with_projected_loads`; empty while nothing is full.
     full_ranks: FullRankCounts,
     block_size: u32,
-    selector: Sel,
+    /// Shared with [`SchedulerQueue`], which runs advisory selections on the
+    /// caller's task. The lock serializes picks and runtime policy updates.
+    selector: Arc<Mutex<Sel>>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     overlap_scores_refresh: Option<Arc<RF>>,
     overlap_refresh_after: Option<Duration>,
@@ -615,6 +781,10 @@ pub struct SchedulerQueue<
     RF: OverlapScoresRefresh = NoopOverlapScoresRefresh,
 > {
     admission_tx: mpsc::Sender<AdmissionCommand>,
+    /// Read by advisory selections, which run on the caller's task.
+    slots: Arc<ActiveSequencesMultiWorker<P>>,
+    /// The actor's selector, for advisory selections.
+    selector: Arc<Mutex<Sel>>,
     runtime_policy: Arc<RuntimePolicyControl>,
     cleanup: Arc<AdmissionCleanup>,
     capacity_updates: Option<Arc<CapacityUpdates>>,
@@ -772,6 +942,9 @@ impl<
             selector.candidate_preparer().map(Arc::new),
         ));
         let exclusive_affinity = selector.uses_exclusive_affinity_target();
+        let selector = Arc::new(Mutex::new(selector));
+        let advisory_slots = Arc::clone(&slots);
+        let advisory_selector = Arc::clone(&selector);
         let actor = SchedulerQueueActor {
             pending,
             cleanup: Arc::clone(&cleanup),
@@ -803,6 +976,8 @@ impl<
         tokio::spawn(actor.run(admission_rx));
         Self {
             admission_tx,
+            slots: advisory_slots,
+            selector: advisory_selector,
             runtime_policy,
             cleanup,
             capacity_updates,
@@ -1150,19 +1325,69 @@ impl<
     /// Select a worker from current scheduler state without entering admission.
     ///
     /// This is for advisory policy probes that must not wait in the router
-    /// queue and must not book active scheduler state.
+    /// queue and must not book active scheduler state. The selection runs on
+    /// the caller's task, not the admission actor: it only reads state the
+    /// actor shares (worker loads, configurations, the selector), so it does
+    /// not wait behind the actor's other commands. The selector lock keeps
+    /// picks serialized, as on the actor. A booking the actor has not yet
+    /// applied or released is not seen, as it would not be for a caller that
+    /// did not wait on that operation.
     pub async fn select_without_admission(
         &self,
         request: SchedulingRequest,
     ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
         request.eligibility().validate_pinned_worker_allowed()?;
+        if self.admission_tx.is_closed() {
+            return Err(KvSchedulerError::SubscriberShutdown);
+        }
+        // Yield once, as the round trip to the actor did: without it the
+        // caller's task runs on without a break and the runtime loses the
+        // chance to batch other connections' I/O. Nothing is picked yet, so
+        // a caller dropped here leaves nothing behind.
+        tokio::task::yield_now().await;
+        self.select_without_admission_now(request, Instant::now())
+    }
 
+    fn select_without_admission_now(
+        &self,
+        mut request: SchedulingRequest,
+        decay_now: Instant,
+    ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
+        let mut full_ranks = FullRankCounts::default();
+        project_worker_loads(
+            &self.slots,
+            self.reject_thresholds.as_ref(),
+            &mut request,
+            decay_now,
+            &mut full_ranks,
+        );
+        let selected = SelectionView {
+            workers_with_configs: &self.workers_with_configs,
+            selector: &self.selector,
+            available_worker_provider: self.available_worker_provider.as_ref(),
+            overloaded_worker_provider: self.overloaded_worker_provider.as_ref(),
+            workers_generation: &self.workers_generation,
+            selection_trace: &self.selection_trace,
+            non_max_overlap_selection_observer: &self.non_max_overlap_selection_observer,
+            block_size: self.block_size,
+            full_ranks: &full_ranks,
+        }
+        .select(&request, false, None)?;
+        Ok(advisory_response(selected, &mut request))
+    }
+
+    /// The pre-inline path: the same advisory selection, run by the actor.
+    #[cfg(test)]
+    async fn select_without_admission_on_actor(
+        &self,
+        request: SchedulingRequest,
+    ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
+        request.eligibility().validate_pinned_worker_allowed()?;
         let (resp_tx, resp_rx) = oneshot::channel();
         let command = AdmissionCommand::SelectWithoutAdmission { request, resp_tx };
         if self.admission_tx.send(command).await.is_err() {
             return Err(KvSchedulerError::SubscriberShutdown);
         }
-
         resp_rx
             .await
             .map_err(|_| KvSchedulerError::SubscriberShutdown)?
@@ -1367,6 +1592,7 @@ impl<
                     self.turn_prepared = None;
                     let _ = ack_tx.send(lease);
                 }
+                #[cfg(test)]
                 AdmissionCommand::SelectWithoutAdmission { request, resp_tx } => {
                     let result = self.select_without_admission_inner(request, Instant::now());
                     if drain_cleanup && self.drain_cleanup() {
@@ -1379,15 +1605,16 @@ impl<
                     if !response.is_closed() {
                         let result = match update {
                             Some(update) => {
-                                let result = self.selector.update_runtime_config(update);
+                                let result = self.selector.lock().update_runtime_config(update);
                                 if result.is_ok() {
                                     // A replacement may need fewer inputs; prepare what it reads.
-                                    self.candidate_preparer
-                                        .store(self.selector.candidate_preparer().map(Arc::new));
+                                    self.candidate_preparer.store(
+                                        self.selector.lock().candidate_preparer().map(Arc::new),
+                                    );
                                 }
                                 result
                             }
-                            None => self.selector.runtime_config(),
+                            None => self.selector.lock().runtime_config(),
                         };
                         let _ = response.send(result);
                     }
@@ -1863,28 +2090,12 @@ impl<
         handle: impl FnOnce(&Self, &mut SchedulingRequest) -> R,
     ) -> R {
         request.worker_loads = std::mem::take(&mut self.projected_loads);
-        // The host's reject thresholds are judged in the same pass that projects each rank's
-        // load, so selection only consults the ranks found full: no second read per rank.
-        let full_ranks = match self
-            .reject_thresholds
-            .as_ref()
-            .map(|provider| provider())
-            .filter(BusyThresholds::is_configured)
-        {
-            Some(limits) => {
-                self.full_ranks.reset(limits);
-                Some(&mut self.full_ranks)
-            }
-            None => {
-                self.full_ranks.clear();
-                None
-            }
-        };
-        self.slots.project_worker_loads_into(
-            request.token_seq.as_deref(),
+        project_worker_loads(
+            &self.slots,
+            self.reject_thresholds.as_ref(),
+            &mut request,
             decay_now,
-            &mut request.worker_loads,
-            full_ranks,
+            &mut self.full_ranks,
         );
         let result = handle(self, &mut request);
         self.projected_loads = std::mem::take(&mut request.worker_loads);
@@ -1899,94 +2110,21 @@ impl<
         admitted: bool,
         prepared: Option<Box<PreparedAdmission>>,
     ) -> Result<SelectedWorkerForRequest, KvSchedulerError> {
-        let available_worker_ids = self
-            .available_worker_provider
-            .as_ref()
-            .and_then(|provider| provider(request));
-
-        {
-            let workers = self.workers_with_configs.borrow();
-            let overloaded_worker_ids = self
-                .overloaded_worker_provider
-                .as_ref()
-                .and_then(|provider| provider());
-            let eligibility = selection_eligibility(
-                request,
-                &workers,
-                overloaded_worker_ids.as_deref(),
-                available_worker_ids.as_deref(),
-                Some(&self.full_ranks),
-                self.selector.uses_exclusive_affinity_target(),
-            );
-            // Checked under the borrow selection uses: a change since the actor
-            // last advanced the generation is not counted in it yet. Prepared rows
-            // never skip full ranks, so any full rank means rebuilding them.
-            let prepared = prepared
-                .filter(|_| !workers.has_changed() && self.full_ranks.is_empty())
-                .and_then(|prepared| {
-                    prepared.into_current(
-                        self.workers_generation.load(AtomicOrdering::Relaxed),
-                        available_worker_ids.as_ref(),
-                        overloaded_worker_ids.as_ref(),
-                    )
-                });
-            let trace = if admitted {
-                self.selection_trace.get().copied()
-            } else {
-                None
-            };
-            self.selector
-                .select_worker_prepared(
-                    WorkerSelectionInput::configured(
-                        &workers,
-                        request,
-                        eligibility,
-                        self.block_size,
-                    ),
-                    prepared,
-                    trace,
-                )
-                .map(|(selection, selection_trace)| {
-                    let non_max_overlap_selection = if request.mode.is_tracked()
-                        && self.non_max_overlap_selection_observer.get().is_some()
-                    {
-                        non_max_overlap_selection(
-                            &workers,
-                            request,
-                            eligibility,
-                            selection.worker,
-                            selection.effective_overlap_blocks,
-                        )
-                    } else {
-                        None
-                    };
-                    let config = workers
-                        .get(&selection.worker.worker_id)
-                        .expect("selected worker config must exist");
-                    let selected_worker_tiers = request
-                        .overlap
-                        .selected_worker_tiers(selection.worker, config);
-                    let worker_load = request.worker_load_for(selection.worker);
-                    let capacity = WorkerCapacity::of(config);
-                    let selected_worker_load = AdvisoryWorkerLoad {
-                        active_prefill_tokens: worker_load.active_prefill_tokens,
-                        prefill_token_capacity: capacity.prefill_budget() as usize,
-                        // TODO(rank-aware-kv-capacity): resolve the selected DP rank and preserve
-                        // capacity quality. Estimated fallbacks must not authorize load-based
-                        // admission/bypass decisions that require an exact or conservative bound.
-                        total_kv_blocks: capacity.total_kv_blocks().map(|blocks| blocks as usize),
-                    };
-                    SelectedWorkerForRequest {
-                        selection,
-                        selection_trace,
-                        selected_worker_tiers,
-                        selected_worker_load,
-                        non_max_overlap_selection,
-                    }
-                })
+        SelectionView {
+            workers_with_configs: &self.workers_with_configs,
+            selector: &self.selector,
+            available_worker_provider: self.available_worker_provider.as_ref(),
+            overloaded_worker_provider: self.overloaded_worker_provider.as_ref(),
+            workers_generation: &self.workers_generation,
+            selection_trace: &self.selection_trace,
+            non_max_overlap_selection_observer: &self.non_max_overlap_selection_observer,
+            block_size: self.block_size,
+            full_ranks: &self.full_ranks,
         }
+        .select(request, admitted, prepared)
     }
 
+    #[cfg(test)]
     fn select_without_admission_inner(
         &mut self,
         request: SchedulingRequest,
@@ -1994,23 +2132,7 @@ impl<
     ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
         self.with_projected_loads(request, decay_now, |actor, request| {
             let selected = actor.select_worker_for_request(request, false, None)?;
-
-            Ok(AdvisorySchedulingResponse {
-                selected_worker_load: selected.selected_worker_load,
-                response: SchedulingResponse {
-                    best_worker: selected.selection.worker,
-                    effective_overlap_blocks: selected.selection.effective_overlap_blocks,
-                    cached_tokens: selected.selection.cached_tokens,
-                    max_raw_cached_tokens: selected.selection.max_raw_cached_tokens,
-                    selected_raw_cached_tokens: selected.selection.selected_raw_cached_tokens,
-                    selected_worker_tiers: selected.selected_worker_tiers,
-                    kv_transfer_source: selected.selection.kv_transfer_source,
-                    kv_transfer_candidates: request.kv_transfer_candidates.take(),
-                    potential_decode_blocks: selected.selection.potential_decode_blocks,
-                    selection_trace: selected.selection_trace,
-                    log_fields: selected.selection.log_fields,
-                },
-            })
+            Ok(advisory_response(selected, request))
         })
     }
 
@@ -3870,7 +3992,7 @@ policy_classes:
             projected_loads: FxHashMap::with_capacity_and_hasher(8, Default::default()),
             full_ranks: FullRankCounts::default(),
             block_size: 16,
-            selector,
+            selector: Arc::new(Mutex::new(selector)),
             prefill_load_estimator: None,
             overlap_scores_refresh: None::<Arc<NoopOverlapScoresRefresh>>,
             overlap_refresh_after: None,
@@ -6256,5 +6378,152 @@ policy_classes:
         queue.update().await;
         following_rx.await.unwrap().unwrap();
         enqueue.await.unwrap();
+    }
+
+    fn advisory_probe(request_id: &str, isl_tokens: usize) -> SchedulingRequest {
+        let (mut request, _rx) = make_request(request_id, isl_tokens);
+        request.mode = ScheduleMode::QueryOnly {
+            request_id: Some(request_id.to_string()),
+        };
+        request.resp_tx = None;
+        request
+    }
+
+    /// Runs on the caller's task, the advisory selection picks what the actor
+    /// would have picked from the same state.
+    #[tokio::test]
+    async fn inline_advisory_selection_matches_the_actor() {
+        let (queue, _slots) = make_queue_with_custom_selector(
+            4,
+            16,
+            64,
+            None,
+            MinDecodeSelector { rendezvous: None },
+        );
+        // Load the workers unevenly with booked requests.
+        for (index, isl) in [96, 32, 160, 64, 128, 16].into_iter().enumerate() {
+            let (request, rx) = make_request(&format!("booked-{index}"), isl);
+            queue.enqueue(request).await;
+            rx.await.unwrap().unwrap();
+        }
+        for (index, isl) in [8, 64, 200, 33].into_iter().enumerate() {
+            let inline = queue
+                .select_without_admission(advisory_probe(&format!("inline-{index}"), isl))
+                .await
+                .unwrap();
+            let actor = queue
+                .select_without_admission_on_actor(advisory_probe(&format!("actor-{index}"), isl))
+                .await
+                .unwrap();
+            assert_eq!(inline.response.best_worker, actor.response.best_worker);
+            assert_eq!(
+                inline.response.potential_decode_blocks,
+                actor.response.potential_decode_blocks
+            );
+            assert_eq!(
+                inline.selected_worker_load.active_prefill_tokens,
+                actor.selected_worker_load.active_prefill_tokens
+            );
+        }
+    }
+
+    /// Many advisory selections at once, beside bookings: none fails, none
+    /// waits on the actor, and each picks a configured worker.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_inline_advisory_selections_stay_valid() {
+        let (queue, _slots) = make_queue_with_custom_selector(
+            4,
+            16,
+            64,
+            None,
+            MinDecodeSelector { rendezvous: None },
+        );
+        let mut tasks = Vec::new();
+        for index in 0..256 {
+            let queue = Arc::clone(&queue);
+            tasks.push(tokio::spawn(async move {
+                if index % 16 == 0 {
+                    let (request, rx) = make_request(&format!("booked-{index}"), 32);
+                    queue.enqueue(request).await;
+                    rx.await.unwrap().unwrap();
+                }
+                queue
+                    .select_without_admission(advisory_probe(&format!("probe-{index}"), 48))
+                    .await
+                    .unwrap()
+                    .response
+                    .best_worker
+            }));
+        }
+        for task in tasks {
+            let worker = tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .expect("advisory selection finished")
+                .unwrap();
+            assert!(worker.worker_id < 4);
+        }
+    }
+
+    /// Advisory selection latency and throughput, on the caller's task and on
+    /// the actor, for 1, 16 and 256 concurrent callers. Run with
+    /// `cargo test --release -p dynamo-kv-router --lib advisory_selection_cost -- --ignored --nocapture`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "benchmark"]
+    async fn advisory_selection_cost() {
+        let (queue, _slots) = make_queue_with_custom_selector(
+            4,
+            16,
+            64,
+            None,
+            MinDecodeSelector { rendezvous: None },
+        );
+        for (index, isl) in [96, 32, 160, 64].into_iter().enumerate() {
+            let (request, rx) = make_request(&format!("booked-{index}"), isl);
+            queue.enqueue(request).await;
+            rx.await.unwrap().unwrap();
+        }
+        const TOTAL: usize = 20_000;
+        for inline in [false, true] {
+            for callers in [1usize, 16, 256] {
+                let per_caller = TOTAL / callers;
+                let started = std::time::Instant::now();
+                let tasks: Vec<_> = (0..callers)
+                    .map(|caller| {
+                        let queue = Arc::clone(&queue);
+                        tokio::spawn(async move {
+                            let mut samples = Vec::with_capacity(per_caller);
+                            for call in 0..per_caller {
+                                let probe = advisory_probe(&format!("p-{caller}-{call}"), 48);
+                                let begin = std::time::Instant::now();
+                                let result = if inline {
+                                    queue.select_without_admission(probe).await
+                                } else {
+                                    queue.select_without_admission_on_actor(probe).await
+                                };
+                                result.unwrap();
+                                samples.push(begin.elapsed().as_nanos() as u64);
+                            }
+                            samples
+                        })
+                    })
+                    .collect();
+                let mut samples = Vec::with_capacity(TOTAL);
+                for task in tasks {
+                    samples.extend(task.await.unwrap());
+                }
+                let elapsed = started.elapsed().as_secs_f64();
+                samples.sort_unstable();
+                let pick =
+                    |q: f64| samples[((samples.len() as f64 - 1.0) * q) as usize] as f64 / 1000.0;
+                println!(
+                    "advisory {:>6} callers={:>3}: p50 {:>8.1} us  p99 {:>8.1} us  {:>9.0} calls/s",
+                    if inline { "inline" } else { "actor" },
+                    callers,
+                    pick(0.5),
+                    pick(0.99),
+                    samples.len() as f64 / elapsed,
+                );
+            }
+        }
     }
 }
