@@ -262,6 +262,7 @@ def _image_video_processor(video_format: str | None):
     image = Image.new("RGB", (5, 4), (200, 30, 30))
     processor.image_loader.load_image_batch = AsyncMock(return_value=[image])
     ip = MagicMock()
+    ip.config = SimpleNamespace(model_type="test_vl")  # not in TRT-LLM's registry
     ip.get_mm_token_ids.return_value = None
     ip.get_num_tokens_per_image.return_value = 4
     ip.get_preferred_media_io_kwargs.return_value = (
@@ -283,13 +284,29 @@ def _route_video(monkeypatch, path: str, video) -> None:
     monkeypatch.setattr(mmp, "async_load_video", AsyncMock(return_value=video))
 
 
-def _request(image: bool = True, video: bool = True) -> dict:
-    mm_data = {}
+_IMAGE_URL = "http://169.254.169.254/i.png"
+_VIDEO_URL = "http://169.254.169.254/v.mp4"
+
+
+def _request(image: bool = True, video: bool = True, video_first: bool = False) -> dict:
+    """A request as the frontend forwards it: media in ``multi_modal_data``,
+    chat structure in ``extra_args.messages``."""
+    parts, mm_data = [], {}
     if image:
-        mm_data["image_url"] = [{"Url": "http://169.254.169.254/i.png"}]
+        mm_data["image_url"] = [{"Url": _IMAGE_URL}]
+        parts.append({"type": "image_url", "image_url": {"url": _IMAGE_URL}})
     if video:
-        mm_data["video_url"] = [{"Url": "http://169.254.169.254/v.mp4"}]
-    return {"multi_modal_data": mm_data, "token_ids": [1, 2, 3]}
+        mm_data["video_url"] = [{"Url": _VIDEO_URL}]
+        parts.insert(
+            0 if video_first else len(parts),
+            {"type": "video_url", "video_url": {"url": _VIDEO_URL}},
+        )
+    parts.append({"type": "text", "text": "What colors are these?"})
+    return {
+        "multi_modal_data": mm_data,
+        "token_ids": [1, 2, 3],
+        "extra_args": {"messages": [{"role": "user", "content": parts}]},
+    }
 
 
 @pytest.mark.asyncio
@@ -329,6 +346,7 @@ async def test_image_only_request_keeps_pil_images(monkeypatch) -> None:
     )
 
     assert processed["multi_modal_data"] == {"image": [image]}
+    assert "mm_item_order" not in processed
     processor.input_processor.get_preferred_media_io_kwargs.assert_not_called()
 
 
@@ -343,6 +361,7 @@ async def test_video_only_request_keeps_float_frames(monkeypatch) -> None:
     )
 
     assert processed["multi_modal_data"]["video"] == [source]
+    assert "mm_item_order" not in processed
     processor.input_processor.get_preferred_media_io_kwargs.assert_not_called()
 
 
@@ -392,6 +411,162 @@ def test_video_frames_to_uint8_round_trips_every_value() -> None:
     assert np.array_equal(video.frames, frames_u8)
     assert video.metadata == source.metadata and video.audio is source.audio
     assert all(torch.equal(a, b) for a, b in zip(before, source.frames))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "video_first, expected",
+    [
+        (False, [("image", 0), ("video", 0)]),
+        (True, [("video", 0), ("image", 0)]),
+    ],
+    ids=["image_first", "video_first"],
+)
+async def test_image_and_video_request_carries_the_prompt_item_order(
+    video_first, expected, monkeypatch
+) -> None:
+    """TRT-LLM matches each item to its tokens and embeddings through
+    ``mm_item_order`` when a request has more than one modality."""
+    processor, _ = _image_video_processor("np")
+    _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
+
+    processed = await processor.process_openai_request(
+        _request(video_first=video_first),
+        embeddings=None,
+        ep_disaggregated_params=None,
+    )
+
+    assert [(e["modality"], e["index"]) for e in processed["mm_item_order"]] == expected
+
+
+@pytest.mark.asyncio
+async def test_item_order_follows_the_models_modality_grouping(monkeypatch) -> None:
+    """A chat template that writes all image placeholders before the video ones
+    (TRT-LLM's ``prompt_modality_order``) decides the order, not the messages."""
+    processor, _ = _image_video_processor(None)
+    _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
+    monkeypatch.setattr(
+        mmp.MULTIMODAL_PLACEHOLDER_REGISTRY,
+        "get_prompt_modality_order",
+        lambda model_type: ("image", "video", "audio"),
+    )
+
+    processed = await processor.process_openai_request(
+        _request(video_first=True), embeddings=None, ep_disaggregated_params=None
+    )
+
+    assert [e["modality"] for e in processed["mm_item_order"]] == ["image", "video"]
+
+
+@pytest.mark.asyncio
+async def test_media_parts_that_do_not_match_the_loaded_items_are_rejected(
+    monkeypatch,
+) -> None:
+    """Without one message part per loaded item the order is unknown; reject
+    the request instead of letting TRT-LLM fail on it."""
+    processor, _ = _image_video_processor("np")
+    _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
+    request = _request()
+    request["extra_args"]["messages"][0]["content"].pop(0)  # drop the image part
+
+    with pytest.raises(HttpStatusError) as excinfo:
+        await processor.process_openai_request(
+            request, embeddings=None, ep_disaggregated_params=None
+        )
+    assert excinfo.value.status == 400
+
+
+_IMAGE_TOKEN, _VIDEO_TOKEN = 900, 901
+
+
+def _with_placeholders(request: dict) -> dict:
+    """Give ``request`` token_ids with one placeholder per media part, in
+    message order, as the chat template writes them."""
+    token_of = {"image_url": _IMAGE_TOKEN, "video_url": _VIDEO_TOKEN}
+    parts = request["extra_args"]["messages"][0]["content"]
+    request["token_ids"] = (
+        [1] + [token_of[p["type"]] for p in parts if p["type"] in token_of] + [2, 3]
+    )
+    return request
+
+
+class _ExpandingInputProcessor:
+    """Stands in for a Qwen-VL input processor under TRT-LLM's hashing wrapper:
+    each image placeholder expands to 3 tokens and each video placeholder to 5."""
+
+    TOKENS = {_IMAGE_TOKEN: 3, _VIDEO_TOKEN: 5}
+
+    def __init__(self) -> None:
+        self.multimodal_hashing_supported = None
+
+    def __call__(self, inputs, sampling_params):
+        ids = [
+            t for t in inputs["prompt_token_ids"] for _ in range(self.TOKENS.get(t, 1))
+        ]
+        return ids, {"multimodal_data": {}}
+
+    def get_num_tokens_per_image(self, *, image, **kwargs) -> int:
+        return self.TOKENS[_IMAGE_TOKEN]
+
+    def get_num_tokens_per_video(self, *, video, **kwargs) -> int:
+        return self.TOKENS[_VIDEO_TOKEN]
+
+    def get_vocab_size(self) -> int:
+        return 1000
+
+    def get_mm_token_ids(self) -> torch.Tensor:
+        return torch.tensor(list(self.TOKENS), dtype=torch.int32)
+
+    def get_mm_special_token_ids(self):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_image_and_video_request_after_single_modality_requests_passes_trtllm_hashing(
+    monkeypatch,
+) -> None:
+    """A worker sees image-only and video-only requests first, which settles
+    TRT-LLM's hashing as supported; after that a failure in it is raised and
+    stops the engine. Image + video requests, in either order, must then hash
+    with every item at its own tokens."""
+    from tensorrt_llm import SamplingParams
+    from tensorrt_llm.inputs.registry import create_input_processor_with_hash
+
+    processor, _ = _image_video_processor("np")
+    _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
+    input_processor = _ExpandingInputProcessor()
+    hashed = create_input_processor_with_hash(input_processor)
+
+    async def run(request):
+        inputs = await processor.process_openai_request(
+            _with_placeholders(request), embeddings=None, ep_disaggregated_params=None
+        )
+        return inputs, hashed(inputs, SamplingParams())
+
+    await run(_request(video=False))
+    await run(_request(image=False))
+    assert input_processor.multimodal_hashing_supported is True
+
+    token_of = {"image": _IMAGE_TOKEN, "video": _VIDEO_TOKEN}
+    for video_first in (False, True):
+        inputs, (ids, extra) = await run(_request(video_first=video_first))
+        mm_input = extra["multimodal_input"]
+        placed = [
+            ids[pos : pos + n]
+            for pos, n in zip(
+                mm_input.multimodal_positions, mm_input.multimodal_lengths
+            )
+        ]
+        expected = []
+        for e in inputs["mm_item_order"]:
+            token = token_of[e["modality"]]
+            expected.append([token] * input_processor.TOKENS[token])
+        assert placed == expected
+
+    # Without the order TRT-LLM counts the first modality's tokens only.
+    inputs.pop("mm_item_order")
+    with pytest.raises(AssertionError, match="does not match sum of per-unit lengths"):
+        hashed(inputs, SamplingParams())
 
 
 @pytest.mark.asyncio

@@ -19,13 +19,14 @@ import logging
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol, Tuple
+from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple
 from urllib.parse import urlparse
 
 import torch
 from safetensors.torch import load as safetensors_load
 from safetensors.torch import load_file as safetensors_load_file
 from tensorrt_llm.inputs.multimodal_data import VideoData
+from tensorrt_llm.inputs.registry import MULTIMODAL_PLACEHOLDER_REGISTRY
 from tensorrt_llm.inputs.utils import async_load_video
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
@@ -95,6 +96,51 @@ def _video_frames_to_uint8(video: VideoData) -> VideoData:
     return dataclasses.replace(
         video, frames=frames_u8.permute(0, 2, 3, 1).contiguous().numpy()
     )
+
+
+# Message content part types that carry a loaded media item.
+_PART_MODALITY = {"image_url": "image", "video_url": "video"}
+
+
+def _mm_item_order(
+    messages: List[Dict],
+    counts: Dict[str, int],
+    prompt_modality_order: Optional[Sequence[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Prompt-order manifest for TRT-LLM's ``inputs["mm_item_order"]``: one
+    ``{"modality", "index"}`` per item, ``index`` being the item's position in
+    ``multi_modal_data[modality]``.
+
+    Built as trtllm-serve builds it: items in the order their parts appear in
+    the messages, which is the order the chat template writes placeholders in,
+    then grouped by modality when the model's template groups them that way
+    (``prompt_modality_order``). ``counts`` is the number of loaded items per
+    modality; the message parts must account for exactly those.
+    """
+    order: List[Dict[str, Any]] = []
+    seen = dict.fromkeys(counts, 0)
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            modality = (
+                _PART_MODALITY.get(part.get("type")) if isinstance(part, dict) else None
+            )
+            if modality in seen:
+                order.append({"modality": modality, "index": seen[modality]})
+                seen[modality] += 1
+    if seen != counts:
+        raise HttpStatusError(
+            400,
+            "Cannot order the request's images and videos: the messages have "
+            f"{seen} media parts but {counts} items were loaded",
+            "multi_modal_data",
+        )
+    if prompt_modality_order:
+        rank = {m: i for i, m in enumerate(prompt_modality_order)}
+        order.sort(key=lambda e: (rank.get(e["modality"], len(rank)), e["index"]))
+    return order
 
 
 class TokenizerProtocol(Protocol):
@@ -246,6 +292,17 @@ class MultimodalRequestProcessor:
             return False
         prefs = get_prefs() or {}
         return prefs.get("video", {}).get("format") == "np"
+
+    def _prompt_modality_order(self) -> Optional[Tuple[str, ...]]:
+        """Modality order the model's chat template groups placeholders in
+        (TRT-LLM's ``prompt_modality_order``), or None when the template keeps
+        the message order. Looked up by the model's ``model_type``, as
+        trtllm-serve does."""
+        config = getattr(self.input_processor, "config", None)
+        model_type = getattr(config, "model_type", None)
+        if not isinstance(model_type, str):
+            return None
+        return MULTIMODAL_PLACEHOLDER_REGISTRY.get_prompt_modality_order(model_type)
 
     def is_url(self, path: str) -> bool:
         """Check if a path is a URL."""
@@ -735,6 +792,17 @@ class MultimodalRequestProcessor:
 
             if processed_mm_data:
                 processed_inputs["multi_modal_data"] = processed_mm_data
+                if len(processed_mm_data) > 1:
+                    # With more than one modality, TRT-LLM needs the items'
+                    # prompt order to give each item its own tokens and
+                    # embeddings. Without it, its multimodal hashing counts
+                    # the first modality's tokens only, and the assertion
+                    # that catches this stops the engine.
+                    processed_inputs["mm_item_order"] = _mm_item_order(
+                        request_messages(request),
+                        {m: len(items) for m, items in processed_mm_data.items()},
+                        self._prompt_modality_order(),
+                    )
 
                 # TRT-LLM echoes these UUIDs into its KV-reuse events, so the
                 # router's per-image identity matches what the worker caches.
