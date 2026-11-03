@@ -760,7 +760,7 @@ async fn engine_loss_withdraws_worker_and_fails_the_process() {
     .unwrap_or_else(|_| panic!("engine loss did not withdraw the worker\n{}", child.logs()));
     env.withdrawn("backend", &router).await;
     assert!(child.is_running(), "withdrawal must precede process exit");
-    // 1 is the engine-loss error; 911 would be the forced-shutdown deadline.
+    // 1 is the engine-loss error; a forced shutdown (exit 911) would read 143.
     assert_eq!(child.exit().await.code(), Some(1), "{}", child.logs());
     assert!(
         child.logs().contains("vLLM engine lost"),

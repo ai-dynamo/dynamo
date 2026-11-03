@@ -50,17 +50,15 @@ pub struct Fixture {
 }
 
 impl Fixture {
-    /// Sets what `Watch` reports for `Inference`; `Check` follows `set_health` instead.
-    pub async fn set_inference_serving(&self, is_serving: bool) {
-        if is_serving {
-            self.health
-                .set_serving::<InferenceServer<ControlledService>>()
-                .await;
+    /// Sets what `Watch` reports for overall health (`""`); `Check` follows
+    /// `set_health` instead.
+    pub async fn set_overall_serving(&self, is_serving: bool) {
+        let status = if is_serving {
+            tonic_health::ServingStatus::Serving
         } else {
-            self.health
-                .set_not_serving::<InferenceServer<ControlledService>>()
-                .await;
-        }
+            tonic_health::ServingStatus::NotServing
+        };
+        self.health.set_service_status("", status).await;
     }
 
     pub fn set_reasoning_parser(&self, parser: &str) {

@@ -841,8 +841,7 @@ impl LLMEngine for VllmSidecarEngine {
         tokio::spawn(async move {
             tokio::select! {
                 _ = stop.cancelled() => {}
-                why = client::watch_inference(health, open_timeout) => {
-                    tracing::warn!(reason = %why.escape_debug(), "vLLM engine lost");
+                why = client::watch_health(health, open_timeout) => {
                     let _ = reason.set(why);
                     lost.cancel();
                 }

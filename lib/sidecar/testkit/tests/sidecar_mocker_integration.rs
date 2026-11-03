@@ -760,17 +760,10 @@ async fn vllm_malformed_terminal_fails_then_recovers() {
     .await;
 }
 
-/// vLLM reporting NOT_SERVING or dropping its connection after startup resolves `engine_lost`.
+/// vLLM reporting NOT_SERVING after startup resolves `engine_lost`; the
+/// process test covers a dropped connection.
 #[tokio::test]
-async fn vllm_engine_lost_on_not_serving_or_disconnect() {
-    let assert_lost = |error: DynamoError| {
-        assert_eq!(
-            error.error_type(),
-            ErrorType::Backend(BackendError::EngineShutdown)
-        );
-        assert!(error.to_string().contains("vLLM engine lost"), "{error}");
-    };
-
+async fn vllm_engine_lost_on_not_serving() {
     let mut fixture =
         vllm_fixture::Fixture::start(Controller::default(), FixtureConfig::default()).await;
     let engine = fixture.engine().await;
@@ -780,17 +773,14 @@ async fn vllm_engine_lost_on_not_serving_or_disconnect() {
     tokio::time::timeout(std::time::Duration::from_millis(300), &mut lost)
         .await
         .expect_err("a SERVING engine is not lost");
-    fixture.set_inference_serving(false).await;
-    assert_lost(bounded("engine lost on NOT_SERVING", lost).await);
+    fixture.set_overall_serving(false).await;
+    let error = bounded("engine lost on NOT_SERVING", lost).await;
+    assert_eq!(
+        error.error_type(),
+        ErrorType::Backend(BackendError::EngineShutdown)
+    );
+    assert!(error.to_string().contains("vLLM engine lost"), "{error}");
     finish(&mut fixture, &engine).await;
-
-    let mut fixture =
-        vllm_fixture::Fixture::start(Controller::default(), FixtureConfig::default()).await;
-    let engine = fixture.engine().await;
-    engine.start(0).await.unwrap();
-    fixture.shutdown().await;
-    assert_lost(bounded("engine lost on disconnect", engine.engine_lost()).await);
-    bounded("sidecar cleanup", engine.cleanup()).await.unwrap();
 }
 
 #[tokio::test]

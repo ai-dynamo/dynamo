@@ -255,22 +255,18 @@ pub(crate) fn protocol_error(message: impl Into<String>) -> DynamoError {
     dynamo_sidecar_common::protocol_error("vLLM", message)
 }
 
-/// Follows `vllm.Inference` health until vLLM stops serving, and returns why.
-/// vLLM v0.33.0 reports NOT_SERVING only on engine failure or shutdown; with
-/// vllm#63870 it also does while paused or asleep, so watch `liveness` there.
-pub(crate) async fn watch_inference(channel: Channel, open_timeout: Duration) -> String {
+/// Follows vLLM's overall gRPC health (`""`) until vLLM stops serving, and
+/// returns why. vLLM changes it only on engine failure or shutdown, never while
+/// paused or asleep.
+pub(crate) async fn watch_health(channel: Channel, open_timeout: Duration) -> String {
     let request = HealthCheckRequest {
-        service: INFERENCE_SERVICE.to_string(),
+        service: String::new(),
     };
     let mut stream =
         match tokio::time::timeout(open_timeout, HealthClient::new(channel).watch(request)).await {
             Ok(Ok(response)) => response.into_inner(),
-            Ok(Err(status)) => return format!("{INFERENCE_SERVICE} health watch failed: {status}"),
-            Err(_) => {
-                return format!(
-                    "{INFERENCE_SERVICE} health watch did not open in {open_timeout:?}"
-                );
-            }
+            Ok(Err(status)) => return format!("health watch failed: {status}"),
+            Err(_) => return format!("health watch did not open in {open_timeout:?}"),
         };
     loop {
         match stream.message().await {
@@ -278,11 +274,11 @@ pub(crate) async fn watch_inference(channel: Channel, open_timeout: Duration) ->
                 let status =
                     ServingStatus::try_from(response.status).unwrap_or(ServingStatus::Unknown);
                 if status != ServingStatus::Serving {
-                    return format!("{INFERENCE_SERVICE} reported {}", status.as_str_name());
+                    return format!("health reported {}", status.as_str_name());
                 }
             }
-            Ok(None) => return format!("{INFERENCE_SERVICE} health stream ended"),
-            Err(status) => return format!("{INFERENCE_SERVICE} health stream failed: {status}"),
+            Ok(None) => return "health stream ended".to_string(),
+            Err(status) => return format!("health stream failed: {status}"),
         }
     }
 }
