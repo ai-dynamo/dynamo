@@ -20,7 +20,11 @@ If an output stream closes early without an error, the sidecar treats the closur
 
 ## SGLang
 
-The standard gRPC generation path requires one completion per request (`n=1`). It does not accept multimodal input. The sidecar provides basic structured output. It supports fewer constraint controls than the in-process backend.
+The standard gRPC generation path requires one completion per request (`n=1`). It accepts image, video, and audio input when the engine reports support for the media type. The engine reports this support in `grpc_features`. The flags are `image_inputs`, `video_inputs`, and `audio_inputs`. Other media requests return HTTP 400. The sidecar does not accept per-request `mm_processor_kwargs` or separate encoder handoffs. The sidecar provides basic structured output. It supports fewer constraint controls than the in-process backend.
+
+Multimodal disaggregated serving is untested. Media-aware KV routing on wide-token SGLang builds is not supported. See the [multimodal compatibility limits](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#wide-token-sglang-builds).
+
+SGLang downloads HTTP and HTTPS media URLs from any host by default. This includes `127.0.0.1` and SGLang's own HTTP API. Start SGLang with `--allowed-media-domains` to limit which hosts it can access.
 
 The sidecar does not register the engine's LoRA adapter list. Dynamo cannot load or unload adapters through this sidecar. An adapter name in an internal request does not add the adapter to OpenAI model lookup.
 
@@ -32,7 +36,7 @@ Request migration can retry a stream that closes early without an error. See the
 
 ## TensorRT-LLM
 
-The standard generation path requires one completion per request (`n=1`). It accepts images. It does not accept separate encoder handoffs, video, or audio. The sidecar provides basic structured output. It supports fewer constraint controls than the in-process backend. The sidecar returns output logprobs (token log probabilities). It does not return prompt logprobs.
+The standard generation path requires one completion per request (`n=1`). It accepts images and video when the engine reports support for them. It does not accept separate encoder handoffs or audio. The sidecar provides basic structured output. It supports fewer constraint controls than the in-process backend. The sidecar returns output logprobs (token log probabilities). It does not return prompt logprobs.
 
 The sidecar publishes routing-load snapshots. These are not the per-iteration Forward Pass Metrics (FPM) that load-based planning needs. Request migration does not retry an output stream that closes early without an error. It also does not retry KV-session or KV-transfer failures.
 
