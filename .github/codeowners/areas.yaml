@@ -29,6 +29,7 @@ areas:
   - lib/llm/src/http/service/
   - lib/llm/src/lora.rs
   - lib/llm/src/lora/
+  - lib/llm/src/lora_routing.rs
   - lib/lora/
   - lib/llm/src/preprocessor.rs
   - lib/llm/src/preprocessor/
@@ -65,6 +66,7 @@ areas:
   - lib/kv-router/tests/
   - lib/llm/src/kv_router.rs
   - lib/llm/src/kv_router/
+  - lib/llm/src/routing_policy.rs
   - lib/llm/src/kv_router/indexer/
   - lib/llm/src/kv_router/prefill_router/
   - lib/llm/src/kv_router/publisher/
