@@ -667,9 +667,12 @@ mod tests {
             pin_runtime_lora_workers(&filter, "dyn-lora-test", &eligible, [pinned]).unwrap(),
             first
         );
-        let conflicting = *eligible.difference(&first).next().unwrap();
-        let error = pin_runtime_lora_workers(&filter, "dyn-lora-test", &eligible, [conflicting])
-            .unwrap_err();
+        let alternate = *eligible.difference(&first).next().unwrap();
+        assert_eq!(
+            pin_runtime_lora_workers(&filter, "dyn-lora-test", &eligible, [alternate]).unwrap(),
+            HashSet::from([alternate])
+        );
+        let error = pin_runtime_lora_workers(&filter, "dyn-lora-test", &eligible, [4]).unwrap_err();
         assert_eq!(
             error.downcast_ref::<DynamoError>().unwrap().error_type(),
             ErrorType::InvalidArgument
