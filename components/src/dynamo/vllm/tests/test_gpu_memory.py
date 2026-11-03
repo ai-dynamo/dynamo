@@ -359,7 +359,9 @@ def test_invalid_rank_or_world_size_fails_before_descriptor_read(
         lambda *args: pytest.fail("Invalid rank must fail before descriptor access"),
     )
     with pytest.raises(ValueError):
-        gpu_memory.open_region("invalid-rank", (4, 24), rank=rank, world_size=world_size)
+        gpu_memory.open_region(
+            "invalid-rank", (4, 24), rank=rank, world_size=world_size
+        )
 
 
 @pytest.mark.pre_merge

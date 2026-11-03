@@ -819,9 +819,10 @@ def test_gpu_tp_discovery_accepts_matching_raw_layout(monkeypatch, tp_size):
     assert KV_HINT_TRANSFER_CAPABILITY_KEY not in fields
     loader.assert_called_once_with("kvbm.vllm_integration.gpu_layout")
     layout.parallel_layout_domain.assert_called_once_with(base, tp_size)
-    assert args.kv_transfer_config.kv_connector_extra_config[
-        "router_hint_transfer_domain"
-    ] == base
+    assert (
+        args.kv_transfer_config.kv_connector_extra_config["router_hint_transfer_domain"]
+        == base
+    )
 
 
 @pytest.mark.parametrize(

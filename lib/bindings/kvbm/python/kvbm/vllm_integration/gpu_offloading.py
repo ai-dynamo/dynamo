@@ -489,9 +489,7 @@ class GPUOffloadingSpec(OffloadingSpec):
             or config.canonical_layout
             or config.replicated_layout
         ):
-            raise ValueError(
-                "Direct GPU KV cache requires raw-layout TP without PP/CP"
-            )
+            raise ValueError("Direct GPU KV cache requires raw-layout TP without PP/CP")
         self.gpu_rank_devices = self.extra_config.get("gpu_rank_devices")
         if world_size > 1 and (
             not isinstance(self.gpu_rank_devices, list)
