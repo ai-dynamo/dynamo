@@ -1970,6 +1970,79 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
+    /// The engine's stream, which records when it is dropped.
+    struct DropFlagStream {
+        inner: Pin<Box<dyn futures::Stream<Item = Annotated<BackendOutput>> + Send>>,
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl futures::Stream for DropFlagStream {
+        type Item = Annotated<BackendOutput>;
+
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            self.inner.as_mut().poll_next(cx)
+        }
+    }
+
+    impl Drop for DropFlagStream {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Sends two outputs, then ends, through a [`DropFlagStream`].
+    struct DropFlagEngine {
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+        for DropFlagEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+            let stream = DropFlagStream {
+                inner: Box::pin(futures::stream::iter([
+                    create_mock_output(101),
+                    create_mock_output(102),
+                ])),
+                dropped: self.dropped.clone(),
+            };
+            Ok(ResponseStream::new(Box::pin(stream), request.context()))
+        }
+    }
+
+    /// Migration lets go of the attempt's stream when its own stream ends, not when its caller
+    /// drops it, and it stays ended. A caller may hold an ended stream for a while; the stages
+    /// below must see their stream end at once.
+    #[tokio::test]
+    async fn migration_drops_the_attempt_stream_when_its_stream_ends() {
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let engine = Arc::new(DropFlagEngine {
+            dropped: dropped.clone(),
+        });
+        let request =
+            Context::with_id_and_metadata(create_mock_request(2), context_id, BTreeMap::new());
+        let migration = Migration::new(1, None, TEST_MODEL.to_string(), Arc::new(Metrics::new()));
+        let mut stream = migration.generate(request, engine).await.unwrap();
+
+        assert!(stream.next().await.is_some());
+        assert!(stream.next().await.is_some());
+        assert!(!dropped.load(Ordering::SeqCst));
+        assert!(stream.next().await.is_none());
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the attempt's stream must be dropped when Migration's stream ends"
+        );
+        assert!(stream.next().await.is_none(), "an ended stream stays ended");
+    }
+
     #[tokio::test]
     async fn explicit_backend_pin_does_not_retry_the_same_worker() {
         let context_id = uuid::Uuid::new_v4().to_string();
