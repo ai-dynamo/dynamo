@@ -269,6 +269,26 @@ fn validate_opaque_source(source_uri: &str) -> Result<(), RuntimeLoraError> {
     Ok(())
 }
 
+pub fn validate_runtime_lora_identity(
+    model: &str,
+    base: &str,
+    source: &str,
+    key: &str,
+) -> Result<(), RuntimeLoraError> {
+    if base.is_empty()
+        || base.len() > MAX_RUNTIME_BASE_MODEL_BYTES
+        || contains_forbidden_character(base)
+        || model != base
+    {
+        return Err(RuntimeLoraError::InvalidModelId);
+    }
+    validate_opaque_source(source)?;
+    if adapter_key(base, source) != key {
+        return Err(RuntimeLoraError::InvalidModelId);
+    }
+    Ok(())
+}
+
 pub fn resolve_runtime_lora_model<K, F, B>(
     requested_model: &str,
     config: &RuntimeLoraConfig,
@@ -370,6 +390,21 @@ mod tests {
             }),
             HashSet::from([RUNTIME_LORA_CAPABILITY_TAINT.to_string()]),
         )
+    }
+
+    #[test]
+    fn runtime_identity_validation_preserves_opaque_sources() {
+        let source = "wandb-artifact:///entity/model|version";
+        let key = adapter_key("base", source);
+        assert!(validate_runtime_lora_identity("base", "base", source, &key).is_ok());
+        assert!(validate_runtime_lora_identity("other", "base", source, &key).is_err());
+        assert!(validate_runtime_lora_identity("base", "base", source, "wrong").is_err());
+        for invalid in ["", "x\n", &"a".repeat(MAX_RUNTIME_SOURCE_URI_BYTES + 1)] {
+            assert!(validate_runtime_lora_identity("base", "base", invalid, &key).is_err());
+        }
+        for invalid in ["", "x\0", &"a".repeat(MAX_RUNTIME_BASE_MODEL_BYTES + 1)] {
+            assert!(validate_runtime_lora_identity(invalid, invalid, source, &key).is_err());
+        }
     }
 
     #[test]

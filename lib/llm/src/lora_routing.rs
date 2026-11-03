@@ -53,16 +53,32 @@ pub(crate) fn check_candidate_policy(
     )?;
     if let Some(routing) = request.routing.as_ref()
         && policy(request).requires_candidate_policy()
-        && (routing.base_model_name.is_none()
-            || routing.lora_source_uri.is_none()
-            || routing.lora_resolution_version
-                != Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION))
     {
-        return Err(dynamo_runtime::error::DynamoError::builder()
-            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
-            .message("invalid_lora_model_id")
-            .build()
-            .into());
+        let valid = match (
+            routing.base_model_name.as_deref(),
+            routing.lora_source_uri.as_ref(),
+            routing.lora_name.as_deref(),
+        ) {
+            (Some(base), Some(source), Some(key)) => {
+                routing.lora_resolution_version
+                    == Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION)
+                    && crate::lora::runtime::validate_runtime_lora_identity(
+                        &request.model,
+                        base,
+                        source.as_str(),
+                        key,
+                    )
+                    .is_ok()
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err(dynamo_runtime::error::DynamoError::builder()
+                .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+                .message("invalid_lora_model_id")
+                .build()
+                .into());
+        }
     }
     Ok(())
 }
@@ -339,7 +355,10 @@ mod tests {
             .build()
             .unwrap();
         let complete = RoutingHints {
-            lora_name: Some("adapter".into()),
+            lora_name: Some(crate::lora::runtime::adapter_key(
+                "base",
+                "custom:///opaque",
+            )),
             base_model_name: Some("base".into()),
             lora_source_uri: Some(crate::lora::runtime::RuntimeLoraSourceUri::new(
                 "custom:///opaque".into(),
@@ -367,6 +386,12 @@ mod tests {
         }
         request.routing = Some(complete.clone());
         assert!(check_candidate_policy(&request, true).is_ok());
+        request.routing.as_mut().unwrap().lora_name = Some("wrong-key".into());
+        assert!(check_candidate_policy(&request, true).is_err());
+        request.routing = Some(complete.clone());
+        request.model = "wrong-base".into();
+        assert!(check_candidate_policy(&request, true).is_err());
+        request.model = "base".into();
         request.routing.as_mut().unwrap().lora_resolution_version = Some(u16::MAX);
         assert!(check_candidate_policy(&request, true).is_err());
         request.routing = Some(RoutingHints {
