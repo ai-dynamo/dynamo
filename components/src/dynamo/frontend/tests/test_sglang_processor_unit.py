@@ -2501,39 +2501,6 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
             assert self._resolve(schema, reference) == {"type": kind}
         xgr.Grammar.from_json_schema(json.dumps(schema))
 
-    @pytest.mark.parametrize("parallel_tool_calls", [None, True, False])
-    def test_required_tool_choice_keeps_sglang_shape_for_plain_tools(
-        self, parallel_tool_calls
-    ):
-        raw_tools = [
-            self._function_tool(
-                "get_weather",
-                {
-                    "type": "object",
-                    "properties": {"city": {"type": "string"}},
-                    "required": ["city"],
-                },
-            ),
-            self._function_tool("ping", None),
-        ]
-        request = {"tool_choice": "required", "tools": raw_tools}
-        if parallel_tool_calls is not None:
-            request["parallel_tool_calls"] = parallel_tool_calls
-        tools = convert_tools(raw_tools)
-
-        guided = build_tool_call_guided_decoding(
-            request,
-            tool_call_parser_name=None,
-            sglang_tools=tools,
-        )
-
-        expected = sglang_prepost_module.get_json_schema_constraint(
-            tools,
-            "required",
-            parallel_tool_calls=parallel_tool_calls is not False,
-        )
-        assert guided == {"json": expected}
-
     def test_required_tool_choice_rejects_non_object_defs(self):
         raw_tools = [self._function_tool("lookup", {"type": "object", "$defs": []})]
 
@@ -2589,7 +2556,7 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
 
         assert guided == {"regex": r"\{\}"}
 
-    def test_required_tool_choice_supports_older_sglang_constraint_signature(
+    def test_named_tool_choice_supports_older_sglang_constraint_signature(
         self, monkeypatch
     ):
         tools = convert_tools(

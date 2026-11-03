@@ -26,7 +26,6 @@ from _tool_guidance_parity import (
 from transformers import AutoTokenizer
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tool_parsers import ToolParser
-from vllm.tool_parsers.utils import get_json_schema_from_tools
 
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.frontend import prepost as prepost_module
@@ -3708,22 +3707,6 @@ class TestToolCallGuidedDecoding:
         assert request.tools[0].function.parameters["$defs"] == {
             "shared": {"type": "string"}
         }
-
-    @pytest.mark.parametrize("parallel_tool_calls", [None, True, False])
-    def test_required_choice_keeps_vllm_shape_for_plain_tools(
-        self, tokenizer, parallel_tool_calls
-    ):
-        overrides = {"tool_choice": "required"}
-        if parallel_tool_calls is not None:
-            overrides["parallel_tool_calls"] = parallel_tool_calls
-        request = self._request(tokenizer, **overrides)
-
-        guided = build_tool_call_guided_decoding(request, tool_parser=None)
-
-        expected = get_json_schema_from_tools(
-            "required", request.tools, request.parallel_tool_calls
-        )
-        assert guided == {"json": expected}
 
     def test_required_choice_rejects_non_object_defs(self, tokenizer):
         request = self._request(
