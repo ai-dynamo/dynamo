@@ -305,9 +305,12 @@ async def test_lifecycle_replaces_dgd_pod_evicted_by_disk_pressure(
     manager = deploying_manager(monkeypatch)
     assert manager.core is not None
     deleted: list[str] = []
+    replacement_listed = False
 
     async def list_pods(*args, **kwargs):
+        nonlocal replacement_listed
         if deleted:
+            replacement_listed = True
             return SimpleNamespace(items=[fake_pod("frontend-new", "Pending")])
         return SimpleNamespace(
             items=[fake_pod("frontend-old", "Failed", "Evicted", DISK_PRESSURE_MESSAGE)]
@@ -317,8 +320,8 @@ async def test_lifecycle_replaces_dgd_pod_evicted_by_disk_pressure(
         deleted.append(name)
 
     async def get(name: str):
-        # Grove cannot finish the deployment while the evicted Pod holds its slot.
-        return dgdr_status("Deployed" if deleted else "Deploying")
+        # Grove cannot finish the deployment until the evicted Pod is replaced.
+        return dgdr_status("Deployed" if replacement_listed else "Deploying")
 
     manager.core.list_namespaced_pod = AsyncMock(side_effect=list_pods)
     manager.core.delete_namespaced_pod = AsyncMock(side_effect=delete_pod)
@@ -332,6 +335,8 @@ async def test_lifecycle_replaces_dgd_pod_evicted_by_disk_pressure(
 
     assert result["status"]["phase"] == "Deployed"
     assert deleted == ["frontend-old"]
+    assert replacement_listed
+    assert manager.core.list_namespaced_pod.await_count == 2
     manager.core.list_namespaced_pod.assert_awaited_with(
         "test-namespace",
         label_selector="nvidia.com/dynamo-graph-deployment-name=deployment",
