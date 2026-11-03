@@ -7,7 +7,6 @@
 //! outage does not drop what a caller already knows.
 
 use std::collections::{HashMap, HashSet};
-use std::error::Error;
 use std::future::Future;
 use std::time::Duration;
 
@@ -17,6 +16,7 @@ use tokio::time::{Interval, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
+use crate::client::error_chain;
 use crate::{DiscoveryClientError, GlobalDiscoveryClient};
 
 /// Whether a cache holds the service's current list. A cache that has stopped
@@ -359,18 +359,6 @@ fn described<'a>(routers: impl Iterator<Item = &'a RouterReplica>) -> Vec<String
     described
 }
 
-/// The error and each of its causes, joined with `: `.
-fn error_chain(error: &dyn Error) -> String {
-    let mut chain = error.to_string();
-    let mut source = error.source();
-    while let Some(cause) = source {
-        chain.push_str(": ");
-        chain.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    chain
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -417,24 +405,6 @@ mod tests {
             .collect::<Vec<_>>();
         ids.sort();
         ids
-    }
-
-    #[test]
-    fn error_chain_joins_every_cause() {
-        #[derive(Debug, thiserror::Error)]
-        #[error("request failed")]
-        struct Outer(#[source] Middle);
-        #[derive(Debug, thiserror::Error)]
-        #[error("connect failed")]
-        struct Middle(#[source] std::io::Error);
-        let error = Outer(Middle(std::io::Error::new(
-            std::io::ErrorKind::ConnectionRefused,
-            "connection refused",
-        )));
-        assert_eq!(
-            error_chain(&error),
-            "request failed: connect failed: connection refused"
-        );
     }
 
     async fn next_set(routers: &mut watch::Receiver<HashSet<RouterReplica>>) -> Vec<String> {
