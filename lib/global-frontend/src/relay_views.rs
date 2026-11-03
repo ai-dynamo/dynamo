@@ -242,7 +242,7 @@ impl RelayStreamGuard {
     pub(crate) fn replace_state_snapshot(
         &mut self,
         revision: u64,
-        pools: impl IntoIterator<Item = (PoolId, View)>,
+        state: Option<View>,
     ) -> Result<(), ReceiveError> {
         if let Some(current) = self.revision
             && revision <= current
@@ -259,18 +259,16 @@ impl RelayStreamGuard {
                 .pool_views(&self.source.pool)
                 .find(|(source, _)| *source == &self.source)
                 .map(|(_, view)| view.source());
-            let pools = pools
-                .into_iter()
-                .map(|(pool, state)| {
-                    let old = views
-                        .pool_views(&pool)
-                        .find(|(source, _)| *source == &self.source)
-                        .map(|(_, view)| view);
-                    let view = ReceivedView::new(state, old, &pool, inner.signals.as_deref());
-                    (pool, view)
-                })
-                .collect::<Vec<_>>();
-            views.replace_snapshot(&self.token, pools)?;
+            let pool = &self.source.pool;
+            let view = state.map(|state| {
+                let old = views
+                    .pool_views(pool)
+                    .find(|(source, _)| *source == &self.source)
+                    .map(|(_, view)| view);
+                let view = ReceivedView::new(state, old, pool, inner.signals.as_deref());
+                (pool.clone(), view)
+            });
+            views.replace_snapshot(&self.token, view)?;
             let next = self.current_source(&views);
             if previous != next {
                 inner.forget_source(&self.source.pool, previous);
@@ -280,30 +278,26 @@ impl RelayStreamGuard {
         self.inner.refresh();
         Ok(())
     }
-    pub(crate) fn upsert_state(
-        &mut self,
-        revision: u64,
-        pool: PoolId,
-        state: View,
-    ) -> Result<(), ReceiveError> {
+    pub(crate) fn upsert_state(&mut self, revision: u64, state: View) -> Result<(), ReceiveError> {
         self.check_revision(revision)?;
         let inner = Arc::clone(&self.inner);
         let mut views = inner.views.lock();
+        let pool = &self.source.pool;
         let previous = views
-            .pool_views(&pool)
+            .pool_views(pool)
             .find(|(source, _)| *source == &self.source)
             .map(|(_, view)| view);
         let readiness_changed =
             previous.is_none_or(|old| old.state.ready_models() != state.ready_models());
         let old_source = previous.map(|view| view.source());
-        let received = ReceivedView::new(state, previous, &pool, inner.signals.as_deref());
+        let received = ReceivedView::new(state, previous, pool, inner.signals.as_deref());
         let new_source = received.source();
         views.upsert(&self.token, pool.clone(), received)?;
         if old_source != Some(new_source) {
-            inner.forget_source(&pool, old_source);
+            inner.forget_source(pool, old_source);
         }
         if !readiness_changed {
-            inner.project_pool(&pool, &views);
+            inner.project_pool(pool, &views);
         }
         drop(views);
         self.revision = Some(revision);
@@ -312,17 +306,20 @@ impl RelayStreamGuard {
         }
         Ok(())
     }
-    pub fn remove(&mut self, revision: u64, pool: &PoolId) -> Result<(), ReceiveError> {
+    pub fn remove(&mut self, revision: u64) -> Result<(), ReceiveError> {
         self.check_revision(revision)?;
         let inner = Arc::clone(&self.inner);
         let mut views = inner.views.lock();
         let previous = self.current_source(&views);
-        views.remove(&self.token, pool)?;
-        inner.forget_source(pool, previous);
+        views.remove(&self.token, &self.source.pool)?;
+        inner.forget_source(&self.source.pool, previous);
         drop(views);
         self.revision = Some(revision);
         self.inner.refresh();
         Ok(())
+    }
+    pub(crate) fn accepted_revision(&self) -> Option<u64> {
+        self.revision
     }
     fn check_revision(&mut self, received: u64) -> Result<(), ReceiveError> {
         let Some(expected) = self.revision.and_then(|value| value.checked_add(1)) else {
@@ -441,14 +438,14 @@ mod tests {
         };
         let mut ready = catalog.open(source("1"));
         ready
-            .replace_state_snapshot(0, [(pool.clone(), state(1, true))])
+            .replace_state_snapshot(0, Some(state(1, true)))
             .unwrap();
         let mut unready = catalog.open(source("2"));
         unready
-            .replace_state_snapshot(0, [(pool.clone(), state(2, false))])
+            .replace_state_snapshot(0, Some(state(2, false)))
             .unwrap();
         assert_eq!(current.borrow().pools().len(), 1);
-        ready.remove(1, &pool).unwrap();
+        ready.remove(1).unwrap();
         assert!(current.borrow().pools().is_empty());
         cancel.cancel();
     }
@@ -493,10 +490,10 @@ mod tests {
             service: pool.to_string(),
             replica: "1".into(),
         });
-        view.replace_state_snapshot(0, [(pool.clone(), state(1, false))])
+        view.replace_state_snapshot(0, Some(state(1, false)))
             .unwrap();
         assert_eq!(current.borrow().pools().len(), 1);
-        view.upsert_state(1, pool.clone(), state(1, true)).unwrap();
+        view.upsert_state(1, state(1, true)).unwrap();
         assert_eq!(current.borrow().pools().len(), 2);
         drop(view);
         assert_eq!(
@@ -561,7 +558,7 @@ mod tests {
         let mut kv = wire::KvPoolLoadUpdate::decode(raw.kv_load).unwrap();
         kv.window_ms = 20;
         raw.kv_load = kv.encode_to_vec().into();
-        view.replace_state_snapshot(0, [(pool.clone(), loaded_state(raw.clone()))])
+        view.replace_state_snapshot(0, Some(loaded_state(raw.clone())))
             .unwrap();
         assert!(signals.occupancy(&pool).is_some());
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -576,8 +573,7 @@ mod tests {
             .aliases
             .push("another-alias".into());
         raw.catalog = metadata.encode_to_vec().into();
-        view.upsert_state(1, pool.clone(), loaded_state(raw.clone()))
-            .unwrap();
+        view.upsert_state(1, loaded_state(raw.clone())).unwrap();
         assert!(
             signals.occupancy(&pool).is_none(),
             "metadata must not revive old reports"
@@ -585,22 +581,16 @@ mod tests {
         let mut ready = wire::ServingReadinessUpdate::decode(raw.readiness).unwrap();
         ready.entries[0].state = wire::ServingReadinessState::Unavailable as i32;
         raw.readiness = ready.encode_to_vec().into();
-        view.upsert_state(2, pool.clone(), loaded_state(raw.clone()))
-            .unwrap();
+        view.upsert_state(2, loaded_state(raw.clone())).unwrap();
         ready.entries[0].state = wire::ServingReadinessState::Ready as i32;
         raw.readiness = ready.encode_to_vec().into();
-        view.upsert_state(3, pool.clone(), loaded_state(raw))
-            .unwrap();
+        view.upsert_state(3, loaded_state(raw)).unwrap();
         assert!(
             signals.occupancy(&pool).is_none(),
             "readiness recovery must preserve report age"
         );
-        view.upsert_state(
-            4,
-            pool.clone(),
-            loaded_state(super::fixtures::state(true, 1, 1, 11)),
-        )
-        .unwrap();
+        view.upsert_state(4, loaded_state(super::fixtures::state(true, 1, 1, 11)))
+            .unwrap();
         assert!(
             signals.occupancy(&pool).is_some(),
             "a new load sequence restores freshness"
@@ -645,7 +635,7 @@ mod tests {
             .requests_generating = Some(32);
         serving.models.push(other);
         raw.serving_load = serving.encode_to_vec().into();
-        view.replace_state_snapshot(0, [(pool.clone(), loaded_state(raw))])
+        view.replace_state_snapshot(0, Some(loaded_state(raw)))
             .unwrap();
         assert!(signals.occupancy(&pool).is_none());
         let candidate = |model| {
@@ -711,30 +701,33 @@ mod tests {
         let mut first = catalog.open(source("1"));
         let mut second = catalog.open(source("2"));
         first
-            .replace_state_snapshot(5, [(pool.clone(), state(1, true))])
+            .replace_state_snapshot(5, Some(state(1, true)))
             .unwrap();
+        assert_eq!(first.accepted_revision(), Some(5));
         second
-            .replace_state_snapshot(5, [(pool.clone(), state(2, true))])
+            .replace_state_snapshot(5, Some(state(2, true)))
             .unwrap();
         assert!(matches!(
-            first.replace_state_snapshot(5, []),
+            first.replace_state_snapshot(5, None),
             Err(ReceiveError::StaleSnapshot { .. })
         ));
         assert_eq!(snapshot.borrow().pools().len(), 1);
         assert!(matches!(
-            first.upsert_state(7, pool.clone(), state(1, true)),
+            first.upsert_state(7, state(1, true)),
             Err(ReceiveError::RevisionGap { .. })
         ));
+        assert_eq!(first.accepted_revision(), None);
         assert_eq!(snapshot.borrow().pools().len(), 1);
         drop(second);
         assert!(snapshot.borrow().pools().is_empty());
         assert!(matches!(
-            first.upsert_state(8, pool.clone(), state(1, true)),
+            first.upsert_state(8, state(1, true)),
             Err(ReceiveError::Apply(ApplyError::SnapshotRequired))
         ));
         first
-            .replace_state_snapshot(9, [(pool, state(1, true))])
+            .replace_state_snapshot(9, Some(state(1, true)))
             .unwrap();
+        assert_eq!(first.accepted_revision(), Some(9));
         assert_eq!(snapshot.borrow().pools().len(), 1);
         cancel.cancel();
     }
@@ -761,7 +754,7 @@ mod tests {
                     service: "relay".into(),
                     replica: "1".into(),
                 });
-                view.replace_state_snapshot(0, [(pool.id.clone(), state(1, true))])
+                view.replace_state_snapshot(0, Some(state(1, true)))
                     .unwrap();
                 view
             })

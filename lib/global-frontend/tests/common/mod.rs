@@ -33,14 +33,25 @@ fn producer(generation: u64) -> relay::ProducerIdentity {
     }
 }
 
+#[allow(dead_code)] // Some test binaries only use state_for_replica.
 pub fn state(
     ready: bool,
     catalog_generation: u64,
     load_generation: u64,
     window: u64,
 ) -> grpc::PoolState {
+    state_for_replica(1, ready, catalog_generation, load_generation, window)
+}
+
+pub fn state_for_replica(
+    drt_instance_id: u64,
+    ready: bool,
+    catalog_generation: u64,
+    load_generation: u64,
+    window: u64,
+) -> grpc::PoolState {
     let identity = relay::RelayIdentity {
-        drt_instance_id: 1,
+        drt_instance_id,
         relay_incarnation: 1,
     };
     let catalog = relay::KvPoolCatalogUpdate {

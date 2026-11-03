@@ -180,7 +180,7 @@ async fn stream_pool(
         replica: source.runtime_id.to_string(),
     });
     let mut revision = 0_u64;
-    view.replace_state_snapshot(revision, [(pool.clone(), Arc::new(initial))])?;
+    view.replace_state_snapshot(revision, Some(Arc::new(initial)))?;
     tracing::info!(%pool, %relay, "following the pool's Relay state");
     loop {
         tokio::select! {
@@ -207,7 +207,7 @@ async fn stream_pool(
         revision = revision
             .checked_add(1)
             .context("Relay receiving revision exhausted")?;
-        view.upsert_state(revision, pool.clone(), Arc::new(state))?;
+        view.upsert_state(revision, Arc::new(state))?;
     }
 }
 

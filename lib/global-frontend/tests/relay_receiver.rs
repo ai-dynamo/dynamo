@@ -5,8 +5,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dynamo_global_common::{PoolKey, grpc};
-use dynamo_llm::pool_relay::wan::grpc::protocol as relay;
-use prost::Message;
 mod common;
 use dynamo_global_frontend::{
     Metrics, PoolSnapshot, RelayGatedPoolCatalog, app, serve, serve_relay_views,
@@ -32,27 +30,6 @@ fn replica_id(replica: &str) -> u64 {
     }
 }
 
-fn replica_state(replica: &str) -> grpc::PoolState {
-    let mut state = common::state(true, 1, 1, 1);
-    let identity = relay::RelayIdentity {
-        drt_instance_id: replica_id(replica),
-        relay_incarnation: 1,
-    };
-    let mut catalog = relay::KvPoolCatalogUpdate::decode(state.catalog).unwrap();
-    catalog.relay = Some(identity);
-    state.catalog = catalog.encode_to_vec().into();
-    let mut ready = relay::ServingReadinessUpdate::decode(state.readiness).unwrap();
-    ready.relay = Some(identity);
-    state.readiness = ready.encode_to_vec().into();
-    let mut serving = relay::ServingLoadUpdate::decode(state.serving_load).unwrap();
-    serving.relay = Some(identity);
-    state.serving_load = serving.encode_to_vec().into();
-    let mut kv = relay::KvPoolLoadUpdate::decode(state.kv_load).unwrap();
-    kv.relay = Some(identity);
-    state.kv_load = kv.encode_to_vec().into();
-    state
-}
-
 fn hello(replica: &str) -> PoolViewFrame {
     PoolViewFrame {
         event: Some(Event::Hello(Hello {
@@ -73,7 +50,13 @@ fn snapshot(revision: u64, replica: &str) -> PoolViewFrame {
         event: Some(Event::Snapshot(Snapshot {
             revision,
             pool_present: true,
-            state: Some(replica_state(replica)),
+            state: Some(common::state_for_replica(
+                replica_id(replica),
+                true,
+                1,
+                1,
+                1,
+            )),
         })),
     }
 }

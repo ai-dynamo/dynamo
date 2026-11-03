@@ -14,7 +14,7 @@ use dynamo_global_common::grpc::pool_view_receiver_server::{
 use dynamo_global_common::grpc::{
     Hello, MAX_POOL_VIEW_FRAME_BYTES, PoolState, PoolViewFrame, PublishResult,
 };
-use dynamo_global_common::{PoolId, PoolIdDeriver, PoolKey, V1PoolIdDeriver};
+use dynamo_global_common::{PoolIdDeriver, PoolKey, V1PoolIdDeriver};
 use dynamo_global_router::RelaySource;
 use dynamo_llm::pool_relay::wan::grpc::protocol::{
     KvPoolCatalogUpdate, KvPoolLoadUpdate, ServingLoadUpdate, ServingReadinessUpdate,
@@ -87,22 +87,22 @@ impl PoolViewReceiver for ReceiverService {
         };
         let pool = V1PoolIdDeriver.derive(&hello.pool_key);
         let source = RelaySourceKey {
-            pool: pool.clone(),
+            pool,
             service: hello.logical_service.clone(),
             replica: hello.replica_id.clone(),
         };
         let mut stream = self.catalog.open(source);
-        let mut revision = None;
         loop {
             let frame = tokio::select! {
                 _ = self.shutdown.cancelled() => return Err(Status::unavailable("receiver shutting down")),
                 frame = frames.message() => frame?,
             };
             let Some(frame) = frame else { break };
-            apply_frame(&mut stream, &pool, &hello, &mut revision, frame)?;
+            apply_frame(&mut stream, &hello, frame)?;
         }
-        let accepted_revision =
-            revision.ok_or_else(|| Status::failed_precondition("snapshot required"))?;
+        let accepted_revision = stream
+            .accepted_revision()
+            .ok_or_else(|| Status::failed_precondition("snapshot required"))?;
         Ok(Response::new(PublishResult { accepted_revision }))
     }
 }
@@ -138,9 +138,7 @@ fn decode_state(state: PoolState, hello: &RelayHello) -> anyhow::Result<RelayPoo
 #[allow(clippy::result_large_err)]
 fn apply_frame(
     stream: &mut RelayStreamGuard,
-    pool: &PoolId,
     hello: &RelayHello,
-    revision: &mut Option<u64>,
     frame: PoolViewFrame,
 ) -> Result<(), Status> {
     match frame.event {
@@ -158,11 +156,9 @@ fn apply_frame(
             if !snapshot.pool_present && state.is_some() {
                 return Err(Status::invalid_argument("withdrawn pool has state"));
             }
-            let pools = state.into_iter().map(|state| (pool.clone(), state));
             stream
-                .replace_state_snapshot(snapshot.revision, pools)
+                .replace_state_snapshot(snapshot.revision, state)
                 .map_err(|error| Status::failed_precondition(error.to_string()))?;
-            *revision = Some(snapshot.revision);
         }
         Some(Event::Upsert(update)) => {
             let state = update.state.ok_or_else(|| {
@@ -172,15 +168,13 @@ fn apply_frame(
                 .map(Arc::new)
                 .map_err(|error| Status::invalid_argument(error.to_string()))?;
             stream
-                .upsert_state(update.revision, pool.clone(), state)
+                .upsert_state(update.revision, state)
                 .map_err(|error| Status::failed_precondition(error.to_string()))?;
-            *revision = Some(update.revision);
         }
         Some(Event::Remove(update)) => {
             stream
-                .remove(update.revision, pool)
+                .remove(update.revision)
                 .map_err(|error| Status::failed_precondition(error.to_string()))?;
-            *revision = Some(update.revision);
         }
         _ => return Err(Status::invalid_argument("unexpected Relay frame")),
     }
