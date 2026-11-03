@@ -2965,7 +2965,9 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
                 status: code,
                 semantic: semantic
                     .filter(|error| {
-                        overloaded || error.reason().as_str() == "request.unprocessable_entity"
+                        overloaded
+                            || (code == StatusCode::UNPROCESSABLE_ENTITY
+                                && error.reason().as_str() == "request.unprocessable_entity")
                     })
                     .cloned(),
                 sanitized: overloaded.then_some(SanitizedError::Overloaded),
@@ -7497,40 +7499,38 @@ mod tests {
     async fn preflight_retains_semantic_422_with_json_diagnostic() {
         use dynamo_runtime::error::{ErrorClass, ErrorReason};
 
-        let error = DynamoError::builder()
-            .class(ErrorClass::InvalidRequest)
-            .reason(ErrorReason::unprocessable_entity())
-            .diagnostic(
-                serde_json::json!({"code":422,"message":"private validation detail"}).to_string(),
-            )
-            .build();
-        let event = Annotated::<NvCreateChatCompletionStreamResponse> {
-            data: None,
-            id: None,
-            event: Some("error".into()),
-            comment: None,
-            error: Some(error),
-        };
-        let extracted = extract_backend_error_if_present(&event).unwrap();
-        assert_eq!(
-            extracted
-                .semantic
-                .as_ref()
-                .map(|error| error.reason().as_str()),
-            Some("request.unprocessable_entity")
-        );
-        let response = match check_for_backend_error(
-            futures::stream::iter([event]),
-            BackendErrorCheck::UntilFirstEvent,
-        )
-        .await
+        for (code, expected_message) in [(422, "Invalid request"), (415, "Unsupported Media Type")]
         {
-            Err(response) => response,
-            Ok(_) => panic!("validation must fail preflight"),
-        };
-        assert_eq!(response.0, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(response.1.message, "Invalid request");
-        assert_ne!(response.1.metric_error_type, Some(ErrorType::Overload));
+            let error = DynamoError::builder()
+                .class(ErrorClass::InvalidRequest)
+                .reason(ErrorReason::unprocessable_entity())
+                .diagnostic(
+                    serde_json::json!({"code":code,"message":"private validation detail"})
+                        .to_string(),
+                )
+                .build();
+            let event = Annotated::<NvCreateChatCompletionStreamResponse> {
+                data: None,
+                id: None,
+                event: Some("error".into()),
+                comment: None,
+                error: Some(error),
+            };
+            let extracted = extract_backend_error_if_present(&event).unwrap();
+            assert_eq!(extracted.semantic.is_some(), code == 422);
+            let response = match check_for_backend_error(
+                futures::stream::iter([event]),
+                BackendErrorCheck::UntilFirstEvent,
+            )
+            .await
+            {
+                Err(response) => response,
+                Ok(_) => panic!("validation must fail preflight"),
+            };
+            assert_eq!(response.0.as_u16(), code);
+            assert_eq!(response.1.message, expected_message);
+            assert_ne!(response.1.metric_error_type, Some(ErrorType::Overload));
+        }
     }
 
     #[test]
