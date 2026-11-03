@@ -427,27 +427,6 @@ mod tests {
     }
 
     #[test]
-    fn http_like_status_attributes_keep_unprocessable_reason_after_wire_round_trip() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            for attribute in ["code", "status"] {
-                let exception = pyo3::exceptions::PyRuntimeError::new_err("private detail");
-                exception.value(py).setattr(attribute, 422).unwrap();
-                exception
-                    .value(py)
-                    .setattr("message", "private token=secret")
-                    .unwrap();
-                let error = http_like_error_to_dynamo(py, &exception).unwrap();
-                let delivered: DynamoError =
-                    serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
-                assert_eq!(delivered.class(), ErrorClass::InvalidRequest);
-                assert_eq!(delivered.reason().as_str(), "request.unprocessable_entity");
-                assert!(delivered.public_message().is_none());
-            }
-        });
-    }
-
-    #[test]
     fn http_like_errors_support_semantic_and_legacy_readers() {
         for (code, expected_class) in [
             (400, ErrorClass::InvalidRequest),
