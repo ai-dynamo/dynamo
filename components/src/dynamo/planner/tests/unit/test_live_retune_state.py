@@ -8,10 +8,18 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
+from collections.abc import Callable
+from typing import Optional
 
 import pytest
 
-from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.config.planner_config import (
+    LIVE_RETUNE_K8S_TIMEOUT_SECONDS,
+    PlannerConfig,
+    live_retune_io_timeout_seconds,
+    live_retune_lease_margin_seconds,
+    live_retune_min_lease_seconds,
+)
 from dynamo.planner.retune.live.contracts import (
     LABEL_DGD,
     LABEL_DGD_UID,
@@ -613,20 +621,120 @@ def test_leadership_conflicts_and_errors() -> None:
     assert not a.release() and not a.is_leader()
 
 
-def test_leadership_validates_arguments_and_caps_the_margin() -> None:
+def test_leadership_validates_arguments() -> None:
     kube = FakeRetuneKube()
     clock = FakeClock()
     with pytest.raises(ValueError):
         LeaseLeadership(kube, DGD, identity="")
     with pytest.raises(ValueError):
         LeaseLeadership(kube, DGD, identity="a", lease_duration_s=0)
-    capped = leadership(kube, clock)
-    assert capped.margin_s == 15.0
-    tiny = LeaseLeadership(
-        kube, DGD, identity="a", lease_duration_s=15.0, margin_s=100.0
+    # No time left to lead in; the default margin is three request timeouts.
+    for margin_s in (None, 15.0, 100.0, -1.0, math.nan):
+        with pytest.raises(ValueError, match="margin_s"):
+            LeaseLeadership(
+                kube, DGD, identity="a", lease_duration_s=15.0, margin_s=margin_s
+            )
+    assert leadership(kube, clock).margin_s == 15.0
+    short = LeaseLeadership(
+        kube, DGD, identity="a", lease_duration_s=15.0, margin_s=10.0
     )
-    assert tiny.margin_s == 10.0
-    tiny.set_owner(dataclasses.replace(DGD, uid="uid-2"))
-    assert tiny.step() == "acquired"
-    owner = kube.leases[tiny.name]["metadata"]["ownerReferences"][0]
+    assert short.margin_s == 10.0
+    short.set_owner(dataclasses.replace(DGD, uid="uid-2"))
+    assert short.step() == "acquired"
+    owner = kube.leases[short.name]["metadata"]["ownerReferences"][0]
     assert owner["uid"] == "uid-2"
+
+
+# The shortest lease the live supervisor accepts, with its request timeout.
+K8S_TIMEOUT = LIVE_RETUNE_K8S_TIMEOUT_SECONDS
+MIN_LEASE = live_retune_min_lease_seconds(K8S_TIMEOUT)
+
+
+def minimum_leadership(kube, clock) -> LeaseLeadership:
+    return LeaseLeadership(
+        kube,
+        DGD,
+        identity="a/1",
+        lease_duration_s=MIN_LEASE,
+        margin_s=live_retune_lease_margin_seconds(K8S_TIMEOUT),
+        timeout_s=K8S_TIMEOUT,
+        monotonic=clock.monotonic,
+        clock=clock.time,
+    )
+
+
+INTERVAL = MIN_LEASE / 3.0
+BUDGET = live_retune_io_timeout_seconds(K8S_TIMEOUT)
+
+
+def renewal_wait(a: LeaseLeadership) -> float:
+    """The supervisor's lease loop wait after a successful renewal."""
+
+    return a.renewal_wait_s(interval_s=INTERVAL, budget_s=BUDGET)
+
+
+def test_leadership_renews_the_minimum_lease_in_one_term_until_it_lapses() -> None:
+    clock = FakeClock()
+    kube = FakeRetuneKube()
+    a = minimum_leadership(kube, clock)
+    assert renewal_wait(a) == INTERVAL
+    assert a.step() == "acquired" and a.acquisitions == 1
+    acquired = kube.leases[a.name]["spec"]["acquireTime"]
+    # One I/O budget before leader_until, sooner than the renew interval.
+    margin = live_retune_lease_margin_seconds(K8S_TIMEOUT)
+    assert renewal_wait(a) == MIN_LEASE - margin - BUDGET < INTERVAL
+    for _ in range(10):
+        clock.advance(renewal_wait(a))
+        assert a.leads_since(1)
+        assert a.step() == "renewed"
+    spec = kube.leases[a.name]["spec"]
+    assert a.transitions == 0 and spec["leaseTransitions"] == 0
+    assert spec["acquireTime"] == acquired
+    # A failed attempt's floor wins over the cap, even past leader_until.
+    clock.advance(a.leader_until - clock.mono - 1.0)
+    assert a.renewal_wait_s(interval_s=INTERVAL, budget_s=BUDGET, floor_s=5.0) == 5.0
+    clock.advance(5.0)
+    assert not a.is_leader() and renewal_wait(a) == INTERVAL
+    assert a.step() == "acquired" and a.acquisitions == 2
+    assert a.is_leader() and not a.leads_since(1)
+
+
+class SlowLeaseKube(FakeRetuneKube):
+    """Every Lease call takes ``latency_s`` of ``clock``. A replace calls
+    ``probe`` when its response is due, before the caller gets it."""
+
+    def __init__(self, clock: FakeClock, latency_s: float) -> None:
+        super().__init__(now=clock.time)
+        self.clock = clock
+        self.latency_s = latency_s
+        self.probe: Optional[Callable[[], bool]] = None
+        self.probes: list[bool] = []
+
+    def get_lease(self, name: str, *, timeout_s: float = 10.0) -> Optional[dict]:
+        self.clock.advance(self.latency_s)
+        return super().get_lease(name, timeout_s=timeout_s)
+
+    def create_lease(self, body: dict, *, timeout_s: float = 10.0) -> dict:
+        self.clock.advance(self.latency_s)
+        return super().create_lease(body, timeout_s=timeout_s)
+
+    def replace_lease(self, name: str, body: dict, *, timeout_s: float = 10.0) -> dict:
+        self.clock.advance(self.latency_s)
+        if self.probe is not None:
+            self.probes.append(self.probe())
+        return super().replace_lease(name, body, timeout_s=timeout_s)
+
+
+def test_leadership_never_lapses_while_slow_renewals_are_in_flight() -> None:
+    # The GET and the replace together take just under the I/O budget that
+    # bounds one renewal (the supervisor's backstop around step()); the
+    # client's (connect, read) timeout alone does not cap a call at K8S_TIMEOUT.
+    clock = FakeClock()
+    kube = SlowLeaseKube(clock, latency_s=BUDGET / 2 - 0.01)
+    a = minimum_leadership(kube, clock)
+    kube.probe = a.is_leader
+    assert a.step() == "acquired"
+    for _ in range(10):
+        clock.advance(renewal_wait(a))
+        assert a.step() == "renewed"
+    assert kube.probes == [True] * 10 and a.transitions == 0

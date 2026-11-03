@@ -702,7 +702,12 @@ class LeaseLeadership:
     ``is_leader`` holds from a successful write until ``leader_until`` =
     send time + lease duration - ``margin_s``, all on the local monotonic
     clock: a contender takes over only after watching the holder unchanged
-    for a whole lease duration, which starts after the send.
+    for a whole lease duration, which starts after the send. ``margin_s``
+    must be >= 0 and less than the lease duration. The caller must start
+    each renewal early enough for it to end before ``leader_until``
+    (``renewal_wait_s``): a renewal whose read of the Lease returns at or
+    after ``leader_until`` reports ``acquired`` (a new term), never
+    ``renewed``.
     """
 
     def __init__(
@@ -729,14 +734,16 @@ class LeaseLeadership:
         self._duration_int = max(1, int(math.ceil(lease_duration_s)))
         if margin_s is None:
             margin_s = 3.0 * timeout_s
-        # Never leave less than a third of the duration to lead in.
-        self.margin_s = min(float(margin_s), self.lease_duration_s * 2.0 / 3.0)
+        if not 0.0 <= margin_s < self.lease_duration_s:
+            raise ValueError("margin_s must be >= 0 and less than lease_duration_s")
+        self.margin_s = float(margin_s)
         self._timeout_s = float(timeout_s)
         self._monotonic = monotonic
         self._clock = clock
         self._lock = threading.Lock()
         self._held = False
         self._leader_until = -math.inf
+        self._acquisitions = 0
         self.transitions = 0
         # resourceVersion of this process's last successful write.
         self.resource_version: Optional[str] = None
@@ -760,6 +767,44 @@ class LeaseLeadership:
     def leader_until(self) -> float:
         with self._lock:
             return self._leader_until
+
+    @property
+    def acquisitions(self) -> int:
+        """How many steps have reported ``acquired``."""
+
+        with self._lock:
+            return self._acquisitions
+
+    def leads_since(self, acquisitions: int) -> bool:
+        """``is_leader`` with no ``acquired`` step since ``acquisitions``.
+
+        Checked atomically with the ``leader_until`` a re-acquisition sets,
+        so a step still in flight on another thread cannot hide its lapse.
+        """
+
+        with self._lock:
+            return (
+                self._held
+                and self._monotonic() < self._leader_until
+                and self._acquisitions == acquisitions
+            )
+
+    def renewal_wait_s(
+        self, *, interval_s: float, budget_s: float, floor_s: float = 0.0
+    ) -> float:
+        """Time until the next ``step``.
+
+        ``interval_s``, but while leading no later than ``budget_s`` before
+        ``leader_until`` (at once if that has passed), so that a renewal
+        taking up to ``budget_s`` ends while this process still leads.
+        Never less than ``floor_s``, which takes precedence.
+        """
+
+        now = self._monotonic()
+        with self._lock:
+            leading = self._held and now < self._leader_until
+            latest_s = self._leader_until - budget_s - now
+        return max(floor_s, min(interval_s, latest_s) if leading else interval_s)
 
     def set_owner(self, dgd: DgdRef) -> None:
         """The DGD the Lease's ownerReference names from now on."""
@@ -813,7 +858,7 @@ class LeaseLeadership:
             new_holder = (updated.get("spec") or {}).get("holderIdentity") or ""
             if new_holder != self.identity:
                 return self._lose()
-            self._lead(t_send, transitions, updated)
+            self._lead(t_send, transitions, updated, acquired=not was_held)
             return "renewed" if was_held else "acquired"
 
         lost = self.held
@@ -872,10 +917,19 @@ class LeaseLeadership:
 
     # ------------------------------------------------------------ helpers
 
-    def _lead(self, t_send: float, transitions: int, written: dict[str, Any]) -> None:
+    def _lead(
+        self,
+        t_send: float,
+        transitions: int,
+        written: dict[str, Any],
+        *,
+        acquired: bool,
+    ) -> None:
         with self._lock:
             self._held = True
             self._leader_until = t_send + self.lease_duration_s - self.margin_s
+            if acquired:
+                self._acquisitions += 1
         self.transitions = transitions
         self.resource_version = (written.get("metadata") or {}).get("resourceVersion")
         self._observed = None
@@ -913,7 +967,7 @@ class LeaseLeadership:
                 "retune leadership: creating %s failed: %s", self.name, error
             )
             return "error"
-        self._lead(t_send, 0, created)
+        self._lead(t_send, 0, created, acquired=True)
         logger.info(
             "retune leadership: acquired new lease %s as %s", self.name, self.identity
         )
@@ -934,7 +988,7 @@ class LeaseLeadership:
                 "retune leadership: taking over %s failed: %s", self.name, error
             )
             return "error"
-        self._lead(t_send, transitions + 1, written)
+        self._lead(t_send, transitions + 1, written, acquired=True)
         logger.info(
             "retune leadership: acquired lease %s as %s (transitions=%d)",
             self.name,

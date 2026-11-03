@@ -190,7 +190,7 @@ retune:
 | `keep_requests` | `5` | Windows whose finished Requests are kept for audit |
 | `max_window_rows` | `5000000` | A larger window fails with `window_too_large` |
 | `promote_last_advisory` | `false` | On switching to active, apply the last advisory recommendation if it is at most one interval old and the configuration is unchanged |
-| `lease_duration_seconds` | `60` | Leadership Lease duration, renewed every third of it |
+| `lease_duration_seconds` | `60` | Leadership Lease duration, renewed every third of it or sooner; at least `37`, so two renewals of up to 11 s each fit before the Planner stops leading, 15 s before the Lease expires |
 | `actuator_interval_seconds` | `15` | Period of the router and clean-up rounds |
 
 For the other `retune` fields and the limits that `executor: dgdr` adds to them, see the

@@ -760,7 +760,7 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
       On switching from `advisory: true` to `false`, apply the last advisory recommendation if it is at most one interval old and the configuration is unchanged.
     </ParamField>
     <ParamField path="lease_duration_seconds" type="number" default="60.0">
-      Duration of the leadership Lease, renewed every third of it. Must be at least 15.
+      Duration of the leadership Lease, renewed every third of it or sooner. Must be at least 37: the Planner stops acting as leader 15 seconds (three 5-second Kubernetes request timeouts) before the Lease expires, and two renewals of up to 11 seconds each must fit before then.
     </ParamField>
     <ParamField path="actuator_interval_seconds" type="number" default="15.0">
       Period of the router and clean-up rounds. Must be greater than 0.

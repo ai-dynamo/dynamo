@@ -27,12 +27,14 @@ from pydantic import ValidationError
 
 from dynamo.planner.config.planner_config import (
     DGDR_MAX_SHARD_POINTS,
+    LIVE_RETUNE_K8S_TIMEOUT_SECONDS,
     DgdrExecutorConfig,
     PlannerConfig,
     balanced_shard_parts,
     dgdr_need_seconds,
     dgdr_rounds,
     largest_shard_points,
+    live_retune_min_lease_seconds,
 )
 from dynamo.planner.retune.domains import expand_router_domain
 
@@ -497,6 +499,28 @@ def test_p5_accepts_the_context_parallel_preset_knobs():
 )
 def test_live_retune_rejects_unsafe_claim_paths(overrides, match):
     _rejects(match, _retune(dgdr=_dgdr(**overrides)))
+
+
+# --------------------------------------------------------- leadership Lease
+
+
+def test_live_retune_lease_fits_two_renewals_before_its_margin():
+    minimum = live_retune_min_lease_seconds(LIVE_RETUNE_K8S_TIMEOUT_SECONDS)
+    # 3 x 5 s margin + 2 x (2 x 5 s + 1 s) I/O budget.
+    assert minimum == 37.0
+    for lease in (15.0, minimum - 0.001):
+        _rejects(
+            r"retune.dgdr.lease_duration_seconds must be at least the lease "
+            r"margin \+ 2 x the I/O budget of one renewal \(15s \+ 2 x 11s = 37s "
+            r"with the 5s Kubernetes request timeout\)",
+            _retune(dgdr=_dgdr(lease_duration_seconds=lease)),
+        )
+    config = _config(_retune(dgdr=_dgdr(lease_duration_seconds=minimum)))
+    assert config.retune is not None and config.retune.dgdr is not None
+    assert config.retune.dgdr.lease_duration_seconds == minimum
+    schema = DgdrExecutorConfig.model_json_schema()["properties"]
+    assert schema["lease_duration_seconds"]["minimum"] == minimum
+    assert "At least 37 s" in schema["lease_duration_seconds"]["description"]
 
 
 # -------------------------------------------------------------------- P13

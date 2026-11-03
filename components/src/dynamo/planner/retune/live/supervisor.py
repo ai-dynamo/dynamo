@@ -25,10 +25,13 @@ Background tasks (all catch every exception; every Kubernetes call runs in a
 thread with a timeout):
 
 - lease: renew or acquire ``<dgd>-planner-retune`` every third of the lease
-  duration. Becoming leader, re-acquiring after losing track, or a re-init
-  request enters initialization (claim the state with ``term_seq + 1``, then
-  apply the first matching row of ``plan_initialization``); losing
-  leadership runs the local loss.
+  duration; while leading, early enough that a renewal using its whole I/O
+  budget still ends before local leadership does. Becoming leader,
+  re-acquiring after losing track, or a re-init request enters
+  initialization (claim the state with ``term_seq + 1``, then apply the
+  first matching row of ``plan_initialization``); the Lease is still renewed
+  on the same schedule while it runs, and a renewal that reports a lapse
+  aborts it. Losing leadership runs the local loss.
 - control: re-read the DGD and re-validate the spec premises (rebuilding the
   controller through ``host.replace_live_retune`` when the startup,
   ``spec_ok`` or P4 change), then, as an initialized leader, the P11 canary
@@ -74,6 +77,12 @@ from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Optional, Protocol, Union
 
+from dynamo.planner.config.planner_config import (
+    LIVE_RETUNE_K8S_TIMEOUT_SECONDS,
+    live_retune_io_timeout_seconds,
+    live_retune_lease_margin_seconds,
+    live_retune_min_lease_seconds,
+)
 from dynamo.planner.plugins.orchestrator.engine_adapter import RetuneHooks
 from dynamo.planner.retune.live.contracts import (
     LABEL_DGD_UID,
@@ -95,6 +104,7 @@ from dynamo.planner.retune.live.contracts import (
 from dynamo.planner.retune.live.dgdr import run_dgdr_sweep
 from dynamo.planner.retune.live.state import (
     LeaseLeadership,
+    LeaseStep,
     RetuneMode,
     RetuneState,
     StateSnapshot,
@@ -227,7 +237,7 @@ class SupervisorSettings:
     router_keys: tuple[str, ...] = ()
     lease_duration_s: float = 60.0
     actuator_interval_s: float = 15.0
-    k8s_timeout_s: float = 5.0
+    k8s_timeout_s: float = LIVE_RETUNE_K8S_TIMEOUT_SECONDS
     write_failure_limit: int = 3
     canary_interval_s: float = 600.0
     stop_timeout_s: float = 10.0
@@ -245,22 +255,37 @@ class SupervisorSettings:
             "lease_duration_s",
             "actuator_interval_s",
             "reconcile_budget_s",
+            "k8s_timeout_s",
         ):
             value = getattr(self, name)
             if not (math.isfinite(value) and value > 0):
                 raise ValueError(f"{name} must be positive and finite")
         if self.write_failure_limit < 1:
             raise ValueError("write_failure_limit must be >= 1")
+        minimum_s = live_retune_min_lease_seconds(self.k8s_timeout_s)
+        if self.lease_duration_s < minimum_s:
+            raise ValueError(
+                f"lease_duration_s {self.lease_duration_s:g}s is too short for "
+                f"k8s_timeout_s {self.k8s_timeout_s:g}s: it must be at least the "
+                f"lease margin ({self.lease_margin_s:g}s) + 2 x the I/O budget "
+                f"of one renewal ({self.io_timeout_s:g}s) = {minimum_s:g}s"
+            )
 
     @property
     def renew_interval_s(self) -> float:
         return self.lease_duration_s / 3.0
 
     @property
+    def lease_margin_s(self) -> float:
+        """How long before the Lease could expire local leadership ends."""
+
+        return live_retune_lease_margin_seconds(self.k8s_timeout_s)
+
+    @property
     def io_timeout_s(self) -> float:
         """Backstop on one blocking call; the client applies its own."""
 
-        return 2.0 * self.k8s_timeout_s + 1.0
+        return live_retune_io_timeout_seconds(self.k8s_timeout_s)
 
     @classmethod
     def from_config(
@@ -608,7 +633,7 @@ class LiveRetuneSupervisor:
             evaluation.dgd,
             identity=identity,
             lease_duration_s=settings.lease_duration_s,
-            margin_s=3.0 * settings.k8s_timeout_s,
+            margin_s=settings.lease_margin_s,
             timeout_s=settings.k8s_timeout_s,
             monotonic=monotonic,
             clock=clock,
@@ -660,6 +685,9 @@ class LiveRetuneSupervisor:
         # Tasks and locks.
         self._init_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
+        # The lease loop and an initialization both step the leadership
+        # Lease; their GET/replace pairs must not race on its resourceVersion.
+        self._lease_step_lock = asyncio.Lock()
         self._tasks: list[asyncio.Task[None]] = []
         self._outbox_task: Optional[asyncio.Task[None]] = None
         self._round_task: Optional[asyncio.Task[None]] = None
@@ -971,16 +999,15 @@ class LiveRetuneSupervisor:
 
     # ------------------------------------------------------------- rounds
 
-    async def lease_round(self) -> None:
-        """One renewal/acquisition; initialize or run the local loss."""
+    async def lease_round(self) -> Optional[LeaseStep]:
+        """One renewal/acquisition; initialize or run the local loss.
+
+        Returns the renewal/acquisition step, ``None`` once stopping.
+        """
 
         if self._stopping:
-            return
-        try:
-            step = await self._io(self._leadership.step)
-        except Exception as error:
-            logger.warning("retune lease round failed: %s", error)
-            step = "error"
+            return None
+        step = await self._lease_step()
         try:
             if self.is_leader():
                 if (
@@ -999,6 +1026,7 @@ class LiveRetuneSupervisor:
         except Exception:
             logger.exception("retune lease round: initialization failed")
         self._publish()
+        return step
 
     async def control_round(self) -> None:
         """Re-validate the spec; as an initialized leader, actuate and start
@@ -1138,31 +1166,50 @@ class LiveRetuneSupervisor:
         Confirms leadership, claims the state (only ``leader_term``), writes
         what ``plan_initialization`` decides, restores the controller and
         rewinds it to the last persisted window. ``True`` once initialized.
+        The leadership Lease is renewed meanwhile; a renewal that reports a
+        lapse (``acquired``) aborts the initialization.
         """
 
         await self._local_loss_locked("initialize")
         # Confirm on the API server right before the claim: a holder change
         # this process has not seen yet (it believes it leads until
         # leader_until) aborts the initialization instead of claiming.
-        try:
-            await self._io(self._leadership.step)
-        except Exception as error:
-            logger.warning("retune init: confirming leadership failed: %s", error)
+        started = self._monotonic()
+        step = await self._lease_step()
         if not self.is_leader():
             return False
+        acquisitions = self._leadership.acquisitions
+        keepalive = asyncio.create_task(
+            self._renew_while_initializing(step, started),
+            name="planner-retune-init-lease",
+        )
+        try:
+            return await self._claim_locked(acquisitions)
+        finally:
+            await self._end_renewals(keepalive)
+
+    async def _claim_locked(self, acquisitions: int) -> bool:
+        """``_initialize_locked`` after the confirming renewal; gives up once
+        a local loss or a re-acquisition since ``acquisitions`` made the new
+        term stale."""
+
         self._term_seq += 1
         self._reinit_requested = False
         term = f"{self._leadership.transitions}/{self._identity}/{self._term_seq}"
         self._term = term
         epoch = self._epoch
         settings = self._settings
+
+        def current() -> bool:
+            return epoch == self._epoch and self._leadership.leads_since(acquisitions)
+
         async with self._write_lock:
             snapshot = await self._read_own_snapshot()
             if snapshot is None:
                 return False
             # Claim: only leader_term, conditional on the resourceVersion.
             for attempt in range(_CLAIM_ATTEMPTS):
-                if not self.is_leader() or epoch != self._epoch:
+                if not current():
                     return False
                 claimed = claim(snapshot.state, dgd_uid=self._dgd.uid, term=term)
                 try:
@@ -1200,7 +1247,7 @@ class LiveRetuneSupervisor:
                 ),
             )
             if plan.write:
-                if not self.is_leader() or epoch != self._epoch:
+                if not current():
                     return False
                 try:
                     snapshot = await self._io(self._store.write, plan.state, snapshot)
@@ -1230,7 +1277,7 @@ class LiveRetuneSupervisor:
                     return False
             if controller is not None:
                 self._rewind(controller)
-        if epoch != self._epoch or not self.is_leader():
+        if not current():
             return False
         self._initialized = True
         self._rollback_since = None
@@ -2045,13 +2092,90 @@ class LiveRetuneSupervisor:
 
     async def _lease_loop(self) -> None:
         while not self._stopping:
+            started = self._monotonic()
+            step: Optional[LeaseStep] = "error"
             try:
-                await self.lease_round()
+                step = await self.lease_round()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("retune lease loop iteration failed")
-            await self._wait(self._lease_wake, self._settings.renew_interval_s)
+            wait_s = self._lease_wait_s(failed=step == "error", started=started)
+            await self._wait(self._lease_wake, wait_s)
+
+    def _lease_wait_s(self, *, failed: bool, started: float) -> float:
+        """Time until the next renewal after an attempt begun at ``started``.
+
+        While leading, after a successful attempt the next starts no later
+        than one I/O budget before ``leader_until`` (at once if that has
+        passed), so that it ends while this process still leads. After a
+        failed attempt the next starts no sooner than one request timeout
+        after the failed one started, even within one I/O budget of
+        ``leader_until`` or past it: a fast-failing API server is not polled
+        in a busy loop, and a retry after a slow failure is not pushed back
+        further.
+        """
+
+        settings = self._settings
+        floor_s = 0.0
+        if failed:
+            elapsed_s = self._monotonic() - started
+            floor_s = max(0.0, settings.k8s_timeout_s - elapsed_s)
+        return self._leadership.renewal_wait_s(
+            interval_s=settings.renew_interval_s,
+            budget_s=settings.io_timeout_s,
+            floor_s=floor_s,
+        )
+
+    async def _lease_step(self) -> LeaseStep:
+        """One ``LeaseLeadership.step``; ``error`` if it raised."""
+
+        async with self._lease_step_lock:
+            try:
+                return await self._io(self._leadership.step)
+            except Exception as error:
+                logger.warning("retune lease renewal failed: %s", error)
+                return "error"
+
+    async def _renew_while_initializing(self, step: LeaseStep, started: float) -> None:
+        """Renew on the lease loop's schedule while an initialization runs.
+
+        The lease loop waits for the initialization (or for ``_init_lock``
+        during a rebuild), which may outlast the local lifetime left after
+        its confirming renewal. ``step`` and ``started`` are that renewal's.
+        A lapse (``acquired``) requests a re-initialization; the leadership
+        re-acquired is still renewed until the stale initialization ends.
+        """
+
+        while True:
+            await self._sleep(
+                self._lease_wait_s(failed=step == "error", started=started)
+            )
+            if self._stopping:
+                return
+            started = self._monotonic()
+            step = await self._lease_step()
+            if step == "acquired":
+                self._request_reinit("leadership lapsed during initialization")
+            elif step not in ("renewed", "error"):
+                return
+
+    async def _end_renewals(self, keepalive: asyncio.Task[None]) -> None:
+        """Cancel ``_renew_while_initializing`` and wait for it to end.
+
+        A renewal in flight is waited for first: cancelled, its thread would
+        go on and race the next step on the resourceVersion. If this task is
+        cancelled meanwhile (``stop``), the renewal is cancelled in flight,
+        as the lease loop's own step is, rather than left running.
+        """
+
+        try:
+            async with self._lease_step_lock:
+                await self._cancel(keepalive)
+        except asyncio.CancelledError:
+            keepalive.cancel()
+            await asyncio.wait([keepalive])
+            raise
 
     async def _control_loop(self) -> None:
         while not self._stopping:

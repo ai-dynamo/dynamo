@@ -34,7 +34,12 @@ pytest.importorskip(
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-from dynamo.planner.config.planner_config import PlannerConfig, RetuneEngineSpec
+from dynamo.planner.config.planner_config import (
+    LIVE_RETUNE_K8S_TIMEOUT_SECONDS,
+    PlannerConfig,
+    RetuneEngineSpec,
+    live_retune_min_lease_seconds,
+)
 from dynamo.planner.core.types import (
     EngineCapabilities,
     RetuneDecision,
@@ -199,8 +204,10 @@ async def inline(call):
     return call()
 
 
-async def no_sleep(_seconds: float) -> None:
-    await asyncio.sleep(0)
+async def frozen_sleep(_seconds: float) -> None:
+    """The test's clock moves only when the test moves it: no sleep ends."""
+
+    await asyncio.get_running_loop().create_future()
 
 
 class RecordingMetrics(NullMetrics):
@@ -748,7 +755,7 @@ def make_process(
         context_factory=context_factory,
         clock=world.clock.time,
         monotonic=world.clock.monotonic,
-        sleep=no_sleep,
+        sleep=frozen_sleep,
         blocking=blocking or inline,
     )
     host = FakeHost(world, sup.hooks(), evaluation.inputs, advisory=advisory)
@@ -1952,6 +1959,340 @@ async def test_background_loops_run_and_stop() -> None:
     assert process.metrics.state["leader"] is False
 
 
+# ------------------------------------------------------------ lease timing
+
+MIN_LEASE = live_retune_min_lease_seconds(LIVE_RETUNE_K8S_TIMEOUT_SECONDS)
+
+
+def test_settings_require_a_lease_that_fits_two_renewals() -> None:
+    for lease in (15.0, MIN_LEASE - 0.001):
+        with pytest.raises(
+            ValueError,
+            match=r"k8s_timeout_s 5s: it must be at least the lease margin "
+            r"\(15s\) \+ 2 x the I/O budget of one renewal \(11s\) = 37s",
+        ):
+            settings_for(lease_duration_s=lease)
+    for timeout in (0.0, -1.0, math.inf, math.nan):
+        with pytest.raises(ValueError, match="k8s_timeout_s must be positive"):
+            settings_for(k8s_timeout_s=timeout)
+    settings = settings_for(lease_duration_s=MIN_LEASE)
+    assert settings.lease_margin_s == 15.0 and settings.io_timeout_s == 11.0
+    # The legacy clean-up supervisor's settings (the defaults).
+    SupervisorSettings(interval_s=3600.0, grace_s=0.0, timeout_s=3000.0)
+    dgdr = live_config().retune.dgdr.model_dump()
+    dgdr["lease_duration_seconds"] = MIN_LEASE
+    config = live_config(retune={"dgdr": dgdr})
+    assert SupervisorSettings.from_config(config).lease_duration_s == MIN_LEASE
+
+
+class SlowLeases:
+    """``world.kube``, but each read or write of a Lease named in
+    ``latency_s`` first advances the test's clock by its latency."""
+
+    def __init__(self, world: World) -> None:
+        self._kube = world.kube
+        self._clock = world.clock
+        self.latency_s: dict[str, float] = {}
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._kube, name)
+
+    def _wait(self, lease: str) -> None:
+        self._clock.advance(self.latency_s.get(lease, 0.0))
+
+    def get_lease(self, name: str, **kwargs: Any) -> Optional[dict]:
+        self._wait(name)
+        return self._kube.get_lease(name, **kwargs)
+
+    def create_lease(self, body: dict, **kwargs: Any) -> dict:
+        self._wait(body["metadata"]["name"])
+        return self._kube.create_lease(body, **kwargs)
+
+    def replace_lease(self, name: str, body: dict, **kwargs: Any) -> dict:
+        self._wait(name)
+        return self._kube.replace_lease(name, body, **kwargs)
+
+
+class LeaseLoop:
+    """The supervisor's own lease loop, one round at a time: each of its
+    waits advances the test's clock by the time the loop asked for (a
+    re-init request does not cut it short).
+
+    Every other sleep (an initialization's renewals) ends once Kubernetes
+    calls have advanced the clock past it: each call runs inline, then lets
+    the sleepers it made due run before its caller goes on.
+    """
+
+    def __init__(self, sup: LiveRetuneSupervisor, clock: Clock) -> None:
+        self._sup = sup
+        self._clock = clock
+        self._asleep = asyncio.Event()
+        self._wake = asyncio.Event()
+        self._task: Optional[asyncio.Task[None]] = None
+        self._sleepers: list[tuple[float, asyncio.Future[None]]] = []
+        self.waits: list[float] = []
+
+    async def __aenter__(self) -> LeaseLoop:
+        self._sup._wait = self._wait  # type: ignore[method-assign]
+        self._sup._sleep = self._sleep
+        self._sup._blocking = self._run
+        self._task = asyncio.create_task(self._sup._lease_loop())
+        await self._round_done()
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> None:
+        assert self._task is not None
+        self._task.cancel()
+        await asyncio.wait([self._task])
+
+    async def _wait(self, _event: Optional[asyncio.Event], seconds: float) -> None:
+        self.waits.append(seconds)
+        self._asleep.set()
+        await self._wake.wait()
+        self._wake.clear()
+        self._clock.advance(seconds)
+
+    async def _sleep(self, seconds: float) -> None:
+        if seconds <= 0:
+            return
+        future = asyncio.get_running_loop().create_future()
+        self._sleepers.append((self._clock.monotonic() + seconds, future))
+        await future
+
+    async def _run(self, call):
+        try:
+            return call()
+        finally:
+            now = self._clock.monotonic()
+            for deadline, future in self._sleepers:
+                if deadline <= now and not future.done():
+                    future.set_result(None)
+            self._sleepers = [
+                (deadline, future)
+                for deadline, future in self._sleepers
+                if not future.done()
+            ]
+            await asyncio.sleep(0)
+
+    async def _round_done(self) -> None:
+        await asyncio.wait_for(self._asleep.wait(), timeout=10)
+        self._asleep.clear()
+
+    async def next_round(self) -> None:
+        """Let the loop wait as asked, then run its next round."""
+
+        self._wake.set()
+        await self._round_done()
+
+
+async def test_renewals_after_a_slow_initialization_keep_the_term() -> None:
+    world = World()
+    kube = SlowLeases(world)
+    process = await started(world, kube=kube)
+    sup, controller = process.sup, process.controller
+    # The state read, claim and plan write after the confirming renewal take
+    # 27 s, each within its 11 s I/O budget: more than the local lifetime
+    # (45 s) minus the renew interval (20 s).
+    kube.latency_s[STATE_NAME] = 9.0
+    async with LeaseLoop(sup, world.clock) as loop:
+        assert sup.initialized
+        kube.latency_s.clear()
+        term, term_seq = sup.term, sup.term_seq
+        await sup.control_round()
+        assert sup.ready()
+        world.clock.wall = window(K0 + 1)[2]
+        await controller.on_tick(world.clock.time(), SPEC_COUNTS)
+        pending = controller._pending
+        assert pending is not None
+        for _ in range(6):
+            await loop.next_round()
+            assert sup.is_leader() and sup.initialized
+            assert (sup.term, sup.term_seq) == (term, term_seq)
+    assert controller._pending is pending and not pending.abort.is_set()
+    assert controller.dropped == []
+
+
+async def test_minimum_lease_renewals_keep_the_term_and_the_sweep() -> None:
+    world = World()
+    kube = SlowLeases(world)
+    settings = settings_for(lease_duration_s=MIN_LEASE)
+    process = await leading(world, kube=kube, settings=settings)
+    sup, controller = process.sup, process.controller
+    term, term_seq = sup.term, sup.term_seq
+    world.clock.wall = window(K0 + 1)[2]
+    await controller.on_tick(world.clock.time(), SPEC_COUNTS)
+    pending = controller._pending
+    assert pending is not None
+    # Every leadership Lease call takes its whole request timeout.
+    kube.latency_s[LEADER_NAME] = settings.k8s_timeout_s
+    async with LeaseLoop(sup, world.clock) as loop:
+        for _ in range(8):
+            await loop.next_round()
+            assert sup.is_leader() and sup.initialized
+            assert (sup.term, sup.term_seq) == (term, term_seq)
+    assert world.kube.leases[LEADER_NAME]["spec"]["leaseTransitions"] == 0
+    assert controller._pending is pending and not pending.abort.is_set()
+    assert controller.dropped == []
+
+
+@pytest.mark.parametrize("latency_s", [4.0, 5.0])
+async def test_minimum_lease_initialization_with_slow_leases_keeps_the_term(
+    latency_s: float,
+) -> None:
+    world = World()
+    kube = SlowLeases(world)
+    settings = settings_for(lease_duration_s=MIN_LEASE)
+    process = await started(world, kube=kube, settings=settings)
+    sup, controller = process.sup, process.controller
+    # Without renewals in between, local leadership would end soon after the
+    # state read, claim and plan write that follow the confirming renewal
+    # (4 s per Lease call: before the next renewal is sent), or before they
+    # end (5 s, the whole request timeout).
+    kube.latency_s[LEADER_NAME] = latency_s
+    kube.latency_s[STATE_NAME] = latency_s
+    async with LeaseLoop(sup, world.clock) as loop:
+        assert sup.is_leader() and sup.initialized
+        term, term_seq = sup.term, sup.term_seq
+        del kube.latency_s[STATE_NAME]
+        await sup.control_round()
+        assert sup.ready()
+        world.clock.wall = window(K0 + 1)[2]
+        await controller.on_tick(world.clock.time(), SPEC_COUNTS)
+        pending = controller._pending
+        assert pending is not None
+        for _ in range(8):
+            await loop.next_round()
+            assert sup.is_leader() and sup.initialized
+            assert (sup.term, sup.term_seq) == (term, term_seq)
+    assert controller._pending is pending and not pending.abort.is_set()
+    assert controller.dropped == []
+
+
+async def test_a_lapse_during_initialization_aborts_it_and_reinitializes_once() -> None:
+    world = World()
+    kube = SlowLeases(world)
+    settings = settings_for(lease_duration_s=MIN_LEASE)
+    process = await started(world, kube=kube, settings=settings)
+    sup = process.sup
+    kube.latency_s[LEADER_NAME] = 1.0
+    kube.latency_s[STATE_NAME] = 9.0
+    # From the new term on (set before its claim), reading the leadership
+    # Lease fails until local leadership has ended: the next renewal that
+    # succeeds re-acquires while the initialization of that term still runs.
+    world.kube.fail(
+        "get_lease",
+        KubeError("unavailable"),
+        times=100,
+        match=lambda target: target == LEADER_NAME
+        and sup.term is not None
+        and sup.is_leader(),
+    )
+    async with LeaseLoop(sup, world.clock) as loop:
+        assert sup.is_leader() and not sup.initialized
+        assert sup.term_seq == 1
+        world.kube.clear_faults()
+        kube.latency_s.clear()
+        for _ in range(3):
+            await loop.next_round()
+            assert sup.is_leader() and sup.initialized
+            assert sup.term_seq == 2
+    assert world.shared_state().leader_term == sup.term
+
+
+async def test_a_cancelled_initialization_leaves_no_renewal_behind() -> None:
+    world = World()
+    process = await started(world)
+    sup = process.sup
+    steps = 0
+    in_flight, gate = asyncio.Event(), asyncio.Event()
+
+    async def gated(call):
+        # The third leadership step, after the acquiring and the confirming
+        # ones, is the initialization's first renewal: it stays in flight,
+        # and the initialization goes on only once it is.
+        nonlocal steps
+        if getattr(call, "func", None) == sup._leadership.step:
+            steps += 1
+            if steps == 3:
+                in_flight.set()
+                await gate.wait()
+        elif steps >= 2:
+            await in_flight.wait()
+        return call()
+
+    sup._blocking = gated
+    sup._sleep = lambda _seconds: asyncio.sleep(0)
+    task = asyncio.create_task(sup.lease_round())
+    for _ in range(1000):
+        if sup.initialized:
+            break
+        await asyncio.sleep(0)
+    # Initialized; the round now waits for the renewal in flight.
+    assert sup.initialized and in_flight.is_set() and not task.done()
+    task.cancel()
+    await asyncio.wait([task])
+    pending = [
+        other
+        for other in asyncio.all_tasks()
+        if other.get_name() == "planner-retune-init-lease"
+    ]
+    assert pending == []
+    await sup.stop()
+    gate.set()
+    await asyncio.sleep(0)
+    assert world.holder() is None and not sup.is_leader()
+
+
+async def test_failed_renewals_are_retried_a_request_timeout_apart() -> None:
+    world = World()
+    process = await leading(world)
+    sup = process.sup
+    world.kube.fail(
+        "get_lease",
+        KubeError("unavailable"),
+        times=100,
+        match=lambda target: target == LEADER_NAME,
+    )
+    async with LeaseLoop(sup, world.clock) as loop:
+        for _ in range(5):
+            await loop.next_round()
+    # The renew interval, then one I/O budget before leader_until (45 s after
+    # the last renewal), then one request timeout apart until it passed.
+    assert loop.waits == [20.0, 14.0, 5.0, 5.0, 5.0, 20.0]
+    assert sup.term is None and not sup.initialized
+
+
+async def test_a_retry_after_a_slow_failure_keeps_the_minimum_lease() -> None:
+    world = World()
+    kube = SlowLeases(world)
+    settings = settings_for(lease_duration_s=MIN_LEASE)
+    process = await leading(world, kube=kube, settings=settings)
+    sup, controller = process.sup, process.controller
+    term, term_seq = sup.term, sup.term_seq
+    world.clock.wall = window(K0 + 1)[2]
+    await controller.on_tick(world.clock.time(), SPEC_COUNTS)
+    pending = controller._pending
+    assert pending is not None
+    kube.latency_s[LEADER_NAME] = 2.0
+    async with LeaseLoop(sup, world.clock) as loop:
+        # The renewal one I/O budget before leader_until fails after its
+        # whole request timeout; the retry goes at once and still renews.
+        kube.latency_s[LEADER_NAME] = settings.k8s_timeout_s
+        world.kube.fail(
+            "get_lease",
+            KubeError("unavailable"),
+            match=lambda target: target == LEADER_NAME,
+        )
+        await loop.next_round()
+        kube.latency_s[LEADER_NAME] = 2.0
+        await loop.next_round()
+        assert sup.is_leader() and sup.initialized
+        assert (sup.term, sup.term_seq) == (term, term_seq)
+    # leader_until is 22 s after each renewal's send; a renewal takes 4 s.
+    assert loop.waits == [7.0, 0.0, 7.0]
+    assert controller._pending is pending and not pending.abort.is_set()
+
+
 async def test_hooks_are_the_adapter_hooks() -> None:
     world = World()
     process = await started(world)
@@ -1978,7 +2319,7 @@ def decommission_supervisor(world: World) -> LiveRetuneSupervisor:
         frontend=frontend,
         clock=world.clock.time,
         monotonic=world.clock.monotonic,
-        sleep=no_sleep,
+        sleep=frozen_sleep,
         blocking=inline,
     )
 

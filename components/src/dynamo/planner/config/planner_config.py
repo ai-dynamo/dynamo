@@ -878,6 +878,41 @@ class DgdrRunConfig(BaseModel):
     )
 
 
+# Kubernetes request timeout of the live retune supervisor
+# (``SupervisorSettings``).
+LIVE_RETUNE_K8S_TIMEOUT_SECONDS = 5.0
+
+
+def live_retune_lease_margin_seconds(k8s_timeout_s: float) -> float:
+    """How long before the leadership Lease could expire local leadership
+    ends."""
+
+    return 3.0 * k8s_timeout_s
+
+
+def live_retune_io_timeout_seconds(k8s_timeout_s: float) -> float:
+    """I/O budget of one blocking Kubernetes call, such as a whole renewal
+    (a GET and a replace): a backstop, the client applies the request
+    timeout too."""
+
+    return 2.0 * k8s_timeout_s + 1.0
+
+
+def live_retune_min_lease_seconds(k8s_timeout_s: float) -> float:
+    """Shortest leadership Lease the live supervisor can keep renewing.
+
+    Local leadership ends the lease margin before the Lease could expire,
+    counted from the send of the renewal that granted it. That renewal may
+    use a whole I/O budget, and the next one starts at least one I/O budget
+    before local leadership ends, so two budgets must fit. Lease rounds are
+    single renewals: an initialization renews concurrently instead of
+    delaying the next one.
+    """
+
+    margin_s = live_retune_lease_margin_seconds(k8s_timeout_s)
+    return margin_s + 2.0 * live_retune_io_timeout_seconds(k8s_timeout_s)
+
+
 class DgdrExecutorConfig(BaseModel):
     """Live retune through DGDR v1beta2 (``retune.executor: dgdr``).
 
@@ -961,9 +996,18 @@ class DgdrExecutorConfig(BaseModel):
     )
     lease_duration_seconds: float = Field(
         default=60.0,
-        ge=15,
         allow_inf_nan=False,
-        description="Leadership Lease duration; renewed every third of it.",
+        # Not ge=: it would reject before _lease_fits_two_renewals explains.
+        json_schema_extra={
+            "minimum": live_retune_min_lease_seconds(LIVE_RETUNE_K8S_TIMEOUT_SECONDS)
+        },
+        description=(
+            "Leadership Lease duration. Renewed every third of it, or sooner "
+            "so that a renewal that uses its whole I/O budget ends before "
+            "local leadership does (the duration minus the lease margin). "
+            "At least 37 s: the 15 s lease margin plus two 11 s renewal I/O "
+            "budgets, with the 5 s Kubernetes request timeout."
+        ),
     )
     actuator_interval_seconds: float = Field(
         default=15.0,
@@ -971,6 +1015,21 @@ class DgdrExecutorConfig(BaseModel):
         allow_inf_nan=False,
         description="Period of the router actuator and reconciler rounds.",
     )
+
+    @field_validator("lease_duration_seconds")
+    @classmethod
+    def _lease_fits_two_renewals(cls, value: float) -> float:
+        timeout_s = LIVE_RETUNE_K8S_TIMEOUT_SECONDS
+        minimum_s = live_retune_min_lease_seconds(timeout_s)
+        if value < minimum_s:
+            raise ValueError(
+                "retune.dgdr.lease_duration_seconds must be at least the lease "
+                "margin + 2 x the I/O budget of one renewal "
+                f"({live_retune_lease_margin_seconds(timeout_s):g}s + 2 x "
+                f"{live_retune_io_timeout_seconds(timeout_s):g}s = {minimum_s:g}s "
+                f"with the {timeout_s:g}s Kubernetes request timeout)"
+            )
+        return value
 
 
 # Live retune (``retune.executor: dgdr``) limits. A sweep must end this long
