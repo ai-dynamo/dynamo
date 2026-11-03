@@ -39,6 +39,7 @@ import threading
 from unittest.mock import MagicMock
 
 import pytest
+from prometheus_client import REGISTRY
 
 from dynamo.trtllm import publisher as publisher_mod
 
@@ -750,12 +751,13 @@ _COLLECTOR_LABELS = {"model_name": "test-attention-dp", "engine_type": "trtllm"}
 
 
 def _unregister_trtllm_collectors():
-    from prometheus_client import REGISTRY
-
+    removed = []
     for collector in list(REGISTRY._collector_to_names.keys()):
         names = REGISTRY._collector_to_names.get(collector, set())
         if any(n.startswith("trtllm_") for n in names):
             REGISTRY.unregister(collector)
+            removed.append(collector)
+    return removed
 
 
 @pytest.fixture
@@ -763,17 +765,20 @@ def trtllm_metrics_collector():
     """A real TRT-LLM MetricsCollector on the global registry.
 
     MetricsCollector registers fixed trtllm_* families on the global
-    prometheus_client REGISTRY, so clear them before and after the test.
+    prometheus_client REGISTRY, so move any collectors already registered
+    aside for the test and put them back afterwards.
     """
     collector_mod = pytest.importorskip("tensorrt_llm.metrics.collector")
-    _unregister_trtllm_collectors()
-    yield collector_mod.MetricsCollector(dict(_COLLECTOR_LABELS))
-    _unregister_trtllm_collectors()
+    previous = _unregister_trtllm_collectors()
+    try:
+        yield collector_mod.MetricsCollector(dict(_COLLECTOR_LABELS))
+    finally:
+        _unregister_trtllm_collectors()
+        for collector in previous:
+            REGISTRY.register(collector)
 
 
 def _collector_sample(name):
-    from prometheus_client import REGISTRY
-
     return REGISTRY.get_sample_value(name, _COLLECTOR_LABELS)
 
 
