@@ -156,9 +156,10 @@ pub trait AsyncEngineContext: Send + Sync + Debug {
     fn kill(&self);
 
     /// Links child AsyncEngineContext to this AsyncEngineContext. If the `stop_generating`, `stop`
-    /// or `kill` on this AsyncEngineContext is called, the same method is called on all linked
-    /// child AsyncEngineContext, in the order they are linked, and then the method on this
-    /// AsyncEngineContext continues.
+    /// or `kill` on this AsyncEngineContext is called, this AsyncEngineContext publishes its new
+    /// state first, and then the same method is called on all linked child AsyncEngineContext, in
+    /// the order they are linked. So a child linked while a signal is under way is either told,
+    /// or reads the new state when it checks this AsyncEngineContext after linking.
     fn link_child(&self, child: Arc<dyn AsyncEngineContext>);
 
     /// Retain request-scoped state until the engine context is dropped.

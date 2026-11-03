@@ -399,6 +399,11 @@ impl Controller {
         &self.id
     }
 
+    /// Move to stopped, unless the context is already stopped or killed.
+    ///
+    /// Called before the children are told, never after: a child linked
+    /// while they are being told is then either among them, or linked after
+    /// the state changed, so a check after `link_child` sees it.
     fn transition_to_stopped(&self) {
         self.tx.send_if_modified(|state| {
             if *state != State::Live {
@@ -451,6 +456,7 @@ impl AsyncEngineContext for Controller {
     }
 
     fn stop_generating(&self) {
+        self.transition_to_stopped();
         // Clone child Arcs to avoid deadlock if parent is accidentally linked under child
         let children = self
             .child_context
@@ -462,11 +468,10 @@ impl AsyncEngineContext for Controller {
         for child in children {
             child.stop_generating();
         }
-
-        self.transition_to_stopped();
     }
 
     fn stop(&self) {
+        self.transition_to_stopped();
         // Clone child Arcs to avoid deadlock if parent is accidentally linked under child
         let children = self
             .child_context
@@ -478,11 +483,11 @@ impl AsyncEngineContext for Controller {
         for child in children {
             child.stop();
         }
-
-        self.transition_to_stopped();
     }
 
     fn kill(&self) {
+        // Published before the children are told (see `transition_to_stopped`).
+        let _ = self.tx.send(State::Killed);
         // Clone child Arcs to avoid deadlock if parent is accidentally linked under child
         let children = self
             .child_context
@@ -494,8 +499,6 @@ impl AsyncEngineContext for Controller {
         for child in children {
             child.kill();
         }
-
-        let _ = self.tx.send(State::Killed);
     }
 
     fn link_child(&self, child: Arc<dyn AsyncEngineContext>) {
@@ -675,5 +678,150 @@ mod tests {
         let ctx: Context<Final> = ctx.into_context();
 
         assert_eq!(ctx.current.message, "Processed length: 5");
+    }
+
+    /// A child that runs a hook on the first signal its parent sends it.
+    struct OnSignal(Mutex<Option<Box<dyn FnOnce() + Send>>>);
+
+    impl OnSignal {
+        fn new(hook: impl FnOnce() + Send + 'static) -> Arc<Self> {
+            Arc::new(Self(Mutex::new(Some(Box::new(hook)))))
+        }
+
+        fn signal(&self) {
+            let hook = self.0.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+    }
+
+    impl std::fmt::Debug for OnSignal {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("OnSignal")
+        }
+    }
+
+    #[async_trait]
+    impl AsyncEngineContext for OnSignal {
+        fn id(&self) -> &str {
+            "on-signal"
+        }
+
+        fn is_stopped(&self) -> bool {
+            false
+        }
+
+        fn is_killed(&self) -> bool {
+            false
+        }
+
+        async fn stopped(&self) {
+            std::future::pending().await
+        }
+
+        async fn killed(&self) {
+            std::future::pending().await
+        }
+
+        fn stop_generating(&self) {
+            self.signal();
+        }
+
+        fn stop(&self) {
+            self.signal();
+        }
+
+        fn kill(&self) {
+            self.signal();
+        }
+
+        fn link_child(&self, _: Arc<dyn AsyncEngineContext>) {}
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Signal {
+        StopGenerating,
+        Stop,
+        Kill,
+    }
+
+    impl Signal {
+        fn send(self, context: &dyn AsyncEngineContext) {
+            match self {
+                Signal::StopGenerating => context.stop_generating(),
+                Signal::Stop => context.stop(),
+                Signal::Kill => context.kill(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stop_after_a_kill_keeps_the_kill() {
+        for stop in [Signal::StopGenerating, Signal::Stop] {
+            let controller = Controller::default();
+            controller.kill();
+            stop.send(&controller);
+
+            assert!(controller.is_stopped(), "{stop:?}");
+            assert!(controller.is_killed(), "{stop:?} replaced the kill");
+            tokio::time::timeout(std::time::Duration::from_secs(1), controller.killed())
+                .await
+                .unwrap_or_else(|_| panic!("killed() waits again after {stop:?}"));
+        }
+    }
+
+    /// A kill that lands while a stop is telling the children wins: the stop
+    /// has published its state already, and a kill is final.
+    #[test]
+    fn a_stop_does_not_replace_a_kill_made_during_it() {
+        for stop in [Signal::StopGenerating, Signal::Stop] {
+            let controller = Arc::new(Controller::default());
+            let target = Arc::downgrade(&controller);
+            controller.link_child(OnSignal::new(move || {
+                target.upgrade().unwrap().kill();
+            }));
+            stop.send(controller.as_ref());
+
+            assert!(controller.is_killed(), "{stop:?} replaced the kill");
+        }
+    }
+
+    /// A child linked while a signal is telling the children, then checked as
+    /// Migration does (`link_child`, then the parent's state), is not missed:
+    /// it is either told, or it reads the parent's new state.
+    #[test]
+    fn a_child_linked_during_a_signal_is_not_missed() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        for signal in [Signal::StopGenerating, Signal::Stop, Signal::Kill] {
+            let controller = Arc::new(Controller::default());
+            let (entered, on_enter) = mpsc::channel();
+            let (release, on_release) = mpsc::channel::<()>();
+            controller.link_child(OnSignal::new(move || {
+                entered.send(()).unwrap();
+                on_release.recv_timeout(Duration::from_secs(5)).unwrap();
+            }));
+
+            let sender = controller.clone();
+            let signaller = std::thread::spawn(move || signal.send(sender.as_ref()));
+            on_enter.recv_timeout(Duration::from_secs(5)).unwrap();
+
+            let late = Arc::new(Controller::default());
+            controller.link_child(late.clone());
+            let seen = match signal {
+                Signal::Kill => controller.is_killed(),
+                _ => controller.is_stopped(),
+            };
+            release.send(()).unwrap();
+            signaller.join().unwrap();
+
+            let told = match signal {
+                Signal::Kill => late.is_killed(),
+                _ => late.is_stopped(),
+            };
+            assert!(seen || told, "a child linked during {signal:?} missed it");
+        }
     }
 }
