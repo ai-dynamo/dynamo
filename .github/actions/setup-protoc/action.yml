@@ -19,6 +19,6 @@ runs:
         echo "${PROTOC_SHA256}  ${PROTOC_ZIP}" | sha256sum -c -
         unzip "${PROTOC_ZIP}" -d $HOME/.local
         rm "${PROTOC_ZIP}"
-        # PATH change is local to this step on purpose; do not write it to $GITHUB_PATH.
-        export PATH="$PATH:$HOME/.local/bin"
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        export PATH="$HOME/.local/bin:$PATH"
         protoc --version
