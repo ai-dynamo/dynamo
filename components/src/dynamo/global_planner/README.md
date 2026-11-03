@@ -229,11 +229,13 @@ ordering inverts with the direction of the transfer:
 | Scale-up (needs GPUs) | donors giving GPUs up | the **least** important pool (lowest number) |
 | Scale-down below the floor (frees GPUs) | recipients taking GPUs on | the **most** important pool (highest number) |
 
-Priority is the leading term, followed by the size of the GPU change. Among
-equal-priority pools, smaller changes come first; transfers inside one DGD
-are preferred only when those changes also tie. A candidate that cannot fit
-even one replica is skipped so a finer-grained partner can still satisfy the
-budget.
+Priority is the leading term. Among equal-priority pools, partners inside the
+requesting DGD are preferred, followed by smaller absolute GPU changes. This
+locality preference also applies when no priorities are configured, since every
+pool then resolves to the same priority. It intentionally changes the previous
+ordering, which preferred smaller absolute GPU changes and used locality only
+to break ties: a same-DGD partner can now precede a cross-DGD partner with a
+smaller GPU change.
 
 Priority does **not** add new denials. Pairing only ever consumes a scale
 *intent a pool already published*, so a high-priority pool never has capacity
@@ -258,7 +260,7 @@ If no packing brings totals into the band, the request is rejected (`REJECTED`) 
 
 When the selected partners span multiple DGDs:
 
-- **Intra-DGD partners** (same DGD as the request) are merged into the request's atomic `set_component_replicas` call — one patch updates request-side and intra-DGD partner pools together.
+- **Intra-DGD partners** (same DGD as the request) share the request's `set_component_replicas` call, which patches component targets separately rather than transactionally.
 - **Cross-DGD partners** (different DGD) get their own per-DGD patch.
 - **Direction-aware order**: scale-down DGDs apply first (freeing GPUs), then scale-up DGDs. If any second-or-later patch fails, the first has already landed and the system self-corrects from the new state on the next tick.
 
