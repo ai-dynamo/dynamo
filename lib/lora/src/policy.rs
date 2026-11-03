@@ -103,6 +103,22 @@ impl RequestPolicy {
         Self::pin_workers(filter, name, &eligible, pins.iter().copied()).map(Some)
     }
 
+    pub fn check_worker_eligible<C: RuntimeLoraWorkerFacts + WorkerConfigLike>(
+        self,
+        worker: u64,
+        configs: Option<&HashMap<u64, C>>,
+        live: &HashSet<u64>,
+        allowed: Option<HashSet<u64>>,
+        constraints: &RoutingConstraints,
+    ) -> Result<(), DynamoError> {
+        if self.runtime
+            && !Self::runtime_eligible(allowed, live, configs, constraints)?.contains(&worker)
+        {
+            return Err(Self::capability_error());
+        }
+        Ok(())
+    }
+
     fn runtime_eligible<C: RuntimeLoraWorkerFacts + WorkerConfigLike>(
         allowed: Option<HashSet<u64>>,
         live: &HashSet<u64>,
@@ -277,6 +293,22 @@ mod tests {
             assert!(runtime.check_stage(stage).is_err());
             assert!(RequestPolicy::new(None).check_stage(stage).is_ok());
         }
+    }
+
+    #[test]
+    fn hard_session_pin_does_not_expand_runtime_placement() {
+        let filter = LoraFilter::new(
+            crate::LoraRoutingTable::new(),
+            crate::LoraStateTracker::new(),
+        );
+        let eligible = HashSet::from([1, 2]);
+        let placed = RequestPolicy::pin_workers(&filter, "adapter", &eligible, []).unwrap();
+        assert_eq!(placed.len(), 1);
+        let session_worker = eligible.difference(&placed).copied().next().unwrap();
+        let error = RequestPolicy::pin_workers(&filter, "adapter", &eligible, [session_worker])
+            .unwrap_err();
+        assert_eq!(error.error_type(), ErrorType::InvalidArgument);
+        assert!(error.to_string().contains("runtime_lora_affinity_conflict"));
     }
 
     #[test]

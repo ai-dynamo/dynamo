@@ -40,7 +40,7 @@ use crate::{
     http::service::metrics::Metrics,
     kv_router::{RoutingLoadContext, routing_host::request_guard::RouteObservation},
     local_model::runtime_config::ModelRuntimeConfig,
-    lora::{LoraReplicaConfig, LoraRoutingTable, LoraStateTracker},
+    lora::{LoadEstimator, LoraFilter, LoraReplicaConfig, LoraRoutingTable, LoraStateTracker},
     migration::Migration,
     protocols::common::{
         extensions::{AgentContextBuilder, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
@@ -138,7 +138,14 @@ async fn builtin_host_constructs_only_declared_capabilities() {
 
     let mut runtime_request = request();
     runtime_request.routing = Some(RoutingHints {
-        lora_name: Some("dyn-lora-test".to_string()),
+        lora_name: Some(crate::lora::runtime::adapter_key(
+            "test",
+            "custom:///opaque",
+        )),
+        base_model_name: Some("test".into()),
+        lora_source_uri: Some(crate::lora::runtime::RuntimeLoraSourceUri::new(
+            "custom:///opaque".into(),
+        )),
         lora_resolution_version: Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION),
         ..Default::default()
     });
@@ -581,8 +588,11 @@ async fn builtin_lora_keeps_separate_selection_and_cleanup() {
 
     let mut runtime_request = request();
     runtime_request.routing = Some(RoutingHints {
-        lora_name: Some("dyn-lora-test".to_string()),
-        base_model_name: Some("base".into()),
+        lora_name: Some(crate::lora::runtime::adapter_key(
+            "test",
+            "custom:///opaque",
+        )),
+        base_model_name: Some("test".into()),
         lora_source_uri: Some(crate::lora::runtime::RuntimeLoraSourceUri::new(
             "custom:///opaque".into(),
         )),
@@ -652,11 +662,12 @@ async fn runtime_lora_pin_is_rechecked_after_transport_fallback() {
     config
         .set_engine_specific("runtime_lora_schemes", vec!["custom"])
         .unwrap();
+    let adapter = crate::lora::runtime::adapter_key("test", "custom:///opaque");
     for worker in [101, 202] {
         tracker.handle_mdc_addition(
             WorkerWithDpRank::new(worker, 0),
             &crate::lora::LoraInfo {
-                name: "adapter".into(),
+                name: adapter.clone(),
                 max_gpu_lora_count: Some(2),
             },
         );
@@ -674,8 +685,8 @@ async fn runtime_lora_pin_is_rechecked_after_transport_fallback() {
     .unwrap();
     let mut input = request();
     input.routing = Some(RoutingHints {
-        lora_name: Some("adapter".into()),
-        base_model_name: Some("base".into()),
+        lora_name: Some(adapter),
+        base_model_name: Some("test".into()),
         lora_source_uri: Some(crate::lora::runtime::RuntimeLoraSourceUri::new(
             "custom:///opaque".into(),
         )),
@@ -698,12 +709,20 @@ async fn runtime_lora_pin_is_rechecked_after_transport_fallback() {
     let dispatch = Arc::new(CompletedBuiltinDispatch::default());
     let host = RoutingHost::builder(client, RouterMode::RoundRobin)
         .load_context(load_context)
-        .candidate_policy(Some(policy))
+        .candidate_policy(Some(policy.clone()))
         .dispatch(dispatch.clone() as LlmDispatch)
         .build()
         .await
         .unwrap();
     for pinned_worker in [101, 202] {
+        let selected = policy
+            .select(&input, Some(pinned_worker), &|| vec![101, 202], &|| {
+                vec![101, 202]
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.worker, pinned_worker);
+        assert_eq!(selected.fallback, HashSet::from([pinned_worker]));
         let mut pinned = input.clone();
         pinned.routing_mut().backend_instance_id = Some(pinned_worker);
         let mut stream = host.generate(Context::new(pinned)).await.unwrap();
@@ -755,7 +774,11 @@ async fn runtime_lora_pin_is_rechecked_after_transport_fallback() {
         )
         .unwrap();
     let error = host.generate(Context::new(input)).await.unwrap_err();
-    assert!(error.to_string().contains("runtime_lora_affinity_conflict"));
+    assert!(match_error_chain(
+        error.as_ref(),
+        &[ErrorType::CannotConnect],
+        &[]
+    ));
     assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[101, 202]);
     drop(host);
     runtime.shutdown();
@@ -2171,8 +2194,11 @@ async fn kv_rejects_partial_runtime_metadata_before_dispatch() {
         router_with_recorded_dispatch("kv-partial-runtime-lora").await;
     let mut input = request();
     input.routing = Some(RoutingHints {
-        lora_name: Some("adapter".into()),
-        base_model_name: Some("base".into()),
+        lora_name: Some(crate::lora::runtime::adapter_key(
+            "test",
+            "custom:///opaque",
+        )),
+        base_model_name: Some("test".into()),
         ..Default::default()
     });
     let input: PreprocessedRequest =
@@ -2779,8 +2805,11 @@ async fn runtime_lora_rechecks_worker_metadata_after_queued_selection() {
     router.inner.client.override_instance_avail(vec![101, 202]);
     let mut input = request();
     input.routing = Some(RoutingHints {
-        lora_name: Some("adapter".into()),
-        base_model_name: Some("base".into()),
+        lora_name: Some(crate::lora::runtime::adapter_key(
+            "test",
+            "custom:///opaque",
+        )),
+        base_model_name: Some("test".into()),
         lora_source_uri: Some(crate::lora::runtime::RuntimeLoraSourceUri::new(
             "custom:///opaque".into(),
         )),
