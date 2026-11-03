@@ -280,6 +280,19 @@ pub trait LLMEngine: Send + Sync + 'static {
         Ok(None)
     }
 
+    /// Resolves once the engine can no longer serve, with the error the
+    /// `Worker` returns. The `Worker` then shuts down as on SIGTERM, withdrawing
+    /// from discovery, draining and running `cleanup`, so the process exits
+    /// and its supervisor can restart it. Default: never resolves.
+    ///
+    /// The `Worker` may poll this before `start` completes, and drops the
+    /// future once it finishes or starts shutting down another way.
+    /// Implementations must allow polling during startup and must not use this
+    /// future to clean up.
+    async fn engine_lost(&self) -> DynamoError {
+        std::future::pending().await
+    }
+
     /// Release all engine resources. Called exactly once.
     ///
     /// `Worker` guarantees:
