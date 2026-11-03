@@ -3116,9 +3116,8 @@ mod tests {
             &self,
             input: WorkerSelectionInput<'_, SimpleWorkerConfig>,
         ) -> Result<WorkerSelectionResult, KvSchedulerError> {
-            if let WorkerSelectionInput::Configured { request, .. } = &input {
-                (self.hook)(request.mode.request_id())?;
-            }
+            let WorkerSelectionInput::Configured { request, .. } = &input;
+            (self.hook)(request.mode.request_id())?;
             self.inner.select_worker(input)
         }
     }
@@ -7373,6 +7372,147 @@ policy_classes:
         actor.handle_enqueue(request, None, lifecycle_transfer, None, None, metadata)
     }
 
+    /// Applies an enqueue of `request` as the actor loop applies a command, with an optional
+    /// explicit deadline. Returns the drain the command calls for and its reply.
+    fn apply_enqueue_command(
+        queue: &SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig, DefaultWorkerSelector>,
+        actor: &mut SchedulerQueueActor<
+            NoopSequencePublisher,
+            SimpleWorkerConfig,
+            DefaultWorkerSelector,
+            NoopOverlapScoresRefresh,
+        >,
+        request: SchedulingRequest,
+        due_at: Option<Instant>,
+    ) -> (Drain, Option<CommandReply>) {
+        let mut queue_metadata = queue
+            .default_queue_metadata(&request, Instant::now())
+            .unwrap();
+        queue_metadata.due_at = due_at;
+        let (ack_tx, _) = oneshot::channel();
+        actor.apply_command(
+            AdmissionCommand::Enqueue {
+                request,
+                attempt_tx: None,
+                block_hashes: None,
+                prepared: None,
+                queue_metadata,
+                lease: None,
+                ack_tx,
+            },
+            true,
+        )
+    }
+
+    struct BlockedSharedHead {
+        queue:
+            Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig, DefaultWorkerSelector>>,
+        slots: Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+        actor: SchedulerQueueActor<
+            NoopSequencePublisher,
+            SimpleWorkerConfig,
+            DefaultWorkerSelector,
+            NoopOverlapScoresRefresh,
+        >,
+        start: Instant,
+        head_rx: SchedulingResponseReceiver,
+        successor_rx: SchedulingResponseReceiver,
+        overdue_rx: Option<SchedulingResponseReceiver>,
+    }
+
+    /// Two workers. Busy worker 0 blocks the head of class `a`'s shared queue, which may run only
+    /// there and is due at `head_due_ms`. Behind it waits a `successor_isl`-token successor that
+    /// idle worker 1 could serve: a shared queue does not search past its blocked head. Rejecting
+    /// the head takes `head_rejection` of the paused clock. With `overdue`, class `b` holds an
+    /// entry for worker 0, due at 99 ms, whose rejection takes 2 ms. Returns at 100 ms.
+    async fn blocked_shared_head(
+        profile: PolicyProfile,
+        head_due_ms: u64,
+        head_rejection: Duration,
+        successor_isl: usize,
+        overdue: bool,
+    ) -> BlockedSharedHead {
+        let (queue, slots) = make_queue_with_profile(2, 16, 64, profile);
+        let mut actor = actor_for_test(&queue, &slots);
+        let start = Instant::now();
+        let at = |millis| Some(start + Duration::from_millis(millis));
+        let pinned = |id: &str, class: &str| {
+            let (mut request, response_rx) = make_request(id, 16);
+            request.pinned_worker = Some(WorkerWithDpRank::new(0, 0));
+            request.policy_class = Some(class.to_string());
+            (request, response_rx)
+        };
+        let (active, mut active_rx) = pinned("active", "a");
+        assert!(enqueue_request_into_actor(
+            &queue, &mut actor, active, None, None
+        ));
+        actor.handle_update(None).await;
+        active_rx.try_recv().unwrap().unwrap();
+
+        let (mut head, mut head_rx) = make_request("head", 16);
+        head.allowed_worker_ids = Some(HashSet::from([0]));
+        head.policy_class = Some("a".to_string());
+        assert!(enqueue_request_into_actor(
+            &queue,
+            &mut actor,
+            head,
+            None,
+            at(head_due_ms)
+        ));
+        if !head_rejection.is_zero() {
+            advance_clock_on_response(&mut head_rx, head_rejection);
+        }
+        let (mut successor, mut successor_rx) = make_request("successor", successor_isl);
+        successor.policy_class = Some("a".to_string());
+        assert!(enqueue_request_into_actor(
+            &queue, &mut actor, successor, None, None
+        ));
+        let mut overdue_rx = None;
+        if overdue {
+            let (request, mut response_rx) = pinned("overdue", "b");
+            assert!(enqueue_request_into_actor(
+                &queue,
+                &mut actor,
+                request,
+                None,
+                at(99)
+            ));
+            advance_clock_on_response(&mut response_rx, Duration::from_millis(2));
+            overdue_rx = Some(response_rx);
+        }
+        actor.handle_update(None).await;
+        assert!(matches!(
+            successor_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        tokio::time::advance(Duration::from_millis(100)).await;
+        BlockedSharedHead {
+            queue,
+            slots,
+            actor,
+            start,
+            head_rx,
+            successor_rx,
+            overdue_rx,
+        }
+    }
+
+    /// Classes `first` and `second`, each with a 100-token quantum and no queueing threshold.
+    fn two_class_profile() -> PolicyProfile {
+        policy_profile(
+            r#"
+default_policy_class: first
+policy_classes:
+  - name: first
+    quantum: 100
+    prefill_busy_threshold_frac: 0.0
+  - name: second
+    quantum: 100
+    prefill_busy_threshold_frac: 0.0
+"#,
+        )
+    }
+
     #[tokio::test(start_paused = true)]
     async fn class_queues_expire_on_independent_timers() {
         let profile = policy_profile(
@@ -7523,18 +7663,7 @@ policy_classes:
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn stalled_refresh_expires_its_candidate_without_release_or_drr_credit() {
-        let profile = policy_profile(
-            r#"
-default_policy_class: first
-policy_classes:
-  - name: first
-    quantum: 100
-    prefill_busy_threshold_frac: 0.0
-  - name: second
-    quantum: 100
-    prefill_busy_threshold_frac: 0.0
-"#,
-        );
+        let profile = two_class_profile();
         let refresher = Arc::new(BlockingRefresher::new(RefreshedOverlap::default()));
         let (queue, slots) = make_queue_with_profile_and_blocking_refresher(
             1,
@@ -7842,18 +7971,7 @@ policy_classes:
             (true, Duration::from_millis(200), 48),
             (false, OVERLAP_REFRESH_TIMEOUT, 0),
         ] {
-            let profile = policy_profile(
-                r#"
-default_policy_class: first
-policy_classes:
-  - name: first
-    quantum: 100
-    prefill_busy_threshold_frac: 0.0
-  - name: second
-    quantum: 100
-    prefill_busy_threshold_frac: 0.0
-"#,
-            );
+            let profile = two_class_profile();
             let refresher = Arc::new(BlockingRefresher::new(refreshed.clone()));
             let (queue, slots) = make_queue_with_profile_and_blocking_refresher(
                 2,
@@ -8737,7 +8855,7 @@ policy_classes:
     #[tokio::test(start_paused = true)]
     async fn a_refused_arrival_drains_the_head_its_expiry_exposed() {
         // Class `a` has no class budget or controlled delay; its two workers give it a 64-token
-        // limit.
+        // limit, which the 64-token successor alone fills once the head leaves.
         let profile = policy_profile(
             r#"
 default_policy_class: a
@@ -8758,83 +8876,36 @@ policy_classes:
         // "arrival-expired": rejecting the head takes 2 ms, past the arrival's own deadline.
         // "arrival-cancelled": the arrival's caller has left.
         for case in ["sweep", "retry", "arrival-expired", "arrival-cancelled"] {
-            let (queue, slots) = make_queue_with_profile(2, 16, 64, profile.clone());
-            let mut actor = actor_for_test(&queue, &slots);
-            let start = Instant::now();
-            let at = |millis| Some(start + Duration::from_millis(millis));
-            let pinned = |id: &str, isl_tokens, worker, class: &str| {
-                let (mut request, response_rx) = make_request(id, isl_tokens);
-                request.pinned_worker = Some(WorkerWithDpRank::new(worker, 0));
-                request.policy_class = Some(class.to_string());
-                (request, response_rx)
+            let head_rejection = if case == "arrival-expired" {
+                Duration::from_millis(2)
+            } else {
+                Duration::ZERO
             };
-            let (active, mut active_rx) = pinned("active", 16, 0, "a");
-            assert!(enqueue_request_into_actor(
-                &queue, &mut actor, active, None, None
-            ));
-            actor.handle_update(None).await;
-            active_rx.try_recv().unwrap().unwrap();
-
-            // The head may run only on busy worker 0. Behind it in the class's shared queue waits
-            // an unbounded request that idle worker 1 could serve, which alone fills the limit once
-            // the head leaves. A shared queue does not search past its blocked head.
-            let (mut head, mut head_rx) = make_request("head", 16);
-            head.allowed_worker_ids = Some(HashSet::from([0]));
-            head.policy_class = Some("a".to_string());
-            let head_due = if case == "retry" { at(101) } else { at(100) };
-            assert!(enqueue_request_into_actor(
-                &queue, &mut actor, head, None, head_due
-            ));
-            let (mut successor, mut successor_rx) = make_request("successor", 64);
-            successor.policy_class = Some("a".to_string());
-            assert!(enqueue_request_into_actor(
-                &queue, &mut actor, successor, None, None
-            ));
-            let mut overdue_rx = None;
-            if case == "retry" {
-                let (overdue, mut response_rx) = pinned("overdue", 16, 0, "b");
-                assert!(enqueue_request_into_actor(
-                    &queue,
-                    &mut actor,
-                    overdue,
-                    None,
-                    at(99)
-                ));
-                advance_clock_on_response(&mut response_rx, Duration::from_millis(2));
-                overdue_rx = Some(response_rx);
-            } else if case == "arrival-expired" {
-                advance_clock_on_response(&mut head_rx, Duration::from_millis(2));
-            }
-            actor.handle_update(None).await;
-            assert!(matches!(
-                successor_rx.try_recv(),
-                Err(oneshot::error::TryRecvError::Empty)
-            ));
-            tokio::time::advance(Duration::from_millis(100)).await;
-
-            // The arrival is applied as the actor loop applies a command.
+            let BlockedSharedHead {
+                queue,
+                slots,
+                mut actor,
+                start,
+                mut head_rx,
+                mut successor_rx,
+                overdue_rx,
+            } = blocked_shared_head(
+                profile.clone(),
+                if case == "retry" { 101 } else { 100 },
+                head_rejection,
+                64,
+                case == "retry",
+            )
+            .await;
+            let at = |millis| Some(start + Duration::from_millis(millis));
             let (arrival, arrival_rx) = make_request("arrival", 16);
             let mut arrival_rx = (case != "arrival-cancelled").then_some(arrival_rx);
-            let now = Instant::now();
-            let mut queue_metadata = queue.default_queue_metadata(&arrival, now).unwrap();
-            queue_metadata.due_at = if case == "arrival-expired" {
+            let arrival_due = if case == "arrival-expired" {
                 at(101)
             } else {
                 None
             };
-            let (ack_tx, _ack_rx) = oneshot::channel();
-            let (ready, reply) = actor.apply_command(
-                AdmissionCommand::Enqueue {
-                    request: arrival,
-                    attempt_tx: None,
-                    block_hashes: None,
-                    prepared: None,
-                    queue_metadata,
-                    lease: None,
-                    ack_tx,
-                },
-                true,
-            );
+            let (ready, reply) = apply_enqueue_command(&queue, &mut actor, arrival, arrival_due);
             let clock_ms = if matches!(case, "retry" | "arrival-expired") {
                 102
             } else {
@@ -8890,12 +8961,14 @@ policy_classes:
     /// head, though no capacity change was recorded for the lane's worker and the expiry left no
     /// class timer armed. Otherwise the successor would wait for a capacity change on its worker
     /// or for a full recheck, which the scheduler's periodic queue update runs.
-    async fn arrival_expiry_drains_the_exact_lane_it_unblocked(arrival_queued: bool) {
+    #[tokio::test(start_paused = true)]
+    async fn an_arrival_drains_the_exact_lane_its_expiry_unblocked() {
         // One worker: a 64-token limit refuses the arrival once the successor alone fills it, and
         // a 128-token limit admits it to the lane behind the successor.
-        let queue_limit = if arrival_queued { 128 } else { 64 };
-        let profile = policy_profile(&format!(
-            r#"
+        for (case, queue_limit) in [("refused", 64), ("accepted", 128)] {
+            let arrival_queued = case == "accepted";
+            let profile = policy_profile(&format!(
+                r#"
 policy_classes:
   - name: a
     queue_policy: fcfs
@@ -8903,122 +8976,102 @@ policy_classes:
     prefill_busy_threshold_frac: 0.0
     raw_isl_token_queue_limit_per_worker: {queue_limit}
 "#
-        ));
-        let (queue, slots) = make_queue_with_profile(1, 16, 64, profile);
-        let mut actor = actor_for_test(&queue, &slots);
-        let start = Instant::now();
-        let worker = WorkerWithDpRank::new(0, 0);
-        let pinned = |id: &str, isl_tokens| {
-            let (mut request, response_rx) = make_request(id, isl_tokens);
-            request.pinned_worker = Some(worker);
-            (request, response_rx)
-        };
-        let (active, mut active_rx) = pinned("active", 16);
-        assert!(enqueue_request_into_actor(
-            &queue, &mut actor, active, None, None
-        ));
-        actor.handle_update(None).await;
-        active_rx.try_recv().unwrap().unwrap();
+            ));
+            let (queue, slots) = make_queue_with_profile(1, 16, 64, profile);
+            let mut actor = actor_for_test(&queue, &slots);
+            let start = Instant::now();
+            let worker = WorkerWithDpRank::new(0, 0);
+            let pinned = |id: &str, isl_tokens| {
+                let (mut request, response_rx) = make_request(id, isl_tokens);
+                request.pinned_worker = Some(worker);
+                (request, response_rx)
+            };
+            let (active, mut active_rx) = pinned("active", 16);
+            assert!(enqueue_request_into_actor(
+                &queue, &mut actor, active, None, None
+            ));
+            actor.handle_update(None).await;
+            active_rx.try_recv().unwrap().unwrap();
 
-        // The busy worker blocks its exact lane at the head, due at 100 ms. The successor, with
-        // no due time, waits behind it.
-        let (head, mut head_rx) = pinned("head", 16);
-        let head_due = start + Duration::from_millis(100);
-        assert!(enqueue_request_into_actor(
-            &queue,
-            &mut actor,
-            head,
-            None,
-            Some(head_due)
-        ));
-        let (successor, mut successor_rx) = pinned("successor", 64);
-        assert!(enqueue_request_into_actor(
-            &queue, &mut actor, successor, None, None
-        ));
-        actor.handle_update(None).await;
-        assert!(matches!(
-            successor_rx.try_recv(),
-            Err(oneshot::error::TryRecvError::Empty)
-        ));
-
-        // The worker gains room with no recorded capacity change, as decaying prefill load gives
-        // it, and the head's due time passes before the actor's timer branch runs.
-        slots.free(&"active".to_string(), decay_now()).unwrap();
-        tokio::time::advance(Duration::from_millis(100)).await;
-
-        // The arrival is applied as the actor loop applies a command. Its expiry sweep removes the
-        // head and leaves the class with no due time to arm.
-        let (arrival, mut arrival_rx) = if arrival_queued {
-            pinned("arrival", 16)
-        } else {
-            make_request("arrival", 16)
-        };
-        let queue_metadata = queue
-            .default_queue_metadata(&arrival, Instant::now())
-            .unwrap();
-        let (ack_tx, _ack_rx) = oneshot::channel();
-        let (ready, reply) = actor.apply_command(
-            AdmissionCommand::Enqueue {
-                request: arrival,
-                attempt_tx: None,
-                block_hashes: None,
-                prepared: None,
-                queue_metadata,
-                lease: None,
-                ack_tx,
-            },
-            true,
-        );
-        assert!(matches!(
-            head_rx.try_recv(),
-            Ok(Err(KvSchedulerError::DeadlineExceeded))
-        ));
-        assert_eq!(actor.class_timers.armed, [None]);
-        assert_eq!(ready, Drain::Enqueued);
-
-        // The drain the actor loop runs for the arrival, with no capacity event or update,
-        // dispatches the successor to the worker that gained room.
-        actor.drain_after_command(ready, reply).await;
-        assert_eq!(
-            successor_rx.try_recv().unwrap().unwrap().best_worker,
-            worker
-        );
-        if arrival_queued {
-            // The successor's booking fills the worker, so the arrival waits on the lane.
+            // The busy worker blocks its exact lane at the head, due at 100 ms. The successor,
+            // with no due time, waits behind it.
+            let (head, mut head_rx) = pinned("head", 16);
+            let head_due = start + Duration::from_millis(100);
+            assert!(enqueue_request_into_actor(
+                &queue,
+                &mut actor,
+                head,
+                None,
+                Some(head_due)
+            ));
+            let (successor, mut successor_rx) = pinned("successor", 64);
+            assert!(enqueue_request_into_actor(
+                &queue, &mut actor, successor, None, None
+            ));
+            actor.handle_update(None).await;
             assert!(matches!(
-                arrival_rx.try_recv(),
+                successor_rx.try_recv(),
                 Err(oneshot::error::TryRecvError::Empty)
             ));
-            assert_eq!(queue.pending_count(), 1);
-            free_requests(&slots, &["successor"]);
-            actor.handle_update(None).await;
-            assert_eq!(arrival_rx.try_recv().unwrap().unwrap().best_worker, worker);
-            free_requests(&slots, &["arrival"]);
-        } else {
-            assert!(matches!(
-                arrival_rx.try_recv(),
-                Ok(Err(KvSchedulerError::QueueRejected(_)))
-            ));
-            assert_eq!(queue.pending_count(), 0);
-            free_requests(&slots, &["successor"]);
+
+            // The worker gains room with no recorded capacity change, as decaying prefill load
+            // gives it, and the head's due time passes before the actor's timer branch runs.
+            slots.free(&"active".to_string(), decay_now()).unwrap();
+            tokio::time::advance(Duration::from_millis(100)).await;
+
+            // Applied as the actor loop applies a command, the arrival's expiry sweep removes the
+            // head and leaves the class with no due time to arm.
+            let (arrival, mut arrival_rx) = if arrival_queued {
+                pinned("arrival", 16)
+            } else {
+                make_request("arrival", 16)
+            };
+            let (ready, reply) = apply_enqueue_command(&queue, &mut actor, arrival, None);
+            assert!(
+                matches!(
+                    head_rx.try_recv(),
+                    Ok(Err(KvSchedulerError::DeadlineExceeded))
+                ),
+                "{case}"
+            );
+            assert_eq!(actor.class_timers.armed, [None], "{case}");
+            assert_eq!(ready, Drain::Enqueued, "{case}");
+
+            // The drain the actor loop runs for the arrival, with no capacity event or update,
+            // dispatches the successor to the worker that gained room.
+            actor.drain_after_command(ready, reply).await;
+            assert_eq!(
+                successor_rx.try_recv().unwrap().unwrap().best_worker,
+                worker,
+                "{case}"
+            );
+            if arrival_queued {
+                // The successor's booking fills the worker, so the arrival waits on the lane.
+                assert!(matches!(
+                    arrival_rx.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ));
+                assert_eq!(queue.pending_count(), 1);
+                free_requests(&slots, &["successor"]);
+                actor.handle_update(None).await;
+                assert_eq!(arrival_rx.try_recv().unwrap().unwrap().best_worker, worker);
+                free_requests(&slots, &["arrival"]);
+            } else {
+                assert!(matches!(
+                    arrival_rx.try_recv(),
+                    Ok(Err(KvSchedulerError::QueueRejected(_)))
+                ));
+                assert_eq!(queue.pending_count(), 0);
+                free_requests(&slots, &["successor"]);
+            }
+            slots.assert_completely_drained(decay_now());
         }
-        slots.assert_completely_drained(decay_now());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_refused_arrival_drains_the_exact_lane_its_expiry_unblocked() {
-        arrival_expiry_drains_the_exact_lane_it_unblocked(false).await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn an_accepted_arrival_drains_the_exact_lane_its_expiry_unblocked() {
-        arrival_expiry_drains_the_exact_lane_it_unblocked(true).await;
     }
 
     #[tokio::test(start_paused = true)]
     async fn an_arrival_due_by_its_insertion_attempt_never_enters_the_queue() {
         // Class `a` has no class budget or controlled delay; its two workers give it a 2-request
-        // limit.
+        // limit, which the head and the successor fill.
         let profile = policy_profile(
             r#"
 default_policy_class: a
@@ -9040,77 +9093,30 @@ policy_classes:
         // removes the head.
         // "caller-left": as "sweep", but the arrival's caller has left.
         for case in ["sweep", "retry", "caller-left"] {
-            let (queue, slots) = make_queue_with_profile(2, 16, 64, profile.clone());
-            let mut actor = actor_for_test(&queue, &slots);
-            let start = Instant::now();
-            let at = |millis| Some(start + Duration::from_millis(millis));
-            let pinned = |id: &str, worker, class: &str| {
-                let (mut request, response_rx) = make_request(id, 16);
-                request.pinned_worker = Some(WorkerWithDpRank::new(worker, 0));
-                request.policy_class = Some(class.to_string());
-                (request, response_rx)
-            };
-            let (active, mut active_rx) = pinned("active", 0, "a");
-            assert!(enqueue_request_into_actor(
-                &queue, &mut actor, active, None, None
-            ));
-            actor.handle_update(None).await;
-            active_rx.try_recv().unwrap().unwrap();
-
-            // The head may run only on busy worker 0. Behind it in the class's shared queue waits
-            // an unbounded request that idle worker 1 could serve; together they fill the limit. A
-            // shared queue does not search past its blocked head.
-            let (mut head, mut head_rx) = make_request("head", 16);
-            head.allowed_worker_ids = Some(HashSet::from([0]));
-            head.policy_class = Some("a".to_string());
-            let head_due = if case == "retry" { at(101) } else { at(100) };
-            assert!(enqueue_request_into_actor(
-                &queue, &mut actor, head, None, head_due
-            ));
-            advance_clock_on_response(&mut head_rx, Duration::from_millis(2));
-            let (mut successor, mut successor_rx) = make_request("successor", 16);
-            successor.policy_class = Some("a".to_string());
-            assert!(enqueue_request_into_actor(
-                &queue, &mut actor, successor, None, None
-            ));
-            let mut overdue_rx = None;
-            if case == "retry" {
-                let (overdue, mut response_rx) = pinned("overdue", 0, "b");
-                assert!(enqueue_request_into_actor(
-                    &queue,
-                    &mut actor,
-                    overdue,
-                    None,
-                    at(99)
-                ));
-                advance_clock_on_response(&mut response_rx, Duration::from_millis(2));
-                overdue_rx = Some(response_rx);
-            }
-            actor.handle_update(None).await;
-            assert!(matches!(
-                successor_rx.try_recv(),
-                Err(oneshot::error::TryRecvError::Empty)
-            ));
-            tokio::time::advance(Duration::from_millis(100)).await;
-
-            // The arrival is applied as the actor loop applies a command.
+            let BlockedSharedHead {
+                queue,
+                slots,
+                mut actor,
+                start,
+                mut head_rx,
+                mut successor_rx,
+                overdue_rx,
+            } = blocked_shared_head(
+                profile.clone(),
+                if case == "retry" { 101 } else { 100 },
+                Duration::from_millis(2),
+                16,
+                case == "retry",
+            )
+            .await;
             let (arrival, arrival_rx) = make_request("arrival", 16);
             let mut arrival_rx = (case != "caller-left").then_some(arrival_rx);
-            let now = Instant::now();
-            let mut queue_metadata = queue.default_queue_metadata(&arrival, now).unwrap();
-            queue_metadata.due_at = if case == "retry" { at(103) } else { at(101) };
-            let (ack_tx, _ack_rx) = oneshot::channel();
-            let (ready, reply) = actor.apply_command(
-                AdmissionCommand::Enqueue {
-                    request: arrival,
-                    attempt_tx: None,
-                    block_hashes: None,
-                    prepared: None,
-                    queue_metadata,
-                    lease: None,
-                    ack_tx,
-                },
-                true,
+            let arrival_due_ms = if case == "retry" { 103 } else { 101 };
+            let (ready, reply) = apply_enqueue_command(
+                &queue,
+                &mut actor,
+                arrival,
+                Some(start + Duration::from_millis(arrival_due_ms)),
             );
             let clock_ms = if case == "retry" { 104 } else { 102 };
             assert_eq!(
@@ -9174,18 +9180,7 @@ policy_classes:
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn due_time_passing_before_selection_is_rejected_without_selecting() {
-        let profile = policy_profile(
-            r#"
-default_policy_class: first
-policy_classes:
-  - name: first
-    quantum: 100
-    prefill_busy_threshold_frac: 0.0
-  - name: second
-    quantum: 100
-    prefill_busy_threshold_frac: 0.0
-"#,
-        );
+        let profile = two_class_profile();
         // The dispatch gate asks for the available workers after the drain reads the clock.
         // Once armed, that call for "crossing" takes 10 ms of the clock, as slow gate work or
         // preemption would. Selecting "crossing" would fail.
