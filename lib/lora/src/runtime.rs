@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const RUNTIME_LORA_PROTOCOL_VERSION: u16 = 2;
-pub const RUNTIME_LORA_CAPABILITY_TAINT: &str = "dynamo.runtime-lora/v2";
 pub const RUNTIME_LORA_KEY_PREFIX: &str = "dyn-lora-";
 pub const MAX_RUNTIME_MODEL_ID_BYTES: usize = 4096;
 pub const MAX_RUNTIME_BASE_MODEL_BYTES: usize = 512;
@@ -19,6 +18,12 @@ const IDENTITY_DOMAIN: &[u8] = b"dynamo-runtime-lora-v1\0";
 pub const RUNTIME_LORA_SCHEMES_RUNTIME_KEY: &str = "runtime_lora_schemes";
 pub const RUNTIME_LORA_SUPPORT_RUNTIME_KEY: &str = "supports_runtime_lora_resolution";
 pub const RUNTIME_LORA_VERSIONS_RUNTIME_KEY: &str = "runtime_lora_protocol_versions";
+static RUNTIME_LORA_CAPABILITY_TAINT: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| capability_taint(RUNTIME_LORA_PROTOCOL_VERSION));
+
+fn capability_taint(protocol_version: u16) -> String {
+    format!("dynamo.runtime-lora/v{protocol_version}")
+}
 
 /// Borrowed discovery metadata, without a dependency on model cards.
 pub trait RuntimeLoraWorkerFacts {
@@ -36,7 +41,9 @@ pub fn supports_runtime_lora<
     is_base
         && requires_preprocessing
         && is_aggregated
-        && config.taints().contains(RUNTIME_LORA_CAPABILITY_TAINT)
+        && config
+            .taints()
+            .contains(RUNTIME_LORA_CAPABILITY_TAINT.as_str())
         && runtime_lora_worker_schemes(config).is_some()
 }
 
@@ -101,7 +108,9 @@ pub fn constrain_runtime_lora_workers<
     eligible.retain(|worker_id| {
         live_worker_ids.contains(worker_id)
             && worker_configs.get(worker_id).is_some_and(|config| {
-                if !config.taints().contains(RUNTIME_LORA_CAPABILITY_TAINT)
+                if !config
+                    .taints()
+                    .contains(RUNTIME_LORA_CAPABILITY_TAINT.as_str())
                     || !routing_constraints.is_compatible_with_worker_taints(config.taints())
                 {
                     return false;
@@ -191,7 +200,7 @@ impl fmt::Debug for RuntimeLoraSelection {
 
 impl RuntimeLoraSelection {
     pub fn capability_taint(&self) -> String {
-        format!("dynamo.runtime-lora/v{}", self.protocol_version)
+        capability_taint(self.protocol_version)
     }
 }
 
@@ -300,15 +309,14 @@ where
     if !config.enabled {
         return Ok(None);
     }
+    if is_known_exact(requested_model) {
+        return Ok(None);
+    }
     if requested_model.is_empty()
         || requested_model.len() > MAX_RUNTIME_MODEL_ID_BYTES
         || contains_forbidden_character(requested_model)
     {
         return Err(RuntimeLoraError::InvalidModelId);
-    }
-
-    if is_known_exact(requested_model) {
-        return Ok(None);
     }
 
     let (canonical_base, source_uri) = if let Some((base, source)) = requested_model.split_once('|')
@@ -462,6 +470,35 @@ mod tests {
     }
 
     #[test]
+    fn runtime_restriction_requires_requested_capability_taint() {
+        let capable = capable_worker(&["custom"]);
+        let mut missing_taint = capable_worker(&["custom"]);
+        missing_taint.1.clear();
+        assert!(supports_runtime_lora(&capable, true, true, true));
+        assert!(!supports_runtime_lora(&missing_taint, true, true, true));
+        let configs = HashMap::from([(1, capable), (2, missing_taint)]);
+        let constraints = RoutingConstraints {
+            required_taints: HashSet::from(["dynamo.runtime-lora/v2".into()]),
+            ..Default::default()
+        };
+        assert_eq!(
+            constrain_runtime_lora_workers(
+                true,
+                None,
+                &HashSet::from([1, 2]),
+                &configs,
+                &constraints
+            ),
+            Some(HashSet::from([1]))
+        );
+        assert_eq!(
+            configs[&2].2.get(),
+            0,
+            "reject missing taint before capability decoding"
+        );
+    }
+
+    #[test]
     fn runtime_restriction_preserves_authoritative_empty_and_rejects_heterogeneity() {
         let configs = HashMap::from([(1, capable_worker(&["a"])), (2, capable_worker(&["b"]))]);
         let live = HashSet::from([1, 2, 3]);
@@ -584,6 +621,35 @@ mod tests {
         )
         .expect("known model should be accepted");
         assert!(selection.is_none());
+    }
+
+    #[test]
+    fn registered_models_bypass_runtime_only_limits() {
+        for name in [
+            "a".repeat(MAX_RUNTIME_MODEL_ID_BYTES + 1),
+            "registered\nname".into(),
+        ] {
+            assert_eq!(
+                resolve_runtime_lora_model(
+                    &name,
+                    &config(),
+                    |candidate| candidate == name,
+                    |_| panic!("registered model must not resolve a runtime base"),
+                    || panic!("registered model must not infer a runtime base"),
+                ),
+                Ok(None)
+            );
+            assert_eq!(
+                resolve_runtime_lora_model(
+                    &name,
+                    &config(),
+                    |_| false,
+                    resolve_base,
+                    || Ok("base".into())
+                ),
+                Err(RuntimeLoraError::InvalidModelId)
+            );
+        }
     }
 
     #[test]

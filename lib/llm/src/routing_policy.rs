@@ -23,6 +23,7 @@ pub(crate) struct CandidateSelection {
 }
 
 pub(crate) trait CandidatePolicy: Send + Sync {
+    /// `Ok(None)` defers to normal selection; policy rejections return `Err`, never fallback.
     fn select(
         &self,
         request: &PreprocessedRequest,
@@ -51,6 +52,7 @@ pub(crate) trait CandidatePolicy: Send + Sync {
         constraints: &RoutingConstraints,
     ) -> Result<(), Error>;
 
+    /// `None` leaves availability unrestricted; `Some(empty)` excludes every worker.
     fn refresh_admission(
         &self,
         request: &SchedulingRequest,
