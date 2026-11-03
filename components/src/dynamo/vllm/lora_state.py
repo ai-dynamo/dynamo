@@ -164,12 +164,12 @@ class LoRAState:
         raise ValueError("no collision-free LoRA ID is available")
 
     def list_lora_ids(self) -> dict[str, int]:
-        """Return map of loaded LoRA names to integer IDs.
+        """Return map of administratively loaded LoRA names to integer IDs.
 
-        Excludes placeholder entries (id=-1) that are reserved during load but not yet committed.
+        Excludes private runtime adapters and uncommitted placeholders.
         """
         return {
             name: lora.id
             for name, lora in self.loaded_loras.items()
-            if lora.id != -1  # Skip uncommitted placeholder reservations
+            if lora.id != -1 and not self.is_runtime_managed(name)
         }
