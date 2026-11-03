@@ -82,7 +82,10 @@ def test_kv_state_endpoint_supports_cli_and_env(monkeypatch):
 
 
 def test_response_plane_defaults_to_unset_and_accepts_quic(monkeypatch):
-    monkeypatch.delenv("DYN_RESPONSE_PLANE", raising=False)
+    # setenv records the original value, so teardown also undoes the "velo"
+    # that validate() exports below instead of leaking it into later tests.
+    monkeypatch.setenv("DYN_RESPONSE_PLANE", "tcp")
+    monkeypatch.delenv("DYN_RESPONSE_PLANE")
 
     default_config, help_text = _parse_runtime_args([])
     # Unset leaves the choice, including the TLS fallback, to the Rust runtime.
