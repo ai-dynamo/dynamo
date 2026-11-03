@@ -470,7 +470,19 @@ jobs:
     # Have an explicit step to build tests first to separate time spent on build vs execution.
     - name: Compile Tests
       working-directory: ${{ matrix.dir }}
-      run: cargo test --locked --no-run
+      run: |
+        if [ "${{ matrix.dir }}" = "." ]; then
+          set -o pipefail
+          set +e
+          cargo test --locked --no-run --message-format=json-render-diagnostics \
+            | tee "$RUNNER_TEMP/completed-rust-test-artifacts.jsonl"
+          compile_status=("${PIPESTATUS[@]}")
+          if [ "${compile_status[0]}" -ne 0 ]; then
+            exit "${compile_status[0]}"
+          fi
+          exit "${compile_status[1]}"
+        fi
+        cargo test --locked --no-run
     - name: Run Doc Tests
       working-directory: ${{ matrix.dir }}
       run: cargo doc --no-deps && cargo test --locked --doc
@@ -527,6 +539,19 @@ jobs:
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}
       run: cargo test --locked --features ais-forward-pass -- --nocapture
+    - name: Reclaim completed Rust test executables
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      run: |
+        set -euo pipefail
+        python3 -m unittest discover -s scripts/ci -p test_reclaim_completed_test_executables.py
+        reclaim_metadata="$RUNNER_TEMP/reclaim-cargo-metadata.json"
+        cargo metadata --locked --no-deps --format-version 1 > "$reclaim_metadata"
+        workspace_root="$(python3 -c 'import json, sys; from pathlib import Path; print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["workspace_root"])' "$reclaim_metadata")"
+        target_dir="$(python3 -c 'import json, sys; from pathlib import Path; print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["target_directory"])' "$reclaim_metadata")"
+        python3 scripts/ci/reclaim_completed_test_executables.py \
+          --cargo-messages "$RUNNER_TEMP/completed-rust-test-artifacts.jsonl" \
+          --workspace "$workspace_root" --target-dir "$target_dir"
     - name: Compile feature-gated benchmark entrypoints
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
