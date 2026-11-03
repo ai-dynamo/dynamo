@@ -19,7 +19,7 @@ Here the operation is connecting to a small TCP server on the decode worker.
   `side_channel` to get the address, then connects. When a decode worker
   leaves the list, the prefill worker drops it.
 
-## Run
+## Run locally
 
 On one machine, the file discovery backend needs no etcd or NATS. Start each
 command in its own terminal, from this directory:
@@ -48,6 +48,43 @@ poll. Stop one and every prefill worker prints:
 prefill 3e4623350c2d3fd: decode 2dd62b4d9d3f923 at 192.168.1.242:39333 left
 ```
 
+## Run on Kubernetes
+
+`k8s.yaml` runs two decode and two prefill workers with Kubernetes discovery
+(`DYN_DISCOVERY_BACKEND=kubernetes`) and without the Dynamo operator. It
+creates by hand what the operator creates for a DynamoGraphDeployment: RBAC
+for `DynamoWorkerMetadata` resources and EndpointSlices, a Service with the
+discovery labels, and the pod name, namespace, and UID in each pod's
+environment. The `Dockerfile` builds an image with the latest nightly Dynamo
+runtime and the two scripts.
+
+From this directory, on minikube:
+
+```bash
+docker build -t pd-discovery:latest .
+minikube image load pd-discovery:latest
+
+# Skip the CRD if the Dynamo platform is installed.
+kubectl apply -f ../../../../../deploy/operator/config/crd/bases/nvidia.com_dynamoworkermetadatas.yaml
+kubectl apply -f k8s.yaml
+
+kubectl -n pd-discovery logs -f -l role=prefill --prefix
+```
+
+On another cluster, push the image to a registry that the cluster can pull
+from and set `image` in `k8s.yaml`. To watch the prefill workers react, scale
+the decode workers or delete a decode pod:
+
+```bash
+kubectl -n pd-discovery scale deploy/decode --replicas=3
+kubectl -n pd-discovery delete pod <decode-pod>
+```
+
+Remove everything with `kubectl delete -f k8s.yaml`.
+
+This was tested on minikube (Kubernetes 1.35) with `ai-dynamo-runtime`
+1.7.0.dev20261102.
+
 ## Notes
 
 - `client.instances()` reads a list that Dynamo keeps up to date from
@@ -66,5 +103,6 @@ prefill 3e4623350c2d3fd: decode 2dd62b4d9d3f923 at 192.168.1.242:39333 left
   worker can also watch `decode.generate` and look up the address with the
   same ID.
 - `--host` sets the address that the decode worker publishes. The default, the
-  machine's hostname resolved to an IP, works on one machine. Across machines,
-  pass an IP that the prefill workers can reach.
+  machine's hostname resolved to an IP, works on one machine and is the pod IP
+  on Kubernetes. Across machines, pass an IP that the prefill workers can
+  reach.
