@@ -3551,9 +3551,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             raw_routed_experts_by_output: dict[int, Any] = {}
             raw_sampling_mask_by_output: dict[int, Any] = {}
             # vLLM surfaces prompt_logprobs once (at end-of-prefill) and clears
-            # them on subsequent chunks. Capture the first non-None payload and
-            # send it once per choice, on that choice's first output that can
-            # carry it.
+            # them on subsequent chunks, so keep the first non-None payload.
             prompt_logprobs_payload: Optional[list] = None
             prompt_logprobs_sent: set[int] = set()
             engine_prompt_token_ids: Optional[list[int]] = None
@@ -3663,11 +3661,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         )
                         usage_metadata_by_index[output_idx] = usage_metadata
 
-                    # Send prompt logprobs with the first token output, not the
-                    # terminal: the frontend can match a stop string and cancel
-                    # the stream before vLLM's terminal output arrives. Send it
-                    # once per choice: the completions echo path reads it per
-                    # choice index.
+                    # Send on the first token output: a stop-string match can cancel the stream
+                    # before the terminal output. Once per choice: echo reads it per choice index.
                     if (
                         prompt_logprobs_payload is not None
                         and output_idx not in prompt_logprobs_sent

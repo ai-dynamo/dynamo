@@ -1238,10 +1238,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     out["completion_usage"] = usage
                     usage_metadata_by_index[output_idx] = usage_metadata
 
-                # Send prompt logprobs with the first token output, not the
-                # terminal: the frontend can match a stop string and cancel the
-                # stream before SGLang's terminal output arrives. Send it once
-                # per choice: the completions echo path reads it per choice index.
+                # Send on the first token output: a stop-string match can cancel the stream
+                # before the terminal output. Once per choice: echo reads it per choice index.
                 if prompt_payload is not None and output_idx not in prompt_payload_sent:
                     engine_data["prompt_logprobs"] = prompt_payload
                     prompt_payload_sent.add(output_idx)

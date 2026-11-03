@@ -1452,12 +1452,8 @@ class HandlerBase(BaseGenerativeHandler):
                                 output
                             )
 
-                        # Send prompt logprobs with the first token output, not the
-                        # terminal: the frontend can match a stop string and cancel
-                        # the stream before TRT-LLM's terminal output arrives.
-                        # Send it once per choice: the completions echo path
-                        # reads it per choice index. Prefill keeps them on its
-                        # single terminal output.
+                        # Send on the first token output: a stop-string match can cancel the stream
+                        # before the terminal output. Once per choice; prefill sends at the end.
                         if (
                             prompt_logprobs_payload is not None
                             and output_idx not in prompt_logprobs_sent
