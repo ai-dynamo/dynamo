@@ -232,14 +232,7 @@ jobs:
           FILES=$(jq -r '.changed[] | "- `\(.)`"' "$RUNNER_TEMP/apply.json")
           NOTES=""
           if [[ -n "$OPERATOR_APP" && "$OPERATOR_APP" != "$TARGET" ]]; then
-            NOTES+="The operator chart's \`appVersion\` stays at ${OPERATOR_APP} on purpose. The operator code owners move it to ${TARGET} after capturing the v${LINE}.0 upgrade history, as the \"Release boundary\" section of \`deploy/operator/internal/controller/testdata/upgrade/README.md\` describes. That has to land before \`release/${TARGET}\` is cut."$'\n\n'
-          fi
-          SYNC=$(sed -nE 's/^ *MAIN_RELEASE_VERSION: *"([^"]+)".*/\1/p' \
-                   .github/workflows/linear-release-sync.yml 2>/dev/null || true)
-          if [[ -n "$SYNC" && "$SYNC" != "$TARGET" ]]; then
-            BASE=$(gh api "repos/${GH_REPO}/compare/main...release/${LINE}.0" --jq .merge_base_commit.sha 2>/dev/null \
-                   || echo "the merge-base of main and release/${LINE}.0")
-            NOTES+="\`.github/workflows/linear-release-sync.yml\` still syncs main into the Linear release ${SYNC}. Set its \`MAIN_RELEASE_VERSION\` to ${TARGET} and its \`RELEASE_SCAN_BASE\` to ${BASE} in a separate PR, because this bot cannot push workflow files."$'\n\n'
+            NOTES+="The operator chart's \`appVersion\` stays at ${OPERATOR_APP} on purpose. The operator code owners move it to ${TARGET} after capturing the v${LINE}.0 upgrade history, as the \"Provenance and release boundaries\" section of \`deploy/operator/internal/controller/testdata/upgrade/README.md\` describes. That has to land before \`release/${TARGET}\` is cut."$'\n\n'
           fi
 
           cat > "$RUNNER_TEMP/body.md" <<EOF

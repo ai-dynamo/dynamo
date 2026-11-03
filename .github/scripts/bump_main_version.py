@@ -14,7 +14,7 @@ main sort above the X.Y releases:
 The operator chart's appVersion never moves here. The operator upgrade-history
 gate (deploy/operator/hack/generate_upgrade_fixtures.py) accepts the next
 appVersion only after the operator owners capture the released predecessor's
-history; see "Release boundary" in
+history; see "Provenance and release boundaries" in
 deploy/operator/internal/controller/testdata/upgrade/README.md.
 """
 
