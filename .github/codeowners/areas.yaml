@@ -1203,6 +1203,10 @@ shared:
   owners:
   - runtime
   - sidecar
+- glob: lib/sidecar/triton/
+  owners:
+  - backend-triton
+  - sidecar
 - glob: lib/sidecar/trtllm/
   owners:
   - backend-trtllm
