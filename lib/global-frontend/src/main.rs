@@ -13,17 +13,21 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use dynamo_global_common::{PoolIdDeriver, PoolKey, V1PoolIdDeriver};
 use dynamo_global_frontend::{
-    Metrics, PoolSnapshot, RelayGatedPoolCatalog, affinity_store_ms, app, discover_pools,
-    follow_relays, measure_round_trips, serve, serve_relay_views,
+    Metrics, PoolSnapshot, RelayGatedPoolCatalog, affinity_store_ms, app, app_with_selection_core,
+    discover_pools, follow_relays, measure_round_trips, serve, serve_relay_views,
 };
 use dynamo_global_router::{
     AffinitySelector, InFlightTracker, LeastInFlightSelector, Pool, PoolSelector, PoolSignals,
-    RoundRobinSelector,
+    RoundRobinSelector, SelectionCorePolicy, SelectionCoreSelector,
 };
+use dynamo_runtime::config::environment_names::logging as env_logging;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+/// The log filter without `DYN_LOG`: the router core logs each selection at
+/// INFO, which `--use-selection-core` would turn into a line per request.
+const DEFAULT_LOG: &str = "info,dynamo_kv_router::scheduling::selector=warn";
 /// How often the round trip to each pool is measured.
 const ROUND_TRIP_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -67,6 +71,9 @@ struct Args {
     connect_timeout_secs: u64,
     #[arg(long, value_enum, default_value_t = RouterPolicy::RoundRobin)]
     router_policy: RouterPolicy,
+    /// Select pools through the embedded router core (round-robin only for now).
+    #[arg(long)]
+    use_selection_core: bool,
     /// The region this process runs in. Affinity prefers it, and metrics
     /// distinguish local requests from requests sent to other regions.
     #[arg(long, required_if_eq("router_policy", "affinity"))]
@@ -156,8 +163,16 @@ fn parse_pool(value: &str) -> Result<Pool, String> {
     Ok(Pool::new(&key, model, key.cluster_id(), frontends))
 }
 
+fn main() -> Result<()> {
+    if std::env::var_os(env_logging::DYN_LOG).is_none() {
+        // SAFETY: no other thread has started yet.
+        unsafe { std::env::set_var(env_logging::DYN_LOG, DEFAULT_LOG) };
+    }
+    run()
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn run() -> Result<()> {
     dynamo_runtime::logging::init();
     let mut args = Args::parse();
     let mut ids = HashSet::new();
@@ -174,6 +189,9 @@ async fn main() -> Result<()> {
     if args.router_policy != RouterPolicy::Affinity && args.affinity.uses_dynamodb() {
         bail!("--affinity-store dynamodb requires --router-policy affinity");
     }
+    let selection_core_policy = (args.use_selection_core)
+        .then(|| selection_core_policy(args.router_policy))
+        .transpose()?;
 
     let shutdown = CancellationToken::new();
     let signal = shutdown.clone();
@@ -237,52 +255,64 @@ async fn main() -> Result<()> {
         .connect_timeout(Duration::from_secs(args.connect_timeout_secs))
         .build()
         .context("build the pool HTTP client")?;
-    // Only `affinity` has affinity metrics to export.
-    let mut affinity_metrics = None;
-    let selector: Arc<dyn PoolSelector> = match args.router_policy {
-        RouterPolicy::RoundRobin => Arc::new(RoundRobinSelector::new()),
-        RouterPolicy::LeastInFlight => Arc::new(LeastInFlightSelector::new(in_flight.clone())),
-        RouterPolicy::Affinity => {
-            let region = args.region.clone().context("--region is required")?;
-            if args.pool_relays.is_empty() && args.relay_view_port.is_none() {
-                tracing::warn!(
-                    "no --pool-relay is given, so affinity knows no pool's load \
-                     and keeps each session on its nearest pool"
-                );
-            }
-            tokio::spawn(measure_round_trips(
-                pools.clone(),
-                signals.clone(),
-                ROUND_TRIP_INTERVAL,
-                shutdown.child_token(),
-            ));
-            let idle = Duration::from_secs(args.session_idle_secs);
-            let (affinity, config, counters) =
-                args.affinity.build(idle, shutdown.child_token()).await?;
-            let store_ms = affinity_store_ms();
-            let timer = store_ms.clone();
-            let selector = Arc::new(
-                AffinitySelector::with_stats(
-                    signals,
-                    region,
-                    args.headroom_factor,
-                    affinity,
-                    config,
-                    counters.affinity.clone(),
-                )
-                .with_store_timer(Box::new(move |elapsed| {
-                    timer.observe(elapsed.as_secs_f64() * 1000.0);
-                })),
-            );
-            affinity_metrics = Some((counters, store_ms));
-            selector
-        }
-    };
     let mut metrics = Metrics::new(args.region.clone(), in_flight.clone());
-    if let Some((counters, store_ms)) = affinity_metrics {
-        metrics = metrics.with_affinity(counters.affinity, counters.cache, store_ms);
-    }
-    let app = app(pools, selector, in_flight, http, metrics);
+    let app = if let Some(policy) = selection_core_policy {
+        let selection_core = Arc::new(SelectionCoreSelector::new(policy, in_flight.clone()).await?);
+        // Wait for the first pool snapshot, or early requests get a 503.
+        let (first_snapshot, reconcile) =
+            selection_core.reconcile_catalog(pools.clone(), shutdown.child_token());
+        tokio::spawn(reconcile);
+        first_snapshot
+            .await
+            .context("the router core stopped before taking the first pool snapshot")?;
+        app_with_selection_core(pools, selection_core, in_flight, http, metrics)
+    } else {
+        // Only `affinity` has affinity metrics to export.
+        let mut affinity_metrics = None;
+        let selector: Arc<dyn PoolSelector> = match args.router_policy {
+            RouterPolicy::RoundRobin => Arc::new(RoundRobinSelector::new()),
+            RouterPolicy::LeastInFlight => Arc::new(LeastInFlightSelector::new(in_flight.clone())),
+            RouterPolicy::Affinity => {
+                let region = args.region.clone().context("--region is required")?;
+                if args.pool_relays.is_empty() && args.relay_view_port.is_none() {
+                    tracing::warn!(
+                        "no --pool-relay is given, so affinity knows no pool's load \
+                         and keeps each session on its nearest pool"
+                    );
+                }
+                tokio::spawn(measure_round_trips(
+                    pools.clone(),
+                    signals.clone(),
+                    ROUND_TRIP_INTERVAL,
+                    shutdown.child_token(),
+                ));
+                let idle = Duration::from_secs(args.session_idle_secs);
+                let (affinity, config, counters) =
+                    args.affinity.build(idle, shutdown.child_token()).await?;
+                let store_ms = affinity_store_ms();
+                let timer = store_ms.clone();
+                let selector = Arc::new(
+                    AffinitySelector::with_stats(
+                        signals,
+                        region,
+                        args.headroom_factor,
+                        affinity,
+                        config,
+                        counters.affinity.clone(),
+                    )
+                    .with_store_timer(Box::new(move |elapsed| {
+                        timer.observe(elapsed.as_secs_f64() * 1000.0);
+                    })),
+                );
+                affinity_metrics = Some((counters, store_ms));
+                selector
+            }
+        };
+        if let Some((counters, store_ms)) = affinity_metrics {
+            metrics = metrics.with_affinity(counters.affinity, counters.cache, store_ms);
+        }
+        app(pools, selector, in_flight, http, metrics)
+    };
     let address = format!("{}:{}", args.host, args.port);
     let listener = tokio::net::TcpListener::bind(&address)
         .await
@@ -304,6 +334,15 @@ async fn main() -> Result<()> {
     } else {
         serve(listener, app, shutdown).await;
         Ok(())
+    }
+}
+
+fn selection_core_policy(policy: RouterPolicy) -> Result<SelectionCorePolicy> {
+    match policy {
+        RouterPolicy::RoundRobin => Ok(SelectionCorePolicy::RoundRobin),
+        RouterPolicy::LeastInFlight | RouterPolicy::Affinity => {
+            bail!("--use-selection-core supports only --router-policy round-robin for now")
+        }
     }
 }
 
