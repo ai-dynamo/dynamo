@@ -2963,7 +2963,11 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
             return Some(BackendErrorInfo {
                 message,
                 status: code,
-                semantic: if overloaded { semantic.cloned() } else { None },
+                semantic: semantic
+                    .filter(|error| {
+                        overloaded || error.reason().as_str() == "request.unprocessable_entity"
+                    })
+                    .cloned(),
                 sanitized: overloaded.then_some(SanitizedError::Overloaded),
                 metric_error_type,
             });
@@ -7486,6 +7490,47 @@ mod tests {
                 .unwrap()
                 .contains("secret")
         );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(failure_metrics)]
+    async fn preflight_retains_semantic_422_with_json_diagnostic() {
+        use dynamo_runtime::error::{ErrorClass, ErrorReason};
+
+        let error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .reason(ErrorReason::unprocessable_entity())
+            .diagnostic(
+                serde_json::json!({"code":422,"message":"private validation detail"}).to_string(),
+            )
+            .build();
+        let event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".into()),
+            comment: None,
+            error: Some(error),
+        };
+        let extracted = extract_backend_error_if_present(&event).unwrap();
+        assert_eq!(
+            extracted
+                .semantic
+                .as_ref()
+                .map(|error| error.reason().as_str()),
+            Some("request.unprocessable_entity")
+        );
+        let response = match check_for_backend_error(
+            futures::stream::iter([event]),
+            BackendErrorCheck::UntilFirstEvent,
+        )
+        .await
+        {
+            Err(response) => response,
+            Ok(_) => panic!("validation must fail preflight"),
+        };
+        assert_eq!(response.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response.1.message, "Invalid request");
+        assert_ne!(response.1.metric_error_type, Some(ErrorType::Overload));
     }
 
     #[test]
