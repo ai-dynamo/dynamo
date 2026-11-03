@@ -225,6 +225,7 @@ class TestNixlReadEmbeddingReceiverPreparation:
             ("nixl_metadata", "", "cannot be empty"),
             ("nixl_metadata", "not-hex", "fromhex"),
             ("nixl_metadata", "00", "decompress"),
+            ("nixl_metadata", zlib.compress(b"").hex(), "Decoded NIXL agent"),
         ],
         ids=[
             "write",
@@ -237,6 +238,7 @@ class TestNixlReadEmbeddingReceiverPreparation:
             "empty-agent",
             "invalid-hex",
             "invalid-compression",
+            "empty-decoded-agent",
         ],
     )
     async def test_invalid_read_metadata_does_not_borrow_buffer(

@@ -917,7 +917,10 @@ class NixlReadEmbeddingReceiver(AbstractEmbeddingReceiver):
             raise ValueError("Local and remote descriptors must be the same size")
         if not readable_metadata.notification_key:
             raise ValueError("READ notification_key must not be empty")
-        self._nixl_connect.Remote.decode_metadata(readable_metadata.nixl_metadata)
+        if not self._nixl_connect.Remote.decode_metadata(
+            readable_metadata.nixl_metadata
+        ):
+            raise ValueError("Decoded NIXL agent metadata cannot be empty")
 
         original_descriptor_size = None
         if self.warmedup_descriptors.empty():
