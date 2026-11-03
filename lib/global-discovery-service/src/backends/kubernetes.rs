@@ -11,10 +11,13 @@
 //!
 //! Each pool's PoolRelay Service, named `<DGD name>-pool-relay` by default,
 //! needs a `ServiceExport`, and so does the router's Service in the hub, so
-//! its replicas appear in every importing cluster. A pool is live while a
-//! PoolRelay endpoint is Ready. Its `relay_identities` are the addresses of
-//! every Ready PoolRelay pod, for routers on a trusted network to admit each
-//! of the pool's active-active replicas.
+//! its replicas appear in every importing cluster. Read alone, a pool is live
+//! while a PoolRelay endpoint is Ready. Its `relay_identities` are the
+//! addresses of every Ready PoolRelay pod, for routers on a trusted network to
+//! admit each of the pool's active-active replicas. The service also needs a
+//! live registration, which says what the pool serves
+//! ([`crate::backends::registered`]), and reads the pool's frontend addresses
+//! from its exported frontend Service, named `<DGD name>-frontend` by default.
 //!
 //! With Karmada, a Service name may have at most 55 characters: DGD names up
 //! to 44 with the default `-pool-relay` suffix. Karmada imports a Service as
@@ -33,10 +36,12 @@
 //! changed.
 //!
 //! ```ignore
+//! let registrations = Arc::new(MemoryPoolStore::new(lease));
+//! let imported = McsPoolDirectory::new(client.clone(), mcs, suffix, frontends)?;
 //! let backend = PoolDiscoveryBackend {
-//!     pools: Arc::new(McsPoolDirectory::new(client.clone(), mcs, suffix)),
+//!     pools: Arc::new(RegisteredPoolDirectory::new(Arc::new(imported), registrations.clone(), lease)),
 //!     routers: Arc::new(McsReplicaDirectory::new(client, &router, mcs)),
-//!     registrar: None,
+//!     registrar: Some(registrations),
 //! };
 //! service::serve(listener, backend, None, shutdown).await?;
 //! ```
@@ -47,5 +52,5 @@ mod hub;
 mod mcs;
 
 pub use endpoints::{ExportedService, McsReplicaDirectory};
-pub use hub::McsPoolDirectory;
+pub use hub::{FrontendService, McsPoolDirectory};
 pub use mcs::{KARMADA_MAX_SERVICE_NAME, McsImplementation};

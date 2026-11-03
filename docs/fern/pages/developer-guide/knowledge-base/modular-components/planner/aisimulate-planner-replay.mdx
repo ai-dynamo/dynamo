@@ -918,6 +918,9 @@ Scenario 2 at about 4.5 GB with `max_parallel: 8`.
 - **One replay per candidate.** Candidate replays share one random seed, but a score is still one
   sample path of one window; see [Measure the Gain](#measure-the-gain).
 - **Router cache weights are not retunable.** `host_cache_hit_weight` and `disk_cache_hit_weight`
-  also set how the startup router counts cached tokens, which a runtime update does not change, and
-  replay reports no shared cache hits for `shared_cache_multiplier`. Retune rejects all three and
-  its error says why.
+  also set how the startup router counts cached tokens, which a runtime update does not change.
+  A router started with `shared_cache_multiplier` at 0 builds no KV fetch inputs, and a runtime
+  update cannot add them. Retune rejects all three and each error says why.
+- **Credit-0 candidates get no KV fetch hints.** A candidate with `overlap_score_credit: 0` is
+  replayed on a fresh router that builds no KV index and so attaches no hints, while the live
+  router keeps its startup index. This matters only for workers that use KVCR.
