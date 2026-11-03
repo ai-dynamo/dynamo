@@ -244,8 +244,37 @@ impl CandidatePolicy for LoraCandidatePolicy {
         request: &PreprocessedRequest,
         worker: u64,
         pin: Option<u64>,
+        live: &dyn Fn() -> Vec<u64>,
     ) -> Result<(), Error> {
-        policy(request).check_affinity(worker, pin)?;
+        let policy = policy(request);
+        policy.check_affinity(worker, pin)?;
+        if policy.requires_candidate_policy() {
+            let routing = request
+                .routing
+                .as_ref()
+                .ok_or_else(RequestPolicy::capability_error)?;
+            let name = routing
+                .lora_name
+                .as_deref()
+                .ok_or_else(RequestPolicy::capability_error)?;
+            let live = live();
+            let configs = self.runtime_configs.as_ref().map(|watch| watch.borrow());
+            let default_constraints = RoutingConstraints::default();
+            let candidates = policy.candidates(
+                &self.filter,
+                name,
+                live,
+                routing.allowed_worker_ids.as_ref(),
+                configs.as_deref(),
+                routing
+                    .routing_constraints
+                    .as_ref()
+                    .unwrap_or(&default_constraints),
+            )?;
+            if !candidates.contains(&worker) {
+                return Err(RequestPolicy::capability_error().into());
+            }
+        }
         Ok(())
     }
 }

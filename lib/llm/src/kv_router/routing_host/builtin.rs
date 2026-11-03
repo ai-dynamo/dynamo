@@ -259,7 +259,12 @@ impl RoutingHost {
             None => (None, None, None),
         };
         if let (Some(target), Some(policy)) = (candidate_target, self.candidate_policy.as_ref()) {
-            policy.check_selected(request.content(), target, explicit.map(|pin| pin.worker_id))?;
+            policy.check_selected(
+                request.content(),
+                target,
+                explicit.map(|pin| pin.worker_id),
+                &|| self.inner.client.instance_ids_avail(),
+            )?;
         }
         let (selection, mut operation) = if let Some(target) = candidate_target {
             (
@@ -413,6 +418,7 @@ impl RoutingHost {
                                 request,
                                 worker_id,
                                 explicit.map(|pin| pin.worker_id),
+                                &|| self.inner.client.instance_ids_avail(),
                             )?;
                         }
                         let occupancy = guard.retarget_worker(worker_id);

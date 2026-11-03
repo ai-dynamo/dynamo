@@ -114,6 +114,39 @@ struct BestMatchArgs<'a> {
 }
 
 impl RoutingHost {
+    pub(super) fn check_current_kv_candidate(
+        &self,
+        request: &PreprocessedRequest,
+        worker: u64,
+    ) -> Result<(), Error> {
+        if !crate::routing_policy::execution_requirements(request).policy_required {
+            return Ok(());
+        }
+        let policy = self
+            .candidate_policy
+            .as_ref()
+            .ok_or_else(|| dynamo_lora::policy::RequestPolicy::capability_error())?;
+        let routing = request
+            .routing
+            .as_ref()
+            .ok_or_else(|| dynamo_lora::policy::RequestPolicy::capability_error())?;
+        let live = self.inner.client.instance_ids_avail().into_iter().collect();
+        let workers = self.kv_router().workers_with_configs.borrow();
+        let default_constraints = RoutingConstraints::default();
+        policy.restrict(
+            request,
+            &workers,
+            &live,
+            routing.allowed_worker_ids.clone(),
+            routing
+                .routing_constraints
+                .as_ref()
+                .unwrap_or(&default_constraints),
+            &[worker],
+        )?;
+        Ok(())
+    }
+
     async fn select_best_match(&self, args: BestMatchArgs<'_>) -> Result<SelectionOutcome, Error> {
         let admitted = self
             .kv_router()

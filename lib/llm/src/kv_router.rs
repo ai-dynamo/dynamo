@@ -1374,6 +1374,7 @@ impl KvRouter {
                 admission: core_admission,
                 track_active_blocks: self.kv_router_config.router_track_active_blocks,
                 return_routing_hashes: return_routing_hashes || session_index_context.is_some(),
+                // Hosted selections do not populate the public reservation replay cache.
                 replay_id: None,
             })
             .await;

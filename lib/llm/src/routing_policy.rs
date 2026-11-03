@@ -53,6 +53,7 @@ pub(crate) trait CandidatePolicy: Send + Sync {
         request: &PreprocessedRequest,
         worker: u64,
         pin: Option<u64>,
+        live: &dyn Fn() -> Vec<u64>,
     ) -> Result<(), Error>;
 }
 
