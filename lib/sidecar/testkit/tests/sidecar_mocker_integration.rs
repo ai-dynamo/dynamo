@@ -1323,6 +1323,31 @@ async fn sglang_visible_stop_tokens_preserve_tool_delimiters() {
     .await;
 }
 
+/// SGLang ending `WatchEngineState` after startup resolves `engine_lost`, but
+/// `healthy=false` and a pause do not, since SGLang can clear both; the
+/// process test covers a dropped connection.
+#[tokio::test]
+async fn sglang_engine_lost_on_state_stream_end() {
+    let mut fixture =
+        sglang_fixture::Fixture::start(Controller::default(), FixtureConfig::default()).await;
+    let engine = fixture.engine().await;
+    engine.start(0).await.unwrap();
+    let lost = engine.engine_lost();
+    tokio::pin!(lost);
+    fixture.set_engine_state(false, true);
+    tokio::time::timeout(std::time::Duration::from_millis(300), &mut lost)
+        .await
+        .expect_err("an unhealthy or paused engine is not lost");
+    fixture.end_engine_state();
+    let error = bounded("engine lost on stream end", lost).await;
+    assert_eq!(
+        error.error_type(),
+        dynamo_backend_common::ErrorType::Backend(BackendError::EngineShutdown)
+    );
+    assert!(error.to_string().contains("SGLang engine lost"), "{error}");
+    finish(&mut fixture, &engine).await;
+}
+
 // An LPX engine withholds the matched stop token, and the sidecar returns a
 // visible one.
 #[tokio::test]

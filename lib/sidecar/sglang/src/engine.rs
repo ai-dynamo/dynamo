@@ -46,6 +46,9 @@ pub struct SglangSidecarEngine {
     native_http_max_event_bytes: usize,
     state: OnceCell<StartedState>,
     cancel: CancellationToken,
+    /// Cancelled once SGLang is lost after `start`, with the reason set first.
+    lost: CancellationToken,
+    lost_reason: Arc<std::sync::OnceLock<String>>,
 }
 
 struct StartedState {
@@ -215,6 +218,8 @@ impl SglangSidecarEngine {
                 native_http_max_event_bytes,
                 state: OnceCell::new(),
                 cancel: CancellationToken::new(),
+                lost: CancellationToken::new(),
+                lost_reason: Arc::default(),
             },
             config,
         ))
@@ -322,6 +327,7 @@ impl LLMEngine for SglangSidecarEngine {
         let kv_event_sources =
             discover_kv_event_sources(&discovery, &mut config, &self.endpoint, deadline).await?;
         let connection_count = pool.len();
+        let state_client = pool.control_client();
         let kv_event_source_count = kv_event_sources.len();
         let combined_token_limit = combined_token_limit(&discovery);
         if combined_token_limit.is_none() {
@@ -342,6 +348,20 @@ impl LLMEngine for SglangSidecarEngine {
             kv_event_sources = kv_event_source_count,
             "sglang sidecar started"
         );
+        let (stop, lost) = (self.cancel.child_token(), self.lost.clone());
+        let reason = Arc::clone(&self.lost_reason);
+        let open_timeout = self.transport.connect_attempt_timeout;
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = stop.cancelled() => {}
+                why = client::watch_engine_state(state_client, open_timeout) => {
+                    if let Some(why) = why {
+                        let _ = reason.set(why);
+                        lost.cancel();
+                    }
+                }
+            }
+        });
         Ok(config)
     }
 
@@ -610,6 +630,12 @@ impl LLMEngine for SglangSidecarEngine {
         self.cancel.cancel();
         tracing::info!("sglang sidecar shutdown complete");
         Ok(())
+    }
+
+    async fn engine_lost(&self) -> DynamoError {
+        self.lost.cancelled().await;
+        let reason = self.lost_reason.get().map_or("unknown", String::as_str);
+        client::engine_shutdown(format!("SGLang engine lost: {reason}"))
     }
 
     async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {

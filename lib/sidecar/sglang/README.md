@@ -87,6 +87,12 @@ devices, `IPC_LOCK`, and shared memory. Tune UCX for the deployment fabric.
 Keep the model, served model name, and tensor parallelism consistent across
 prefill and decode; KV routing also requires a consistent page size.
 
+If SGLang's `WatchEngineState` stream ends or fails after startup, the sidecar
+withdraws the worker from discovery and exits with an error, so Kubernetes
+restarts it and it registers again once SGLang is back. On SIGTERM, SGLang
+drains with no time limit, but the sidecar exits after its grace period, so
+requests that run longer are cut, as on any pod stop.
+
 ## Topologies
 
 The frontend reaches each sidecar over Dynamo's request, discovery, and event
