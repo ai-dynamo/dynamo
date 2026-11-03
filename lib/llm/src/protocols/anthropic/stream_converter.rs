@@ -2116,8 +2116,8 @@ mod tests {
 
     /// Streaming usage reports cache writes as `cache_creation_input_tokens` (zero when
     /// absent), excluded from `input_tokens`; `total_tokens` stays prompt plus completion.
-    #[test]
-    fn test_stream_usage_defaults_and_preserves_cache_write_tokens() {
+    #[tokio::test]
+    async fn test_stream_usage_defaults_and_preserves_cache_write_tokens() {
         use dynamo_protocols::types::PromptTokensDetails;
 
         // (details, input_tokens, cache_read_input_tokens, cache_creation_input_tokens)
@@ -2144,7 +2144,8 @@ mod tests {
             ),
         ] {
             let mut conv = AnthropicStreamConverter::new("test-model".into(), 19);
-            let mut chunk = usage_chunk(13, None, 2);
+            let mut chunk = text_chunk("hi");
+            chunk.inner.usage = usage_chunk(13, None, 2).inner.usage;
             chunk
                 .inner
                 .usage
@@ -2153,38 +2154,38 @@ mod tests {
                 .prompt_tokens_details = prompt_tokens_details;
             let mut events = Vec::new();
             conv.append_chunk_events(&chunk, &mut events);
-            assert_eq!(conv.usage.input_tokens, expected_input);
-            assert_eq!(conv.usage.cache_read_input_tokens, expected_read);
-            assert_eq!(conv.usage.cache_creation_input_tokens, Some(expected_write));
 
-            // Usage stamped onto a later content_block_delta.
-            let delta = AnthropicStreamEvent::ContentBlockDelta {
-                index: 0,
-                delta: AnthropicDelta::TextDelta {
-                    text: "hi".to_string(),
-                },
-            };
-            let value = event_json_with_usage(&delta, &conv.usage).expect("serialize");
+            let values = sse_values(events).await;
+            let delta = values
+                .iter()
+                .find(|v| v["type"] == "content_block_delta")
+                .expect("content_block_delta present");
+            assert_eq!(delta["usage"]["input_tokens"], expected_input);
             assert_eq!(
-                value["usage"]["cache_creation_input_tokens"],
+                delta["usage"]["cache_read_input_tokens"],
+                serde_json::json!(expected_read)
+            );
+            assert_eq!(
+                delta["usage"]["cache_creation_input_tokens"],
                 expected_write
             );
-            assert_eq!(value["usage"]["total_tokens"], 13 + 2);
+            assert_eq!(delta["usage"]["total_tokens"], 13 + 2);
 
-            let end = conv.emit_end_events_tagged();
+            let end = sse_values(conv.emit_end_events()).await;
             let message_delta = end
                 .iter()
-                .find(|e| e.event_type == "message_delta")
+                .find(|v| v["type"] == "message_delta")
                 .expect("message_delta present");
-            match &message_delta.data {
-                AnthropicStreamEvent::MessageDelta { usage, .. } => {
-                    assert_eq!(usage.input_tokens, expected_input);
-                    assert_eq!(usage.cache_read_input_tokens, expected_read);
-                    assert_eq!(usage.cache_creation_input_tokens, Some(expected_write));
-                    assert_eq!(usage.output_tokens, 2);
-                }
-                other => panic!("expected MessageDelta, got {other:?}"),
-            }
+            assert_eq!(message_delta["usage"]["input_tokens"], expected_input);
+            assert_eq!(
+                message_delta["usage"]["cache_read_input_tokens"],
+                serde_json::json!(expected_read)
+            );
+            assert_eq!(
+                message_delta["usage"]["cache_creation_input_tokens"],
+                expected_write
+            );
+            assert_eq!(message_delta["usage"]["output_tokens"], 2);
         }
     }
 
