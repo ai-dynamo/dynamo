@@ -258,6 +258,18 @@ impl Model {
         self.worker_sets.load().values().cloned().collect()
     }
 
+    /// A committed generation base, independent of live worker capabilities.
+    pub(crate) fn has_generation_base_deployment(&self) -> bool {
+        self.worker_sets.load().values().any(|worker_set| {
+            let card = worker_set.card();
+            card.lora.is_none()
+                && (card.model_type.supports_chat()
+                    || card.model_type.supports_completions()
+                    || worker_set.has_chat_engine()
+                    || worker_set.has_completions_engine())
+        })
+    }
+
     /// Whether this catalog model can carry request-time LoRA metadata through
     /// frontend preprocessing to a non-LoRA base deployment.
     pub(crate) fn has_runtime_lora_base_deployment(

@@ -1246,19 +1246,9 @@ fn runtime_lora_selection(
                 .map(|_| canonical)
         },
         || {
-            let canonical = state
+            state
                 .manager()
-                .unique_runtime_lora_base_model(supports_surface)
-                .ok_or(RuntimeLoraError::BaseModelRequired)?;
-            if state
-                .manager()
-                .get_committed_model(&canonical)
-                .is_some_and(|model| model.has_runtime_lora_base_deployment(supports_surface))
-            {
-                Ok(canonical)
-            } else {
-                Err(RuntimeLoraError::BaseModelUnsupported(canonical))
-            }
+                .infer_runtime_lora_base_model(supports_surface)
         },
     )
     .map_err(runtime_lora_error_response)

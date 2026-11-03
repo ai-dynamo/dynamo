@@ -492,22 +492,24 @@ impl ModelManager {
         views
     }
 
-    /// Infer a bare source only from runtime-capable text generation bases.
-    pub(crate) fn unique_runtime_lora_base_model(
+    /// Infer a bare source from a unique committed generation base before checking live capability.
+    pub(crate) fn infer_runtime_lora_base_model(
         &self,
         supports_surface: fn(&WorkerSet) -> bool,
-    ) -> Option<String> {
+    ) -> Result<String, crate::lora::runtime::RuntimeLoraError> {
+        use crate::lora::runtime::RuntimeLoraError;
         let catalog = self.catalog.load();
-        let mut bases = catalog
-            .models
-            .iter()
-            .filter(|(name, model)| {
-                !catalog.aliases.contains_key(name.as_str())
-                    && model.has_runtime_lora_base_deployment(supports_surface)
-            })
-            .map(|(name, _)| name.clone());
-        let base = bases.next()?;
-        bases.next().is_none().then_some(base)
+        let mut bases = catalog.models.iter().filter(|(name, model)| {
+            !catalog.aliases.contains_key(name.as_str()) && model.has_generation_base_deployment()
+        });
+        let (name, model) = bases.next().ok_or(RuntimeLoraError::BaseModelRequired)?;
+        if bases.next().is_some() {
+            return Err(RuntimeLoraError::BaseModelRequired);
+        }
+        if !model.has_runtime_lora_base_deployment(supports_surface) {
+            return Err(RuntimeLoraError::BaseModelUnsupported(name.clone()));
+        }
+        Ok(name.clone())
     }
 
     fn get_model_internal(&self, model_name: &str) -> Option<Arc<Model>> {
@@ -3737,11 +3739,19 @@ mod tests {
     }
 
     #[test]
-    fn runtime_lora_base_inference_uses_live_eligible_generation_workers() {
+    fn runtime_lora_base_inference_is_stable_across_surface_and_capability_changes() {
+        use crate::lora::runtime::RuntimeLoraError;
         let mm = ModelManager::new();
-        assert!(mm.add_worker_set("text-base", "text", make_worker_set("text", "abc")));
+        let mut embedding_card = ModelDeploymentCard::default();
+        embedding_card.model_type = crate::model_type::ModelType::Embedding;
+        assert!(mm.add_worker_set(
+            "embedding",
+            "embedding",
+            WorkerSet::new("embedding".into(), "embedding".into(), embedding_card)
+        ));
         let mut token_card = ModelDeploymentCard::default();
         token_card.model_input = crate::model_type::ModelInput::Tokens;
+        token_card.model_type = crate::model_type::ModelType::Chat;
         token_card
             .runtime_config
             .taints
@@ -3760,7 +3770,7 @@ mod tests {
             .unwrap();
         let mut token_ws = WorkerSet::new("tokens".into(), "def".into(), token_card.clone());
         token_ws.chat_engine = Some(make_chat_engine());
-        let (_instances, instance_rx) = tokio::sync::watch::channel(vec![1]);
+        let (instances, instance_rx) = tokio::sync::watch::channel(vec![1]);
         let (configs, config_rx) =
             tokio::sync::watch::channel(HashMap::from([(1, token_card.runtime_config.clone())]));
         token_ws.set_instance_watcher(instance_rx);
@@ -3772,21 +3782,42 @@ mod tests {
             "alias",
             Arc::new(make_worker_set("alias", "alias")),
         ));
-        assert_eq!(
-            mm.unique_runtime_lora_base_model(WorkerSet::has_chat_engine)
-                .as_deref(),
-            Some("token-base")
-        );
+        let mut adapter_card = token_card.clone();
+        adapter_card.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter".into(),
+            max_gpu_lora_count: None,
+        });
         assert!(mm.add_worker_set(
-            "token-base",
-            "mixed-text",
-            make_worker_set("mixed-text", "ghi"),
+            "adapter",
+            "adapter",
+            WorkerSet::new("adapter".into(), "adapter".into(), adapter_card)
         ));
         assert_eq!(
-            mm.unique_runtime_lora_base_model(WorkerSet::has_chat_engine)
-                .as_deref(),
-            Some("token-base")
+            mm.infer_runtime_lora_base_model(WorkerSet::has_chat_engine),
+            Ok("token-base".to_string())
         );
+        assert_eq!(
+            mm.infer_runtime_lora_base_model(WorkerSet::has_completions_engine),
+            Err(RuntimeLoraError::BaseModelUnsupported("token-base".into()))
+        );
+        configs.send_replace(HashMap::new());
+        assert_eq!(
+            mm.infer_runtime_lora_base_model(WorkerSet::has_chat_engine),
+            Err(RuntimeLoraError::BaseModelUnsupported("token-base".into()))
+        );
+        configs.send_replace(HashMap::from([(1, token_card.runtime_config.clone())]));
+        instances.send_replace(Vec::new());
+        assert_eq!(
+            mm.infer_runtime_lora_base_model(WorkerSet::has_chat_engine),
+            Err(RuntimeLoraError::BaseModelUnsupported("token-base".into()))
+        );
+        instances.send_replace(vec![1]);
+        assert_eq!(
+            mm.infer_runtime_lora_base_model(WorkerSet::has_chat_engine),
+            Ok("token-base".into())
+        );
+
+        token_card.model_type = crate::model_type::ModelType::Completions;
         let mut second_ws = WorkerSet::new("second".into(), "second".into(), token_card.clone());
         second_ws.completions_engine = Some(Arc::new(crate::engines::StreamingEngineAdapter::new(
             crate::engines::make_echo_engine(),
@@ -3798,43 +3829,28 @@ mod tests {
         second_ws.set_runtime_config_watcher(second_config_rx);
         assert!(mm.add_worker_set("other-base", "second", second_ws));
         assert_eq!(
-            mm.unique_runtime_lora_base_model(WorkerSet::has_chat_engine)
-                .as_deref(),
-            Some("token-base")
+            mm.infer_runtime_lora_base_model(WorkerSet::has_chat_engine),
+            Err(RuntimeLoraError::BaseModelRequired)
         );
         assert_eq!(
-            mm.unique_runtime_lora_base_model(WorkerSet::has_completions_engine)
-                .as_deref(),
-            Some("other-base")
+            mm.infer_runtime_lora_base_model(WorkerSet::has_completions_engine),
+            Err(RuntimeLoraError::BaseModelRequired)
         );
-        let mut third_ws = WorkerSet::new("third".into(), "third".into(), token_card.clone());
-        third_ws.chat_engine = Some(make_chat_engine());
-        let (_third_instances, third_instance_rx) = tokio::sync::watch::channel(vec![3]);
-        let (_third_configs, third_config_rx) =
-            tokio::sync::watch::channel(HashMap::from([(3, token_card.runtime_config)]));
-        third_ws.set_instance_watcher(third_instance_rx);
-        third_ws.set_runtime_config_watcher(third_config_rx);
-        assert!(mm.add_worker_set("third-base", "third", third_ws));
+        instances.send_replace(Vec::new());
         assert_eq!(
-            mm.unique_runtime_lora_base_model(WorkerSet::has_chat_engine),
-            None
+            mm.infer_runtime_lora_base_model(WorkerSet::has_completions_engine),
+            Err(RuntimeLoraError::BaseModelRequired)
         );
-        assert_eq!(
-            mm.unique_runtime_lora_base_model(WorkerSet::has_completions_engine)
-                .as_deref(),
-            Some("other-base")
-        );
-        mm.remove_worker_set("third-base", "third");
         mm.remove_worker_set("other-base", "second");
         assert_eq!(
-            mm.unique_runtime_lora_base_model(WorkerSet::has_chat_engine)
-                .as_deref(),
-            Some("token-base")
+            mm.infer_runtime_lora_base_model(WorkerSet::has_completions_engine),
+            Err(RuntimeLoraError::BaseModelUnsupported("token-base".into()))
         );
-        configs.send_replace(HashMap::new());
+        instances.send_replace(vec![1]);
+        drop(configs);
         assert_eq!(
-            mm.unique_runtime_lora_base_model(WorkerSet::has_chat_engine),
-            None
+            mm.infer_runtime_lora_base_model(WorkerSet::has_chat_engine),
+            Err(RuntimeLoraError::BaseModelUnsupported("token-base".into()))
         );
     }
 
