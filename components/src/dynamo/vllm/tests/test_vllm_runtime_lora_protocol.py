@@ -15,6 +15,7 @@ from dynamo.vllm.runtime_lora_protocol import publish_runtime_lora_capability
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
