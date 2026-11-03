@@ -34,6 +34,10 @@ The frontend and router discover sidecars and send requests to them over the
 Dynamo request plane. Each sidecar converts requests to the engine's native gRPC
 API and streams responses back.
 
+Sidecar backends support optional
+[Backend Admission Control](../admission-control/backend.md) to limit work
+admitted to each engine and queue excess requests outside it.
+
 ## Responsibilities
 
 | Layer | Responsibility |

@@ -10,7 +10,7 @@ Configure the gate on the worker containers in your DynamoGraphDeployment (DGD).
 Dynamo Python and Dynamo Sidecar backends.
 
 For behavior and tuning guidance, see
-[Admission Control Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md).
+[Backend Admission Control](../../developer-guide/knowledge-base/concepts/admission-control/backend.md).
 
 ## Configure the Worker
 
@@ -51,9 +51,9 @@ spec:
 
 For a disaggregated deployment, configure prefill and decode workers separately. Set these variables on
 the workers, not the frontend. See
-[Configuration](../../developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md#configuration)
+[Configuration](../../developer-guide/knowledge-base/concepts/admission-control/backend.md#configuration)
 for CLI precedence and aliases, and
-[Best Practices](../../developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md#best-practices)
+[Best Practices](../../developer-guide/knowledge-base/concepts/admission-control/backend.md#best-practices)
 for tuning from the starting limits.
 
 ## Verify the Configuration
@@ -63,5 +63,5 @@ metrics to observe engine occupancy, queued requests, rejections, and cancellati
 stay at zero while admission control is disabled. The `dp_rank` label identifies the rank;
 `unspecified` covers unranked requests. Sum over `dp_rank` for worker totals.
 
-See [Metrics](../../developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md#metrics)
+See [Metrics](../../developer-guide/knowledge-base/concepts/admission-control/backend.md#metrics)
 for metric names and labels.

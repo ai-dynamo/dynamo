@@ -1,50 +1,33 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Admission Control Architecture
-subtitle: Protect serving capacity and govern how competing requests share it.
+title: Backend Admission Control
+sidebar-title: Backend
+subtitle: Bound engine work on each worker and queue excess requests outside the engine.
 ---
 
-NVIDIA Dynamo admission control aims to preserve useful service under load and govern how competing
-requests share capacity.
+Backend admission control is the worker-side layer of NVIDIA Dynamo
+[admission control](overview.md): a gate on each worker limits the work inside its engine and queues
+the excess outside it.
 
-For deployment instructions, see [Admission Control on Kubernetes](../../../../kubernetes/fault-tolerance/admission-control.md).
+<a id="router"></a>
 
-## Goal
+The router-side layer, which queues requests by policy class before a worker is selected, is
+described in [Router Admission Control](router.md).
 
-Admission control protects **goodput** and **quality of service (QoS)** by deciding which requests
-to admit, delay, or reject before they consume engine capacity.
+<a id="goal"></a>
 
-**Goodput:**
+For the goodput and quality-of-service goals that both layers serve, see the
+[Admission Control Overview](overview.md#goal). For deployment instructions, see
+[Admission Control on Kubernetes](../../../../kubernetes/fault-tolerance/admission-control.md).
 
-- **Useful throughput:** sustain the rate of successful requests that meet their service-level
-  objectives (SLOs).
-- **Overload protection:** bound concurrent work and backlog so excess demand does not overwhelm
-  serving resources.
+<a id="backend"></a>
 
-**Quality of service (QoS):**
-
-- **Priority:** favor requests according to the provider's priorities and service objectives when
-  capacity is contested.
-- **Fairness:** share capacity among competing request classes according to provider-defined shares,
-  preventing one class from monopolizing service.
-
-The graph illustrates the goodput goal: useful work should remain near sustainable capacity as
-demand grows.
-
-![Conceptual goodput curves: admission control sustains a plateau as offered load grows, while overload erodes goodput without it.](../../../../../assets/img/admission-control-goodput-goal.png)
-
-This graph illustrates the goal; it is not benchmark data or a guarantee for every workload. The
-backend gate provides local capacity protection; priority and fairness policies across request classes
-are planned at the router.
-
-## Backend
+## Request Flow
 
 Backend admission control supports both Dynamo Python and Dynamo Sidecar backends. Each worker has
 its own gate, including separate prefill and decode workers in a disaggregated deployment. All
 endpoints of a worker share its gate.
-
-### Request Flow
 
 The gate keeps excess work outside the engine using two limits and a bounded first-in, first-out
 (FIFO) queue:
@@ -95,11 +78,12 @@ worker could neither admit nor queue any request, the rejection applies to the w
 Frontend stops routing new requests to it for up to one second. Rejections of unranked requests always
 apply to the whole worker.
 
-### Configuration
+## Configuration
 
 > [!NOTE]
 > **Backend admission control is disabled by default.** To enable it, apply the
-> [recommended starting limits](#best-practices), then tune them to your traffic shape and SLOs.
+> [recommended starting limits](#best-practices), then tune them to your traffic shape and
+> service-level objectives (SLOs).
 
 Set these on the backend worker. All values apply **per DP rank**; the worker's total capacity is the
 combined capacity of its ranks. Restart the worker to change a setting.
@@ -123,7 +107,7 @@ the next source; an invalid CLI value fails startup.
 
 Until the engine reports its ranks, the gate assumes one rank and handles all requests as unranked.
 
-### Best Practices
+## Best Practices
 
 **Enable admission control with engine-based starting limits.** Set the three limits below using the
 engine's `max_num_seqs` (may be found in the worker log):
@@ -149,7 +133,7 @@ completion; size the waiting limit with Little's law, as described below. A deep
 longer bursts at the cost of longer waits; the gate does not reject requests based on how long they
 have waited. Validate each change under representative load, watching goodput and latency.
 
-#### Size the waiting limit with Little's law
+### Size the waiting limit with Little's law
 
 [Little's law](https://web.mit.edu/urban_or_book/www/book/chapter4/4.4.html) relates average occupancy,
 arrival rate, and time spent in a stage:
@@ -188,7 +172,7 @@ latency percentiles.
 For multi-rank workers, `dp_rank="unspecified"` does not reveal how the engine distributes those
 requests across ranks, so it cannot provide a per-rank sizing estimate.
 
-### Metrics
+## Metrics
 
 Each worker exposes the following metrics. In the **Labels** column, `dp_rank` is the rank ID, such as
 `"4"`, or `"unspecified"` for unranked requests.
@@ -209,8 +193,3 @@ disabled, these metrics stay at zero.
 
 Compare engine and queue counts with their configured limits to identify where work accumulates.
 Watch admission and rejection rates alongside client-visible goodput when tuning under load.
-
-## Router
-
-Router policies for SLO-aware admission, priority, and fair sharing across request classes are planned
-for future work.

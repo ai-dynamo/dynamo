@@ -29,6 +29,8 @@ flowchart LR
 
 The request host tokenizes and normalizes the request before the router evaluates candidate workers. The KV cache index reports prefix overlap for each worker, and the active-load tracker accounts for work already assigned there. The router filters ineligible workers, scores the remaining candidates, and chooses one target.
 
+When enabled in Dynamo Frontend, [Router Admission Control](../admission-control/router.md) queues requests by policy class and controls when they proceed to worker selection.
+
 Workers publish KV creation and release events that keep the index current. When a deployment cannot publish KV events, set `--no-router-kv-events` to predict cache state from routing decisions; otherwise `kv` mode uses load-only scoring. See [Configuration and Tuning](../../modular-components/router/configuration-and-tuning.md#kv-event-transport) for the operational tradeoff.
 
 ## Cache Locality and Load Work Together

@@ -404,12 +404,19 @@ navigation:
                     path: pages/developer-guide/knowledge-base/concepts/fault-tolerance/request-cancellation-architecture.md
                   - page: Request Rejection Architecture
                     path: pages/developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md
-                  - page: Admission Control Architecture
-                    path: pages/developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md
                   - page: Graceful Shutdown Architecture
                     path: pages/developer-guide/knowledge-base/concepts/fault-tolerance/graceful-shutdown-architecture.md
                   - page: Fault Tolerance Testing
                     path: pages/developer-guide/knowledge-base/concepts/fault-tolerance/fault-tolerance-testing.md
+              - section: Admission Control
+                collapsed: true
+                contents:
+                  - page: Overview
+                    path: pages/developer-guide/knowledge-base/concepts/admission-control/overview.md
+                  - page: Backend
+                    path: pages/developer-guide/knowledge-base/concepts/admission-control/backend.md
+                  - page: Router
+                    path: pages/developer-guide/knowledge-base/concepts/admission-control/router.md
               - page: Sidecar Backends (Experimental)
                 slug: system-architecture/sidecar-backends
                 path: pages/developer-guide/knowledge-base/concepts/system-architecture/sidecar-backends.md

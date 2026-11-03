@@ -2180,6 +2180,11 @@ redirects:
   - source: "/dynamo/dev/advanced-customizations/write-custom-routing-strategies"
     destination: "/dynamo/dev/knowledge-base/modular-components/router/write-custom-routing-strategies"
 
+  # Admission control concepts split into Backend and Router pages. The old page's
+  # content was the backend gate, and its section anchors exist on the Backend page.
+  - source: "/dynamo/dev/knowledge-base/concepts/fault-tolerance/admission-control-architecture"
+    destination: "/dynamo/dev/knowledge-base/concepts/admission-control/backend"
+
   # The per-class NIXL Connect pages were replaced by the generated Python API
   # reference, which covers the same classes from source plus seven more.
   # Keep their published URLs serving, anchored at the matching class.
