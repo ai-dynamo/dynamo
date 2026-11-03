@@ -926,6 +926,8 @@ class TestGenerateLocally:
         last_index = len(prompt_logprobs_per_chunk) - 1
         for index, prompt_logprobs in enumerate(prompt_logprobs_per_chunk):
             output = MagicMock()
+            # Every chunk streams the same choice.
+            output.index = 0
             output.token_ids = list(range(42, 43 + index))
             output.finish_reason = "stop" if index == last_index else None
             output.stop_reason = None
