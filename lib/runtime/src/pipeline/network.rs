@@ -72,13 +72,31 @@ impl ResponsePlaneMode {
         let value =
             std::env::var(crate::config::environment_names::response_plane::DYN_RESPONSE_PLANE)
                 .ok();
-        let mode = Self::from_config_value(value.as_deref())?;
+        let mode = Self::from_config_value(
+            value.as_deref(),
+            Self::default(),
+            &velo_response::tcp_tls_settings(),
+        )?;
         Ok(*RESPONSE_PLANE_MODE.get_or_init(|| mode))
     }
 
-    fn from_config_value(value: Option<&str>) -> Result<Self> {
+    /// An explicit value always wins. When it is unset, a Velo default gives
+    /// way to TCP while TLS is configured, because Velo has no TLS.
+    fn from_config_value(
+        value: Option<&str>,
+        default: Self,
+        tls_settings: &[&str],
+    ) -> Result<Self> {
         match value {
-            None | Some("tcp") => Ok(Self::Tcp),
+            None if default == Self::Velo && !tls_settings.is_empty() => {
+                tracing::info!(
+                    "{} is set and Velo has no TLS; using the tcp response plane",
+                    tls_settings.join(", ")
+                );
+                Ok(Self::Tcp)
+            }
+            None => Ok(default),
+            Some("tcp") => Ok(Self::Tcp),
             Some("quic") => Ok(Self::Quic),
             Some("velo") => Ok(Self::Velo),
             Some(other) => anyhow::bail!(
@@ -956,24 +974,26 @@ mod tests {
 
     #[test]
     fn response_plane_mode_parses_supported_values() {
-        assert_eq!(
-            ResponsePlaneMode::from_config_value(None).unwrap(),
-            ResponsePlaneMode::Tcp
-        );
-        assert_eq!(
-            ResponsePlaneMode::from_config_value(Some("tcp")).unwrap(),
-            ResponsePlaneMode::Tcp
-        );
-        assert_eq!(
-            ResponsePlaneMode::from_config_value(Some("quic")).unwrap(),
-            ResponsePlaneMode::Quic
-        );
-        assert_eq!(
-            ResponsePlaneMode::from_config_value(Some("velo")).unwrap(),
-            ResponsePlaneMode::Velo
-        );
-        assert!(ResponsePlaneMode::from_config_value(Some("")).is_err());
-        assert!(ResponsePlaneMode::from_config_value(Some("invalid")).is_err());
+        let parse =
+            |value| ResponsePlaneMode::from_config_value(value, ResponsePlaneMode::default(), &[]);
+        assert_eq!(parse(None).unwrap(), ResponsePlaneMode::Tcp);
+        assert_eq!(parse(Some("tcp")).unwrap(), ResponsePlaneMode::Tcp);
+        assert_eq!(parse(Some("quic")).unwrap(), ResponsePlaneMode::Quic);
+        assert_eq!(parse(Some("velo")).unwrap(), ResponsePlaneMode::Velo);
+        assert!(parse(Some("")).is_err());
+        assert!(parse(Some("invalid")).is_err());
+    }
+
+    #[test]
+    fn tls_settings_keep_an_unset_velo_default_on_tcp() {
+        use ResponsePlaneMode::{Tcp, Velo};
+        let tls = ["DYN_TCP_TLS_CA_CERT_PATH"];
+        let resolve = ResponsePlaneMode::from_config_value;
+
+        assert_eq!(resolve(None, Velo, &[]).unwrap(), Velo);
+        assert_eq!(resolve(None, Velo, &tls).unwrap(), Tcp);
+        // An explicit velo is kept, so the Velo service refuses to start.
+        assert_eq!(resolve(Some("velo"), Velo, &tls).unwrap(), Velo);
     }
 
     #[test]

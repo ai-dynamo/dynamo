@@ -347,10 +347,10 @@ def test_compute_kv_bytes_propagates_unexpected_errors(monkeypatch):
         kv_cache.compute_kv_bytes_per_token("org/model")
 
 
-def test_response_plane_defaults_to_tcp_and_accepts_quic(monkeypatch):
+def test_response_plane_defaults_to_unset_and_accepts_quic(monkeypatch):
     monkeypatch.delenv("DYN_RESPONSE_PLANE", raising=False)
 
-    assert parse_args([]).response_plane == "tcp"
+    assert parse_args([]).response_plane is None
     assert parse_args(["--response-plane", "quic"]).response_plane == "quic"
     assert parse_args(["--response-plane", "velo"]).response_plane == "velo"
     monkeypatch.setenv("DYN_RESPONSE_PLANE", "quic")
