@@ -113,10 +113,6 @@ FROM ${PLANNER_RUNTIME_IMAGE}:${PLANNER_RUNTIME_IMAGE_TAG} AS planner
 ARG PLANNER_PYTHON_VERSION
 USER 0
 
-# Remove this ensurepip copy once the NGC runtime provides Python 3.13.17+.
-# https://github.com/ai-dynamo/dynamo/issues/17188
-RUN ["/usr/local/bin/python3", "-c", "import ensurepip, pathlib, shutil; shutil.rmtree(pathlib.Path(ensurepip.__file__).parent)"]
-COPY --from=planner_builder /usr/local/lib/python${PLANNER_PYTHON_VERSION}/ensurepip/ /usr/local/lib/python${PLANNER_PYTHON_VERSION}/ensurepip/
 RUN ["/usr/local/bin/python3", "-c", "import ensurepip, pathlib, shutil, subprocess, tempfile, venv; assert tuple(map(int, ensurepip.version().split('.'))) >= (26, 2, 2); assert len(list((pathlib.Path(ensurepip.__file__).parent / '_bundled').glob('pip-*.whl'))) == 1; d = tempfile.mkdtemp(); venv.create(d, with_pip=True); subprocess.run([d + '/bin/python', '-m', 'pip', '--version'], check=True); shutil.rmtree(d)"]
 
 COPY --from=planner_builder /etc/group /etc/passwd /etc/

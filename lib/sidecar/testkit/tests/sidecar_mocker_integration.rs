@@ -3,8 +3,8 @@
 
 use dynamo_backend_common::testing::mock_context;
 use dynamo_backend_common::{
-    BackendError, DisaggregationMode, DynamoError, FinishReason, GenerateContext, LLMEngine,
-    LLMEngineOutput, PreprocessedRequest,
+    BackendError, DisaggregationMode, DynamoError, ErrorType, FinishReason, GenerateContext,
+    LLMEngine, LLMEngineOutput, PreprocessedRequest,
 };
 use dynamo_llm::protocols::common::preprocessor::PrefillResult;
 use dynamo_sidecar_testkit::assert::{failure, terminal};
@@ -758,6 +758,29 @@ async fn vllm_malformed_terminal_fails_then_recovers() {
         fixture.shutdown().await;
     })
     .await;
+}
+
+/// vLLM reporting NOT_SERVING after startup resolves `engine_lost`; the
+/// process test covers a dropped connection.
+#[tokio::test]
+async fn vllm_engine_lost_on_not_serving() {
+    let mut fixture =
+        vllm_fixture::Fixture::start(Controller::default(), FixtureConfig::default()).await;
+    let engine = fixture.engine().await;
+    engine.start(0).await.unwrap();
+    let lost = engine.engine_lost();
+    tokio::pin!(lost);
+    tokio::time::timeout(std::time::Duration::from_millis(300), &mut lost)
+        .await
+        .expect_err("a SERVING engine is not lost");
+    fixture.set_overall_serving(false).await;
+    let error = bounded("engine lost on NOT_SERVING", lost).await;
+    assert_eq!(
+        error.error_type(),
+        ErrorType::Backend(BackendError::EngineShutdown)
+    );
+    assert!(error.to_string().contains("vLLM engine lost"), "{error}");
+    finish(&mut fixture, &engine).await;
 }
 
 #[tokio::test]
