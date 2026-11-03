@@ -25,7 +25,7 @@ diagnostic info.
 > reasoning, tool-call, and control tokens that the parsed message does not show. Streamed responses
 > carry each backend chunk's entries once, on one chunk for that choice, so the entries need not line
 > up with the text in `reasoning_content`, `content`, and `tool_calls`. This note does not describe
-> the V1 route.
+> the V1 route, where late entries can arrive in a final empty-`delta` chunk after `finish_reason`.
 
 ## The request
 
@@ -96,12 +96,14 @@ engine's raw token stream:
 
 Each entry in `logprobs.content` is one generated token and keeps the score
 the backend returned for it. The `token` text and `bytes` are decoded
-representations: a control token such as end-of-sequence can have empty text
-and bytes, and `return_tokens_as_token_ids` can replace the text with a
+representations: an end-of-sequence token can appear as its literal text and
+bytes, such as `<|im_end|>` with `--dyn-chat-processor sglang`, or as empty
+text and no bytes, and `return_tokens_as_token_ids` can replace the text with a
 `token_id:<id>` label. Without that option, concatenating the `bytes` in
 order approximates the model output before any tool-call parser touched it.
-It omits tokens that decode to nothing, and because each token can be
-decoded on its own, it can lose spacing that the tokenizer adds only in
+It can include control-token literals such as a trailing `<|im_end|>`, omits
+tokens that decode to nothing, and, because each token can be decoded on its
+own, can lose spacing that the tokenizer adds only in
 context. That is the key piece for triage: it tells us what the model
 actually produced, separately from what the parser made of it. For an exact
 replay, also request the generated token IDs with
