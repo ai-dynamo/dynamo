@@ -12,10 +12,12 @@ runs on the controller's single sweep thread and never raises:
    probe that evaluates one fixed grid point a second time.
 2. Adopt the Requests a previous leader created for this window, matched by
    ``(dgd-uid, window, shard, spec hash)``; others of the window are queued
-   for deletion. A window whose every shard is adopted as Succeeded is
-   harvested without cutting it again. An adopted attempt whose Run failed
-   or ran another input is replaced by attempt+1 while the shard still
-   fits before the deadline.
+   for deletion. The spec names the window file, whose name holds the
+   trace selection (``window_claim_path``), so a Request of another window
+   start or cutoff with the same end is never adopted. A window whose
+   every shard is adopted as Succeeded is harvested without cutting it
+   again. An adopted attempt whose Run failed or ran another input is
+   replaced by attempt+1 while the shard still fits before the deadline.
 3. Cut the window file (a subprocess, ``context.cut_window``), then create
    one Request per remaining shard with Strict field validation and check
    that the API server kept every submitted field.
@@ -294,10 +296,36 @@ def spec_hash(spec: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
-def window_claim_path(cfg: DgdrExecutorConfig, dgd: DgdRef, window_end_ms: int) -> str:
-    """Claim-relative path of a window file: ``<windows_dir>/<dgd>/<end_ms>.jsonl.gz``."""
+def window_selection(window_start_ms: int, window_end_ms: int, as_of_ms: int) -> str:
+    """First 12 hex digits of the SHA-256 of ``<start>|<end>|<as_of>`` (epoch ms)."""
 
-    return f"{cfg.windows_dir.strip('/')}/{dgd.name}/{int(window_end_ms)}.jsonl.gz"
+    key = f"{int(window_start_ms)}|{int(window_end_ms)}|{int(as_of_ms)}"
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
+
+
+def window_claim_path(
+    cfg: DgdrExecutorConfig,
+    dgd: DgdRef,
+    *,
+    window_start_ms: int,
+    window_end_ms: int,
+    as_of_ms: int,
+) -> str:
+    """Claim-relative path of a window file:
+    ``<windows_dir>/<dgd>/<end_ms>-<window_selection>.jsonl.gz``.
+
+    The Request spec names this path, so the selection (``[start, end)``
+    as of ``as_of``) is part of the spec hash and the Request name: a
+    window cut or a Request of another selection with the same end is
+    never reused. The reconciler reads the window end from the leading
+    digits.
+    """
+
+    selection = window_selection(window_start_ms, window_end_ms, as_of_ms)
+    return (
+        f"{cfg.windows_dir.strip('/')}/{dgd.name}/"
+        f"{int(window_end_ms)}-{selection}.jsonl.gz"
+    )
 
 
 def request_name(
@@ -330,7 +358,9 @@ def build_request(
     retune: RetuneConfig,
     sla_ttft_ms: float,
     sla_itl_ms: float,
+    window_start_ms: int,
     window_end_ms: int,
+    as_of_ms: int,
     shard: Shard,
     spec_replicas: Mapping[str, int],
     backend: str,
@@ -338,8 +368,10 @@ def build_request(
 ) -> dict:
     """The DGDR v1beta2 Request that replays one shard of a window.
 
-    The engine is ``cfg.engine`` with every leaf a scalar and each used
-    role's ``parallelism.preset[0].replicas`` set from ``spec_replicas``
+    The trace is the window file of ``[window_start_ms, window_end_ms)`` as
+    of ``as_of_ms`` (``window_claim_path``). The engine is ``cfg.engine``
+    with every leaf a scalar and each used role's
+    ``parallelism.preset[0].replicas`` set from ``spec_replicas``
     (unused roles are deleted with ``null``); the GPU budget is the sum of
     replicas times GPUs per worker (tensor x pipeline x attention_data).
     Router knobs use their AISimulate public names: ``{choices: [...]}``
@@ -368,7 +400,13 @@ def build_request(
                 "source": {
                     "persistentVolumeClaim": {
                         "claimName": cfg.claim_name,
-                        "subPath": window_claim_path(cfg, dgd, window_end_ms),
+                        "subPath": window_claim_path(
+                            cfg,
+                            dgd,
+                            window_start_ms=window_start_ms,
+                            window_end_ms=window_end_ms,
+                            as_of_ms=as_of_ms,
+                        ),
                     }
                 },
             }
@@ -818,10 +856,20 @@ class _DgdrSweep:
             if request.deadline_s is not None
             else started + request.timeout_s
         )
+        # Rounded once: the window file's path, the Request specs and the
+        # cut must agree on the selection.
+        self.window_start_ms = int(round(request.window_start_ms))
         self.window_end_ms = int(round(request.window_end_ms))
+        self.as_of_ms = int(round(request.as_of_ms))
         # Registry references this sweep took; each is released at the end.
         self._protections = 0
-        self.claim_path = window_claim_path(self.cfg, context.dgd, self.window_end_ms)
+        self.claim_path = window_claim_path(
+            self.cfg,
+            context.dgd,
+            window_start_ms=self.window_start_ms,
+            window_end_ms=self.window_end_ms,
+            as_of_ms=self.as_of_ms,
+        )
         self.local_path = os.path.join(self.cfg.mount_path, self.claim_path)
         self.shards: dict[str, _ShardRun] = {}
         self.cut_done = False
@@ -1020,7 +1068,9 @@ class _DgdrSweep:
                     retune=self.ctx.retune,
                     sla_ttft_ms=request.sla_ttft_ms,
                     sla_itl_ms=request.sla_itl_ms,
+                    window_start_ms=self.window_start_ms,
                     window_end_ms=self.window_end_ms,
+                    as_of_ms=self.as_of_ms,
                     shard=shard,
                     spec_replicas=replicas,
                     backend=self.ctx.backend,
@@ -1076,7 +1126,9 @@ class _DgdrSweep:
             retune=self.ctx.retune,
             sla_ttft_ms=self.request.sla_ttft_ms,
             sla_itl_ms=self.request.sla_itl_ms,
+            window_start_ms=self.window_start_ms,
             window_end_ms=self.window_end_ms,
+            as_of_ms=self.as_of_ms,
             shard=run.shard,
             spec_replicas=self.details["replicas"],
             backend=self.ctx.backend,
@@ -1306,9 +1358,9 @@ class _DgdrSweep:
             os.makedirs(os.path.dirname(self.local_path), exist_ok=True)
             result: WindowCutResult = self.ctx.cut_window(
                 segments_root,
-                int(round(self.request.window_start_ms)),
+                self.window_start_ms,
                 self.window_end_ms,
-                int(round(self.request.as_of_ms)),
+                self.as_of_ms,
                 self.local_path,
                 max_rows=self.cfg.max_window_rows,
                 deadline_s=cut_deadline_s,

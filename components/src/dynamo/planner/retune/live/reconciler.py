@@ -8,9 +8,9 @@ is initialized. It deletes, with ``fs_root`` the planner's mount of the trace
 claim, ``T``/``G`` the retune interval/grace and ``timeout`` the sweep
 timeout::
 
-    <fs_root>/<segments_dir>/<dgd>/<pod>/<prefix>.NNNNNN.jsonl.gz   frontend segments
-    <fs_root>/<windows_dir>/<dgd>/<window_end_ms>.jsonl.gz           window files
-    <fs_root>/<windows_dir>/<dgd>/.tmp-<window_end_ms>-<nonce>       cut temp files
+    <fs_root>/<segments_dir>/<dgd>/<pod>/<prefix>.NNNNNN.jsonl.gz      frontend segments
+    <fs_root>/<windows_dir>/<dgd>/<window_end_ms>-<selection>.jsonl.gz  window files
+    <fs_root>/<windows_dir>/<dgd>/.tmp-<window_end_ms>-<nonce>          cut temp files
 
 - Segments, only when the frontend pod set is known and nonempty: never the
   highest-numbered segment of a live pod; other segments of a live pod, and
@@ -83,8 +83,8 @@ RUN_COMPLETED_CONDITION = "Completed"
 REQUEST_ACCEPTED_CONDITION = "Accepted"
 REQUEST_INVALID_SPEC_REASON = "InvalidSpec"
 
-# A window file: <window_end_ms>.jsonl.gz
-_WINDOW_RE = re.compile(r"^(\d+)" + re.escape(SEGMENT_SUFFIX) + r"$")
+# A window file: <window_end_ms>[-<selection digest>].jsonl.gz
+_WINDOW_RE = re.compile(r"^(\d+)(?:-[0-9a-f]+)?" + re.escape(SEGMENT_SUFFIX) + r"$")
 # A Rust gzip JSONL sink segment: <prefix>.<index, at least 6 digits>.jsonl.gz
 _SEGMENT_RE = re.compile(r"^(.*)\.(\d{6,})" + re.escape(SEGMENT_SUFFIX) + r"$")
 

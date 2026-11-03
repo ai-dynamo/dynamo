@@ -14,7 +14,9 @@ block-size rule and ``row_counts`` are those of
 rows are the same bytes; only the output is gzip-compressed and the memory
 is bounded. The cut runs in a child process, reads the segments in two
 passes (``_Selection``, ``_write_rows``) and publishes the file atomically
-(``_publish``).
+(``_publish``). The file's gzip header records its selection (``start_ms``,
+``end_ms``, ``as_of_ms`` in whole ms) and counts; a file already at the
+output path is reused only for the same selection.
 
 A gzip member that fails validation is dropped whole. Runs of bad bytes
 above ``MAX_DROPPED_MEMBER_RATIO`` of the members, or bad bytes above that
@@ -103,7 +105,7 @@ _GZIP_MAGIC = b"\x1f\x8b\x08"  # ID1, ID2, CM=deflate
 _GZIP_WBITS = 16 + zlib.MAX_WBITS  # one gzip member, header and trailer
 # The header of a window file: FLG=FCOMMENT, MTIME=0 (equal cuts are equal
 # bytes), XFL=0, OS=unknown. The zero-terminated comment that follows holds
-# the cut's counts.
+# the cut's selection and counts.
 _WINDOW_HEADER = _GZIP_MAGIC + b"\x10" + bytes(4) + b"\x00\xff"
 _WINDOW_HEADER_READ = 1 << 16
 _READ_CHUNK = 1 << 20
@@ -224,9 +226,12 @@ def cut_window_inprocess(
     """Cut a window file in this process; the body of ``cut_window``'s child.
 
     An empty window writes no file (``path=None``). When ``out_path`` already
-    exists, no segment is read: the result carries the counts in its header
-    (``reused=True``, nothing dropped). ``temp_path`` names the temporary
-    file (it must be in ``out_path``'s directory); by default a fresh
+    exists, no segment is read: if its header records the same selection
+    (``start_ms``, ``end_ms`` and ``as_of_ms`` rounded to whole ms), the
+    result carries the counts in its header (``reused=True``, nothing
+    dropped); a file of another selection, or one that records none, fails
+    as ``window_cut_failed``. ``temp_path`` names the temporary file (it
+    must be in ``out_path``'s directory); by default a fresh
     ``temp_file_name`` there. Failures raise ``WindowCutError``.
     """
 
@@ -243,7 +248,9 @@ def cut_window_inprocess(
         if os.path.lexists(out_path):
             # Another process (an earlier leader, an adopted Request's cut)
             # already published this window; DGDR Requests name it by path.
-            return _published(out_path)
+            return _published(
+                out_path, start_ms=start_ms, end_ms=end_ms, as_of_ms=as_of_ms
+            )
         files = _segment_files(os.fspath(segments_root))
         selection = _Selection(start_ms, end_ms, as_of_ms, max_rows)
         items = _trace_items(files, start_ms / 1000.0 - SEGMENT_MTIME_MARGIN_S)
@@ -265,11 +272,15 @@ def cut_window_inprocess(
         created = _publish(
             out_path,
             temp_path,
-            _counts_comment(result),
+            _counts_comment(
+                result, start_ms=start_ms, end_ms=end_ms, as_of_ms=as_of_ms
+            ),
             lambda sink: _write_rows(selection, files, sink),
         )
+        if created:
+            return result
         # Another process published it first: report the counts it holds.
-        return result if created else _published(out_path)
+        return _published(out_path, start_ms=start_ms, end_ms=end_ms, as_of_ms=as_of_ms)
     except OSError as error:
         raise WindowCutError(
             "window_cut_failed", f"{type(error).__name__}: {error}"
@@ -1072,11 +1083,29 @@ class _GzipWriter:
         self._raw.write(struct.pack("<II", self._crc, self._size & 0xFFFFFFFF))
 
 
-def _counts_comment(result: WindowCutResult) -> bytes:
-    """The header comment of a window file: the counts of its cut, as ASCII
-    JSON (which never holds the NUL that ends a gzip comment)."""
+def _selection_bounds(
+    start_ms: float, end_ms: float, as_of_ms: float
+) -> dict[str, int]:
+    return {
+        "start_ms": int(round(start_ms)),
+        "end_ms": int(round(end_ms)),
+        "as_of_ms": int(round(as_of_ms)),
+    }
+
+
+def _describe_selection(bounds: Mapping[str, Any]) -> str:
+    return f"[{bounds['start_ms']}, {bounds['end_ms']}) as of {bounds['as_of_ms']}"
+
+
+def _counts_comment(
+    result: WindowCutResult, *, start_ms: float, end_ms: float, as_of_ms: float
+) -> bytes:
+    """The header comment of a window file: the selection and the counts of
+    its cut, as ASCII JSON (which never holds the NUL that ends a gzip
+    comment)."""
 
     counts = {
+        "selection": _selection_bounds(start_ms, end_ms, as_of_ms),
         "num_requests": result.num_requests,
         "trace_block_size": result.trace_block_size,
         "row_counts": result.row_counts,
@@ -1084,11 +1113,15 @@ def _counts_comment(result: WindowCutResult) -> bytes:
     return json.dumps(counts, sort_keys=True, separators=(",", ":")).encode("ascii")
 
 
-def _published(path: str) -> WindowCutResult:
+def _published(
+    path: str, *, start_ms: float, end_ms: float, as_of_ms: float
+) -> WindowCutResult:
     """The result of the window file already at ``path``, from its header.
 
     Nothing was dropped by this call: it read no segment. A file without
-    the counts of a cut in its header fails as ``window_cut_failed``.
+    the counts of a cut in its header, or cut for another selection than
+    ``[start_ms, end_ms)`` as of ``as_of_ms`` (whole ms), or recording no
+    selection, fails as ``window_cut_failed``.
     """
 
     with open(path, "rb") as source:
@@ -1116,6 +1149,20 @@ def _published(path: str) -> WindowCutResult:
             f"window file {path} exists but its gzip header holds no cut "
             f"counts: {error}",
         ) from error
+    wanted = _selection_bounds(start_ms, end_ms, as_of_ms)
+    found = counts.get("selection")
+    if found != wanted:
+        if not (isinstance(found, dict) and set(found) == set(wanted)):
+            raise WindowCutError(
+                "window_cut_failed",
+                f"window file {path} exists but its gzip header holds no "
+                "selection, so it is not reused",
+            )
+        raise WindowCutError(
+            "window_cut_failed",
+            f"window file {path} was cut for {_describe_selection(found)}, "
+            f"not {_describe_selection(wanted)}",
+        )
     return WindowCutResult(
         path=path,
         num_requests=num_requests,

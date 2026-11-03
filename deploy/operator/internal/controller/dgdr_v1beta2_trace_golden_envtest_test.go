@@ -24,8 +24,9 @@ const traceRequestLoweringGoldenPath = "../aisimulate/testdata/trace_request_low
 
 // liveRetuneShardRequestSpec is the spec of one grid shard the live-retune planner submits: its
 // build_request for an aggregated vLLM deployment with 3 replicas of tensor parallelism 2, the window
-// ending at 1793000000000 ms, and a 2x2x2 router grid. It omits workload.trace.format, which the
-// CRD schema defaults. Change it together with the planner and regenerate the golden file.
+// [1792996400000, 1793000000000) ms as of 1793000120000 ms, whose selection digest ends the subPath,
+// and a 2x2x2 router grid. It omits workload.trace.format, which the CRD schema defaults. Change it
+// together with the planner and regenerate the golden file.
 const liveRetuneShardRequestSpec = `{
   "model": {"name": "Qwen/Qwen3-32B"},
   "backends": ["vllm"],
@@ -35,7 +36,7 @@ const liveRetuneShardRequestSpec = `{
       "source": {
         "persistentVolumeClaim": {
           "claimName": "request-traces",
-          "subPath": "windows/llm/1793000000000.jsonl.gz"
+          "subPath": "windows/llm/1793000000000-ba081802aba3.jsonl.gz"
         }
       }
     }

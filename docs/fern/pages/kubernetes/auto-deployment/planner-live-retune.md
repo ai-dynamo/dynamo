@@ -28,8 +28,12 @@ runs in retune-only mode and never scales.
 1. **Record.** Each frontend writes a `request_end` record per request to its own directory on a
    shared ReadWriteMany claim (`<segments_dir>/<dgd>/<pod>/`).
 2. **Cut a window.** At `L_k = window end + grace_seconds`, the Planner merges the records of the
-   window into one canonical trace file, `<windows_dir>/<dgd>/<window_end_ms>.jsonl.gz`, in a
-   subprocess bounded by `cut_budget_seconds`.
+   window into one canonical trace file,
+   `<windows_dir>/<dgd>/<window_end_ms>-<selection>.jsonl.gz`, in a subprocess bounded by
+   `cut_budget_seconds`. `<selection>` is a digest of the window's start, end and cutoff
+   (`window end + grace_seconds`), so a Planner restarted with another `interval_seconds` or
+   `grace_seconds` cuts its own file and creates its own Requests instead of reusing those of a
+   window with the same end.
 3. **Search.** The Planner splits the router grid into at most `run.max_shards` Cartesian shards of
    at most 100 points and creates one DGDR v1beta2 Request per shard. Each Request replays the
    window file on the pinned `retune.dgdr.engine` with the replica counts of the DGD spec. One more

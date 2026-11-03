@@ -548,7 +548,7 @@ class TraceClaim:
         if not self.windows.is_dir():
             return set()
         return {
-            int(name.split(".", 1)[0])
+            int(name.split(".", 1)[0].split("-", 1)[0])
             for name in os.listdir(self.windows)
             if name.endswith(".jsonl.gz")
         }

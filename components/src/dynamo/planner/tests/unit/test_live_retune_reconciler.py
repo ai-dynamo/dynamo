@@ -437,6 +437,10 @@ def window_path(reconciler: Reconciler, window: int) -> Path:
     return Path(reconciler.windows_root) / f"{window}.jsonl.gz"
 
 
+def selection_path(reconciler: Reconciler, window: int, digest: str) -> Path:
+    return Path(reconciler.windows_root) / f"{window}-{digest}.jsonl.gz"
+
+
 def test_protected_windows_are_never_deleted(tmp_path: Path) -> None:
     reconciler, _, _ = make(tmp_path)
     last, due = window_ms(2), int((NOW - 60) * 1000)
@@ -566,6 +570,54 @@ def test_unreferenced_window_needs_the_fallback_age(tmp_path: Path) -> None:
 
     assert report.deleted_windows == (window_ms(6),)
     assert young.exists() and not old.exists() and unknown.exists()
+
+
+def test_windows_named_by_their_selection_are_protected_by_their_end(
+    tmp_path: Path,
+) -> None:
+    reconciler, _, _ = make(tmp_path)
+    last, due = window_ms(2), int((NOW - 60) * 1000)
+    due_path = touch(selection_path(reconciler, due, "0123456789ab"), OLD)
+    stale_path = touch(selection_path(reconciler, window_ms(5), "0123456789ab"), OLD)
+    legacy_path = touch(window_path(reconciler, window_ms(6)), OLD)
+
+    report = run_once(reconciler, last=last, due=due, pods=[frontend("fe-0")])
+
+    assert due_path.exists()  # undecided and before its deadline
+    assert not stale_path.exists() and not legacy_path.exists()
+    assert report.deleted_windows == (window_ms(6), window_ms(5))
+
+
+def test_a_window_named_by_its_selection_goes_once_its_referrer_is_finished(
+    tmp_path: Path,
+) -> None:
+    reconciler, kube, _ = make(tmp_path, keep_requests=10)
+    # Outside the protected range and before its deadline, so only its
+    # referrer decides.
+    window = int((NOW - 60) * 1000)
+    path = touch(selection_path(reconciler, window, "0123456789ab"), 10)
+    other_selection = touch(selection_path(reconciler, window, "ba9876543210"), 10)
+    kube.add_request(
+        "rt-a",
+        window,
+        state="running",
+        job_pods=1,
+        sub_path=f"windows/dgd/{path.name}",
+    )
+
+    def round_():
+        return run_once(reconciler, last=window_ms(0), due=window_ms(0))
+
+    round_()
+    assert path.exists() and other_selection.exists()
+
+    kube.add_request(
+        "rt-a", window, state="completed", sub_path=f"windows/dgd/{path.name}"
+    )
+    report = round_()
+    assert report.deleted_windows == (window,)
+    assert not path.exists()
+    assert other_selection.exists()  # unreferenced but young
 
 
 def test_windows_are_kept_when_requests_cannot_be_listed(tmp_path: Path) -> None:

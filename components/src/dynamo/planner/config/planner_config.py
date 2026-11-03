@@ -949,7 +949,11 @@ class DgdrExecutorConfig(BaseModel):
     windows_dir: str = Field(
         default="windows",
         min_length=1,
-        description="Claim-relative directory of window files: <windows_dir>/<dgd>/.",
+        description=(
+            "Claim-relative directory of window files: "
+            "<windows_dir>/<dgd>/<window_end_ms>-<selection>.jsonl.gz, where "
+            "<selection> is a digest of the window's start, end and cutoff."
+        ),
     )
     model: str = Field(
         min_length=1,

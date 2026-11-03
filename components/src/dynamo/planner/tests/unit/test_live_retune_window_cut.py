@@ -859,10 +859,20 @@ def _reused(result, path):
     )
 
 
+def _header_comment(path):
+    data = path.read_bytes()
+    return json.loads(data[10 : data.index(b"\x00", 10)])
+
+
 def test_published_window_is_reused_without_reading_the_trace(tmp_path):
     root = _random_trace(tmp_path / "segments", 5)
     first, out = _cut(root, tmp_path)
     published = out.read_bytes()
+    assert _header_comment(out)["selection"] == {
+        "start_ms": START,
+        "end_ms": END,
+        "as_of_ms": AS_OF,
+    }
     # A later leader adopting the window must not fail it on segments that
     # changed, broke or were collected since it was published.
     shutil.rmtree(root)
@@ -874,6 +884,40 @@ def test_published_window_is_reused_without_reading_the_trace(tmp_path):
     assert _temp_files(out.parent) == []
 
 
+@pytest.mark.parametrize(
+    "selection",
+    [{"start": START + 1000}, {"as_of": AS_OF + 100}],
+    ids=["start", "as_of"],
+)
+def test_published_window_of_another_selection_is_not_reused(tmp_path, selection):
+    root = _random_trace(tmp_path / "segments", 5)
+    _, out = _cut(root, tmp_path)
+    published = out.read_bytes()
+
+    with pytest.raises(WindowCutError) as caught:
+        _cut(root, tmp_path, **selection)
+
+    assert caught.value.reason == "window_cut_failed"
+    assert f"was cut for [{START}, {END}) as of {AS_OF}, not [" in str(caught.value)
+    assert out.read_bytes() == published
+    assert _temp_files(out.parent) == []
+
+
+def test_published_window_without_a_selection_is_not_reused(tmp_path):
+    root = _random_trace(tmp_path / "segments", 5)
+    _, out = _cut(root, tmp_path)
+    data = out.read_bytes()
+    end = data.index(b"\x00", 10)
+    counts = _header_comment(out)
+    del counts["selection"]
+    out.write_bytes(data[:10] + json.dumps(counts).encode("ascii") + data[end:])
+
+    with pytest.raises(WindowCutError) as caught:
+        _cut(root, tmp_path)
+    assert caught.value.reason == "window_cut_failed"
+    assert "holds no selection" in str(caught.value)
+
+
 def test_a_window_file_without_cut_counts_fails(tmp_path):
     root = _random_trace(tmp_path / "segments", 5)
     out = _out(tmp_path)
@@ -883,6 +927,21 @@ def test_a_window_file_without_cut_counts_fails(tmp_path):
         cut_window_inprocess(root, START, END, AS_OF, out, max_rows=10**6)
     assert caught.value.reason == "window_cut_failed"
     assert "holds no cut counts" in str(caught.value)
+
+
+def _lose_link_race_to(monkeypatch, winner_out):
+    """Make the cut's link find ``winner_out`` already published at its target."""
+
+    real_link = os.link
+    linked = []
+
+    def racing_link(source, target):
+        linked.append(os.path.basename(source))
+        real_link(winner_out, target)  # another process published first
+        return real_link(source, target)
+
+    monkeypatch.setattr(os, "link", racing_link)
+    return linked
 
 
 def test_link_race_reports_the_winners_counts(tmp_path, monkeypatch):
@@ -898,21 +957,29 @@ def test_link_race_reports_the_winners_counts(tmp_path, monkeypatch):
     )
     assert winner.num_requests != _golden(root, tmp_path)[0].num_requests
     out = _out(tmp_path)
-    real_link = os.link
-    linked = []
-
-    def racing_link(source, target):
-        linked.append(os.path.basename(source))
-        real_link(winner_out, target)  # another process published first
-        return real_link(source, target)
-
-    monkeypatch.setattr(os, "link", racing_link)
+    linked = _lose_link_race_to(monkeypatch, winner_out)
 
     result = cut_window_inprocess(root, START, END, AS_OF, out, max_rows=10**6)
 
     assert result == _reused(winner, out)
     assert out.read_bytes() == winner_out.read_bytes()
     assert linked[0].startswith(f".tmp-{END}-")
+    assert _temp_files(out.parent) == []
+
+
+def test_link_race_won_by_another_selection_fails(tmp_path, monkeypatch):
+    root = _random_trace(tmp_path / "segments", 6)
+    winner_out = _out(tmp_path, "winner.jsonl.gz")
+    cut_window_inprocess(root, START + 1000, END, AS_OF, winner_out, max_rows=10**6)
+    out = _out(tmp_path)
+    linked = _lose_link_race_to(monkeypatch, winner_out)
+
+    with pytest.raises(WindowCutError) as caught:
+        cut_window_inprocess(root, START, END, AS_OF, out, max_rows=10**6)
+
+    assert caught.value.reason == "window_cut_failed"
+    assert f"was cut for [{START + 1000}, {END}) as of {AS_OF}" in str(caught.value)
+    assert linked and out.read_bytes() == winner_out.read_bytes()
     assert _temp_files(out.parent) == []
 
 

@@ -721,7 +721,7 @@ The Planner runs the builtin plugin pipeline by default. `scheduling` controls p
       Claim-relative directory of the frontend trace segments, written as `<segments_dir>/<dgd>/<pod>/`. `/`-separated names without empty, `.` or `..` segments. `segments_dir` and `windows_dir` must not contain one another.
     </ParamField>
     <ParamField path="windows_dir" type="string" default="windows">
-      Claim-relative directory of the window files, written as `<windows_dir>/<dgd>/<window_end_ms>.jsonl.gz`. Same rules as `segments_dir`.
+      Claim-relative directory of the window files, written as `<windows_dir>/<dgd>/<window_end_ms>-<selection>.jsonl.gz`, where `<selection>` is a digest of the window's start, end and cutoff. Same rules as `segments_dir`.
     </ParamField>
     <ParamField path="phase_seconds" type="number" default="0.0">
       Window phase. Window `k` is `[phase_seconds + k × interval_seconds, phase_seconds + (k+1) × interval_seconds)` in epoch seconds, so a restarted Planner continues the same windows. Must be 0 or greater.

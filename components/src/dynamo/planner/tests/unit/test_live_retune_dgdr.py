@@ -13,7 +13,9 @@ all deterministic.
 
 from __future__ import annotations
 
+import dataclasses
 import gzip
+import hashlib
 import itertools
 import json
 import math
@@ -62,6 +64,8 @@ from dynamo.planner.retune.live.dgdr import (
     request_name,
     run_dgdr_sweep,
     spec_hash,
+    window_claim_path,
+    window_selection,
 )
 from dynamo.planner.retune.live.reconciler import trace_pvc_source
 from dynamo.planner.retune.sweep import SweepRequest, score_summary
@@ -94,6 +98,12 @@ INTERVAL_S = 3600.0
 GRACE_S = 120.0
 TIMEOUT_S = 3000.0
 LAUNCH_S = WINDOW_END_MS / 1000.0 + GRACE_S
+WINDOW_START_MS = WINDOW_END_MS - int(INTERVAL_S * 1000)
+AS_OF_MS = WINDOW_END_MS + int(GRACE_S * 1000)
+WINDOW_FILE = (
+    f"windows/llm/{WINDOW_END_MS}-"
+    f"{window_selection(WINDOW_START_MS, WINDOW_END_MS, AS_OF_MS)}.jsonl.gz"
+)
 POLL_S = 5.0
 DGD = DgdRef(name="llm", namespace="test-ns", uid="dgd-uid-1", dynamo_namespace="dyn")
 AGG_ENGINE = {
@@ -623,7 +633,9 @@ def test_build_request_aggregated_grid_shard():
         retune=retune,
         sla_ttft_ms=500,
         sla_itl_ms=30,
+        window_start_ms=WINDOW_START_MS,
         window_end_ms=WINDOW_END_MS,
+        as_of_ms=AS_OF_MS,
         shard=shard,
         spec_replicas={"aggregated": 3},
         backend="vllm",
@@ -642,7 +654,7 @@ def test_build_request_aggregated_grid_shard():
             "source": {
                 "persistentVolumeClaim": {
                     "claimName": "request-traces",
-                    "subPath": f"windows/llm/{WINDOW_END_MS}.jsonl.gz",
+                    "subPath": WINDOW_FILE,
                 }
             },
         }
@@ -713,7 +725,9 @@ def test_build_request_point_shard_uses_scalars_and_disagg_budget():
         retune=retune,
         sla_ttft_ms=200,
         sla_itl_ms=20,
+        window_start_ms=WINDOW_START_MS,
         window_end_ms=WINDOW_END_MS,
+        as_of_ms=AS_OF_MS,
         shard=probe,
         spec_replicas={"prefill": 2, "decode": 4},
         backend="vllm",
@@ -749,7 +763,9 @@ def test_build_request_rejects_spec_replicas_it_cannot_pin(replicas, match):
             retune=make_retune(cfg),
             sla_ttft_ms=1,
             sla_itl_ms=1,
+            window_start_ms=WINDOW_START_MS,
             window_end_ms=WINDOW_END_MS,
+            as_of_ms=AS_OF_MS,
             shard=_shards()[0],
             spec_replicas=replicas,
             backend="vllm",
@@ -769,7 +785,9 @@ def test_build_request_requires_the_three_dgdr_knobs():
             retune=make_retune(cfg),
             sla_ttft_ms=1,
             sla_itl_ms=1,
+            window_start_ms=WINDOW_START_MS,
             window_end_ms=WINDOW_END_MS,
+            as_of_ms=AS_OF_MS,
             shard=shard,
             spec_replicas={"aggregated": 1},
             backend="vllm",
@@ -777,7 +795,9 @@ def test_build_request_requires_the_three_dgdr_knobs():
         )
 
 
-def _body(shard_index=0, **kwargs):
+def _body(
+    shard_index=0, *, window_start_ms=WINDOW_START_MS, as_of_ms=AS_OF_MS, **kwargs
+):
     cfg = make_cfg(**kwargs)
     return build_request(
         dgd=DGD,
@@ -785,12 +805,55 @@ def _body(shard_index=0, **kwargs):
         retune=make_retune(cfg),
         sla_ttft_ms=500,
         sla_itl_ms=30,
+        window_start_ms=window_start_ms,
         window_end_ms=WINDOW_END_MS,
+        as_of_ms=as_of_ms,
         shard=_shards()[shard_index],
         spec_replicas={"aggregated": 3},
         backend="vllm",
         attempt=1,
     )
+
+
+def test_window_file_is_named_by_its_end_and_selection_digest():
+    key = f"{WINDOW_START_MS}|{WINDOW_END_MS}|{AS_OF_MS}".encode()
+    digest = hashlib.sha256(key).hexdigest()[:12]
+    assert window_selection(WINDOW_START_MS, WINDOW_END_MS, AS_OF_MS) == digest
+    path = window_claim_path(
+        make_cfg(windows_dir="retune/windows"),
+        DGD,
+        window_start_ms=WINDOW_START_MS,
+        window_end_ms=WINDOW_END_MS,
+        as_of_ms=AS_OF_MS,
+    )
+    assert path == f"retune/windows/llm/{WINDOW_END_MS}-{digest}.jsonl.gz"
+
+
+def _identity(**selection: int) -> tuple[Optional[str], str, str]:
+    """The window file, spec hash and name of a grid shard's Request."""
+
+    body = _body(**selection)
+    _, path = trace_pvc_source(body["spec"])
+    return path, body["metadata"]["labels"][LABEL_SPEC], body["metadata"]["name"]
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        {"window_start_ms": WINDOW_END_MS - 1_800_000},
+        {"as_of_ms": WINDOW_END_MS + 300_000},
+    ],
+    ids=["start", "as_of"],
+)
+def test_request_identity_follows_the_trace_selection(selection):
+    same = _identity()
+    assert _identity() == same
+    assert same[0] == WINDOW_FILE
+    path, digest, name = _identity(**selection)
+    assert path is not None and path.startswith(f"windows/llm/{WINDOW_END_MS}-")
+    assert path != same[0]
+    assert digest != same[1]
+    assert name != same[2]
 
 
 def test_input_read_back_accepts_the_operator_lowering_and_finds_drift():
@@ -947,9 +1010,7 @@ def test_fresh_window_creates_cuts_harvests_and_scores(tmp_path):
     )
     # The window was cut once, into the claim path the Requests name.
     (cut,) = h.cutter.calls
-    assert cut["out_path"] == str(
-        tmp_path / "trace" / f"windows/llm/{WINDOW_END_MS}.jsonl.gz"
-    )
+    assert cut["out_path"] == str(tmp_path / "trace" / WINDOW_FILE)
     assert cut["segments_root"] == "/trace/segments/llm"
     assert cut["start_ms"] == WINDOW_END_MS - 3_600_000
     assert cut["end_ms"] == WINDOW_END_MS
@@ -1017,6 +1078,55 @@ def test_window_adopted_as_succeeded_is_not_cut_again(tmp_path):
     assert second.num_requests == 1234
     assert second.row_counts == {"selected": 1234}
     assert all(shard["adopted"] for shard in second.details["shards"].values())
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        # Restarted with half the interval: the window ends at the same time
+        # but starts later.
+        {
+            "window_index": 15,
+            "window_start_ms": WINDOW_END_MS - INTERVAL_S * 500.0,
+            "history_start_ms": WINDOW_END_MS - INTERVAL_S * 500.0,
+        },
+        # Restarted with a longer grace: the same window, a later cutoff.
+        {"as_of_ms": WINDOW_END_MS + 2 * GRACE_S * 1000.0},
+    ],
+    ids=["interval", "grace"],
+)
+def test_changed_selection_at_a_shared_end_is_not_adopted(tmp_path, change):
+    h = Harness(tmp_path)
+    first = h.sweep(make_request())
+    assert first.status == "ok", first.error
+    old = dict(h.kube.requests)
+    (first_cut,) = h.cutter.calls
+
+    h.cutter = FakeCutter()
+    request = dataclasses.replace(make_request(), **change)
+    second = h.sweep(request)
+
+    assert second.status == "ok", second.error
+    assert len(h.cutter.calls) == 1, "the new selection was not cut"
+    (cut,) = h.cutter.calls
+    assert (cut["start_ms"], cut["end_ms"], cut["as_of_ms"]) == (
+        round(request.window_start_ms),
+        WINDOW_END_MS,
+        round(request.as_of_ms),
+    )
+    assert cut["out_path"] != first_cut["out_path"]
+    assert not any(shard["adopted"] for shard in second.details["shards"].values())
+    assert sorted(h.registry.deleted) == sorted(old)
+    new = [obj for name, obj in h.kube.requests.items() if name not in old]
+    assert len(new) == len(old)
+    new_files = {trace_pvc_source(obj["spec"])[1] for obj in new}
+    old_files = {trace_pvc_source(obj["spec"])[1] for obj in old.values()}
+    assert {str(tmp_path / "trace" / path) for path in new_files} == {cut["out_path"]}
+    assert new_files.isdisjoint(old_files)
+    new_specs = {obj["metadata"]["labels"][LABEL_SPEC] for obj in new}
+    old_specs = {obj["metadata"]["labels"][LABEL_SPEC] for obj in old.values()}
+    assert new_specs.isdisjoint(old_specs)
+    assert_scores(second, request)
 
 
 def test_lost_leadership_leaves_requests_for_the_next_leader(tmp_path):
@@ -1268,7 +1378,9 @@ def test_name_taken_by_a_foreign_request_fails_a_critical_shard(tmp_path):
         retune=h.retune,
         sla_ttft_ms=500,
         sla_itl_ms=30,
+        window_start_ms=WINDOW_START_MS,
         window_end_ms=WINDOW_END_MS,
+        as_of_ms=AS_OF_MS,
         shard=_shards()[0],
         spec_replicas={"aggregated": 3},
         backend="vllm",
@@ -1998,7 +2110,7 @@ def test_sweep_with_the_real_window_cutter(tmp_path):
     result = h.sweep(request, cut_window=real_cut)
     assert result.status == "ok", result.error
     assert result.num_requests == 5
-    window_file = tmp_path / "trace" / "windows" / "llm" / f"{WINDOW_END_MS}.jsonl.gz"
+    window_file = tmp_path / "trace" / WINDOW_FILE
     with gzip.open(window_file, "rt", encoding="utf-8") as lines:
         assert len(lines.readlines()) == 5
     _, claim_path = trace_pvc_source(h.created()[0]["spec"])
