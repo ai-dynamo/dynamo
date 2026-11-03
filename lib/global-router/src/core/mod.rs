@@ -1047,6 +1047,48 @@ mod tests {
         assert_eq!((in_flight.get(&blue.id), in_flight.get(&green.id)), (0, 1));
     }
 
+    /// Picks on many threads at once still see each other: the core's advisory
+    /// pick runs on each caller's task, under the selector's lock, so least-
+    /// in-flight spreads the requests evenly and gives every pick back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn parallel_least_in_flight_picks_spread_evenly() {
+        let blue = pool("blue", "qwen", &["http://blue:8000"]);
+        let green = pool("green", "qwen", &["http://green:8000"]);
+        let in_flight = Arc::new(InFlightTracker::new());
+        let counts = Arc::new(FrontendSignals::new(in_flight.clone()));
+        let (core, _catalog) = selector(
+            least_in_flight_counting(&counts),
+            &[blue.clone(), green.clone()],
+        )
+        .await;
+        let core = Arc::new(core);
+        let tasks: Vec<_> = (0..64)
+            .map(|_| {
+                let (core, blue, green) = (core.clone(), blue.clone(), green.clone());
+                tokio::spawn(async move {
+                    let request = RoutingRequest::new("qwen");
+                    let selection = core.select(&request, &[&blue, &green]).await.unwrap();
+                    (selection.target.pool.id.clone(), selection.in_flight)
+                })
+            })
+            .collect();
+        let mut held = Vec::new();
+        for task in tasks {
+            held.push(task.await.unwrap());
+        }
+        let to = |pool: &Pool| held.iter().filter(|(id, _)| *id == pool.id).count();
+        assert_eq!(to(&blue) + to(&green), 64);
+        assert!(
+            to(&blue).abs_diff(to(&green)) <= 1,
+            "{} vs {}",
+            to(&blue),
+            to(&green)
+        );
+        assert_eq!(counts.pending(), 0, "every pick was taken over");
+        drop(held);
+        assert_eq!((in_flight.get(&blue.id), in_flight.get(&green.id)), (0, 0));
+    }
+
     /// A select dropped before it returns, as when the client leaves, leaves
     /// no pick pending, whether or not the core picked.
     #[tokio::test]
@@ -1063,13 +1105,14 @@ mod tests {
         let request = RoutingRequest::new("qwen");
         let candidates = [&blue, &green];
 
-        // Sent to the core, then dropped; and dropped before it was sent.
+        // Polled once, then dropped; and dropped before it was polled. The
+        // core may answer on the first poll (its advisory pick runs on the
+        // caller's task) or later; either way the pick is given back.
         for _ in 0..8 {
             let mut select = std::pin::pin!(core.select(&request, &candidates));
-            // Polled once, so the request reaches the core, then dropped.
             tokio::select! {
                 biased;
-                _ = select.as_mut() => panic!("the core answers on its own task"),
+                selection = select.as_mut() => drop(selection),
                 () = std::future::ready(()) => {}
             }
         }
