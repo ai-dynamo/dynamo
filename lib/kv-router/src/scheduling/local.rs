@@ -94,6 +94,7 @@ where
             block_hashes,
             isl_tokens,
             lora_name,
+            accounting_attribution,
             expected_output_tokens,
             affinity_target,
             pinned_worker,
@@ -114,6 +115,7 @@ where
             token_seq,
             isl_tokens,
             lora_name,
+            accounting_attribution,
             expected_output_tokens,
             affinity_target,
             pinned_worker,
@@ -639,6 +641,7 @@ where
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         let mode = ScheduleMode::from_legacy(maybe_request_id, update_states)?;
         self.schedule_request(ScheduleRequest {
+            accounting_attribution: Default::default(),
             mode,
             token_seq,
             block_hashes,
@@ -1210,6 +1213,7 @@ mod tests {
 
     fn request(mode: ScheduleMode) -> ScheduleRequest {
         ScheduleRequest {
+            accounting_attribution: Default::default(),
             mode,
             token_seq: Some(vec![1, 2, 3, 4]),
             block_hashes: None,

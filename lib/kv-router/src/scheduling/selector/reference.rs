@@ -812,6 +812,7 @@ mod tests {
             (30, SimpleWorkerConfig::default()),
         ]);
         let request = SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1216,6 +1217,7 @@ mod tests {
             },
         )]);
         let request = SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1275,6 +1277,7 @@ mod tests {
             ),
         ]);
         let request = SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1352,6 +1355,7 @@ mod tests {
             decode_blocks.insert(WorkerWithDpRank::from_worker_id(noisy_worker_id), 400_000);
 
             let request = SchedulingRequest {
+                accounting_attribution: Default::default(),
                 mode: ScheduleMode::QueryOnly {
                     request_id: Some("test".into()),
                 },
@@ -1427,6 +1431,7 @@ mod tests {
         decode_blocks.insert(WorkerWithDpRank::from_worker_id(20), 90);
 
         let request = SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1498,6 +1503,7 @@ mod tests {
         decode_blocks.insert(WorkerWithDpRank::from_worker_id(20), 100);
 
         let request = SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1585,6 +1591,7 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1663,6 +1670,7 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1965,6 +1973,7 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -2070,6 +2079,7 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
+            accounting_attribution: Default::default(),
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
