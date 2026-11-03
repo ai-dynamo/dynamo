@@ -476,7 +476,7 @@ async def test_selection_service_worker_is_eagle_rejects_non_booleans(monkeypatc
         return {
             "worker_id": worker_id,
             "model_name": model_name,
-            "endpoint": f"http://worker-{worker_id}:8000",
+            "endpoint": f"http://worker-{worker_id}",
             "block_size": 4,
             "max_num_batched_tokens": 1024,
             **extra,
@@ -506,11 +506,11 @@ async def test_selection_service_worker_is_eagle_rejects_non_booleans(monkeypatc
         assert service.list_workers(model_name="malformed") == []
         assert stored_is_eagle("plain") is False
 
-        # An omitted or None patch value leaves the stored value unchanged.
+        # An omitted or None patch value leaves the stored value unchanged; a real boolean replaces it.
         for patch in [{}, {"is_eagle": None}]:
             record = await service.patch_worker(2, patch)
             assert record["is_eagle"] is True
-        record = await service.patch_worker(1, {"is_eagle": False})
+        record = await service.patch_worker(2, {"is_eagle": False})
         assert record["is_eagle"] is False
     finally:
         await service.shutdown_async()
