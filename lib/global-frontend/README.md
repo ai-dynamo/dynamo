@@ -6,7 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 # Global Frontend
 
 An HTTP entry point that forwards requests to explicitly configured Dynamo pool
-frontends. It reads only each request's `model` and passes the request and the
+frontends. It reads each request's `model`, and under `affinity` the input of a
+request that names no session, and passes the request and the
 pool's response through as they are; the pool frontend owns validation,
 preprocessing, generation, and the response format. Pool identity types live
 in `dynamo-global-common`, and pool selection in `dynamo-global-router`.
@@ -63,9 +64,10 @@ coding agent's own header (`x-claude-code-agent-id` or
 A request that names none continues the session of an earlier request whose
 whole input its own input begins with, as a conversation's next turn does.
 The input is the text of Anthropic's `system`, then each item of `messages` or
-of the Responses `input`. Cache breakpoints, part types, and reasoning do not
-count, so a client may change them in messages it sends again. A request that
-continues none, such as a conversation's first turn, starts a session.
+of the Responses `input` (a string `input` being a user message). Field order,
+cache breakpoints, and reasoning do not count, so a client may change them in
+messages it sends again. A request that continues none, such as a
+conversation's first turn, starts a session.
 
 `affinity` needs `--region`, this process's region named as `--pool` names
 clusters. It reads each pool's load from the pool's PoolRelay, given per pool

@@ -11,33 +11,25 @@
 
 use std::fmt;
 
-use serde::de::{
-    DeserializeSeed, Deserializer, IgnoredAny, IntoDeserializer, MapAccess, SeqAccess, Visitor,
-};
+use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde_json::value::RawValue;
 use xxhash_rust::const_xxh3::xxh3_64 as const_xxh3_64;
-use xxhash_rust::xxh3::Xxh3;
+use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 const PREFIX_SEED: u64 = const_xxh3_64(b"dynamo.global-router.prefix-key.v1");
 
-/// Fields that say nothing about the conversation, or that clients change
-/// in messages they send again: cache breakpoints, part types, and
-/// reasoning, which clients drop from earlier turns.
-const SKIPPED_FIELDS: &[&str] = &[
-    "cache_control",
-    "type",
-    "thinking",
-    "signature",
-    "reasoning",
-    "reasoning_content",
-    "encrypted_content",
-];
+/// Fields that clients change in messages they send again: cache
+/// breakpoints, and reasoning, which they drop from earlier turns.
+const SKIPPED_FIELDS: &[&str] = &["cache_control", "reasoning", "reasoning_content"];
 
-// What each hashed leaf starts with, so that leaves cannot run together.
-const STRING: u8 = 1;
-const NUMBER: u8 = 2;
-const BOOL: u8 = 3;
-const ELEMENT_END: u8 = 4;
+/// Objects, by their `type`, that clients drop from earlier turns: Responses
+/// reasoning items and Anthropic thinking parts. Other types are not text.
+const SKIPPED_TYPES: &[&str] = &["reasoning", "thinking", "redacted_thinking"];
+
+// Seeds for each kind of value, so that `"1"` and `1` differ.
+const STRING: u64 = 1;
+const NUMBER: u64 = 2;
+const BOOL: u64 = 3;
 
 /// One prefix of a request's input: see [`RequestInput::prefix_keys`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -64,70 +56,77 @@ pub struct RequestInput<'a> {
 
 impl RequestInput<'_> {
     /// One key for each prefix of the input, shortest first: the input is a
-    /// list of elements (`system`, then each message or `input` item, or an
-    /// `input` string as one element), and each key covers `model` and the
-    /// elements up to its own, as the tokenizer cache keys each prefix of a
-    /// prompt. A conversation's next turn sends this turn's input again with
-    /// more after it, so its keys include this turn's last key.
+    /// list of elements (`system`, then each message or `input` item, an
+    /// `input` string being one user message), and each key covers `model`
+    /// and the elements up to its own, as the tokenizer cache keys each
+    /// prefix of a prompt. A conversation's next turn sends this turn's input
+    /// again with more after it, so its keys include this turn's last key.
     ///
-    /// Only an element's text counts: its string, number, and bool values in
-    /// order, without field names, structure, or [`SKIPPED_FIELDS`]. So a
-    /// client may move cache breakpoints, drop reasoning, or turn a string
-    /// into text parts between turns and keep its keys.
+    /// An element counts by its text: the set of its string, number, and bool
+    /// values, without field names, structure, order, [`SKIPPED_FIELDS`], or
+    /// objects of [`SKIPPED_TYPES`]. So a client may reorder fields, move
+    /// cache breakpoints, drop reasoning, or turn a string into text parts
+    /// between turns and keep its keys. Elements with no text count as none.
+    /// Elements whose values differ only in arrangement collide, which at
+    /// worst routes a request with another conversation's.
     ///
-    /// Empty if the input has no elements or is not as described.
+    /// Empty if the input is not as described.
     pub fn prefix_keys(&self, model: &str) -> Vec<PrefixKey> {
-        let mut hasher = Xxh3::with_seed(PREFIX_SEED);
-        hasher.update(&(model.len() as u64).to_le_bytes());
-        hasher.update(model.as_bytes());
-        let mut keys = Vec::new();
-        let mut elements = |value: &RawValue, list: bool| {
-            let mut json = serde_json::Deserializer::from_str(value.get());
-            let element = Element {
-                hasher: &mut hasher,
-                keys: &mut keys,
-            };
-            if list {
-                (&mut json).deserialize_any(Elements(element))
-            } else {
-                element.deserialize(&mut json)
-            }
+        let mut chain = Chain {
+            key: xxh3_64_with_seed(model.as_bytes(), PREFIX_SEED),
+            keys: Vec::new(),
         };
-        let read = self
-            .system
-            .map_or(Ok(()), |system| elements(system, false))
-            .and_then(|()| {
-                self.messages
-                    .map_or(Ok(()), |messages| elements(messages, true))
-            })
-            .and_then(|()| self.input.map_or(Ok(()), |input| elements(input, true)));
-        if read.is_err() {
-            return Vec::new();
+        let mut read = || -> serde_json::Result<()> {
+            if let Some(system) = self.system {
+                chain.push(Text.deserialize(&mut json(system))?);
+            }
+            for list in [self.messages, self.input].into_iter().flatten() {
+                json(list).deserialize_any(Elements(&mut chain))?;
+            }
+            Ok(())
+        };
+        match read() {
+            Ok(()) => chain.keys,
+            Err(_) => Vec::new(),
         }
-        keys
     }
 }
 
-/// Hashes one element's text, then keys the prefix it ends.
-struct Element<'h> {
-    hasher: &'h mut Xxh3,
-    keys: &'h mut Vec<PrefixKey>,
+fn json(value: &RawValue) -> serde_json::Deserializer<serde_json::de::StrRead<'_>> {
+    serde_json::Deserializer::from_str(value.get())
 }
 
-impl<'de> DeserializeSeed<'de> for Element<'_> {
-    type Value = ();
+fn leaf(seed: u64, bytes: &[u8]) -> u64 {
+    xxh3_64_with_seed(bytes, seed)
+}
 
-    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
-        Text(&mut *self.hasher).deserialize(deserializer)?;
-        self.hasher.update(&[ELEMENT_END]);
-        self.keys.push(PrefixKey(self.hasher.digest()));
-        Ok(())
+/// Empty strings count as absent, as nulls do.
+fn string(value: &str) -> u64 {
+    if value.is_empty() {
+        0
+    } else {
+        leaf(STRING, value.as_bytes())
     }
 }
 
-/// Reads a list of elements, in one pass: each item of an array, or a string
-/// as one element.
-struct Elements<'h>(Element<'h>);
+/// The key of each prefix so far.
+struct Chain {
+    key: u64,
+    keys: Vec<PrefixKey>,
+}
+
+impl Chain {
+    fn push(&mut self, text: u64) {
+        if text != 0 {
+            self.key = xxh3_64_with_seed(&text.to_le_bytes(), self.key);
+            self.keys.push(PrefixKey(self.key));
+        }
+    }
+}
+
+/// Adds a list of elements to a chain: each item of an array, or a string as
+/// the user message it stands for.
+struct Elements<'c>(&'c mut Chain);
 
 impl<'de> Visitor<'de> for Elements<'_> {
     type Value = ();
@@ -137,98 +136,121 @@ impl<'de> Visitor<'de> for Elements<'_> {
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
-        let Element { hasher, keys } = self.0;
-        while seq
-            .next_element_seed(Element {
-                hasher: &mut *hasher,
-                keys: &mut *keys,
-            })?
-            .is_some()
-        {}
+        while let Some(text) = seq.next_element_seed(Text)? {
+            self.0.push(text);
+        }
         Ok(())
     }
 
-    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<(), E> {
-        self.0.deserialize(value.into_deserializer())
+    fn visit_str<E>(self, value: &str) -> Result<(), E> {
+        self.0.push(string("user").wrapping_add(string(value)));
+        Ok(())
     }
 }
 
-/// Feeds a JSON value's text into a hasher: see [`RequestInput::prefix_keys`].
-struct Text<'h>(&'h mut Xxh3);
+/// A JSON value's text, as a sum of its values' hashes: see
+/// [`RequestInput::prefix_keys`]. Zero for none.
+struct Text;
 
-impl<'de> DeserializeSeed<'de> for Text<'_> {
-    type Value = ();
+impl<'de> DeserializeSeed<'de> for Text {
+    type Value = u64;
 
-    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<u64, D::Error> {
         deserializer.deserialize_any(self)
     }
 }
 
-impl<'de> Visitor<'de> for Text<'_> {
-    type Value = ();
+impl<'de> Visitor<'de> for Text {
+    type Value = u64;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         formatter.write_str("JSON")
     }
 
-    fn visit_bool<E>(self, value: bool) -> Result<(), E> {
-        self.0.update(&[BOOL, value as u8]);
-        Ok(())
+    fn visit_bool<E>(self, value: bool) -> Result<u64, E> {
+        Ok(leaf(BOOL, &[value as u8]))
     }
 
-    fn visit_i64<E>(self, value: i64) -> Result<(), E> {
-        self.0.update(&[NUMBER]);
-        self.0.update(&value.to_le_bytes());
-        Ok(())
+    fn visit_i64<E>(self, value: i64) -> Result<u64, E> {
+        Ok(leaf(NUMBER, &value.to_le_bytes()))
     }
 
-    fn visit_u64<E>(self, value: u64) -> Result<(), E> {
-        self.0.update(&[NUMBER]);
-        self.0.update(&value.to_le_bytes());
-        Ok(())
+    fn visit_u64<E>(self, value: u64) -> Result<u64, E> {
+        Ok(leaf(NUMBER, &value.to_le_bytes()))
     }
 
-    fn visit_f64<E>(self, value: f64) -> Result<(), E> {
-        self.0.update(&[NUMBER]);
-        self.0.update(&value.to_le_bytes());
-        Ok(())
+    fn visit_f64<E>(self, value: f64) -> Result<u64, E> {
+        Ok(leaf(NUMBER, &value.to_le_bytes()))
     }
 
-    /// Empty strings count as absent, as nulls do.
-    fn visit_str<E>(self, value: &str) -> Result<(), E> {
-        if !value.is_empty() {
-            self.0.update(&[STRING]);
-            self.0.update(&(value.len() as u64).to_le_bytes());
-            self.0.update(value.as_bytes());
+    fn visit_str<E>(self, value: &str) -> Result<u64, E> {
+        Ok(string(value))
+    }
+
+    fn visit_unit<E>(self) -> Result<u64, E> {
+        Ok(0)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<u64, A::Error> {
+        let mut text = 0u64;
+        while let Some(item) = seq.next_element_seed(Text)? {
+            text = text.wrapping_add(item);
         }
-        Ok(())
+        Ok(text)
     }
 
-    fn visit_unit<E>(self) -> Result<(), E> {
-        Ok(())
-    }
-
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
-        while seq.next_element_seed(Text(&mut *self.0))?.is_some() {}
-        Ok(())
-    }
-
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
-        while let Some(skipped) = map.next_key_seed(Skipped)? {
-            if skipped {
-                map.next_value::<IgnoredAny>()?;
-            } else {
-                map.next_value_seed(Text(&mut *self.0))?;
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<u64, A::Error> {
+        let mut text = 0u64;
+        let mut skipped = false;
+        while let Some(field) = map.next_key_seed(FieldName)? {
+            match field {
+                Field::Type => skipped |= map.next_value_seed(SkippedType)?,
+                Field::Skipped => drop(map.next_value::<IgnoredAny>()?),
+                Field::Text => text = text.wrapping_add(map.next_value_seed(Text)?),
             }
         }
-        Ok(())
+        Ok(if skipped { 0 } else { text })
     }
 }
 
-/// Reads a field name: whether it is one of [`SKIPPED_FIELDS`].
-struct Skipped;
+enum Field {
+    /// `type`: read only to find [`SKIPPED_TYPES`].
+    Type,
+    Skipped,
+    Text,
+}
 
-impl<'de> DeserializeSeed<'de> for Skipped {
+/// Reads a field name.
+struct FieldName;
+
+impl<'de> DeserializeSeed<'de> for FieldName {
+    type Value = Field;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Field, D::Error> {
+        deserializer.deserialize_str(self)
+    }
+}
+
+impl<'de> Visitor<'de> for FieldName {
+    type Value = Field;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a field name")
+    }
+
+    fn visit_str<E>(self, name: &str) -> Result<Field, E> {
+        Ok(match name {
+            "type" => Field::Type,
+            name if SKIPPED_FIELDS.contains(&name) => Field::Skipped,
+            _ => Field::Text,
+        })
+    }
+}
+
+/// Reads a `type` value: whether it is one of [`SKIPPED_TYPES`].
+struct SkippedType;
+
+impl<'de> DeserializeSeed<'de> for SkippedType {
     type Value = bool;
 
     fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<bool, D::Error> {
@@ -236,15 +258,15 @@ impl<'de> DeserializeSeed<'de> for Skipped {
     }
 }
 
-impl<'de> Visitor<'de> for Skipped {
+impl<'de> Visitor<'de> for SkippedType {
     type Value = bool;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("a field name")
+        formatter.write_str("a type name")
     }
 
     fn visit_str<E>(self, name: &str) -> Result<bool, E> {
-        Ok(SKIPPED_FIELDS.contains(&name))
+        Ok(SKIPPED_TYPES.contains(&name))
     }
 }
 
@@ -294,20 +316,29 @@ mod tests {
             {"role": "user", "content": [
                 {"type": "text", "text": "read it", "cache_control": {"type": "ephemeral"}},
             ]},
+            {"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "hmm"}]},
             {"role": "assistant", "reasoning_content": "they want it read", "content": [
                 {"type": "thinking", "thinking": "hmm", "signature": "abc"},
                 {"type": "tool_use", "id": "t1", "name": "read", "input": {"path": "a.rs"}},
             ]},
             {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "fn main"}]},
         ]));
-        let resent = chat(json!([
-            {"role": "user", "content": "read it"},
-            {"role": "assistant", "content": [
-                {"type": "tool_use", "id": "t1", "name": "read", "input": {"path": "a.rs"}},
-            ]},
-            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "fn main"}]},
-        ]));
-        assert_eq!(sent, resent);
+        // Sent again with the fields reordered, and without cache breakpoints
+        // or reasoning.
+        let resent = RawValue::from_string(
+            r#"[
+                {"content": "read it", "role": "user"},
+                {"content": [{"input": {"path": "a.rs"}, "name": "read", "id": "t1", "type": "tool_use"}], "role": "assistant"},
+                {"content": [{"content": "fn main", "tool_use_id": "t1", "type": "tool_result"}], "role": "user"}
+            ]"#
+            .to_owned(),
+        )
+        .unwrap();
+        let resent = RequestInput {
+            messages: Some(&resent),
+            ..Default::default()
+        };
+        assert_eq!(sent, resent.prefix_keys("qwen"));
         // Any change to the text changes the keys from there on.
         let edited = chat(json!([
             {"role": "user", "content": "read it"},
@@ -333,9 +364,11 @@ mod tests {
         assert_eq!(keys.len(), 2);
         assert_ne!(keys, anthropic.prefix_keys("qwen"));
 
+        // A Responses string input is the user message the next turn sends.
         let string = RawValue::from_string(r#""hi""#.to_owned()).unwrap();
         let items = RawValue::from_string(
-            r#"[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]"#
+            r#"[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+                {"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello."}]}]"#
                 .to_owned(),
         )
         .unwrap();
@@ -346,8 +379,7 @@ mod tests {
             }
             .prefix_keys("qwen")
         };
-        assert_eq!(responses(&string).len(), 1);
-        assert_eq!(responses(&items).len(), 1);
+        assert_eq!(responses(&string)[..], responses(&items)[..1]);
     }
 
     #[test]
@@ -373,7 +405,7 @@ mod tests {
             ..Default::default()
         };
         let keys = input.prefix_keys("qwen");
-        assert_eq!(keys, [PrefixKey(0x02d3_874b_28bf_12a9)]);
-        assert_eq!(keys[0].session_id(), "\u{1}px:02d3874b28bf12a9");
+        assert_eq!(keys, [PrefixKey(0x7d30_387a_9afe_37a7)]);
+        assert_eq!(keys[0].session_id(), "\u{1}px:7d30387a9afe37a7");
     }
 }

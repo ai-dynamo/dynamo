@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -11,8 +12,9 @@ use crate::Pool;
 use crate::selector::{Cursors, PoolSelector, PoolTarget, RoutingRequest, reachable, target};
 use crate::signals::PoolSignals;
 
-/// Most pins kept for sessions derived from requests' input. Every request
-/// that names no session adds one.
+/// Pins beyond which sessions derived from requests' input are not pinned,
+/// since every request that names no session adds one. Counted at each
+/// sweep, so the table may pass it by the pins added since.
 const MAX_DERIVED_PINS: usize = 1 << 20;
 /// How many of a request's input prefixes, deepest first, are looked up. A
 /// conversation's previous turn is a few messages back.
@@ -45,6 +47,8 @@ pub struct AffinitySelector {
     headroom_factor: f64,
     idle: Duration,
     pins: DashMap<String, Pin>,
+    /// Pins left by the last sweep: counting the table locks every shard.
+    swept_pins: AtomicUsize,
     frontends: Cursors<PoolId>,
 }
 
@@ -68,6 +72,7 @@ impl AffinitySelector {
             headroom_factor,
             idle,
             pins: DashMap::new(),
+            swept_pins: AtomicUsize::new(0),
             frontends: Cursors::default(),
         }
     }
@@ -97,6 +102,7 @@ impl AffinitySelector {
     /// path.
     pub fn sweep(&self) {
         self.pins.retain(|_, pin| pin.used.elapsed() <= self.idle);
+        self.swept_pins.store(self.pins.len(), Ordering::Relaxed);
     }
 }
 
@@ -132,7 +138,7 @@ impl PoolSelector for AffinitySelector {
         if let Some(session) = request.session {
             self.pin(session, &choice.pool.id);
         } else if let Some(key) = request.prefix.last()
-            && self.pins.len() < MAX_DERIVED_PINS
+            && self.swept_pins.load(Ordering::Relaxed) < MAX_DERIVED_PINS
         {
             self.pin(&key.session_id(), &choice.pool.id);
         }
