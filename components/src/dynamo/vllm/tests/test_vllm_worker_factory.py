@@ -5,8 +5,10 @@
 
 import asyncio
 import copy
+import gc
 import json
 import logging
+import weakref
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -17,6 +19,7 @@ from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.vllm.args import Config
 from dynamo.vllm.benchmark_worker_extension import FpmBenchmarkWorkerExtension
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.handlers import BaseWorkerHandler
 from dynamo.vllm.instrumented_scheduler import (
     ENV_FPM_BENCHMARK_OUTPUT_PATH,
     ENV_FPM_WORKER_ID,
@@ -148,6 +151,11 @@ def test_worker_lifecycle_cleanup_in_reverse_construction_order():
     engine_client.shutdown.assert_called_once_with(timeout=7.0)
 
 
+@pytest.mark.asyncio
+async def test_base_handler_aclose_is_safe_without_runtime_lora_coordinator():
+    await BaseWorkerHandler.aclose(SimpleNamespace())
+
+
 def test_worker_lifecycle_shutdown_engine_when_handler_cleanup_fails():
     handler = Mock()
     handler.cleanup.side_effect = RuntimeError("handler cleanup failed")
@@ -190,6 +198,7 @@ async def test_custom_encoder_preserves_primary_error_when_cleanup_fails(caplog)
     factory = _make_factory()
     engine_client = Mock()
     handler = Mock()
+    handler.aclose = AsyncMock()
     handler.cleanup.side_effect = RuntimeError("handler cleanup failed")
     startup_error = ValueError("decode worker startup failed")
 
@@ -209,6 +218,36 @@ async def test_custom_encoder_preserves_primary_error_when_cleanup_fails(caplog)
     assert exc_info.value is startup_error
     engine_client.shutdown.assert_called_once_with(timeout=5.0)
     assert "Failed to clean up worker after an earlier failure" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["decode", "prefill"])
+async def test_worker_preserves_primary_error_when_async_drain_fails(caplog, role):
+    state_agent_lifecycle = SimpleNamespace(close=AsyncMock())
+    factory = _make_factory(state_agent_lifecycle=state_agent_lifecycle)
+    engine_client = Mock()
+    handler = Mock()
+    handler.aclose = AsyncMock(side_effect=RuntimeError("async drain failed"))
+    startup_error = ValueError("decode worker startup failed")
+
+    async def fail_after_resource_creation(*_args, lifecycle, **_kwargs):
+        lifecycle.engine_client = engine_client
+        lifecycle.vllm_config = SimpleNamespace(shutdown_timeout=5.0)
+        lifecycle.handler = handler
+        raise startup_error
+
+    setattr(factory, f"_run_{role}_worker", fail_after_resource_creation)
+    caplog.set_level(logging.ERROR)
+
+    with pytest.raises(ValueError, match="decode worker startup failed") as exc_info:
+        await getattr(factory, f"_create_{role}_worker")(
+            Mock(), SimpleNamespace(custom_encoder_class=None), asyncio.Event(), []
+        )
+
+    assert exc_info.value is startup_error
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+    assert f"Failed to drain {role} worker after an earlier failure" in caplog.text
+    state_agent_lifecycle.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -233,7 +272,8 @@ async def test_decode_worker_without_custom_encoder_uses_lifecycle():
 
 
 @pytest.mark.asyncio
-async def test_decode_failure_withdraws_state_agent_before_engine_cleanup():
+@pytest.mark.parametrize("role", ["decode", "prefill"])
+async def test_worker_failure_withdraws_state_agent_before_engine_cleanup(role):
     calls = []
     state_agent_lifecycle = SimpleNamespace(
         close=AsyncMock(side_effect=lambda: calls.append("state-agent"))
@@ -242,6 +282,7 @@ async def test_decode_failure_withdraws_state_agent_before_engine_cleanup():
     engine_client = Mock()
     engine_client.shutdown.side_effect = lambda **_kwargs: calls.append("engine")
     handler = Mock()
+    handler.aclose = AsyncMock(side_effect=lambda: calls.append("async-handler"))
     handler.cleanup.side_effect = lambda: calls.append("handler")
 
     async def fail_after_setup(*_args, lifecycle, **_kwargs):
@@ -250,13 +291,130 @@ async def test_decode_failure_withdraws_state_agent_before_engine_cleanup():
         lifecycle.handler = handler
         raise RuntimeError("startup failed")
 
-    factory._run_decode_worker = fail_after_setup  # type: ignore[method-assign]
+    setattr(factory, f"_run_{role}_worker", fail_after_setup)
     with pytest.raises(RuntimeError, match="startup failed"):
-        await factory._create_decode_worker(
+        await getattr(factory, f"_create_{role}_worker")(
             Mock(), SimpleNamespace(custom_encoder_class=None), asyncio.Event(), []
         )
 
-    assert calls == ["state-agent", "handler", "engine"]
+    assert calls == ["state-agent", "async-handler", "handler", "engine"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["decode", "prefill"])
+@pytest.mark.parametrize("configured_timeout", [0.01, 0])
+async def test_hung_async_drain_does_not_prevent_engine_shutdown(
+    role, configured_timeout, monkeypatch
+):
+    if configured_timeout == 0:
+        monkeypatch.setattr(
+            "dynamo.vllm.worker_factory.ASYNC_HANDLER_DRAIN_TIMEOUT_SECONDS", 0.01
+        )
+    factory = _make_factory(state_agent_lifecycle=SimpleNamespace(close=AsyncMock()))
+    released = asyncio.Event()
+    settled = asyncio.Event()
+    started = asyncio.Event()
+    calls = []
+    cancelled = False
+    shutdown_saw_pending_drain = False
+
+    async def close_after_engine_shutdown():
+        nonlocal cancelled
+        started.set()
+        calls.append("drain-started")
+        try:
+            await released.wait()
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            calls.append("drain-settled")
+            settled.set()
+
+    def shutdown(**_kwargs):
+        nonlocal shutdown_saw_pending_drain
+        shutdown_saw_pending_drain = started.is_set() and not settled.is_set()
+        calls.append("engine-shutdown")
+        released.set()
+
+    handler = Mock()
+    handler.aclose = AsyncMock(side_effect=close_after_engine_shutdown)
+    engine_client = Mock()
+    engine_client.shutdown.side_effect = shutdown
+
+    async def finish_serving(*_args, lifecycle, **_kwargs):
+        lifecycle.handler = handler
+        lifecycle.engine_client = engine_client
+        lifecycle.vllm_config = SimpleNamespace(shutdown_timeout=configured_timeout)
+
+    setattr(factory, f"_run_{role}_worker", finish_serving)
+    try:
+        with pytest.raises(TimeoutError, match="asynchronous handler drain"):
+            await asyncio.wait_for(
+                getattr(factory, f"_create_{role}_worker")(
+                    Mock(),
+                    SimpleNamespace(custom_encoder_class=None),
+                    asyncio.Event(),
+                    [],
+                ),
+                timeout=1,
+            )
+    finally:
+        released.set()
+        await asyncio.wait_for(settled.wait(), timeout=1)
+
+    engine_client.shutdown.assert_called_once_with(timeout=configured_timeout)
+    await asyncio.gather(*tuple(factory._pending_handler_drains))
+    await asyncio.sleep(0)
+    assert shutdown_saw_pending_drain
+    assert not cancelled
+    assert calls == ["drain-started", "engine-shutdown", "drain-settled"]
+    assert not factory._pending_handler_drains
+    assert handler.aclose.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_cancelled_drain_observes_already_failed_close_task(monkeypatch):
+    factory = _make_factory()
+    wait_returned = asyncio.Event()
+    original_wait = asyncio.wait
+    close_tasks = []
+
+    async def fail_close():
+        raise RuntimeError("asynchronous close failed")
+
+    async def wait_before_caller_observes_result(tasks, *, timeout):
+        close_tasks.append(weakref.ref(next(iter(tasks))))
+        result = await original_wait(tasks, timeout=timeout)
+        wait_returned.set()
+        await asyncio.Event().wait()
+        return result
+
+    monkeypatch.setattr(asyncio, "wait", wait_before_caller_observes_result)
+    lifecycle = _WorkerLifecycle(
+        handler=SimpleNamespace(aclose=fail_close),
+        vllm_config=SimpleNamespace(shutdown_timeout=1),
+    )
+    loop = asyncio.get_running_loop()
+    original_handler = loop.get_exception_handler()
+    unobserved = []
+    loop.set_exception_handler(lambda _loop, context: unobserved.append(context))
+    try:
+        drain = asyncio.create_task(factory._drain_handler(lifecycle))
+        await asyncio.wait_for(wait_returned.wait(), timeout=1)
+        drain.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await drain
+        del drain
+        gc.collect()
+        await asyncio.sleep(0)
+
+        assert not unobserved
+        assert all(reference() is None for reference in close_tasks)
+        assert not factory._pending_handler_drains
+    finally:
+        loop.set_exception_handler(original_handler)
 
 
 @pytest.mark.asyncio
@@ -844,6 +1002,26 @@ class TestCreate:
 
     # Tests for non-legacy worker config, 'route_to_encode' is worker internal config
     # so either case should hit creation function.
+    @pytest.mark.parametrize(
+        "surface", ["realtime", "embedding_worker", "classify_worker"]
+    )
+    async def test_runtime_lora_rejects_unsupported_surface_before_engine_setup(
+        self, factory: WorkerFactory, monkeypatch, surface
+    ) -> None:
+        from dynamo.common.lora.runtime import RuntimeLoRAConfigurationError
+
+        monkeypatch.setenv("DYN_LORA_RUNTIME_LOAD_ENABLED", "true")
+        config = _make_config(**{surface: True})
+
+        with pytest.raises(RuntimeLoRAConfigurationError, match="tokenized chat"):
+            await factory.create(Mock(), config, asyncio.Event(), [])
+
+        factory.setup_vllm_engine.assert_not_called()
+        factory.register_vllm_model.assert_not_awaited()
+        factory._create_realtime_worker.assert_not_awaited()
+        factory._create_embedding_worker.assert_not_awaited()
+        factory._create_classify_worker.assert_not_awaited()
+
     @pytest.mark.parametrize("route_to_encode", [True, False])
     async def test_aggregated(
         self, factory: WorkerFactory, route_to_encode: bool
@@ -1182,6 +1360,7 @@ async def test_prefill_initializes_metrics_and_serves_lora_lifecycle(
 ) -> None:
     engine_client = Mock()
     vllm_config = Mock(
+        shutdown_timeout=5.0,
         additional_config={},
         cache_config=SimpleNamespace(num_gpu_blocks=96),
     )
@@ -1210,6 +1389,7 @@ async def test_prefill_initializes_metrics_and_serves_lora_lifecycle(
 
     handler = Mock(embedding_cache_manager=None)
     handler.cleanup = Mock()
+    handler.aclose = AsyncMock()
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.PrefillWorkerHandler",
         Mock(return_value=handler),
@@ -1813,6 +1993,7 @@ async def test_prefill_exit_shuts_down_the_engine_after_withdrawing_state_agent(
     (engine_setup, _stat_logger), engine_client = _restore_snapshot_engine()
     engine_client.shutdown.side_effect = lambda **_kwargs: calls.append("engine")
     handler = Mock(embedding_cache_manager=None)
+    handler.aclose = AsyncMock()
     handler.cleanup.side_effect = lambda: calls.append("handler")
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.PrefillWorkerHandler", Mock(return_value=handler)
