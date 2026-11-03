@@ -426,10 +426,10 @@ func ComponentRuntimeNamespace(dynamoNamespace string, componentType string, wor
 	return dynamoNamespace
 }
 
-// ComponentRuntimeNamespaces returns a component status's RuntimeNamespaces:
+// StatusRuntimeNamespaces returns a component status's RuntimeNamespaces:
 // the distinct, non-empty namespaces among active and namespaces, sorted, or nil
 // when active alone names them all.
-func ComponentRuntimeNamespaces(active string, namespaces ...string) []string {
+func StatusRuntimeNamespaces(active string, namespaces ...string) []string {
 	all := make([]string, 0, len(namespaces)+1)
 	for _, namespace := range append([]string{active}, namespaces...) {
 		if namespace != "" && !slices.Contains(all, namespace) {

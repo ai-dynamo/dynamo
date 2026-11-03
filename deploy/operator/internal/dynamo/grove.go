@@ -3,6 +3,7 @@ package dynamo
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
@@ -337,18 +338,25 @@ func (p groveRuntimeNamespacePlan) runtimeNamespace(
 	return p.acceptedRuntimeNamespace(baseNamespace, component)
 }
 
-// runtimeNamespaces lists a worker's namespaces while Grove rolls out the
-// accepted PCS revision: active, which runtimeNamespace keeps until cutover, and
-// the accepted revision's, whose replicas already run.
+// runtimeNamespaces lists a worker's namespaces until its replicas complete the
+// accepted PCS revision: active, which runtimeNamespace keeps until cutover, the
+// accepted revision's, whose replicas already run, and every namespace listed
+// before. The last keeps a revision that a newer one superseded before it
+// completed, and keeps the list while Grove has not yet accepted the latest
+// revision.
 func (p groveRuntimeNamespacePlan) runtimeNamespaces(
 	dgd *v1beta1.DynamoGraphDeployment,
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	active string,
 ) []string {
-	if !IsWorkerComponent(string(component.ComponentType)) || p.acceptedPCSRevisionHash == nil || p.workersCompleted {
+	if !IsWorkerComponent(string(component.ComponentType)) || (p.acceptedPCSRevisionHash != nil && p.workersCompleted) {
 		return nil
 	}
-	return ComponentRuntimeNamespaces(active, p.acceptedRuntimeNamespace(dgd.GetDynamoNamespaceForComponent(component), component))
+	namespaces := slices.Clone(dgd.Status.Components[component.ComponentName].RuntimeNamespaces)
+	if p.acceptedPCSRevisionHash != nil {
+		namespaces = append(namespaces, p.acceptedRuntimeNamespace(dgd.GetDynamoNamespaceForComponent(component), component))
+	}
+	return StatusRuntimeNamespaces(active, namespaces...)
 }
 
 // acceptedRuntimeNamespace returns the runtime namespace of a worker of the

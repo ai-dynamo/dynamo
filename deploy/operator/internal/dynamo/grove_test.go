@@ -1380,6 +1380,7 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 	tests := []struct {
 		name                       string
 		activeNamespace            bool
+		previousNamespaces         []string
 		pcsAccepted                bool
 		childRevision              string
 		updateInProgress           bool
@@ -1412,6 +1413,9 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 		{name: "omitted replicas preserve externally managed capacity", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, childReplicas: new(int32(2)), wantReady: true, wantNamespace: acceptedHash},
 		{name: "accepted completed PCS revision remains published after worker health loss", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, wantNamespace: acceptedHash},
 		{name: "accepted legacy PCS with an unfinished child preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, legacyPCS: true, childRevision: targetRevision, updateInProgress: true, childReady: true, wantReady: true, wantNamespace: "active", wantNamespaces: []string{"active", "base"}},
+		{name: "an interrupted rollout keeps the superseded revision's namespace", activeNamespace: true, previousNamespaces: []string{"active", "middle"}, pcsAccepted: true, childRevision: targetRevision, updateInProgress: true, childReady: true, wantReady: true, wantNamespace: "active", wantNamespaces: []string{"active", "middle", acceptedHash}},
+		{name: "an unaccepted PCS keeps the listed namespaces", activeNamespace: true, previousNamespaces: []string{"active", "middle"}, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: "active", wantNamespaces: []string{"active", "middle"}},
+		{name: "cutover drops the listed namespaces", activeNamespace: true, previousNamespaces: []string{"active", "middle"}, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: acceptedHash},
 		{name: "accepted legacy PCS publishes the base namespace", pcsAccepted: true, legacyPCS: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: "base"},
 	}
 
@@ -1438,10 +1442,18 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 				t.Fatal("test requires a desired DGD hash different from the accepted PCS hash")
 			}
 			baseNamespace := dgd.GetDynamoNamespaceForComponent(component)
+			namespaceOf := map[string]string{
+				"base":       baseNamespace,
+				"active":     ComponentRuntimeNamespace(baseNamespace, string(component.ComponentType), "active"),
+				"middle":     ComponentRuntimeNamespace(baseNamespace, string(component.ComponentType), "middle"),
+				acceptedHash: ComponentRuntimeNamespace(baseNamespace, string(component.ComponentType), acceptedHash),
+			}
 			if tt.activeNamespace {
-				dgd.Status.Components = map[string]v1beta1.ComponentReplicaStatus{
-					componentName: {RuntimeNamespace: ComponentRuntimeNamespace(baseNamespace, string(component.ComponentType), "active")},
+				status := v1beta1.ComponentReplicaStatus{RuntimeNamespace: namespaceOf["active"]}
+				for _, token := range tt.previousNamespaces {
+					status.RuntimeNamespaces = append(status.RuntimeNamespaces, namespaceOf[token])
 				}
+				dgd.Status.Components = map[string]v1beta1.ComponentReplicaStatus{componentName: status}
 			}
 
 			labels := map[string]string{commonconsts.KubeLabelDynamoComponent: componentName}
@@ -1514,12 +1526,7 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 				t.Fatalf("runtime namespace = %q, want %q", got, wantNamespace)
 			}
 
-			t.Log("Verify that a rollout lists the accepted revision's namespace beside the active one")
-			namespaceOf := map[string]string{
-				"base":       baseNamespace,
-				"active":     ComponentRuntimeNamespace(baseNamespace, string(component.ComponentType), "active"),
-				acceptedHash: ComponentRuntimeNamespace(baseNamespace, string(component.ComponentType), acceptedHash),
-			}
+			t.Log("Verify that a rollout lists the accepted revision's namespace beside the active and listed ones")
 			var wantNamespaces []string
 			for _, token := range tt.wantNamespaces {
 				wantNamespaces = append(wantNamespaces, namespaceOf[token])

@@ -1093,3 +1093,47 @@ func TestWithdrawCleansOwnedDeploymentAfterForeignService(t *testing.T) {
 		t.Fatalf("Relay still advertises readiness: %+v", relay.Status)
 	}
 }
+
+func TestSourceNamespaces(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status v1beta1.ComponentReplicaStatus
+		want   []string
+	}{
+		{
+			name:   "the worker's runtime namespace",
+			status: v1beta1.ComponentReplicaStatus{RuntimeNamespace: "inference-green-old"},
+			want:   []string{"inference-green-old"},
+		},
+		{
+			name: "the base namespace while the status names none",
+			want: []string{"inference-green"},
+		},
+		{
+			name: "both revisions during a rolling update",
+			status: v1beta1.ComponentReplicaStatus{
+				RuntimeNamespace:  "inference-green-old",
+				RuntimeNamespaces: []string{"inference-green-new", "inference-green-old"},
+			},
+			want: []string{"inference-green-new", "inference-green-old"},
+		},
+		{
+			name:   "only the listed namespace before the first cutover, without the unused base namespace",
+			status: v1beta1.ComponentReplicaStatus{RuntimeNamespaces: []string{"inference-green-new"}},
+			want:   []string{"inference-green-new"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dgd := &v1beta1.DynamoGraphDeployment{
+				Name: "green", Namespace: "inference",
+				Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeWorker},
+				}},
+				Status: v1beta1.DynamoGraphDeploymentStatus{Components: map[string]v1beta1.ComponentReplicaStatus{"decode": tc.status}},
+			}
+			if got := sourceNamespaces(dgd); !slices.Equal(got, tc.want) {
+				t.Fatalf("sourceNamespaces() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

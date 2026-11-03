@@ -301,10 +301,10 @@ type ServiceReplicaStatus struct {
 	ComponentNames []string `json:"componentNames,omitempty"`
 
 	// RuntimeNamespace is the effective Dynamo runtime namespace for this
-	// component. Worker components may include a generation suffix; non-workers and
-	// Grove-backed workers use the base namespace. During rolling updates, worker
-	// status keeps the old active revision namespace until cutover completes, and
-	// RuntimeNamespaces also lists the new revision's.
+	// component. Worker components may include a generation suffix; non-workers use
+	// the base namespace. During rolling updates, worker status keeps the old
+	// active revision namespace until cutover completes, and RuntimeNamespaces also
+	// lists the new revision's.
 	// +optional
 	RuntimeNamespace string `json:"runtimeNamespace,omitempty"`
 

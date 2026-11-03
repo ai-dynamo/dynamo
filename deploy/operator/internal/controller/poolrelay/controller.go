@@ -421,13 +421,15 @@ func sourceNamespaces(dgd *v1beta1.DynamoGraphDeployment) []string {
 			continue
 		}
 		status := dgd.Status.Components[component.ComponentName]
-		namespace := status.RuntimeNamespace
-		if namespace == "" {
-			namespace = dgd.GetDynamoNamespaceForComponent(component)
+		if status.RuntimeNamespace == "" && len(status.RuntimeNamespaces) == 0 {
+			unique[dgd.GetDynamoNamespaceForComponent(component)] = struct{}{}
+			continue
 		}
-		unique[namespace] = struct{}{}
-		for _, namespace := range status.RuntimeNamespaces {
-			unique[namespace] = struct{}{}
+		if status.RuntimeNamespace != "" {
+			unique[status.RuntimeNamespace] = struct{}{}
+		}
+		for _, runtimeNamespace := range status.RuntimeNamespaces {
+			unique[runtimeNamespace] = struct{}{}
 		}
 	}
 	namespaces := make([]string, 0, len(unique))

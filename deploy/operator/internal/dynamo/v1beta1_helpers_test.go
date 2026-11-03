@@ -195,9 +195,9 @@ func TestComponentRuntimeNamespaces(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ComponentRuntimeNamespaces(tt.active, tt.namespaces...)
+			got := StatusRuntimeNamespaces(tt.active, tt.namespaces...)
 			if !slices.Equal(got, tt.want) || (got == nil) != (tt.want == nil) {
-				t.Fatalf("ComponentRuntimeNamespaces(%q, %q) = %q, want %q", tt.active, tt.namespaces, got, tt.want)
+				t.Fatalf("StatusRuntimeNamespaces(%q, %q) = %q, want %q", tt.active, tt.namespaces, got, tt.want)
 			}
 		})
 	}
