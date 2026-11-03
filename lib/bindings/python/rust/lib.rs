@@ -385,7 +385,6 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ModelCardInstanceId>()?;
     m.add_class::<Client>()?;
     m.add_class::<Instance>()?;
-    m.add_class::<RuntimeConfigWatch>()?;
     m.add_class::<TransportType>()?;
     m.add_class::<AsyncResponseStream>()?;
     m.add_class::<PyAsyncRequestStream>()?;
@@ -1227,67 +1226,6 @@ impl Instance {
     }
 }
 
-/// A live view of the runtime config that each ready instance of an endpoint
-/// published in its model card, keyed by instance ID. Discovery keeps it
-/// current until the object is dropped.
-#[pyclass]
-struct RuntimeConfigWatch {
-    current: llm_rs::discovery::RuntimeConfigWatch,
-    // A separate receiver tracks which version `changed()` has returned.
-    changes: Arc<Mutex<llm_rs::discovery::RuntimeConfigWatch>>,
-    lifecycle: rs::CancellationToken,
-}
-
-impl RuntimeConfigWatch {
-    fn to_py(
-        configs: &std::collections::HashMap<
-            u64,
-            llm_rs::local_model::runtime_config::ModelRuntimeConfig,
-        >,
-    ) -> std::collections::HashMap<u64, ModelRuntimeConfig> {
-        configs
-            .iter()
-            .map(|(id, config)| {
-                (
-                    *id,
-                    ModelRuntimeConfig {
-                        inner: config.clone(),
-                    },
-                )
-            })
-            .collect()
-    }
-}
-
-impl Drop for RuntimeConfigWatch {
-    fn drop(&mut self) {
-        // Stop the discovery watch behind this view.
-        self.lifecycle.cancel();
-    }
-}
-
-#[pymethods]
-impl RuntimeConfigWatch {
-    /// The current runtime configs, keyed by instance ID.
-    fn snapshot(&self) -> std::collections::HashMap<u64, ModelRuntimeConfig> {
-        Self::to_py(&self.current.borrow())
-    }
-
-    /// Wait until an instance joins, leaves, or changes its runtime config
-    /// since the previous call, then return the current runtime configs.
-    fn changed<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let changes = self.changes.clone();
-        crate::future_into_py(py, async move {
-            let mut changes = changes.lock().await;
-            changes
-                .changed()
-                .await
-                .map_err(|_| PyRuntimeError::new_err("runtime config watch stopped"))?;
-            Ok(Self::to_py(&changes.borrow_and_update()))
-        })
-    }
-}
-
 #[pyclass]
 #[derive(Clone, PartialEq)]
 struct ModelType {
@@ -2010,21 +1948,52 @@ impl Endpoint {
         self.inner.drt().connection_id()
     }
 
-    /// Watch the runtime config that each ready instance of this endpoint
-    /// published in its model card, such as values set with
-    /// `ModelRuntimeConfig.set_engine_specific`.
-    fn watch_runtime_configs<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+    /// The model card that each instance of this endpoint registered, keyed by
+    /// instance ID, as discovery lists them now. LoRA adapter cards are left
+    /// out.
+    fn model_cards<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let endpoint = self.inner.clone();
         crate::future_into_py(py, async move {
-            let lifecycle = endpoint.drt().primary_token().child_token();
-            let current = llm_rs::discovery::runtime_config_watch(&endpoint, lifecycle.clone())
+            let id = endpoint.id();
+            let instances = endpoint
+                .drt()
+                .discovery()
+                .list(rs::discovery::DiscoveryQuery::EndpointModels {
+                    namespace: id.namespace,
+                    component: id.component,
+                    endpoint: id.name,
+                })
                 .await
                 .map_err(to_pyerr)?;
-            Ok(RuntimeConfigWatch {
-                changes: Arc::new(Mutex::new(current.clone())),
-                current,
-                lifecycle,
-            })
+
+            let mut cards = std::collections::HashMap::new();
+            for instance in instances {
+                let rs::discovery::DiscoveryInstanceId::Model(model_id) = instance.id() else {
+                    continue;
+                };
+                if model_id.model_suffix.is_some() {
+                    continue;
+                }
+                // Skip a card this version cannot read rather than fail the whole list.
+                let card =
+                    match instance.deserialize_model::<llm_rs::model_card::ModelDeploymentCard>() {
+                        Ok(card) if card.lora.is_none() => card,
+                        Ok(_) => continue,
+                        Err(error) => {
+                            tracing::warn!(
+                                instance_id = model_id.instance_id,
+                                %error,
+                                "Skipping a model card that does not deserialize"
+                            );
+                            continue;
+                        }
+                    };
+                cards.insert(
+                    model_id.instance_id,
+                    llm::model_card::ModelDeploymentCard { inner: card },
+                );
+            }
+            Ok(cards)
         })
     }
 

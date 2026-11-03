@@ -3,16 +3,15 @@
 
 """Mock prefill worker that finds decode workers in discovery and connects.
 
-While it serves `prefill.generate`, it watches the runtime configs that decode
-workers publish in their model cards. Each decode worker publishes its
-side-channel address there, so this worker reads it from discovery instead of
-asking the decode worker. It connects to each new decode worker and drops the
-ones that leave.
+While it serves `prefill.generate`, it reads the model cards that decode
+workers registered, every `--interval` seconds. Each decode worker publishes
+its side-channel address in its card, so this worker reads it from discovery
+instead of asking the decode worker. It connects to each new decode worker and
+drops the ones that leave.
 """
 
 import argparse
 import asyncio
-import json
 
 import uvloop
 
@@ -27,10 +26,7 @@ uvloop.install()
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--interval",
-        type=float,
-        default=2.0,
-        help="Most seconds between checks; a change in discovery wakes it sooner",
+        "--interval", type=float, default=2.0, help="Seconds between checks"
     )
     return parser.parse_args()
 
@@ -50,43 +46,34 @@ async def connect(decode_id: int, address: dict, my_id: int):
 async def watch_decode_workers(
     runtime: DistributedRuntime, my_id: int, interval: float
 ):
-    # Discovery keeps this view of every ready decode worker's runtime config
-    # up to date. Reading it makes no network calls.
     decode = runtime.endpoint(f"{NAMESPACE}.decode.generate")
-    configs = await decode.watch_runtime_configs()
-    known = {}  # (decode instance ID, published side channel) -> address
+    known = {}  # (decode instance ID, incarnation) -> address
     while True:
-        current = {
-            (decode_id, side_channel)
-            for decode_id, config in configs.snapshot().items()
-            if (side_channel := config.runtime_data.get(SIDE_CHANNEL_KEY))
-        }
+        # Read the address each decode worker published in its model card.
+        current = {}
+        for decode_id, card in (await decode.model_cards()).items():
+            runtime_data = card.runtime_config().get("runtime_data", {})
+            if address := runtime_data.get(SIDE_CHANNEL_KEY):
+                current[decode_id, address["incarnation"]] = address
 
-        for key in known.keys() - current:
+        for key in known.keys() - current.keys():
             address = known.pop(key)
             print(
                 f"prefill {my_id:x}: decode {key[0]:x} at "
                 f"{address['host']}:{address['port']} left"
             )
 
-        for key in current - known.keys():
-            decode_id, side_channel = key
-            address = json.loads(side_channel)
+        for key in current.keys() - known.keys():
             # A worker can stop before this connection, so log the failure and
-            # retry on a later check instead of stopping the watch.
+            # retry on the next check instead of stopping the watch.
             try:
-                await connect(decode_id, address, my_id)
+                await connect(key[0], current[key], my_id)
             except OSError as e:
-                print(f"prefill {my_id:x}: decode {decode_id:x} failed: {e}")
+                print(f"prefill {my_id:x}: decode {key[0]:x} failed: {e}")
                 continue
-            known[key] = address
+            known[key] = current[key]
 
-        # Wake when a decode worker joins, leaves, or republishes, or after
-        # `interval` seconds to retry failed connections.
-        try:
-            await asyncio.wait_for(configs.changed(), timeout=interval)
-        except TimeoutError:
-            pass
+        await asyncio.sleep(interval)
 
 
 @dynamo_worker()

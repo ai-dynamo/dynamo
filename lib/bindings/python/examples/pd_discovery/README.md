@@ -16,15 +16,14 @@ worker. The prefill worker never asks a decode worker for its address.
   `ModelRuntimeConfig.set_engine_specific("side_channel", ...)` and
   `register_model`. A real decode worker already registers its model, so only
   the `set_engine_specific` call is new.
-- `prefill.py` serves `prefill.generate` (mock output) and calls
-  `watch_runtime_configs()` on the decode endpoint. It returns a view of every
-  ready decode worker's runtime config, keyed by instance ID, that discovery
-  keeps up to date: `snapshot()` reads it, and `changed()` waits for a decode
-  worker to join, leave, or publish new values. The prefill worker connects to
-  each new decode worker and drops the ones that leave.
+- `prefill.py` serves `prefill.generate` (mock output). Every `--interval`
+  seconds it calls `model_cards()` on the decode endpoint, which returns the
+  model card of each decode worker from discovery, keyed by instance ID, and
+  reads the address from `card.runtime_config()["runtime_data"]`. It connects
+  to each new decode worker and drops the ones that leave.
 
-`Endpoint.watch_runtime_configs()` is new, so a released or nightly
-`ai-dynamo-runtime` may not have it yet. Build the Python bindings from this
+`Endpoint.model_cards()` is new, so a released or nightly `ai-dynamo-runtime`
+may not have it yet. Build the Python bindings from this
 source tree first, as described in
 [Building from Source](../../../../../docs/fern/pages/developer-guide/advanced-customizations/building-from-source.md).
 
@@ -50,8 +49,8 @@ Each prefill worker connects to every decode worker, and prints:
 prefill 5a0c58c0314098a0: decode 124b86db51ca2566 at 192.168.1.242:40807 -> 'ack from decode 124b86db51ca2566'
 ```
 
-Start another decode worker and every prefill worker connects to it right
-away. Stop one and every prefill worker prints:
+Start another decode worker and every prefill worker connects to it within one
+check. Stop one and every prefill worker prints:
 
 ```text
 prefill 5a0c58c0314098a0: decode 7391da11afde812d at 192.168.1.242:38553 left
@@ -95,10 +94,10 @@ Remove everything with `kubectl delete -f k8s.yaml`.
 
 ## Notes
 
-- Reading `snapshot()` makes no network calls. The prefill worker wakes when
-  `changed()` returns, and at least every `--interval` seconds to retry failed
-  connections.
-- A worker that shuts down gracefully leaves the view right away. A worker that
+- Each `model_cards()` call lists the cards from discovery. With Kubernetes
+  discovery it reads a local cache; with etcd it is one read of the model card
+  keys. A failed connection is retried on the next check.
+- A worker that shuts down gracefully leaves the list right away. A worker that
   is killed, which includes Ctrl-C in this example, leaves when its discovery
   lease expires: 10 seconds with the file backend, 30 seconds with etcd
   (`ETCD_LEASE_TTL`). With Kubernetes discovery, a worker leaves when its pod
@@ -108,8 +107,8 @@ Remove everything with `kubectl delete -f k8s.yaml`.
   that restarts in its pod keeps its ID; the new incarnation tells the prefill
   worker to treat it as a new worker.
 - The model card checksum that the frontend compares across the workers of a
-  model does not include the runtime config, so per-worker values such as this
-  address do not split the workers into separate sets.
+  model ignores `runtime_data` keys such as this one, so per-worker values do
+  not split the workers into separate sets.
 - `--host` sets the address that the decode worker publishes. The default, the
   machine's hostname resolved to an IP, works on one machine and is the pod IP
   on Kubernetes. Across machines, pass an IP that the prefill workers can

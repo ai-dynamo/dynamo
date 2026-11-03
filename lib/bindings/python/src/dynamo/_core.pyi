@@ -234,11 +234,11 @@ class Endpoint:
         """
         ...
 
-    async def watch_runtime_configs(self) -> RuntimeConfigWatch:
+    async def model_cards(self) -> Dict[int, ModelDeploymentCard]:
         """
-        Watch the runtime config that each ready instance of this endpoint
-        published in its model card, such as values set with
-        ``ModelRuntimeConfig.set_engine_specific``.
+        The model card that each instance of this endpoint registered, keyed by
+        instance ID, as discovery lists them now. LoRA adapter cards are left
+        out.
         """
         ...
 
@@ -320,25 +320,6 @@ class Instance:
     @property
     def device_type(self) -> Optional[str]:
         """Device type, e.g. "cpu" or "cuda", or None if unspecified."""
-        ...
-
-class RuntimeConfigWatch:
-    """
-    A live view of the runtime config that each ready instance of an endpoint
-    published in its model card, keyed by instance ID. Discovery keeps it
-    current until the object is dropped. Create one with
-    ``Endpoint.watch_runtime_configs()``.
-    """
-
-    def snapshot(self) -> Dict[int, ModelRuntimeConfig]:
-        """The current runtime configs, keyed by instance ID."""
-        ...
-
-    async def changed(self) -> Dict[int, ModelRuntimeConfig]:
-        """
-        Wait until an instance joins, leaves, or changes its runtime config
-        since the previous call, then return the current runtime configs.
-        """
         ...
 
 class Client:

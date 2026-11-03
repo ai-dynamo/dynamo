@@ -242,53 +242,42 @@ async def test_wait_for_instance_by_runtime_data_links_two_late_subscribers(
         nonleader_b.shutdown()
 
 
-async def _wait_for_snapshot(configs, predicate, timeout_s=5.0):
-    """Return the first runtime-config snapshot that satisfies `predicate`."""
+@pytest.mark.asyncio
+async def test_model_cards_report_published_runtime_data(temp_file_store):
+    leader = _runtime()
+    reader = _runtime()
+    try:
+        leader_id = await _register_leader(leader, "group-a")
 
-    async def wait():
-        snapshot = configs.snapshot()
-        while not predicate(snapshot):
-            snapshot = await configs.changed()
-        return snapshot
+        cards = await reader.endpoint(ENDPOINT_PATH).model_cards()
 
-    return await asyncio.wait_for(wait(), timeout_s)
+        assert list(cards) == [leader_id]
+        runtime_data = cards[leader_id].runtime_config()["runtime_data"]
+        assert runtime_data[SGLANG_WORKER_GROUP_ID_KEY] == "group-a"
+    finally:
+        leader.shutdown()
+        reader.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_watch_runtime_configs_reports_published_runtime_data(
-    temp_file_store,
-):
+async def test_model_cards_drop_instance_that_leaves(temp_file_store):
     leader = _runtime()
-    watcher = _runtime()
-    try:
-        configs = await watcher.endpoint(ENDPOINT_PATH).watch_runtime_configs()
-        leader_id = await _register_leader(leader, "group-a")
-
-        snapshot = await _wait_for_snapshot(configs, lambda s: leader_id in s)
-
-        assert list(snapshot) == [leader_id]
-        runtime_data = snapshot[leader_id].runtime_data
-        assert json.loads(runtime_data[SGLANG_WORKER_GROUP_ID_KEY]) == "group-a"
-    finally:
-        leader.shutdown()
-        watcher.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_watch_runtime_configs_drops_instance_that_leaves(temp_file_store):
-    leader = _runtime()
-    watcher = _runtime()
+    reader = _runtime()
     try:
         leader_id = await _register_leader(leader, "group-a")
-        configs = await watcher.endpoint(ENDPOINT_PATH).watch_runtime_configs()
-        await _wait_for_snapshot(configs, lambda s: leader_id in s)
+        endpoint = reader.endpoint(ENDPOINT_PATH)
+        assert list(await endpoint.model_cards()) == [leader_id]
 
         leader.shutdown()
 
-        assert await _wait_for_snapshot(configs, lambda s: leader_id not in s) == {}
+        async def wait_until_empty():
+            while await endpoint.model_cards():
+                await asyncio.sleep(0.05)
+
+        await asyncio.wait_for(wait_until_empty(), 5.0)
     finally:
         leader.shutdown()
-        watcher.shutdown()
+        reader.shutdown()
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +387,10 @@ async def test_lora_registration_persists_base_and_lora_model_cards(temp_file_st
         assert lora_cards[0]["card_json"]["lora"] == {"name": "adapterA"}
         # model_suffix is the slugified LoRA name
         assert lora_cards[0]["model_suffix"] == "adaptera"
+
+        # Endpoint.model_cards() returns only the base card.
+        cards = await ep.model_cards()
+        assert [card.name() for card in cards.values()] == ["base-model"]
     finally:
         rt.shutdown()
 
