@@ -4,7 +4,10 @@
 //! Exercise the batch scoring contract using only public plugin inputs.
 mod support;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
 use dynamo_kv_router::{
     KvRouterConfig, WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView, WorkerInputs,
@@ -29,7 +32,7 @@ impl WorkerScorer for RelativeLoadScorer {
     }
 
     fn score(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -57,7 +60,7 @@ impl WorkerScorer for RelativeLoadScorer {
 struct ExcludeWorkerOne;
 impl WorkerFilter for ExcludeWorkerOne {
     fn keep(
-        &mut self,
+        &self,
         _: &WorkerSelectionContext<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
@@ -68,7 +71,7 @@ impl WorkerFilter for ExcludeWorkerOne {
 struct InspectCosts(Arc<Mutex<Vec<Call>>>);
 impl WorkerPicker for InspectCosts {
     fn pick(
-        &mut self,
+        &self,
         _: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -148,7 +151,7 @@ fn scores_batches_from_surviving_workers_and_resets_each_selection() {
 struct FailScoring(Arc<Mutex<usize>>);
 impl WorkerScorer for FailScoring {
     fn score(
-        &mut self,
+        &self,
         _: &WorkerSelectionContext<'_>,
         _: WorkerCandidates<'_>,
         _: &mut [f64],
@@ -160,7 +163,7 @@ impl WorkerScorer for FailScoring {
 struct NeverPick;
 impl WorkerPicker for NeverPick {
     fn pick(
-        &mut self,
+        &self,
         _: &WorkerSelectionContext<'_>,
         _: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -201,7 +204,7 @@ fn rejects_nonfinite_contributions_and_overflow_before_picking() {
     struct Constant(f64);
     impl WorkerScorer for Constant {
         fn score(
-            &mut self,
+            &self,
             _: &WorkerSelectionContext<'_>,
             _: WorkerCandidates<'_>,
             costs: &mut [f64],
@@ -234,20 +237,19 @@ fn rejects_nonfinite_contributions_and_overflow_before_picking() {
 
 #[test]
 fn picker_columns_and_costs_stay_aligned_after_a_scoring_error() {
-    struct FailSecondScoreOnce(usize);
+    struct FailSecondScoreOnce(AtomicUsize);
     impl WorkerScorer for FailSecondScoreOnce {
         fn required_worker_inputs(&self) -> WorkerInputs {
             WorkerInputs::LOAD
         }
         fn score(
-            &mut self,
+            &self,
             _: &WorkerSelectionContext<'_>,
             candidates: WorkerCandidates<'_>,
             costs: &mut [f64],
         ) -> Result<(), WorkerSelectionPolicyError> {
             for (candidate, cost) in candidates.iter().zip(costs) {
-                self.0 += 1;
-                if self.0 == 2 {
+                if self.0.fetch_add(1, Ordering::Relaxed) == 1 {
                     return Err(WorkerSelectionPolicyError::failed("score failed"));
                 }
                 *cost = candidate.load().unwrap().active_requests() as f64;
@@ -261,7 +263,7 @@ fn picker_columns_and_costs_stay_aligned_after_a_scoring_error() {
             WorkerInputs::CACHE | WorkerInputs::LOAD
         }
         fn pick(
-            &mut self,
+            &self,
             _: &WorkerSelectionContext<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -287,7 +289,7 @@ fn picker_columns_and_costs_stay_aligned_after_a_scoring_error() {
         KvRouterConfig::default(),
         "test",
         vec![Box::new(ExcludeWorkerOne)],
-        vec![Box::new(FailSecondScoreOnce(0))],
+        vec![Box::new(FailSecondScoreOnce(AtomicUsize::new(0)))],
         Box::new(CheckColumns),
     );
     let select = |request: &dynamo_kv_router::scheduling::SchedulingRequest| {
@@ -310,7 +312,7 @@ fn unwritten_costs_cannot_reuse_a_previous_selection_or_scorer() {
     struct Fill;
     impl WorkerScorer for Fill {
         fn score(
-            &mut self,
+            &self,
             _: &WorkerSelectionContext<'_>,
             _: WorkerCandidates<'_>,
             costs: &mut [f64],
@@ -319,15 +321,15 @@ fn unwritten_costs_cannot_reuse_a_previous_selection_or_scorer() {
             Ok(())
         }
     }
-    struct OmitOnSecondCall(bool);
+    struct OmitOnSecondCall(AtomicBool);
     impl WorkerScorer for OmitOnSecondCall {
         fn score(
-            &mut self,
+            &self,
             _: &WorkerSelectionContext<'_>,
             _: WorkerCandidates<'_>,
             costs: &mut [f64],
         ) -> Result<(), WorkerSelectionPolicyError> {
-            if std::mem::replace(&mut self.0, false) {
+            if self.0.swap(false, Ordering::Relaxed) {
                 costs.fill(1.0);
             }
             Ok(())
@@ -336,7 +338,7 @@ fn unwritten_costs_cannot_reuse_a_previous_selection_or_scorer() {
     struct First;
     impl WorkerPicker for First {
         fn pick(
-            &mut self,
+            &self,
             _: &WorkerSelectionContext<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -348,7 +350,10 @@ fn unwritten_costs_cannot_reuse_a_previous_selection_or_scorer() {
     let policy = WorkerSelectionPolicy::new(
         KvRouterConfig::default(),
         "test",
-        vec![Box::new(Fill), Box::new(OmitOnSecondCall(true))],
+        vec![
+            Box::new(Fill),
+            Box::new(OmitOnSecondCall(AtomicBool::new(true))),
+        ],
         Box::new(First),
     );
     let select = || policy.select_worker(support::selection_input(&workers, &request, 16));

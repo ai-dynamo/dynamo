@@ -2008,6 +2008,7 @@ impl<
                     kv_transfer_candidates: request.kv_transfer_candidates.take(),
                     potential_decode_blocks: selected.selection.potential_decode_blocks,
                     selection_trace: selected.selection_trace,
+                    log_fields: selected.selection.log_fields,
                 },
             })
         })
@@ -2067,6 +2068,7 @@ impl<
             kv_transfer_candidates: request.kv_transfer_candidates.take(),
             potential_decode_blocks: selected.selection.potential_decode_blocks,
             selection_trace: selected.selection_trace,
+            log_fields: selected.selection.log_fields,
         };
         let non_max_overlap_selection = selected.non_max_overlap_selection;
 
@@ -2517,6 +2519,7 @@ mod tests {
                 potential_decode_blocks: request
                     .potential_decode_blocks_after_admission(worker, block_size),
                 kv_transfer_source: None,
+                log_fields: None,
             })
         }
     }
@@ -3924,7 +3927,7 @@ policy_classes:
         }
 
         fn pick(
-            &mut self,
+            &self,
             _context: &crate::WorkerSelectionContext<'_>,
             input: crate::WorkerInputView<'_>,
         ) -> Result<usize, crate::WorkerSelectionPolicyError> {
@@ -5902,6 +5905,7 @@ policy_classes:
                         ExternalSequenceBlockHash(102),
                     ],
                     owner_prefix_blocks: vec![(WorkerWithDpRank::new(1, 0).into(), 2)],
+                    source_intervals: Vec::new(),
                     routing_snapshot: None,
                 }),
                 overlap: OverlapSignals {
@@ -6000,6 +6004,7 @@ policy_classes:
                 kv_transfer_candidates: Some(KvTransferCandidates {
                     block_hashes: vec![ExternalSequenceBlockHash(101)],
                     owner_prefix_blocks: vec![(worker.into(), 1)],
+                    source_intervals: Vec::new(),
                     routing_snapshot: None,
                 }),
                 overlap: OverlapSignals {

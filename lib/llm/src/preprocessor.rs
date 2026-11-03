@@ -17,6 +17,7 @@ pub mod mm_routing;
 pub mod prompt;
 pub mod speculative_prefill;
 pub(crate) mod structural_tag;
+pub use structural_tag::structural_tag_parser_names;
 pub(crate) mod tool_choice;
 pub mod tools;
 use anyhow::Context;
@@ -237,10 +238,9 @@ pub struct PromptReasoningPrefill {
     unified: bool,
     unified_starting_state: Option<dynamo_parsers_v2::UnifiedParserStartingState>,
     prefix: Option<Arc<str>>,
-    /// MiniMax M3 only: whether the rendered generation prompt ends with
-    /// `</mm:think>`. `None` when unknown (no rendered text, no generation
-    /// prompt, or not an M3 reasoning parser); callers then keep trusting the
-    /// request's `thinking_mode`.
+    /// Whether the rendered generation prompt closed reasoning. MiniMax M3
+    /// treats an unclosed prompt as open; GLM requires an explicit boundary.
+    /// `None` leaves the request's thinking controls authoritative.
     reasoning_closed_by_prompt: Option<bool>,
     /// The prompt left the model's final (visible) channel open — an assistant
     /// prefill with `continue_final_message` on a channel grammar (Beam) — so the
@@ -281,8 +281,8 @@ fn compact_gpt_oss_prefill(prefix: &str) -> &str {
     };
     if header.contains("to=") || body.contains("<|") {
         // Recipient-owned bodies may contain a partially consumed JSON argument.
-        // TODO: Use parser-owned continuation snapshots to bound retained seeds;
-        // replay still encodes request-sized input and retains parser state per choice.
+        // TODO: Validate argument prefixes incrementally so released bytes no longer
+        // need to remain in the shared per-request continuation body.
         return prefix;
     }
     &prefix[..header.len() + MESSAGE.len()]
@@ -604,15 +604,7 @@ fn drain_router_routing_data(
     let Some(tracker) = tracker else {
         return;
     };
-    if let Some(timing) = routing_data.timing {
-        tracker.set_external_timing(timing);
-    }
-    if let Some(worker_id) = routing_data.worker_id {
-        tracker.set_external_worker_info(worker_id);
-    }
-    if let Some(token_ids) = routing_data.token_ids {
-        tracker.set_external_query_token_ids(token_ids);
-    }
+    tracker.ingest_routing_data(routing_data);
 }
 
 fn attach_metrics_annotation<Resp>(response: &mut Annotated<Resp>, metrics: &LLMMetricAnnotation) {
@@ -1548,6 +1540,24 @@ fn should_hash_decoded_video(
 #[cfg(feature = "mm-routing")]
 fn exact_mm_routing_supports_modality(modality: &str, frontend_decoding: bool) -> bool {
     modality == "image_url" || (modality == "video_url" && frontend_decoding)
+}
+
+#[cfg(any(test, all(feature = "mm-routing", feature = "media-ffmpeg")))]
+fn log_video_routing_capability(model_id: &str, model_type: &str, frontend_video_decoding: bool) {
+    tracing::info!(
+        target: "mm_routing",
+        model = %model_id,
+        model_type,
+        frontend_video_decoding,
+        "video routing processor available; exact routing requires KV router mode and eligible requests"
+    );
+    if !frontend_video_decoding {
+        tracing::info!(
+            target: "mm_routing",
+            model = %model_id,
+            "frontend video decoding disabled; video requests use text-prefix routing"
+        );
+    }
 }
 
 #[cfg(feature = "mm-routing")]
@@ -2972,6 +2982,11 @@ impl OpenAIPreprocessor {
                 )
             });
 
+        #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+        let frontend_video_decoding = mdc
+            .media_decoder
+            .as_ref()
+            .is_some_and(|decoder| decoder.video.is_some());
         let media_loader = match mdc.media_decoder {
             Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
             None => None,
@@ -3161,12 +3176,7 @@ impl OpenAIPreprocessor {
         if video_routing_processor.is_some()
             && let Some((model_id, model_type, _)) = image_token_inputs.as_ref()
         {
-            tracing::info!(
-                target: "mm_routing",
-                model = %model_id,
-                model_type = %model_type,
-                "exact video-aware KV routing enabled"
-            );
+            log_video_routing_capability(model_id, model_type, frontend_video_decoding);
         }
 
         #[cfg(feature = "mm-routing")]
@@ -3477,10 +3487,27 @@ impl OpenAIPreprocessor {
         }
 
         let mut preprocessed = builder.build()?;
-        if let Some(reasoning_ended) = Self::prompt_injected_reasoning_ended_arg(
-            self.runtime_config.reasoning_parser.as_deref(),
-            formatted_prompt.as_ref().map(RenderedPrompt::as_str),
-        ) {
+        let glm_reasoning_ended =
+            prompt_injected_reasoning
+                .reasoning_closed_by_prompt
+                .filter(|_| {
+                    matches!(
+                        self.runtime_config.reasoning_parser.as_deref(),
+                        Some("glm45" | "glm47")
+                    )
+                });
+        if let Some(reasoning_ended) = glm_reasoning_ended {
+            preprocessed.require_reasoning = !reasoning_ended
+                && (Self::has_guided_tool_choice(request)
+                    || Self::has_structured_response_format(request)
+                    || preprocessed.stop_conditions.max_thinking_tokens.is_some());
+        }
+        if let Some(reasoning_ended) = glm_reasoning_ended.or_else(|| {
+            Self::prompt_injected_reasoning_ended_arg(
+                self.runtime_config.reasoning_parser.as_deref(),
+                formatted_prompt.as_ref().map(RenderedPrompt::as_str),
+            )
+        }) {
             let extra_args = preprocessed
                 .extra_args
                 .get_or_insert_with(|| serde_json::json!({}));
@@ -3488,6 +3515,14 @@ impl OpenAIPreprocessor {
                 .as_object_mut()
                 .context("preprocessed extra_args must be an object")?;
             extra_args.insert("reasoning_ended".to_string(), reasoning_ended.into());
+            if glm_reasoning_ended.is_some() {
+                // vLLM's GLM parser drops the reasoning terminator when thinking is disabled.
+                let kwargs = extra_args
+                    .entry("reasoning_parser_kwargs")
+                    .or_insert_with(|| serde_json::json!({"chat_template_kwargs": {}}));
+                kwargs["chat_template_kwargs"]["thinking"] = (!reasoning_ended).into();
+                kwargs["chat_template_kwargs"]["enable_thinking"] = (!reasoning_ended).into();
+            }
         }
 
         // If omitted, allow generation up to the remaining context length. Responses requests
@@ -3969,8 +4004,8 @@ impl OpenAIPreprocessor {
         );
         // Without a generation prompt (`add_generation_prompt: false`, or a
         // continued final message, which ends inside the assistant's text) the
-        // tail cannot show whether the template closed reasoning: keep the
-        // request's `thinking_mode` for it.
+        // tail cannot establish the template's reasoning state: keep the
+        // request's thinking controls for it.
         if !request.should_add_generation_prompt() {
             prefill.reasoning_closed_by_prompt = None;
         }
@@ -5790,61 +5825,56 @@ impl OpenAIPreprocessor {
                 None,
                 Some(family),
             );
-            // TODO: Resolve model-specific prefill and guidance through the parser adapter's
-            // UnifiedRequestPolicy and parser capabilities; migrate equivalent batch/stream
-            // branches together while preserving legacy/v2 behavior.
-            let bare_guidance = *family == "gpt_oss"
-                && (tool_choice::has_explicit_guided_decoding(request)
-                    || guided_tool_constraint.installs_guided_json()
-                        && !(self.runtime_config.structural_tag.is_some()
-                            && structural_tag::uses_gpt_oss_required_array(
-                                (
-                                    self.tool_call_parser.as_deref(),
-                                    self.runtime_config.reasoning_parser.as_deref(),
-                                ),
-                                &tool_choice::convert_tool_choice(
-                                    request
-                                        .inner
-                                        .tool_choice
-                                        .as_ref()
-                                        .unwrap_or(&ChatCompletionToolChoiceOption::Auto),
-                                ),
-                                request.inner.parallel_tool_calls,
-                            )));
+            // TODO: Replace family-specific guidance decisions with parser capabilities;
+            // migrate equivalent batch/stream branches together while preserving legacy/v2 behavior.
+            let policy = unified_parser::UnifiedRequestPolicy {
+                reasoning_disabled,
+                structured_response: Self::has_structured_response_format(request),
+                multiple_choices: request.inner.n.unwrap_or(1) > 1,
+            };
+            let prefill = policy.resolve_stream_prefill(
+                family,
+                unified_parser::StreamPrefill {
+                    starting_state: if *family == unified_parser::BEAM_UNIFIED_FAMILY
+                        && (prompt_prefill.response || self.beam_output_is_bare_guidance(request))
+                    {
+                        dynamo_parsers_v2::UnifiedParserStartingState::Response
+                    } else {
+                        prompt_prefill.unified_starting_state.unwrap_or_else(|| {
+                            unified_parser::stream_prefill(family, prompt_injected_reasoning)
+                        })
+                    },
+                    prefix: prompt_prefill.prefix.clone(),
+                },
+                &guided_tool_constraint,
+                tool_choice::has_explicit_guided_decoding(request),
+                || {
+                    self.runtime_config.structural_tag.is_some()
+                        && structural_tag::uses_gpt_oss_required_array(
+                            (
+                                self.tool_call_parser.as_deref(),
+                                self.runtime_config.reasoning_parser.as_deref(),
+                            ),
+                            &tool_choice::convert_tool_choice(
+                                request
+                                    .inner
+                                    .tool_choice
+                                    .as_ref()
+                                    .unwrap_or(&ChatCompletionToolChoiceOption::Auto),
+                            ),
+                            request.inner.parallel_tool_calls,
+                        )
+                },
+            );
             let unified: Pin<Box<dyn Stream<Item = _> + Send>> =
                 Box::pin(unified_parser::apply_stream_with_policy(
                     stream,
                     tool_definitions,
                     guided_tool_constraint,
-                    unified_parser::StreamPrefill {
-                        starting_state: if bare_guidance
-                            || (*family == unified_parser::BEAM_UNIFIED_FAMILY
-                                && (prompt_prefill.response
-                                    || self.beam_output_is_bare_guidance(request)))
-                        {
-                            // Assistant prefill inside Beam's final channel, or bare text
-                            // an explicit `guided_*` constraint owns (no turn grammar, so
-                            // no channel framing): the reply is visible text from its
-                            // first byte and ends on `<|return|>` or at the end of the
-                            // stream.
-                            dynamo_parsers_v2::UnifiedParserStartingState::Response
-                        } else {
-                            prompt_prefill.unified_starting_state.unwrap_or_else(|| {
-                                unified_parser::stream_prefill(family, prompt_injected_reasoning)
-                            })
-                        },
-                        prefix: if bare_guidance {
-                            None
-                        } else {
-                            prompt_prefill.prefix.clone()
-                        },
-                    },
+                    prefill,
                     family,
                     guided_tool_streaming,
-                    unified_parser::UnifiedRequestPolicy {
-                        reasoning_disabled,
-                        structured_response: Self::has_structured_response_format(request),
-                    },
+                    policy,
                 ));
             return Ok(Self::apply_unified_response_policies(
                 unified,
@@ -7354,9 +7384,19 @@ impl OpenAIPreprocessor {
         // the rendered prompt is what the model was told. A chat template that
         // does not render `thinking_mode` leaves a "disabled" prompt open, so
         // the model may still open with `<mm:think>` or `</mm:think>`.
-        let reasoning_closed_by_prompt = Self::is_minimax_m3_reasoning_parser(reasoning_parser)
-            .then(|| formatted_prompt.map(|prompt| prompt.trim_end().ends_with("</mm:think>")))
-            .flatten();
+        let reasoning_closed_by_prompt = if matches!(reasoning_parser, Some("glm45" | "glm47")) {
+            formatted_prompt.and_then(|prompt| {
+                if unified {
+                    Some(false)
+                } else {
+                    prompt.trim_end().ends_with("</think>").then_some(true)
+                }
+            })
+        } else {
+            Self::is_minimax_m3_reasoning_parser(reasoning_parser)
+                .then(|| formatted_prompt.map(|prompt| prompt.trim_end().ends_with("</mm:think>")))
+                .flatten()
+        };
         let beam_channel = (family
             == Some(
                 crate::protocols::openai::chat_completions::unified_parser::BEAM_UNIFIED_FAMILY,
@@ -7453,6 +7493,8 @@ impl OpenAIPreprocessor {
             return match family {
                 // GPT-OSS cannot disable reasoning; unsupported aliases must not expose it as answer text.
                 "gpt_oss" => false,
+                // Thinking controls govern generation; keep emitted GLM reasoning separate.
+                "glm47" => false,
                 "gemma4" => thinking != Some(true) && !Self::is_gemma4_tool_parser(tool_parser),
                 // Spark's template cannot disable reasoning, so keep generated
                 // reasoning separate instead of folding it into visible content.
@@ -9485,6 +9527,37 @@ mod tests {
     };
     use std::path::PathBuf;
 
+    #[test]
+    fn video_routing_startup_does_not_claim_active_routing() {
+        use std::io::{Read, Seek, SeekFrom};
+
+        for frontend_video_decoding in [false, true] {
+            let mut output = tempfile::tempfile().unwrap();
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(output.try_clone().unwrap())
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                log_video_routing_capability("test-model", "qwen3_vl", frontend_video_decoding);
+            });
+            output.seek(SeekFrom::Start(0)).unwrap();
+            let mut logs = String::new();
+            output.read_to_string(&mut logs).unwrap();
+
+            assert!(logs.contains("video routing processor available"));
+            assert!(logs.contains("KV router mode and eligible requests"));
+            assert!(logs.contains(&format!(
+                "frontend_video_decoding={frontend_video_decoding}"
+            )));
+            assert!(!logs.contains("exact video-aware KV routing enabled"));
+            assert_eq!(
+                logs.contains("video requests use text-prefix routing"),
+                !frontend_video_decoding
+            );
+        }
+    }
+
     #[tokio::test]
     async fn gpt_oss_disabled_aliases_keep_reasoning_separate() {
         if crate::test_utils::run_isolated(
@@ -9603,17 +9676,19 @@ mod tests {
             "plain message body is irrelevant to the parser seed"
         );
 
-        let structural_prompt = format!("{header}quoted marker <|ghissue|> remains structural");
-        let structural_prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
-            None,
-            Some("gpt_oss"),
-            Some(&structural_prompt),
-        );
-        assert_eq!(
-            structural_prefill.prefix.as_deref().map(str::len),
-            Some(structural_prompt.len()),
-            "marker-bearing bodies must retain their parser state"
-        );
+        for body in ["quoted marker <|ghissue|> remains structural", "partial <|"] {
+            let structural_prompt = format!("{header}{body}");
+            let structural_prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+                None,
+                Some("gpt_oss"),
+                Some(&structural_prompt),
+            );
+            assert_eq!(
+                structural_prefill.prefix.as_deref().map(str::len),
+                Some(structural_prompt.len()),
+                "marker-bearing bodies must retain their parser state"
+            );
+        }
 
         let incomplete_header = "<|start|>assistant to=";
         let incomplete_prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
@@ -9941,33 +10016,32 @@ mod tests {
                 " to=python<|channel|>analysis",
                 "<|channel|>analysis to=python",
             ] {
-                for body in ["Hello", "quoted <|ghissue|>", "partial <|"] {
-                    let prompt = format!(
-                        "<|start|>assistant<|channel|>analysis<|message|>earlier<|end|><|start|>{role}{metadata}<|message|>{body}"
-                    );
-                    let prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
-                        None,
-                        Some("gpt_oss"),
-                        Some(&prompt),
-                    );
-                    assert_eq!(
-                        prefill.prefix.is_some(),
-                        role == "assistant",
-                        "role={role} metadata={metadata} body={body}"
-                    );
-                    assert_eq!(
-                        prefill.unified_starting_state,
-                        (role != "assistant")
-                            .then_some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
-                        "role={role} metadata={metadata}"
-                    );
-                    let reasoning = role == "assistant" && metadata.contains("<|channel|>analysis");
-                    assert_eq!(
-                        prefill.unified, reasoning,
-                        "role={role} metadata={metadata}"
-                    );
-                    assert_eq!(prefill.legacy, reasoning, "role={role} metadata={metadata}");
-                }
+                let body = "Hello";
+                let prompt = format!(
+                    "<|start|>assistant<|channel|>analysis<|message|>earlier<|end|><|start|>{role}{metadata}<|message|>{body}"
+                );
+                let prefill = OpenAIPreprocessor::prompt_reasoning_prefill_for_parsers(
+                    None,
+                    Some("gpt_oss"),
+                    Some(&prompt),
+                );
+                assert_eq!(
+                    prefill.prefix.is_some(),
+                    role == "assistant",
+                    "role={role} metadata={metadata} body={body}"
+                );
+                assert_eq!(
+                    prefill.unified_starting_state,
+                    (role != "assistant")
+                        .then_some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
+                    "role={role} metadata={metadata}"
+                );
+                let reasoning = role == "assistant" && metadata.contains("<|channel|>analysis");
+                assert_eq!(
+                    prefill.unified, reasoning,
+                    "role={role} metadata={metadata}"
+                );
+                assert_eq!(prefill.legacy, reasoning, "role={role} metadata={metadata}");
             }
         }
     }
@@ -14968,6 +15042,117 @@ responses_tools: None,
                 expected,
                 "parser={parser:?}, fields={fields}",
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn glm_generation_reasoning_follows_rendered_prompt() {
+        for parser in ["glm45", "glm47"] {
+            let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
+            preprocessor.runtime_config.reasoning_parser = Some(parser.into());
+            preprocessor.tool_call_parser = Some("glm47".into());
+            for (tail, reasoning_open) in [
+                ("<|assistant|><think>\n", true),
+                ("<|assistant|><think></think>\n", false),
+            ] {
+                preprocessor.formatter = test_prompt_formatter(tail);
+                for control in ["enable_thinking", "thinking"] {
+                    for requested in [false, true] {
+                        for (fields, needs_gate) in [
+                            (
+                                serde_json::json!({"response_format": {"type": "json_object"}}),
+                                true,
+                            ),
+                            (
+                                serde_json::json!({"response_format": {"type": "json_schema", "json_schema": {
+                                    "name": "answer", "schema": {"type": "object"}
+                                }}}),
+                                true,
+                            ),
+                            (serde_json::json!({"thinking_token_budget": 32}), true),
+                            (
+                                serde_json::json!({"tools": [{"type": "function", "function": {
+                                "name": "lookup", "parameters": {"type": "object", "properties": {}}
+                            }}], "tool_choice": "required"}),
+                                true,
+                            ),
+                            (serde_json::json!({}), false),
+                        ] {
+                            let mut body = serde_json::json!({
+                                "model": "test-model",
+                                "messages": [{"role": "user", "content": "return JSON"}],
+                                "chat_template_kwargs": {control: requested, "reasoning_effort": "max"},
+                            });
+                            body.as_object_mut()
+                                .unwrap()
+                                .extend(fields.as_object().unwrap().clone());
+                            let mut request: NvCreateChatCompletionRequest =
+                                serde_json::from_value(body).unwrap();
+                            OpenAIPreprocessor::normalize_thinking_arg(
+                                &mut request,
+                                Some(parser),
+                                Some("glm47"),
+                            );
+                            let (common, _, prefill) = preprocessor
+                                .preprocess_request(&request, None)
+                                .await
+                                .unwrap();
+                            let case = format!("{parser} {tail:?} {control}={requested} {fields}");
+                            assert_eq!(
+                                common.require_reasoning,
+                                reasoning_open && needs_gate,
+                                "{case}"
+                            );
+                            assert_eq!(prefill.unified, reasoning_open, "{case}");
+                            let extra = common.extra_args.as_ref().unwrap();
+                            assert_eq!(extra["reasoning_ended"], !reasoning_open, "{case}");
+                            let args = &extra["reasoning_parser_kwargs"]["chat_template_kwargs"];
+                            assert_eq!(args["thinking"], reasoning_open, "{case}");
+                            assert_eq!(args["enable_thinking"], reasoning_open, "{case}");
+                            assert_eq!(args["reasoning_effort"], "max", "{case}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn glm_unknown_prompt_reasoning_preserves_request_controls() {
+        let mut preprocessor = Arc::try_unwrap(mock_llama_preprocessor()).ok().unwrap();
+        preprocessor.runtime_config.reasoning_parser = Some("glm45".into());
+        preprocessor.tool_call_parser = Some("glm47".into());
+        for (tail, add_generation_prompt) in [
+            ("<|assistant|>", true),
+            ("<think>", false),
+            ("</think>", false),
+        ] {
+            preprocessor.formatter = test_prompt_formatter(tail);
+            for requested in [false, true] {
+                let request: NvCreateChatCompletionRequest =
+                    serde_json::from_value(serde_json::json!({
+                        "model": "test-model",
+                        "messages": [{"role": "user", "content": "return JSON"}],
+                        "response_format": {"type": "json_object"},
+                        "chat_template_kwargs": {"enable_thinking": requested},
+                        "add_generation_prompt": add_generation_prompt,
+                    }))
+                    .unwrap();
+                let (common, _, _) = preprocessor
+                    .preprocess_request(&request, None)
+                    .await
+                    .unwrap();
+                assert_eq!(common.require_reasoning, requested, "{tail:?} {requested}");
+                let extra = common.extra_args.as_ref().unwrap();
+                assert!(
+                    extra.get("reasoning_ended").is_none(),
+                    "{tail:?} {requested}"
+                );
+                assert_eq!(
+                    extra["reasoning_parser_kwargs"]["chat_template_kwargs"]["enable_thinking"],
+                    requested
+                );
+            }
         }
     }
 

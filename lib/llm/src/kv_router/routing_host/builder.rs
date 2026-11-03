@@ -274,7 +274,7 @@ fn assemble(
             let hosted_occupancy = matches!(
                 &policy,
                 RoutingPolicy::Builtin(selector)
-                    if selector.required_worker_inputs().contains(WorkerInputs::OCCUPANCY)
+                    if selector.required_worker_inputs().contains(WorkerInputs::ACTIVE_REQUESTS)
             )
             .then(|| HostedOccupancy::new(&inner))
             .transpose()?;

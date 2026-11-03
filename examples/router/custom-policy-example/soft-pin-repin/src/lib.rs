@@ -54,7 +54,7 @@ impl WorkerPicker for SoftPinRepinPicker {
     }
 
     fn pick(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {

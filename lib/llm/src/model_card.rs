@@ -1126,16 +1126,7 @@ pub struct ModelDeploymentCard {
     tokenizer_id_bound: OnceLock<Option<usize>>,
 }
 
-/// LoRA adapter information for routing decisions
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct LoraInfo {
-    /// LoRA adapter name (e.g., "customer-123-v2")
-    pub name: String,
-
-    /// Maximum number of LoRA adapters that can be loaded at once on a single GPU
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_gpu_lora_count: Option<u32>,
-}
+pub use crate::lora::LoraInfo;
 
 impl ModelDeploymentCard {
     /// Number of typed metadata slots (`model_info`, `tokenizer`,

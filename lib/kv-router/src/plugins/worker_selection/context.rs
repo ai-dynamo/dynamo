@@ -5,11 +5,21 @@
 
 use super::SessionContext;
 use crate::protocols::{WorkerAffinityTarget, WorkerWithDpRank};
+#[cfg(any(test, feature = "bench"))]
 use crate::scheduling::SchedulingRequest;
 
 /// Request-level values available to custom filters, scorers, and pickers.
 pub struct WorkerSelectionContext<'a> {
-    pub(crate) request: &'a SchedulingRequest,
+    // The KV path's full request, for the test and benchmark reference selector; hosted
+    // selection has none. Not exposed to policies.
+    #[cfg(any(test, feature = "bench"))]
+    pub(crate) request: Option<&'a SchedulingRequest>,
+    pub(crate) isl_tokens: usize,
+    pub(crate) session_context: Option<&'a SessionContext>,
+    pub(crate) affinity_target: Option<WorkerAffinityTarget>,
+    pub(crate) expected_output_tokens: Option<u32>,
+    pub(crate) priority_jump: f64,
+    pub(crate) strict_priority: u32,
     pub(crate) request_blocks: u64,
     pub(crate) block_size: u32,
     pub(crate) track_prefill_tokens: bool,
@@ -29,7 +39,7 @@ impl WorkerSelectionContext<'_> {
     /// `ClassifyRequest::isl_tokens`. No rounding or cache weighting is applied.
     /// Zero when the request carries no prompt token IDs, such as embeddings-only input.
     pub fn isl_tokens(&self) -> usize {
-        self.request.isl_tokens
+        self.isl_tokens
     }
 
     /// Return the input size in KV blocks. Zero when
@@ -50,7 +60,7 @@ impl WorkerSelectionContext<'_> {
 
     /// Return the session metadata available to worker selection.
     pub fn session_context(&self) -> Option<&SessionContext> {
-        self.request.session_context.as_ref()
+        self.session_context
     }
 
     /// Return the session-affinity target resolved by the request host.
@@ -58,22 +68,22 @@ impl WorkerSelectionContext<'_> {
     /// The default selector treats an eligible target as exclusive. Custom policies receive it as
     /// advisory context; it may be absent from their candidate set when unavailable or filtered.
     pub fn affinity_target(&self) -> Option<WorkerAffinityTarget> {
-        self.request.affinity_target
+        self.affinity_target
     }
 
     /// Return the expected output length, if the request supplies one.
     pub fn expected_output_tokens(&self) -> Option<u32> {
-        self.request.expected_output_tokens
+        self.expected_output_tokens
     }
 
     /// Return the request's scheduler priority boost.
     pub fn priority_jump(&self) -> f64 {
-        self.request.priority_jump
+        self.priority_jump
     }
 
     /// Return the request's strict integer priority.
     pub fn strict_priority(&self) -> u32 {
-        self.request.strict_priority
+        self.strict_priority
     }
 
     /// Return the request-level router temperature override, if present.

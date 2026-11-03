@@ -27,12 +27,14 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
-use crate::client::{self, Client, Discovery, KV_CONFIG_KEY, NodeMetadata, Pool, WORKER_GROUP_KEY};
+use crate::client::{
+    self, Client, Discovery, KV_CONFIG_KEY, MediaSupport, NodeMetadata, Pool, WORKER_GROUP_KEY,
+};
 use crate::native_http::{self, NativeHttp};
 use crate::proto as pb;
 use crate::protocol::{
     build_generate_request, disaggregated_params_to_json, engine_data_from_meta, extract_logprobs,
-    meta_u32, output_ids_to_u32, terminal_from_meta,
+    meta_u32, output_ids_to_u32, require_media_support, terminal_from_meta,
 };
 
 const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
@@ -53,6 +55,7 @@ struct StartedState {
     native_http: Option<NativeHttp>,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
     combined_token_limit: Option<u32>,
+    media_support: MediaSupport,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -327,12 +330,14 @@ impl LLMEngine for SglangSidecarEngine {
         if combined_token_limit.is_none() {
             tracing::warn!("requests without max_tokens keep SGLang's 128-token default");
         }
+        let media_support = client::media_support(&discovery.server_info);
         self.state
             .set(StartedState {
                 pool,
                 native_http,
                 kv_event_sources,
                 combined_token_limit,
+                media_support,
             })
             .map_err(|_| client::engine_shutdown("sglang sidecar already started"))?;
         tracing::info!(
@@ -340,6 +345,7 @@ impl LLMEngine for SglangSidecarEngine {
             mode = ?self.disaggregation_mode,
             connections = connection_count,
             kv_event_sources = kv_event_source_count,
+            media_support = ?media_support,
             "sglang sidecar started"
         );
         Ok(config)
@@ -389,6 +395,7 @@ impl LLMEngine for SglangSidecarEngine {
             self.bootstrap_host.as_deref(),
             self.bootstrap_port,
         )?;
+        require_media_support(&grpc_request, state.media_support)?;
         let mut prefill_handoff = if self.disaggregation_mode.is_prefill() {
             grpc_request
                 .disaggregated_params
@@ -567,10 +574,15 @@ impl LLMEngine for SglangSidecarEngine {
         let Some(state) = self.state.get() else {
             return;
         };
+        let request_id = state
+            .native_http
+            .as_ref()
+            .and_then(|http| http.request_id(&ctx))
+            .unwrap_or_else(|| ctx.id().to_string());
         // HTTP queues scheduler cancellation without first closing the gRPC stream.
         if let Some(native_http) = &state.native_http {
             match native_http
-                .abort(ctx.id(), self.transport.connect_attempt_timeout)
+                .abort(&request_id, self.transport.connect_attempt_timeout)
                 .await
             {
                 Ok(()) => return,
@@ -583,7 +595,7 @@ impl LLMEngine for SglangSidecarEngine {
         }
         let mut grpc_client = state.pool.control_client();
         let request = pb::AbortRequest {
-            rid: ctx.id().to_string(),
+            rid: request_id,
             abort_all: false,
         };
         if let Err(error) = client::abort(

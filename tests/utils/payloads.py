@@ -1084,13 +1084,35 @@ class StreamingChatPayload(BasePayload):
         return content
 
 
+def _validate_single_tool_call(call: Dict[str, Any], arguments: Dict[str, Any]) -> None:
+    assert call.get("type") == "function", f"Not a function call: {call}"
+    assert call.get("id"), f"Tool call has no id: {call}"
+    assert (
+        json.loads(call["function"]["arguments"]) == arguments
+    ), f"Wrong arguments: {call}"
+
+
+def _one_value(values: List[Any]) -> Any:
+    # Later stream deltas may repeat a tool call's id, type, or name, but never change it.
+    distinct = {value for value in values if value is not None}
+    assert len(distinct) == 1, f"Expected one value, got {distinct}"
+    return distinct.pop()
+
+
 @dataclass
 class ToolCallingChatPayload(ChatPayload):
     """ChatPayload that validates tool calls in the response."""
 
-    def __init__(self, *args, expected_tool_name: Optional[str] = None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        expected_tool_name: Optional[str] = None,
+        expected_arguments: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.expected_tool_name = expected_tool_name
+        self.expected_arguments = expected_arguments
 
     def validate(self, response, content: str) -> None:
         """Validate that tool calls exist in the response.
@@ -1149,6 +1171,52 @@ class ToolCallingChatPayload(ChatPayload):
                 )
             else:
                 logger.info(f"Found expected keywords in tool args: {found}")
+
+        if self.expected_arguments is not None:
+            assert len(tool_calls) == 1, f"Expected one tool call, got {tool_calls}"
+            assert not (message.get("content") or "").strip(), f"Content: {message}"
+            _validate_single_tool_call(tool_calls[0], self.expected_arguments)
+
+
+@dataclass
+class StreamingToolCallingChatPayload(BasePayload):
+    expected_tool_name: str = field(kw_only=True)
+    expected_arguments: Dict[str, Any] = field(kw_only=True)
+    expected_finish_reason: str = field(kw_only=True)
+    endpoint: str = "/v1/chat/completions"
+    http_stream: bool = True
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        text = response.content.decode("utf-8")
+        events = [
+            line[5:].strip() for line in text.splitlines() if line.startswith("data:")
+        ]
+        assert events[-1:] == ["[DONE]"], "Stream did not end with [DONE]"
+        chunks = parse_sse_json_chunks(text)
+        assert not any("error" in chunk for chunk in chunks), chunks
+        choices = [choice for chunk in chunks for choice in chunk["choices"]]
+        assert all(choice["index"] == 0 for choice in choices), choices
+        deltas = [choice.get("delta") or {} for choice in choices]
+        content = "".join(delta.get("content") or "" for delta in deltas)
+        assert not content.strip(), f"Unexpected content: {content!r}"
+        parts = [part for delta in deltas for part in delta.get("tool_calls") or []]
+        assert {part["index"] for part in parts} == {0}, f"Not one tool call: {parts}"
+        functions = [part.get("function") or {} for part in parts]
+        call = {
+            "id": _one_value([part.get("id") for part in parts]),
+            "type": _one_value([part.get("type") for part in parts]),
+            "function": {
+                "name": _one_value([function.get("name") for function in functions]),
+                "arguments": "".join(f.get("arguments") or "" for f in functions),
+            },
+        }
+        assert call["function"]["name"] == self.expected_tool_name, call
+        _validate_single_tool_call(call, self.expected_arguments)
+        finish_reasons = [choice.get("finish_reason") for choice in choices]
+        assert finish_reasons[-1:] == [self.expected_finish_reason], finish_reasons[-1:]
+        assert not any(finish_reasons[:-1]), f"Choices after the end: {finish_reasons}"
+        return call["function"]["arguments"]
 
 
 @dataclass

@@ -6,12 +6,13 @@
 //! `EngineConfig::InProcessTokens`, the TCP request plane and `PushRouter`.
 //!
 //! Two workers in one process, each its own `DistributedRuntime` and config,
-//! own independent gates: each is sized by its own model card, fills and
-//! refuses on its own, and exposes its family on its own component's registry,
-//! labelled with its own `worker_id`. A config cloned to serve a sibling
-//! endpoint is still one worker, so both endpoints admit through its one gate.
-//! A later capacity or rank report reaches only its own worker's gate, and a
-//! LoRA adapter's card reports none.
+//! own independent gates: each is sized by the DP ranks its own model card
+//! reports, under the same explicit per-rank limit, fills and refuses on its
+//! own, and exposes its family on its own component's registry, labelled with
+//! its own `worker_id`. A config cloned to serve a sibling endpoint is still
+//! one worker, so both endpoints admit through its one gate. A later rank
+//! report reaches only its own worker's gate, and a LoRA adapter's card reports
+//! none. No card's `max_num_seqs` sizes a gate.
 //!
 //! The TCP request-plane server is process-global and runs on the runtime that
 //! first starts it, so every scenario runs under this one test, and its own
@@ -58,6 +59,9 @@ const REJECTED: &str = "dynamo_backend_admission_rejection_total";
 const ENGINE_REQUESTS: &str = "dynamo_backend_admission_engine_request_count";
 const WAITING: &str = "dynamo_backend_admission_engine_request_waiting_count";
 const TIMEOUT: Duration = Duration::from_secs(10);
+/// What every card reports, far above any gate's limit here: the gates are
+/// sized by their settings and ranks alone.
+const MAX_NUM_SEQS: u64 = 8;
 
 type Output = Annotated<LLMEngineOutput>;
 type Router = PushRouter<PreprocessedRequest, Output>;
@@ -101,11 +105,11 @@ struct Worker {
     reached: mpsc::UnboundedReceiver<()>,
 }
 
-/// A model whose card reports `max_num_seqs` per rank, for the DP ranks
-/// `start_rank..start_rank + rank_count`.
-async fn model(name: &str, max_num_seqs: u64, start_rank: u32, rank_count: u32) -> Box<LocalModel> {
+/// A model whose card reports the DP ranks
+/// `start_rank..start_rank + rank_count`, and [`MAX_NUM_SEQS`] per rank.
+async fn model(name: &str, start_rank: u32, rank_count: u32) -> Box<LocalModel> {
     let runtime_config = ModelRuntimeConfig {
-        max_num_seqs: Some(max_num_seqs),
+        max_num_seqs: Some(MAX_NUM_SEQS),
         data_parallel_start_rank: start_rank,
         data_parallel_size: rank_count,
         ..Default::default()
@@ -121,9 +125,9 @@ async fn model(name: &str, max_num_seqs: u64, start_rank: u32, rank_count: u32) 
 }
 
 impl Worker {
-    /// A worker serving DP rank 0, whose model card reports `max_num_seqs`, on
-    /// a runtime of its own.
-    async fn new(rt: &Runtime, name: &str, max_num_seqs: u64) -> Self {
+    /// A worker serving `rank_count` DP ranks from rank 0, on a runtime of its
+    /// own.
+    async fn new(rt: &Runtime, name: &str, rank_count: u32) -> Self {
         let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
             .await
             .unwrap();
@@ -133,7 +137,7 @@ impl Worker {
             engine: Arc::new(Holding {
                 reached: reached_tx,
             }),
-            model: model(name, max_num_seqs, 0, 1).await,
+            model: model(name, 0, rank_count).await,
             is_prefill: false,
             is_decode: false,
             admission_gate: admission_gate.clone(),
@@ -342,12 +346,13 @@ fn is_worker_overloaded(error: &(dyn std::error::Error + 'static)) -> bool {
 
 #[tokio::test]
 async fn each_worker_admits_through_its_own_gate_and_its_endpoints_share_it() {
-    // No queue, so a full gate refuses at once; the engine limits are left to
-    // each worker's own card.
+    // One engine request per DP rank, the waiting limit left unlimited, and no
+    // queue, so a full gate refuses at once. Requests here name no rank, so
+    // each worker admits one per rank its own card reports.
     unsafe {
+        std::env::set_var("DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT", "1");
         std::env::set_var("DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT", "0");
         for name in [
-            "DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT",
             "DYN_ENGINE_REQUEST_LIMIT",
             "DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT",
             "DYN_BACKEND_ADMISSION_ENGINE_WAIT_LIMIT",
@@ -357,7 +362,6 @@ async fn each_worker_admits_through_its_own_gate_and_its_endpoints_share_it() {
         }
     }
     let rt = Runtime::from_current().unwrap();
-    // Worker A reports one sequence, worker B two.
     let mut a = Worker::new(&rt, "worker-a", 1).await;
     let mut b = Worker::new(&rt, "worker-b", 2).await;
     let to_a = a.serve("generate").await;
@@ -365,16 +369,12 @@ async fn each_worker_admits_through_its_own_gate_and_its_endpoints_share_it() {
 
     // Each worker's gate exists once it serves: its own, never the other's,
     // and the same one through every clone of its handle.
-    let (component_a, component_b) = (a.component(), b.component());
-    let gate_a = a.admission_gate.get_or_create(&component_a);
+    let gate_a = a.admission_gate.get().unwrap();
     assert!(Arc::ptr_eq(
         &gate_a,
-        &a.admission_gate.clone().get_or_create(&component_a)
+        &a.admission_gate.clone().get().unwrap()
     ));
-    assert!(!Arc::ptr_eq(
-        &gate_a,
-        &b.admission_gate.get_or_create(&component_b)
-    ));
+    assert!(!Arc::ptr_eq(&gate_a, &b.admission_gate.get().unwrap()));
 
     // A gate registers its family once, on the registry of the component it
     // is created for: reached again through another component object of the
@@ -391,14 +391,19 @@ async fn each_worker_admits_through_its_own_gate_and_its_endpoints_share_it() {
     };
     let (first, second) = (component(), component());
     let handle = WorkerAdmissionGate::default();
-    let gate_c = handle.get_or_create(&first);
-    assert!(Arc::ptr_eq(&gate_c, &handle.get_or_create(&second)));
+    let gate_c = handle.get_or_create(&first).unwrap();
+    assert!(Arc::ptr_eq(
+        &gate_c,
+        &handle.get_or_create(&second).unwrap()
+    ));
     assert_eq!(admission_families(&first), 7);
     assert_eq!(admission_families(&second), 0);
     // Another gate created for that same component object finds the family
     // already registered there: it is still created, with its collectors kept
     // unregistered, and adds no family.
-    let duplicate_gate = WorkerAdmissionGate::default().get_or_create(&first);
+    let duplicate_gate = WorkerAdmissionGate::default()
+        .get_or_create(&first)
+        .unwrap();
     assert!(!Arc::ptr_eq(&gate_c, &duplicate_gate));
     assert_eq!(admission_families(&first), 7);
 
@@ -424,8 +429,8 @@ async fn each_worker_admits_through_its_own_gate_and_its_endpoints_share_it() {
     }
     assert_ne!(a.drt.connection_id(), b.drt.connection_id());
 
-    // Each card sized its own worker's gate: A admits one request and B two,
-    // each refusing the next on its own, whatever the other holds.
+    // Each card's ranks sized its own worker's gate: A admits one request and
+    // B two, each refusing the next on its own, whatever the other holds.
     let held_a = hold(&to_a, &mut a).await;
     a.occupancy_reaches((1.0, 0.0)).await;
     let held_b = [hold(&to_b, &mut b).await, hold(&to_b, &mut b).await];
@@ -461,27 +466,24 @@ async fn each_worker_admits_through_its_own_gate_and_its_endpoints_share_it() {
         [4.0, 2.0, 2.0]
     );
 
-    // Capacity and rank reports stay with their worker. A LoRA adapter's card
-    // reports nothing, so B, full at two, stays capped.
+    // Rank reports stay with their worker. A LoRA adapter's card reports
+    // nothing, not even eight ranks, so B, full at two, stays capped.
     let mut adapter = ModelDeploymentCard::with_name_only("adapter");
     adapter.lora = Some(LoraInfo {
         name: "adapter".to_string(),
         max_gpu_lora_count: None,
     });
-    adapter.runtime_config.max_num_seqs = Some(8);
-    b.admission_gate
-        .get_or_create(&component_b)
-        .record_model_card(&adapter);
+    adapter.runtime_config.max_num_seqs = Some(MAX_NUM_SEQS);
+    adapter.runtime_config.data_parallel_size = 8;
+    b.admission_gate.get().unwrap().record_model_card(&adapter);
     refused(&b.router("generate").await, &mut b).await;
-    assert_eq!(
-        b.ranks(),
-        BTreeSet::from(["0".into(), "unspecified".into()])
-    );
+    let b_ranks = BTreeSet::from(["0", "1", "unspecified"].map(String::from));
+    assert_eq!(b.ranks(), b_ranks);
 
-    // A's worker registers a new card, three sequences on rank 4, through the
+    // A's worker registers a new card, three ranks from rank 4, through the
     // same path: A, holding one request, now admits two more and refuses the
-    // next, while B stays capped at two and never sees A's rank.
-    let resized = a.reregistered(model("worker-a", 3, 4, 1).await);
+    // next, while B stays capped at two and never sees A's ranks.
+    let resized = a.reregistered(model("worker-a", 4, 3).await);
     a.serve_config("resized", resized).await;
     let to_a = a.router("generate").await;
     let held_a = [hold(&to_a, &mut a).await, hold(&to_a, &mut a).await];
@@ -490,12 +492,9 @@ async fn each_worker_admits_through_its_own_gate_and_its_endpoints_share_it() {
     refused(&b.router("generate").await, &mut b).await;
     assert_eq!(
         a.ranks(),
-        BTreeSet::from(["0".into(), "4".into(), "unspecified".into()])
+        BTreeSet::from(["0", "4", "5", "6", "unspecified"].map(String::from))
     );
-    assert_eq!(
-        b.ranks(),
-        BTreeSet::from(["0".into(), "unspecified".into()])
-    );
+    assert_eq!(b.ranks(), b_ranks);
     assert_eq!(
         [a.total(RECEIVED), a.total(ADMITTED), a.total(REJECTED)],
         [7.0, 4.0, 3.0]

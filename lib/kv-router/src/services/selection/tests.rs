@@ -70,7 +70,7 @@ struct WorkerIdScorer;
 
 impl WorkerScorer for WorkerIdScorer {
     fn score(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -86,7 +86,7 @@ struct LowestCostPicker;
 
 impl WorkerPicker for LowestCostPicker {
     fn pick(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -104,7 +104,7 @@ struct NonFiniteScorer;
 
 impl WorkerScorer for NonFiniteScorer {
     fn score(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -120,7 +120,7 @@ struct InvalidRowPicker;
 
 impl WorkerPicker for InvalidRowPicker {
     fn pick(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -132,7 +132,7 @@ struct RejectAllFilter;
 
 impl WorkerFilter for RejectAllFilter {
     fn keep(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         _candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
@@ -144,7 +144,7 @@ struct RejectWorker(WorkerId);
 
 impl WorkerFilter for RejectWorker {
     fn keep(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {

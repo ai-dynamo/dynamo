@@ -363,7 +363,7 @@ mod tests {
 
     impl WorkerPicker for NeverPicker {
         fn pick(
-            &mut self,
+            &self,
             _context: &WorkerSelectionContext<'_>,
             _input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {

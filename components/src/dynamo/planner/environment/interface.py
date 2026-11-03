@@ -13,7 +13,12 @@ from __future__ import annotations
 from typing import Optional, Protocol
 
 from dynamo.planner.config.defaults import TargetReplica
-from dynamo.planner.core.types import FpmObservations, TrafficObservation
+from dynamo.planner.core.types import (
+    BatchDrainLimitDecision,
+    BatchSchedulingObservation,
+    FpmObservations,
+    TrafficObservation,
+)
 from dynamo.planner.environment.state import DeploymentState
 from dynamo.planner.monitoring.traffic_metrics import Metrics
 
@@ -29,6 +34,24 @@ class RuntimeNamespaceSource(Protocol):
 
     async def refresh_runtime_namespace(self) -> bool:
         """Return True when runtime-backed providers should rebind."""
+        pass
+
+
+class BatchSchedulingProvider(Protocol):
+    """Lifecycle-owned batch observation and actuation boundary."""
+
+    async def initialize(self) -> None:
+        pass
+
+    async def collect(self) -> BatchSchedulingObservation:
+        pass
+
+    async def apply_drain_limits(
+        self, decisions: list[BatchDrainLimitDecision]
+    ) -> None:
+        pass
+
+    async def shutdown(self) -> None:
         pass
 
 
@@ -62,8 +85,16 @@ class PlannerEnvironment(Protocol):
     def collect_fpm(self) -> FpmObservations:
         pass
 
+    async def collect_batch_scheduling(self) -> BatchSchedulingObservation:
+        pass
+
     async def apply_scaling(
         self, targets: list[TargetReplica], blocking: bool = False
+    ) -> None:
+        pass
+
+    async def apply_batch_drain_limits(
+        self, decisions: list[BatchDrainLimitDecision]
     ) -> None:
         pass
 
