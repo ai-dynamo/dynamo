@@ -1118,9 +1118,9 @@ mod tests {
             let cancelled = self.0.clone();
             let response = async_stream::stream! {
                 yield Annotated::from_data(LLMEngineOutput {
-                    disaggregated_params: Some(serde_json::json!({
+                    disaggregated_params: Some(Box::new(serde_json::json!({
                         "bootstrap_host": "127.0.0.1", "bootstrap_port": 1, "bootstrap_room": 7,
-                    })),
+                    }))),
                     ..Default::default()
                 });
                 worker_context.stopped().await;
@@ -1348,9 +1348,9 @@ mod tests {
             let held = self.held.clone();
             let response = async_stream::stream! {
                 yield Annotated::from_data(LLMEngineOutput {
-                    disaggregated_params: Some(serde_json::json!({
+                    disaggregated_params: Some(Box::new(serde_json::json!({
                         "bootstrap_host": "127.0.0.1", "bootstrap_port": 1, "bootstrap_room": 7,
-                    })),
+                    }))),
                     ..Default::default()
                 });
                 tokio::select! {

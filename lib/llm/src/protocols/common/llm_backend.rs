@@ -128,6 +128,8 @@ pub struct TopLogprob {
 }
 pub type TopLogprobs = Vec<Vec<TopLogprob>>; // num_tokens x top_logprobs
 
+/// Backend's output, one stream item per token or chunk. As in [`LLMEngineOutput`], the large
+/// fields that are `None` on the default path are boxed.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct BackendOutput {
     /// New token_ids generated from the LLM Engine
@@ -173,32 +175,32 @@ pub struct BackendOutput {
     /// encoded `LlmDisaggregatedParams`). Dynamo does NOT inject framework
     /// metadata into this field — use `worker_trace_link` instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub disaggregated_params: Option<serde_json::Value>,
+    pub disaggregated_params: Option<Box<serde_json::Value>>,
 
     /// Multimodal encoder handoff payload (object-only by contract).
     /// Set by Encode workers on their terminal chunk; consumed by the
     /// frontend and threaded onto the downstream PreprocessedRequest.
     /// Engine-opaque; framework does not inspect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub encoder_result: Option<serde_json::Value>,
+    pub encoder_result: Option<Box<serde_json::Value>>,
 
     /// Framework-owned link to the prefill worker's span. Propagated
     /// alongside the engine's `disaggregated_params` so the decode worker
     /// can record an OTel `Link` on its `engine.generate` span. Engines
     /// should NOT read or write this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_trace_link: Option<crate::protocols::common::preprocessor::TraceLink>,
+    pub worker_trace_link: Option<Box<crate::protocols::common::preprocessor::TraceLink>>,
 
     /// Opaque engine data passed through from the backend worker to the response.
     /// Dynamo does not inspect this field; it is serialized as-is into `nvext.engine_data`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub engine_data: Option<serde_json::Value>,
+    pub engine_data: Option<Box<serde_json::Value>>,
 
     /// Router-computed data handed back to the frontend (e.g. per-request timing from
     /// a standalone router) so it joins this request's trace/metrics. Dynamo-internal,
     /// consumed by the frontend and not surfaced to clients. See [`RoutingData`](crate::protocols::common::timing::RoutingData).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing_data: Option<crate::protocols::common::timing::RoutingData>,
+    pub routing_data: Option<Box<crate::protocols::common::timing::RoutingData>>,
 
     /// Frontend-only decoder checkpoint for a possible migration retry. Its serialized
     /// representation remains the historical optional `jailed_text` string; pending token
@@ -215,6 +217,10 @@ pub struct BackendOutput {
 ///
 /// This is the minimal raw output from the LLM engine. The Backend may then apply multiple
 /// levels of post-processing before the BackendOutput is returns
+///
+/// It is a stream item, moved several times per token, so the large fields that are `None` on
+/// the default path are boxed: `None` costs a pointer, not the field. A `Box` serializes as the
+/// value it holds, so the wire is unchanged.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct LLMEngineOutput {
     // new token_ids
@@ -264,7 +270,7 @@ pub struct LLMEngineOutput {
 
     /// Disaggregated execution parameters (for prefill/decode separation)
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub disaggregated_params: Option<serde_json::Value>,
+    pub disaggregated_params: Option<Box<serde_json::Value>>,
 
     /// Multimodal encoder handoff payload (object-only by contract).
     /// Set by Encode workers on their terminal chunk via
@@ -272,18 +278,18 @@ pub struct LLMEngineOutput {
     /// through to `BackendOutput.encoder_result`. Engine-opaque payload;
     /// framework does not inspect or mutate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub encoder_result: Option<serde_json::Value>,
+    pub encoder_result: Option<Box<serde_json::Value>>,
 
     /// Framework-owned link to the prefill worker's span (cross-process
     /// trace linking on disagg requests). Set by the framework on the
     /// prefill terminal chunk; consumed by the decode adapter. Engines
     /// should NOT read or write this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_trace_link: Option<crate::protocols::common::preprocessor::TraceLink>,
+    pub worker_trace_link: Option<Box<crate::protocols::common::preprocessor::TraceLink>>,
 
     /// Additional arguments for extensibility
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extra_args: Option<serde_json::Value>,
+    pub extra_args: Option<Box<serde_json::Value>>,
 
     // Token usage information
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -292,12 +298,12 @@ pub struct LLMEngineOutput {
     /// Opaque engine data passed through from the backend worker to the response.
     /// Dynamo does not inspect this field; it is serialized as-is into `nvext.engine_data`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub engine_data: Option<serde_json::Value>,
+    pub engine_data: Option<Box<serde_json::Value>>,
 
     /// Router-computed data handed back to the frontend (e.g. standalone-router timing).
     /// Dynamo-internal; consumed by the frontend. See [`RoutingData`](crate::protocols::common::timing::RoutingData).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing_data: Option<crate::protocols::common::timing::RoutingData>,
+    pub routing_data: Option<Box<crate::protocols::common::timing::RoutingData>>,
 
     /// Frontend-only decoder checkpoint for a possible migration retry. Engines never set
     /// it; `Backend` populates it after worker deserialization. The legacy optional-string
@@ -431,7 +437,7 @@ impl LLMEngineOutput {
             stop_reason: None,
             index: Some(0),
             disaggregated_params: None,
-            encoder_result: Some(serde_json::Value::Object(encoder_result)),
+            encoder_result: Some(Box::new(serde_json::Value::Object(encoder_result))),
             worker_trace_link: None,
             extra_args: None,
             completion_usage: None,
@@ -577,6 +583,17 @@ mod tests {
         );
     }
 
+    /// The outputs are stream items, moved several times per token: their size is a cost
+    /// per item. A field that is `None` on the default path and larger than a pointer is held
+    /// in a `Box`. Raise these limits only with a measured reason.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn engine_and_backend_outputs_stay_small() {
+        use dynamo_runtime::protocols::annotated::Annotated;
+        assert!(std::mem::size_of::<Annotated<LLMEngineOutput>>() <= 632);
+        assert!(std::mem::size_of::<Annotated<BackendOutput>>() <= 592);
+    }
+
     /// Decoder checkpoints retain the legacy optional-string wire shape while keeping
     /// pending token IDs strictly in process.
     #[test]
@@ -632,7 +649,7 @@ mod tests {
         };
 
         let bootstrap = LLMEngineOutput {
-            disaggregated_params: Some(serde_json::json!({"bootstrap_room": 7})),
+            disaggregated_params: Some(Box::new(serde_json::json!({"bootstrap_room": 7}))),
             ..output(vec![], None)
         };
         assert_eq!(bootstrap.admission_output(), ResponseOutput::INTERIM);
@@ -644,7 +661,7 @@ mod tests {
                 prompt_tokens_details: None,
                 completion_tokens_details: None,
             }),
-            disaggregated_params: Some(serde_json::json!("dummy")),
+            disaggregated_params: Some(Box::new(serde_json::json!("dummy"))),
             ..output(vec![42], None)
         };
         assert_eq!(early_usage.admission_output(), classified(true, false));
@@ -700,7 +717,7 @@ mod tests {
             .as_ref()
             .expect("encoder_result must be set");
         assert!(result.is_object(), "encoder_result must be a JSON object");
-        assert_eq!(result, &payload);
+        assert_eq!(**result, payload);
         // Sibling Option fields stay None on the producer terminal.
         assert!(chunk.disaggregated_params.is_none());
         assert!(chunk.worker_trace_link.is_none());

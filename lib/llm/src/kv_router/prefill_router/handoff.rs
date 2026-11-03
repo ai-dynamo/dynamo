@@ -30,7 +30,7 @@ pub(super) struct PrefillTask(JoinHandle<Result<PrefillOutput, PrefillError>>);
 
 /// Prefill's output as a stream item tagged with [`PREFILL_OUTPUT_ANNOTATION`].
 fn output_item(output: PrefillOutput) -> Option<Annotated<LLMEngineOutput>> {
-    let engine_data = Some(output?);
+    let engine_data = Some(Box::new(output?));
     Some(Annotated {
         event: Some(PREFILL_OUTPUT_ANNOTATION.to_string()),
         ..Annotated::from_data(LLMEngineOutput {
@@ -578,7 +578,7 @@ mod tests {
             }
             let item = response.next().await.unwrap();
             assert_eq!(item.event.as_deref(), Some(PREFILL_OUTPUT_ANNOTATION));
-            assert_eq!(item.data.unwrap().engine_data, Some(output));
+            assert_eq!(item.data.unwrap().engine_data, Some(Box::new(output)));
             assert!(
                 response
                     .next()
@@ -639,7 +639,7 @@ mod tests {
         tx.send(Ok(Some(output.clone()))).unwrap();
         let item = terminal.await.unwrap();
         assert_eq!(item.event.as_deref(), Some(PREFILL_OUTPUT_ANNOTATION));
-        assert_eq!(item.data.unwrap().engine_data, Some(output));
+        assert_eq!(item.data.unwrap().engine_data, Some(Box::new(output)));
         assert!(
             response
                 .next()
@@ -699,7 +699,7 @@ mod tests {
                 assert_eq!(outputs.len(), 1);
                 let output = outputs.into_iter().next().unwrap();
                 assert_eq!(output.event.as_deref(), Some(PREFILL_OUTPUT_ANNOTATION));
-                assert_eq!(output.data.unwrap().engine_data, Some(expected));
+                assert_eq!(output.data.unwrap().engine_data, Some(Box::new(expected)));
             } else {
                 assert!(outputs.is_empty());
             }
