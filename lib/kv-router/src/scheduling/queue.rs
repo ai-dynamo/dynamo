@@ -222,8 +222,7 @@ impl ClassTimers {
     }
 }
 
-/// Scheduler work that arrives during an optional overlap refresh. It is handled at once, in a
-/// new actor turn, and the refresh keeps running.
+/// Scheduler work that arrives during an optional overlap refresh.
 #[allow(clippy::large_enum_variant)]
 enum RefreshEvent {
     ClassTimer,
@@ -231,27 +230,24 @@ enum RefreshEvent {
     Command(AdmissionCommand),
 }
 
-/// How the optional overlap refresh of an extracted candidate ended. A transient return value,
-/// never stored, so its refreshed scores stay unboxed.
+/// How the optional overlap refresh of an extracted candidate ended. Every ending but `Finished`
+/// drops the refresh unfinished, and a candidate still dispatched keeps its queued scores. A
+/// transient return value, never stored, so its refreshed scores stay unboxed.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum RefreshEnd {
-    /// The refresh finished: the scores to use, or `None` to keep the queued ones.
+    /// The scores to use, or `None` to keep the queued ones.
     Finished(Option<RefreshedOverlap>),
-    /// The candidate's due time passed first. The refresh was dropped unfinished, and the
-    /// candidate keeps its queued scores.
+    /// The candidate's due time passed first.
     DueTimePassed,
-    /// The candidate's response closed first. The refresh was dropped unfinished, and the
-    /// candidate keeps its queued scores.
+    /// The candidate's response closed first.
     ResponseClosed,
     /// The caller released the candidate's lifecycle first. The candidate leaves unanswered,
     /// as a queued entry that cleanup removes does.
     Released,
-    /// Every command sender is gone. The refresh was dropped unfinished, and the actor stops
-    /// once the candidate is settled.
+    /// Every command sender is gone. The actor stops once the candidate is settled.
     Shutdown,
-    /// The refresh outlasted [`OVERLAP_REFRESH_TIMEOUT`] and was dropped unfinished. The
-    /// candidate keeps its queued scores.
+    /// The refresh outlasted [`OVERLAP_REFRESH_TIMEOUT`].
     TimedOut,
 }
 
@@ -1586,15 +1582,14 @@ impl<
         }
     }
 
-    /// Starts an actor turn: one per command or wakeup, including one handled during an
-    /// overlap refresh. Rows prepared in the previous turn are dropped with it; a request
-    /// still queued rebuilds them when admitted.
+    /// One turn per command or wakeup, including one handled during an overlap refresh. Rows
+    /// prepared in the previous turn are dropped; a request still queued rebuilds them when
+    /// admitted.
     fn begin_turn(&mut self) {
         self.turn = self.turn.wrapping_add(1);
         self.turn_prepared = None;
     }
 
-    /// Runs the drain a command calls for, then sends the command's reply.
     async fn drain_after_command(&mut self, drain: Drain, reply: Option<CommandReply>) {
         match drain {
             Drain::None => {
@@ -1607,8 +1602,7 @@ impl<
         }
     }
 
-    /// Applies one command without draining. Returns the drain the command calls for and
-    /// the reply to send once that drain completes.
+    /// Applies one command without draining: returns the drain it calls for and its reply.
     fn apply_command(
         &mut self,
         command: AdmissionCommand,
@@ -1787,19 +1781,14 @@ impl<
         true
     }
 
-    /// Inserts an arrival into its class queue once the entries due by `now` have left, so the
-    /// class limits do not count them. Due times come before the limits throughout. The
-    /// arrival's own due time is judged right before each insertion attempt: the sweep, or a
-    /// class cleanup below, can last long enough for it to become due, and it is then rejected
-    /// before it can enter the queue and count as pending. When a limit refuses the arrival,
-    /// due times are judged again at a fresh instant, the arrival's own first and then its
-    /// class's. Class entries due by then leave and the limits judge again. Each pass removes
-    /// at least one existing entry and nothing joins the class meanwhile, so this ends; a
-    /// rejection stands only once no entry of the class was due when it was checked.
+    /// Inserts an arrival once the entries due by `now` have left, so the class limits do not
+    /// count them. The arrival's own due time is judged at a fresh instant right before each
+    /// insertion attempt and, ahead of its class's, after a limit refusal. A refusal stands only
+    /// once no entry of the class was due; each retry removes an existing entry and nothing joins
+    /// the class meanwhile, so this ends.
     ///
-    /// A refused arrival is answered here and counted once, or dropped uncounted when its
-    /// receiver is already closed at the check, as booking drops it. A queued arrival is not
-    /// yet counted as pending or armed on its class timer: the caller does both.
+    /// A refused arrival is answered and counted here, or dropped uncounted when its receiver is
+    /// already closed. The caller counts a queued arrival as pending and arms its class timer.
     fn insert_arrival(
         &mut self,
         queue_metadata: QueueMetadata,
@@ -2081,8 +2070,7 @@ impl<
         self.drain_ready(None).await;
     }
 
-    /// Rechecks every blocked lane and drains ready work, then sends `reply`, as
-    /// [`Self::drain_ready`] does.
+    /// Rechecks every blocked lane, then drains as [`Self::drain_ready`] does.
     async fn handle_update(&mut self, reply: Option<CommandReply>) {
         self.expire_due_classes(Instant::now());
         self.recheck_capacity_updates(true);
@@ -2097,10 +2085,9 @@ impl<
         self.drain_ready(reply).await;
     }
 
-    /// Admits ready work until no lane head can dispatch. `reply` belongs to the command
-    /// that started the drain. It is sent when the drain ends or before the drain first awaits
-    /// an overlap refresh, never held across that await; a command that arrives during a
-    /// refresh is answered as soon as it is applied (see [`Self::refresh_candidate`]).
+    /// Admits ready work until no lane head can dispatch. `reply`, from the command that started
+    /// the drain, is sent before the first refresh await or when the drain ends, never held across
+    /// that await.
     async fn drain_ready(&mut self, mut reply: Option<CommandReply>) {
         // Continuation draining stays actor-local; never self-send through the
         // bounded command channel while processing an update.
@@ -2248,17 +2235,12 @@ impl<
         }
     }
 
-    /// Runs the optional overlap refresh of an extracted candidate without blocking the actor.
-    /// Class timers, capacity wakes, and commands that arrive meanwhile are handled at once, each
-    /// in a new actor turn, and the refresh keeps running, so ordinary scheduler traffic never
-    /// abandons it. A command applied here is answered at once, so no reply waits on the refresh;
-    /// the drain it calls for is the one that resumes once the candidate is settled.
-    ///
-    /// The candidate has left its class queue, so expiry no longer covers it, and the work handled
-    /// here can rearm its class timer without it. The refresh therefore races the candidate's own
-    /// due time directly. That due time, the candidate's response closing, the cleanup of its
-    /// lifecycle, the loss of every command sender, or the refresh timeout (see
-    /// [`OverlapScoresRefresh`]) ends the refresh early and drops it unfinished.
+    /// Runs the optional overlap refresh of an extracted candidate while class timers, capacity
+    /// wakes, and commands are handled, each in a new actor turn. A command applied here is
+    /// answered at once; the drain it calls for is the one that resumes. The candidate has left
+    /// its class queue, so class expiry no longer covers it: the refresh races its own due time.
+    /// That due time, its response closing, its lifecycle cleanup, shutdown, or the refresh
+    /// timeout (see [`OverlapScoresRefresh`]) ends the refresh early.
     async fn refresh_candidate(
         &mut self,
         queued: &mut QueuedRequest,

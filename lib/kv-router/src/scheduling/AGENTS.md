@@ -72,18 +72,13 @@ sequenceDiagram
 - Each class queue has its own expiry timer (`ClassTimers`), armed at that class's earliest
   enforced due time. When it fires, the actor rejects that class's overdue entries, spends no
   DRR credit, and rearms the class at its next due time. A due time is also checked before
-  enqueue limits, right before each queue insertion attempt (the expiry sweep or a limit cleanup
-  can outlast the first check, and an arrival due by then never enters the queue or its pending
-  counts), before each extraction, after an optional overlap refresh, right before worker
-  selection, and right before booking or untracked delivery. When a limit rejects an arrival,
-  due times are judged again at a fresh instant: the arrival's own first, then its class's. Class
-  entries due by then leave and the limits judge again; a rejection stands only once no entry of
-  the class was due, and each repeat removes an existing entry, so it ends. Expiry that leaves a
-  class with entries can expose a head that runs, so an enqueue that expired entries reports ready
-  work even when it refuses the arrival, and the actor drains. A
-  deadline or queue-limit rejection whose response receiver is already closed at the rejection
-  check is dropped uncounted, the precedence booking uses; a receiver closed after the check can
-  still be counted.
+  enqueue limits, right before each queue insertion attempt, before each extraction, after an
+  optional overlap refresh, right before worker selection, and right before booking or untracked
+  delivery. A limit refusal stands only after due times are judged again at a fresh instant (see
+  `SchedulerQueueActor::insert_arrival`). Expiry that leaves a class with entries can expose a
+  head that runs, so an enqueue that expired entries reports ready work even when it refuses the
+  arrival, and the actor drains. A deadline or queue-limit rejection whose response receiver is
+  already closed at the rejection check is dropped uncounted, the precedence booking uses.
   All deadline math uses `tokio::time::Instant` so paused-clock tests stay coherent.
 - `SchedulerQueueActor::admit_one` performs final worker selection and reserves worker capacity after either path.
 - A single-class profile still uses `PolicyQueue`, but DRR has no cross-class effect.
@@ -133,17 +128,12 @@ PolicyClassQueue("agents")
   capacity before responding.
   Failed response delivery must release that capacity. Do not bypass this for
   normal scheduling.
-- The optional overlap refresh is the only await inside a drain. Class timers, capacity wakes,
-  and commands that arrive during it are handled at once, each in a new actor turn, and the
-  refresh keeps running: ordinary scheduler traffic never abandons it. A command applied there
-  is answered at once, and the drain it calls for resumes once the candidate is settled. The
-  candidate has left its class queue, so the refresh races the candidate's own due time
-  directly; that due time, the candidate's response closing, the cleanup of its lifecycle, the
-  loss of every command sender, or the refresh timeout (`OVERLAP_REFRESH_TIMEOUT`, documented on
-  `OverlapScoresRefresh`) ends the refresh early. The candidate is then settled against its
-  due time with its queued scores, or leaves unanswered when its lifecycle was released, as a
-  queued entry removed by cleanup does. Rows prepared before a turn that starts during the
-  refresh are not used after it. Never hold a command reply across that await.
+- The optional overlap refresh is the only await inside a drain. Scheduler traffic that arrives
+  during it is handled at once, each event in a new actor turn, and never abandons it; rows
+  prepared before such a turn are not used after it. Never hold a command reply across that
+  await. The candidate has left its class queue, so class expiry does not cover it: the refresh
+  races the candidate's own due time (see `SchedulerQueueActor::refresh_candidate`, and
+  `OverlapScoresRefresh` for the refresh timeout).
 - Do not remove or weaken `admission_gate` without proving selection and
   capacity reservation cannot assign more work than the workers can hold.
 - Potential-load projection must go through
