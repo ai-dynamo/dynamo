@@ -22,7 +22,7 @@ use super::{
     start_subscriber,
 };
 use crate::discovery::KvSourceMembershipWatch;
-use crate::kv_router::{KvEventSourceRequirement, needs_kv_index};
+use crate::kv_router::KvEventSourceRequirement;
 
 pub(crate) struct RuntimeIngressArgs<'a> {
     pub endpoint: &'a Endpoint,
@@ -63,7 +63,7 @@ impl RuntimeIngress {
         } = args;
         let component = endpoint.component();
         let index_required =
-            needs_kv_index(worker_inputs) || kv_event_source_requirement.requires_source();
+            worker_inputs.reads_kv_index() || kv_event_source_requirement.requires_source();
         let indexer = if index_required {
             super::build(
                 component,

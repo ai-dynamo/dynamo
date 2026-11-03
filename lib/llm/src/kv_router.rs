@@ -401,13 +401,6 @@ pub(crate) fn to_worker_selection_session_context(
     .with_agent_headers(agent_headers.clone())
 }
 
-/// Whether a policy reads the KV index: its overlaps (`CACHE`) or the prefixes
-/// workers could fetch (`KV_TRANSFER`). Each component still reads only the
-/// inputs it declares.
-pub(crate) fn needs_kv_index(inputs: WorkerInputs) -> bool {
-    inputs.contains(WorkerInputs::CACHE) || inputs.contains(WorkerInputs::KV_TRANSFER)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KvEventSourceRequirement {
     NotRequired,
@@ -436,7 +429,7 @@ impl KvEventSourceRequirement {
         {
             return Self::DecodeTransferSource;
         }
-        if !needs_kv_index(inputs) {
+        if !inputs.reads_kv_index() {
             // GPU advisory routing must count the target's retained rows even
             // when execution selection is load-only. Native Device eviction
             // does not remove that inventory or make it new prefill savings.
