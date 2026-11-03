@@ -99,22 +99,28 @@ class CandidateRecordLike(Protocol):
     """The subset of aisimulate's ``CandidateRecord`` this adapter reads (read-only)."""
 
     @property
-    def candidate_id(self) -> str: ...
+    def candidate_id(self) -> str:
+        ...
 
     @property
-    def status(self) -> Any: ...  # aisimulate.sweeper.result.CandidateStatus
+    def status(self) -> Any:
+        ...  # aisimulate.sweeper.result.CandidateStatus
 
     @property
-    def score(self) -> float | None: ...
+    def score(self) -> float | None:
+        ...
 
     @property
-    def used_gpus(self) -> int | None: ...
+    def used_gpus(self) -> int | None:
+        ...
 
     @property
-    def config(self) -> Mapping[str, Any]: ...
+    def config(self) -> Mapping[str, Any]:
+        ...
 
     @property
-    def metrics(self) -> Mapping[str, float | None]: ...
+    def metrics(self) -> Mapping[str, float | None]:
+        ...
 
 
 def _plain(value: Any) -> Any:
