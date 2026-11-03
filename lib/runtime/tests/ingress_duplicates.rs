@@ -19,10 +19,12 @@ use tokio::sync::{Semaphore, mpsc};
 use dynamo_runtime::{
     engine::{AsyncEngine, AsyncEngineContextProvider},
     pipeline::{
-        ManyOut, PipelineError, ResponseStream, SingleIn,
-        network::{Ingress, PushWorkHandler},
+        ManyOut, PipelineError, ResponseStream, SegmentSource, ServiceBackend, ServiceEngine,
+        SingleIn, Source,
+        network::{Ingress, PushWorkHandler, SerdeIngressPayloadAdapter},
     },
     protocols::annotated::Annotated,
+    telemetry::LifecycleOperationRole,
 };
 
 mod common;
@@ -62,6 +64,8 @@ impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error> for GatedE
     }
 }
 
+type TestEngine = ServiceEngine<SingleIn<String>, ManyOut<Annotated<String>>>;
+
 struct Worker {
     ingress: Arc<dyn PushWorkHandler>,
     address: String,
@@ -72,15 +76,19 @@ struct Worker {
 
 impl Worker {
     fn start() -> Self {
+        Self::start_with(|engine| Ingress::for_engine(engine).unwrap())
+    }
+
+    /// A worker whose ingress `build` makes around the gated engine.
+    fn start_with(build: impl FnOnce(TestEngine) -> Arc<dyn PushWorkHandler>) -> Self {
         let (tx, arrivals) = mpsc::unbounded_channel();
         let call_gate = Arc::new(Semaphore::new(0));
         let stream_gate = Arc::new(Semaphore::new(0));
-        let ingress = Ingress::for_engine(Arc::new(GatedEngine {
+        let ingress = build(Arc::new(GatedEngine {
             arrivals: tx,
             call_gate: call_gate.clone(),
             stream_gate: stream_gate.clone(),
-        }))
-        .unwrap();
+        }));
         Self {
             ingress,
             address: start_response_peer(),
@@ -188,4 +196,65 @@ async fn dropped_request_frees_its_id() {
         .await
         .expect("a dropped request must free its id");
     assert_eq!(worker.arrival().await, ANSWER);
+}
+
+/// Every constructor serves a request and refuses a duplicate inside the engine
+/// call, including those that take a `SegmentSource` pipeline.
+#[tokio::test]
+async fn every_constructor_serves_and_refuses_duplicates() {
+    fn pipeline(
+        engine: TestEngine,
+    ) -> Arc<SegmentSource<SingleIn<String>, ManyOut<Annotated<String>>>> {
+        let frontend = SegmentSource::new();
+        frontend
+            .link(ServiceBackend::from_engine(engine))
+            .unwrap()
+            .link_terminal(frontend)
+            .unwrap()
+    }
+    type Build = fn(TestEngine) -> Arc<dyn PushWorkHandler>;
+    let constructors: [(&str, Build); 7] = [
+        ("for_engine", |engine| Ingress::for_engine(engine).unwrap()),
+        ("for_engine_with_lifecycle_role", |engine| {
+            Ingress::for_engine_with_lifecycle_role(engine, LifecycleOperationRole::Worker).unwrap()
+        }),
+        ("for_engine_with_adapter", |engine| {
+            Ingress::for_engine_with_adapter(engine, SerdeIngressPayloadAdapter).unwrap()
+        }),
+        ("for_engine_with_adapter_and_lifecycle_role", |engine| {
+            Ingress::for_engine_with_adapter_and_lifecycle_role(
+                engine,
+                SerdeIngressPayloadAdapter,
+                LifecycleOperationRole::Worker,
+            )
+            .unwrap()
+        }),
+        ("for_pipeline", |engine| {
+            Ingress::for_pipeline(pipeline(engine)).unwrap()
+        }),
+        ("link", |engine| Ingress::link(pipeline(engine)).unwrap()),
+        ("attach", |engine| {
+            let ingress = Ingress::new();
+            ingress.attach(pipeline(engine)).unwrap();
+            ingress
+        }),
+    ];
+    for (name, build) in constructors {
+        let mut worker = Worker::start_with(build);
+        worker
+            .send("id", ANSWER)
+            .await
+            .unwrap_or_else(|error| panic!("{name}: request failed: {error:?}"));
+        assert_eq!(worker.arrival().await, ANSWER, "{name}");
+
+        let first = worker.spawn("same-id", PARK_IN_CALL);
+        assert_eq!(worker.arrival().await, PARK_IN_CALL, "{name}");
+        let error = worker
+            .send("same-id", ANSWER)
+            .await
+            .expect_err("a duplicate inside the engine call must be refused");
+        assert!(is_duplicate_id(&error, "same-id"), "{name}: {error:?}");
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled(), "{name}");
+    }
 }
