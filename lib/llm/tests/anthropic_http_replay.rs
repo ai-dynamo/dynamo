@@ -351,20 +351,39 @@ async fn fragmented_tool_arguments_close_after_all_deltas() {
     .await;
 }
 
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
 #[tokio::test]
 #[serial]
-async fn finish_signal_publishes_tool_block_before_usage_tail() {
+async fn completed_tool_block_precedes_gated_tail(#[case] per_tool_completion: bool) {
     temp_env::async_with_vars(ENV, async {
-        let script = load_agent_fixture("fragmented-tool.sse").await.unwrap();
-        let split_at = script
-            .iter()
-            .position(|chunk| {
-                chunk
-                    .data
-                    .as_ref()
-                    .is_some_and(|data| data.inner.usage.is_some())
-            })
-            .expect("fragmented-tool fixture has no usage chunk");
+        let fixture = if per_tool_completion {
+            "parallel-tools.sse"
+        } else {
+            "fragmented-tool.sse"
+        };
+        let mut script = load_agent_fixture(fixture).await.unwrap();
+        let split_at = if per_tool_completion {
+            script[1].data.as_mut().unwrap().tool_call_completion.push(
+                dynamo_llm::protocols::openai::chat_completions::ToolCallCompletion {
+                    choice_index: 0,
+                    tool_index: 0,
+                    complete: true,
+                },
+            );
+            2
+        } else {
+            script
+                .iter()
+                .position(|chunk| {
+                    chunk
+                        .data
+                        .as_ref()
+                        .is_some_and(|data| data.inner.usage.is_some())
+                })
+                .expect("fragmented-tool fixture has no usage chunk")
+        };
         let (svc, gate) = HarnessService::start_with_gated_tail(script, split_at).await;
         let response = post_messages(
             &svc,
@@ -372,7 +391,7 @@ async fn finish_signal_publishes_tool_block_before_usage_tail() {
                 "model": MODEL,
                 "max_tokens": 128,
                 "stream": true,
-                "tools": [tool("list_directory")],
+                "tools": [tool(if per_tool_completion { "read_file" } else { "list_directory" })],
                 "messages": [{"role": "user", "content": "List /tmp"}]
             }),
         )
@@ -398,14 +417,18 @@ async fn finish_signal_publishes_tool_block_before_usage_tail() {
             }
         })
         .await
-        .expect("tool block completion did not arrive before the gated usage tail");
+        .expect("tool block completion did not arrive before the gated tail");
 
         assert!(!saw_message_delta);
         gate.release();
-        while let Some(bytes) = body.next().await {
-            let bytes = bytes.expect("failed to drain response SSE bytes");
-            parser.push(&bytes).expect("failed to parse response SSE");
-        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(bytes) = body.next().await {
+                let bytes = bytes.expect("failed to drain response SSE bytes");
+                parser.push(&bytes).expect("failed to parse response SSE");
+            }
+        })
+        .await
+        .expect("response did not finish after releasing the tail");
 
         let raw = parser.into_body().expect("response SSE was not UTF-8");
         assert_eq!(raw.matches("data: [DONE]").count(), 1);
@@ -415,7 +438,7 @@ async fn finish_signal_publishes_tool_block_before_usage_tail() {
                 .iter()
                 .filter(|event| event.event == "content_block_stop")
                 .count(),
-            1
+            if per_tool_completion { 2 } else { 1 }
         );
         assert_eq!(
             events
