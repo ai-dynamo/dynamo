@@ -622,18 +622,21 @@ def run_migration_test(
             request_thread.is_alive()
         ), "Request completed before the worker fault was injected"
         if expected_output_prefix is not None:
-            output_before_fault = "".join(
+            chunks_before_fault = [
                 content
                 for content, _ in response.observations
                 if isinstance(content, str)
-            )
+            ]
+            output_before_fault = "".join(chunks_before_fault)
             assert expected_output_prefix.startswith(output_before_fault), (
                 "Fault-free reference does not match the output emitted before "
                 "the fault; the content oracle is not stable"
             )
             assert len(expected_output_prefix) >= len(output_before_fault) + 32, (
                 "Fault-free stable prefix must cover at least 32 characters "
-                "after the fault boundary"
+                f"after the fault boundary (reference {len(expected_output_prefix)} "
+                f"characters, snapshot {len(output_before_fault)} characters in "
+                f"{len(chunks_before_fault)} chunks)"
             )
 
     if before_worker_fault is not None:
