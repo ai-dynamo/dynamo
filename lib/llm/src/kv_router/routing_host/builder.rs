@@ -22,7 +22,10 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 
-use super::{BuiltinWorkerSelector, HostedOccupancy, LoraRouting, RoutingHost, RoutingPolicy};
+use super::{
+    BuiltinWorkerSelector, HostedOccupancy, RoutingHost, RoutingPolicy,
+    candidate_policy::{CandidatePolicy, LegacyLoraPolicy},
+};
 use crate::{
     kv_router::{KvRouter, RoutingLoadContext, metrics::RouterRequestMetrics},
     lora::{LoadEstimator, LoraFilter},
@@ -51,6 +54,7 @@ pub struct RoutingHostBuilder {
     load_context: Option<Arc<RoutingLoadContext>>,
     affinity: Option<AffinityCoordinator>,
     lora: Option<(Arc<LoraFilter>, Arc<LoadEstimator>)>,
+    pub(crate) candidate_policy: Option<Arc<dyn CandidatePolicy>>,
     dispatch: Option<LlmDispatch>,
     multimodal_cache: Option<MultimodalCache>,
 }
@@ -66,6 +70,7 @@ impl RoutingHost {
             load_context: None,
             affinity: None,
             lora: None,
+            candidate_policy: None,
             dispatch: None,
             multimodal_cache: None,
         }
@@ -128,6 +133,7 @@ impl RoutingHostBuilder {
             load_context,
             affinity,
             lora,
+            candidate_policy,
             dispatch,
             multimodal_cache,
         } = self;
@@ -137,6 +143,7 @@ impl RoutingHostBuilder {
             load_context,
             affinity.is_some(),
             lora,
+            candidate_policy,
         )?;
         let (multimodal_cache_indexer, multimodal_cache_key_extractor) = multimodal_cache
             .map_or((None, None), |(indexer, extractor)| {
@@ -167,7 +174,7 @@ enum PolicyInputs {
     Builtin {
         policy: RoutingPolicy,
         load_context: Arc<RoutingLoadContext>,
-        lora: Option<LoraRouting>,
+        candidate_policy: Option<Arc<dyn CandidatePolicy>>,
     },
 }
 
@@ -178,10 +185,11 @@ impl PolicyInputs {
         load_context: Option<Arc<RoutingLoadContext>>,
         has_affinity: bool,
         lora: Option<(Arc<LoraFilter>, Arc<LoadEstimator>)>,
+        candidate_policy: Option<Arc<dyn CandidatePolicy>>,
     ) -> anyhow::Result<Self> {
         match (router_mode, kv_router) {
             (RouterMode::KV, Some(kv_router)) => {
-                if lora.is_some() {
+                if lora.is_some() || candidate_policy.is_some() {
                     anyhow::bail!("LoRA filtering is unsupported with KV routing");
                 }
                 Ok(Self::Kv {
@@ -197,7 +205,7 @@ impl PolicyInputs {
                 let Some(load_context) = load_context else {
                     anyhow::bail!("{mode:?} routing requires a RoutingLoadContext");
                 };
-                if has_affinity && lora.is_some() {
+                if has_affinity && (lora.is_some() || candidate_policy.is_some()) {
                     anyhow::bail!("session affinity and LoRA filtering cannot both be enabled");
                 }
                 let policy = match mode {
@@ -205,16 +213,21 @@ impl PolicyInputs {
                     RouterMode::DeviceAwareWeighted => RoutingPolicy::DeviceAwareWeighted,
                     mode => RoutingPolicy::Builtin(builtin_selector(mode)?),
                 };
-                let lora = match (lora, mode) {
-                    (None, _) => None,
+                let candidate_policy = match (lora, mode) {
+                    (None, _) => candidate_policy,
                     (
                         Some((filter, load_estimator)),
                         RouterMode::RoundRobin | RouterMode::Random,
-                    ) => Some(LoraRouting {
-                        filter,
-                        load_estimator,
-                        selector: builtin_selector(mode)?,
-                    }),
+                    ) => {
+                        if candidate_policy.is_some() {
+                            anyhow::bail!("multiple candidate policies are unsupported");
+                        }
+                        Some(LegacyLoraPolicy::hosted(
+                            filter,
+                            load_estimator,
+                            builtin_selector(mode)?,
+                        ))
+                    }
                     (Some(_), mode) => {
                         anyhow::bail!("LoRA filtering is unsupported with {mode:?} routing")
                     }
@@ -222,7 +235,7 @@ impl PolicyInputs {
                 Ok(Self::Builtin {
                     policy,
                     load_context,
-                    lora,
+                    candidate_policy,
                 })
             }
         }
@@ -255,6 +268,7 @@ fn assemble(
             // and the standalone router create RoutingHost, so this covers both.
             let request_metrics =
                 RouterRequestMetrics::from_component(kv_router.client().endpoint.component());
+            let candidate_policy = kv_router.candidate_policy.clone();
             Ok(RoutingHost {
                 inner,
                 policy: RoutingPolicy::Kv(kv_router),
@@ -262,14 +276,14 @@ fn assemble(
                 session_affinity_mode,
                 affinity,
                 hosted_occupancy: None,
-                lora: None,
+                candidate_policy,
                 routing_context: load_context,
             })
         }
         PolicyInputs::Builtin {
             policy,
             load_context,
-            lora,
+            candidate_policy,
         } => {
             let hosted_occupancy = matches!(
                 &policy,
@@ -287,7 +301,7 @@ fn assemble(
                 session_affinity_mode,
                 affinity,
                 hosted_occupancy,
-                lora,
+                candidate_policy,
                 routing_context: Some(load_context),
             })
         }

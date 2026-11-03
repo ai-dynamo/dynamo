@@ -33,7 +33,6 @@ use crate::{
         KvRouter, metrics::RouterRequestMetrics, request_lease::RequestAttemptRelease,
         to_worker_selection_session_context,
     },
-    lora::{LoadEstimator, LoraFilter},
     preprocessor::PreprocessedRequest,
     protocols::common::{
         FinishReason,
@@ -51,6 +50,7 @@ use crate::{
 mod builder;
 mod builtin;
 mod cancellation;
+pub(crate) mod candidate_policy;
 mod kv;
 mod kv_selection;
 mod occupancy;
@@ -59,10 +59,11 @@ mod request_guard;
 pub use builder::{LlmDispatch, MultimodalCache, RoutingHostBuilder};
 use builtin::BuiltinWorkerSelector;
 use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cleanup_policy};
+use candidate_policy::CandidatePolicy;
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 use occupancy::HostedOccupancy;
 pub(crate) use request_guard::prompt_private_blocks;
-use request_guard::{KvRequestCleanup, LoraLoadGuard, RequestGuard};
+use request_guard::{KvRequestCleanup, RequestGuard};
 
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
 const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
@@ -273,18 +274,6 @@ enum RoutingPolicy {
     DeviceAwareWeighted,
 }
 
-struct LoraRouting {
-    filter: Arc<LoraFilter>,
-    load_estimator: Arc<LoadEstimator>,
-    selector: BuiltinWorkerSelector,
-}
-
-struct LoraSelection {
-    target: u64,
-    allowed_fallback: HashSet<u64>,
-    load_guard: LoraLoadGuard,
-}
-
 struct HostedSelection {
     initial_worker: u64,
     target_constraint: Option<AffinityTarget>,
@@ -312,7 +301,7 @@ pub struct RoutingHost {
     affinity: Option<AffinityCoordinator>,
     session_affinity_mode: SessionAffinityMode,
     hosted_occupancy: Option<HostedOccupancy>,
-    lora: Option<LoraRouting>,
+    candidate_policy: Option<Arc<dyn CandidatePolicy>>,
     /// Retains the shared client, overload state, and cancellation subtree for this host.
     ///
     /// Required for every mode except KV, where the [`KvRouter`] owns the client.
