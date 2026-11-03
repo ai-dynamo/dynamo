@@ -250,6 +250,28 @@ fn sampling_and_stopping_fields_preserve_native_values() {
 }
 
 #[test]
+fn visible_stop_tokens_stop_in_engine_and_return_only_ids() {
+    let mut request = request();
+    request.stop_conditions.stop_token_ids = Some(vec![19]);
+    request.stop_conditions.stop_token_ids_hidden = Some(vec![200002, 199999]);
+    request.stop_conditions.stop_token_ids_visible = Some(vec![200012, 19]);
+    let mapped = build_generate_request(
+        &request,
+        "visible",
+        DisaggregationMode::Aggregated,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        mapped.sampling_params.unwrap().stop_token_ids,
+        vec![19, 200002, 199999, 200012]
+    );
+    // SGLang text trims the stop token.
+    assert_eq!(mapped.return_text, None);
+}
+
+#[test]
 fn optional_controls_distinguish_absence_from_explicit_zero_or_false() {
     for explicit in [false, true] {
         let mut request = request();
@@ -334,6 +356,7 @@ fn values_outside_native_signed_fields_are_rejected() {
         ("token", "token ids must fit in i32"),
         ("stop", "stop token ids must fit in i32"),
         ("hidden_stop", "stop token ids must fit in i32"),
+        ("visible_stop", "stop token ids must fit in i32"),
         ("max_tokens", "max_tokens does not fit in i32"),
         ("min_tokens", "min_tokens does not fit in i32"),
         ("logprobs", "requested logprobs does not fit in i32"),
@@ -346,6 +369,7 @@ fn values_outside_native_signed_fields_are_rejected() {
             "token" => request.token_ids = vec![overflow].into(),
             "stop" => request.stop_conditions.stop_token_ids = Some(vec![overflow]),
             "hidden_stop" => request.stop_conditions.stop_token_ids_hidden = Some(vec![overflow]),
+            "visible_stop" => request.stop_conditions.stop_token_ids_visible = Some(vec![overflow]),
             "max_tokens" => request.stop_conditions.max_tokens = Some(overflow),
             "min_tokens" => request.stop_conditions.min_tokens = Some(overflow),
             "logprobs" => request.output_options.logprobs = Some(overflow),
@@ -411,6 +435,13 @@ fn unsupported_sampling_controls_are_rejected() {
             },
             "include_stop_str_in_output",
         ),
+        (
+            SamplingOptions {
+                logit_bias: Some(std::collections::HashMap::from([(18, -10.0)])),
+                ..Default::default()
+            },
+            "logit_bias",
+        ),
     ] {
         let mut request = request();
         request.sampling_options = options;
@@ -428,7 +459,6 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
         "prompt_embeds",
         "multimodal",
         "mm_processor_kwargs",
-        "visible",
     ] {
         let mut request = request();
         let message = match field {
@@ -447,10 +477,6 @@ fn unsupported_payload_stopping_and_priority_controls_are_rejected() {
             "mm_processor_kwargs" => {
                 request.mm_processor_kwargs = Some(json!({}));
                 "multimodal"
-            }
-            "visible" => {
-                request.stop_conditions.stop_token_ids_visible = Some(vec![42]);
-                "visible stop-token"
             }
             _ => unreachable!(),
         };

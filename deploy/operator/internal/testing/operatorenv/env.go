@@ -25,7 +25,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/client-go/rest"
@@ -317,7 +316,7 @@ type TestEnv struct {
 func newTestEnv(tb testing.TB, rt *runtimeEnv, opts Options) *TestEnv {
 	tb.Helper()
 	name := "operatorenv-" + rand.String(8)
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	ns := &corev1.Namespace{Name: name}
 	if err := rt.client.Create(context.Background(), ns); err != nil {
 		tb.Fatalf("create test namespace %q: %v", name, err)
 	}
@@ -469,7 +468,7 @@ func defaultOperatorConfig(in *configv1alpha1.OperatorConfiguration) *configv1al
 	cfg.Server.HealthProbe.BindAddress = "0"
 	cfg.Server.Webhook.CertProvisionMode = configv1alpha1.CertProvisionModeManual
 	if in == nil || in.GPU.DiscoveryEnabled == nil {
-		cfg.GPU.DiscoveryEnabled = ptr.To(false)
+		cfg.GPU.DiscoveryEnabled = new(false)
 	}
 	return cfg
 }

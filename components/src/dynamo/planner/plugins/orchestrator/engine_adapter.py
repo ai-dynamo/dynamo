@@ -60,13 +60,17 @@ adapter so callers (mode subclasses) have a single entry point.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 from dynamo.common.forward_pass_metrics import encode as _encode_fpm_record
-from dynamo.planner.config.planner_config import resolve_min_endpoint
+from dynamo.planner.config.planner_config import PlannerConfig, resolve_min_endpoint
+from dynamo.planner.monitoring.signal_health import PlannerSignalHealth
 
 if TYPE_CHECKING:
     import grpc.aio
+
+    from dynamo.planner.retune.controller import RetuneController
 
 from dynamo.planner.core.budget import (
     apply_power_budget,
@@ -80,6 +84,7 @@ from dynamo.planner.core.types import (
     BatchSchedulingObservation,
     FpmObservations,
     PlannerEffects,
+    RetuneInputs,
     ScalingDecision,
     ScheduledTick,
     TickInput,
@@ -139,6 +144,11 @@ class OrchestratorEngineAdapter:
     4. ``initial_tick(start_s)`` — get the first scheduled tick.
     5. ``await tick(scheduled_tick, tick_input)`` — repeatedly.
     6. ``await shutdown()`` — release plugin transports.
+
+    When ``config.retune`` is set, the adapter also owns a
+    ``RetuneController`` built from ``retune_inputs``: ``initial_tick``
+    anchors its window schedule, every ``tick`` runs it after the plugin
+    pipeline, and ``shutdown`` closes it.
     """
 
     def __init__(
@@ -148,6 +158,7 @@ class OrchestratorEngineAdapter:
         *,
         observe_plugin: Optional[EnvironmentObserver] = None,
         clock: Optional[Clock] = None,
+        retune_inputs: Optional[RetuneInputs] = None,
     ) -> None:
         self._config = config
         self._capabilities = capabilities
@@ -220,6 +231,10 @@ class OrchestratorEngineAdapter:
             # the adapter still runs normally.
             self._plugin_framework_metrics = None
 
+        self._signal_health = PlannerSignalHealth(
+            config, self._plugin_framework_metrics
+        )
+
         # Build orchestrator + scheduler + circuit_breaker + registry.
         # All transport-shaped knobs (timeouts + wire security) live under
         # ``plugin_registration.transport``; we hand that subtree to the
@@ -227,6 +242,16 @@ class OrchestratorEngineAdapter:
         # knobs (``tick_max_duration_seconds`` etc).
         cb = CircuitBreaker(self._clock)
         transport_config = config.plugin_registration.transport
+        # Live ticks run under wall-clock budgets: the whole-tick deadline
+        # and the per-call timeout of in-process plugins. Under a
+        # ``VirtualClock`` (replay) a tick takes no simulated time, so it runs
+        # to completion: a wall-clock budget would make the simulated
+        # decisions depend on host speed and load. No looser replay guard
+        # replaces them, since a loaded host can outlast any bound; a retune
+        # sweep still kills its candidate replays at its own timeout. gRPC
+        # plugins keep their call timeout; they are remote services, outside
+        # the simulation.
+        wall_clock_budgets = not isinstance(self._clock, VirtualClock)
 
         def _factory(plugin_id, endpoint, *, in_process_instance=None):
             return make_transport_for_endpoint(
@@ -234,6 +259,7 @@ class OrchestratorEngineAdapter:
                 endpoint,
                 transport_config,
                 in_process_instance=in_process_instance,
+                in_process_timeout=wall_clock_budgets,
             )
 
         # Build the auth validator from config when ``trusted_sources`` is
@@ -279,7 +305,11 @@ class OrchestratorEngineAdapter:
             scheduler=scheduler,
             circuit_breaker=cb,
             clock=self._clock,
-            tick_max_duration_seconds=config.scheduling.tick_max_duration_seconds,
+            tick_max_duration_seconds=(
+                config.scheduling.tick_max_duration_seconds
+                if wall_clock_budgets
+                else None
+            ),
             capabilities=capabilities,
             metrics=self._plugin_framework_metrics,
         )
@@ -295,6 +325,36 @@ class OrchestratorEngineAdapter:
         self._plugins_bootstrapped = False
         self._in_process_plugins_loaded = False
         self._register_builtin_plugins()
+        self._retune = self._build_retune_controller(retune_inputs)
+
+    def _build_retune_controller(
+        self, retune_inputs: Optional[RetuneInputs]
+    ) -> Optional[RetuneController]:
+        """Build the retune controller iff ``config.retune`` is set.
+
+        The controller validates the retune setup in its constructor, so an
+        invalid one fails here, at engine construction.
+        """
+        if self._config.retune is None:
+            return None
+        if retune_inputs is None:
+            raise ValueError(
+                "planner.retune requires retune inputs (the trace and pinned "
+                "engine to replay); this host did not provide them"
+            )
+        # Local import keeps the retune stack (sweep workers, replay API) out
+        # of the import chain of planners that never enable retune, and avoids
+        # an import cycle through dynamo.replay, whose planner host imports
+        # this module.
+        from dynamo.planner.retune.controller import RetuneController
+
+        return RetuneController(
+            self._config,
+            retune_inputs,
+            self._capabilities,
+            self._clock,
+            self._scale_interval,
+        )
 
     @property
     def plugins_bootstrapped(self) -> bool:
@@ -539,7 +599,39 @@ class OrchestratorEngineAdapter:
         for plugin in self._orchestrator._registry.all_plugins():
             if plugin.is_builtin and plugin.last_call_at == float("-inf"):
                 plugin.registered_at = self._last_tick_monotonic
+        if self._retune is not None:
+            # Anchors the retune window schedule (s0) at the planner start.
+            self._retune.start(start_s)
         return self._compute_next_scheduled_tick()
+
+    def apply_runtime_configuration(
+        self,
+        candidate: PlannerConfig,
+        fields: Iterable[str],
+        predictor: BuiltinLoadPredict | None,
+    ) -> None:
+        active_predictor: BuiltinLoadPredict | None = None
+        if predictor is not None:
+            active = self._builtins["load_predict"]
+            if not isinstance(active, BuiltinLoadPredict):
+                raise TypeError(
+                    "runtime prediction updates require the builtin load predictor"
+                )
+            active_predictor = active
+        changed = {
+            field
+            for field in fields
+            if getattr(self._config, field) != getattr(candidate, field)
+        }
+        for field in changed:
+            setattr(self._config, field, getattr(candidate, field))
+        if active_predictor is not None and predictor is not None:
+            active_predictor.install_prepared_predictors(predictor)
+        if changed or predictor is not None:
+            self._orchestrator.invalidate_runtime_configuration()
+            self._startup_down_candidate = None
+            self._startup_down_inventory = None
+            self._startup_down_sources = frozenset()
 
     async def tick(
         self,
@@ -607,9 +699,16 @@ class OrchestratorEngineAdapter:
             tick_now=scheduled_tick.at_monotonic_s,
         )
 
-        # 4. Project PipelineOutcome onto PlannerEffects.
-        scale_to = self._project_scale_to(
-            outcome, tick_input.worker_counts or WorkerCounts()
+        # 4. Project PipelineOutcome onto PlannerEffects. A retune-only
+        #    planner (retune with both scaling modes off) keeps the
+        #    deployment's replicas: no GPU-budget or min-endpoint repair.
+        retune_only = self._retune is not None and not self._config.scaling_enabled()
+        scale_to = (
+            None
+            if retune_only
+            else self._project_scale_to(
+                outcome, tick_input.worker_counts or WorkerCounts()
+            )
         )
 
         # 5. Populate diagnostics from the shared scaling state. Consumed by
@@ -649,11 +748,31 @@ class OrchestratorEngineAdapter:
         diagnostics.short_circuit_reason = outcome.short_circuit_reason
         diagnostics.audit_events = list(outcome.audit_events)
 
-        return PlannerEffects(
+        self._signal_health.observe(
+            scheduled_tick, tick_input, self._capabilities, diagnostics
+        )
+
+        effects = PlannerEffects(
             scale_to=scale_to,
             next_tick=self._compute_next_scheduled_tick(),
             diagnostics=diagnostics,
         )
+
+        # 6. Retune runs after the plugin pipeline, outside the
+        #    orchestrator's per-tick deadline. It launches a sweep or turns a
+        #    finished one into a decision; the replays and the preparation of
+        #    a new predictor run in the sweep's worker processes (under a
+        #    VirtualClock the tick awaits a launched sweep inline). Its audit
+        #    strings force diagnostics emission in both hosts.
+        if self._retune is not None:
+            retune = await self._retune.on_tick(
+                tick_input.now_s, tick_input.worker_counts
+            )
+            effects.router_parameters = retune.router_parameters
+            effects.retune_decisions = list(retune.decisions)
+            diagnostics.audit_events.extend(retune.audit_events)
+
+        return effects
 
     async def observe(self, scheduled_tick: ScheduledTick, now_s: float) -> TickInput:
         """Run the in-process OBSERVE plugin for native planner execution.
@@ -683,6 +802,18 @@ class OrchestratorEngineAdapter:
                     exc,
                 )
             self._gateway_server = None
+        if self._retune is not None:
+            try:
+                # Kills in-flight sweep workers and stops the sweep thread.
+                self._retune.close()
+            except Exception as exc:
+                # Don't let a retune teardown error mask the plugin shutdown
+                # that follows.
+                log.warning(
+                    "retune controller close raised %s: %s — continuing shutdown",
+                    type(exc).__name__,
+                    exc,
+                )
         await self._orchestrator.shutdown()
 
     # ------------------------------------------------------------------
@@ -713,7 +844,11 @@ class OrchestratorEngineAdapter:
         # ``RegisteredPlugin.last_call_at`` lives in — NOT wall-epoch.
         # ``at_s`` (wall-epoch) is for ``ScheduledTick.at_s`` only.
         at_monotonic = self._last_tick_monotonic + self._scale_interval
-        load_loop_due = self._interval_due(
+        # A retune-only planner (both scaling modes off) runs no load loop:
+        # no load-loop diagnostics and no FPM pull (``internal_fpm_due``
+        # below). Gate on any scaling, not ``enable_load_scaling``, because
+        # throughput-only SLA planners still need the load loop for FPM.
+        load_loop_due = self._config.scaling_enabled() and self._interval_due(
             self._last_load_loop_monotonic,
             float(self._config.load_adjustment_interval_seconds),
             at_monotonic,

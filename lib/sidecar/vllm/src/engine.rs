@@ -26,7 +26,7 @@ use crate::args::Args;
 use crate::client::{self, CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
 use crate::convert::{
     ResponseState, build_generate_request, consume_reasoning_parser_args, data_parallel_rank,
-    normalize_response_options, request_has_multimodal_input, require_proto_0_6_controls,
+    request_has_multimodal_input, require_proto_0_6_controls,
 };
 use crate::lora::{self, build_downloader, parse_load_lora, parse_lora_name, resolve_source_path};
 use crate::model::DiscoveredModel;
@@ -208,13 +208,13 @@ impl VllmSidecarEngine {
         match model.reasoning_parser() {
             None if dynamo_parsers => {
                 let advice = if model.reports_proto_0_6() {
-                    "Start vllm-rs with a reasoning parser"
+                    "start vllm-rs with `--reasoning-parser <name>`, or drop `--reasoning-parser none` so vllm-rs picks the model's parser (its default, `auto`)"
                 } else {
-                    "Upgrade to a vLLM gRPC server that reports vllm-proto 0.6.0 or later and start it with a reasoning parser"
+                    "upgrade to a vLLM gRPC server that reports vllm-proto 0.6.0 or later and start it with `--reasoning-parser <name>`"
                 };
                 tracing::warn!(
                     proto_version,
-                    "vLLM runs no reasoning parser, so tool and structured-output grammars apply from the first generated token and thinking budgets are rejected. {advice} to let the engine gate grammars on reasoning"
+                    "vLLM runs no reasoning parser, so tool and structured-output grammars apply from the first generated token and thinking budgets are rejected. To let the engine gate grammars on reasoning, {advice}"
                 );
             }
             // The frontend sends the gate only from its own reasoning parser.
@@ -241,6 +241,8 @@ impl VllmSidecarEngine {
         let mut engine = Self::new(endpoint, model.clone(), mode, transport);
         engine.engine_gates_reasoning =
             model.reports_proto_0_6() && model.reasoning_parser().is_some();
+        // Off by default until vLLM's gRPC server uses xgrammar (vllm-project/vllm#61892).
+        let structural_tag = args.sidecar.common.structural_tag(false);
         let config = WorkerConfig {
             runtime: args.sidecar.common.runtime,
             namespace: args.sidecar.common.namespace,
@@ -258,6 +260,7 @@ impl VllmSidecarEngine {
             served_model_name: Some(model.served_name.clone()),
             tool_call_parser: args.sidecar.common.dyn_tool_call_parser,
             reasoning_parser: args.sidecar.common.dyn_reasoning_parser,
+            structural_tag,
             exclude_tools_when_tool_choice_none: args
                 .sidecar
                 .common
@@ -845,7 +848,7 @@ impl LLMEngine for VllmSidecarEngine {
             .get()
             .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
-        let mut request = normalize_response_options(request)?;
+        let mut request = request;
         if !self.model.reports_proto_0_6()
             && consume_reasoning_parser_args(&mut request.extra_args)
             && let Some(parser) = self.model.reasoning_parser()
@@ -1261,6 +1264,7 @@ impl LLMEngine for VllmSidecarEngine {
                 ));
             }
             sources.push(KvEventSource::Zmq {
+                heartbeat_timeout: None,
                 endpoint: zmq_connect_endpoint(&source.endpoint, &self.endpoint),
                 topic: source.topic,
                 dp_rank,

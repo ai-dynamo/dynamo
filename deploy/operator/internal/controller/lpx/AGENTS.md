@@ -63,6 +63,10 @@ SPDX-License-Identifier: Apache-2.0
 
 - Read workload dependencies through the cached client and validate them once
   per reconciliation; do not add uncached reads or pre-write revalidation.
+- Cyborg GPU resolution is a validation-only exception to dependency watches.
+  Do not add ResourceClaim, ResourceClaimTemplate, or DeviceClass watches for it:
+  the resolved count does not affect the rendered workload. Lookup failures use
+  ordinary error retries, and DGD edits use the existing watch.
 - Observations are not an atomic snapshot. Publishing previously observed
   intent during a concurrent edit is accepted; watches drive convergence.
   UID/resource-version preconditions and write conflicts protect mutations.
@@ -141,14 +145,24 @@ SPDX-License-Identifier: Apache-2.0
   are deleted. Keep UID/resource-version delete preconditions. Deadline cancellation
   remains separate.
 - Ordinary retirement leaves Pod and PodClique cleanup to Grove and owner GC.
-  The Dynamo operator's LPX controller may directly delete Pods only for a matching,
-  still-desired, non-deleting NodeLocal LPR in `Releasing` for `requestChanged`,
+  The Dynamo operator's LPX controller may directly delete Pods only for an observed,
+  owned, non-deleting NodeLocal LPR in `Releasing` for `requestChanged`,
   `dependencyChanged`, or `bindingFailed`: remove its journaled current and target
   Agent Pod UIDs, including plan-replacement predecessors, after verifying their
   PodClique -> PCSG -> PCS owner chain, including terminating PodCliques. Keep namespace
   checks and UID/resource-version delete preconditions. Retry missing observations
   without blocking cleanup of the remaining journaled Pods. Preserve Grove capacity
   and LPUPipelineRequest status, finalizers, and annotations.
+- Attempt release cleanup after DGD identity and input-handoff checks and owned
+  Grove-resource observations, including every configured PCSG. It bypasses model
+  downloads and desired workload resolution, not these earlier gates. Use observed
+  LPRs even when they no longer match desired intent. Accepted tradeoff: before the
+  desired PCS template is synchronized, Grove may recreate deleted Agents from the
+  old template, requiring another release cycle.
+- Cleanup errors do not stop downloads or workload reconciliation. Combine them
+  with the final error before status persistence,
+  retain the previous ObservedGeneration, and retry. Cap any later scheduled wakeup
+  at the existing bounded error-retry interval; otherwise use ordinary error backoff.
 - A terminating LPR is pending cleanup, not a reason to delete its PCS or Pods.
   Wait for scheduler finalization through watches, including when external
   capacity is unchanged.

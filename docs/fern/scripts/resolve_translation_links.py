@@ -71,6 +71,8 @@ from pathlib import Path, PurePosixPath
 import yaml
 
 LINK = re.compile(r"(!?)(\[[^\]]*\])\(([^)#\s]+)(#[^)]*)?\)")
+# JSX attributes such as <Card href="...">, which Fern does not resolve either.
+HREF = re.compile(r'(\bhref=")([^"#\s]+)(#[^"]*)?"')
 PAGE_EXT = (".md", ".mdx")
 GITHUB_REPO_BLOB = "https://github.com/ai-dynamo/dynamo/blob"
 
@@ -260,25 +262,20 @@ def main() -> int:
                         return None, cand, (pages_root / mirror_rel).exists()
                 return None, None, False
 
-            def repl(m: re.Match) -> str:
+            def resolve_target(target: str, anchor: str) -> str | None:
+                """Site URL (or GitHub fallback) for a target; None leaves it as-is."""
                 nonlocal rewritten, warned
-                bang, label, target, anchor = (
-                    m.group(1),
-                    m.group(2),
-                    m.group(3),
-                    m.group(4) or "",
-                )
-                if bang or target.startswith(("http://", "https://", "mailto:", "/")):
-                    return m.group(0)
+                if target.startswith(("http://", "https://", "mailto:", "/")):
+                    return None
                 if not target.endswith(PAGE_EXT):
-                    return m.group(0)
+                    return None
                 doc_rel, escaped = resolve_doc_rel(target)
                 if escaped:
                     print(
                         f"::warning::{lang}/{rel}: {target} escapes docs/, left as-is"
                     )
                     warned += 1
-                    return m.group(0)
+                    return None
                 slug, disk_rel, translated = lookup(doc_rel)
                 if slug is None:
                     if disk_rel is None:
@@ -290,7 +287,7 @@ def main() -> int:
                             f"not in docs/, left as-is"
                         )
                         warned += 1
-                        return m.group(0)
+                        return None
                     # Target exists in the repo but isn't published in the nav,
                     # so it has no site URL. A relative path would naive-join
                     # into a guaranteed 404 on the rendered page; link to the
@@ -301,7 +298,7 @@ def main() -> int:
                         f"linking to GitHub source"
                     )
                     warned += 1
-                    return f"{bang}{label}({github_blob}/docs/fern/{disk_rel}{anchor})"
+                    return f"{github_blob}/docs/fern/{disk_rel}{anchor}"
                 # Locale sits between product and version in Fern URLs
                 # (/dynamo/zh-CN/dev/...); links starting with the product
                 # slug pass through Fern's renderer unmodified.
@@ -311,13 +308,24 @@ def main() -> int:
                     else f"{args.site_root}/{args.version_slug}/{slug}"
                 )
                 rewritten += 1
-                return f"{bang}{label}({url}{anchor})"
+                return f"{url}{anchor}"
+
+            def repl(m: re.Match) -> str:
+                if m.group(1):
+                    return m.group(0)
+                url = resolve_target(m.group(3), m.group(4) or "")
+                return m.group(0) if url is None else f"{m.group(2)}({url})"
+
+            def repl_href(m: re.Match) -> str:
+                url = resolve_target(m.group(2), m.group(3) or "")
+                return m.group(0) if url is None else f'{m.group(1)}{url}"'
 
             text = page.read_text(encoding="utf-8")
             # Skip link-shaped text inside fenced code blocks / inline code.
             parts = re.split(r"(```.*?```|~~~.*?~~~|`[^`\n]*`)", text, flags=re.S)
             new = "".join(
-                p if i % 2 else LINK.sub(repl, p) for i, p in enumerate(parts)
+                p if i % 2 else HREF.sub(repl_href, LINK.sub(repl, p))
+                for i, p in enumerate(parts)
             )
             if new != text:
                 page.write_text(new, encoding="utf-8")

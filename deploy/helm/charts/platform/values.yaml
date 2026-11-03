@@ -94,10 +94,12 @@ dynamo-operator:
   upgradeCRD: true
 
   dgdrV1Beta2:
-    # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Install the unfinished DGDR v1beta2
-    # API schemas. Run and Candidate objects are persisted in etcd; incompatible
-    # schema changes may make them unreadable or block future CRD upgrades. The
-    # operator does not reconcile v1beta2 resources.
+    # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Serve the unfinished DGDR v1beta2
+    # Request API with conversion and install the Run and Candidate APIs. Run and
+    # Candidate objects are persisted in etcd; incompatible schema changes may make
+    # them unreadable or block future CRD upgrades. When true, the operator
+    # reconciles v1beta2 Requests into Runs and executes each Run as an AISimulate
+    # planner Job with a publisher sidecar that persists deployment Candidates.
     enabled: false
 
   # Environment variables to pass to operator Deployment.

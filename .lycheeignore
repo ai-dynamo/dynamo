@@ -60,13 +60,9 @@
 # (afterwards lychee validates the URL again, catching any later rename/move).
 ^https://github\.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg\.yaml
 
-# The v1.5.0 release entry lands with the current-release promotion; the tag
-# URL 404s from CI until v1.5.0 is cut. Remove after the tag exists.
-^https://github\.com/ai-dynamo/dynamo/releases/tag/v1\.5\.0$
-
-# The classic dynamo-platform 1.5.0 chart publishes to helm.ngc.nvidia.com in a
+# The classic dynamo-platform 1.6.0 chart publishes to helm.ngc.nvidia.com in a
 # follow-up NGC publishing MR; the .tgz URL 404s until then. Remove once live.
-^https://helm\.ngc\.nvidia\.com/nvidia/ai-dynamo/charts/dynamo-platform-1\.5\.0\.tgz$
+^https://helm\.ngc\.nvidia\.com/nvidia/ai-dynamo/charts/dynamo-platform-1\.6\.0\.tgz$
 
 # The Dynamo Enterprise NGC collection is not published on the public catalog
 # yet, so the canonical collection URL 404s from CI. The org and team segments
@@ -89,11 +85,6 @@
 # the page is live.
 ^https://docs\.nvidia\.com/dynamo/dev/recipes/deepseek-v4-1-flash$
 
-# The TokenSpeed example is introduced with its docs link in the same PR.
-# Its canonical main-branch URL returns 404 until merge. Cleanup tracked in:
-# https://github.com/ai-dynamo/dynamo/issues/15025
-^https://github\.com/ai-dynamo/dynamo/tree/main/examples/backends/tokenspeed$
-
 # Introduced by the same PR as its docs link: the K-EXAONE 2.0 recipe does not exist on main
 # until this PR merges, so these blob/main URLs 404 during review. Remove after merge.
 ^https://github\.com/ai-dynamo/dynamo/(tree|blob)/main/recipes/k-exaone-2\.0
@@ -115,3 +106,6 @@
 # examples/gpu-sharing is added in the same PR as the GPU sharing docs
 # that link to it on main. Remove this rule once that PR merges.
 ^https://github\.com/ai-dynamo/dynamo/(blob|tree)/main/examples/gpu-sharing
+
+# Preserve historical attribution while this contributor profile is unavailable.
+^https://github\.com/Spycsh$

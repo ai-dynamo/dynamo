@@ -121,6 +121,10 @@ class OmniStageRouter:
         if request_type == RequestType.IMAGE_GENERATION:
             if not isinstance(parsed_request, NvCreateImageRequest):
                 raise InvalidArgument("Invalid image-generation request")
+            if parsed_request.input_reference:
+                raise InvalidArgument(
+                    "Image edits are not supported by the Omni stage router"
+                )
             try:
                 image_output_format = _normalize_image_output_options(
                     parsed_request.output_format,
@@ -344,6 +348,8 @@ async def init_omni_stage_router(
         # Aggregated with no peer dependencies.
         worker_type=WorkerType.Aggregated,
         needs=[],
+        # Stage 0 does not load input_reference into the image prompt.
+        user_data={"image_edits": {"schema_version": 1, "max_input_images": 0}},
     )
     register_model_taint_route(runtime, generate_endpoint)
     logger.info("OmniStageRouter registered at '%s'", generate_endpoint)
