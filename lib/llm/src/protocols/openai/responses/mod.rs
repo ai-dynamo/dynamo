@@ -1251,10 +1251,8 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
         }
 
         let top_logprobs = convert_top_logprobs(resp.inner.top_logprobs);
-        // The Responses API has no `logprobs` flag; a positive `top_logprobs` is
-        // the request for alternatives. Chat validation rejects a positive count
-        // unless `logprobs` is true, so set it here. `include` still decides
-        // whether the alternatives are returned.
+        // Responses has no `logprobs` flag, but chat validation needs it for a positive
+        // `top_logprobs`. `include` still decides whether alternatives are returned.
         let logprobs = top_logprobs.is_some_and(|n| n > 0).then_some(true);
 
         let (tools, tool_choice) = convert_tools_and_choice(
