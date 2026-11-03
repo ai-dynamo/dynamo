@@ -79,12 +79,15 @@ const MAX_NAME_LENGTH: usize = 63;
 /// `kubernetes.io/service-name` label, so a longer name gets neither.
 pub const KARMADA_MAX_SERVICE_NAME: usize = MAX_NAME_LENGTH - KARMADA_DERIVED_PREFIX.len();
 
-/// Whether `mcs` can import a Service of this name. A directory lists
-/// nothing for one it cannot.
-pub fn can_import(mcs: McsImplementation, service: &str) -> bool {
-    match mcs {
-        McsImplementation::Standard => true,
-        McsImplementation::Karmada => service.len() <= KARMADA_MAX_SERVICE_NAME,
+impl McsImplementation {
+    /// Whether this implementation can import a Service of this name: with
+    /// Karmada, one of at most [`KARMADA_MAX_SERVICE_NAME`] characters. A
+    /// directory lists nothing for a Service it cannot import.
+    pub fn can_import(self, service: &str) -> bool {
+        match self {
+            Self::Standard => true,
+            Self::Karmada => service.len() <= KARMADA_MAX_SERVICE_NAME,
+        }
     }
 }
 
@@ -263,8 +266,8 @@ mod tests {
     #[test]
     fn karmada_imports_names_of_up_to_55_characters() {
         assert_eq!(KARMADA_MAX_SERVICE_NAME, 55);
-        assert!(can_import(McsImplementation::Karmada, &"a".repeat(55)));
-        assert!(!can_import(McsImplementation::Karmada, &"a".repeat(56)));
-        assert!(can_import(McsImplementation::Standard, &"a".repeat(56)));
+        assert!(McsImplementation::Karmada.can_import(&"a".repeat(55)));
+        assert!(!McsImplementation::Karmada.can_import(&"a".repeat(56)));
+        assert!(McsImplementation::Standard.can_import(&"a".repeat(56)));
     }
 }
