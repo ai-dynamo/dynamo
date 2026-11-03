@@ -45,7 +45,7 @@ fn worker_pool(initial_workers: usize, args: &MockerConfig) -> WorkerPoolSpec {
 
 fn validate_agentic_host_offload(
     input: &ReplayRuntimeInput,
-    roles: &[(usize, &MockerConfig)],
+    roles: &[&MockerConfig],
     scaling_enabled: bool,
 ) -> Result<()> {
     let ReplayRuntimeInput::Workload(driver) = input else {
@@ -55,27 +55,22 @@ fn validate_agentic_host_offload(
         return Ok(());
     }
     anyhow::ensure!(
-        roles.iter().all(|(_, args)| args.g3_offload.is_none()),
+        roles.iter().all(|args| args.g3_offload.is_none()),
         "agentic replay does not support G3"
     );
-    if !roles
-        .iter()
-        .any(|(_, args)| args.native_host_offload.is_some())
-    {
+    if !roles.iter().any(|args| args.native_host_offload.is_some()) {
         return Ok(());
     }
 
     // These entrypoints are offline. Apply the AgentX G2 deployment contract
     // to every active role, including a P/D role whose own G2 is disabled.
-    anyhow::ensure!(
-        roles.iter().all(|(workers, _)| *workers == 1),
-        "agentic host offload requires one aggregated worker or one prefill and one decode worker"
-    );
+    // Worker count is unrestricted: placement consumes each worker's native
+    // G2 KV events, and per-play token namespaces keep G2 identities play-local.
     anyhow::ensure!(
         !scaling_enabled,
         "agentic host offload requires static worker pools without a scaling policy"
     );
-    for (_, args) in roles {
+    for args in roles {
         anyhow::ensure!(
             args.backend == EngineType::Vllm
                 && args.ais_perf_config().is_none_or(|config| {
@@ -208,7 +203,7 @@ fn run_aggregated_with_capture_options(
     telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
-    validate_agentic_host_offload(&input, &[(num_workers, &args)], scaling_policy.is_some())?;
+    validate_agentic_host_offload(&input, &[&args], scaling_policy.is_some())?;
     let (engine, factory) = aggregated_replay_setup(&args)?;
     let spec = replay_spec(
         ReplayTopology::Aggregated {
@@ -307,10 +302,7 @@ fn run_disaggregated_with_capture_options(
     let config = config.normalized()?;
     validate_agentic_host_offload(
         &input,
-        &[
-            (config.num_prefill_workers, &config.prefill_args),
-            (config.num_decode_workers, &config.decode_args),
-        ],
+        &[&config.prefill_args, &config.decode_args],
         scaling_policy.is_some(),
     )?;
     let (engine, factory) = disaggregated_replay_setup(&config.prefill_args, &config.decode_args)?;
@@ -935,17 +927,16 @@ mod agentic_host_offload_tests {
     }
 
     #[test]
-    fn accepts_single_worker_and_independent_pd_g2_scopes() {
+    fn accepts_independent_pd_g2_scopes() {
         let input = agentic_input();
         let scopes = [None, Some("dp_rank_local"), Some("cluster_shared")];
         for prefill_scope in scopes {
             let mut prefill = args(prefill_scope);
             prefill.tensor_parallel_size = 4;
-            validate_agentic_host_offload(&input, &[(1, &prefill)], false).unwrap();
+            validate_agentic_host_offload(&input, &[&prefill], false).unwrap();
             for decode_scope in scopes {
                 let decode = args(decode_scope);
-                validate_agentic_host_offload(&input, &[(1, &prefill), (1, &decode)], false)
-                    .unwrap();
+                validate_agentic_host_offload(&input, &[&prefill, &decode], false).unwrap();
             }
         }
     }
@@ -1001,26 +992,12 @@ mod agentic_host_offload_tests {
             "agentic host offload requires speculative decoding disabled",
         ));
         for (invalid, expected) in invalid_roles {
-            for roles in [
-                vec![(1, &offloaded), (1, &invalid)],
-                vec![(1, &invalid), (1, &offloaded)],
-            ] {
+            for roles in [vec![&offloaded, &invalid], vec![&invalid, &offloaded]] {
                 let error = validate_agentic_host_offload(&input, &roles, false).unwrap_err();
                 assert_eq!(error.to_string(), expected);
             }
         }
-        for roles in [
-            vec![(2, &offloaded)],
-            vec![(2, &offloaded), (1, &offloaded)],
-            vec![(1, &offloaded), (2, &offloaded)],
-        ] {
-            let error = validate_agentic_host_offload(&input, &roles, false).unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                "agentic host offload requires one aggregated worker or one prefill and one decode worker"
-            );
-        }
-        let error = validate_agentic_host_offload(&input, &[(1, &offloaded)], true).unwrap_err();
+        let error = validate_agentic_host_offload(&input, &[&offloaded], true).unwrap_err();
         assert_eq!(
             error.to_string(),
             "agentic host offload requires static worker pools without a scaling policy"
@@ -1029,8 +1006,10 @@ mod agentic_host_offload_tests {
 
     #[test]
     fn native_execution_entrypoints_apply_the_agentic_g2_guard() {
+        let mut speculative = args(Some("cluster_shared"));
+        speculative.decode_speedup_ratio = 2.0;
         let error = run_aggregated(
-            args(Some("cluster_shared")),
+            speculative,
             None,
             None,
             agentic_input(),
@@ -1046,7 +1025,7 @@ mod agentic_host_offload_tests {
         .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "agentic host offload requires one aggregated worker or one prefill and one decode worker"
+            "agentic host offload requires speculative decoding disabled"
         );
 
         let mut decode = args(None);
@@ -1055,8 +1034,8 @@ mod agentic_host_offload_tests {
             OfflineDisaggReplayConfig {
                 prefill_args: args(Some("dp_rank_local")),
                 decode_args: decode,
-                num_prefill_workers: 1,
-                num_decode_workers: 1,
+                num_prefill_workers: 2,
+                num_decode_workers: 2,
             },
             None,
             None,
@@ -1092,7 +1071,7 @@ mod agentic_host_offload_tests {
             let offloaded = offloaded.normalized().unwrap();
             validate_agentic_host_offload(
                 &ReplayRuntimeInput::Requests(VecDeque::new()),
-                &[(1, &offloaded)],
+                &[&offloaded],
                 false,
             )
             .unwrap();
@@ -1121,17 +1100,17 @@ mod agentic_host_offload_tests {
         hbm.backend = EngineType::Sglang;
         hbm.dp_size = 2;
         hbm.decode_speedup_ratio = 2.0;
-        validate_agentic_host_offload(&agentic_input(), &[(2, &hbm)], true).unwrap();
+        validate_agentic_host_offload(&agentic_input(), &[&hbm], true).unwrap();
         hbm.decode_speedup_ratio = 1.0;
         hbm.aic_nextn = Some(2);
-        validate_agentic_host_offload(&agentic_input(), &[(2, &hbm)], true).unwrap();
+        validate_agentic_host_offload(&agentic_input(), &[&hbm], true).unwrap();
 
         let mut offloaded = args(Some("cluster_shared"));
         offloaded.dp_size = 2;
         offloaded.decode_speedup_ratio = 2.0;
         validate_agentic_host_offload(
             &ReplayRuntimeInput::Requests(VecDeque::new()),
-            &[(2, &offloaded)],
+            &[&offloaded],
             true,
         )
         .unwrap();
@@ -1148,6 +1127,623 @@ mod agentic_host_offload_tests {
         .unwrap();
         let input =
             ReplayRuntimeInput::Workload(trace.into_trace_driver_with_block_size(4).unwrap());
-        validate_agentic_host_offload(&input, &[(2, &offloaded)], true).unwrap();
+        validate_agentic_host_offload(&input, &[&offloaded], true).unwrap();
+    }
+}
+
+/// AgentX G2 across several replicas: Router placement consumes each worker's
+/// native G2 (`HostPinned`) KV events, not an AgentX-specific residency path.
+#[cfg(test)]
+mod agentic_multi_replica_g2_tests {
+    use super::*;
+    use crate::common::protocols::{G2Scope, NativeHostOffloadConfig};
+    use crate::loadgen::{
+        AGENTIC_MOONCAKE_SCHEMA, AGENTIC_MOONCAKE_VERSION, AgenticHashIdScope,
+        AgenticMooncakeHeader, AgenticMooncakeRow, AgenticSnapshotOptions,
+        AgenticSnapshotSelection, AgenticSourceProvenance,
+    };
+    use crate::replay::{AgenticReplayOptions, ReplayDeterminism, ReplayScope, with_replay_scope};
+    use aisimulate_core::replay::{PerRequestRecord, PerRequestRoutingRecord, ReplayRequestPool};
+
+    const BLOCK_SIZE: usize = 4;
+
+    fn row(
+        request_id: &str,
+        play_id: &str,
+        not_before_ms: f64,
+        hash_ids: Vec<u64>,
+        input_length: usize,
+        output_length: usize,
+    ) -> AgenticMooncakeRow {
+        AgenticMooncakeRow {
+            request_id: request_id.to_string(),
+            play_id: play_id.to_string(),
+            session_id: format!("{play_id}:{request_id}"),
+            model: "model".to_string(),
+            input_length: Some(input_length),
+            output_length: Some(output_length),
+            hash_ids: Some(hash_ids),
+            not_before_ms,
+            ..Default::default()
+        }
+    }
+
+    fn header() -> AgenticMooncakeHeader {
+        AgenticMooncakeHeader {
+            schema: AGENTIC_MOONCAKE_SCHEMA.to_string(),
+            version: AGENTIC_MOONCAKE_VERSION,
+            block_size: BLOCK_SIZE,
+            hash_id_scope: AgenticHashIdScope::Local,
+            source: AgenticSourceProvenance {
+                format: "test".to_string(),
+                digest: "agentic-multi-replica-g2".to_string(),
+            },
+        }
+    }
+
+    fn input(rows: Vec<AgenticMooncakeRow>, lanes: Option<usize>) -> ReplayRuntimeInput {
+        let trace = AgenticTrace::from_agentic_mooncake_rows(header(), rows).unwrap();
+        ReplayRuntimeInput::Workload(
+            trace
+                .into_trace_driver_with_options(BLOCK_SIZE, true, lanes)
+                .unwrap(),
+        )
+    }
+
+    /// `seed` finishes on one worker while `pin` occupies the other, then
+    /// `pressure` evicts `seed` from that worker's three-block G1. When
+    /// `resume` arrives no worker holds its prefix in G1 and both workers are
+    /// decoding; load alone prefers `pin`'s worker.
+    fn evicted_prefix_play() -> Vec<AgenticMooncakeRow> {
+        vec![
+            row("seed", "play", 0.0, vec![1, 2, 3], 10, 1),
+            row("pin", "play", 0.5, vec![100, 101], 5, 2),
+            row("pressure", "play", 20.0, vec![200, 201, 202], 10, 2),
+            row("resume", "play", 50.0, vec![1, 2, 3], 10, 1),
+        ]
+    }
+
+    fn args(host_offload: Option<NativeHostOffloadConfig>) -> MockerConfig {
+        MockerConfig::from_value(serde_json::json!({
+            "engine": {
+                "block_size": BLOCK_SIZE,
+                "num_gpu_blocks": 3,
+                "max_num_batched_tokens": 64,
+                "max_num_seqs": 1,
+                "kv_cache_bytes_per_token": 1024,
+                "native_host_offload": host_offload,
+                "timing_model": {"type": "fixed", "prefill_ms": 1.0, "decode_ms": 100.0}
+            }
+        }))
+        .unwrap()
+    }
+
+    fn local_g2() -> NativeHostOffloadConfig {
+        NativeHostOffloadConfig::new(64).with_bandwidths(0.0, 0.0)
+    }
+
+    fn shared_g2() -> NativeHostOffloadConfig {
+        local_g2().cluster_shared("agentic-multi-replica-g2")
+    }
+
+    fn scope(kv_event_lag_ms: f64) -> ReplayScope {
+        ReplayScope {
+            kv_event_lag_ms,
+            determinism: ReplayDeterminism::CanonicalV1,
+            ..Default::default()
+        }
+    }
+
+    /// Score G2 blocks like G1 blocks so the Router's reported overlap is
+    /// directly comparable with the engine's realized reuse.
+    fn router_config() -> ReplayKvRouterConfig {
+        ReplayKvRouterConfig {
+            host_cache_hit_weight: 1.0,
+            ..Default::default()
+        }
+    }
+
+    fn run_agg(
+        args: MockerConfig,
+        input: ReplayRuntimeInput,
+        workers: usize,
+        kv_event_lag_ms: f64,
+    ) -> TraceSimulationReport {
+        with_replay_scope(scope(kv_event_lag_ms), || {
+            run_aggregated(
+                args,
+                Some(router_config()),
+                None,
+                input,
+                workers,
+                None,
+                ReplayRouterMode::KvRouter,
+                true,
+                None,
+                SlaThresholds::default(),
+                None,
+                None,
+            )
+        })
+        .unwrap()
+        .unwrap()
+    }
+
+    fn record<'a>(report: &'a TraceSimulationReport, source: &str) -> &'a PerRequestRecord {
+        report
+            .per_request
+            .iter()
+            .find(|record| {
+                record
+                    .agentic
+                    .as_ref()
+                    .is_some_and(|identity| identity.request_id == source)
+            })
+            .unwrap_or_else(|| panic!("no record for {source}"))
+    }
+
+    /// The single routing decision made for `pool`.
+    fn route(record: &PerRequestRecord, pool: ReplayRequestPool) -> &PerRequestRoutingRecord {
+        let mut routes = record.routing_history.iter().filter(|r| r.pool == pool);
+        let route = routes.next().expect("one route in the pool");
+        assert!(routes.next().is_none(), "{pool:?} routed more than once");
+        route
+    }
+
+    fn worker(record: &PerRequestRecord, pool: ReplayRequestPool) -> usize {
+        route(record, pool)
+            .logical_worker_id
+            .expect("logical worker")
+    }
+
+    /// Replay checkpoint at each admission: the overlap the Router scored from
+    /// visible G1 and G2 events equals the engine's realized G1 plus G2 reuse.
+    fn assert_router_and_engine_residency_reconcile(
+        report: &TraceSimulationReport,
+        pool: ReplayRequestPool,
+    ) {
+        for record in &report.per_request {
+            let admission = record
+                .admission_history
+                .iter()
+                .find(|admission| admission.pool == pool)
+                .expect("admitted in the pool");
+            let realized = admission.g1_reused_input_tokens.unwrap_or(0)
+                + admission.host_reused_input_tokens.unwrap_or(0);
+            assert_eq!(
+                route(record, pool).reported_overlap_tokens,
+                Some(realized),
+                "{:?}",
+                record.agentic
+            );
+        }
+    }
+
+    fn run_disagg(
+        prefill: MockerConfig,
+        decode: MockerConfig,
+        input: ReplayRuntimeInput,
+        workers: usize,
+    ) -> TraceSimulationReport {
+        with_replay_scope(scope(0.0), || {
+            run_disaggregated(
+                OfflineDisaggReplayConfig {
+                    prefill_args: prefill,
+                    decode_args: decode,
+                    num_prefill_workers: workers,
+                    num_decode_workers: workers,
+                },
+                Some(router_config()),
+                None,
+                input,
+                None,
+                ReplayRouterMode::KvRouter,
+                true,
+                None,
+                SlaThresholds::default(),
+                None,
+                None,
+            )
+        })
+        .unwrap()
+        .unwrap()
+    }
+
+    #[test]
+    fn placement_moves_to_a_g2_owner_only_after_its_event_is_visible() {
+        let agg = ReplayRequestPool::Agg;
+        let hbm = run_agg(args(None), input(evicted_prefix_play(), None), 2, 0.0);
+        let local = run_agg(
+            args(Some(local_g2())),
+            input(evicted_prefix_play(), None),
+            2,
+            0.0,
+        );
+        // Longer than the whole replay: no KV event becomes Router-visible.
+        let hidden = run_agg(
+            args(Some(local_g2())),
+            input(evicted_prefix_play(), None),
+            2,
+            1_000.0,
+        );
+        for report in [&hbm, &local, &hidden] {
+            assert_eq!(report.request_counts.completed_requests, 4);
+            assert_ne!(
+                worker(record(report, "seed"), agg),
+                worker(record(report, "pin"), agg)
+            );
+            assert_eq!(
+                worker(record(report, "pressure"), agg),
+                worker(record(report, "seed"), agg)
+            );
+            assert_router_and_engine_residency_reconcile(report, agg);
+        }
+
+        // Without G2, or before seed's HostPinned store is visible, resume
+        // follows load and recomputes the prefix.
+        for report in [&hbm, &hidden] {
+            let resume = record(report, "resume");
+            assert_eq!(worker(resume, agg), worker(record(report, "pin"), agg));
+            assert_eq!(route(resume, agg).reported_overlap_tokens, Some(0));
+            assert_eq!(
+                resume.first_admission_host_reused_input_tokens.unwrap_or(0),
+                0
+            );
+        }
+        // Once visible, the same event moves resume to the private G2 owner,
+        // which restores the two full prompt blocks instead of recomputing them.
+        let resume = record(&local, "resume");
+        assert_eq!(worker(resume, agg), worker(record(&local, "seed"), agg));
+        assert_eq!(route(resume, agg).reported_overlap_tokens, Some(8));
+        assert_eq!(resume.first_admission_g1_reused_input_tokens, Some(0));
+        assert_eq!(resume.first_admission_host_reused_input_tokens, Some(8));
+        assert!(local.committed_prefill_tokens < hidden.committed_prefill_tokens);
+    }
+
+    #[test]
+    fn cluster_shared_g2_residency_is_visible_to_every_replica() {
+        let agg = ReplayRequestPool::Agg;
+        let report = run_agg(
+            args(Some(shared_g2())),
+            input(evicted_prefix_play(), None),
+            2,
+            0.0,
+        );
+        assert_eq!(report.request_counts.completed_requests, 4);
+        assert_eq!(report.g2_domains.len(), 1);
+        assert_router_and_engine_residency_reconcile(&report, agg);
+        // Both replicas observe the shared pool's HostPinned store, so locality
+        // does not override load: resume restores on the other replica.
+        let resume = record(&report, "resume");
+        assert_eq!(worker(resume, agg), worker(record(&report, "pin"), agg));
+        assert_ne!(worker(resume, agg), worker(record(&report, "seed"), agg));
+        assert_eq!(route(resume, agg).reported_overlap_tokens, Some(8));
+        assert_eq!(resume.first_admission_host_reused_input_tokens, Some(8));
+    }
+
+    #[test]
+    fn disaggregated_prefill_placement_consumes_g2_events() {
+        let (prefill_pool, decode_pool) = (ReplayRequestPool::Prefill, ReplayRequestPool::Decode);
+        // Two simultaneous pressure requests evict G1 on both prefill replicas.
+        let mut play = evicted_prefix_play();
+        play.insert(
+            3,
+            row("pressure-b", "play", 20.0, vec![300, 301, 302], 10, 2),
+        );
+        for g2 in [local_g2(), shared_g2()] {
+            let mut prefill = args(Some(g2.clone()));
+            prefill.worker_type = WorkerType::Prefill;
+            let mut decode = args(Some(g2));
+            decode.worker_type = WorkerType::Decode;
+            let report = run_disagg(prefill, decode, input(play.clone(), None), 2);
+            assert_eq!(report.request_counts.completed_requests, 5);
+            assert_router_and_engine_residency_reconcile(&report, prefill_pool);
+            assert_ne!(
+                worker(record(&report, "pressure"), prefill_pool),
+                worker(record(&report, "pressure-b"), prefill_pool)
+            );
+            let resume = record(&report, "resume");
+            assert_eq!(
+                worker(resume, prefill_pool),
+                worker(record(&report, "seed"), prefill_pool)
+            );
+            assert_eq!(route(resume, prefill_pool).reported_overlap_tokens, Some(8));
+            assert_eq!(resume.first_admission_g1_reused_input_tokens, Some(0));
+            assert_eq!(resume.first_admission_host_reused_input_tokens, Some(8));
+            // Decode placement stays load-only and consumes no KV events.
+            assert!(
+                report
+                    .per_request
+                    .iter()
+                    .all(|record| route(record, decode_pool).reported_overlap_tokens == Some(0))
+            );
+        }
+    }
+
+    #[test]
+    fn recycled_snapshot_plays_never_share_g2_identity() {
+        // Both lanes sample the same source play, so their prompts have equal
+        // source hash IDs but distinct play-local token namespaces.
+        let trace = AgenticTrace::from_agentic_mooncake_rows(
+            header(),
+            vec![
+                row("first", "play", 0.0, vec![1, 2, 3], 10, 1),
+                row("second", "play", 10.0, vec![1, 2, 3], 10, 1),
+            ],
+        )
+        .unwrap();
+        let driver = AgenticReplayOptions {
+            snapshot: Some(AgenticSnapshotOptions::seeded(5)),
+            ..Default::default()
+        }
+        .into_driver(trace, BLOCK_SIZE, true, Some(2), None)
+        .unwrap();
+        let report = run_agg(
+            args(Some(shared_g2())),
+            ReplayRuntimeInput::Workload(driver),
+            2,
+            0.0,
+        );
+        let cache_ids = report
+            .per_request
+            .iter()
+            .map(|record| record.agentic.as_ref().unwrap().cache_id.clone().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(cache_ids.len(), 2);
+        assert_eq!(report.per_request.len(), 2);
+        assert_router_and_engine_residency_reconcile(&report, ReplayRequestPool::Agg);
+        for record in &report.per_request {
+            assert_eq!(record.first_admission_g1_reused_input_tokens, Some(0));
+            assert_eq!(record.first_admission_host_reused_input_tokens, Some(0));
+        }
+    }
+
+    #[test]
+    fn multi_replica_agentic_g2_replay_is_deterministic() {
+        let replay = || {
+            let report = run_agg(
+                args(Some(local_g2())),
+                input(evicted_prefix_play(), None),
+                2,
+                0.0,
+            );
+            serde_json::to_value(&report.per_request).unwrap()
+        };
+        assert_eq!(replay(), replay());
+    }
+
+    /// Shared-G2 qualification: one deployment-owned pool whose residency every
+    /// replica discovers through native `HostPinned` events.
+    fn shared_g2_with(num_host_blocks: usize, h2d_gbps: f64) -> NativeHostOffloadConfig {
+        let mut config = NativeHostOffloadConfig::new(num_host_blocks)
+            .with_bandwidths(0.0, h2d_gbps)
+            .cluster_shared("agentic-multi-replica-g2");
+        config.shared_h2d_bandwidth_gbps = h2d_gbps;
+        config
+    }
+
+    fn snapshot_driver(rows: Vec<AgenticMooncakeRow>, lanes: usize) -> ReplayRuntimeInput {
+        let trace = AgenticTrace::from_agentic_mooncake_rows(header(), rows).unwrap();
+        let driver = AgenticReplayOptions {
+            snapshot: Some(AgenticSnapshotOptions {
+                initial_selections: Some(
+                    (0..lanes)
+                        .map(|_| AgenticSnapshotSelection {
+                            source_play_id: "play".to_string(),
+                            t_star_ms: 0.0,
+                        })
+                        .collect(),
+                ),
+                corpus_cursor: Some(lanes as u64),
+                ..AgenticSnapshotOptions::seeded(5)
+            }),
+            ..Default::default()
+        }
+        .into_driver(trace, BLOCK_SIZE, true, Some(lanes), None)
+        .unwrap();
+        ReplayRuntimeInput::Workload(driver)
+    }
+
+    /// `seed`, `pin` and `pressure` from [`evicted_prefix_play`], then a
+    /// sibling conversation of the same play that shares `seed`'s prefix.
+    fn sibling_play() -> Vec<AgenticMooncakeRow> {
+        let mut play = evicted_prefix_play();
+        play.pop();
+        play.push(row("sibling", "play", 50.0, vec![1, 2, 3], 10, 1));
+        play
+    }
+
+    fn lane_records<'a>(
+        report: &'a TraceSimulationReport,
+        lane: &str,
+    ) -> Vec<&'a PerRequestRecord> {
+        report
+            .per_request
+            .iter()
+            .filter(|record| record.agentic.as_ref().unwrap().lane_id.as_deref() == Some(lane))
+            .collect()
+    }
+
+    fn source<'a>(records: &[&'a PerRequestRecord], source: &str) -> &'a PerRequestRecord {
+        let suffix = format!(":request:{source}");
+        records
+            .iter()
+            .find(|record| {
+                record
+                    .agentic
+                    .as_ref()
+                    .unwrap()
+                    .request_id
+                    .ends_with(&suffix)
+            })
+            .unwrap_or_else(|| panic!("no record for {source}"))
+    }
+
+    #[test]
+    fn shared_g2_hits_stay_within_the_authorized_play() {
+        let g2 = Some(shared_g2_with(64, 0.0));
+        let one = run_agg(args(g2.clone()), snapshot_driver(sibling_play(), 1), 2, 0.0);
+        let two = run_agg(args(g2), snapshot_driver(sibling_play(), 2), 2, 0.0);
+        assert_router_and_engine_residency_reconcile(&two, ReplayRequestPool::Agg);
+        let mut cache_ids = std::collections::BTreeSet::new();
+        for lane in ["lane:0", "lane:1"] {
+            let records = lane_records(&two, lane);
+            assert_eq!(records.len(), 4);
+            let lane_cache = records
+                .iter()
+                .map(|record| record.agentic.as_ref().unwrap().cache_id.clone().unwrap())
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(lane_cache.len(), 1, "one cache identity per play");
+            cache_ids.extend(lane_cache);
+            // The sibling conversation restores its play's shared prefix.
+            let sibling = source(&records, "sibling");
+            assert_eq!(sibling.first_admission_host_reused_input_tokens, Some(8));
+            assert_eq!(sibling.first_admission_g1_reused_input_tokens, Some(0));
+            for name in ["seed", "pin", "pressure"] {
+                let record = source(&records, name);
+                assert_eq!(record.first_admission_host_reused_input_tokens, Some(0));
+                assert_eq!(record.first_admission_g1_reused_input_tokens, Some(0));
+            }
+        }
+        assert_eq!(cache_ids.len(), 2);
+        // Equal source prompts in two recycled plays occupy separate entries.
+        assert_eq!(
+            two.g2_domains[0].resident_blocks,
+            2 * one.g2_domains[0].resident_blocks
+        );
+    }
+
+    /// `seed` is evicted from G1 on both replicas; two consumers then restore
+    /// its shared G2 prefix at the same time, one per replica.
+    fn concurrent_restore_play(consumers: usize) -> Vec<AgenticMooncakeRow> {
+        let mut play = vec![
+            row("seed", "play", 0.0, vec![1, 2, 3], 10, 1),
+            row("pin", "play", 0.5, vec![100, 101], 5, 2),
+            row("pressure", "play", 20.0, vec![200, 201, 202], 10, 2),
+            row("pressure-b", "play", 20.0, vec![300, 301, 302], 10, 2),
+        ];
+        for consumer in ["resume-a", "resume-b"].into_iter().take(consumers) {
+            play.push(row(consumer, "play", 250.0, vec![1, 2, 3], 10, 1));
+        }
+        play
+    }
+
+    #[test]
+    fn concurrent_shared_consumers_have_deterministic_transfer_accounting() {
+        let agg = ReplayRequestPool::Agg;
+        let replay = |consumers: usize| {
+            run_agg(
+                args(Some(shared_g2_with(64, 1.0))),
+                input(concurrent_restore_play(consumers), None),
+                2,
+                0.0,
+            )
+        };
+        let solo = replay(1);
+        let concurrent = replay(2);
+        assert_eq!(
+            serde_json::to_value(&concurrent.per_request).unwrap(),
+            serde_json::to_value(&replay(2).per_request).unwrap()
+        );
+        assert_router_and_engine_residency_reconcile(&concurrent, agg);
+        let wait =
+            |record: &PerRequestRecord| record.first_admit_ms.unwrap() - record.arrival_time_ms;
+        let solo_wait = wait(record(&solo, "resume-a"));
+        assert!(solo_wait > 0.0);
+        let (a, b) = (
+            record(&concurrent, "resume-a"),
+            record(&concurrent, "resume-b"),
+        );
+        assert_ne!(worker(a, agg), worker(b, agg));
+        for consumer in [a, b] {
+            assert_eq!(consumer.first_admission_host_reused_input_tokens, Some(8));
+            // Two consumers split the pool's 1 GB/s H2D cap evenly.
+            assert!((wait(consumer) - 2.0 * solo_wait).abs() < 1e-9);
+        }
+        // Both consumers read the same entries: pool residency is counted once.
+        assert_eq!(concurrent.g2_domains, solo.g2_domains);
+        assert_eq!(concurrent.g2_domains[0].capacity_blocks, 64);
+    }
+
+    #[test]
+    fn stale_shared_residency_falls_back_to_recompute() {
+        let agg = ReplayRequestPool::Agg;
+        let mut play = evicted_prefix_play();
+        // Resume queues behind the decoding requests; meanwhile the two-block
+        // pool evicts seed's prefix to admit pressure's blocks.
+        play[3].not_before_ms = 40.0;
+        let report = run_agg(
+            args(Some(shared_g2_with(2, 0.0))),
+            input(play, None),
+            2,
+            0.0,
+        );
+        assert_eq!(report.request_counts.completed_requests, 4);
+        let resume = record(&report, "resume");
+        assert!(resume.first_admit_ms.unwrap() > resume.arrival_time_ms);
+        // Placement scored the residency visible at arrival...
+        assert_eq!(route(resume, agg).reported_overlap_tokens, Some(8));
+        // ...and admission found it gone, so the prefix was recomputed.
+        assert_eq!(resume.first_admission_host_reused_input_tokens, Some(0));
+        assert_eq!(resume.first_admission_g1_reused_input_tokens, Some(0));
+        assert_eq!(report.g2_domains[0].resident_blocks, 2);
+    }
+
+    #[test]
+    fn disabling_shared_g2_reproduces_the_private_baseline() {
+        let private = local_g2().with_bandwidths(0.0, 1.0);
+        let mut disabled = shared_g2_with(64, 1.0);
+        disabled.scope = G2Scope::DpRankLocal;
+        let per_request =
+            |report: &TraceSimulationReport| serde_json::to_value(&report.per_request).unwrap();
+        for workers in [1, 2] {
+            let baseline = run_agg(
+                args(Some(private.clone())),
+                input(evicted_prefix_play(), None),
+                workers,
+                0.0,
+            );
+            let report = run_agg(
+                args(Some(disabled.clone())),
+                input(evicted_prefix_play(), None),
+                workers,
+                0.0,
+            );
+            assert!(report.g2_domains.is_empty());
+            assert_eq!(per_request(&report), per_request(&baseline));
+            assert_eq!(
+                report.committed_prefill_tokens,
+                baseline.committed_prefill_tokens
+            );
+        }
+        // One consumer gains nothing from sharing: placement and reuse match the
+        // private pool; only shared-pool transfer service timing differs.
+        let shared = run_agg(
+            args(Some(shared_g2_with(64, 1.0))),
+            input(evicted_prefix_play(), None),
+            1,
+            0.0,
+        );
+        let baseline = run_agg(
+            args(Some(private)),
+            input(evicted_prefix_play(), None),
+            1,
+            0.0,
+        );
+        assert_eq!(
+            shared.committed_prefill_tokens,
+            baseline.committed_prefill_tokens
+        );
+        for name in ["seed", "pin", "pressure", "resume"] {
+            let (shared, baseline) = (record(&shared, name), record(&baseline, name));
+            assert_eq!(
+                shared.first_admission_host_reused_input_tokens,
+                baseline.first_admission_host_reused_input_tokens
+            );
+            assert_eq!(
+                shared.first_admission_g1_reused_input_tokens,
+                baseline.first_admission_g1_reused_input_tokens
+            );
+        }
     }
 }
