@@ -18,6 +18,8 @@ const IDENTITY_DOMAIN: &[u8] = b"dynamo-runtime-lora-v1\0";
 pub const RUNTIME_LORA_SCHEMES_RUNTIME_KEY: &str = "runtime_lora_schemes";
 pub const RUNTIME_LORA_SUPPORT_RUNTIME_KEY: &str = "supports_runtime_lora_resolution";
 pub const RUNTIME_LORA_VERSIONS_RUNTIME_KEY: &str = "runtime_lora_protocol_versions";
+static RUNTIME_LORA_CAPABILITY_TAINT: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| capability_taint(RUNTIME_LORA_PROTOCOL_VERSION));
 
 fn capability_taint(protocol_version: u16) -> String {
     format!("dynamo.runtime-lora/v{protocol_version}")
@@ -41,7 +43,7 @@ pub fn supports_runtime_lora<
         && is_aggregated
         && config
             .taints()
-            .contains(&capability_taint(RUNTIME_LORA_PROTOCOL_VERSION))
+            .contains(RUNTIME_LORA_CAPABILITY_TAINT.as_str())
         && runtime_lora_worker_schemes(config).is_some()
 }
 
@@ -425,6 +427,8 @@ mod tests {
         let capable = capable_worker(&["custom"]);
         let mut missing_taint = capable_worker(&["custom"]);
         missing_taint.2.clear();
+        assert!(supports_runtime_lora(&capable, true, true, true));
+        assert!(!supports_runtime_lora(&missing_taint, true, true, true));
         let configs = HashMap::from([(1, capable), (2, missing_taint)]);
         let constraints = RoutingConstraints {
             required_taints: HashSet::from(["dynamo.runtime-lora/v2".into()]),
