@@ -3,11 +3,13 @@
 
 use std::collections::BTreeMap;
 use std::error::Error as StdError;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Poll, ready};
 use std::time::Instant;
 
 use anyhow::{Error, Result};
-use futures::{stream, stream::StreamExt};
+use futures::{Stream, stream::StreamExt};
 
 use crate::{
     http::service::metrics::Metrics,
@@ -338,14 +340,116 @@ where
             session_affinity,
         )
         .await?;
-        let response_stream = stream::unfold(retry_manager, move |mut retry_manager| async move {
-            retry_manager
-                .next()
-                .await
-                .map(|response| (response, retry_manager))
-        })
-        .fuse();
-        Ok(ResponseStream::new(Box::pin(response_stream), engine_ctx_))
+        Ok(ResponseStream::new(
+            Box::pin(Migrated::Streaming(retry_manager)),
+            engine_ctx_,
+        ))
+    }
+}
+
+/// Migration's response stream.
+///
+/// A stream that reads the active attempt's items where the attempt's stream returned them, in
+/// place of `unfold` and `fuse` over [`RetryManager::next`], which moved the manager and the
+/// item (about 1 KB) through a new future on every item. Only a migration, which awaits the
+/// next attempt's dispatch, runs as a future, and that future owns the manager until it ends.
+// The large variant is the one every item is read through. Boxing the manager to shrink the
+// enum would cost an allocation per request and an indirection per item, for the sake of the
+// rare variants.
+#[allow(clippy::large_enum_variant)]
+enum Migrated<Resp>
+where
+    Resp: Data + HasTokenIds,
+{
+    /// Reading the active attempt.
+    Streaming(RetryManager<Resp>),
+    /// Migrating on a failure of the active attempt, or reading after the manager lost its
+    /// attempt: [`RetryManager::migrate_on`] and [`RetryManager::next`] in a future. Its output
+    /// gives the manager back with the next item, or with `None` at the end.
+    Migrating(MigrationFuture<Resp>),
+    /// Ended. The manager, and with it the attempt's stream, is dropped when the stream ends,
+    /// as `unfold` dropped it, rather than when its caller drops the stream.
+    Ended,
+}
+
+/// The future of [`Migrated::Migrating`].
+type MigrationFuture<Resp> =
+    Pin<Box<dyn Future<Output = (RetryManager<Resp>, Option<Annotated<Resp>>)> + Send>>;
+
+// Nothing in the stream is pinned: the manager is moved freely, as `unfold` moved it, and the
+// future is boxed.
+impl<Resp> Unpin for Migrated<Resp> where Resp: Data + HasTokenIds {}
+
+impl<Resp> Stream for Migrated<Resp>
+where
+    Resp: Data + HasTokenIds,
+{
+    type Item = Annotated<Resp>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Annotated<Resp>>> {
+        let this = &mut *self;
+        loop {
+            match this {
+                Migrated::Streaming(manager) => {
+                    if let Some(stream) = manager.next_stream.as_mut() {
+                        // Edit the item inside the `Poll` the attempt's stream returned, and
+                        // return that same value: taking it out and wrapping it again would
+                        // move it twice more.
+                        let mut poll = stream.poll_next_unpin(cx);
+                        match &mut poll {
+                            Poll::Pending => return poll,
+                            Poll::Ready(None) => {
+                                *this = Migrated::Ended;
+                                return poll;
+                            }
+                            Poll::Ready(Some(response)) => {
+                                if manager.accept(response) {
+                                    return poll;
+                                }
+                            }
+                        }
+                        let Poll::Ready(Some(response)) = poll else {
+                            unreachable!("only a failure to migrate on gets here");
+                        };
+                        let Migrated::Streaming(mut manager) =
+                            std::mem::replace(this, Migrated::Ended)
+                        else {
+                            unreachable!("matched above");
+                        };
+                        *this = Migrated::Migrating(Box::pin(async move {
+                            let next = match manager.migrate_on(response).await {
+                                Some(response) => Some(response),
+                                None => manager.next().await,
+                            };
+                            (manager, next)
+                        }));
+                    } else {
+                        // `next` reports a manager without an attempt as an error item.
+                        let Migrated::Streaming(mut manager) =
+                            std::mem::replace(this, Migrated::Ended)
+                        else {
+                            unreachable!("matched above");
+                        };
+                        *this = Migrated::Migrating(Box::pin(async move {
+                            let next = manager.next().await;
+                            (manager, next)
+                        }));
+                    }
+                }
+                Migrated::Migrating(future) => {
+                    let (manager, next) = ready!(future.as_mut().poll(cx));
+                    *this = match next {
+                        Some(_) => Migrated::Streaming(manager),
+                        None => Migrated::Ended,
+                    };
+                    return Poll::Ready(next);
+                }
+                Migrated::Ended => return Poll::Ready(None),
+            }
+        }
     }
 }
 
@@ -501,62 +605,87 @@ where
                     return Some(Annotated::from_error("next_stream is None"));
                 }
             };
-            if let Some(mut response) = response_stream.next().await {
-                // Check if this is a migratable error that should trigger stream recreation.
-                if let Some(err) = response.error.as_ref() {
-                    if is_migratable_for_request(&self.request, err) {
-                        let Some(migration_error) = migratable_error_in_chain(err) else {
-                            tracing::warn!(error = %err, "Migration eligibility had no semantic error");
-                            continue;
-                        };
-                        if !self.attempts.has_remaining() {
-                            let route_trace = self.active_route_trace.clone();
-                            self.record_migration_exhausted(MigrationCause {
-                                reason: migration_error.error_type(),
-                                from_worker_id: route_trace
-                                    .as_deref()
-                                    .and_then(RouteTraceContext::selected_worker_id),
-                                attempt: self.failed_attempt(route_trace.as_deref()),
-                            });
-                            // The stream host parked the lifecycle on this
-                            // failure. The client receives this worker error
-                            // (below), so the classifier's abort cause must be
-                            // the same error, not the synthetic exhaustion
-                            // error `new_stream` would otherwise abort with.
-                            self.abort_request_lifecycle(err);
-                        } else {
-                            self.queue_migration(
-                                migration_error.error_type(),
-                                self.active_route_trace.clone(),
-                            );
-                        }
-                        tracing::warn!(error = %err, "Stream disconnected, recreating stream");
-                        self.metrics.inc_migration_ongoing_request(&self.model_name);
-                        let migration_event =
-                            MigrationEvent::new(frontend_service::migration_type::ONGOING_REQUEST);
-                        // NOTE: Delegate exhaustion to new_stream so retry accounting has one owner.
-                        // When no replacement is established, preserve the triggering stream error.
-                        if let Err(err) = self.new_stream(Some(migration_event)).await {
-                            tracing::warn!(error = ?err, "Cannot recreate stream");
-                        } else {
-                            self.release_replay_prompt_if_final();
-                            continue;
-                        }
-                    } else {
-                        // The stream host parks the classifier lifecycle on any
-                        // type-migratable failure, but an explicit worker pin can
-                        // veto the retry here. Nothing will claim the parked
-                        // lifecycle, so abort it with the cause now rather than
-                        // letting Drop emit a late, cause-less event.
-                        self.abort_request_lifecycle(err);
-                    }
-                }
-                self.track_response(&response);
-                self.rebase_usage(&mut response);
+            let mut response = response_stream.next().await?;
+            if self.accept(&mut response) {
                 return Some(response);
             }
+            if let Some(response) = self.migrate_on(response).await {
+                return Some(response);
+            }
+        }
+    }
+
+    /// Take `response` from the active attempt as it is, unless it is a failure to migrate
+    /// on: then return `false` and leave it to [`migrate_on`](Self::migrate_on).
+    ///
+    /// Edits `response` in place, so the response stream returns the item where the attempt's
+    /// stream put it.
+    fn accept(&mut self, response: &mut Annotated<Resp>) -> bool {
+        if let Some(err) = response.error.as_ref() {
+            if is_migratable_for_request(&self.request, err) {
+                return false;
+            }
+            // The stream host parks the classifier lifecycle on any
+            // type-migratable failure, but an explicit worker pin can
+            // veto the retry here. Nothing will claim the parked
+            // lifecycle, so abort it with the cause now rather than
+            // letting Drop emit a late, cause-less event.
+            self.abort_request_lifecycle(err);
+        }
+        self.track_response(response);
+        self.rebase_usage(response);
+        true
+    }
+
+    /// Migrate on `response`, a migratable failure of the active attempt: start the next
+    /// attempt and return `None`, so the caller reads on from it. When no attempt can start,
+    /// return `response` to the client.
+    async fn migrate_on(&mut self, mut response: Annotated<Resp>) -> Option<Annotated<Resp>> {
+        let err = response
+            .error
+            .as_ref()
+            .expect("migrate_on is called with a failure");
+        // Check if this is a migratable error that should trigger stream recreation.
+        let Some(migration_error) = migratable_error_in_chain(err) else {
+            tracing::warn!(error = %err, "Migration eligibility had no semantic error");
+            return None;
+        };
+        if !self.attempts.has_remaining() {
+            let route_trace = self.active_route_trace.clone();
+            self.record_migration_exhausted(MigrationCause {
+                reason: migration_error.error_type(),
+                from_worker_id: route_trace
+                    .as_deref()
+                    .and_then(RouteTraceContext::selected_worker_id),
+                attempt: self.failed_attempt(route_trace.as_deref()),
+            });
+            // The stream host parked the lifecycle on this
+            // failure. The client receives this worker error
+            // (below), so the classifier's abort cause must be
+            // the same error, not the synthetic exhaustion
+            // error `new_stream` would otherwise abort with.
+            self.abort_request_lifecycle(err);
+        } else {
+            self.queue_migration(
+                migration_error.error_type(),
+                self.active_route_trace.clone(),
+            );
+        }
+        tracing::warn!(error = %err, "Stream disconnected, recreating stream");
+        self.metrics.inc_migration_ongoing_request(&self.model_name);
+        let migration_event =
+            MigrationEvent::new(frontend_service::migration_type::ONGOING_REQUEST);
+        // NOTE: Delegate exhaustion to new_stream so retry accounting has one owner.
+        // When no replacement is established, preserve the triggering stream error.
+        if let Err(err) = self.new_stream(Some(migration_event)).await {
+            tracing::warn!(error = ?err, "Cannot recreate stream");
+        } else {
+            self.release_replay_prompt_if_final();
             return None;
         }
+        self.track_response(&response);
+        self.rebase_usage(&mut response);
+        Some(response)
     }
 
     /// Abort any classifier lifecycle parked for a retry this request will not
@@ -926,6 +1055,7 @@ mod tests {
     use dynamo_runtime::pipeline::AsyncEngine;
     use dynamo_runtime::pipeline::context::Controller;
     use dynamo_runtime::protocols::maybe_error::MaybeError;
+    use futures::stream;
     use std::sync::atomic::{AtomicU32, Ordering};
     use tokio::sync::mpsc;
 
