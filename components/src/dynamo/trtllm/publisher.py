@@ -899,8 +899,8 @@ class Publisher:
             # other row, so those rows add nothing but would reset
             # trtllm_num_requests_waiting to 0 and double-count spec-decode
             # counters. TRT-LLM does not report true per-rank running or KV
-            # values; per-rank scheduled values are exported with dp_rank by
-            # the component gauges and FPM.
+            # values. Per-rank scheduled values are exported with dp_rank only
+            # through FPM, when it is enabled.
             if (
                 dp_rank == 0
                 and self.metrics_collector

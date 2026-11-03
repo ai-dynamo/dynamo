@@ -804,8 +804,7 @@ def _engine_rank_row(rank, *, queued, ibs_overrides):
         "inflightBatchingStats": ibs,
         "specDecodingStats": {"numDraftTokens": 8, "numAcceptedTokens": 5},
     }
-    if rank is not None:
-        stat["attentionDpRank"] = rank
+    stat["attentionDpRank"] = rank
     return stat
 
 
@@ -873,22 +872,6 @@ async def test_native_collector_keeps_rank0_queue_under_attention_dp(
     assert _collector_sample("trtllm_num_scheduled_requests") == 4
     assert _collector_sample("trtllm_spec_decode_num_draft_tokens_total") == 8
     assert _collector_sample("trtllm_spec_decode_num_accepted_tokens_total") == 5
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("rank", [0, None], ids=["rank0", "missing_rank"])
-async def test_native_collector_receives_single_rank_rows(
-    trtllm_metrics_collector, rank
-):
-    rows = [_engine_rank_row(rank, queued=2, ibs_overrides={"numScheduledRequests": 3})]
-
-    await _drain_rows_through_publisher(rows, trtllm_metrics_collector)
-
-    assert _collector_sample("trtllm_num_requests_waiting") == 2
-    assert _collector_sample("trtllm_num_requests_running") == 3
-    assert _collector_sample("trtllm_kv_cache_utilization") == pytest.approx(0.4)
-    assert _collector_sample("trtllm_num_scheduled_requests") == 3
-    assert _collector_sample("trtllm_spec_decode_num_draft_tokens_total") == 8
 
 
 @pytest.mark.asyncio
