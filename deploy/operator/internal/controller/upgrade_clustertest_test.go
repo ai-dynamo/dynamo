@@ -76,8 +76,9 @@ func prepareUpgradeHistory(ctx context.Context, c client.Client) (func(context.C
 	return clusterenv.PrepareHistory(ctx, c, snapshots)
 }
 
-// The controller-runtime completion counter is a barrier against comparing an
-// already-matching historical object before the candidate has ever reconciled it.
+// The sequential special scenarios use the process-wide completion counter.
+// Parallel matrix cases instead record calls through their own manager.
+// This rejects an already-matching predecessor that the candidate has never reconciled.
 func completedUpgradeReconciles(t *testing.T) float64 {
 	t.Helper()
 	families, err := metrics.Registry.Gather()
@@ -137,6 +138,20 @@ func captureUpgradeComponent(t *testing.T, env *clusterenv.TestEnv, completed *u
 	return objects, nil
 }
 
+// setupUpgradeDGDController keeps production watch/index wiring with per-manager evidence.
+func setupUpgradeDGDController(mgr ctrl.Manager, opts SetupOptions, completed *upgradeDGDReconciles) error {
+	r := &DynamoGraphDeploymentReconciler{
+		Client: mgr.GetClient(), Recorder: mgr.GetEventRecorder("dynamographdeployment"),
+		Config: opts.Config, RuntimeConfig: opts.RuntimeConfig, RestConfig: mgr.GetConfig(),
+	}
+	controller, err := r.controllerBuilder(mgr)
+	if err != nil {
+		return err
+	}
+	completed.next = r
+	return controller.Complete(completed)
+}
+
 func TestClusterOperatorUpgrade(t *testing.T) {
 	historical, err := upgradeInputs("history")
 	require.NoError(t, err)
@@ -182,188 +197,196 @@ func TestClusterOperatorUpgrade(t *testing.T) {
 		require.NotContains(t, namespaces, namespace, "namespace collision: %s", item.relative)
 		namespaces[namespace] = item.relative
 	}
-	for _, item := range scenarios {
-		input, relative := item.input, item.relative
-		t.Run(relative, func(t *testing.T) {
-			ctx := t.Context()
-			isHistory := strings.HasPrefix(relative, "history/") && !item.promote
-			objects, err := golden.ReadManifests(input)
-			require.NoError(t, err)
-			namespace := objects[0].GetNamespace()
-			if item.promote {
-				namespace = upgradeScenarioNamespace(relative)
-			}
-			var env *clusterenv.TestEnv
-			if isHistory {
-				env = clusterTestEnv.RunTInNamespace(t, namespace)
-			} else {
-				// Trigger exclusive history preparation before creating new admitted inputs.
-				env = clusterTestEnv.RunT(t)
-				// Latest inputs have fixed names too, so their literal hashes are reviewable.
-				require.NoError(t, env.Client().Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}))
-				env = clusterTestEnv.RunTInNamespace(t, namespace)
-			}
-			env.BlockWorkloads()
-			if !isHistory {
-				// Set the namespace on CREATE, never on a reconciled snapshot.
-				for i := range objects {
-					objects[i].SetNamespace(namespace)
-					require.NoError(t, env.Client().Create(ctx, &objects[i]))
+	// Join ordinary scenarios and their cleanup before running the dependent special cases.
+	t.Run("scenarios", func(t *testing.T) {
+		for _, item := range scenarios {
+			input, relative := item.input, item.relative
+			t.Run(relative, func(t *testing.T) {
+				// Release fixture capture retains its original sequential execution.
+				if os.Getenv("DYNAMO_UPGRADE_CAPTURE_DIR") == "" {
+					t.Parallel()
 				}
-			}
-			before := captureUpgrade(t, env)
-			if isHistory {
-				// Preserve historical fields for safety comparisons even if the
-				// candidate API schema normalizes them on its first read.
-				ids := map[string]unstructured.Unstructured{}
-				for _, object := range before {
-					ids[object.GetKind()+"/"+object.GetName()] = object
+				ctx := t.Context()
+				isHistory := strings.HasPrefix(relative, "history/") && !item.promote
+				objects, err := golden.ReadManifests(input)
+				require.NoError(t, err)
+				namespace := objects[0].GetNamespace()
+				if item.promote {
+					namespace = upgradeScenarioNamespace(relative)
 				}
-				before = nil
-				for _, object := range objects {
-					old := object.DeepCopy()
-					restored, ok := ids[old.GetKind()+"/"+old.GetName()]
-					require.True(t, ok)
-					old.SetUID(restored.GetUID())
-					old.SetGeneration(restored.GetGeneration())
-					before = append(before, *old)
+				var env *clusterenv.TestEnv
+				if isHistory {
+					env = clusterTestEnv.RunTInNamespace(t, namespace)
+				} else {
+					// Trigger exclusive history preparation before creating new admitted inputs.
+					env = clusterTestEnv.RunT(t)
+					// Latest inputs have fixed names too, so their literal hashes are reviewable.
+					require.NoError(t, env.Client().Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}))
+					env = clusterTestEnv.RunTInNamespace(t, namespace)
 				}
-			}
-			dgd := getOnlyClusterDGD(t, ctx, env.Client(), namespace)
-			rollout := newDGDWorkerRolloutReconciler(env.Client(), nil)
-			transition, err := rollout.planUnsupportedWorkerHashTransition(dgd)
-			require.NoError(t, err)
-			// Report independently of the golden and keep observing to emit the full diff.
-			if isHistory {
-				require.NotEmpty(t, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
-				if transition.hashChanged {
-					t.Error("operator-only takeover requests a new worker generation")
-				}
-			}
-			completed := &upgradeComponentReconciles{}
-			baseline := completedUpgradeReconciles(t)
-			// Render valid MPI Secret references without starting model-serving Pods.
-			operatorConfig := clusterTestRestrictedConfig(namespace)
-			operatorConfig.MPI.SSHSecretName = upgradeMPISSHSecret
-			operatorConfig.MPI.SSHSecretNamespace = namespace
-			require.Empty(t, configvalidation.ValidateOperatorConfiguration(operatorConfig))
-			env.StartManager(func(mgr ctrl.Manager) error {
-				opts := SetupOptions{Config: operatorConfig, RuntimeConfig: &common.RuntimeConfig{Gate: features.Gates{Grove: true, LWS: true, DisaggregatedSet: true}}}
-				if err := SetupDynamoGraphDeployment(mgr, DynamoGraphDeploymentSetupOptions{SetupOptions: opts}); err != nil {
-					return err
-				}
-				return setupUpgradeComponentController(mgr, opts, completed)
-			})
-			t.Log("Wait for a completed production reconcile, then compare the full owned resource graph")
-			require.Eventually(t, func() bool { return completedUpgradeReconciles(t) >= baseline+1 }, 90*time.Second, 200*time.Millisecond, "candidate did not complete a successful reconciliation")
-			if !isHistory {
-				t.Log("Wait for the admitted DGD and its worker hash to converge before capture")
-				require.Eventually(t, func() bool {
-					live := getOnlyClusterDGD(t, ctx, env.Client(), namespace)
-					want, err := dynamo.ComputeDGDWorkersSpecHash(live)
-					return err == nil && live.Status.ObservedGeneration == live.Generation && live.Annotations[consts.AnnotationCurrentWorkerHashV2] == want
-				}, 90*time.Second, 200*time.Millisecond)
-			}
-			dgd = getOnlyClusterDGD(t, ctx, env.Client(), namespace)
-			var after []unstructured.Unstructured
-			if dgd.Annotations[consts.KubeAnnotationEnableGrove] == "false" {
-				t.Log("Wait for each DCD and its immediate workload without requiring serving Pods")
-				require.Eventually(t, func() bool {
-					var err error
-					after, err = captureUpgradeComponent(t, env, completed, upgradeExpectedDCDs(dgd))
-					return err == nil
-				}, 90*time.Second, 200*time.Millisecond, "component workload graph did not converge")
-			} else {
-				after = captureUpgrade(t, env)
-			}
-			checkUpgradeWorkloadMatrix(t, relative, dgd, after)
-			checkUpgradeGroveMatrix(t, relative, getOnlyClusterDGD(t, ctx, env.Client(), namespace), after)
-			if isHistory {
-				if err := upgradeSafetyError(transition.hashChanged, before, after); err != nil {
-					t.Error(err)
-				}
-			} else {
-				dgd = getOnlyClusterDGD(t, ctx, env.Client(), namespace)
-				require.Equal(t, version, dgd.Annotations["nvidia.com/dynamo-operator-origin-version"])
-			}
-			if !item.promote {
-				path := filepath.Join(filepath.Dir(input), "output.yaml")
-				var variables golden.Variables
+				env.BlockWorkloads()
 				if !isHistory {
-					variables = upgradeLatestVariables(t, path, version)
+					// Set the namespace on CREATE, never on a reconciled snapshot.
+					for i := range objects {
+						objects[i].SetNamespace(namespace)
+						require.NoError(t, env.Client().Create(ctx, &objects[i]))
+					}
 				}
-				golden.MatchCapturedManifestsWithVariables(t, after, path, variables)
-			}
-			if root := os.Getenv("DYNAMO_UPGRADE_CAPTURE_DIR"); root != "" && !t.Failed() {
-				path := filepath.Join(root, relative, "input.yaml")
-				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
-				require.NoError(t, golden.WriteManifests(path, after))
-			}
-			if !isHistory && !item.promote && (strings.HasSuffix(relative, "/component") || strings.HasSuffix(relative, "/disaggregatedset")) && !t.Failed() {
-				t.Log("An intentional worker edit must reach every immediate worker template while Pods are blocked")
-				var workers []string
-				current := getOnlyClusterDGD(t, ctx, env.Client(), namespace)
-				for i := range current.Spec.Components {
-					if current.Spec.Components[i].ComponentType == api.ComponentTypeFrontend {
-						continue
+				before := captureUpgrade(t, env)
+				if isHistory {
+					// Preserve historical fields for safety comparisons even if the
+					// candidate API schema normalizes them on its first read.
+					ids := map[string]unstructured.Unstructured{}
+					for _, object := range before {
+						ids[object.GetKind()+"/"+object.GetName()] = object
 					}
-					workers = append(workers, current.Spec.Components[i].ComponentName)
-					container := &current.Spec.Components[i].PodTemplate.Spec.Containers[0]
-					container.Env = append(container.Env, corev1.EnvVar{Name: "WORKER_REVISION", Value: "2"})
+					before = nil
+					for _, object := range objects {
+						old := object.DeepCopy()
+						restored, ok := ids[old.GetKind()+"/"+old.GetName()]
+						require.True(t, ok)
+						old.SetUID(restored.GetUID())
+						old.SetGeneration(restored.GetGeneration())
+						before = append(before, *old)
+					}
 				}
-				desiredHash, err := dynamo.ComputeDGDWorkersSpecHash(current)
+				dgd := getOnlyClusterDGD(t, ctx, env.Client(), namespace)
+				rollout := newDGDWorkerRolloutReconciler(env.Client(), nil)
+				transition, err := rollout.planUnsupportedWorkerHashTransition(dgd)
 				require.NoError(t, err)
-				require.NoError(t, env.Client().Update(ctx, current))
-				require.EventuallyWithT(t, func(c *assert.CollectT) {
-					assert.NoError(c, upgradeWorkerEditError(captureUpgrade(t, env), workers, desiredHash))
-				}, 60*time.Second, 200*time.Millisecond, "worker edit did not reach every immediate template")
-				require.Error(t, upgradeSafetyError(false, after, captureUpgrade(t, env)))
-			}
-			if isHistory && strings.HasSuffix(relative, "/sglang-1.5") && !t.Failed() {
-				t.Log("A real worker environment edit must still request and persist a new generation")
-				current := getOnlyClusterDGD(t, ctx, env.Client(), namespace)
-				oldHash := current.Annotations[consts.AnnotationCurrentWorkerHashV2]
-				current.Spec.Components[0].PodTemplate.Spec.Containers[0].Env = append(current.Spec.Components[0].PodTemplate.Spec.Containers[0].Env, corev1.EnvVar{Name: "WORKER_REVISION", Value: "2"})
-				edit, err := rollout.planUnsupportedWorkerHashTransition(current)
-				require.NoError(t, err)
-				require.True(t, edit.hashChanged)
-				require.NoError(t, env.Client().Update(ctx, current))
-				require.Eventually(t, func() bool {
-					var live api.DynamoGraphDeployment
-					if env.Client().Get(ctx, client.ObjectKeyFromObject(current), &live) != nil {
-						return false
+				// Report independently of the golden and keep observing to emit the full diff.
+				if isHistory {
+					require.NotEmpty(t, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
+					if transition.hashChanged {
+						t.Error("operator-only takeover requests a new worker generation")
 					}
-					want, err := dynamo.ComputeDGDWorkersSpecHash(&live)
-					if err != nil {
-						return false
+				}
+				completed := &upgradeComponentReconciles{}
+				candidate := &upgradeDGDReconciles{}
+				// Render valid MPI Secret references without starting model-serving Pods.
+				operatorConfig := clusterTestRestrictedConfig(namespace)
+				operatorConfig.MPI.SSHSecretName = upgradeMPISSHSecret
+				operatorConfig.MPI.SSHSecretNamespace = namespace
+				require.Empty(t, configvalidation.ValidateOperatorConfiguration(operatorConfig))
+				env.StartManager(func(mgr ctrl.Manager) error {
+					opts := SetupOptions{Config: operatorConfig, RuntimeConfig: &common.RuntimeConfig{Gate: features.Gates{Grove: true, LWS: true, DisaggregatedSet: true}}}
+					if err := setupUpgradeDGDController(mgr, opts, candidate); err != nil {
+						return err
 					}
-					return want != oldHash && live.Annotations[consts.AnnotationCurrentWorkerHashV2] == want && live.Status.ObservedGeneration == live.Generation
-				}, 60*time.Second, 200*time.Millisecond)
-				changed := captureUpgrade(t, env)
-				require.Error(t, upgradeSafetyError(false, after, changed))
-				// Verify the workload actually carries the edit, not just the annotation.
-				for _, object := range changed {
-					if object.GetKind() == upgradePodCliqueSetKind {
-						templates, err := upgradeWorkerTemplates(object)
-						require.NoError(t, err)
-						found := false
-						for _, value := range templates {
-							pod := value.(map[string]any)["podSpec"].(map[string]any)
-							containers := pod["containers"].([]any)
-							for _, container := range containers {
-								for _, variable := range container.(map[string]any)["env"].([]any) {
-									if variable.(map[string]any)["name"] == "WORKER_REVISION" {
-										found = true
+					return setupUpgradeComponentController(mgr, opts, completed)
+				})
+				t.Log("Wait for a completed production reconcile, then compare the full owned resource graph")
+				require.Eventually(t, func() bool { return candidate.completed(client.ObjectKeyFromObject(dgd)) }, 90*time.Second, 200*time.Millisecond, "candidate did not complete a successful reconciliation")
+				if !isHistory {
+					t.Log("Wait for the admitted DGD and its worker hash to converge before capture")
+					require.Eventually(t, func() bool {
+						live := getOnlyClusterDGD(t, ctx, env.Client(), namespace)
+						want, err := dynamo.ComputeDGDWorkersSpecHash(live)
+						return err == nil && live.Status.ObservedGeneration == live.Generation && live.Annotations[consts.AnnotationCurrentWorkerHashV2] == want
+					}, 90*time.Second, 200*time.Millisecond)
+				}
+				dgd = getOnlyClusterDGD(t, ctx, env.Client(), namespace)
+				var after []unstructured.Unstructured
+				if dgd.Annotations[consts.KubeAnnotationEnableGrove] == "false" {
+					t.Log("Wait for each DCD and its immediate workload without requiring serving Pods")
+					require.Eventually(t, func() bool {
+						var err error
+						after, err = captureUpgradeComponent(t, env, completed, upgradeExpectedDCDs(dgd))
+						return err == nil
+					}, 90*time.Second, 200*time.Millisecond, "component workload graph did not converge")
+				} else {
+					after = captureUpgrade(t, env)
+				}
+				checkUpgradeWorkloadMatrix(t, relative, dgd, after)
+				checkUpgradeGroveMatrix(t, relative, getOnlyClusterDGD(t, ctx, env.Client(), namespace), after)
+				if isHistory {
+					if err := upgradeSafetyError(transition.hashChanged, before, after); err != nil {
+						t.Error(err)
+					}
+				} else {
+					dgd = getOnlyClusterDGD(t, ctx, env.Client(), namespace)
+					require.Equal(t, version, dgd.Annotations["nvidia.com/dynamo-operator-origin-version"])
+				}
+				if !item.promote {
+					path := filepath.Join(filepath.Dir(input), "output.yaml")
+					var variables golden.Variables
+					if !isHistory {
+						variables = upgradeLatestVariables(t, path, version)
+					}
+					golden.MatchCapturedManifestsWithVariables(t, after, path, variables)
+				}
+				if root := os.Getenv("DYNAMO_UPGRADE_CAPTURE_DIR"); root != "" && !t.Failed() {
+					path := filepath.Join(root, relative, "input.yaml")
+					require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+					require.NoError(t, golden.WriteManifests(path, after))
+				}
+				if !isHistory && !item.promote && (strings.HasSuffix(relative, "/component") || strings.HasSuffix(relative, "/disaggregatedset")) && !t.Failed() {
+					t.Log("An intentional worker edit must reach every immediate worker template while Pods are blocked")
+					var workers []string
+					current := getOnlyClusterDGD(t, ctx, env.Client(), namespace)
+					for i := range current.Spec.Components {
+						if current.Spec.Components[i].ComponentType == api.ComponentTypeFrontend {
+							continue
+						}
+						workers = append(workers, current.Spec.Components[i].ComponentName)
+						container := &current.Spec.Components[i].PodTemplate.Spec.Containers[0]
+						container.Env = append(container.Env, corev1.EnvVar{Name: "WORKER_REVISION", Value: "2"})
+					}
+					desiredHash, err := dynamo.ComputeDGDWorkersSpecHash(current)
+					require.NoError(t, err)
+					require.NoError(t, env.Client().Update(ctx, current))
+					require.EventuallyWithT(t, func(c *assert.CollectT) {
+						assert.NoError(c, upgradeWorkerEditError(captureUpgrade(t, env), workers, desiredHash))
+					}, 60*time.Second, 200*time.Millisecond, "worker edit did not reach every immediate template")
+					require.Error(t, upgradeSafetyError(false, after, captureUpgrade(t, env)))
+				}
+				if isHistory && strings.HasSuffix(relative, "/sglang-1.5") && !t.Failed() {
+					t.Log("A real worker environment edit must still request and persist a new generation")
+					current := getOnlyClusterDGD(t, ctx, env.Client(), namespace)
+					oldHash := current.Annotations[consts.AnnotationCurrentWorkerHashV2]
+					current.Spec.Components[0].PodTemplate.Spec.Containers[0].Env = append(current.Spec.Components[0].PodTemplate.Spec.Containers[0].Env, corev1.EnvVar{Name: "WORKER_REVISION", Value: "2"})
+					edit, err := rollout.planUnsupportedWorkerHashTransition(current)
+					require.NoError(t, err)
+					require.True(t, edit.hashChanged)
+					require.NoError(t, env.Client().Update(ctx, current))
+					require.Eventually(t, func() bool {
+						var live api.DynamoGraphDeployment
+						if env.Client().Get(ctx, client.ObjectKeyFromObject(current), &live) != nil {
+							return false
+						}
+						want, err := dynamo.ComputeDGDWorkersSpecHash(&live)
+						if err != nil {
+							return false
+						}
+						return want != oldHash && live.Annotations[consts.AnnotationCurrentWorkerHashV2] == want && live.Status.ObservedGeneration == live.Generation
+					}, 60*time.Second, 200*time.Millisecond)
+					changed := captureUpgrade(t, env)
+					require.Error(t, upgradeSafetyError(false, after, changed))
+					// Verify the workload actually carries the edit, not just the annotation.
+					for _, object := range changed {
+						if object.GetKind() == upgradePodCliqueSetKind {
+							templates, err := upgradeWorkerTemplates(object)
+							require.NoError(t, err)
+							found := false
+							for _, value := range templates {
+								pod := value.(map[string]any)["podSpec"].(map[string]any)
+								containers := pod["containers"].([]any)
+								for _, container := range containers {
+									for _, variable := range container.(map[string]any)["env"].([]any) {
+										if variable.(map[string]any)["name"] == "WORKER_REVISION" {
+											found = true
+										}
 									}
 								}
 							}
+							require.True(t, found, "worker edit did not reach PCS")
 						}
-						require.True(t, found, "worker edit did not reach PCS")
 					}
 				}
-			}
-		})
-	}
+			})
+		}
+	})
+
 	t.Run("component-history-barrier", testUpgradeComponentHistoryBarrier)
 	t.Run("disaggregatedset-replay", testUpgradeDisaggregatedSetReplay)
 	t.Run("missing-origin", testUpgradeMissingOrigin)
