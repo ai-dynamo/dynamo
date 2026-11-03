@@ -49,9 +49,9 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** Replace `WorkerInputs::OCCUPANCY` with `WorkerInputs::ACTIVE_REQUESTS` in custom worker-selection policies.
 
-<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Deprecated the `power-of-two` Router mode.** `--router-mode power-of-two` still works and logs a deprecation warning at startup, as does a policy file that names the `power-of-two` worker-selection type. The flag value, the `power-of-two` policy type, and the Rust `PushRouter::power_of_two_choices()` method are slated for removal in Dynamo v1.8.0. Model cards that carry the `power_of_two_choices` Router mode remain readable until v1.10.0.
+<span className="dynref-badge dynref-badge--red">Removed</span> **Removed the `power-of-two` Router mode.** `--router-mode power-of-two`, `DYN_ROUTER_MODE=power-of-two`, and a policy file that names the `power-of-two` worker-selection type now fail at startup, and the Rust `PushRouter::power_of_two_choices()` method is removed. A frontend that discovers a v1.5 or v1.6 worker advertising `power-of-two` reports an error naming the removal instead of routing to that worker set.
 
-  > **Migrate:** Choose another `--router-mode`. If a policy file names the `power-of-two` type, name another worker-selection type there and keep `--router-mode kv`.
+  > **Migrate:** Choose another `--router-mode`, and restart workers that pass `--router-mode power-of-two` with another mode before upgrading the frontend. If a policy file names the `power-of-two` type, name another worker-selection type there.
 
 <span className="dynref-badge dynref-badge--red">Removed</span> **Removed the compatibility import paths and names for Router plugins** in the `dynamo-kv-router` and `dynamo-llm` Rust crates.
 

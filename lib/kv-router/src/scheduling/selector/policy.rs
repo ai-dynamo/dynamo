@@ -230,7 +230,7 @@ impl WorkerSelectionPolicy {
     /// most [`WorkerInputs::ACTIVE_REQUESTS`]. Any other policy comes back unchanged.
     ///
     /// Passing this check doesn't make a policy run hosted: for now the hosts call it only
-    /// for the `--router-mode` types (random, round-robin, least-loaded, power-of-two), in
+    /// for the `--router-mode` types (random, round-robin, least-loaded), in
     /// the routing host and as `PushRouter`'s instance selectors. A picker-only type named
     /// in a policy file still runs on the KV path.
     ///
