@@ -34,5 +34,4 @@ kv_cache_config:
   free_gpu_memory_fraction: 0.10
   enable_block_reuse: false
 
-cache_transceiver_config:
-  backend: DEFAULT
+# No cache_transceiver_config: the E/PD pd worker that uses this file transfers no KV cache.
