@@ -8,6 +8,7 @@ import logging
 import os
 
 import uvloop
+from vllm_omni.model_extras import get_model_class_name
 
 from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
@@ -23,6 +24,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.handlers import get_lora_manager
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.health_check import build_omni_health_check_payload
+from dynamo.vllm.omni.image_edit import image_edit_capability
 from dynamo.vllm.omni.realtime_utils import init_omni_realtime
 from dynamo.vllm.omni.stage_router import init_omni_stage_router
 from dynamo.vllm.omni.stage_worker import init_omni_stage
@@ -140,6 +142,9 @@ async def init_omni(
     model_type = get_output_modalities(config.output_modalities, config.model)
     if model_type is None:
         model_type = ModelType.Images
+    has_image_output = model_type == ModelType.Images or any(
+        modality.lower() == "image" for modality in config.output_modalities
+    )
 
     try:
         await register_model(
@@ -155,6 +160,14 @@ async def init_omni(
             worker_type=WorkerType.Aggregated,
             needs=[],
             max_gpu_lora_count=_base_model_lora_capacity(config, lora_enabled),
+            user_data={
+                "image_edits": image_edit_capability(
+                    get_model_class_name(handler.engine_client),
+                    handler._image_edit_limits,
+                )
+            }
+            if has_image_output
+            else None,
         )
 
         logger.info("Starting to serve Omni worker endpoint...")

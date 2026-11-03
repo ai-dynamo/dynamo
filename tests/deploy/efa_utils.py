@@ -18,7 +18,9 @@ adapter counters that moved -- are identical and live here.
 
 import json
 import logging
+import re
 import shlex
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -44,6 +46,18 @@ logger = logging.getLogger(__name__)
 EFA_MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 MANIFEST_DIR = Path(__file__).parent / "efa"
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# The operator reads each component's Dynamo version from its image tag and
+# rejects the DGD when the tag has none. CI passes these tests the raw build tag
+# (<sha>-<framework>-runtime-efa-nightly), which has none.
+_VERSIONED_TAG = re.compile(
+    r"^[vV]?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+    r"(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
 
 # Comfortably under the tests' own pytest timeout, so a deployment that never
 # becomes ready loses the race to _wait_for_condition, which raises with pod
@@ -124,6 +138,23 @@ class EfaFrameworkProfile:
     @property
     def worker_services(self) -> tuple[str, str]:
         return (self.prefill_service, self.decode_service)
+
+
+def runtime_version_override(image: str) -> str | None:
+    """The version to declare for ``image``, or None when its tag carries one.
+
+    Read from the workspace Cargo.toml without its pre-release suffix, which is
+    how CI derives the version it puts in the image tags of the other deploy
+    tests.
+    """
+    ref = image.strip().split("@", 1)[0]
+    tag = ref.rpartition(":")[2].strip() if ref.rfind(":") > ref.rfind("/") else ""
+    match = _VERSIONED_TAG.fullmatch(tag)
+    if match and all(int(part) <= 2**64 - 1 for part in match.groups()):
+        return None
+    with open(REPO_ROOT / "Cargo.toml", "rb") as f:
+        version = tomllib.load(f)["workspace"]["package"]["version"]
+    return re.split(r"[-+]", version, maxsplit=1)[0]
 
 
 def _read_pod_logs(pod, tail_lines: int = 20000) -> str:
@@ -346,7 +377,7 @@ def read_efa_device_counters(pod) -> dict:
         "if not u: print('{}'); raise SystemExit\n"
         "dev=open('/sys/class/infiniband_verbs/%s/ibdev'%u[0]).read().strip()\n"
         "ip=os.environ.get('EFA_EXPORTER_HOST','')\n"
-        f"t=urllib.request.urlopen('http://%s:{EFA_EXPORTER_PORT}/metrics'%ip,timeout=10).read().decode()\n"
+        f"t=urllib.request.urlopen('http://%s:{EFA_EXPORTER_PORT}/metrics?collect[]=amazonefa'%ip,timeout=10).read().decode()\n"
         "lines=[l for l in t.splitlines() if l.startswith('node_amazonefa_')]\n"
         "print(json.dumps({'_ibdev':dev,'_lines':lines}))"
     )
@@ -504,11 +535,17 @@ async def run_efa_deployment_check(
     # Single EFA-tagged image for every service (the framework runtime image also
     # provides the frontend entrypoint).
     deployment_spec.set_image(image)
+    runtime_version = runtime_version_override(image)
+    if runtime_version:
+        for service in deployment_spec.services:
+            deployment_spec.set_runtime_version(runtime_version, service.name)
 
     logger.info(
-        "Starting %s EFA deploy test (image: %s, model: %s, namespace: %s)",
+        "Starting %s EFA deploy test (image: %s, runtime version override: %s, "
+        "model: %s, namespace: %s)",
         profile.name,
         image,
+        runtime_version,
         EFA_MODEL_NAME,
         namespace,
     )

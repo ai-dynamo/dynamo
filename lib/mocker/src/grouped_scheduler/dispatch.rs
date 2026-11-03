@@ -82,12 +82,13 @@ pub(super) async fn run_effect_dispatcher(
             GroupedLiveEvent::PassStarted(started) => {
                 for rank in started.by_rank {
                     let dispatch = rank_dispatch(&ranks, rank.dp_rank)?;
+                    compatibility.record_admissions(&rank.effects.admissions);
                     dispatch.publish_admissions(rank.effects.admissions).await?;
                     dispatch.publish_kv(rank.effects.kv_events);
                 }
             }
             GroupedLiveEvent::InternalWorkCompleted(effects) => {
-                publish_internal_work(effects, &ranks).await?;
+                publish_internal_work(effects, &ranks, &compatibility).await?;
             }
             GroupedLiveEvent::PassCompleted {
                 completed,
@@ -188,7 +189,7 @@ async fn dispatch_pass_completion(
             compatibility.apply_cleanup(Cleanup::Request(request_id));
             let outcome = outcome?;
             for effects in outcome.internal {
-                publish_internal_work(effects, ranks).await?;
+                publish_internal_work(effects, ranks, compatibility).await?;
             }
             let effects = outcome.command?;
             merge_boundary_command_effects(effects, ranks, compatibility, &mut publications)?;
@@ -223,9 +224,11 @@ async fn dispatch_pass_completion(
 async fn publish_internal_work(
     effects: EngineEffects<PassStartEffects>,
     ranks: &[RankDispatch],
+    compatibility: &CompatibilityState,
 ) -> Result<()> {
     for rank in effects.by_rank {
         let dispatch = rank_dispatch(ranks, rank.dp_rank)?;
+        compatibility.record_admissions(&rank.effects.admissions);
         dispatch.publish_admissions(rank.effects.admissions).await?;
         dispatch.publish_kv(rank.effects.kv_events);
     }

@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use aisimulate_core::engine::{
-    HandoffId as EngineHandoffId, LifecycleEvent, Output, Request,
+    Admission, HandoffId as EngineHandoffId, LifecycleEvent, Output, Request,
     TransferTimingMode as EngineTransferTimingMode,
 };
 use anyhow::{Result, anyhow};
@@ -27,15 +27,22 @@ pub(super) enum Cleanup {
 
 pub(super) struct CompatibilityState {
     args: MockerConfig,
-    request_prompt_lengths: Mutex<HashMap<Uuid, usize>>,
+    request_accounting: Mutex<HashMap<Uuid, RequestAccounting>>,
     handoffs: Mutex<HandoffMap>,
+}
+
+#[derive(Clone, Copy)]
+struct RequestAccounting {
+    prompt_len: usize,
+    cached_tokens: Option<usize>,
+    cache_usage_reported: bool,
 }
 
 impl CompatibilityState {
     pub(super) fn new(args: MockerConfig) -> Self {
         Self {
             args,
-            request_prompt_lengths: Mutex::new(HashMap::new()),
+            request_accounting: Mutex::new(HashMap::new()),
             handoffs: Mutex::new(HandoffMap::default()),
         }
     }
@@ -50,9 +57,14 @@ impl CompatibilityState {
             "Dynamo grouped live engines do not support image requests"
         );
         let request_id = request.uuid.unwrap_or_else(Uuid::new_v4);
-        self.request_prompt_lengths
-            .lock()
-            .insert(request_id, request.tokens.len());
+        self.request_accounting.lock().insert(
+            request_id,
+            RequestAccounting {
+                prompt_len: request.tokens.len(),
+                cached_tokens: None,
+                cache_usage_reported: false,
+            },
+        );
         Ok(Request {
             request_id,
             tokens: request.tokens,
@@ -66,6 +78,18 @@ impl CompatibilityState {
         })
     }
 
+    pub(super) fn record_admissions(&self, admissions: &[Admission]) {
+        let mut requests = self.request_accounting.lock();
+        for admission in admissions {
+            if let Some(request) = requests.get_mut(&admission.request_id) {
+                // Recomputing or readmitting a request must not count its own KV as a hit.
+                request
+                    .cached_tokens
+                    .get_or_insert(admission.reused_input_tokens);
+            }
+        }
+    }
+
     pub(super) fn engine_handoff(&self, handoff_id: DynamoHandoffId) -> Result<EngineHandoffId> {
         self.handoffs.lock().native(handoff_id)
     }
@@ -75,6 +99,10 @@ impl CompatibilityState {
     }
 
     pub(super) fn mark_destination(&self, handoff_id: DynamoHandoffId, request_id: Uuid) {
+        // Transferred prompt KV does not measure the prefill worker's cache hits.
+        if let Some(request) = self.request_accounting.lock().get_mut(&request_id) {
+            request.cache_usage_reported = true;
+        }
         self.handoffs
             .lock()
             .mark_destination(handoff_id, request_id);
@@ -87,7 +115,7 @@ impl CompatibilityState {
     pub(super) fn apply_cleanup(&self, cleanup: Cleanup) {
         match cleanup {
             Cleanup::Request(request_id) => {
-                self.request_prompt_lengths.lock().remove(&request_id);
+                self.request_accounting.lock().remove(&request_id);
                 self.handoffs.lock().cancel_request(request_id);
             }
             Cleanup::SourceHandoff(handoff_id) => self.handoffs.lock().finish_source(handoff_id),
@@ -98,10 +126,23 @@ impl CompatibilityState {
     }
 
     pub(super) fn output_signal(&self, output: Output) -> OutputSignal {
-        let prompt_len = output.completed.then(|| {
-            self.request_prompt_lengths
-                .lock()
-                .remove(&output.request_id)
+        let accounting = {
+            let mut requests = self.request_accounting.lock();
+            if output.completed {
+                requests.remove(&output.request_id)
+            } else {
+                requests.get_mut(&output.request_id).map(|request| {
+                    let snapshot = *request;
+                    request.cache_usage_reported |=
+                        output.cached_tokens.is_some() || request.cached_tokens.is_some();
+                    snapshot
+                })
+            }
+        };
+        let cached_tokens = output.cached_tokens.or_else(|| {
+            accounting
+                .filter(|request| !output.rejected && !request.cache_usage_reported)
+                .and_then(|request| request.cached_tokens)
         });
         if output.completed {
             self.handoffs
@@ -113,16 +154,16 @@ impl CompatibilityState {
             token_id: output.token_id,
             completed: output.completed,
             rejected: output.rejected,
-            handoff_delay_ms: prompt_len.flatten().and_then(|prompt_len| {
+            handoff_delay_ms: accounting.filter(|_| output.completed).and_then(|request| {
                 compute_prefill_handoff_delay_ms(
                     self.args.worker_type,
                     output.completed,
-                    prompt_len,
+                    request.prompt_len,
                     self.args.kv_transfer_bandwidth,
                     self.args.kv_transfer_bytes_per_token,
                 )
             }),
-            cached_tokens: output.cached_tokens,
+            cached_tokens,
         }
     }
 
@@ -291,6 +332,28 @@ mod tests {
     }
 
     #[test]
+    fn destination_admission_does_not_invent_cache_usage() {
+        for explicit in [None, Some(0), Some(3)] {
+            let state = CompatibilityState::new(MockerConfig::default());
+            let request = state.native_request(DirectRequest::default()).unwrap();
+            state.mark_destination(handoff(9), request.request_id);
+            state.record_admissions(&[Admission {
+                request_id: request.request_id,
+                reused_input_tokens: 0,
+                cache_tier_attribution: None,
+            }]);
+            let output = state.output_signal(Output {
+                request_id: request.request_id,
+                token_id: Some(7),
+                completed: true,
+                rejected: false,
+                cached_tokens: explicit,
+            });
+            assert_eq!(output.cached_tokens, explicit);
+        }
+    }
+
+    #[test]
     fn cancelling_request_does_not_remove_unrelated_empty_handoff() {
         let mut handoffs = HandoffMap::default();
         let target = handoff(1);
@@ -376,7 +439,7 @@ mod tests {
                 .to_string()
                 .contains("authored KV fetch hints")
         );
-        assert!(state.request_prompt_lengths.lock().is_empty());
+        assert!(state.request_accounting.lock().is_empty());
         request.kv_hints = None;
         request.images.push(aisimulate_core::engine::ImageSpec {
             identity: 1,
@@ -397,6 +460,6 @@ mod tests {
                 .to_string()
                 .contains("image requests")
         );
-        assert!(state.request_prompt_lengths.lock().is_empty());
+        assert!(state.request_accounting.lock().is_empty());
     }
 }

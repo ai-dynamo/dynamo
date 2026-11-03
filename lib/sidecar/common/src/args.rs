@@ -76,7 +76,8 @@ pub struct SidecarArgs {
     #[command(flatten)]
     pub common: CommonArgs,
 
-    /// Engine gRPC endpoint as `host:port` or a plaintext gRPC/HTTP URL.
+    /// Engine gRPC endpoint as `host:port`, a plaintext gRPC/HTTP URL, or
+    /// `unix:///ABSOLUTE/PATH` for a Unix socket.
     #[arg(
         long,
         env = "DYN_SIDECAR_GRPC_ENDPOINT",

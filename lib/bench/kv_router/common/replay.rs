@@ -40,12 +40,8 @@ pub fn maybe_rescale_ready_span(
     }
 }
 
-/// Build default MockerConfig suitable for event generation.
-pub fn default_mock_engine_args(
-    num_gpu_blocks: usize,
-    block_size: usize,
-) -> anyhow::Result<MockerConfig> {
-    MockerConfig::from_value(serde_json::json!({
+fn mock_engine_json(num_gpu_blocks: usize, block_size: usize) -> serde_json::Value {
+    serde_json::json!({
         "engine": {
             "num_gpu_blocks": num_gpu_blocks,
             "block_size": block_size,
@@ -54,7 +50,31 @@ pub fn default_mock_engine_args(
             "max_num_batched_tokens": usize::MAX,
             "max_num_seqs": usize::MAX
         }
-    }))
+    })
+}
+
+/// Build default MockerConfig suitable for event generation.
+pub fn default_mock_engine_args(
+    num_gpu_blocks: usize,
+    block_size: usize,
+) -> anyhow::Result<MockerConfig> {
+    MockerConfig::from_value(mock_engine_json(num_gpu_blocks, block_size))
+}
+
+/// The default engine with vLLM's CPU offload tier of `num_host_blocks` per worker: computed
+/// prompt blocks are written through to host, which evicts LRU and publishes host-tier events.
+/// `kv_cache_bytes_per_token` sizes host blocks and so sets the device-to-host copy time.
+pub fn host_offload_mock_engine_args(
+    num_gpu_blocks: usize,
+    block_size: usize,
+    num_host_blocks: usize,
+    kv_cache_bytes_per_token: usize,
+) -> anyhow::Result<MockerConfig> {
+    let mut config = mock_engine_json(num_gpu_blocks, block_size);
+    config["engine"]["kv_cache_bytes_per_token"] = kv_cache_bytes_per_token.into();
+    config["engine"]["native_host_offload"] =
+        serde_json::json!({ "num_host_blocks": num_host_blocks });
+    MockerConfig::from_value(config)
 }
 
 fn replay_worker_trace(

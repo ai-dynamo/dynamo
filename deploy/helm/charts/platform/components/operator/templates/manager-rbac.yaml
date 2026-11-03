@@ -108,18 +108,6 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - dynamoworkermetadatas
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - nvidia.com
-  resources:
   - dynamocomponentdeployments/finalizers
   - dynamographdeploymentrequests/finalizers
   - dynamographdeployments/finalizers
