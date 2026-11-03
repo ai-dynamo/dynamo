@@ -128,7 +128,8 @@ for state, label, and lifetime semantics.
 
 ## Related Documentation
 
-- [Admission Control Architecture](admission-control-architecture.md) - Backend admission limits and queueing
+- [Backend Admission Control](../admission-control/backend.md) - Backend admission limits and queueing
+- [Router Admission Control](../admission-control/router.md) - Policy-class queues, ordering, and due times
 - [Request Rejection](../../../../kubernetes/fault-tolerance/request-rejection.md) - Enable, tune, verify, and troubleshoot load shedding
 - [Frontend Configuration](../../../../reference/components/frontend-configuration.mdx#fault-tolerance) - Threshold and overload response fields
 - [Observability Architecture](../observability-architecture.md#active-worker-health-checks) - Worker health monitoring

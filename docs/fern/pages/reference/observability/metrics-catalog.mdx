@@ -427,7 +427,7 @@ The request metrics below are recorded for every endpoint a process serves. vLLM
 </ParamField>
 
 The shared TCP request plane, the default, exposes the following `dynamo_work_handler_*` metrics. They are
-registered once per process and are independent of backend admission; see [Backend Admission Control](../../developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md#backend).
+registered once per process and are independent of backend admission; see [Backend Admission Control](../../developer-guide/knowledge-base/concepts/admission-control/backend.md#backend).
 With the NATS request plane, all except `dynamo_work_handler_time_to_first_response_seconds` stay at 0.
 
 <ParamField path="dynamo_work_handler_pool_active_tasks" type="gauge">
@@ -465,7 +465,7 @@ With the NATS request plane, all except `dynamo_work_handler_time_to_first_respo
 The `dynamo_backend_admission_*` metrics track engine occupancy, queueing, and request outcomes.
 These metrics count requests only when at least one engine limit is configured. With both engine limits
 unlimited, they remain at zero.
-See [Backend Admission Control](../../developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md#backend)
+See [Backend Admission Control](../../developer-guide/knowledge-base/concepts/admission-control/backend.md#backend)
 for gate behavior.
 
 The `dp_rank` label contains the rank ID, such as `"4"`, or `"unspecified"` for unranked requests.
