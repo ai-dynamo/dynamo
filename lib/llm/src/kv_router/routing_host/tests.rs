@@ -377,6 +377,8 @@ async fn builtin_direct_uses_bound_soft_affinity_as_exact_target() {
 struct CompletedBuiltinDispatch {
     worker_ids: Mutex<Vec<u64>>,
     dp_ranks: Mutex<Vec<Option<u32>>>,
+    fails: AtomicBool,
+    unfinished: AtomicBool,
 }
 
 #[async_trait]
@@ -397,6 +399,15 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
             .lock()
             .unwrap()
             .push(instance.expect("selected worker instance").id());
+        if self.fails.load(Ordering::SeqCst) {
+            return Err(anyhow::anyhow!("dispatch failed"));
+        }
+        if self.unfinished.load(Ordering::SeqCst) {
+            return Ok(ResponseStream::new(
+                Box::pin(stream::pending()),
+                context.context(),
+            ));
+        }
         let output = Annotated::from_data(LLMEngineOutput {
             finish_reason: Some(FinishReason::Stop),
             ..Default::default()
@@ -520,6 +531,23 @@ async fn builtin_lora_keeps_separate_selection_and_cleanup() {
 
     assert_eq!(dispatch.worker_ids.lock().unwrap().len(), 2);
     assert_eq!(dispatch.worker_ids.lock().unwrap()[1], worker_id);
+    assert!(!estimator.get_inflight_counts().contains_key("adapter"));
+
+    dispatch.fails.store(true, Ordering::SeqCst);
+    let mut adapter_request = request();
+    adapter_request.routing_mut().lora_name = Some("adapter".into());
+    assert!(
+        host.generate(Context::new(adapter_request.clone()))
+            .await
+            .is_err()
+    );
+    assert!(!estimator.get_inflight_counts().contains_key("adapter"));
+
+    dispatch.fails.store(false, Ordering::SeqCst);
+    dispatch.unfinished.store(true, Ordering::SeqCst);
+    let stream = host.generate(Context::new(adapter_request)).await.unwrap();
+    assert_eq!(estimator.get_inflight_counts().get("adapter"), Some(&1));
+    drop(stream);
     assert!(!estimator.get_inflight_counts().contains_key("adapter"));
 
     drop(host);
