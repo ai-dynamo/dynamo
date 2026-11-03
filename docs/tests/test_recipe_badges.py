@@ -25,6 +25,7 @@ CERT = {
 BACKFILL_BASELINE = {
     "ax-k2",
     "beam-1-0-501b",
+    "cosmos3-nano-reasoner",
     "deepseek-v4-1-flash",
     "deepseek-v4-flash",
     "deepseek-v4-pro",
