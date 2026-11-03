@@ -198,6 +198,14 @@ These flags control which role this worker plays in a disaggregated deployment. 
   Environment variable: `DYN_ENABLE_RL`
 </ParamField>
 
+<ParamField path="--enable-rl-weight-transfer" type="boolean" default="false">
+  **Experimental.** Enable the strict, sequenced weight-install protocol with `--enable-rl` and [`DYN_SYSTEM_ENGINE_AUTH_TOKEN`](../observability/environment-variables.mdx#system-and-metrics). Requires aggregated dense BF16 text generation and BF16 KV cache, token input/output, TP=DP=PP=1, `--generation-config=vllm`, and an explicit `ipc` or `nccl` weight-transfer backend. Headless and pooling workers, GMS, benchmark mode, quantization, LoRA, speculative decoding, and generation-config overrides are rejected.
+
+  Generation opens after a complete install and a successful prefix and connector cache reset. Requests that cross a policy change before their terminal output are rejected. When serving through a frontend, require `--migration-limit 0`: replay after a worker failure could otherwise combine output from different policy versions. Admission failures can report `WorkerUnavailable`; policy changes after accepted output report a non-retryable server error. Worker startup requires an extension implementing `get_weight_transfer_device_info`; the default strict extension supplies it. Strict mode omits legacy weight-mutation aliases and sleep, wake, and elastic controls. GPU qualification covers trusted-local packed IPC only; NCCL is not GPU-qualified.
+
+  Environment variable: `DYN_ENABLE_RL_WEIGHT_TRANSFER`
+</ParamField>
+
 <ParamField path="--gms-shadow-mode" type="boolean" default="false">
   Enable GMS (GPU Memory Service) shadow/standby mode. Shadow engines skip KV cache allocation at startup, automatically pause after initialization, and resume on demand when the active engine dies. Requires `--load-format=gms`.
 

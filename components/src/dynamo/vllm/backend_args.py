@@ -182,6 +182,13 @@ class DynamoVllmArgGroup(ArgGroup):
                 "per-token logprob parity."
             ),
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-rl-weight-transfer",
+            env_var="DYN_ENABLE_RL_WEIGHT_TRANSFER",
+            default=False,
+            help="Enable authenticated, fail-closed RL weight-install sessions; requires --enable-rl.",
+        )
         add_argument(
             g,
             flag_name="--mm-prompt-template",
@@ -611,6 +618,7 @@ class DynamoVllmConfig(ConfigBase):
     enable_multimodal: bool
     # Enables RL-style token-in/token-out defaults.
     enable_rl: bool = False
+    enable_rl_weight_transfer: bool = False
     mm_prompt_template: str
     frontend_decoding: bool
     embedding_transfer_mode: Union[

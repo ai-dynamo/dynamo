@@ -1721,6 +1721,7 @@ def test_build_sampling_params_caps_omitted_max_tokens_to_generation_default():
 def _make_dynamo_config(**overrides):
     """Build a minimal fake DynamoConfig for update_engine_config_with_dynamo tests."""
     defaults = {
+        "enable_rl_weight_transfer": False,
         "disaggregation_mode": DisaggregationMode.AGGREGATED,
         "use_kv_events": False,
         "enable_local_indexer": True,

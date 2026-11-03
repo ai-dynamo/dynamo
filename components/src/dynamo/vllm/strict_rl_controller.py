@@ -14,6 +14,7 @@ from vllm.v1.engine.exceptions import EngineDeadError
 from dynamo.llm.exceptions import InvalidArgument
 
 from .generation_policy import StrictRLGenerationObserver
+from .strict_rl_config import validate_strict_rl_model
 from .weight_transfer import (
     WeightTransferSession,
     WeightTransferStatus,
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
     from vllm.inputs import PromptType
     from vllm.sampling_params import SamplingParams
 
+    from .handlers import BaseWorkerHandler
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +75,27 @@ class StrictRLWeightTransferController:
         self._lock = pause_lock
         self._shutdown_on_engine_dead = shutdown_on_engine_dead
         self._device_uuids = device_uuids
+
+    @classmethod
+    async def create(
+        cls, engine_client, model_max_len, pause_lock, shutdown_on_engine_dead
+    ):
+        devices = await engine_client.collective_rpc("get_weight_transfer_device_info")
+        if (
+            not isinstance(devices, list)
+            or len(devices) != 1
+            or not isinstance(devices[0], dict)
+            or not isinstance(devices[0].get("device_uuid"), str)
+            or not devices[0]["device_uuid"]
+        ):
+            raise ValueError("invalid weight-transfer device metadata")
+        return cls(
+            engine_client,
+            model_max_len,
+            pause_lock,
+            shutdown_on_engine_dead,
+            device_uuids=(devices[0]["device_uuid"],),
+        )
 
     def routes(self) -> dict[str, Callable[[dict], Awaitable[dict]]]:
         """Advertise only the strict protocol, without legacy mutation aliases."""
@@ -285,3 +308,19 @@ class StrictRLWeightTransferController:
             )
 
         return await self._locked(finish)
+
+
+async def strict_rl_routes(handler: "BaseWorkerHandler") -> tuple:
+    """Validate and wire the complete strict controller before publishing a worker."""
+    validate_strict_rl_model(handler.model_config)
+    controller = await StrictRLWeightTransferController.create(
+        handler.engine_client,
+        handler.model_max_len,
+        handler._pause_lock,
+        handler._shutdown_on_engine_dead,
+    )
+    return controller, {
+        **controller.routes(),
+        "liveness_probe": controller.versioned_route(handler.liveness_probe),
+        "abort_request": controller.versioned_route(handler.abort_request),
+    }

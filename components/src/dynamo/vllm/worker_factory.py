@@ -59,6 +59,7 @@ from .pooling_handlers import ClassifyWorkerHandler
 from .publisher import StatLoggerFactory
 from .realtime import RealtimeHandler, RealtimeTextHandler, RealtimeTranscriptionHandler
 from .state_agent import StateAgentLifecycle, state_agent_settings
+from .strict_rl_controller import strict_rl_routes
 
 
 def _register_request_cache_metrics(
@@ -2439,7 +2440,7 @@ class WorkerFactory:
         _register_request_cache_metrics(generate_endpoint, handler, config)
 
         # Register engine routes
-        self.register_engine_routes(
+        await self.register_engine_routes(
             runtime,
             generate_endpoint,
             handler,
@@ -2739,7 +2740,7 @@ class WorkerFactory:
         _register_request_cache_metrics(generate_endpoint, handler, config)
 
         # Register engine routes
-        self.register_engine_routes(
+        await self.register_engine_routes(
             runtime,
             generate_endpoint,
             handler,
@@ -2886,7 +2887,7 @@ class WorkerFactory:
             return encode_worker_client
         return None
 
-    def register_engine_routes(
+    async def register_engine_routes(
         self,
         runtime: DistributedRuntime,
         generate_endpoint: Endpoint,
@@ -2902,27 +2903,32 @@ class WorkerFactory:
         register_model_taint_route(runtime, generate_endpoint)
         runtime.register_engine_route("control/start_profile", handler.start_profile)
         runtime.register_engine_route("control/stop_profile", handler.stop_profile)
-        runtime.register_engine_route("control/sleep", handler.sleep)
-        runtime.register_engine_route("control/wake_up", handler.wake_up)
-        runtime.register_engine_route(
-            "control/scale_elastic_ep", handler.scale_elastic_ep
-        )
-        runtime.register_engine_route("control/ep_capacity", handler.get_ep_capacity)
-
-        rl_routes: dict = {
-            "liveness_probe": handler.liveness_probe,
-            "pause_generation": handler.pause_generation,
-            "resume_generation": handler.resume_generation,
-            "flush_cache": handler.flush_cache,
-            "abort_request": handler.abort_request,
-            "update_weights_from_disk": handler.update_weights_from_disk,
-            "update_weights_from_distributed": handler.update_weights_from_distributed,
-            "update_weights_from_tensor": handler.update_weights_from_tensor,
-            "init_weights_update_group": handler.init_weights_update_group,
-            "destroy_weights_update_group": handler.destroy_weights_update_group,
-            "get_weight_version": handler.get_weight_version,
-            "set_weight_version": handler.set_weight_version,
-        }
+        if handler.config.enable_rl_weight_transfer is True:
+            controller, rl_routes = await strict_rl_routes(handler)
+            handler.generation_policy = controller
+        else:
+            runtime.register_engine_route("control/sleep", handler.sleep)
+            runtime.register_engine_route("control/wake_up", handler.wake_up)
+            runtime.register_engine_route(
+                "control/scale_elastic_ep", handler.scale_elastic_ep
+            )
+            runtime.register_engine_route(
+                "control/ep_capacity", handler.get_ep_capacity
+            )
+            rl_routes = {
+                "liveness_probe": handler.liveness_probe,
+                "pause_generation": handler.pause_generation,
+                "resume_generation": handler.resume_generation,
+                "flush_cache": handler.flush_cache,
+                "abort_request": handler.abort_request,
+                "update_weights_from_disk": handler.update_weights_from_disk,
+                "update_weights_from_distributed": handler.update_weights_from_distributed,
+                "update_weights_from_tensor": handler.update_weights_from_tensor,
+                "init_weights_update_group": handler.init_weights_update_group,
+                "destroy_weights_update_group": handler.destroy_weights_update_group,
+                "get_weight_version": handler.get_weight_version,
+                "set_weight_version": handler.set_weight_version,
+            }
 
         if lora_enabled:
 
@@ -2943,10 +2949,7 @@ class WorkerFactory:
         )
 
         logger.info(
-            "Registered engine routes: control/sleep, control/wake_up, "
-            "control/scale_elastic_ep, control/ep_capacity, "
-            "control/start_profile, control/stop_profile, "
-            "and RL admin routes: %s%s",
+            "Registered engine profiling and RL admin routes: %s%s",
             ", ".join(sorted(rl_routes)),
             " (LoRA routes: load_lora, unload_lora)" if lora_enabled else "",
         )
