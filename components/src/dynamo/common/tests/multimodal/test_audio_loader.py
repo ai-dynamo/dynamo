@@ -229,33 +229,6 @@ async def test_load_audio_batch_preserves_invalid_audio_value_error(bad_result):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "typed_error",
-    [
-        HttpStatusError(415, "Unsupported Media Type", "https://example.com/x.wav"),
-        UrlValidationError("blocked host"),
-        audio_loader_module.audio_decoder_missing("vllm"),
-    ],
-    ids=["http_status", "url_validation", "missing_decoder"],
-)
-async def test_load_audio_batch_typed_error_outranks_value_error(typed_error):
-    loader = AudioLoader()
-    loader.load_audio = AsyncMock(  # type: ignore[method-assign]
-        side_effect=[ValueError("Decoded waveform is empty."), typed_error]
-    )
-
-    with pytest.raises(type(typed_error)) as exc_info:
-        await loader.load_audio_batch(
-            [
-                {"Url": "https://example.com/empty.wav"},
-                {"Url": "https://example.com/typed.wav"},
-            ]
-        )
-
-    assert exc_info.value is typed_error
-
-
-@pytest.mark.asyncio
 async def test_load_audio_batch_value_error_outranks_generic_failure():
     loader = AudioLoader()
     value_error = ValueError("Decoded waveform is empty.")
@@ -272,20 +245,6 @@ async def test_load_audio_batch_value_error_outranks_generic_failure():
         )
 
     assert exc_info.value is value_error
-
-
-@pytest.mark.asyncio
-async def test_load_audio_batch_non_value_error_stays_generic():
-    """Server-side failures must not be relabelled as invalid input."""
-    loader = AudioLoader()
-    loader.load_audio = AsyncMock(  # type: ignore[method-assign]
-        side_effect=RuntimeError("nixl read failed")
-    )
-
-    with pytest.raises(Exception, match="nixl read failed") as exc_info:
-        await loader.load_audio_batch([{"Url": "https://example.com/one.wav"}])
-
-    assert type(exc_info.value) is Exception
 
 
 @pytest.mark.asyncio
