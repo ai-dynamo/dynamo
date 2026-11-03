@@ -57,6 +57,8 @@ See the [feature support matrix](../../reference/general/compatibility.mdx#featu
 
 **Experimental.** Protocol version 2 supports aggregated vLLM workers using Dynamo frontend tokenization. Disaggregated vLLM workers and `--use-vllm-tokenizer` reject this configuration at startup. SGLang and TensorRT-LLM do not implement this plugin integration; a frontend with no compatible worker rejects runtime requests.
 
+Runtime-LoRA chat requests require the default Rust chat processor. Frontends using `--dyn-chat-processor=vllm` or `--dyn-chat-processor=sglang` reject these requests before dispatch; ordinary chat and Rust-preprocessed `/v1/completions` requests are unaffected.
+
 > [!WARNING]
 > Any inference caller can trigger artifact downloads through the worker's credentials. The plugin has no authenticated caller identity, and warm hits bypass it. Use one trust domain or authorize every source in an upstream gateway. Enforce request-rate and storage limits.
 
@@ -151,7 +153,7 @@ Return an absolute snapshot directory strictly below the cache root, containing 
 
 Dynamo checks measured size, bounded JSON, rank, exact accepted base names, and target-name structure; vLLM checks final compatibility. Preserve exported configuration rather than rewriting its base name to bypass a mismatch. The base tokenizer/chat template remain in use; adapter-specific tokenizer files/templates are not loaded.
 
-Protocol version 2 deterministically pins each runtime adapter key to one healthy capable worker. It does not spill that key to another worker when the selected worker is overloaded, so throughput for one adapter is bounded by one worker and a membership change can trigger a cold load on a different worker. Residency-aware spillover and replication are future protocol work.
+Without an explicit hard worker pin, protocol version 2 deterministically selects one healthy capable worker for each runtime adapter key. A single eligible hard pin overrides that default home and preserves the requested data-parallel rank. Ineligible or conflicting pins are rejected. A pinned request can load another worker-local copy without changing the default home for later unpinned requests. There is no overload spillover, and membership changes can trigger cold loads; residency-aware spillover and replication are future protocol work.
 
 The caller's runtime resolution/admission wait is bounded by `DYN_LORA_RESOLVE_TIMEOUT_SECONDS`, including initial eviction transitions, resolution queueing, and engine loading. A timed-out caller stops waiting while the shared worker-owned load can continue; it does not cancel an engine operation or release its ownership. Request-owned pending leases remain protected while waiting for engine admission and are released when the request exits. The fallback pending-admission timer applies to direct coordinator calls without that cleanup owner. These settings do not impose an end-to-end deadline on generation or paused engine admission. Budget proxy/client timeouts for all phases.
 
