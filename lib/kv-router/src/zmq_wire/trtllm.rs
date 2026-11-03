@@ -5,12 +5,33 @@
 
 use serde::Deserialize;
 
-#[derive(Deserialize)]
-#[serde(untagged)]
+use super::types::KvTokenIds;
+
+/// UUID namespace reserved for adapter-generated TRT-LLM image routing hints.
+pub const IMAGE_ROUTING_UUID_PREFIX: &str = "dynamo-image-v1:";
+
 pub(super) enum MapTokenIds {
-    Single(Vec<u64>),
-    Bigram(Vec<(u64, u64)>),
+    Plain(KvTokenIds),
     DigestFirst(Vec<Token>),
+}
+
+impl<'de> Deserialize<'de> for MapTokenIds {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Nested untagged derives clone the buffered sequence on every event.
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Single(Vec<u64>),
+            Bigram(Vec<(u64, u64)>),
+            DigestFirst(Vec<Token>),
+        }
+
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Single(ids) => Self::Plain(KvTokenIds::Single(ids)),
+            Wire::Bigram(ids) => Self::Plain(KvTokenIds::Bigram(ids)),
+            Wire::DigestFirst(tokens) => Self::DigestFirst(tokens),
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -47,8 +68,35 @@ pub(super) enum RoutingKeys {
     Ignored(serde::de::IgnoredAny),
 }
 
+pub(super) fn token_ids(
+    ids: MapTokenIds,
+    metadata: RoutingMetadata,
+    keys: Option<RoutingKeys>,
+    block_size: usize,
+    blocks: usize,
+) -> Option<Vec<u32>> {
+    let RoutingMetadata::Fields(metadata) = metadata else {
+        return None;
+    };
+    if metadata.version != 1 {
+        return None;
+    }
+    let tokens = match ids {
+        MapTokenIds::Plain(KvTokenIds::Single(ids)) => ids
+            .into_iter()
+            .map(|id| u32::try_from(id).ok().map(Token::Id))
+            .collect::<Option<Vec<_>>>()?,
+        MapTokenIds::DigestFirst(tokens) => tokens,
+        MapTokenIds::Plain(KvTokenIds::Bigram(_)) => return None,
+    };
+    let RoutingKeys::Fields(keys) = keys? else {
+        return None;
+    };
+    normalize(tokens, metadata.token_id_offset, keys, block_size, blocks)
+}
+
 /// Missing/evicted identities make only this stored event ineligible for indexing.
-pub(super) fn normalize(
+fn normalize(
     tokens: Vec<Token>,
     offset: u32,
     keys: Vec<Vec<MediaKey>>,
@@ -99,7 +147,10 @@ fn key_pad(key: &MediaKey) -> Option<u32> {
     if key.hash.len() != 64 || !key.hash.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
-    let hash = key.uuid.as_deref()?.strip_prefix("dynamo-image-v1:")?;
+    let hash = key
+        .uuid
+        .as_deref()?
+        .strip_prefix(IMAGE_ROUTING_UUID_PREFIX)?;
     if hash.len() != 16 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }

@@ -501,10 +501,10 @@ async fn e2e_real_openengine_image() {
             .await
             .expect("read live routing capability")
             .into_inner();
-        assert!(info.extra.as_ref().is_some_and(|extra| matches!(
-            extra.fields.get("trtllm_image_routing_version").and_then(|value| value.kind.as_ref()),
-            Some(prost_types::value::Kind::NumberValue(version)) if *version == 1.0
-        )), "the official runtime must include TRT-LLM #21125 image routing support");
+        assert!(
+            crate::client::has_image_routing_v1(&info),
+            "the official runtime must include TRT-LLM #21125 image routing support"
+        );
     }
     let block_size = registration.llm.unwrap().kv_cache_block_size.unwrap_or(0);
     let requests = if routing {

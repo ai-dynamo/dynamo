@@ -57,6 +57,15 @@ pub(crate) struct ModelInfo {
     pub(crate) served_model_name: String,
 }
 
+pub(crate) fn has_image_routing_v1(info: &pb::ModelInfo) -> bool {
+    info.extra.as_ref().is_some_and(|extra| {
+        matches!(
+            extra.fields.get("trtllm_image_routing_version").and_then(|value| value.kind.as_ref()),
+            Some(prost_types::value::Kind::NumberValue(version)) if *version == 1.0
+        )
+    })
+}
+
 const TARGET_DP_RANK_METADATA_KEY: &str = "openengine-target-dp-rank";
 
 #[derive(Clone)]
@@ -215,12 +224,7 @@ impl TrtllmClient {
                 engine_context_length: info.max_context_length.filter(|len| *len > 0),
                 max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
                 supports_image: Some(supports_image),
-                supports_image_routing: supports_image && info.extra.as_ref().is_some_and(|extra| {
-                    matches!(
-                        extra.fields.get("trtllm_image_routing_version").and_then(|v| v.kind.as_ref()),
-                        Some(prost_types::value::Kind::NumberValue(version)) if *version == 1.0
-                    )
-                }),
+                supports_image_routing: supports_image && has_image_routing_v1(&info),
             },
             served_model_name: info.served_model_name,
         })

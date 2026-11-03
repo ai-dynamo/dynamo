@@ -19,6 +19,7 @@ use dynamo_backend_common::{
     CompletionUsage, DisaggregationMode, DynamoError, FinishReason, LLMEngineOutput,
     MultimodalData, PreprocessedRequest, PromptTokensDetails, StopReason, TopLogprob, usage,
 };
+use dynamo_kv_router::zmq_wire::IMAGE_ROUTING_UUID_PREFIX;
 
 use crate::client::{self, ModelLimits};
 use crate::disagg;
@@ -207,7 +208,6 @@ fn max_tokens(
 }
 
 const IMAGE_KEY: &str = "image_url";
-const IMAGE_ROUTING_UUID_PREFIX: &str = "dynamo-image-v1:";
 
 /// The engine fetches passthrough media, so enforce Dynamo's policy before dispatch.
 pub(crate) fn validate_remote_media_urls(

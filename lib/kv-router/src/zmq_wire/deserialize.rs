@@ -142,37 +142,12 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let block_size =
                     block_size.ok_or_else(|| de::Error::missing_field("block_size"))?;
                 let (raw_token_ids, is_eagle) = match (token_ids, trtllm_routing) {
-                    (MapTokenIds::Single(ids), None) => {
-                        normalize_token_ids(KvTokenIds::Single(ids))
-                    }
-                    (MapTokenIds::Bigram(ids), None) => {
-                        normalize_token_ids(KvTokenIds::Bigram(ids))
-                    }
-                    (ids, Some(trtllm::RoutingMetadata::Fields(metadata))) => {
-                        if metadata.version != 1 {
-                            return Ok(RawKvEvent::Ignored);
-                        }
-                        let tokens = match ids {
-                            MapTokenIds::Single(ids) => {
-                                let Some(tokens) = ids
-                                    .into_iter()
-                                    .map(|id| u32::try_from(id).ok().map(trtllm::Token::Id))
-                                    .collect::<Option<Vec<_>>>()
-                                else {
-                                    return Ok(RawKvEvent::Ignored);
-                                };
-                                tokens
-                            }
-                            MapTokenIds::DigestFirst(tokens) => tokens,
-                            _ => return Ok(RawKvEvent::Ignored),
-                        };
-                        let Some(trtllm::RoutingKeys::Fields(keys)) = mm_keys else {
-                            return Ok(RawKvEvent::Ignored);
-                        };
-                        let Some(tokens) = trtllm::normalize(
-                            tokens,
-                            metadata.token_id_offset,
-                            keys,
+                    (MapTokenIds::Plain(ids), None) => normalize_token_ids(ids),
+                    (ids, Some(metadata)) => {
+                        let Some(tokens) = trtllm::token_ids(
+                            ids,
+                            metadata,
+                            mm_keys,
                             block_size,
                             block_hashes.len(),
                         ) else {

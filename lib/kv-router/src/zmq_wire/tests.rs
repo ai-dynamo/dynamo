@@ -210,7 +210,7 @@ fn test_deserialize_sglang_cache_salt() {
 }
 
 #[test]
-fn test_deserialize_bigram_block_stored_sequence() {
+fn test_deserialize_bigram_block_stored() {
     let raw_event = (
         "BlockStored",
         vec![BlockHashValue::Unsigned(11), BlockHashValue::Unsigned(12)],
@@ -221,21 +221,28 @@ fn test_deserialize_bigram_block_stored_sequence() {
         Option::<String>::None,
         Option::<String>::None,
     );
-    let encoded = to_vec(&raw_event).unwrap();
-    let event: RawKvEvent = from_slice(&encoded).unwrap();
-
-    match event {
-        RawKvEvent::BlockStored {
-            token_ids,
-            block_size,
-            is_eagle,
-            ..
-        } => {
-            assert_eq!(token_ids, vec![10, 11, 12, 13, 14]);
-            assert_eq!(block_size, 2);
-            assert_eq!(is_eagle, Some(true));
+    let named_event = serde_json::json!({
+        "type": "BlockStored", "block_hashes": [11, 12],
+        "token_ids": [[10, 11], [11, 12], [12, 13], [13, 14]], "block_size": 2,
+    });
+    for encoded in [
+        to_vec(&raw_event).unwrap(),
+        to_vec_named(&named_event).unwrap(),
+    ] {
+        let event: RawKvEvent = from_slice(&encoded).unwrap();
+        match event {
+            RawKvEvent::BlockStored {
+                token_ids,
+                block_size,
+                is_eagle,
+                ..
+            } => {
+                assert_eq!(token_ids, vec![10, 11, 12, 13, 14]);
+                assert_eq!(block_size, 2);
+                assert_eq!(is_eagle, Some(true));
+            }
+            other => panic!("expected BlockStored, got {other:?}"),
         }
-        other => panic!("expected BlockStored, got {other:?}"),
     }
 }
 
