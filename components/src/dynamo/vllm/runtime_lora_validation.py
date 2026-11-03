@@ -409,6 +409,10 @@ def _validate_snapshot(
         raise _runtime_error(422, "invalid_lora_adapter")
 
     raw_targets = adapter_config.get("target_modules")
+    if raw_targets is None or raw_targets == []:
+        raw_targets = adapter_config.get("target_parameters")
+        if not isinstance(raw_targets, list):
+            raise _runtime_error(422, "invalid_lora_adapter")
     if isinstance(raw_targets, str):
         if (
             not raw_targets

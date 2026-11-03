@@ -158,7 +158,9 @@ class LoRAState:
         candidate = max(1, int(preferred_id))
         for _ in range(len(used) + 1):
             owner = used.get(candidate)
-            if owner is None or owner == lora_name:
+            if candidate not in self.rollback_reserved_ids and (
+                owner is None or owner == lora_name
+            ):
                 return candidate
             candidate = candidate % 0x7FFFFFFF + 1
         raise ValueError("no collision-free LoRA ID is available")
