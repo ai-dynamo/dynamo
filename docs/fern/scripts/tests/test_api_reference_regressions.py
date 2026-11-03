@@ -825,6 +825,21 @@ def test_kubernetes_sources_use_supported_admonitions() -> None:
     assert "> [!WARNING]" in rendered
 
 
+def test_kubernetes_validation_drops_valueless_optional_required_braces() -> None:
+    """crd-ref-docs valueless markers must not become escaped empty braces (#17194)."""
+    for raw in (
+        "MaxLength: 63  Optional: {}  Required: {}  Enum: [a, b]",
+        r"MaxLength: 63 <br />Optional: \{\} <br />Required: \{\} <br />Enum: [a, b]",
+    ):
+        rendered = kubernetes_api_rendering._prose(raw)
+        assert "Optional" in rendered
+        assert "Required" in rendered
+        assert "{}" not in rendered
+        assert "&#123;" not in rendered
+        assert "&#125;" not in rendered
+        assert "Enum: [a, b]" in rendered
+
+
 def test_kubernetes_table_parser_preserves_literal_pipes() -> None:
     row = r"| `field` _string_ | uses `a|b` and x \| y |  | Required: {} |"
 

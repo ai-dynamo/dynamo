@@ -78,9 +78,18 @@ _WARNING = (
 )
 
 
+# crd-ref-docs emits valueless markers as ``Optional: {}`` / ``Required: {}``,
+# often already Markdown-escaped as ``\{\}``. Escaping those braces again for
+# MDX surfaces ``\&#123;\&#125;`` noise (#17194).
+_VALUELESS_MARKER_RE = re.compile(
+    r"\b(Optional|Required):\s*(?:\\\{\\\}|\{\s*\})"
+)
+
+
 def _prose(text: str) -> str:
     """Escape crd-ref-docs prose for MDX, collapsing its ``<br />`` wraps."""
-    return escape_mdx_prose(BR_RE.sub(" ", text))
+    normalized = _VALUELESS_MARKER_RE.sub(r"\1", BR_RE.sub(" ", text))
+    return escape_mdx_prose(normalized)
 
 
 def render_mdx(reference: KubernetesReference) -> str:
