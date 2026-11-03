@@ -130,23 +130,23 @@
       "platform": "linux/arm64"
     },
     {
-      "baseline_digest": "sha256:d9eff62906053e6eb7f55037259b281ec064bee3ab04e84f0eb92fdfd70200c0",
+      "baseline_digest": "sha256:c718fc9571456bdb18a964450aa77025898747e3a5f92b7d4d81b194413bc09d",
       "baseline_image": "nvcr.io/nvidia/distroless/python",
-      "baseline_sbom": "python@d9eff629-amd64.cdx.json",
-      "baseline_tag": "3.13-v4.1.9",
-      "from_digest": "sha256:d9eff62906053e6eb7f55037259b281ec064bee3ab04e84f0eb92fdfd70200c0",
+      "baseline_sbom": "python@c718fc95-amd64.cdx.json",
+      "baseline_tag": "3.13-v4.1.10",
+      "from_digest": "sha256:c718fc9571456bdb18a964450aa77025898747e3a5f92b7d4d81b194413bc09d",
       "from_image": "nvcr.io/nvidia/distroless/python",
-      "from_tag": "3.13-v4.1.9",
+      "from_tag": "3.13-v4.1.10",
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:d9eff62906053e6eb7f55037259b281ec064bee3ab04e84f0eb92fdfd70200c0",
+      "baseline_digest": "sha256:c718fc9571456bdb18a964450aa77025898747e3a5f92b7d4d81b194413bc09d",
       "baseline_image": "nvcr.io/nvidia/distroless/python",
-      "baseline_sbom": "python@d9eff629-arm64.cdx.json",
-      "baseline_tag": "3.13-v4.1.9",
-      "from_digest": "sha256:d9eff62906053e6eb7f55037259b281ec064bee3ab04e84f0eb92fdfd70200c0",
+      "baseline_sbom": "python@c718fc95-arm64.cdx.json",
+      "baseline_tag": "3.13-v4.1.10",
+      "from_digest": "sha256:c718fc9571456bdb18a964450aa77025898747e3a5f92b7d4d81b194413bc09d",
       "from_image": "nvcr.io/nvidia/distroless/python",
-      "from_tag": "3.13-v4.1.9",
+      "from_tag": "3.13-v4.1.10",
       "platform": "linux/arm64"
     }
   ],
@@ -162,6 +162,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-10-30T20:26:10+00:00",
+  "generated_at": "2026-11-03T04:29:35+00:00",
   "schema_version": 2
 }
