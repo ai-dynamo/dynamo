@@ -571,6 +571,64 @@ class _StoppingEngine(_StreamingEngine):
             return
 
 
+class _LongAnswerEngine(_StreamingEngine):
+    """Engine fake that streams a long answer and counts the outputs it produced."""
+
+    def __init__(self, length: int) -> None:
+        super().__init__()
+        self.length = length
+        self.produced = 0
+
+    async def generate(self, prompt, sampling_params, request_id, **kwargs):
+        async for chunk in prompt:
+            if chunk.params is _PREFILL_PARAMS:
+                yield SimpleNamespace(text="warm", finished=False)
+                continue
+            for index in range(self.length):
+                self.produced += 1
+                yield SimpleNamespace(text="x", finished=index == self.length - 1)
+
+
+def test_held_answer_reads_engine_outputs_only_as_the_client_takes_them():
+    async def run():
+        engine = _LongAnswerEngine(100)
+        held = _held_request(engine)
+        held.feed([1, 2])
+        await asyncio.sleep(0.01)
+        answer = held.answer([1, 2, 3], _sampling_params())
+        try:
+            first = await anext(answer)
+            await asyncio.sleep(0.05)
+            produced_while_stalled = engine.produced
+            rest = [output async for output in answer]
+        finally:
+            await held.close()
+        return produced_while_stalled, [first, *rest]
+
+    produced_while_stalled, outputs = asyncio.run(asyncio.wait_for(run(), timeout=5))
+    assert produced_while_stalled <= 2
+    assert len(outputs) == 100
+    assert outputs[-1].finished
+
+
+def test_held_request_closes_while_its_answer_waits_for_the_client():
+    async def run():
+        engine = _LongAnswerEngine(100)
+        held = _held_request(engine)
+        held.feed([1, 2])
+        await asyncio.sleep(0.01)
+        answer = held.answer([1, 2, 3], _sampling_params())
+        await anext(answer)
+        await asyncio.sleep(0.01)
+        await answer.aclose()
+        await held.close()
+        return engine, held
+
+    engine, held = asyncio.run(asyncio.wait_for(run(), timeout=5))
+    assert engine.produced <= 2
+    assert engine.aborted == [held._request_id]
+
+
 @pytest.mark.parametrize("error", [None, RuntimeError("engine stopped")])
 def test_held_request_ends_an_answer_the_engine_never_took(error):
     async def run():

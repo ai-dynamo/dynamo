@@ -100,6 +100,9 @@ class HeldTextRequest:
     chunk arrives, so the engine keeps the prompt's KV cache and recurrent state
     without relying on prefix caching. The answer must be the last chunk: a
     resumable request whose input stream stays open can keep decoding past EOS.
+    The answer reads the next engine output only once the previous one is
+    taken, so a slow client leaves vLLM to merge outputs as it does for any
+    other request.
     """
 
     def __init__(
@@ -162,6 +165,7 @@ class HeldTextRequest:
         self, queue: asyncio.Queue[Any]
     ) -> AsyncGenerator[Any, None]:
         while (output := await queue.get()) is not None:
+            queue.task_done()
             if isinstance(output, Exception):
                 raise output
             yield output
@@ -201,6 +205,7 @@ class HeldTextRequest:
                 self._answer.put_nowait(output)
                 if output.finished:
                     break
+                await self._answer.join()
         except Exception as exc:  # noqa: BLE001 - surfaced as an answer failure
             if (answer := self._claim_answer()) is None:
                 logger.warning("realtime text prefill stopped: %s", exc)
