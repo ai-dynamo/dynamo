@@ -10,6 +10,7 @@
 //! Disaggregation is driven by [`DisaggregationMode`]: a prefill worker marks
 //! its request `context_only` and returns the `PrefillReady` handoff as its
 //! terminal chunk, and a decode worker replays that handoff in `kv.session`.
+//! Image E+PD uses an encoder-only terminal followed by a cache-consuming request.
 //! See [`crate::disagg`] for the codec.
 
 use std::collections::BTreeSet;
@@ -49,6 +50,7 @@ pub(crate) fn build_generate_request_with_routing(
 ) -> Result<pb::GenerateRequest, DynamoError> {
     validate_request(&request, mode, allow_dp_rank)?;
     let request_has_media = has_media(&request);
+    let encoder = encoder_options(&request, limits, mode)?;
     let media = image_media(&mut request, limits)?;
 
     let sampling = &request.sampling_options;
@@ -63,7 +65,7 @@ pub(crate) fn build_generate_request_with_routing(
     // prove the request impossible nor prove it servable, so checking it would
     // reject requests a wider decode window would serve. Releasing the handoff
     // when decode does reject is the sound fix and belongs on that side.
-    let max_tokens = if mode.is_prefill() {
+    let max_tokens = if mode.is_prefill() || mode.is_encode() {
         Some(1)
     } else {
         max_tokens(&request, limits, request_has_media)?
@@ -86,7 +88,11 @@ pub(crate) fn build_generate_request_with_routing(
         DisaggregationMode::Aggregated | DisaggregationMode::Encode => None,
     };
     let conditions = stop_conditions(&request);
-    let guided = guided_decoding(&request)?;
+    let guided = if mode.is_encode() {
+        None
+    } else {
+        guided_decoding(&request)?
+    };
     let session_id = request
         .agent_context
         .as_ref()
@@ -159,6 +165,7 @@ pub(crate) fn build_generate_request_with_routing(
         }),
         guided,
         media,
+        encoder,
         lora_name: String::new(),
         kv,
         extra: Some(disagg::request_extra(
@@ -472,17 +479,13 @@ fn has_visible_stop_tokens(request: &PreprocessedRequest) -> bool {
         .is_some_and(|ids| !ids.is_empty())
 }
 
-/// Stop IDs the engine trims by default but returns once
-/// `include_stop_in_output` is set for visible stops.
+/// Stop IDs to hide when the engine includes them in its token deltas.
 fn retained_hidden_stop_ids(request: &PreprocessedRequest) -> BTreeSet<u32> {
     let visible = request
         .stop_conditions
         .stop_token_ids_visible
         .as_deref()
         .unwrap_or_default();
-    if visible.is_empty() {
-        return BTreeSet::new();
-    }
     stop_token_ids(request)
         .into_iter()
         .filter(|id| !visible.contains(id))
@@ -553,11 +556,6 @@ fn validate_request(
     if request.prompt_embeds.is_some() {
         return Err(client::invalid_argument(
             "prompt embeddings are not supported by the TensorRT-LLM sidecar",
-        ));
-    }
-    if request.encoder_result.is_some() {
-        return Err(client::invalid_argument(
-            "multimodal encoder handoffs are not supported by the TensorRT-LLM sidecar",
         ));
     }
     // Only a decode worker consumes a prefill handoff. Seeing one anywhere else
@@ -667,15 +665,14 @@ pub(crate) struct ResponseState {
     prompt_tokens: u32,
     completion_tokens: u32,
     output_logprobs: Option<u32>,
-    /// Every stop ID when visible stops are set, empty otherwise. The engine
-    /// stops on these, so one at the end of a delta is held for the terminal.
-    /// OpenEngine sends the matched stop before the `finished` event carrying
-    /// usage, and the frontend decoder drops everything after a visible stop.
+    /// Hold a trailing stop ID until the terminal carries authoritative usage.
+    /// Otherwise local EOS detection can cancel before that usage arrives.
     held_stop_ids: BTreeSet<u32>,
     /// See [`retained_hidden_stop_ids`]. Dropped when the terminal matched it.
     hidden_stop_ids: BTreeSet<u32>,
     pending_stop: Option<pb::TokenInfo>,
     phase: Phase,
+    encode_only: bool,
 }
 
 /// What this worker does with the tokens the engine streams back. Each arm owns
@@ -708,14 +705,11 @@ struct Handoff {
 impl ResponseState {
     pub(crate) fn new(request: &PreprocessedRequest, mode: DisaggregationMode) -> Self {
         Self {
+            encode_only: mode.is_encode(),
             prompt_tokens: request.token_ids.len() as u32,
             completion_tokens: 0,
             output_logprobs: request.output_options.logprobs,
-            held_stop_ids: if has_visible_stop_tokens(request) {
-                stop_token_ids(request).into_iter().collect()
-            } else {
-                BTreeSet::new()
-            },
+            held_stop_ids: stop_token_ids(request).into_iter().collect(),
             hidden_stop_ids: retained_hidden_stop_ids(request),
             pending_stop: None,
             phase: if mode.is_prefill() {
@@ -750,7 +744,37 @@ impl ResponseState {
         let Some(event) = event else {
             return Err(client::protocol_error("response carried no event"));
         };
+        if self.encode_only
+            && !matches!(
+                &event,
+                pb::generate_response::Event::EncoderReady(_)
+                    | pb::generate_response::Event::Error(_)
+            )
+        {
+            return Err(client::protocol_error(
+                "encode stream must terminate with EncoderReady",
+            ));
+        }
         match event {
+            pb::generate_response::Event::EncoderReady(ready) => {
+                if !self.encode_only {
+                    return Err(client::protocol_error(
+                        "unexpected EncoderReady on generation stream",
+                    ));
+                }
+                let cache = ready
+                    .cache
+                    .ok_or_else(|| client::protocol_error("EncoderReady has no cache"))?;
+                validate_encoder_cache(&cache)
+                    .map_err(|error| client::protocol_error(error.to_string()))?;
+                let mut result = serde_json::Map::new();
+                result.insert(
+                    "transfer_backend".into(),
+                    serde_json::json!(cache.transfer_backend),
+                );
+                result.insert("opaque_state".into(), serde_json::json!(cache.opaque_state));
+                Ok(Some(LLMEngineOutput::encode_terminal(result)))
+            }
             pb::generate_response::Event::Token(token) => self.convert_token(token),
             pb::generate_response::Event::Finished(finished) => {
                 self.convert_finished(finished, usage).map(Some)
@@ -1101,3 +1125,87 @@ pub(crate) fn engine_error(error: pb::EngineError) -> DynamoError {
 mod request_tests;
 #[cfg(test)]
 mod response_tests;
+
+const ENCODER_BACKEND: &str = "trtllm-shared-safetensors-v1";
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EncoderHandoff {
+    transfer_backend: String,
+    opaque_state: Vec<u8>,
+}
+
+fn validate_encoder_cache(cache: &pb::EncoderCacheRef) -> Result<(), DynamoError> {
+    if !matches!(
+        cache.transfer_backend.as_str(),
+        ENCODER_BACKEND | "trtllm-nixl-encoder-v1"
+    ) || cache.opaque_state.is_empty()
+        || cache.opaque_state.len() > 64 * 1024
+    {
+        return Err(client::invalid_argument(
+            "unsupported or oversized encoder cache reference",
+        ));
+    }
+    Ok(())
+}
+
+fn encoder_options(
+    request: &PreprocessedRequest,
+    limits: Option<ModelLimits>,
+    mode: DisaggregationMode,
+) -> Result<Option<pb::EncoderOptions>, DynamoError> {
+    if mode.is_encode() {
+        if !limits.is_some_and(|limits| limits.encoder_only)
+            || !has_media(request)
+            || request.encoder_result.is_some()
+        {
+            return Err(client::invalid_argument(
+                "encode requires image media, a capable engine, and no encoder_result",
+            ));
+        }
+        return Ok(Some(pb::EncoderOptions {
+            encode_only: true,
+            cache: None,
+        }));
+    }
+    let Some(result) = request.encoder_result.as_ref() else {
+        return Ok(None);
+    };
+    if !matches!(mode, DisaggregationMode::Aggregated)
+        || !limits.is_some_and(|limits| limits.encoder_consumer)
+        || !has_media(request)
+    {
+        return Err(client::invalid_argument(
+            "encoder_result requires E+PD image serving and a capable consumer",
+        ));
+    }
+    if result
+        .get("opaque_state")
+        .and_then(serde_json::Value::as_array)
+        .is_none_or(|bytes| bytes.len() > 64 * 1024)
+    {
+        return Err(client::invalid_argument(
+            "invalid or oversized encoder_result",
+        ));
+    }
+    let handoff: EncoderHandoff = serde::Deserialize::deserialize(result)
+        .map_err(|error| client::invalid_argument(format!("invalid encoder_result: {error}")))?;
+    let cache = pb::EncoderCacheRef {
+        transfer_backend: handoff.transfer_backend,
+        opaque_state: handoff.opaque_state,
+    };
+    validate_encoder_cache(&cache)?;
+    if !limits.is_some_and(|limits| match cache.transfer_backend.as_str() {
+        ENCODER_BACKEND => limits.encoder_shared_safetensors,
+        "trtllm-nixl-encoder-v1" => limits.encoder_nixl,
+        _ => false,
+    }) {
+        return Err(client::invalid_argument(
+            "encoder consumer does not support the handoff transfer backend",
+        ));
+    }
+    Ok(Some(pb::EncoderOptions {
+        encode_only: false,
+        cache: Some(cache),
+    }))
+}

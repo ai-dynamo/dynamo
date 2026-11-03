@@ -91,6 +91,7 @@ pub struct TrtllmSidecarEngine {
     mode: DisaggregationMode,
     subagent_affinity_auth_key: Option<String>,
     allow_remote_media_urls: bool,
+    route_to_encoder: bool,
     /// Connection and model information may be discovered in the cancellable sidecar bootstrap.
     connection: OnceCell<(TrtllmClient, ModelInfo)>,
     started: OnceCell<()>,
@@ -115,6 +116,7 @@ impl TrtllmSidecarEngine {
             mode,
             subagent_affinity_auth_key: None,
             allow_remote_media_urls: true,
+            route_to_encoder: false,
             connection: OnceCell::new(),
             started: OnceCell::new(),
             routing: OnceCell::new(),
@@ -220,14 +222,9 @@ impl TrtllmSidecarEngine {
             })?;
         let allow_remote_media_urls = crate::args::allow_remote_media_urls(remote_urls.as_deref())?;
         let mode = args.sidecar.common.disaggregation_mode;
-        if mode.is_encode() {
+        if args.sidecar.common.route_to_encoder && !matches!(mode, DisaggregationMode::Aggregated) {
             return Err(client::invalid_argument(
-                "encode mode is not supported by the TensorRT-LLM sidecar",
-            ));
-        }
-        if args.sidecar.common.route_to_encoder {
-            return Err(client::invalid_argument(
-                "route-to-encoder is not supported by the TensorRT-LLM sidecar",
+                "TensorRT-LLM encoder routing currently supports E+PD only",
             ));
         }
 
@@ -248,6 +245,7 @@ impl TrtllmSidecarEngine {
         let mut engine = Self::new(endpoint, transport, model.clone(), mode);
         engine.subagent_affinity_auth_key = args.subagent_affinity_auth_key;
         engine.allow_remote_media_urls = allow_remote_media_urls;
+        engine.route_to_encoder = args.sidecar.common.route_to_encoder;
         // Off by default: TensorRT-LLM's xgrammar rejects several tag formats (NVIDIA/TensorRT-LLM#19913).
         let structural_tag = args.sidecar.common.structural_tag(false);
         let config = WorkerConfig {
@@ -275,9 +273,9 @@ impl TrtllmSidecarEngine {
                 .exclude_tools_when_tool_choice_none,
             // Framework wiring is available; discovered source declarations
             // independently decide whether any event or metrics work starts.
-            enable_kv_routing: true,
+            enable_kv_routing: !mode.is_encode(),
             disaggregation_mode: mode,
-            route_to_encoder: false,
+            route_to_encoder: args.sidecar.common.route_to_encoder,
             enable_rl: args.sidecar.common.enable_rl,
             default_thinking_mode: args.default_thinking_mode,
             ..Default::default()
@@ -324,6 +322,16 @@ impl TrtllmSidecarEngine {
                 self.transport.retry_interval,
             )
             .await?;
+        if info.limits.encoder_only != self.mode.is_encode() {
+            return Err(client::invalid_argument(
+                "sidecar role must match the engine encoder-only role",
+            ));
+        }
+        if info.limits.encoder_consumer != self.route_to_encoder {
+            return Err(client::invalid_argument(
+                "encoder consumer engines require --route-to-encoder",
+            ));
+        }
         Ok((client, info))
     }
 }
@@ -343,7 +351,7 @@ impl LLMEngine for TrtllmSidecarEngine {
             .map_err(|_| client::engine_shutdown(ALREADY_STARTED))?;
         let mut model = self.model.clone();
         model.context_length = limits.context_length;
-        {
+        if !self.mode.is_encode() {
             let routing_deadline = startup_deadline(self.transport.startup_deadline)?;
             let routing_discovery = async {
                 let server = client.server_info().await?.unwrap_or_default();
@@ -465,10 +473,11 @@ impl LLMEngine for TrtllmSidecarEngine {
         // A single-rank engine needs no hint, even when it advertises the
         // capability. Suppress it and the associated anonymous conversation ID
         // to avoid retaining one-shot per-conversation cache state.
-        let use_dp_targeting = self
-            .routing
-            .get()
-            .is_some_and(|routing| routing.dp_targeting && routing.dp_size > 1);
+        let use_dp_targeting = !self.mode.is_encode()
+            && self
+                .routing
+                .get()
+                .is_some_and(|routing| routing.dp_targeting && routing.dp_size > 1);
         let target_dp_rank = request.routing.as_ref().and_then(|routing| {
             if self.mode.is_prefill() {
                 routing.prefill_dp_rank.or(routing.dp_rank)
@@ -640,6 +649,9 @@ impl LLMEngine for TrtllmSidecarEngine {
     }
 
     async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
+        if self.mode.is_encode() && self.started.initialized() {
+            return Ok(Vec::new());
+        }
         let routing = self
             .routing
             .get()
@@ -652,6 +664,9 @@ impl LLMEngine for TrtllmSidecarEngine {
     }
 
     async fn setup_metrics(&self, _ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
+        if self.mode.is_encode() && self.started.initialized() {
+            return Ok(MetricsBindings::default());
+        }
         let routing = self
             .routing
             .get()

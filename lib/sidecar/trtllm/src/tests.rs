@@ -38,6 +38,7 @@ mod kv_routing;
 #[derive(Clone, Default)]
 struct FakeTrtllm {
     requests: Arc<Mutex<Vec<pb::GenerateRequest>>>,
+    encoder_role: Arc<Mutex<Option<String>>>,
     target_dp_ranks: Arc<Mutex<Vec<Option<String>>>>,
     affinity_headers: Arc<Mutex<Vec<(String, String)>>>,
     aborts: Arc<Mutex<Vec<String>>>,
@@ -120,6 +121,25 @@ impl pb::inference_server::Inference for FakeTrtllm {
         self.requests.lock().await.push(request.clone());
 
         let request_id = request.request_id.clone();
+        if request
+            .encoder
+            .as_ref()
+            .is_some_and(|options| options.encode_only)
+        {
+            let stream = futures::stream::iter([Ok(pb::GenerateResponse {
+                request_id,
+                event: Some(pb::generate_response::Event::EncoderReady(
+                    pb::EncoderReady {
+                        cache: Some(pb::EncoderCacheRef {
+                            transfer_backend: "trtllm-shared-safetensors-v1".into(),
+                            opaque_state: vec![1, 2, 3],
+                        }),
+                    },
+                )),
+                ..Default::default()
+            })]);
+            return Ok(Response::new(Box::pin(stream)));
+        }
         let prompt_tokens = prompt_len(&request);
         let wants_logprobs = wants_logprobs(&request);
         let context_only = is_context_only(&request);
@@ -228,6 +248,39 @@ impl pb::control_server::Control for FakeTrtllm {
         if self.unavailable_model_info.load(Ordering::SeqCst) {
             self.model_info_unavailable.notify_one();
             return Err(Status::unavailable("not serving yet"));
+        }
+        if let Some(role) = self.encoder_role.lock().await.as_ref() {
+            let extra = prost_types::Struct {
+                fields: [(
+                    "trtllm_supported_modalities".into(),
+                    prost_types::Value {
+                        kind: Some(prost_types::value::Kind::ListValue(
+                            prost_types::ListValue {
+                                values: vec![prost_types::Value {
+                                    kind: Some(prost_types::value::Kind::StringValue(
+                                        "image".into(),
+                                    )),
+                                }],
+                            },
+                        )),
+                    },
+                )]
+                .into(),
+            };
+            return Ok(Response::new(pb::ModelInfo {
+                model_id: "model-source".into(),
+                served_model_name: "served-model".into(),
+                max_context_length: Some(4096),
+                supports_multimodal: Some(true),
+                encoder: Some(pb::EncoderCapabilities {
+                    schema_version: 1,
+                    encoder_only: role == "encode",
+                    accepts_cache: role == "consume",
+                    transfer_backends: vec!["trtllm-shared-safetensors-v1".into()],
+                }),
+                extra: Some(extra),
+                ..Default::default()
+            }));
         }
         Ok(Response::new(pb::ModelInfo {
             model_id: "fake-model".to_string(),
@@ -385,6 +438,22 @@ impl pb::control_server::Control for FakeTrtllm {
         _request: Request<pb::ListLorasRequest>,
     ) -> Result<Response<pb::ListLorasResponse>, Status> {
         Err(Status::unimplemented("ListLoras is not used"))
+    }
+
+    async fn shutdown(
+        &self,
+        _request: Request<pb::ShutdownRequest>,
+    ) -> Result<Response<pb::ShutdownResponse>, Status> {
+        Err(Status::unimplemented("engine shutdown is not implemented"))
+    }
+
+    async fn transfer_encoder_cache(
+        &self,
+        _request: Request<pb::TransferEncoderCacheRequest>,
+    ) -> Result<Response<pb::TransferEncoderCacheResponse>, Status> {
+        Err(Status::unimplemented(
+            "native NIXL transfer requires an engine",
+        ))
     }
 
     async fn get_kv_event_sources(
@@ -912,6 +981,56 @@ async fn visible_stop_token_is_returned_and_hidden_stop_token_is_not() {
     assert_eq!(terminal.stop_reason, Some(StopReason::Int(42)));
 }
 
+#[test]
+fn hidden_stop_waits_for_authoritative_terminal_usage() {
+    let mut request = request();
+    request.output_options.logprobs = None;
+    request.stop_conditions.stop_token_ids_hidden = Some(vec![42]);
+    let mut state = crate::convert::ResponseState::new(&request, DisaggregationMode::Aggregated);
+    let output = state
+        .convert(pb::GenerateResponse {
+            event: Some(pb::generate_response::Event::Token(pb::TokenOutput {
+                tokens: vec![pb::TokenInfo {
+                    token_id: 42,
+                    ..Default::default()
+                }],
+                output_index: Some(0),
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
+        .expect("token");
+    assert!(
+        output.is_none(),
+        "EOS must not cancel the stream before final usage"
+    );
+    let terminal = state
+        .convert(pb::GenerateResponse {
+            event: Some(pb::generate_response::Event::Finished(
+                pb::GenerationFinished {
+                    output_index: Some(0),
+                    reason: pb::FinishReason::Stop as i32,
+                    stop_match: Some(pb::StopMatch {
+                        r#match: Some(pb::stop_match::Match::StopTokenId(42)),
+                    }),
+                    ..Default::default()
+                },
+            )),
+            usage: Some(pb::Usage {
+                prompt_tokens: 88,
+                completion_tokens: 23,
+                total_tokens: 111,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .expect("finished")
+        .expect("terminal");
+    assert!(terminal.token_ids.is_empty());
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
+    assert_eq!(terminal.completion_usage.unwrap().prompt_tokens, 88);
+}
+
 #[tokio::test]
 async fn pool_uses_each_configured_connection() {
     let server = FakeServer::start(FakeTrtllm::default()).await;
@@ -1228,4 +1347,71 @@ async fn bootstrap_discovers_once_but_requires_start_before_serving() {
         Some(FinishReason::Stop)
     );
     engine.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn image_encoder_and_consumer_exchange_opaque_handoff_over_grpc() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        use dynamo_backend_common::metrics::{EngineMetrics, TestHierarchy};
+        let source_service = FakeTrtllm::default();
+        *source_service.encoder_role.lock().await = Some("encode".into());
+        let source_server = FakeServer::start(source_service).await;
+        let encoder = engine_in_mode(&source_server.endpoint, 1, DisaggregationMode::Encode);
+        encoder.start(0).await.unwrap();
+        let metrics = EngineMetrics::from_hierarchy(TestHierarchy::new());
+        let bindings = encoder
+            .setup_metrics(dynamo_backend_common::MetricsCtx {
+                model: "model",
+                component: "encode",
+                model_load_time_seconds: 0.0,
+                metrics: &metrics,
+            })
+            .await
+            .unwrap();
+        assert!(bindings.dp_ranks.is_empty());
+        assert!(encoder.kv_event_sources().await.unwrap().is_empty());
+        let mut input = request();
+        add_images(&mut input, ["https://example.com/image.png"]);
+        let outputs = collect(&encoder, input.clone()).await;
+        assert_eq!(outputs.len(), 1);
+        assert!(outputs[0].token_ids.is_empty());
+        input.encoder_result = outputs[0].encoder_result.clone();
+
+        let consumer_service = FakeTrtllm::default();
+        *consumer_service.encoder_role.lock().await = Some("consume".into());
+        let consumer_server = FakeServer::start(consumer_service).await;
+        let mut argv = vec![
+            "sidecar".to_string(),
+            "--grpc-endpoint".into(),
+            consumer_server.endpoint.clone(),
+            "--model-path".into(),
+            "model-source".into(),
+            "--route-to-encoder".into(),
+        ];
+        let consumer = TrtllmSidecarEngine::from_args(std::mem::take(&mut argv))
+            .unwrap()
+            .0;
+        consumer.start(1).await.unwrap();
+        let outputs = collect(&consumer, input).await;
+        assert_eq!(
+            outputs.last().unwrap().finish_reason,
+            Some(FinishReason::Stop)
+        );
+        let requests = consumer_server.service.requests.lock().await;
+        assert_eq!(
+            requests[0]
+                .encoder
+                .as_ref()
+                .unwrap()
+                .cache
+                .as_ref()
+                .unwrap()
+                .opaque_state,
+            [1, 2, 3]
+        );
+        encoder.cleanup().await.unwrap();
+        consumer.cleanup().await.unwrap();
+    })
+    .await
+    .expect("encoder handoff timed out");
 }

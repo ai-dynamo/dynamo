@@ -705,3 +705,80 @@ fn prefill_result_on_a_non_decode_worker_is_rejected() {
         );
     }
 }
+
+#[test]
+fn image_encoder_handoff_requires_negotiated_roles_and_e_pd() {
+    let mut source = request();
+    add_images(&mut source, ["https://example.com/image.png"]);
+    let mut limits = image_limits(4096).unwrap();
+    assert!(
+        build_generate_request(
+            source.clone(),
+            "e",
+            "model",
+            Some(limits),
+            DisaggregationMode::Encode
+        )
+        .is_err()
+    );
+    limits.encoder_only = true;
+    let encoded = build_generate_request(
+        source.clone(),
+        "e",
+        "model",
+        Some(limits),
+        DisaggregationMode::Encode,
+    )
+    .unwrap();
+    assert!(encoded.encoder.unwrap().encode_only);
+    source.encoder_result =
+        Some(json!({"transfer_backend": ENCODER_BACKEND, "opaque_state": [1, 2, 3]}));
+    assert!(build_generate_request(source.clone(), "pd", "model", Some(limits), AGG).is_err());
+    limits.encoder_consumer = true;
+    limits.encoder_shared_safetensors = true;
+    let consumed =
+        build_generate_request(source.clone(), "pd", "model", Some(limits), AGG).unwrap();
+    let options = consumed.encoder.unwrap();
+    assert!(!options.encode_only);
+    assert_eq!(options.cache.unwrap().opaque_state, [1, 2, 3]);
+    for mode in [
+        DisaggregationMode::Prefill,
+        DisaggregationMode::Decode,
+        DisaggregationMode::Encode,
+    ] {
+        assert!(build_generate_request(source.clone(), "p", "model", Some(limits), mode).is_err());
+    }
+    source.encoder_result = Some(json!({"transfer_backend": "future", "opaque_state": [1]}));
+    assert!(build_generate_request(source, "pd", "model", Some(limits), AGG).is_err());
+}
+
+#[test]
+fn nixl_encoder_reference_is_forwarded_without_interpreting_engine_metadata() {
+    let mut source = request();
+    add_images(&mut source, ["https://example.com/image.png"]);
+    let mut limits = image_limits(4096).unwrap();
+    limits.encoder_consumer = true;
+    limits.encoder_nixl = true;
+    let state = vec![17_u8; 2048];
+    source.encoder_result = Some(json!({
+        "transfer_backend": "trtllm-nixl-encoder-v1", "opaque_state": state
+    }));
+    let consumed =
+        build_generate_request(source.clone(), "pd", "model", Some(limits), AGG).unwrap();
+    let cache = consumed.encoder.unwrap().cache.unwrap();
+    assert_eq!(cache.transfer_backend, "trtllm-nixl-encoder-v1");
+    assert_eq!(cache.opaque_state, state);
+    limits.encoder_nixl = false;
+    limits.encoder_shared_safetensors = true;
+    assert!(build_generate_request(source.clone(), "pd", "model", Some(limits), AGG).is_err());
+    limits.encoder_nixl = true;
+    source.encoder_result = Some(json!({
+        "transfer_backend": ENCODER_BACKEND, "opaque_state": [1, 2, 3]
+    }));
+    limits.encoder_shared_safetensors = false;
+    assert!(build_generate_request(source.clone(), "pd", "model", Some(limits), AGG).is_err());
+    source.encoder_result = Some(json!({
+        "transfer_backend": "trtllm-nixl-encoder-v1", "opaque_state": vec![0_u8; 65537]
+    }));
+    assert!(build_generate_request(source, "pd", "model", Some(limits), AGG).is_err());
+}

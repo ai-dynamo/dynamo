@@ -48,6 +48,10 @@ pub(crate) struct ModelLimits {
     /// Whether both portable and engine-specific capabilities advertise images.
     /// `None` is reserved for unresolved/test metadata; startup always resolves this.
     pub(crate) supports_image: Option<bool>,
+    pub(crate) encoder_only: bool,
+    pub(crate) encoder_consumer: bool,
+    pub(crate) encoder_nixl: bool,
+    pub(crate) encoder_shared_safetensors: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -214,6 +218,10 @@ impl TrtllmClient {
                 engine_context_length: info.max_context_length.filter(|len| *len > 0),
                 max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
                 supports_image: Some(supports_image),
+                encoder_only: supports_image && encoder_role(&info, "encode"),
+                encoder_consumer: supports_image && encoder_role(&info, "consume"),
+                encoder_nixl: encoder_backend(&info, "trtllm-nixl-encoder-v1"),
+                encoder_shared_safetensors: encoder_backend(&info, "trtllm-shared-safetensors-v1"),
             },
             served_model_name: info.served_model_name,
         })
@@ -398,4 +406,63 @@ pub(crate) fn engine_error(message: impl Into<String>) -> DynamoError {
         .error_type(ErrorType::Backend(BackendError::Unknown))
         .message(message)
         .build()
+}
+
+fn encoder_backend(info: &pb::ModelInfo, backend: &str) -> bool {
+    info.encoder.as_ref().is_some_and(|capabilities| {
+        capabilities.schema_version == 1
+            && capabilities
+                .transfer_backends
+                .iter()
+                .any(|value| value == backend)
+    })
+}
+
+fn encoder_role(info: &pb::ModelInfo, role: &str) -> bool {
+    let Some(capabilities) = info.encoder.as_ref() else {
+        return false;
+    };
+    capabilities.schema_version == 1
+        && capabilities.transfer_backends.iter().any(|backend| {
+            matches!(
+                backend.as_str(),
+                "trtllm-shared-safetensors-v1" | "trtllm-nixl-encoder-v1"
+            )
+        })
+        && match role {
+            "encode" => capabilities.encoder_only && !capabilities.accepts_cache,
+            "consume" => capabilities.accepts_cache && !capabilities.encoder_only,
+            _ => false,
+        }
+}
+
+#[cfg(test)]
+mod encoder_capability_tests {
+    use super::*;
+
+    #[test]
+    fn negotiation_rejects_missing_unknown_and_ambiguous_capabilities() {
+        let mut info = pb::ModelInfo::default();
+        assert!(!encoder_role(&info, "encode"));
+        info.encoder = Some(pb::EncoderCapabilities {
+            schema_version: 1,
+            encoder_only: true,
+            accepts_cache: false,
+            transfer_backends: vec!["trtllm-shared-safetensors-v1".into()],
+        });
+        assert!(encoder_role(&info, "encode"));
+        info.encoder.as_mut().unwrap().transfer_backends = vec!["trtllm-nixl-encoder-v1".into()];
+        assert!(encoder_role(&info, "encode"));
+        assert!(!encoder_role(&info, "consume"));
+        info.encoder.as_mut().unwrap().accepts_cache = true;
+        assert!(!encoder_role(&info, "encode"));
+        assert!(!encoder_role(&info, "consume"));
+        info.encoder.as_mut().unwrap().encoder_only = false;
+        assert!(encoder_role(&info, "consume"));
+        info.encoder.as_mut().unwrap().schema_version = 2;
+        assert!(!encoder_role(&info, "consume"));
+        info.encoder.as_mut().unwrap().schema_version = 1;
+        info.encoder.as_mut().unwrap().transfer_backends = vec!["unknown".into()];
+        assert!(!encoder_role(&info, "consume"));
+    }
 }
