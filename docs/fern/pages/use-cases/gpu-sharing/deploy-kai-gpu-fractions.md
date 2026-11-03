@@ -7,7 +7,7 @@ subtitle: Run 16 Qwen3-4B models on 8 A100 GPUs, two per GPU, each capped at 50%
 
 This guide deploys 16 Qwen3-4B models, each in its own `DynamoGraphDeployment` (DGD), packed two per A100 40GB GPU. Unlike the [KAI + HAMi experiment](deploy-kai-hami.md), each model gets a hard share of the GPU's compute as well as its memory. The fork-built KAI-Scheduler and kai-gpu-fractioning place each worker in its own CUDA Multi-Process Service (MPS) namespace capped at 50% of the active threads, with a 19,968 MiB memory cap. The two models on a GPU run concurrently instead of taking turns.
 
-The scripts, manifests, and results for this experiment are co-authored by [@marckarp](https://github.com/marckarp) and [@scheckerNV](https://github.com/scheckerNV).
+The scripts, manifests, and results for this experiment are co-authored by @marckarp and @scheckerNV.
 
 This is the third configuration in [Interpreting GPU Sharing Results](gpu-sharing-results.mdx):
 

@@ -181,7 +181,7 @@ Multi-tier storage solves sharing and persistence, but blocks still arrive on GP
 
 ### Selective Cache Retention
 
-Making blocks globally available solves the sharing problem, but does not solve eviction. SGLang currently exposes priority-based radix eviction, where the harness assigns a numeric priority per request and lower-priority blocks are evicted first. TensorRT-LLM takes this further with `TokenRangeRetentionConfig` (designed and implemented by a Dynamo team member [@jthomson04](https://github.com/jthomson04)), which allows per-region control within a single request.
+Making blocks globally available solves the sharing problem, but does not solve eviction. SGLang currently exposes priority-based radix eviction, where the harness assigns a numeric priority per request and lower-priority blocks are evicted first. TensorRT-LLM takes this further with `TokenRangeRetentionConfig` (designed and implemented by a Dynamo team member @jthomson04), which allows per-region control within a single request.
 
 The general design pattern is to attach zero or more retention directives to a request or token range. Blocks without directives follow the default LRU path with zero overhead. The evictor becomes a two-structure system: an LRU free list for unprioritized blocks (O(1), unchanged) and a priority queue for annotated blocks. Dynamo's public agent surface exposes the priority part today through `nvext.agent_hints.priority`; TTL or per-token-range retention directives are future API work.
 

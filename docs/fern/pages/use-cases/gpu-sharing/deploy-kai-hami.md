@@ -7,7 +7,7 @@ subtitle: Run 16 Qwen3-4B models on 8 A100 GPUs, two per GPU, with KAI-Scheduler
 
 This guide deploys 16 Qwen3-4B models, each in its own `DynamoGraphDeployment` (DGD), packed two per A100 40GB GPU. The upstream [KAI-Scheduler](https://github.com/kai-scheduler/KAI-Scheduler) places each worker on a half-GPU fraction, and the HAMi resource isolator enforces a per-pod memory cap. HAMi limits memory only: the two models on a GPU share all of its streaming multiprocessors (SMs), and the CUDA driver time-slices between them.
 
-The scripts, manifests, and results for this experiment are co-authored by [@marckarp](https://github.com/marckarp) and [@scheckerNV](https://github.com/scheckerNV).
+The scripts, manifests, and results for this experiment are co-authored by @marckarp and @scheckerNV.
 
 This is the middle configuration in [Interpreting GPU Sharing Results](gpu-sharing-results.mdx). It uses stock upstream components, so you can run it without building anything:
 

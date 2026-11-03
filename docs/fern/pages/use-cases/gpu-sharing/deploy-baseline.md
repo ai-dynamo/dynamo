@@ -7,7 +7,7 @@ subtitle: Run 8 Qwen3-4B models on 8 A100 GPUs, one model per GPU, as the refere
 
 This guide deploys the baseline for the many-model GPU sharing benchmark: eight Qwen3-4B models, each in its own `DynamoGraphDeployment` (DGD), each on a dedicated A100 40GB GPU. You then sweep concurrency against all eight models at once. The numbers you collect are the denominator for every percentage in [Interpreting GPU Sharing Results](gpu-sharing-results.mdx).
 
-The scripts, manifests, and results for this experiment are co-authored by [@marckarp](https://github.com/marckarp) and [@scheckerNV](https://github.com/scheckerNV).
+The scripts, manifests, and results for this experiment are co-authored by @marckarp and @scheckerNV.
 
 The baseline uses the stock Kubernetes scheduler and whole-GPU requests, so it needs no scheduler or isolation add-ons. The other two experiments pack two models per GPU and differ only in how they isolate the models:
 
