@@ -49,22 +49,25 @@ async def watch_decode_workers(
     runtime: DistributedRuntime, my_id: int, interval: float
 ):
     client = await runtime.endpoint(f"{NAMESPACE}.decode.side_channel").client()
-    known = {}  # decode instance id -> (host, port)
+    known = {}  # (decode instance id, transport address) -> (host, port)
     while True:
-        # A local snapshot that Dynamo keeps current from discovery.
-        current = {instance.instance_id for instance in client.instances()}
+        # A local snapshot that Dynamo keeps current from discovery. The
+        # transport address tells a restarted worker apart: on Kubernetes, a
+        # restarted container keeps its pod's instance id but gets a new port.
+        current = {(i.instance_id, i.transport.address) for i in client.instances()}
 
-        for decode_id in current - known.keys():
+        for key in known.keys() - current:
+            host, port = known.pop(key)
+            print(f"prefill {my_id:x}: decode {key[0]:x} at {host}:{port} left")
+
+        for key in current - known.keys():
+            decode_id = key[0]
             # A worker can stop between the snapshot and this call, so log the
             # failure and retry on the next poll instead of stopping the watch.
             try:
-                known[decode_id] = await on_new_decode(client, decode_id, my_id)
+                known[key] = await on_new_decode(client, decode_id, my_id)
             except Exception as e:
                 print(f"prefill {my_id:x}: decode {decode_id:x} failed: {e}")
-
-        for decode_id in known.keys() - current:
-            host, port = known.pop(decode_id)
-            print(f"prefill {my_id:x}: decode {decode_id:x} at {host}:{port} left")
 
         await asyncio.sleep(interval)
 

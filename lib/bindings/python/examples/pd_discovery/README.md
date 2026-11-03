@@ -56,7 +56,12 @@ prefill 3e4623350c2d3fd: decode 2dd62b4d9d3f923 at 192.168.1.242:39333 left
 - A worker that shuts down gracefully leaves the list right away. A worker that
   is killed, which includes Ctrl-C in this example, leaves when its discovery
   lease expires: 10 seconds with the file backend, 30 seconds with etcd
-  (`ETCD_LEASE_TTL`).
+  (`ETCD_LEASE_TTL`). With Kubernetes discovery, a worker leaves when its pod
+  stops being ready, for example when the pod starts terminating.
+- With Kubernetes discovery, the instance ID comes from the pod name, so a
+  container that restarts in its pod keeps the same ID. Its transport address
+  (`instance.transport.address`) changes, so the prefill worker tracks both
+  and treats the restarted worker as a new one.
 - All endpoints served by one process share its instance ID, so a prefill
   worker can also watch `decode.generate` and look up the address with the
   same ID.
