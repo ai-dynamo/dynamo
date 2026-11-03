@@ -119,6 +119,7 @@ impl CandidatePolicy for LoraCandidatePolicy {
     fn select(
         &self,
         request: &PreprocessedRequest,
+        pin: Option<u64>,
         live: &dyn Fn() -> Vec<u64>,
         free: &dyn Fn() -> Vec<u64>,
     ) -> Result<Option<CandidateSelection>, Error> {
@@ -148,19 +149,36 @@ impl CandidatePolicy for LoraCandidatePolicy {
             &self.filter,
             name,
             live,
-            routing.and_then(|routing| routing.allowed_worker_ids.as_ref()),
+            policy
+                .requires_candidate_policy()
+                .then(|| routing.and_then(|routing| routing.allowed_worker_ids.as_ref()))
+                .flatten(),
             configs.as_deref(),
             routing
                 .and_then(|routing| routing.routing_constraints.as_ref())
                 .unwrap_or(&default_constraints),
         )?;
         drop(configs);
+        let pin = pin.filter(|_| policy.requires_candidate_policy());
+        if pin.is_some_and(|worker| !candidates.contains(&worker)) {
+            return Err(RequestPolicy::affinity_error().into());
+        }
         let candidates = RequestPolicy::free_candidates(name, candidates, free)?;
-        let worker = self
-            .picker
-            .as_ref()
-            .and_then(|picker| picker.select_worker(&candidates, |_| 0))
-            .ok_or_else(RequestPolicy::capability_error)?;
+        let worker = match pin {
+            Some(worker) if candidates.contains(&worker) => worker,
+            Some(_) => {
+                return Err(dynamo_runtime::error::DynamoError::builder()
+                    .error_type(dynamo_runtime::error::ErrorType::ResourceExhausted)
+                    .message(format!("Pinned LoRA worker is overloaded (lora={name})"))
+                    .build()
+                    .into());
+            }
+            None => self
+                .picker
+                .as_ref()
+                .and_then(|picker| picker.select_worker(&candidates, |_| 0))
+                .ok_or_else(RequestPolicy::capability_error)?,
+        };
         Ok(Some(CandidateSelection {
             worker,
             fallback: candidates.into_iter().collect(),
@@ -348,6 +366,7 @@ mod tests {
         let result = policy
             .select(
                 &request,
+                None,
                 &|| panic!("base request must not collect live workers"),
                 &|| panic!("base request must not read free capacity"),
             )
@@ -381,7 +400,7 @@ mod tests {
             ..Default::default()
         });
         let selection = policy
-            .select(&request, &|| vec![1, 2], &|| vec![2])
+            .select(&request, None, &|| vec![1, 2], &|| vec![2])
             .unwrap()
             .unwrap();
         assert_eq!(selection.worker, 2);
@@ -396,7 +415,11 @@ mod tests {
                 .unwrap_or(0),
             0
         );
-        assert!(policy.select(&request, &|| vec![1], &Vec::new).is_err());
+        assert!(
+            policy
+                .select(&request, None, &|| vec![1], &Vec::new)
+                .is_err()
+        );
         assert_eq!(
             estimator
                 .get_current_load()

@@ -243,6 +243,7 @@ impl RoutingHost {
             .map(|policy| {
                 policy.select(
                     request.content(),
+                    explicit.map(|pin| pin.worker_id),
                     &|| self.inner.client.instance_ids_avail(),
                     &|| self.inner.client.instance_ids_free(),
                 )

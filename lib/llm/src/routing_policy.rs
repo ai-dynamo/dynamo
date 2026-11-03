@@ -26,6 +26,7 @@ pub(crate) trait CandidatePolicy: Send + Sync {
     fn select(
         &self,
         request: &PreprocessedRequest,
+        pin: Option<u64>,
         live: &dyn Fn() -> Vec<u64>,
         free: &dyn Fn() -> Vec<u64>,
     ) -> Result<Option<CandidateSelection>, Error>;
