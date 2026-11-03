@@ -62,6 +62,114 @@ mod tests {
         );
         assert!(estimator.get_current_load().is_empty());
     }
+
+    #[test]
+    fn hosted_policy_releases_load_after_selection_and_on_error() {
+        let estimator = Arc::new(LoadEstimator::new());
+        let policy = LegacyLoraPolicy::hosted(
+            Arc::new(LoraFilter::new(
+                LoraRoutingTable::new(),
+                LoraStateTracker::new(),
+            )),
+            estimator.clone(),
+            BuiltinWorkerSelector::new(RouterMode::RoundRobin).unwrap(),
+        );
+        let mut request = PreprocessedRequest::builder()
+            .model("base".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap();
+        request.routing = Some(crate::protocols::common::preprocessor::RoutingHints {
+            lora_name: Some("adapter".into()),
+            ..Default::default()
+        });
+        let selection = policy
+            .select(&request, &|| vec![1, 2], &|| vec![2])
+            .unwrap()
+            .unwrap();
+        assert_eq!(selection.target, 2);
+        assert_eq!(selection.allowed_fallback, HashSet::from([2]));
+        assert_eq!(estimator.get_current_load().get("adapter"), Some(&1));
+        drop(selection);
+        assert_eq!(
+            estimator
+                .get_current_load()
+                .get("adapter")
+                .copied()
+                .unwrap_or(0),
+            0
+        );
+        assert!(policy.select(&request, &|| vec![1], &Vec::new).is_err());
+        assert_eq!(
+            estimator
+                .get_current_load()
+                .get("adapter")
+                .copied()
+                .unwrap_or(0),
+            0
+        );
+    }
+
+    #[test]
+    fn kv_admission_intersects_live_and_allowed_workers_on_each_refresh() {
+        use dynamo_kv_router::{protocols::WorkerWithDpRank, scheduling::ScheduleMode};
+        let policy = LegacyLoraPolicy::kv(Arc::new(LoraFilter::new(
+            LoraRoutingTable::new(),
+            LoraStateTracker::new(),
+        )));
+        let (_tx, workers) = tokio::sync::watch::channel(Default::default());
+        let mut request = SchedulingRequest {
+            mode: ScheduleMode::QueryOnly {
+                request_id: Some("test".into()),
+            },
+            token_seq: None,
+            isl_tokens: 0,
+            lora_name: Some("adapter".into()),
+            accounting_attribution: Default::default(),
+            expected_output_tokens: None,
+            affinity_target: None,
+            pinned_worker: Some(WorkerWithDpRank::new(2, 0)),
+            allowed_worker_ids: Some(HashSet::from([1, 2])),
+            routing_constraints: Default::default(),
+            router_config_override: None,
+            track_prefill_tokens: false,
+            priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
+            session_context: None,
+            overlap: Default::default(),
+            kv_transfer_candidates: None,
+            retain_kv_transfer_chain: false,
+            shared_cache_hits: None,
+            worker_loads: Default::default(),
+            resp_tx: None,
+        };
+        let available = Some(Arc::new(HashSet::from([2, 3])));
+        assert_eq!(
+            *policy
+                .refresh_admission(&request, available.clone(), &workers)
+                .unwrap(),
+            HashSet::from([2])
+        );
+        request.lora_name = None;
+        assert!(Arc::ptr_eq(
+            policy
+                .refresh_admission(&request, available.clone(), &workers)
+                .as_ref()
+                .unwrap(),
+            available.as_ref().unwrap()
+        ));
+        request.lora_name = Some("adapter".into());
+        assert!(
+            policy
+                .refresh_admission(&request, Some(Arc::new(HashSet::new())), &workers)
+                .unwrap()
+                .is_empty()
+        );
+    }
 }
 
 pub(crate) trait CandidatePolicy: Send + Sync {
