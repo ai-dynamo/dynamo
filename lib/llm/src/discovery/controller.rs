@@ -422,11 +422,15 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         };
     }
 
+    /// Reconcile registrations without changing an existing worker incarnation.
+    /// Capability-only updates still refresh the incumbent cohort.
     fn apply_added(&mut self, instance: DesiredInstance) -> bool {
         if let Some(existing) = self.desired.get(&instance.key) {
             if existing.mdc_checksum == instance.mdc_checksum
                 && existing.projection_fingerprint == instance.projection_fingerprint
                 && existing.video_contract == instance.video_contract
+                && super::image_edits::advertised_limit(&existing.card)
+                    == super::image_edits::advertised_limit(&instance.card)
             {
                 // A repeated registration still confirms liveness after an older snapshot.
                 self.record_mutation(instance.key.clone());
@@ -1982,6 +1986,93 @@ mod tests {
         finish_build(&mut controller).await;
 
         assert_eq!(host.members(&group_key()), BTreeSet::from([first.key]));
+        assert_eq!(host.starts.load(Ordering::SeqCst), 1);
+    }
+
+    /// Capability changes must refresh admission without replacing the MDC identity.
+    #[tokio::test]
+    async fn image_edits_capability_update_reconciles_without_changing_identity() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let legacy = instance(1, "same");
+        controller.apply_added(legacy.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        let admitted = host.admissions.lock().unwrap()[0].clone();
+
+        let mut upgraded = legacy.clone();
+        upgraded.card.user_data = Some(serde_json::json!({"image_edits": {
+            "schema_version": 1, "max_input_images": 4
+        }}));
+        assert_eq!(legacy.mdc_checksum, upgraded.mdc_checksum);
+        assert!(
+            controller.apply_added(upgraded.clone()),
+            "capability changes must not be suppressed as duplicate Added events"
+        );
+        assert!(!controller.apply_added(upgraded));
+        assert_eq!(*admitted.borrow(), vec![1]);
+        assert_eq!(host.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+
+        // A legacy join stays admitted under the existing cohort rules. A
+        // competing model identity remains outside this capability population.
+        let peer = instance(2, "same");
+        controller.apply_added(peer.clone());
+        controller.apply_added(instance(99, "different"));
+        assert_eq!(*admitted.borrow(), vec![1, 2]);
+        controller.apply_removed(&peer.key);
+        assert_eq!(*admitted.borrow(), vec![1]);
+        assert!(controller.apply_added(legacy));
+    }
+
+    #[tokio::test]
+    async fn systemone_serial_cohort_excludes_unsafe_workers_at_same_endpoint() {
+        use crate::local_model::runtime_config::{
+            SGLANG_GENERATE_CAPABILITY, SGLANG_SYSTEMONE_SERIAL_V1,
+        };
+
+        fn worker(id: u64, speculative: bool) -> DesiredInstance {
+            let mut desired = instance(id, "same");
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.source_path = Some("same".to_string());
+            card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+            card.runtime_config.max_num_seqs = Some(1);
+            card.runtime_config
+                .runtime_data
+                .insert(SGLANG_GENERATE_CAPABILITY.to_string(), true.into());
+            card.runtime_config
+                .runtime_data
+                .insert(SGLANG_SYSTEMONE_SERIAL_V1.to_string(), true.into());
+            if speculative {
+                card.runtime_config
+                    .runtime_data
+                    .insert("spec_decode".to_string(), serde_json::json!({}));
+            }
+            desired.mdc_checksum = card.mdcsum().to_string();
+            desired.card = card;
+            desired
+        }
+
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let serial = worker(1, false);
+        controller.apply_added(serial.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        let unsafe_worker = worker(2, true);
+        assert_eq!(unsafe_worker.endpoint_id, serial.endpoint_id);
+        controller.apply_added(unsafe_worker);
+        let compatible = worker(3, false);
+        controller.apply_added(compatible.clone());
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([serial.key, compatible.key])
+        );
+        assert_eq!(*host.admissions.lock().unwrap()[0].borrow(), vec![1, 3]);
         assert_eq!(host.starts.load(Ordering::SeqCst), 1);
     }
 

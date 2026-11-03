@@ -363,6 +363,24 @@ hardware offload recipe.
 - `evaluation.sla` accepts either `e2e_ms` alone or `ttft_ms` and `itl_ms` together. The two forms
   are mutually exclusive.
 
+### Conversation Affinity
+
+For AgentX trace replay, `router.conversation_affinity` uses Dynamo's native hard binding
+with `kv_router` and fixed aggregated or disaggregated worker pools. Online replay and
+Planner-enabled replay are unsupported. Omitting the field preserves normal routing.
+
+```yaml
+router:
+  policy: kv_router
+  conversation_affinity: {mode: session, ttl_seconds: 300}
+planner: {policy: disabled}
+```
+
+`session` (the default) binds each conversation. `sibling_group` binds siblings sharing a parent
+within the same play and requires unambiguous lineage; the parent keeps its own binding.
+Prefill and decode pools bind independently. `ttl_seconds` is the idle expiry in simulated
+seconds, defaults to 300, and must be finite and between 1 and 31,536,000 inclusive.
+
 ## Overrides
 
 `--set` accepts dot-separated, schema-valid paths. The field does not need to be present in the
@@ -386,12 +404,19 @@ The output directory contains:
 ```text
 aisimulate-output/
 ├── prediction.json
-└── requests.jsonl
+├── requests.jsonl
+├── resource-runtime.json
+├── execution-events.jsonl
+└── resource-plan.json
 ```
 
 `prediction.json` preserves the Dynamo runner report, including summary metrics and available
-Planner diagnostics. `requests.jsonl` is present only with `--capture-per-request`. `--format`
-changes standard output but not durable files.
+Planner diagnostics. `requests.jsonl` is present only with `--capture-per-request`.
+`resource-runtime.json` records the supervised execution: its status, resource budget,
+`peak_observed_rss_bytes`, and wall time. `execution-events.jsonl` records the execution's progress
+events, starting with its resource plan. `resource-plan.json` is written only when the run is
+refused for resources before it starts. `--format` changes standard output but not durable files.
 
 The command exits with `0` on success, `1` for execution failure, `2` for CLI or configuration
-errors, and `130` when interrupted.
+errors, `3` when the run is refused or stopped by its `execution.resources` limits, `124` when
+execution start-up or shutdown times out, and `130` when interrupted.

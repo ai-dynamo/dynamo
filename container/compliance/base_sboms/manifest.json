@@ -56,33 +56,33 @@
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:95ac815038c4b3537b173798bfe3b89bdf525a52bd653cd14d4deb01f1062be7",
+      "baseline_digest": "sha256:20509fabe50dda62c09c0786d1a6effa299d3dbdddcc49331b93e65144652a8c",
       "baseline_image": "vllm/vllm-openai-xpu",
-      "baseline_sbom": "vllm-openai-xpu@95ac8150-amd64.cdx.json",
-      "baseline_tag": "v0.31.0",
-      "from_digest": "sha256:95ac815038c4b3537b173798bfe3b89bdf525a52bd653cd14d4deb01f1062be7",
+      "baseline_sbom": "vllm-openai-xpu@20509fab-amd64.cdx.json",
+      "baseline_tag": "v0.32.0",
+      "from_digest": "sha256:20509fabe50dda62c09c0786d1a6effa299d3dbdddcc49331b93e65144652a8c",
       "from_image": "vllm/vllm-openai-xpu",
-      "from_tag": "v0.31.0",
+      "from_tag": "v0.32.0",
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:63303112b0b7ea234ceecfeba3402c6bbf36fe2abb3baec218c52e2345240aef",
+      "baseline_digest": "sha256:9ef7b9ac43cbf4c833fd5d98689dc09b06a29e5ec3451796b037aa27928fe532",
       "baseline_image": "nvcr.io/nvidia/distroless/go",
-      "baseline_sbom": "go@63303112-amd64.cdx.json",
-      "baseline_tag": "v4.1.5",
-      "from_digest": "sha256:63303112b0b7ea234ceecfeba3402c6bbf36fe2abb3baec218c52e2345240aef",
+      "baseline_sbom": "go@9ef7b9ac-amd64.cdx.json",
+      "baseline_tag": "v4.1.7",
+      "from_digest": "sha256:9ef7b9ac43cbf4c833fd5d98689dc09b06a29e5ec3451796b037aa27928fe532",
       "from_image": "nvcr.io/nvidia/distroless/go",
-      "from_tag": "v4.1.5",
+      "from_tag": "v4.1.7",
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:63303112b0b7ea234ceecfeba3402c6bbf36fe2abb3baec218c52e2345240aef",
+      "baseline_digest": "sha256:9ef7b9ac43cbf4c833fd5d98689dc09b06a29e5ec3451796b037aa27928fe532",
       "baseline_image": "nvcr.io/nvidia/distroless/go",
-      "baseline_sbom": "go@63303112-arm64.cdx.json",
-      "baseline_tag": "v4.1.5",
-      "from_digest": "sha256:63303112b0b7ea234ceecfeba3402c6bbf36fe2abb3baec218c52e2345240aef",
+      "baseline_sbom": "go@9ef7b9ac-arm64.cdx.json",
+      "baseline_tag": "v4.1.7",
+      "from_digest": "sha256:9ef7b9ac43cbf4c833fd5d98689dc09b06a29e5ec3451796b037aa27928fe532",
       "from_image": "nvcr.io/nvidia/distroless/go",
-      "from_tag": "v4.1.5",
+      "from_tag": "v4.1.7",
       "platform": "linux/arm64"
     },
     {
@@ -110,43 +110,43 @@
       "platform": "linux/arm64"
     },
     {
-      "baseline_digest": "sha256:cab8318458b3dd92cc74c53709a30001d90d38928e5bfeb9fb84280ce00369f5",
+      "baseline_digest": "sha256:93a3eaf1fa574813d608a7147735134bcfbd06d18d1aa98e8ee0d5da09e51e3a",
       "baseline_image": "nvcr.io/nvidia/tensorrt-llm/release",
-      "baseline_sbom": "release@cab83184-amd64.cdx.json",
-      "baseline_tag": "1.4.0rc0",
-      "from_digest": "sha256:cab8318458b3dd92cc74c53709a30001d90d38928e5bfeb9fb84280ce00369f5",
+      "baseline_sbom": "release@93a3eaf1-amd64.cdx.json",
+      "baseline_tag": "1.4.0rc2",
+      "from_digest": "sha256:93a3eaf1fa574813d608a7147735134bcfbd06d18d1aa98e8ee0d5da09e51e3a",
       "from_image": "nvcr.io/nvidia/tensorrt-llm/release",
-      "from_tag": "1.4.0rc0",
+      "from_tag": "1.4.0rc2",
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:cab8318458b3dd92cc74c53709a30001d90d38928e5bfeb9fb84280ce00369f5",
+      "baseline_digest": "sha256:93a3eaf1fa574813d608a7147735134bcfbd06d18d1aa98e8ee0d5da09e51e3a",
       "baseline_image": "nvcr.io/nvidia/tensorrt-llm/release",
-      "baseline_sbom": "release@cab83184-arm64.cdx.json",
-      "baseline_tag": "1.4.0rc0",
-      "from_digest": "sha256:cab8318458b3dd92cc74c53709a30001d90d38928e5bfeb9fb84280ce00369f5",
+      "baseline_sbom": "release@93a3eaf1-arm64.cdx.json",
+      "baseline_tag": "1.4.0rc2",
+      "from_digest": "sha256:93a3eaf1fa574813d608a7147735134bcfbd06d18d1aa98e8ee0d5da09e51e3a",
       "from_image": "nvcr.io/nvidia/tensorrt-llm/release",
-      "from_tag": "1.4.0rc0",
+      "from_tag": "1.4.0rc2",
       "platform": "linux/arm64"
     },
     {
-      "baseline_digest": "sha256:5be5c1f0b90ff32870e118b13706396924f4a9520b0197e53fd0a02c9da2d8ea",
+      "baseline_digest": "sha256:d9eff62906053e6eb7f55037259b281ec064bee3ab04e84f0eb92fdfd70200c0",
       "baseline_image": "nvcr.io/nvidia/distroless/python",
-      "baseline_sbom": "python@5be5c1f0-amd64.cdx.json",
-      "baseline_tag": "3.13-v4.1.6",
-      "from_digest": "sha256:5be5c1f0b90ff32870e118b13706396924f4a9520b0197e53fd0a02c9da2d8ea",
+      "baseline_sbom": "python@d9eff629-amd64.cdx.json",
+      "baseline_tag": "3.13-v4.1.9",
+      "from_digest": "sha256:d9eff62906053e6eb7f55037259b281ec064bee3ab04e84f0eb92fdfd70200c0",
       "from_image": "nvcr.io/nvidia/distroless/python",
-      "from_tag": "3.13-v4.1.6",
+      "from_tag": "3.13-v4.1.9",
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:5be5c1f0b90ff32870e118b13706396924f4a9520b0197e53fd0a02c9da2d8ea",
+      "baseline_digest": "sha256:d9eff62906053e6eb7f55037259b281ec064bee3ab04e84f0eb92fdfd70200c0",
       "baseline_image": "nvcr.io/nvidia/distroless/python",
-      "baseline_sbom": "python@5be5c1f0-arm64.cdx.json",
-      "baseline_tag": "3.13-v4.1.6",
-      "from_digest": "sha256:5be5c1f0b90ff32870e118b13706396924f4a9520b0197e53fd0a02c9da2d8ea",
+      "baseline_sbom": "python@d9eff629-arm64.cdx.json",
+      "baseline_tag": "3.13-v4.1.9",
+      "from_digest": "sha256:d9eff62906053e6eb7f55037259b281ec064bee3ab04e84f0eb92fdfd70200c0",
       "from_image": "nvcr.io/nvidia/distroless/python",
-      "from_tag": "3.13-v4.1.6",
+      "from_tag": "3.13-v4.1.9",
       "platform": "linux/arm64"
     }
   ],
@@ -162,6 +162,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-10-15T10:41:31+00:00",
+  "generated_at": "2026-10-30T20:26:10+00:00",
   "schema_version": 2
 }

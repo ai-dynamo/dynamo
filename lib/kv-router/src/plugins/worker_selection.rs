@@ -6,7 +6,7 @@
 mod config;
 mod context;
 pub mod experimental;
-mod inputs;
+pub(crate) mod inputs;
 mod runtime;
 
 pub(crate) use runtime::RuntimePolicyState;
@@ -15,10 +15,11 @@ pub use runtime::{
 };
 
 pub use context::WorkerSelectionContext;
-pub(crate) use inputs::{CacheSnapshot, CandidateData, WorkerCacheData};
+pub(crate) use inputs::{CacheSnapshot, CandidateData, WorkerCacheData, WorkerInputRows};
 pub use inputs::{
     ScoredWorkerCandidate, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates,
-    WorkerInputView, WorkerInputs, WorkerLoadInput,
+    WorkerCapacity, WorkerInfo, WorkerInputView, WorkerInputs, WorkerLoadInput,
+    WorkerTransferInput,
 };
 
 pub use super::registry::{

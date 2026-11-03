@@ -86,6 +86,8 @@ spec:
             command:
             - /opt/dynamo-lpu
             env:
+            - name: LPX_MODEL_PATH
+              value: /models/node-local-v2-connected
             - name: DYN_COMPONENT
               value: lpx
             - name: DYN_DISCOVERY_BACKEND
@@ -340,6 +342,8 @@ spec:
             env:
             - name: GBUILD_MANIFEST_PATH
               value: /models/node-local-v2-connected-lpx/manifest.v2.capnp.bin
+            - name: LPX_MODEL_PATH
+              value: /models/node-local-v2-connected-lpx
             - name: DYN_COMPONENT
               value: decode
             - name: DYN_DISCOVERY_BACKEND

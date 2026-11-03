@@ -29,6 +29,7 @@ import os
 import struct
 import uuid
 from abc import ABC, abstractmethod
+from contextlib import ExitStack
 from queue import Queue
 from typing import Any
 
@@ -253,27 +254,39 @@ class MmKwargsSender(ABC):
             cleanup_items: list[Any] = []
             mm_hashes: list[str] = []
 
-            for i, feat in enumerate(mm_features):
-                if feat.mm_hash:
-                    mm_hashes.append(feat.mm_hash)
-                if feat.data is None:
-                    continue
+            try:
+                for i, feat in enumerate(mm_features):
+                    if feat.mm_hash:
+                        mm_hashes.append(feat.mm_hash)
+                    if feat.data is None:
+                        continue
 
-                with _nvtx.annotate(self._serialize_nvtx_label, color=self._nvtx_color):
-                    serialized = encode_mm_kwargs_item(feat.data)
+                    with _nvtx.annotate(
+                        self._serialize_nvtx_label, color=self._nvtx_color
+                    ):
+                        serialized = encode_mm_kwargs_item(feat.data)
 
-                encoded, cleanup = await self._encode_item(i, serialized)
-                encoded_items.append(encoded)
-                if cleanup is not None:
-                    cleanup_items.append(cleanup)
+                    encoded, cleanup = await self._encode_item(i, serialized)
+                    if cleanup is not None:
+                        cleanup_items.append(cleanup)
+                    encoded_items.append(encoded)
 
-            if not encoded_items:
-                return None, []
+                if not encoded_items:
+                    return None, []
 
-            return (
-                self._assemble_extra_args(modality, encoded_items, mm_hashes),
-                cleanup_items,
-            )
+                return (
+                    self._assemble_extra_args(modality, encoded_items, mm_hashes),
+                    cleanup_items,
+                )
+            except BaseException:
+                # Include cancellation while a later registration is awaited.
+                # Metadata has not escaped, so none of these reads can start.
+                await self._abort_prepare(cleanup_items)
+                raise
+
+    async def _abort_prepare(self, items: list[Any]) -> None:
+        """Release resources when preparation cannot hand ownership to its caller."""
+        await self.cleanup(items)
 
     @abstractmethod
     async def _encode_item(self, idx: int, serialized: bytes) -> tuple[Any, Any | None]:
@@ -346,19 +359,27 @@ class MmKwargsNixlSender(MmKwargsSender):
             )
             descriptor = self._nixl_connect.Descriptor(serialized_tensor)
             readable_op = await self._connector.create_readable(descriptor)
-        logger.debug(
-            "[NIXL-Sender] feature[%d]: registered %d bytes", idx, len(serialized)
-        )
-        spec = TensorTransferSpec(
-            field_name="__pickled_kwargs_item__",
-            shape=[len(serialized)],
-            dtype_str="uint8",
-            serialized_request=readable_op.metadata().model_dump(),
-        )
+        try:
+            logger.debug(
+                "[NIXL-Sender] feature[%d]: registered %d bytes", idx, len(serialized)
+            )
+            spec = TensorTransferSpec(
+                field_name="__pickled_kwargs_item__",
+                shape=[len(serialized)],
+                dtype_str="uint8",
+                serialized_request=readable_op.metadata().model_dump(),
+            )
+        except BaseException:
+            self._release_all([readable_op])
+            raise
         # Hand back the operation itself, not just its completion awaitable:
         # cleanup() must be able to release the registered memory region even
         # when the remote side never reads it.
         return spec, readable_op
+
+    async def _abort_prepare(self, items: list[Any]) -> None:
+        # No receiver has the metadata yet, so waiting for completion cannot help.
+        self._release_all(items)
 
     def _assemble_extra_args(
         self,
@@ -612,36 +633,61 @@ class MmKwargsNixlReceiver(MmKwargsReceiver):
         if not self._available:
             raise RuntimeError("NIXL not available for mm_kwargs reception")
 
-        # Pre-allocate result slots to preserve spec order regardless of
-        # completion order from asyncio.gather.
-        read_tasks = []
+        # Validate the whole batch before borrowing buffers or creating reads.
+        read_metadata = [
+            self._nixl_connect.RdmaMetadata.model_validate(spec.serialized_request)
+            for spec in metadata.tensor_specs
+        ]
+        read_sizes = []
+        for spec, rm in zip(metadata.tensor_specs, read_metadata):
+            if rm.operation_kind != self._nixl_connect.OperationKind.READ.value:
+                raise ValueError("mm_kwargs transfer metadata must be of kind READ")
+            # Schema validation alone accepts empty descriptors and defaults.
+            # Exercise descriptor conversion and the matching READ contract
+            # before borrowing any local buffer or registering a remote agent.
+            remote_desc = rm.to_descriptors()
+            if isinstance(remote_desc, list):
+                raise ValueError(
+                    "mm_kwargs READ requires exactly one remote descriptor"
+                )
+            if remote_desc.ptr == 0:
+                raise ValueError("Remote descriptor pointer cannot be zero")
+            size_bytes = 1
+            for s in spec.shape:
+                size_bytes *= s
+            if remote_desc.size != size_bytes:
+                raise ValueError("Local and remote descriptors must be the same size")
+            if not rm.notification_key:
+                raise ValueError("READ notification_key must not be empty")
+            self._nixl_connect.Remote.decode_metadata(rm.nixl_metadata)
+            read_sizes.append(size_bytes)
         # Track acquired descriptors for release after reads complete.
         acquired: list[tuple[Any, bool, int | None]] = []
         # Store (spec_index, field_name, tensor_view, size_bytes) per task.
         task_meta: list[tuple[int, str, Any, int]] = []
 
-        for idx, spec in enumerate(metadata.tensor_specs):
-            size_bytes = 1
-            for s in spec.shape:
-                size_bytes *= s
-            # uint8 → 1 byte per element
-            desc, tensor_view, is_dynamic, orig_size = self._acquire_descriptor(
-                size_bytes
-            )
-            acquired.append((desc, is_dynamic, orig_size))
-            task_meta.append((idx, spec.field_name, tensor_view, size_bytes))
+        # Preparation cannot issue a transfer. Restore earlier buffers if a later
+        # allocation fails, but do not recycle buffers after reads have started.
+        with ExitStack() as rollback:
+            for idx, (spec, size_bytes) in enumerate(
+                zip(metadata.tensor_specs, read_sizes)
+            ):
+                # uint8 → 1 byte per element
+                desc, tensor_view, is_dynamic, orig_size = self._acquire_descriptor(
+                    size_bytes
+                )
+                rollback.callback(self._release_descriptor, desc, is_dynamic, orig_size)
+                acquired.append((desc, is_dynamic, orig_size))
+                task_meta.append((idx, spec.field_name, tensor_view, size_bytes))
+            rollback.pop_all()
 
-            rdma_metadata = self._nixl_connect.RdmaMetadata.model_validate(
-                spec.serialized_request
-            )
+        async def _do_read(rm, desc):
+            read_op = await self._connector.begin_read(rm, desc)
+            await read_op.wait_for_completion()
 
-            async def _do_read(rm=rdma_metadata, d=desc):
-                read_op = await self._connector.begin_read(rm, d)
-                await read_op.wait_for_completion()
-
-            read_tasks.append(_do_read())
-
-        await asyncio.gather(*read_tasks)
+        await asyncio.gather(
+            *(_do_read(rm, desc) for rm, (desc, _, _) in zip(read_metadata, acquired))
+        )
 
         # Collect results in spec order (not completion order).
         results: dict[str, Any] = {}
@@ -690,14 +736,18 @@ class MmKwargsShmSender(MmKwargsSender):
         name = f"mm_kwargs_{os.getpid()}_{uuid.uuid4().hex[:12]}_{idx}"
         with _nvtx.annotate("mm_shm:create_and_write", color="cyan"):
             sm = shm.SharedMemory(name=name, create=True, size=len(serialized))
-            sm.buf[: len(serialized)] = serialized
-        logger.debug(
-            "[SHM-Sender] feature[%d]: wrote %d bytes to shm %s",
-            idx,
-            len(serialized),
-            name,
-        )
-        return MmKwargsShmItem(name=name, size=len(serialized)), sm
+            try:
+                sm.buf[: len(serialized)] = serialized
+                logger.debug(
+                    "[SHM-Sender] feature[%d]: wrote %d bytes to shm %s",
+                    idx,
+                    len(serialized),
+                    name,
+                )
+                return MmKwargsShmItem(name=name, size=len(serialized)), sm
+            except BaseException:
+                await self.cleanup([sm])
+                raise
 
     def _assemble_extra_args(
         self,
