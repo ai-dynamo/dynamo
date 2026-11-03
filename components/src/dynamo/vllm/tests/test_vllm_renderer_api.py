@@ -418,6 +418,8 @@ class TestVllmRendererApi:
                 "new_prompt_len_snapshot",
                 "num_generation_tokens",
                 "is_coalesced",
+                "stage_payload",
+                "stage_work",
             )
 
         actual_request_fields = EngineCoreRequest.__struct_fields__
