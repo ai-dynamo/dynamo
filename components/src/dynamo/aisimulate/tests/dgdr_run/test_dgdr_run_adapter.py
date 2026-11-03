@@ -613,7 +613,6 @@ def test_pareto_adapter_is_accepted(tmp_path: Path) -> None:
     assert adapter._is_pareto is True
 
 
-
 @pytest.mark.parametrize(
     ("overrides", "valid"),
     [
@@ -1139,7 +1138,10 @@ def test_pareto_live_front_size_exceeds_max_candidates(
             used_gpus=8,
             score=t_gpu[i],
             metrics={"throughput_per_gpu": t_gpu[i]},
-            objectives={"throughput_per_gpu": t_gpu[i], "throughput_per_user": t_usr[i]},
+            objectives={
+                "throughput_per_gpu": t_gpu[i],
+                "throughput_per_user": t_usr[i],
+            },
         )
         for i in range(3)
     ]
@@ -1151,8 +1153,12 @@ def test_pareto_live_front_size_exceeds_max_candidates(
     adapter.close()
 
     snapshot = load(tmp_path)
-    assert len(snapshot["candidates"]) == 1, "publication subset is bounded by max_candidates=1"
-    assert snapshot["progress"]["paretoFront"] == 3, "paretoFront reports the full front, not the publication cap"
+    assert (
+        len(snapshot["candidates"]) == 1
+    ), "publication subset is bounded by max_candidates=1"
+    assert (
+        snapshot["progress"]["paretoFront"] == 3
+    ), "paretoFront reports the full front, not the publication cap"
 
 
 def test_pareto_on_round_replaces_dominated_points_with_true_front(
@@ -1183,9 +1189,27 @@ def test_pareto_on_round_replaces_dominated_points_with_true_front(
     )
 
     # on_candidate: scalar eviction with max_candidates=2 keeps A+B (highest scores)
-    adapter.on_candidate(record("A", 100.0, objectives={"throughput_per_gpu": 100.0, "throughput_per_user": 10.0}))
-    adapter.on_candidate(record("B", 90.0, objectives={"throughput_per_gpu": 90.0, "throughput_per_user": 9.0}))
-    adapter.on_candidate(record("C", 80.0, objectives={"throughput_per_gpu": 80.0, "throughput_per_user": 100.0}))
+    adapter.on_candidate(
+        record(
+            "A",
+            100.0,
+            objectives={"throughput_per_gpu": 100.0, "throughput_per_user": 10.0},
+        )
+    )
+    adapter.on_candidate(
+        record(
+            "B",
+            90.0,
+            objectives={"throughput_per_gpu": 90.0, "throughput_per_user": 9.0},
+        )
+    )
+    adapter.on_candidate(
+        record(
+            "C",
+            80.0,
+            objectives={"throughput_per_gpu": 80.0, "throughput_per_user": 100.0},
+        )
+    )
 
     # on_round provides the true Pareto front {A, C} from AISimulate — must override scalar eviction
     adapter.on_round(1, [ais_point("A", 100.0, 10.0), ais_point("C", 80.0, 100.0)])
@@ -1255,8 +1279,12 @@ def test_pinned_aisimulate_pareto_lifecycle_live_snapshot_reports_front(
     }
 
     # A Pareto candidate may carry score=None; the adapter retains it in Pareto mode.
-    pareto_a = record("a", 9.0, objectives={"throughput_per_gpu": 9.0, "throughput_per_user": 3.0})
-    pareto_b = record("b", 7.0, objectives={"throughput_per_gpu": 4.0, "throughput_per_user": 8.0})
+    pareto_a = record(
+        "a", 9.0, objectives={"throughput_per_gpu": 9.0, "throughput_per_user": 3.0}
+    )
+    pareto_b = record(
+        "b", 7.0, objectives={"throughput_per_gpu": 4.0, "throughput_per_user": 8.0}
+    )
     # The final result reports both candidates on the Pareto front; the retained set
     # inside the live adapter may hold fewer (bounded by max_candidates).
     final_result = SimpleNamespace(

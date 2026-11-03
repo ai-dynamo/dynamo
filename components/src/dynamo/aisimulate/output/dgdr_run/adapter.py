@@ -99,28 +99,22 @@ class CandidateRecordLike(Protocol):
     """The subset of aisimulate's ``CandidateRecord`` this adapter reads (read-only)."""
 
     @property
-    def candidate_id(self) -> str:
-        ...
+    def candidate_id(self) -> str: ...
 
     @property
-    def status(self) -> Any:
-        ...  # aisimulate.sweeper.result.CandidateStatus
+    def status(self) -> Any: ...  # aisimulate.sweeper.result.CandidateStatus
 
     @property
-    def score(self) -> float | None:
-        ...
+    def score(self) -> float | None: ...
 
     @property
-    def used_gpus(self) -> int | None:
-        ...
+    def used_gpus(self) -> int | None: ...
 
     @property
-    def config(self) -> Mapping[str, Any]:
-        ...
+    def config(self) -> Mapping[str, Any]: ...
 
     @property
-    def metrics(self) -> Mapping[str, float | None]:
-        ...
+    def metrics(self) -> Mapping[str, float | None]: ...
 
 
 def _plain(value: Any) -> Any:
@@ -438,7 +432,9 @@ class DGDRRunOutputAdapter:
                 try:
                     retained = self._retain(c)
                 except Exception:
-                    logger.exception("dgdr_run: ignoring Pareto-front point that could not be read")
+                    logger.exception(
+                        "dgdr_run: ignoring Pareto-front point that could not be read"
+                    )
                     continue
                 if retained is not None:
                     new_front_items.append(retained)
@@ -703,7 +699,11 @@ class DGDRRunOutputAdapter:
                     phase=terminal.phase if terminal else RunPhase.RUNNING,
                     round_no=round_no,
                     evaluated=evaluated,
-                    pareto_front=(self._pareto_front_size or live_pareto_size or len(ordered)) if self._is_pareto else 0,
+                    pareto_front=(
+                        (self._pareto_front_size or live_pareto_size or len(ordered))
+                        if self._is_pareto
+                        else 0
+                    ),
                     candidates=candidates,
                     message=terminal.message if terminal else "",
                     error=terminal.error if terminal else "",
@@ -825,8 +825,12 @@ class DGDRRunOutputPlugin:
         is_pareto = bool(pareto_front)
         pareto_front_size = len(pareto_front) if pareto_front else 0
         adapter = DGDRRunOutputAdapter(
-            resolved, workload, snapshot_dir=directory, keep_arrival_order=True,
-            is_pareto=is_pareto, pareto_front_size=pareto_front_size,
+            resolved,
+            workload,
+            snapshot_dir=directory,
+            keep_arrival_order=True,
+            is_pareto=is_pareto,
+            pareto_front_size=pareto_front_size,
         )
         for candidate in selected:
             adapter.on_candidate(_as_feasible(candidate))
