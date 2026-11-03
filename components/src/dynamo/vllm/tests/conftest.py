@@ -9,8 +9,45 @@ framework is not installed in the current container.
 import importlib
 import importlib.util
 import sys
+from unittest.mock import AsyncMock
 
 import pytest
+
+
+@pytest.fixture
+def advance_session():
+    async def advance(
+        session, through="flush", *, round_id=1, initialize=True, resume=False
+    ):
+        rpc = AsyncMock(return_value=True)
+        session_id = f"round-{round_id}"
+        await session.pause(rpc, "abort")
+        if through == "pause":
+            return
+        if initialize:
+            await session.initialize({"init_info": {"packed": True}}, rpc)
+        session.begin(
+            {"session_id": session_id, "weight_version": f"policy-{round_id}"}
+        )
+        if through == "begin":
+            return
+        await session.start({"session_id": session_id, "seq": 0}, rpc)
+        if through == "start":
+            return
+        await session.update(
+            {"session_id": session_id, "seq": 1, "update_info": {}}, rpc, rpc
+        )
+        if through == "update":
+            return
+        await session.finish({"session_id": session_id, "seq": 2}, rpc, rpc)
+        if through == "finish":
+            return
+        await session.flush(rpc)
+        if resume:
+            await session.resume(rpc)
+
+    return advance
+
 
 # Cached result of attempting to import the omni handler module.
 # `None` = not yet attempted, `True` = succeeded, `False` = raised.

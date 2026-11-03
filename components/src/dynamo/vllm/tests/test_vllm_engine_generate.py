@@ -9,6 +9,8 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
+from dynamo.vllm.engine_generate import adapt_engine_generate_request
+
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.pre_merge,
@@ -196,6 +198,26 @@ def test_tito_adapter_preserves_stop_strings_and_stop_token_ids():
     assert adapted is not None
     assert adapted.sampling_params.stop_token_ids == [42]
     assert adapted.sampling_params.detokenize is False
+
+
+@pytest.mark.parametrize("include_stop", [False, True])
+def test_tito_adapter_preserves_include_stop_string_output(include_stop):
+    adapted = adapt_engine_generate_request(
+        _request(
+            sampling_params={
+                "max_tokens": 8,
+                "stop": ["END"],
+                "include_stop_str_in_output": include_stop,
+            }
+        ),
+        enable_multimodal=False,
+        decode_capable=True,
+        vllm_config=_vllm_config(),
+        default_sampling_params={},
+    )
+    assert adapted.sampling_params.stop == ["END"]
+    assert adapted.sampling_params.include_stop_str_in_output is include_stop
+    assert adapted.sampling_params.detokenize is True
 
 
 # vLLM's decode_mm_kwargs_item base64-decodes into immutable bytes, so
