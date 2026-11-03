@@ -147,6 +147,7 @@ configuration:
 | --- | --- |
 | `nixl` and `sharded-ssd` | Hash the same bytes being copied through pinned host memory, with no extra storage read. |
 | `nixl-gds` | Read and verify each shard before direct transfer, because GDS has no CPU-visible staging buffer. Keep files unchanged between verification and transfer. |
+| `mx` | Does not verify, because it reads no shard. It fills the allocations over RDMA from a ModelExpress peer that serves the same weights under the same source key (`v1.snapshot.mx_source`), pairing allocations by creation order and requiring equal sizes. |
 
 After transfer and verification succeed, the loader synchronizes, releases its
 temporary mappings, commits the socket from RW to RO, and closes its lease.
@@ -209,36 +210,55 @@ sequenceDiagram
     W->>KM: connect RW
     W->>KM: reallocate_all_handles, remap_all_vas
     Note over KS: fresh KV backing at preserved VAs
-    W->>WM: connect RO to configured socket
+    W->>WM: connect RO to its GPU's socket
     W->>WM: verify GPU and remap exact IDs
 ```
 
 Suspend order is weights then KV so the exclusive KV lease remains held until
 local weight memory is asleep. Resume order is KV then weights.
 
-Every connection verifies the physical GPU identity. The container-local device
-ordinal selects both the rank-local socket and the `device-<ordinal>` artifact
-directory; a predecessor server identity is not persisted. V1 does not
-reconstruct models, retain KV contents, scan raw mappings, validate
+Sockets are named by GPU UUID, and each connection reaches the sockets of the
+GPU the engine's device is on at that moment, so a restore onto other GPUs needs
+no configuration and engines may number GPUs in any order. Every connection
+verifies the physical GPU identity; a predecessor server identity is not
+persisted.
+
+GMS device N is the pod's N-th GPU in PCI bus order and names the
+`device-<N>` artifact directory. Restore relies on Dynamo Snapshot moving the
+process from the checkpoint's N-th GPU in bus order to the restoring pod's
+N-th, where GMS device N loads the `device-<N>` artifact. If a restore pairs
+GPUs differently, the engine fails to remap: the artifact holds another rank's
+allocation IDs.
+
+V1 does not reconstruct models, retain KV contents, scan raw mappings, validate
 model-specific layouts, or implement SGLang integration.
 
 ## Running V1
 
-Start one V1 child per visible device:
+Start one V1 process per GPU:
 
 ```text
 DYN_GMS_USE_V1=true python3 -m gpu_memory_service.cli.server
 ```
 
-The supervisor discovers the visible devices and monitors the children. To
-start one rank-local child directly:
+The supervisor reads the GPUs from `/proc/driver/nvidia/gpus` without starting
+CUDA, keeps those whose device node it can open, and serves GMS device N from
+the N-th of them in PCI bus order. Each device's process is pinned to its GPU
+with `CUDA_VISIBLE_DEVICES` and told its GPU's UUID. libcuda initializes every
+GPU whose device node it can open, so the supervisor also confines each process
+with Landlock to open only its own GPU's node, and the process brings up that
+GPU alone. This shortens start-up and keeps it from slowing other CUDA work on
+the node. It is not isolation between devices. On a kernel without Landlock the
+supervisor logs a warning and runs the processes unconfined. Pass
+`--no-isolation` to run them unconfined anyway. To start one device's server
+directly:
 
 ```text
 DYN_GMS_USE_V1=true gpu-memory-service --device 0
 ```
 
 Save or load every visible device (pass `--device N` for one GPU). Artifacts
-land under `<checkpoint-dir>/device-<ordinal>`:
+land under `<checkpoint-dir>/device-<N>`:
 
 ```text
 DYN_GMS_USE_V1=true python -m gpu_memory_service.cli.snapshot.saver \
@@ -249,7 +269,14 @@ DYN_GMS_USE_V1=true python -m gpu_memory_service.cli.snapshot.loader \
 DYN_GMS_USE_V1=true python3 -m gpu_memory_service.cli.server --enable-loader \
   --checkpoint-dir /checkpoints/run/versions/1 \
   --transfer-backend nixl-gds
+DYN_GMS_USE_V1=true python3 -m gpu_memory_service.cli.server --enable-loader \
+  --checkpoint-dir /checkpoints/run/versions/1 \
+  --transfer-backend mx --mx-source-key <checkpoint>
 ```
+
+With `--enable-loader`, each device's server process loads its weights in a
+thread and keeps serving. The `mx` backend starts its NIXL agent while the
+loader allocates.
 
 The loader also accepts `nixl` and `sharded-ssd`, the existing sharded SSD root
 and queue flags, and repeatable `--posix-backend-param KEY=VALUE` overrides.
@@ -261,3 +288,54 @@ Dynamo vLLM and SGLang backends select the V1 client from that env; no extra
 CLI flag is required. vLLM keeps its normal load format and uses
 `GMSV1Worker`. SGLang enables `--enable-memory-saver` (a real SGLang
 ServerArgs field) from the same env.
+
+### ModelExpress restore (experimental)
+
+The `mx` backend fills each device from a peer that serves the same weights
+over ModelExpress RDMA. It is V1 only. The V0 loader rejects it. No CI lane
+runs a live peer-to-peer transfer yet.
+
+Peers publish their weights with
+`python3 -m gpu_memory_service.v1.snapshot.mx_source --source-key <checkpoint>`.
+It serves every device, one process each. Pass `--device N` to serve one.
+Device N's loader listens on `--mx-listen-port` (default 25555) + N. It fills
+from the peer's device N, so the peer must hold the same rank on its N-th GPU
+in bus order, as pods of one deployment do. Ranks of equal size cannot be told
+apart. The loader does not fall back to another backend: it fails if no peer
+serves the key.
+
+The operator has no MX field. Declare the loader and the source as your own
+containers and list them under `experimental.gpuMemoryService.extraClientContainers`.
+The operator then gives each one the GMS socket, the shared DRA claim and
+`DYN_GMS_USE_V1=true`:
+
+```yaml
+experimental:
+  gpuMemoryService:
+    extraClientContainers: [gms-loader, gms-mx-source]
+podTemplate:
+  spec:
+    containers:
+    - name: main
+      # ... the engine ...
+    - name: gms-loader  # on pods that restore from a peer
+      image: my-registry/runtime:my-tag
+      command: [python3, -m, gpu_memory_service.cli.snapshot.loader]
+      args: [--checkpoint-dir, /checkpoints/run/versions/1,
+             --transfer-backend, mx, --mx-source-key, <checkpoint>]
+    - name: gms-mx-source  # on pods that serve their weights to peers
+      image: my-registry/runtime:my-tag
+      command: [python3, -m, gpu_memory_service.v1.snapshot.mx_source]
+      args: [--source-key, <checkpoint>]
+```
+
+The source waits until the weights are committed, then holds a read-only
+lease on them until it stops. A pod running it cannot be checkpointed:
+checkpoint prepare refuses while the lease is held, and the pod keeps serving.
+Do not list the source under `checkpoint.job.gmsClientContainers`. The lease
+does not block restored engines, which attach the weights read-only.
+
+The source exits with an error if it finds no GPU or cannot start publishing.
+While the ModelExpress server is unreachable it keeps retrying the
+registration (`MX_PUBLISH_TIMEOUT_SECS` defaults to 0, no limit, here). When
+stopped, it withdraws the source before it releases the weights.
