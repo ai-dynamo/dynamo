@@ -63,6 +63,13 @@ class ImageGenerationHandler(BaseGenerativeHandler):
         """
         self.engine = engine
         self.config = config
+        # The frontend decodes the reported step count as u8. Video workers
+        # share DiffusionConfig and accept larger counts, so check it here.
+        if not 1 <= config.default_num_inference_steps <= 255:
+            raise ValueError(
+                "default_num_inference_steps must be in [1, 255] for image "
+                f"generation, got {config.default_num_inference_steps}"
+            )
         if not config.media_output_fs_url:
             raise ValueError(
                 "media_output_fs_url must be set; use --media-output-fs-url or DYN_MEDIA_OUTPUT_FS_URL."

@@ -803,6 +803,16 @@ class TestImageHandlerResponseFormats:
         with pytest.raises(ValueError, match="default_num_images_per_prompt"):
             DiffusionConfig(default_num_images_per_prompt=default)
 
+    @pytest.mark.parametrize("default", [0, 256])
+    def test_handler_rejects_default_num_inference_steps_out_of_range(
+        self, tmp_path, default
+    ):
+        """The step count the handler reports must fit the frontend's u8
+        field, so a default outside [1, 255] fails at startup, not after a
+        finished generation."""
+        with pytest.raises(ValueError, match="default_num_inference_steps"):
+            self._make_handler(tmp_path, default_num_inference_steps=default)
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize("n", [0, -1, 11, 100])
     async def test_n_out_of_range_is_rejected(self, tmp_path, n):
