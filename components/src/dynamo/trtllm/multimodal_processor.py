@@ -761,12 +761,15 @@ class MultimodalRequestProcessor:
         # calculator is not override-aware (Qwen2-VL ignores the kwargs while
         # counting) and is not guaranteed non-mutating (Gemma-4 writes them
         # into class-level defaults). Falling back to the engine default beats
-        # a stale or leaked estimate.
+        # a stale or leaked estimate. Also skipped when the request has video:
+        # the estimate counts image tokens only, and would drop the video's.
+        # Video-only requests already get no estimate.
         expanded_len = (
             None
             if processed_inputs.get("mm_processor_kwargs")
             else self._expanded_prompt_len(
-                token_ids, mm_data.get("image") if mm_data else None
+                token_ids,
+                mm_data.get("image") if mm_data and not mm_data.get("video") else None,
             )
         )
         if expanded_len is not None:

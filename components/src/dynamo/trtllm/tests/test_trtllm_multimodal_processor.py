@@ -798,6 +798,28 @@ async def test_expanded_prompt_len_skipped_when_kwargs_override() -> None:
 
 
 @pytest.mark.asyncio
+async def test_expanded_prompt_len_left_to_engine_when_request_has_video(
+    monkeypatch,
+) -> None:
+    """The estimate counts image tokens only. With a video as well it would
+    drop the video's tokens and size max_tokens past the context, so a request
+    with video gets no hint, as a video-only request already does."""
+    processor, _ = _image_video_processor("np")
+    _route_video(monkeypatch, "nvdec", _pt_video(_decoded_frames()))
+
+    mixed = await processor.process_openai_request(
+        _request(), embeddings=None, ep_disaggregated_params=None
+    )
+    image_only = await processor.process_openai_request(
+        _request(video=False), embeddings=None, ep_disaggregated_params=None
+    )
+
+    assert "expanded_prompt_len" not in mixed
+    assert image_only["expanded_prompt_len"] == 3 + 4  # 3 text ids + 4 image tokens
+    processor.input_processor.get_num_tokens_per_image.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_epd_non_object_kwargs_raises_client_error() -> None:
     """The disaggregated path must raise the same 400 as the aggregated one.
 
