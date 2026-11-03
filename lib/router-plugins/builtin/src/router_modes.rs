@@ -23,8 +23,8 @@ use dynamo_kv_router::plugins::worker_selection::{
     WorkerSelectionPolicyFactory,
 };
 use dynamo_kv_router::plugins::{
-    RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProviderError,
-    WorkerSelectionPolicyRegistryError,
+    RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
+    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
 };
 
 pub use least_loaded::LEAST_LOADED;
@@ -57,6 +57,11 @@ fn active_requests(input: WorkerInputView<'_>) -> impl Fn(usize) -> u64 + '_ {
     move |row| input.active_requests(row).unwrap_or_default()
 }
 
+/// The routing modes take no parameters, so a policy file that passes one fails to resolve.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoParameters {}
+
 /// A provider whose factory builds a fresh picker per call, so every partition and selector
 /// keeps its own state, such as its own rotation.
 fn provider<P: WorkerPicker + 'static>(
@@ -67,7 +72,8 @@ fn provider<P: WorkerPicker + 'static>(
 + Send
 + Sync
 + 'static {
-    move |_parameters| {
+    move |parameters| {
+        let _: NoParameters = parameters.deserialize()?;
         Ok(Arc::new(
             move |config: &KvRouterConfig, worker_type, _partition| {
                 WorkerSelectionPolicy::new(
@@ -81,23 +87,30 @@ fn provider<P: WorkerPicker + 'static>(
     }
 }
 
-/// Register the routing modes. Every host links them through `default_registry`.
-pub(crate) fn register(
-    registry: &mut RouterPluginRegistry,
-) -> Result<(), WorkerSelectionPolicyRegistryError> {
-    registry.register_worker_selection(RANDOM, Arc::new(provider(|| random::RandomPicker)))?;
-    registry.register_worker_selection(
-        ROUND_ROBIN,
-        Arc::new(provider(round_robin::RoundRobinPicker::default)),
-    )?;
-    registry.register_worker_selection(
-        LEAST_LOADED,
-        Arc::new(provider(|| least_loaded::LeastLoadedPicker)),
-    )?;
-    registry.register_worker_selection(
-        POWER_OF_TWO,
-        Arc::new(provider(|| power_of_two::PowerOfTwoPicker)),
-    )
+/// Add each routing mode `registry` doesn't already provide. Every host links them through
+/// [`crate::with_defaults`].
+pub(crate) fn register_missing(registry: &mut RouterPluginRegistry) {
+    let modes: [(&str, WorkerSelectionPolicyProvider); 4] = [
+        (RANDOM, Arc::new(provider(|| random::RandomPicker))),
+        (
+            ROUND_ROBIN,
+            Arc::new(provider(round_robin::RoundRobinPicker::default)),
+        ),
+        (
+            LEAST_LOADED,
+            Arc::new(provider(|| least_loaded::LeastLoadedPicker)),
+        ),
+        (
+            POWER_OF_TWO,
+            Arc::new(provider(|| power_of_two::PowerOfTwoPicker)),
+        ),
+    ];
+    for (name, provider) in modes {
+        match registry.register_worker_selection(name, provider) {
+            Ok(()) | Err(WorkerSelectionPolicyRegistryError::Duplicate { .. }) => {}
+            Err(error) => unreachable!("{name} is a valid routing-mode type name: {error}"),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -12,11 +12,12 @@ use super::{KvRouter, SelectionPolicySource};
 
 static INSTALLED_PLUGINS: OnceLock<RouterPluginRegistry> = OnceLock::new();
 
-/// Install the linked catalog once for frontend and embedded router construction.
-/// Returns `false` if a catalog has already been installed.
+/// Install the linked catalog once for frontend and embedded router construction, adding
+/// Dynamo's default and any routing mode it lacks. Returns `false` if a catalog has already
+/// been installed.
 pub fn install_router_plugin_registry(registry: RouterPluginRegistry) -> bool {
     INSTALLED_PLUGINS
-        .set(registry.with_default_factory(dynamo_router_policies::default_factory()))
+        .set(dynamo_router_policies::with_defaults(registry))
         .is_ok()
 }
 

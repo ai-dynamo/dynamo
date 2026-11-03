@@ -5,11 +5,12 @@ mod support;
 
 use std::collections::HashSet;
 
+use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_kv_router::{
     KvRouterConfig, RoutingPartitionRef, WorkerSelectionPolicy, WorkerSelector, WorkerType,
 };
-use dynamo_router_policies::default_registry;
 use dynamo_router_policies::router_modes::{LEAST_LOADED, POWER_OF_TWO, RANDOM, ROUND_ROBIN};
+use dynamo_router_policies::{default_registry, register, with_defaults};
 use support::*;
 
 const MODES: [&str; 4] = [RANDOM, ROUND_ROBIN, LEAST_LOADED, POWER_OF_TWO];
@@ -30,6 +31,30 @@ fn routing_modes_resolve_by_name_and_run_without_kv_state() {
             policy(policy_type).into_hosted_picker().is_ok(),
             "{policy_type} should need no KV state"
         );
+    }
+}
+
+/// A host installs `with_defaults` of whatever catalog it was given, so `--router-mode`
+/// resolves even when that catalog was built without `default_registry`, and a catalog that
+/// already holds the modes keeps them.
+#[test]
+fn every_installed_catalog_resolves_the_routing_modes() {
+    let mut custom_only = RouterPluginRegistry::default();
+    register(&mut custom_only).unwrap();
+    let mut from_default = default_registry();
+    register(&mut from_default).unwrap();
+
+    for registry in [
+        with_defaults(RouterPluginRegistry::default()),
+        with_defaults(custom_only),
+        with_defaults(from_default),
+    ] {
+        for policy_type in MODES {
+            assert!(
+                registry.resolve_type(policy_type).is_ok(),
+                "{policy_type} should resolve"
+            );
+        }
     }
 }
 
