@@ -31,9 +31,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
 )
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_offload.base import (
-    OffloadKey,
     OffloadingEvent,
     OffloadingSpec,
+    OffloadKey,
     RequestOffloadingContext,
     get_offload_block_hash,
 )
