@@ -958,6 +958,12 @@ Emitted by the Global Frontend at `/metrics` on its serving port. It forwards ea
   **Experimental.** Time to select a pool for a request, in milliseconds, with either selection path (`--use-selection-core` or not) and any `--router-policy`. Counts every request that reaches selection, also one that no pool can take. No labels: a process runs one path and one policy, so compare paths across runs. Unit and buckets match the router's `dynamo_router_overhead_*_ms` histograms.
 </ParamField>
 
+The following is emitted with `--use-selection-core`. It is read from the embedded router core at scrape time.
+
+<ParamField path="dynamo_global_frontend_pin_bookings_total" type="counter">
+  **Experimental.** Affinity pin bookings: a session's first request, a move to another pool, and a periodic refresh. Under `round-robin` and `least-in-flight` nothing is booked. A rate close to the request rate under `affinity` means sessions are moving or starting rather than staying on their pools.
+</ParamField>
+
 ## Mocker Metrics
 
 The mocker (`python -m dynamo.mocker`) simulates an inference engine. It emits imitation engine metrics with simulated values on `DYN_SYSTEM_PORT`, choosing the set by `--engine-type`. They carry the engine's usual labels plus `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, `worker_id`, `model`, and `model_name`. These imitate engine metrics, so this table has no Labels, Description, or Status column; each metric means what it means in the engine it imitates.

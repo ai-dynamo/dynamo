@@ -12,21 +12,27 @@ mod catalog;
 mod directory;
 mod policies;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use dynamo_global_common::PoolId;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::protocols::RoutingConstraints;
 use dynamo_kv_router::scheduling::RouterPolicyConfig;
+use dynamo_kv_router::services::selection::affinity::{
+    MAX_SESSION_AFFINITY_ENTRIES, SessionAffinityMode,
+};
 use dynamo_kv_router::services::selection::{
-    CatalogReconciler, PromptRequest, SelectRequest, SelectResponse, SelectionError,
-    SelectionService, SelectionServiceBuilder,
+    CatalogReconciler, PromptRequest, SelectAndReserveRequest, SelectRequest, SelectResponse,
+    SelectionError, SelectionService, SelectionServiceBuilder,
 };
 use dynamo_kv_router::{WorkerId, WorkerType};
+use parking_lot::Mutex;
 use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -38,6 +44,9 @@ use crate::{Pool, RoutingRequest};
 use catalog::{PoolCatalogSource, ROUTING_GROUP, worker_id};
 use directory::PoolDirectory;
 
+/// The longest session id the core's session table accepts.
+pub use dynamo_kv_router::services::selection::affinity::MAX_SESSION_AFFINITY_ID_BYTES as MAX_SESSION_ID_BYTES;
+
 /// How the core picks among a model's pools.
 #[derive(Clone, Debug)]
 pub enum SelectionCorePolicy {
@@ -45,6 +54,20 @@ pub enum SelectionCorePolicy {
     RoundRobin,
     /// As [`crate::LeastInFlightSelector`].
     LeastInFlight(LeastInFlightConfig),
+    /// As [`crate::AffinitySelector`], with the core's session table holding pins.
+    Affinity(AffinityConfig),
+}
+
+#[derive(Clone, Debug)]
+pub struct AffinityConfig {
+    /// Pool occupancy and region round trips.
+    pub signals: Arc<PoolSignals>,
+    /// This process's region.
+    pub region: String,
+    /// Leave a pool only for one with this many times its spare room.
+    pub headroom_factor: f64,
+    /// How long a pin lasts without a request.
+    pub idle: Duration,
 }
 
 #[derive(Clone, Debug)]
@@ -65,6 +88,58 @@ pub struct SelectionCoreSelector {
     frontends: Cursors<PoolId>,
     /// The frontend's in-flight counts and least-in-flight's pending picks.
     counts: Arc<FrontendSignals>,
+    pins: Option<PinRefresh>,
+    pin_bookings: AtomicU64,
+}
+
+/// When each session's pin was last booked. Only a booking sets or moves a
+/// pin, and the core's binding expires `idle` after it, so a session books
+/// when its pin is new, moved, or half `idle` old; the rest are advisory.
+struct PinRefresh {
+    refresh: Duration,
+    capacity: usize,
+    booked: Mutex<Pins>,
+}
+
+#[derive(Default)]
+struct Pins {
+    by_session: HashMap<String, (WorkerId, Instant)>,
+    /// Last sweep of stale pins, at most one per refresh window.
+    swept: Option<Instant>,
+}
+
+impl PinRefresh {
+    fn new(idle: Duration) -> Self {
+        Self {
+            refresh: idle / 2,
+            capacity: MAX_SESSION_AFFINITY_ENTRIES,
+            booked: Mutex::default(),
+        }
+    }
+
+    fn fresh(&self, session: &str, now: Instant) -> Option<WorkerId> {
+        let booked = self.booked.lock();
+        let &(worker, at) = booked.by_session.get(session)?;
+        (now.saturating_duration_since(at) < self.refresh).then_some(worker)
+    }
+
+    /// A new session that finds the table full is not remembered, so it
+    /// books every request, as when the core's own table is full.
+    fn record(&self, session: &str, worker: WorkerId, now: Instant) {
+        let mut booked = self.booked.lock();
+        let Pins { by_session, swept } = &mut *booked;
+        if by_session.len() >= self.capacity && !by_session.contains_key(session) {
+            let refresh = self.refresh;
+            if swept.is_none_or(|at| now.saturating_duration_since(at) >= refresh) {
+                by_session.retain(|_, (_, at)| now.saturating_duration_since(*at) < refresh);
+                *swept = Some(now);
+            }
+            if by_session.len() >= self.capacity {
+                return;
+            }
+        }
+        by_session.insert(session.to_owned(), (worker, now));
+    }
 }
 
 impl SelectionCoreSelector {
@@ -75,9 +150,17 @@ impl SelectionCoreSelector {
         let counts = Arc::new(FrontendSignals::new(in_flight));
         let registry = policies::registry(&policy, directory.clone(), counts.clone())
             .context("register the pool selection policies")?;
-        let builder =
+        let mut builder =
             SelectionServiceBuilder::new(config(&policy)?, WorkerType::Aggregated, registry)
                 .indexer_threads(1);
+        let mut pins = None;
+        if let SelectionCorePolicy::Affinity(affinity) = &policy {
+            // Soft: the binding follows the pool picked.
+            builder = builder
+                .session_affinity(affinity.idle)
+                .session_affinity_mode(SessionAffinityMode::Soft);
+            pins = Some(PinRefresh::new(affinity.idle));
+        }
         let service = Arc::new(builder.build().await.context("build the router core")?);
         Ok(Self {
             policy,
@@ -85,7 +168,14 @@ impl SelectionCoreSelector {
             directory,
             frontends: Cursors::default(),
             counts,
+            pins,
+            pin_bookings: AtomicU64::new(0),
         })
+    }
+
+    /// Affinity pin bookings since start.
+    pub fn pin_bookings(&self) -> u64 {
+        self.pin_bookings.load(Ordering::Relaxed)
     }
 
     /// Keeps the core's workers in sync with `pools`, as the local router's
@@ -114,15 +204,27 @@ impl SelectionCoreSelector {
         request: &RoutingRequest<'_>,
         candidates: &[&'a Pool],
     ) -> Option<(PoolTarget<'a>, InFlightGuard)> {
-        let allowed = candidates
-            .iter()
-            .filter(|pool| reachable(pool))
-            .map(|pool| worker_id(&pool.id))
-            .collect::<HashSet<_>>();
-        if allowed.is_empty() {
-            return None;
+        let model = request.model;
+        let session = request.session.filter(|_| self.pins.is_some());
+        let now = Instant::now();
+        let pinned = session
+            .zip(self.pins.as_ref())
+            .and_then(|(session, pins)| pins.fresh(session, now));
+        // A session books when its pin is new or due for a refresh.
+        let mut book = session.is_some() && pinned.is_none();
+        let mut selected = self
+            .pick(model, allowed(candidates)?, session, book)
+            .await?;
+        if !book && pinned.is_some_and(|pinned| pinned != selected.worker_id) {
+            // The plugin moved the session: only a booking moves its pin.
+            book = true;
+            selected = self
+                .pick(model, allowed(candidates)?, session, true)
+                .await?;
         }
-        let selected = self.pick(request.model, allowed).await?;
+        if let (true, Some(session), Some(pins)) = (book, session, &self.pins) {
+            pins.record(session, selected.worker_id, now);
+        }
         let Some(pool) = candidates
             .iter()
             .copied()
@@ -137,22 +239,59 @@ impl SelectionCoreSelector {
             return None;
         };
         let in_flight = match self.policy {
-            SelectionCorePolicy::RoundRobin => self.counts.start(&pool.id),
+            SelectionCorePolicy::RoundRobin | SelectionCorePolicy::Affinity(_) => {
+                self.counts.start(&pool.id)
+            }
             SelectionCorePolicy::LeastInFlight(_) => {
                 self.counts.take_pending(&pool.id, selected.worker_id)
             }
         };
         let target = target(&self.frontends, pool)?;
-        tracing::trace!(model = request.model, pool = %pool.name, "the router core picked a pool");
+        tracing::trace!(model, session, pool = %pool.name, "the router core picked a pool");
         Some((target, in_flight))
     }
 
-    /// A least-in-flight pick stays pending until the caller takes it over
-    /// or gives it back.
-    async fn pick(&self, model: &str, allowed: HashSet<WorkerId>) -> Option<SelectResponse> {
-        let request = advisory(model, allowed);
-        let selected = match self.policy {
-            SelectionCorePolicy::RoundRobin => self.service.select(request).await,
+    /// Books only if `book`, which commits the session's pin; a
+    /// least-in-flight pick stays pending until the caller takes it over.
+    async fn pick(
+        &self,
+        model: &str,
+        allowed: HashSet<WorkerId>,
+        session: Option<&str>,
+        book: bool,
+    ) -> Option<SelectResponse> {
+        let booking = booking(model, allowed, session);
+        let selected = if book {
+            self.pin_bookings.fetch_add(1, Ordering::Relaxed);
+            self.book(booking).await
+        } else {
+            self.advise(advisory(booking)).await
+        };
+        selected
+            .map_err(|error| tracing::debug!(model, %error, "the router core selected no pool"))
+            .ok()
+    }
+
+    /// Frees the booking at once: the session's binding outlives it.
+    async fn book(
+        &self,
+        booking: SelectAndReserveRequest,
+    ) -> Result<SelectResponse, SelectionError> {
+        let selected = self.service.select_and_reserve(booking).await?;
+        if let Some(selection_id) = &selected.selection_id
+            && let Err(error) = self.service.free_reservation(selection_id).await
+        {
+            // The core expires an unfreed booking by age.
+            tracing::warn!(%selection_id, %error, "the router core did not free a pin booking");
+        }
+        Ok(selected)
+    }
+
+    async fn advise(&self, request: SelectRequest) -> Result<SelectResponse, SelectionError> {
+        match self.policy {
+            SelectionCorePolicy::RoundRobin | SelectionCorePolicy::Affinity(_) => {
+                self.service.select(request).await
+            }
             SelectionCorePolicy::LeastInFlight(_) => {
                 let service = self.service.clone();
                 let select = Box::pin(async move { service.select(request).await });
@@ -160,10 +299,7 @@ impl SelectionCoreSelector {
                     .finish()
                     .await
             }
-        };
-        selected
-            .map_err(|error| tracing::debug!(model, %error, "the router core selected no pool"))
-            .ok()
+        }
     }
 
     fn release(&self, worker: WorkerId) {
@@ -217,9 +353,22 @@ impl Drop for PendingSelect {
     }
 }
 
-/// An advisory select (books nothing) with no prompt: pools have no KV cache.
-fn advisory(model: &str, allowed: HashSet<WorkerId>) -> SelectRequest {
-    SelectRequest {
+fn allowed(candidates: &[&Pool]) -> Option<HashSet<WorkerId>> {
+    let allowed = candidates
+        .iter()
+        .filter(|pool| reachable(pool))
+        .map(|pool| worker_id(&pool.id))
+        .collect::<HashSet<_>>();
+    (!allowed.is_empty()).then_some(allowed)
+}
+
+/// A booking with no prompt: pools have no KV cache.
+fn booking(
+    model: &str,
+    allowed: HashSet<WorkerId>,
+    session: Option<&str>,
+) -> SelectAndReserveRequest {
+    SelectAndReserveRequest {
         model_name: model.to_owned(),
         routing_group: ROUTING_GROUP.to_owned(),
         selection_id: None,
@@ -231,12 +380,32 @@ fn advisory(model: &str, allowed: HashSet<WorkerId>) -> SelectRequest {
         expected_output_tokens: None,
         priority_jump: None,
         strict_priority: None,
-        session_id: None,
+        session_id: session.map(str::to_owned),
         session_context: None,
         affinity_target: None,
         pinned_worker: None,
         allowed_worker_ids: Some(allowed),
         routing_constraints: RoutingConstraints::default(),
+    }
+}
+
+/// Books nothing; honours a session's pin without setting it.
+fn advisory(booking: SelectAndReserveRequest) -> SelectRequest {
+    SelectRequest {
+        model_name: booking.model_name,
+        routing_group: booking.routing_group,
+        selection_id: None,
+        prompt: booking.prompt,
+        router_config_override: None,
+        expected_output_tokens: None,
+        priority_jump: None,
+        strict_priority: None,
+        session_id: booking.session_id,
+        session_context: None,
+        affinity_target: None,
+        pinned_worker: None,
+        allowed_worker_ids: booking.allowed_worker_ids,
+        routing_constraints: booking.routing_constraints,
         advisory: true,
     }
 }
@@ -264,6 +433,7 @@ mod tests {
 
     use url::Url;
 
+    use crate::affinity::tests::{OHIO, fleet, set_occupancy};
     use crate::selector::{self, tests::pool};
     use crate::{PoolSelector, RoundRobinSelector};
 
@@ -479,5 +649,62 @@ mod tests {
         .await
         .expect("every abandoned pick was given back");
         assert_eq!((in_flight.get(&blue.id), in_flight.get(&green.id)), (0, 0));
+    }
+
+    fn affinity(signals: &Arc<PoolSignals>) -> SelectionCorePolicy {
+        SelectionCorePolicy::Affinity(AffinityConfig {
+            signals: signals.clone(),
+            region: OHIO.into(),
+            headroom_factor: 2.0,
+            idle: Duration::from_secs(60),
+        })
+    }
+
+    async fn session_s(selection_core: &SelectionCoreSelector, pools: &[Pool]) -> String {
+        let candidates = pools.iter().collect::<Vec<_>>();
+        let request = RoutingRequest::new("qwen").with_session(Some("s"));
+        let (target, _in_flight) = selection_core.select(&request, &candidates).await.unwrap();
+        target.frontend.host_str().unwrap().to_owned()
+    }
+
+    /// The pin holds after its booking is freed, and moves only for twice the room.
+    #[tokio::test]
+    async fn affinity_moves_for_twice_the_room_and_does_not_flip_back() {
+        let (pools, signals) = fleet();
+        let (selection_core, _catalog) =
+            selection_core(affinity(&signals), &pools, &Arc::default()).await;
+        set_occupancy(&pools, &signals, [0.1, 0.5, 0.5, 0.5]);
+        assert_eq!(session_s(&selection_core, &pools).await, "ohio-a");
+        // 50% against 30%: 0.5 spare against 0.7, under twice.
+        set_occupancy(&pools, &signals, [0.5, 0.3, 0.3, 0.3]);
+        assert_eq!(session_s(&selection_core, &pools).await, "ohio-a");
+        // 80% against 10%: 0.2 against 0.9, so to the nearest such pool.
+        set_occupancy(&pools, &signals, [0.8, 0.1, 0.1, 0.1]);
+        assert_eq!(session_s(&selection_core, &pools).await, "ohio-b");
+        // 0.4 spare against 0.6 is under twice, so no flip back.
+        set_occupancy(&pools, &signals, [0.4, 0.6, 0.6, 0.6]);
+        assert_eq!(session_s(&selection_core, &pools).await, "ohio-b");
+    }
+
+    #[tokio::test]
+    async fn affinity_books_only_to_set_or_move_a_pin() {
+        let (pools, signals) = fleet();
+        let (selection_core, _catalog) =
+            selection_core(affinity(&signals), &pools, &Arc::default()).await;
+        set_occupancy(&pools, &signals, [0.1, 0.5, 0.5, 0.5]);
+        for _ in 0..3 {
+            assert_eq!(session_s(&selection_core, &pools).await, "ohio-a");
+        }
+        let candidates = pools.iter().collect::<Vec<_>>();
+        selection_core
+            .select(&RoutingRequest::new("qwen"), &candidates)
+            .await
+            .unwrap();
+        assert_eq!(selection_core.pin_bookings(), 1);
+
+        set_occupancy(&pools, &signals, [0.8, 0.1, 0.1, 0.1]);
+        assert_eq!(session_s(&selection_core, &pools).await, "ohio-b");
+        assert_eq!(session_s(&selection_core, &pools).await, "ohio-b");
+        assert_eq!(selection_core.pin_bookings(), 2);
     }
 }
