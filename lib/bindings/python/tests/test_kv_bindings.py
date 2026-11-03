@@ -468,6 +468,60 @@ async def test_selection_service_malformed_payload_raises_value_error(
 )
 @pytest.mark.timeout(5)
 @pytest.mark.asyncio
+async def test_selection_service_worker_is_eagle_rejects_non_booleans(monkeypatch):
+    monkeypatch.setenv("DYN_ROUTER_USE_KV_EVENTS", "false")
+    service = SelectionService(indexer_threads=1)
+
+    def worker(worker_id, model_name, **extra):
+        return {
+            "worker_id": worker_id,
+            "model_name": model_name,
+            "endpoint": f"http://worker-{worker_id}:8000",
+            "block_size": 4,
+            "max_num_batched_tokens": 1024,
+            **extra,
+        }
+
+    def stored_is_eagle(model_name):
+        (record,) = service.list_workers(model_name=model_name)
+        return record["is_eagle"]
+
+    try:
+        # Real booleans keep their meaning; omitted and None stay unset.
+        record = await service.upsert_worker(worker(1, "plain", is_eagle=False))
+        assert record["is_eagle"] is False
+        record = await service.upsert_worker(worker(2, "eagle", is_eagle=True))
+        assert record["is_eagle"] is True
+        record = await service.upsert_worker(worker(3, "omitted"))
+        assert record["is_eagle"] is None
+        record = await service.upsert_worker(worker(4, "null", is_eagle=None))
+        assert record["is_eagle"] is None
+
+        # Worker booleans are not coerced by truthiness, so "false" cannot enable Eagle.
+        for value in ["false", "true", 1, [False]]:
+            with pytest.raises(ValueError, match="boolean"):
+                await service.upsert_worker(worker(5, "malformed", is_eagle=value))
+            with pytest.raises(ValueError, match="boolean"):
+                await service.patch_worker(1, {"is_eagle": value})
+        assert service.list_workers(model_name="malformed") == []
+        assert stored_is_eagle("plain") is False
+
+        # An omitted or None patch value leaves the stored value unchanged.
+        for patch in [{}, {"is_eagle": None}]:
+            record = await service.patch_worker(2, patch)
+            assert record["is_eagle"] is True
+        record = await service.patch_worker(1, {"is_eagle": False})
+        assert record["is_eagle"] is False
+    finally:
+        await service.shutdown_async()
+
+
+@pytest.mark.skipif(
+    SelectionService is None,
+    reason="SelectionService requires the select-service Cargo feature",
+)
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
 async def test_selection_service_not_ready_carries_status(monkeypatch):
     monkeypatch.setenv("DYN_ROUTER_USE_KV_EVENTS", "false")
     service = SelectionService(indexer_threads=1)

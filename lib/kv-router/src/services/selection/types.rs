@@ -328,6 +328,7 @@ pub struct WorkerRequest {
     pub max_num_batched_tokens: Option<u64>,
     pub total_kv_blocks: Option<u64>,
     pub stable_routing_id: Option<String>,
+    #[serde(default, deserialize_with = "strict_bool")]
     pub is_eagle: Option<bool>,
     #[serde(default)]
     pub taints: HashSet<String>,
@@ -363,6 +364,7 @@ pub struct WorkerPatchRequest {
     pub max_num_batched_tokens: Option<u64>,
     pub total_kv_blocks: Option<u64>,
     pub stable_routing_id: Option<String>,
+    #[serde(default, deserialize_with = "strict_bool")]
     pub is_eagle: Option<bool>,
     pub taints: Option<HashSet<String>>,
     pub topology_domains: Option<HashMap<String, String>>,
@@ -905,6 +907,38 @@ mod tests {
                 ["{invalid json", ""]
             );
         }
+    }
+
+    #[test]
+    fn worker_requests_parse_is_eagle_as_strict_bool() {
+        // `default` keeps an omitted key as `None`; `strict_bool` rejects non-booleans.
+        for (value, expected) in [
+            (None, None),
+            (Some(serde_json::Value::Null), None),
+            (Some(serde_json::json!(true)), Some(true)),
+            (Some(serde_json::json!(false)), Some(false)),
+        ] {
+            let mut worker = serde_json::json!({"worker_id": 1});
+            let mut patch = serde_json::json!({});
+            if let Some(value) = value {
+                worker["is_eagle"] = value.clone();
+                patch["is_eagle"] = value;
+            }
+            let worker: WorkerRequest = serde_json::from_value(worker).expect("worker request");
+            assert_eq!(worker.is_eagle, expected);
+            let patch: WorkerPatchRequest = serde_json::from_value(patch).expect("worker patch");
+            assert_eq!(patch.is_eagle, expected);
+        }
+
+        let err = serde_json::from_value::<WorkerRequest>(
+            serde_json::json!({"worker_id": 1, "is_eagle": "false"}),
+        )
+        .expect_err("string is_eagle must be rejected");
+        assert!(err.to_string().contains("boolean"), "{err}");
+        let err =
+            serde_json::from_value::<WorkerPatchRequest>(serde_json::json!({"is_eagle": "false"}))
+                .expect_err("string is_eagle must be rejected");
+        assert!(err.to_string().contains("boolean"), "{err}");
     }
 
     #[test]
