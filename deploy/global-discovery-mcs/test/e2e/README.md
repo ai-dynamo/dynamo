@@ -54,6 +54,11 @@ the counts of every phase. It exits non-zero when an assertion failed.
 
 ![Batteries included or Cilium with the same Global Router discovery boundary](assets/mcs-batteries-vs-cilium.png)
 
+The slide's 22/22 badges record the 2026-10-30 run: 20 shared discovery cases
+and two setup checks. Review removed a redundant region-presence assertion;
+the current suite has 19 shared cases and two setup checks. The retained
+region-contract assertion requires a nonempty region and checks its value.
+
 The Cilium swap requires no changes to the bundled MCS implementation. The
 runtime fix is in the Global Discovery Service's region-label reader
 ([#17604](https://github.com/ai-dynamo/dynamo/pull/17604)). The discovery
@@ -160,6 +165,21 @@ synchronization can use synthetic Pod names; the relay check uses actual Pod
 addresses and remains unchanged. See the [Cilium synchronization guide](https://docs.cilium.io/en/stable/network/clustermesh/global-services/#synchronizing-kubernetes-endpointslice-beta).
 
 ### Shared-suite parity
+
+The review rerun on 2026-11-03 passed after removing the duplicate
+region-presence assertion:
+
+| Provider | Shared discovery cases | Setup checks | Failed | GAP | Skipped | Wall time |
+| :---- | ----: | ----: | ----: | ----: | ----: | :---- |
+| Bundled MCS | 19 | 2 | 0 | 0 | 0 | 84 s |
+| Cilium 1.20.4 | 19 | 2 | 0 | 0 | 0 | 204 s |
+
+Case names and order match exactly. Both runs reused the validated
+`global-discovery-service:e2e-78fb0157db6a` image: the rebase did not change
+its runtime sources or dependencies, and the GDS review edits remove only
+two comments. The bundled MCS image was rebuilt. Dated JSON snapshots in
+[results/](results/) record images, source state and the tested phase-3 hash.
+Both runs deleted their dedicated clusters.
 
 The `e2e-discovery` target was rerun with both providers on 2026-10-30:
 

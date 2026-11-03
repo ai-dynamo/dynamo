@@ -142,7 +142,6 @@ run_phase_3() {
   expect "ServiceImports demo-pool-relay and demo-frontend in the hub" p3_imports_in_hub || true
 
   expect "GET /pools lists one complete pool: cluster_id a, namespace demo, dgd_name demo (demo-frontend is not a pool)" pool_listed || true
-  expect "the pool has a location.region" pool_region_seen || true
   expect "pool location.region follows the imported region label or source-cluster fallback" pool_region_matches_import || true
   if expect "pool relay_identities name the relay pods or one bound relay pod by address" relay_identities_are_bound; then
     log "relay_identities kind: ${RELAY_IDENTITIES_KIND}"
