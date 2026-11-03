@@ -44,10 +44,23 @@ pub fn supports_runtime_lora<
         && config
             .taints()
             .contains(RUNTIME_LORA_CAPABILITY_TAINT.as_str())
-        && runtime_lora_worker_schemes(config).is_some()
+        && runtime_lora_worker_schemes_view(config).is_some()
 }
 
-pub fn runtime_lora_worker_schemes(config: &impl RuntimeLoraWorkerFacts) -> Option<Vec<String>> {
+struct RuntimeLoraSchemes<'a>(&'a [serde_json::Value]);
+
+impl PartialEq for RuntimeLoraSchemes<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        // Scheme order and duplicate advertisements do not change resolver policy.
+        self.0 == other.0
+            || (self.0.iter().all(|scheme| other.0.contains(scheme))
+                && other.0.iter().all(|scheme| self.0.contains(scheme)))
+    }
+}
+
+fn runtime_lora_worker_schemes_view(
+    config: &impl RuntimeLoraWorkerFacts,
+) -> Option<RuntimeLoraSchemes<'_>> {
     if config
         .runtime_value(RUNTIME_LORA_SUPPORT_RUNTIME_KEY)
         .and_then(serde_json::Value::as_bool)
@@ -55,28 +68,46 @@ pub fn runtime_lora_worker_schemes(config: &impl RuntimeLoraWorkerFacts) -> Opti
     {
         return None;
     }
-    let versions =
-        Vec::<u32>::deserialize(config.runtime_value(RUNTIME_LORA_VERSIONS_RUNTIME_KEY)?).ok()?;
-    if !versions.contains(&u32::from(RUNTIME_LORA_PROTOCOL_VERSION)) {
+    let versions = config
+        .runtime_value(RUNTIME_LORA_VERSIONS_RUNTIME_KEY)?
+        .as_array()?;
+    let mut supported = false;
+    for version in versions {
+        let version = u32::try_from(version.as_u64()?).ok()?;
+        supported |= version == u32::from(RUNTIME_LORA_PROTOCOL_VERSION);
+    }
+    if !supported {
         return None;
     }
-    let mut schemes =
-        Vec::<String>::deserialize(config.runtime_value(RUNTIME_LORA_SCHEMES_RUNTIME_KEY)?).ok()?;
+    let schemes = config
+        .runtime_value(RUNTIME_LORA_SCHEMES_RUNTIME_KEY)?
+        .as_array()?;
+    (!schemes.is_empty() && schemes.iter().all(serde_json::Value::is_string))
+        .then_some(RuntimeLoraSchemes(schemes))
+}
+
+pub fn runtime_lora_worker_schemes(config: &impl RuntimeLoraWorkerFacts) -> Option<Vec<String>> {
+    let mut schemes: Vec<_> = runtime_lora_worker_schemes_view(config)?
+        .0
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .collect();
     schemes.sort_unstable();
     schemes.dedup();
-    (!schemes.is_empty()).then_some(schemes)
+    Some(schemes)
 }
 
 pub fn runtime_lora_workers_have_homogeneous_resolvers<C: RuntimeLoraWorkerFacts>(
     worker_ids: &[WorkerId],
     worker_configs: &HashMap<WorkerId, C>,
 ) -> bool {
-    let mut expected: Option<Vec<String>> = None;
+    let mut expected = None;
     for worker_id in worker_ids {
         let Some(config) = worker_configs.get(worker_id) else {
             return false;
         };
-        let Some(schemes) = runtime_lora_worker_schemes(config) else {
+        let Some(schemes) = runtime_lora_worker_schemes_view(config) else {
             return false;
         };
         match &expected {
@@ -115,7 +146,7 @@ pub fn constrain_runtime_lora_workers<
                 {
                     return false;
                 }
-                let Some(schemes) = runtime_lora_worker_schemes(config) else {
+                let Some(schemes) = runtime_lora_worker_schemes_view(config) else {
                     malformed_workers += 1;
                     return false;
                 };
@@ -467,6 +498,28 @@ mod tests {
         for worker in configs.values() {
             assert_eq!(worker.2.get(), 3, "read each capability field once");
         }
+    }
+
+    #[test]
+    fn capability_view_borrows_current_discovery_values() {
+        let mut worker = capable_worker(&["a", "b"]);
+        let schemes = runtime_lora_worker_schemes_view(&worker).unwrap();
+        assert!(std::ptr::eq(
+            schemes.0,
+            worker.0[RUNTIME_LORA_SCHEMES_RUNTIME_KEY]
+                .as_array()
+                .unwrap()
+                .as_slice()
+        ));
+        assert_eq!(worker.2.get(), 3);
+
+        worker.0[RUNTIME_LORA_SCHEMES_RUNTIME_KEY] = serde_json::json!(["updated"]);
+        assert_eq!(
+            runtime_lora_worker_schemes_view(&worker).unwrap().0,
+            &[serde_json::json!("updated")]
+        );
+        worker.0[RUNTIME_LORA_SUPPORT_RUNTIME_KEY] = serde_json::json!(false);
+        assert!(runtime_lora_worker_schemes_view(&worker).is_none());
     }
 
     #[test]
