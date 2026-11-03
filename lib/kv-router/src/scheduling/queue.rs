@@ -2174,7 +2174,7 @@ impl<
                 if let Some(reply) = reply.take() {
                     reply.send();
                 }
-                // NOTE: Overlap refresh is expected to be very short. We intentionally
+                // NOTE: Overlap refresh is bounded by `OVERLAP_REFRESH_TIMEOUT`. We intentionally
                 // accept load crossing the class threshold during this await: busy
                 // thresholds guide admission, not reservation. The candidate's DRR
                 // charge stays unpaid until its admission outcome is known.
@@ -2257,8 +2257,8 @@ impl<
     /// The candidate has left its class queue, so expiry no longer covers it, and the work handled
     /// here can rearm its class timer without it. The refresh therefore races the candidate's own
     /// due time directly. That due time, the candidate's response closing, the cleanup of its
-    /// lifecycle, or the loss of every command sender ends the refresh early and drops it
-    /// unfinished.
+    /// lifecycle, the loss of every command sender, or the refresh timeout (see
+    /// [`OverlapScoresRefresh`]) ends the refresh early and drops it unfinished.
     async fn refresh_candidate(
         &mut self,
         queued: &mut QueuedRequest,

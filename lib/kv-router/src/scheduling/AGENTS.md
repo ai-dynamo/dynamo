@@ -138,8 +138,9 @@ PolicyClassQueue("agents")
   refresh keeps running: ordinary scheduler traffic never abandons it. A command applied there
   is answered at once, and the drain it calls for resumes once the candidate is settled. The
   candidate has left its class queue, so the refresh races the candidate's own due time
-  directly; that due time, the candidate's response closing, the cleanup of its lifecycle, or the
-  loss of every command sender ends the refresh early. The candidate is then settled against its
+  directly; that due time, the candidate's response closing, the cleanup of its lifecycle, the
+  loss of every command sender, or the refresh timeout (`OVERLAP_REFRESH_TIMEOUT`, documented on
+  `OverlapScoresRefresh`) ends the refresh early. The candidate is then settled against its
   due time with its queued scores, or leaves unanswered when its lifecycle was released, as a
   queued entry removed by cleanup does. Rows prepared before a turn that starts during the
   refresh are not used after it. Never hold a command reply across that await.

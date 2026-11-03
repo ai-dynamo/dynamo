@@ -20,7 +20,8 @@
 //! worker chosen for dispatch.
 //!
 //! Refresh failures are non-fatal: an implementation can return `None` and the queue will
-//! dispatch with the (stale) original scores rather than dropping the request.
+//! dispatch with the (stale) original scores rather than dropping the request. A refresh that
+//! outlasts [`OVERLAP_REFRESH_TIMEOUT`] ends the same way; see [`OverlapScoresRefresh`].
 
 use std::time::Duration;
 
@@ -56,11 +57,15 @@ impl RefreshedOverlap {
 ///
 /// Implementations are expected to be cheap to clone (typically `Arc`-wrapped) and to never
 /// panic. Returning `None` indicates the refresh failed; the queue will then dispatch with
-/// the original scores. The queue keeps the returned future running while it handles other
-/// scheduler work, and drops it unfinished only when the waiting request's own due time
-/// passes, its caller goes away, or the scheduler shuts down. The request is then rejected,
-/// dropped, or, at shutdown, dispatched with the original scores, so a refresh must not depend
-/// on running to completion.
+/// the original scores.
+///
+/// The queue keeps the returned future running while it handles other scheduler work, for at
+/// most [`OVERLAP_REFRESH_TIMEOUT`] (250 ms) from the start of the refresh; that work never
+/// restarts the timeout. At the timeout the queue drops the future unfinished and dispatches
+/// the request with its original queued scores, as for `None`. It drops the future earlier when
+/// the waiting request's own due time passes, rejecting the request as overdue, when its caller
+/// goes away, dropping the request, or when the scheduler shuts down, dispatching the request
+/// with the original scores. A refresh must not depend on running to completion.
 #[async_trait]
 pub trait OverlapScoresRefresh: Send + Sync {
     async fn refresh(

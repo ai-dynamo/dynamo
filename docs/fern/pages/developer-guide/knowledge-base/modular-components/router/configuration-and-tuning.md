@@ -720,7 +720,7 @@ Use `--router-track-output-blocks` when your workload is output-heavy and you wa
 
 This threshold delays dispatch. It does not remove workers from the candidate set; for that distinction, see [Router Filtering](worker-filtering.md).
 
-Use `DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS` when queued requests may wait long enough for worker cache state to materially change before dispatch. The default is `10` seconds; set it to `0` to disable dequeue-time overlap refresh. Arriving requests, capacity changes, and other requests' queue deadlines are handled while the refresh runs, and the request then dispatches with the refreshed scores. If the request's own due time passes first, the router rejects it, and if its client disconnects, the router drops it, without waiting for the refresh.
+Use `DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS` when queued requests may wait long enough for worker cache state to materially change before dispatch. The default is `10` seconds; set it to `0` to disable dequeue-time overlap refresh. Arriving requests, capacity changes, and other requests' queue deadlines are handled while the refresh runs, and the request then dispatches with the refreshed scores. A refresh that takes longer than 250 ms is abandoned, and the request dispatches with its queued scores. If the request's own due time passes first, the router rejects it, and if its client disconnects, the router drops it, without waiting for the refresh.
 
 **Note for the SGLang backend.** In Dynamo v1.1.0 and later, the value the SGLang worker publishes for `max_num_batched_tokens` in its Model Deployment Card depends on the server args:
 
