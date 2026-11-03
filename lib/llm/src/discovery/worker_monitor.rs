@@ -148,21 +148,45 @@ impl LoadThresholdConfig {
 /// only `/busy_threshold` writes it. Reads are wait-free: `get` copies the current value out
 /// of an [`ArcSwap`] without taking a lock, so a pending write never stalls the request path.
 #[derive(Clone)]
-pub struct LoadThresholdHandle(Arc<ArcSwap<LoadThresholdConfig>>);
+pub struct LoadThresholdHandle {
+    config: Arc<ArcSwap<LoadThresholdConfig>>,
+    enabled: bool,
+}
 
 impl LoadThresholdHandle {
     pub fn new(config: LoadThresholdConfig) -> Self {
-        Self(Arc::new(ArcSwap::from_pointee(config)))
+        Self {
+            config: Arc::new(ArcSwap::from_pointee(config)),
+            enabled: true,
+        }
+    }
+
+    /// A handle that ignores thresholds, for a frontend in direct routing mode.
+    /// Its monitor never subscribes to KV metrics.
+    pub(crate) fn disabled() -> Self {
+        Self {
+            enabled: false,
+            ..Self::new(LoadThresholdConfig::default())
+        }
+    }
+
+    /// False for a handle from [`Self::disabled`].
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     pub fn get(&self) -> LoadThresholdConfig {
-        LoadThresholdConfig::clone(&self.0.load())
+        LoadThresholdConfig::clone(&self.config.load())
     }
 
     /// Merge the set fields of `config` into the current thresholds. Concurrent writers
-    /// retry through `rcu`; they are rare and never block readers.
+    /// retry through `rcu`; they are rare and never block readers. A handle from
+    /// [`Self::disabled`] ignores the update.
     pub fn update(&self, config: &LoadThresholdConfig) {
-        self.0.rcu(|current| {
+        if !self.enabled {
+            return;
+        }
+        self.config.rcu(|current| {
             let mut next = LoadThresholdConfig::clone(current);
             if let Some(value) = config.active_decode_blocks_threshold {
                 next.active_decode_blocks_threshold = Some(value);
@@ -178,7 +202,7 @@ impl LoadThresholdHandle {
     }
 
     pub fn is_configured(&self) -> bool {
-        self.0.load().is_configured()
+        self.config.load().is_configured()
     }
 }
 
@@ -876,15 +900,26 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
             };
 
         // Subscribe to KV metrics over the configured event transport. This is
-        // optional; cleanup of TTFT and ITL metrics continues without it.
-        let kv_metrics_rx = match KvMetricsSubscriber::for_endpoint(endpoint).await {
-            Ok(sub) => Some(sub),
-            Err(e) => {
-                tracing::warn!(
-                    "KvWorkerMonitor: KV metrics subscriber not available ({}), skipping load metrics.",
-                    e
-                );
-                None
+        // optional; cleanup of TTFT and ITL metrics continues without it. The
+        // reports feed only threshold-based overload detection, and the
+        // subscription connects to every worker, so skip it when the threshold
+        // handle is disabled.
+        let kv_metrics_rx = if !self.thresholds.handle().is_enabled() {
+            tracing::debug!(
+                endpoint = %endpoint.id(),
+                "KvWorkerMonitor: threshold handle disabled, skipping the KV metrics subscription"
+            );
+            None
+        } else {
+            match KvMetricsSubscriber::for_endpoint(endpoint).await {
+                Ok(sub) => Some(sub),
+                Err(e) => {
+                    tracing::warn!(
+                        "KvWorkerMonitor: KV metrics subscriber not available ({}), skipping load metrics.",
+                        e
+                    );
+                    None
+                }
             }
         };
 
@@ -1271,6 +1306,7 @@ mod tests {
     use dynamo_kv_router::protocols::{ActiveLoad, WorkerWithDpRank};
     use dynamo_kv_router::sequences::SchedulerLoadSnapshot;
     use std::collections::HashSet;
+    use std::sync::Arc;
 
     #[test]
     fn overloaded_worker_tracker_updates_one_worker() {
@@ -2011,7 +2047,10 @@ mod tests {
 
         assert!(!tracker.update_worker(7, false));
         client.mark_overloaded_immediate(7);
-        assert_eq!(client.overloaded_instance_ids(), Some(HashSet::from([7])));
+        assert_eq!(
+            client.overloaded_instance_ids(),
+            Some(Arc::new(HashSet::from([7])))
+        );
 
         let overloaded_changed = tracker.update_worker(7, false);
         assert!(

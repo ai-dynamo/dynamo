@@ -110,6 +110,7 @@ link no catalog and reject a configured policy type at startup.
 | `dynamo-default-cost-fn` | The default cost model with configurable scoring and sampling parameters. |
 | `thunderagent` | Honors the paired ThunderAgent classifier's worker/rank preference, then falls back to the least-loaded eligible worker. Enable both roles for program-aware admission and repacking; see [ThunderAgent Program Scheduler](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin). |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
+| `dynamo-sticky-min-load` | Session-sticky least-loaded placement. A session's first request goes to the eligible worker with the fewest active requests; later requests carrying the same `X-Dynamo-Session-ID` return to that worker until it leaves the candidate set. Ignores cache overlap and load once a session is bound. Requests without a session ID go to the least-loaded worker. Inspired by SMG's `manual` policy with `assignment_mode: min_load`. |
 
 Write the instance into the same YAML file that `--router-policy-config` already points at:
 
@@ -226,6 +227,23 @@ startup, so an out-of-range value or an unknown key fails the process immediatel
 rather than being silently ignored. It selects the least-loaded worker once the active-request spread is greater than 32 and the
 largest count is more than 1.1 times the smallest; otherwise it prefers the worker holding the
 largest device-KV overlap when that overlap covers more than 50% of the request's blocks.
+
+`dynamo-sticky-min-load` accepts two parameters:
+
+```yaml
+    - name: dynamo-sticky-min-load
+      type: dynamo-sticky-min-load
+      parameters:
+        max_idle_secs: 14400
+        eviction_interval_secs: 60
+```
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `max_idle_secs` | `14400` | Seconds a session binding may go unused before it is dropped. Must be greater than `0`. |
+| `eviction_interval_secs` | `60` | Minimum seconds between sweeps for idle bindings. |
+
+Each worker pool keeps its own bindings, so prefill and decode stages bind sessions independently. The table holds at most 65,536 bindings and ignores session IDs longer than 256 bytes; requests that cannot be bound go to the least-loaded worker.
 
 #### Override the Selection
 
@@ -598,7 +616,8 @@ Use `--router-queue-policy wspt` when your workload has a mix of short and long 
 ## Runtime Policy Updates
 
 **Experimental.** `/router_policy` groups worker-selection parameters and model-level busy
-thresholds on the frontend HTTP port (8000 by default).
+thresholds. It is served on the frontend admin listener (`127.0.0.1:8002` by default), which is
+off unless `DYN_ENABLE_FRONTEND_ADMIN_API=1` is set.
 
 | Resource | Methods | Scope |
 | --- | --- | --- |
@@ -622,7 +641,7 @@ Routers that have stopped or do not respond within five seconds are omitted; hea
 remain available in the listing.
 
 ```bash
-curl --get http://localhost:8000/router_policy --data-urlencode model=qwen
+curl --get http://localhost:8002/router_policy --data-urlencode model=qwen
 ```
 
 Use a returned `router_id` and revision in `PATCH /router_policy`:
@@ -683,7 +702,7 @@ resets use these effective values; host-owned cache accounting settings are unch
 one or more threshold fields with `POST /router_policy/busy_threshold` to update them:
 
 ```bash
-curl -X POST http://localhost:8000/router_policy/busy_threshold \
+curl -X POST http://localhost:8002/router_policy/busy_threshold \
   -H 'Content-Type: application/json' \
   -d '{"model":"qwen","active_decode_blocks_threshold":0.85,"active_prefill_tokens_threshold":1000,"active_prefill_tokens_threshold_frac":0.8}'
 ```
@@ -697,7 +716,8 @@ curl -X POST http://localhost:8000/router_policy/busy_threshold \
 The response returns the model name and current values of all three fields. Omitted or null
 fields retain their current values; a body containing only `model` queries that model. A write
 to an undiscovered model returns 404. Invalid threshold ranges return 400, and invalid field
-types return 422, without changing the thresholds.
+types return 422, without changing the thresholds. A frontend in direct routing mode
+(`--router-mode direct`) does not pick workers and ignores busy thresholds, so a write returns 409.
 
 The legacy `GET` and `POST /busy_threshold` routes remain compatibility aliases with the same
 handlers and state. Writes through either path are visible through the other. These updates
@@ -706,15 +726,18 @@ reset. Updating thresholds and selection parameters is not one atomic transactio
 
 ### Scope and Access
 
-The frontend admin API remains enabled by default on the HTTP port, with no separate admin
-authentication. `DYN_DISABLE_FRONTEND_ADMIN_API=1` disables `/router_policy`, its busy-threshold
-subresource, and the legacy `/busy_threshold` routes. Restrict access to these management
-routes at the deployment's gateway or network boundary.
+The admin listener has no authentication and is never served on the inference port. If you
+widen its bind address with `DYN_FRONTEND_ADMIN_HOST`, restrict the admin port at the network
+boundary. See [Admin](../../../../reference/components/frontend-configuration.mdx#admin) for the
+listener settings.
 
 Updates are process-local and not persisted. A rebuilt router receives a new ID and starts
 from its configured startup values. A controller must address each frontend replica directly,
 retain the desired settings, and reapply them to new router instances; a load-balanced request
-does not update every replica. The standalone Python router does not expose this HTTP API.
+does not update every replica. With the default loopback bind, the admin port is reachable only
+from inside the pod or through `kubectl port-forward`. An out-of-pod controller needs
+`DYN_FRONTEND_ADMIN_HOST` set to a reachable address, such as the pod IP, and a network policy
+that limits the admin port to that controller. The standalone Python router does not expose this HTTP API.
 Rust hosts can use `KvRouter::policy_control()` or `LocalScheduler::policy_control()` to access
 the same actor-serialized control handle.
 
