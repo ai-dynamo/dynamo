@@ -6,6 +6,8 @@ use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -46,14 +48,23 @@ pub(crate) struct GrpcTransport {
     health: Arc<RwLock<GrpcTransportHealth>>,
     task: Mutex<Option<JoinHandle<()>>>,
     #[cfg(test)]
-    accepted: Arc<Notify>,
+    accepted: Arc<AcceptedConnectionProbe>,
+}
+
+/// Test hook: signals when tonic first reads an accepted connection and records
+/// whether that connection had `TCP_NODELAY` set.
+#[cfg(test)]
+#[derive(Default)]
+struct AcceptedConnectionProbe {
+    polled: Notify,
+    nodelay: AtomicBool,
 }
 
 struct CancellableIo {
     stream: TcpStream,
     cancelled: Pin<Box<WaitForCancellationFutureOwned>>,
     #[cfg(test)]
-    accepted: Option<Arc<Notify>>,
+    accepted: Option<Arc<AcceptedConnectionProbe>>,
 }
 
 impl CancellableIo {
@@ -78,7 +89,7 @@ impl CancellableIo {
     }
 
     #[cfg(test)]
-    fn notify_when_polled(mut self, accepted: Arc<Notify>) -> Self {
+    fn notify_when_polled(mut self, accepted: Arc<AcceptedConnectionProbe>) -> Self {
         self.accepted = Some(accepted);
         self
     }
@@ -92,7 +103,9 @@ impl AsyncRead for CancellableIo {
     ) -> Poll<io::Result<()>> {
         #[cfg(test)]
         if let Some(accepted) = self.accepted.take() {
-            accepted.notify_one();
+            let nodelay = self.stream.nodelay().unwrap_or(false);
+            accepted.nodelay.store(nodelay, Ordering::Release);
+            accepted.polled.notify_one();
         }
         if let Err(error) = self.poll_cancelled(cx) {
             return Poll::Ready(Err(error));
@@ -217,7 +230,7 @@ impl GrpcTransport {
         let server_cancel = cancel.clone();
         let server_health = health.clone();
         #[cfg(test)]
-        let accepted = Arc::new(Notify::new());
+        let accepted = Arc::new(AcceptedConnectionProbe::default());
         #[cfg(test)]
         let accepted_for_server = accepted.clone();
         let server_task = tokio::spawn(async move {
@@ -278,9 +291,12 @@ impl GrpcTransport {
         self.health.read().clone()
     }
 
+    /// Waits until tonic first reads an accepted connection, then reports whether
+    /// that connection had `TCP_NODELAY` set.
     #[cfg(test)]
-    pub(crate) async fn wait_for_accepted_connection(&self) {
-        self.accepted.notified().await;
+    pub(crate) async fn wait_for_accepted_connection(&self) -> bool {
+        self.accepted.polled.notified().await;
+        self.accepted.nodelay.load(Ordering::Acquire)
     }
 
     pub(crate) async fn shutdown(&self) {
@@ -363,18 +379,6 @@ async fn supervise_transport(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn accepted_connections_disable_nagle() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let client = TcpStream::connect(listener.local_addr().unwrap())
-            .await
-            .unwrap();
-        let (accepted, _) = listener.accept().await.unwrap();
-        let io = accept_connection(accepted, CancellationToken::new());
-        assert!(io.stream.nodelay().unwrap());
-        drop(client);
-    }
 
     #[tokio::test]
     async fn supervised_load_task_failure_cancels_the_relay() {
