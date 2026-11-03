@@ -176,21 +176,33 @@ async fn anthropic_error_middleware(mut request: Request<Body>, next: Next) -> R
                 })
             }
         };
-        body["request_id"] = serde_json::Value::String(request_id.clone());
+        stamp_request_id(&mut body, &mut parts.headers, &request_id);
         parts.headers.insert(
             header::CONTENT_TYPE,
             header::HeaderValue::from_static("application/json"),
         );
         parts.headers.remove(header::CONTENT_LENGTH);
-        response = Response::from_parts(parts, Body::from(body.to_string()));
+        Response::from_parts(parts, Body::from(body.to_string()))
+    } else {
+        insert_request_id_header(response.headers_mut(), &request_id);
+        response
     }
-    response.headers_mut().insert(
+}
+
+/// Sets the `request-id` header that Anthropic clients read.
+fn insert_request_id_header(headers: &mut HeaderMap, request_id: &str) {
+    headers.insert(
         "request-id",
         request_id
             .parse()
             .expect("assigned request ID is a valid header"),
     );
-    response
+}
+
+/// Adds the request ID to an Anthropic error body and its response headers.
+fn stamp_request_id(body: &mut serde_json::Value, headers: &mut HeaderMap, request_id: &str) {
+    body["request_id"] = serde_json::Value::String(request_id.to_owned());
+    insert_request_id_header(headers, request_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -1521,15 +1533,9 @@ pub(crate) fn readiness_rejection_response(
         },
     })
     .expect("Anthropic error is serializable");
-    body["request_id"] = serde_json::Value::String(request_id.clone());
-    let mut response = (status, Json(body)).into_response();
-    response.headers_mut().insert(
-        "request-id",
-        request_id
-            .parse()
-            .expect("assigned request ID is a valid header"),
-    );
-    response
+    let mut response_headers = HeaderMap::new();
+    stamp_request_id(&mut body, &mut response_headers, &request_id);
+    (status, response_headers, Json(body)).into_response()
 }
 
 /// Returns an Anthropic-compatible JSON `404` error response for an unmatched route.

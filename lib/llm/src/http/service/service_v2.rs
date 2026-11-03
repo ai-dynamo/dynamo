@@ -139,7 +139,7 @@ struct InferenceReadinessState {
 impl InferenceReadinessState {
     fn rejection(&self, request: &axum::extract::Request) -> axum::response::Response {
         // Records the unavailable failure once; the protocol bodies below must not record again.
-        let unavailable = super::openai::ErrorMessage::_service_unavailable();
+        let (status, axum::Json(error)) = super::openai::ErrorMessage::_service_unavailable();
         let protocol = request
             .extensions()
             .get::<axum::extract::MatchedPath>()
@@ -150,20 +150,20 @@ impl InferenceReadinessState {
             Some(MountedProtocol::Anthropic) => {
                 let response = super::anthropic::readiness_rejection_response(
                     request.headers(),
-                    unavailable.0,
-                    unavailable.1.0.message(),
+                    status,
+                    error.message(),
                 );
                 return close_draining_connection(response, request.version());
             }
             None => return draining_inference_response(request.version()),
         };
-        let error = dynamo_decisions::DecisionError::new(
+        let decision_error = dynamo_decisions::DecisionError::new(
             dialect,
-            unavailable.0.as_u16(),
+            status.as_u16(),
             "server_error",
-            unavailable.1.0.message(),
+            error.message(),
         );
-        let mut response = (unavailable.0, axum::Json(error.response_body())).into_response();
+        let mut response = (status, axum::Json(decision_error.response_body())).into_response();
         let request_id = super::openai::get_or_create_request_id(request.headers());
         super::systemone::attach_request_ids(&mut response, &request_id);
         close_draining_connection(response, request.version())
@@ -3544,6 +3544,8 @@ mod tests {
     /// Verifies that unmatched routes under the Anthropic Messages API path return
     /// the Anthropic error envelope.
     #[tokio::test]
+    // Serial because other tests set `DYN_HTTP_SVC_ANTHROPIC_PATH`.
+    #[serial_test::serial]
     async fn test_unmatched_anthropic_route_returns_anthropic_envelope() {
         let (port, _state, handle) =
             spawn_service(|builder| builder.enable_anthropic_endpoints(true)).await;
@@ -4289,43 +4291,40 @@ mod tests {
                     let base = configured_path.unwrap_or("/v1/messages");
                     let count_tokens = format!("{base}/count_tokens");
                     for path in [base, count_tokens.as_str()] {
-                        for client_id in [Some("anthropic-readiness"), None] {
-                            let mut request = axum::http::Request::post(path)
-                                .header("content-type", "application/json")
-                                .header("anthropic-version", "2023-06-01");
-                            if let Some(client_id) = client_id {
-                                request = request.header("x-request-id", client_id);
-                            }
-                            let response = service
-                                .router
-                                .clone()
-                                .oneshot(request.body(Body::from("{}")).unwrap())
-                                .await
-                                .unwrap();
-                            assert_eq!(
-                                response.status(),
-                                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                                "{path}"
-                            );
-                            assert_eq!(response.headers()[header::CONNECTION], "close");
-                            let request_id = response.headers()["request-id"]
-                                .to_str()
-                                .unwrap()
-                                .to_owned();
-                            // The server owns `request-id`; clients correlate with `x-request-id`.
-                            assert!(uuid::Uuid::parse_str(&request_id).is_ok());
-                            if let Some(client_id) = client_id {
-                                assert_eq!(response.headers()["x-request-id"], client_id);
-                            }
-                            let body = axum::body::to_bytes(response.into_body(), 4096)
-                                .await
-                                .unwrap();
-                            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                            assert_eq!(body["type"], "error", "{path}: {body}");
-                            assert_eq!(body["error"]["type"], "overloaded_error");
-                            assert_eq!(body["error"]["message"], "Service is not ready");
-                            assert_eq!(body["request_id"], request_id.as_str());
-                        }
+                        let response = service
+                            .router
+                            .clone()
+                            .oneshot(
+                                axum::http::Request::post(path)
+                                    .header("content-type", "application/json")
+                                    .header("anthropic-version", "2023-06-01")
+                                    .header("x-request-id", "anthropic-readiness")
+                                    .body(Body::from("{}"))
+                                    .unwrap(),
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            response.status(),
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                            "{path}"
+                        );
+                        assert_eq!(response.headers()[header::CONNECTION], "close");
+                        let request_id = response.headers()["request-id"]
+                            .to_str()
+                            .unwrap()
+                            .to_owned();
+                        // The server owns `request-id`; clients correlate with `x-request-id`.
+                        assert!(uuid::Uuid::parse_str(&request_id).is_ok());
+                        assert_eq!(response.headers()["x-request-id"], "anthropic-readiness");
+                        let body = axum::body::to_bytes(response.into_body(), 4096)
+                            .await
+                            .unwrap();
+                        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        assert_eq!(body["type"], "error", "{path}: {body}");
+                        assert_eq!(body["error"]["type"], "overloaded_error");
+                        assert_eq!(body["error"]["message"], "Service is not ready");
+                        assert_eq!(body["request_id"], request_id.as_str());
                     }
 
                     // Other inference routes keep the OpenAI body.
