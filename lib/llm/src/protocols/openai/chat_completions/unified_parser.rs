@@ -4063,6 +4063,8 @@ where
                 if !is_last {
                     data.tool_call_completion.clear();
                 }
+                // Every child referencing a call can carry its final parser state,
+                // even before its arguments. Completion is not a delivery barrier.
                 attach_call_completion(&mut data, &choice, &states, &records);
                 data.inner.choices = vec![choice];
                 if !is_last {
