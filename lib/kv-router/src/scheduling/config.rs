@@ -1514,6 +1514,14 @@ impl KvRouterConfig {
         self.router_predicted_ttl_secs.is_some()
     }
 
+    /// Whether the KV index built from this config can retain the block chain
+    /// that KV fetch hints need: a local, event-driven primary with no
+    /// predict-on-route side indexer. Offline replay, which cannot build that
+    /// index, relies on this matching `Indexer::supports_kv_transfer_chain_retention`.
+    pub fn supports_kv_transfer_chain_retention(&self) -> bool {
+        self.use_kv_events && !self.use_remote_indexer && !self.predict_on_route_enabled()
+    }
+
     pub fn queueing_enabled(
         &self,
         model_name: Option<&str>,
