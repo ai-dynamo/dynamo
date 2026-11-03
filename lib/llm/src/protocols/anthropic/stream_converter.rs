@@ -2114,9 +2114,8 @@ mod tests {
         }
     }
 
-    /// Streaming usage reports the backend's cache-write count as
-    /// `cache_creation_input_tokens` (zero when absent) and excludes it from
-    /// `input_tokens`, so `total_tokens` still equals prompt plus completion.
+    /// Streaming usage reports cache writes as `cache_creation_input_tokens` (zero when
+    /// absent), excluded from `input_tokens`; `total_tokens` stays prompt plus completion.
     #[test]
     fn test_stream_usage_defaults_and_preserves_cache_write_tokens() {
         use dynamo_protocols::types::PromptTokensDetails;

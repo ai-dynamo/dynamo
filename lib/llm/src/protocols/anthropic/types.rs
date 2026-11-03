@@ -594,15 +594,8 @@ fn convert_anthropic_tool_choice(
 /// Convert Dynamo's OpenAI-compatible usage into Anthropic's non-overlapping
 /// input-token accounting.
 ///
-/// Dynamo backends report `prompt_tokens` as the complete prompt, and
-/// `cached_tokens` (cache reads) and `cache_write_tokens` (cache writes) as
-/// subsets of it. Anthropic reports both subsets separately, so `input_tokens`
-/// must exclude them: `input_tokens + cache_read_input_tokens +
-/// cache_creation_input_tokens == prompt_tokens`.
-///
-/// A backend must not be able to produce a breakdown whose subsets exceed the
-/// complete prompt. Reads are clamped to the prompt first; writes are clamped
-/// to the prompt left after reads, and a negative write count becomes zero.
+/// Cache reads and writes are subsets of `prompt_tokens`; Anthropic reports them separately,
+/// so `input_tokens` excludes both, and each is clamped so the parts never exceed the prompt.
 pub(super) fn completion_usage_to_anthropic(usage: &CompletionUsage) -> AnthropicUsage {
     let details = usage.prompt_tokens_details.as_ref();
     let cache_read_input_tokens = details
@@ -1804,9 +1797,8 @@ mod tests {
     fn test_anthropic_usage_clamps_cache_write_tokens_to_remaining_prompt() {
         use dynamo_protocols::types::PromptTokensDetails;
 
-        // (cached_tokens, cache_write_tokens, input, cache_read, cache_creation)
-        // with a 12-token prompt. Reads keep precedence; writes fill at most the
-        // rest of the prompt, and negative or oversized writes cannot wrap.
+        // (cached_tokens, cache_write_tokens, input, cache_read, cache_creation), 12-token prompt.
+        // Reads take precedence; writes fill at most the rest and never go negative or wrap.
         for (cached, write, expected_input, expected_read, expected_write) in [
             (Some(5), Some(20), 0, Some(5), 7),
             (Some(20), Some(4), 0, Some(12), 0),
