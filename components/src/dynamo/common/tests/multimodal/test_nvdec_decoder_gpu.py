@@ -28,6 +28,7 @@ pytestmark = [
     pytest.mark.post_merge,
     pytest.mark.gpu_1,
     pytest.mark.vllm,
+    pytest.mark.multimodal,
 ]
 
 
@@ -83,7 +84,57 @@ def _decode_and_assert(codec: str) -> int:
     assert frames[:, :, :, :].max() > 0  # real pixels, not a black clip
     assert metadata["total_num_frames"] >= 8
     assert len(metadata["frames_indices"]) == 8
+
+    import PyNvVideoCodec as nvc
+    import torch
+
+    # Copy each reference frame before another decode can reuse its storage.
+    # Shape/nonzero assertions alone miss the bug where every returned frame
+    # aliases the last one; compare the actual pixels at each sampled index.
+    decoder = nvc.SimpleDecoder(
+        str(path),
+        gpu_id=nd._gpu_id(),
+        output_color_type=nvc.OutputColorType.RGB,
+        use_device_memory=False,
+    )
+    reference = [
+        torch.from_dlpack(decoder[index]).cpu().numpy().copy()
+        for index in metadata["frames_indices"]
+    ]
+    assert not np.array_equal(reference[0], reference[-1]), "fixture must vary"
+    np.testing.assert_array_equal(frames, np.stack(reference))
     return 0
+
+
+def _assert_cuda_frame_conversion() -> None:
+    import numpy as np
+    import torch
+
+    from dynamo.common.multimodal import nvdec_decoder as nd
+
+    class CudaArrayOnly:
+        def __init__(self, tensor):
+            self.tensor = tensor
+
+        @property
+        def __cuda_array_interface__(self):
+            return self.tensor.__cuda_array_interface__
+
+    for dtype in (np.uint8, np.float32):
+        values = np.arange(72, dtype=dtype).reshape(4, 6, 3)
+        if dtype == np.float32:
+            values += 0.5
+        expected = values.astype(np.uint8)
+        for array_only in (False, True):
+            source = torch.from_numpy(values).to(f"cuda:{nd._gpu_id()}")
+            frame = CudaArrayOnly(source) if array_only else source
+            result = nd._frame_to_rgb_hwc(frame)
+            source.fill_(255)
+            torch.cuda.synchronize(source.device)
+
+            assert isinstance(result, np.ndarray)
+            assert result.dtype == np.uint8
+            np.testing.assert_array_equal(result, expected)
 
 
 def _run_worker() -> int:
@@ -92,6 +143,7 @@ def _run_worker() -> int:
         status = _decode_and_assert(codec)
         if status != 0:
             return status
+    _assert_cuda_frame_conversion()
     return 0
 
 

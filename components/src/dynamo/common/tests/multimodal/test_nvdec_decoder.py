@@ -24,7 +24,9 @@ def _clear_cache():
     nd.nvdec_available.cache_clear()
 
 
-def _fake_pynv(num_frames: int = 10, h: int = 4, w: int = 6):
+def _fake_pynv(
+    num_frames: int = 10, h: int = 4, w: int = 6, reuse_buffer: bool = False
+):
     """A stand-in PyNvVideoCodec module returning deterministic HWC uint8 frames."""
     mod = types.ModuleType("PyNvVideoCodec")
 
@@ -36,11 +38,15 @@ def _fake_pynv(num_frames: int = 10, h: int = 4, w: int = 6):
             self, src, gpu_id=0, output_color_type=None, use_device_memory=False
         ):
             self._n = num_frames
+            self._frame = np.empty((h, w, 3), dtype=np.uint8)
 
         def __len__(self):
             return self._n
 
         def __getitem__(self, i):
+            if reuse_buffer:
+                self._frame.fill(i % 256)
+                return self._frame
             return np.full((h, w, 3), i % 256, dtype=np.uint8)
 
         def get_fps(self):
@@ -161,6 +167,63 @@ def test_should_use_nvdec_routes_only_h264_hevc(monkeypatch):
 def test_should_use_nvdec_false_when_unavailable(monkeypatch):
     monkeypatch.setenv(nd.DISABLE_ENV, "1")
     assert nd.should_use_nvdec("h264") is False
+
+
+# These regressions exercise real Torch/DLPack; select the vLLM CPU CI lane.
+@pytest.mark.vllm
+@pytest.mark.multimodal
+@pytest.mark.parametrize("dtype", [np.uint8, np.float32])
+@pytest.mark.parametrize("row_padding", [0, 2], ids=["contiguous", "row-padded"])
+def test_frame_conversion_preserves_data_when_source_is_reused(dtype, row_padding):
+    # NumPy exports CPU DLPack storage just like a host-memory DecodedFrame.
+    width = 6 + row_padding
+    source = np.arange(4 * width * 3, dtype=dtype).reshape(4, width, 3)[:, :6]
+    expected = source.astype(np.uint8, copy=True)
+
+    frame = nd._frame_to_rgb_hwc(source)
+    source.fill(255)
+
+    assert frame.dtype == np.uint8
+    assert not np.shares_memory(frame, source)
+    np.testing.assert_array_equal(frame, expected)
+
+
+@pytest.mark.vllm
+@pytest.mark.multimodal
+@pytest.mark.parametrize(
+    "total,num_frames,fps,expected_indices",
+    [
+        (1, 5, -1, [0]),  # single-frame clip
+        (10, 1, -1, [0]),  # one requested frame from a longer clip
+        (10, 4, -1, [0, 3, 6, 9]),  # uniform sampling
+        (10, 32, -1, list(range(10))),  # capped at the source frame count
+        (90, 32, 1, [0, 44, 89]),  # three seconds at one sampled frame per second
+    ],
+)
+def test_decode_preserves_frames_when_decoder_reuses_host_buffer(
+    monkeypatch, total, num_frames, fps, expected_indices
+):
+    monkeypatch.setitem(
+        sys.modules, "PyNvVideoCodec", _fake_pynv(total, reuse_buffer=True)
+    )
+    # Exercise the real conversion helper: returning a view here would make
+    # every saved frame contain the last sampled index by the time we stack.
+    frames, metadata = nd.decode_video_nvdec(b"fakebytes", num_frames, fps=fps)
+
+    assert frames.shape == (len(expected_indices), 4, 6, 3)
+    assert frames.dtype == np.uint8
+    assert frames.flags["C_CONTIGUOUS"]
+    expected = np.broadcast_to(
+        np.asarray(expected_indices, dtype=np.uint8)[:, None, None, None],
+        frames.shape,
+    )
+    np.testing.assert_array_equal(frames, expected)
+    assert metadata == {
+        "fps": 30.0,
+        "frames_indices": expected_indices,
+        "total_num_frames": total,
+        "do_sample_frames": len(expected_indices) == total,
+    }
 
 
 def test_decode_matches_frame_contract(monkeypatch):
