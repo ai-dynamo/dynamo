@@ -159,7 +159,7 @@ meaning "not supplied".
 | Excluded workers, parked classifier lifecycle | `migration_state` | `PreprocessedRequest::migration_state` |
 | Staged KV that only this decode can release | `staged_kv_cleanup` | `PreprocessedRequest::staged_kv_cleanup` |
 | Query-only selection | `is_query_only` | annotation `query_instance_id` in `PreprocessedRequest::annotations` |
-| Multimodal cache keys (device-aware mode only) | `preprocessed` | the whole `PreprocessedRequest`; device-aware routing fails without it |
+| Multimodal cache keys (device-aware mode only) | `preprocessed` | the whole `PreprocessedRequest`; without it, device-aware routing weighs device types without cache hits |
 
 The Runtime EPP supplies only some of these inputs. Which ones, and the gaps that leaves, are
 listed in its

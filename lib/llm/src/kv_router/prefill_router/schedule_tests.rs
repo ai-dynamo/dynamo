@@ -432,6 +432,14 @@ async fn kept_prefill_booking_releases_exactly_after_rebind() {
     let (replacement, _) = tracked_binding("replacement").await;
     router.binding.store(Some(replacement));
     booking.release().await;
+    let loads = original_chooser
+        .get_potential_loads(&[], None, None, None, None)
+        .await
+        .unwrap();
+    assert!(
+        loads.iter().any(|load| load.potential_prefill_tokens > 0),
+        "releasing one booking must leave the other: {loads:?}"
+    );
 
     drop(dropped_booking);
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -517,9 +525,13 @@ async fn kept_prefill_booking_releases_builtin_occupancy() {
         )
         .await;
 
-        // Device-aware routing reads the frontend's request.
+        // A request with no `PreprocessedRequest`, as the EPP schedules:
+        // device-aware routing then weighs device types alone.
         let route = prefill
-            .schedule(&SingleIn::new(request()))
+            .schedule(&TestRouteRequest::new(
+                &format!("epp-prefill/occupancy-{index}"),
+                &[1u32; 64],
+            ))
             .await
             .unwrap()
             .into_route()

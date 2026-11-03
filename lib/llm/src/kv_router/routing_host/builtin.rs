@@ -235,11 +235,8 @@ impl RoutingHost {
             }
             RoutingPolicy::DeviceAwareWeighted => {
                 let preferred_worker = preferred_worker()?;
-                let request = request.preprocessed().ok_or_else(|| {
-                    anyhow::anyhow!("device-aware routing requires the frontend's request")
-                })?;
                 let selection = self.inner.select_device_aware_and_reserve(
-                    request,
+                    request.preprocessed(),
                     target_constraint
                         .map(|target| target.worker_id)
                         .or(preferred_worker),

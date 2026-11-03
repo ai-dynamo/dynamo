@@ -86,7 +86,8 @@ pub trait RouteRequest: Send + Sync {
 
     /// The frontend request, for the one input only it carries: the
     /// multimodal cache keys device-aware routing reads. `None` for a host
-    /// that has no `PreprocessedRequest`; device-aware routing then fails.
+    /// that has no `PreprocessedRequest`; device-aware routing then weighs
+    /// device types without cache hits.
     fn preprocessed(&self) -> Option<&PreprocessedRequest> {
         None
     }
