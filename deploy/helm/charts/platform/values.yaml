@@ -256,7 +256,7 @@ dynamo-operator:
       # `<DGD name>-pool-relay` and for each frontend component's Service.
       # Needs the multicluster.x-k8s.io/v1alpha1 ServiceExport API in this
       # cluster. Empty exports nothing; clearing it leaves earlier exports in
-      # place until their DGDs are deleted.
+      # place until their DynamoPoolRelays are deleted.
       mcsImplementation: ""
 
     # Metrics configuration

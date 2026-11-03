@@ -82,6 +82,8 @@ rules:
   - clusterproperties
   verbs:
   - get
+  - list
+  - watch
 - apiGroups:
   - apiextensions.k8s.io
   resources:
@@ -270,6 +272,7 @@ rules:
   - delete
   - get
   - list
+  - patch
   - watch
 - apiGroups:
   - networking.istio.io

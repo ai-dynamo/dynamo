@@ -4355,7 +4355,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `mcsImplementation` _[MCSImplementation](#mcsimplementation)_ | MCSImplementation is the MCS implementation that imports the exports. Empty,<br />the default, exports nothing: Global Router pools are then discovered without<br />Kubernetes. Clearing it leaves earlier exports in place until their DGDs are<br />deleted. |  |  |
+| `mcsImplementation` _[MCSImplementation](#mcsimplementation)_ | MCSImplementation is the MCS implementation that imports the exports. Empty,<br />the default, exports nothing: Global Router pools are then discovered without<br />Kubernetes. Clearing it leaves earlier exports in place until their<br />DynamoPoolRelays are deleted. |  |  |
 
 
 #### NamespaceConfiguration

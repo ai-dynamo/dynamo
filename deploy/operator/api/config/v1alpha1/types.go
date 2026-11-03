@@ -407,8 +407,8 @@ type DiscoveryConfiguration struct {
 type MultiClusterConfiguration struct {
 	// MCSImplementation is the MCS implementation that imports the exports. Empty,
 	// the default, exports nothing: Global Router pools are then discovered without
-	// Kubernetes. Clearing it leaves earlier exports in place until their DGDs are
-	// deleted.
+	// Kubernetes. Clearing it leaves earlier exports in place until their
+	// DynamoPoolRelays are deleted.
 	MCSImplementation MCSImplementation `json:"mcsImplementation,omitempty"`
 }
 

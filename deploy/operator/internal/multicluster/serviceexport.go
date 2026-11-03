@@ -5,7 +5,7 @@
 
 // Package multicluster renders the ServiceExports that announce a Global Router
 // pool to other clusters through the Kubernetes Multi-Cluster Services (MCS) API,
-// and reads what the MCS implementation reports about them.
+// lists them, and reads the cluster's ID in its ClusterSet.
 package multicluster
 
 import (
@@ -22,7 +22,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -168,47 +167,33 @@ func RenderServiceExport(version, namespace, name, dgdName string) *unstructured
 	return serviceExport
 }
 
-// ExportState is what the MCS implementation reports about a ServiceExport.
-type ExportState int
-
-const (
-	// ExportPending means that the import is not finished, or that a standard
-	// implementation has not reported on the export yet.
-	ExportPending ExportState = iota
-	// ExportAccepted means that nothing is reported against the export. Karmada
-	// writes no conditions, so its exports are always accepted.
-	ExportAccepted
-	// ExportConflicting means that some property of the export conflicts with
-	// another cluster's export of the Service. The implementation resolves the
-	// conflict, so the import can still work.
-	ExportConflicting
-	// ExportRejected means that Valid is False, or Ready is False for a reason
-	// other than Pending.
-	ExportRejected
-)
-
 // Export is a ServiceExport as the operator sees it.
 type Export struct {
 	Name string
 	UID  types.UID
-	// ControllerUID is the UID of the export's controller, empty without one.
-	ControllerUID types.UID
+	// ResourceVersion is the version of the export that was read. A write
+	// conditioned on it fails once the export has changed.
+	ResourceVersion string
+	// Labels are the export's labels, and Controller its controller reference,
+	// nil without one: the operator writes both on the exports of a pool.
+	Labels     map[string]string
+	Controller *metav1.OwnerReference
 	// Deleting is true once the export's deletion has started.
 	Deleting bool
-	// State is what the MCS implementation reports on the export, and Detail the
-	// condition that decided it, for people.
-	State  ExportState
-	Detail string
 }
 
-// ListExports returns the ServiceExports in namespace by name, read at version,
-// with what implementation reports on them. reader should serve unstructured
-// objects from a cache: the manager's client reads them from the API server.
+// ControlledBy reports whether the object with uid controls the export.
+func (e Export) ControlledBy(uid types.UID) bool {
+	return e.Controller != nil && e.Controller.UID == uid
+}
+
+// ListExports returns the ServiceExports in namespace by name, read at version.
+// reader should serve unstructured objects from a cache: the manager's client
+// reads them from the API server.
 func ListExports(
 	ctx context.Context,
 	reader client.Reader,
 	version, namespace string,
-	implementation configv1alpha1.MCSImplementation,
 ) (map[string]Export, error) {
 	list := &unstructured.UnstructuredList{}
 	list.SetGroupVersionKind(schema.GroupVersionKind{
@@ -220,83 +205,46 @@ func ListExports(
 	exports := make(map[string]Export, len(list.Items))
 	for i := range list.Items {
 		item := &list.Items[i]
-		export := Export{Name: item.GetName(), UID: item.GetUID(), Deleting: item.GetDeletionTimestamp() != nil}
-		if controller := metav1.GetControllerOf(item); controller != nil {
-			export.ControllerUID = controller.UID
+		export := Export{
+			Name:            item.GetName(),
+			UID:             item.GetUID(),
+			ResourceVersion: item.GetResourceVersion(),
+			Labels:          item.GetLabels(),
+			Controller:      metav1.GetControllerOf(item),
+			Deleting:        item.GetDeletionTimestamp() != nil,
 		}
-		export.State, export.Detail = ReadExportState(implementation, item)
 		exports[export.Name] = export
 	}
 	return exports, nil
 }
 
-// ReadExportState reads the conditions that implementation writes on a
-// ServiceExport (KEP-1645: Valid, Ready and Conflict), and returns the export's
-// state with the condition that decided it, for people.
-func ReadExportState(
-	implementation configv1alpha1.MCSImplementation,
-	serviceExport *unstructured.Unstructured,
-) (ExportState, string) {
-	var status struct {
-		Conditions []metav1.Condition `json:"conditions"`
-	}
-	if fields, ok := serviceExport.Object["status"].(map[string]any); ok {
-		// A status that cannot be read counts as no report.
-		_ = runtime.DefaultUnstructuredConverter.FromUnstructured(fields, &status)
-	}
-
-	if valid := meta.FindStatusCondition(status.Conditions, "Valid"); valid != nil &&
-		valid.Status == metav1.ConditionFalse {
-		return ExportRejected, describeCondition(valid)
-	}
-	// Pending is a reason for Ready to be False or Unknown while the export
-	// is in progress.
-	if ready := meta.FindStatusCondition(status.Conditions, "Ready"); ready != nil {
-		switch {
-		case ready.Status == metav1.ConditionFalse && ready.Reason != "Pending":
-			return ExportRejected, describeCondition(ready)
-		case ready.Status != metav1.ConditionTrue:
-			return ExportPending, describeCondition(ready)
-		}
-	}
-	if conflict := meta.FindStatusCondition(status.Conditions, "Conflict"); conflict != nil &&
-		conflict.Status == metav1.ConditionTrue {
-		return ExportConflicting, describeCondition(conflict)
-	}
-	if len(status.Conditions) == 0 && implementation != configv1alpha1.MCSImplementationKarmada {
-		return ExportPending, "no conditions yet"
-	}
-	return ExportAccepted, ""
+// NewClusterProperty returns an empty ClusterProperty, to watch properties or to
+// read one.
+func NewClusterProperty() *unstructured.Unstructured {
+	property := &unstructured.Unstructured{}
+	property.SetGroupVersionKind(ClusterPropertyGVK)
+	return property
 }
 
-// describeCondition returns condition as `<type> is <status> (<reason>): <message>`,
-// leaving out a missing reason or message.
-func describeCondition(condition *metav1.Condition) string {
-	description := fmt.Sprintf("%s is %s", condition.Type, condition.Status)
-	if condition.Reason != "" {
-		description += fmt.Sprintf(" (%s)", condition.Reason)
-	}
-	if condition.Message != "" {
-		description += ": " + condition.Message
-	}
-	return description
+// ClusterPropertyValue returns the value of property, or "" without one.
+func ClusterPropertyValue(property *unstructured.Unstructured) string {
+	value, _, _ := unstructured.NestedString(property.Object, "spec", "value")
+	return value
 }
 
 // ReadClusterID returns the cluster's ID in its ClusterSet, from the About API's
 // ClusterProperty named ClusterIDProperty, or "" when the cluster has no such
-// property or the reader may not read it, as in a namespace-restricted install.
-// reader should bypass the cache: the property is cluster-scoped, and reading it
-// is optional.
+// property or does not serve the About API. Any other failure, such as a missing
+// permission, is an error. reader should be the manager's cache, which a watch of
+// ClusterProperties fills.
 func ReadClusterID(ctx context.Context, reader client.Reader) (string, error) {
-	property := &unstructured.Unstructured{}
-	property.SetGroupVersionKind(ClusterPropertyGVK)
+	property := NewClusterProperty()
 	err := reader.Get(ctx, client.ObjectKey{Name: ClusterIDProperty}, property)
-	if apierrors.IsNotFound(err) || apierrors.IsForbidden(err) || meta.IsNoMatchError(err) {
+	if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
 		return "", nil
 	}
 	if err != nil {
 		return "", fmt.Errorf("failed to read ClusterProperty %s: %w", ClusterIDProperty, err)
 	}
-	value, _, _ := unstructured.NestedString(property.Object, "spec", "value")
-	return value, nil
+	return ClusterPropertyValue(property), nil
 }

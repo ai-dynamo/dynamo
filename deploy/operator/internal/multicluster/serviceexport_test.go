@@ -8,7 +8,6 @@ package multicluster
 import (
 	"context"
 	"errors"
-	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -17,6 +16,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -119,126 +119,6 @@ func TestRenderServiceExport(t *testing.T) {
 	}
 }
 
-// exportWithConditions returns a ServiceExport whose status holds conditions,
-// each given as type, status, reason and message.
-func exportWithConditions(conditions ...[4]string) *unstructured.Unstructured {
-	export := RenderServiceExport("v1alpha1", "dynamo", "qwen-pool-relay", "qwen")
-	items := make([]any, 0, len(conditions))
-	for _, condition := range conditions {
-		items = append(items, map[string]any{
-			"type": condition[0], "status": condition[1], "reason": condition[2], "message": condition[3],
-		})
-	}
-	if len(items) > 0 {
-		export.Object["status"] = map[string]any{"conditions": items}
-	}
-	return export
-}
-
-func TestReadExportState(t *testing.T) {
-	const (
-		standard = configv1alpha1.MCSImplementationStandard
-		karmada  = configv1alpha1.MCSImplementationKarmada
-	)
-	for _, tc := range []struct {
-		name           string
-		implementation configv1alpha1.MCSImplementation
-		export         *unstructured.Unstructured
-		want           ExportState
-		wantDetail     string
-	}{
-		{name: "Karmada writes no status", implementation: karmada, export: exportWithConditions(), want: ExportAccepted},
-		{
-			name:           "a standard implementation has not reported yet",
-			implementation: standard,
-			export:         exportWithConditions(),
-			want:           ExportPending,
-			wantDetail:     "no conditions yet",
-		},
-		{
-			name:           "valid, as an implementation without Ready reports it",
-			implementation: standard,
-			export:         exportWithConditions([4]string{"Valid", "True", "Valid", ""}),
-			want:           ExportAccepted,
-		},
-		{
-			name:           "valid and imported",
-			implementation: standard,
-			export: exportWithConditions(
-				[4]string{"Valid", "True", "Valid", ""},
-				[4]string{"Ready", "True", "Exported", ""},
-				[4]string{"Conflict", "False", "NoConflicts", ""}),
-			want: ExportAccepted,
-		},
-		{
-			name:           "a missing Service is invalid",
-			implementation: standard,
-			export:         exportWithConditions([4]string{"Valid", "False", "NoService", "Service qwen-pool-relay not found"}),
-			want:           ExportRejected,
-			wantDetail:     "Valid is False (NoService): Service qwen-pool-relay not found",
-		},
-		{
-			name:           "an export the registry refused",
-			implementation: standard,
-			export:         exportWithConditions([4]string{"Ready", "False", "Failed", ""}),
-			want:           ExportRejected,
-			wantDetail:     "Ready is False (Failed)",
-		},
-		{
-			name:           "an import that has not finished, reported as Unknown",
-			implementation: standard,
-			export:         exportWithConditions([4]string{"Valid", "True", "", ""}, [4]string{"Ready", "Unknown", "Pending", ""}),
-			want:           ExportPending,
-			wantDetail:     "Ready is Unknown (Pending)",
-		},
-		{
-			name:           "an import that has not finished, reported as False",
-			implementation: standard,
-			export:         exportWithConditions([4]string{"Valid", "True", "", ""}, [4]string{"Ready", "False", "Pending", ""}),
-			want:           ExportPending,
-			wantDetail:     "Ready is False (Pending)",
-		},
-		{
-			name:           "a conflict that the implementation resolved",
-			implementation: standard,
-			export: exportWithConditions(
-				[4]string{"Valid", "True", "", ""},
-				[4]string{"Ready", "True", "Exported", ""},
-				[4]string{"Conflict", "True", "PortConflict", "ports differ"}),
-			want:       ExportConflicting,
-			wantDetail: "Conflict is True (PortConflict): ports differ",
-		},
-		{
-			name:           "a conflict while the import is not finished",
-			implementation: standard,
-			export: exportWithConditions(
-				[4]string{"Ready", "Unknown", "Pending", ""},
-				[4]string{"Conflict", "True", "PortConflict", ""}),
-			want:       ExportPending,
-			wantDetail: "Ready is Unknown (Pending)",
-		},
-		{
-			name:           "a status that cannot be read counts as no report",
-			implementation: standard,
-			export: func() *unstructured.Unstructured {
-				export := exportWithConditions()
-				export.Object["status"] = map[string]any{"conditions": "not a list"}
-				return export
-			}(),
-			want:       ExportPending,
-			wantDetail: "no conditions yet",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Log("Read what the MCS implementation reports on the export")
-			got, detail := ReadExportState(tc.implementation, tc.export)
-			if got != tc.want || detail != tc.wantDetail {
-				t.Errorf("ReadExportState = %v, %q, want %v, %q", got, detail, tc.want, tc.wantDetail)
-			}
-		})
-	}
-}
-
 func TestCheckServiceName(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
@@ -264,11 +144,11 @@ func TestCheckServiceName(t *testing.T) {
 }
 
 func TestListExports(t *testing.T) {
-	t.Log("Store an export controlled by a DGD that is being deleted, and one a user created that Karmada reports nothing on")
-	owned := exportWithConditions([4]string{"Valid", "False", "NoService", ""})
+	t.Log("Store an export controlled by a DynamoPoolRelay that is being deleted, and one a user created")
+	owned := RenderServiceExport("v1alpha1", "dynamo", "qwen-pool-relay", "qwen")
 	owned.SetUID("export-1")
 	owned.SetOwnerReferences([]metav1.OwnerReference{
-		{APIVersion: "nvidia.com/v1beta1", Kind: "DynamoGraphDeployment", Name: "qwen", UID: "dgd-1", Controller: new(true)},
+		{APIVersion: "nvidia.com/v1alpha1", Kind: "DynamoPoolRelay", Name: "qwen", UID: "relay-1", Controller: new(true)},
 	})
 	owned.SetFinalizers([]string{"example.com/hold"})
 	owned.SetDeletionTimestamp(&metav1.Time{Time: time.Now()})
@@ -283,19 +163,24 @@ func TestListExports(t *testing.T) {
 		WithObjects(owned, foreign, elsewhere).
 		Build()
 
-	t.Log("List the exports in namespace dynamo, as Karmada sees them")
-	got, err := ListExports(context.Background(), reader, "v1alpha1", "dynamo", configv1alpha1.MCSImplementationKarmada)
+	t.Log("List the exports in namespace dynamo")
+	got, err := ListExports(context.Background(), reader, "v1alpha1", "dynamo")
 	if err != nil {
 		t.Fatalf("ListExports: %v", err)
 	}
+	// The fake client gives the objects it starts with resourceVersion 999.
+	labels := map[string]string{commonconsts.KubeLabelDynamoGraphDeploymentName: "qwen"}
 	want := map[string]Export{
 		"qwen-pool-relay": {
-			Name: "qwen-pool-relay", UID: "export-1", ControllerUID: "dgd-1", Deleting: true,
-			State: ExportRejected, Detail: "Valid is False (NoService)",
+			Name: "qwen-pool-relay", UID: "export-1", ResourceVersion: "999", Labels: labels,
+			Controller: &metav1.OwnerReference{
+				APIVersion: "nvidia.com/v1alpha1", Kind: "DynamoPoolRelay", Name: "qwen", UID: "relay-1", Controller: new(true),
+			},
+			Deleting: true,
 		},
-		"qwen-frontend": {Name: "qwen-frontend", UID: "export-2", State: ExportAccepted},
+		"qwen-frontend": {Name: "qwen-frontend", UID: "export-2", ResourceVersion: "999", Labels: labels},
 	}
-	if !maps.Equal(got, want) {
+	if !equality.Semantic.DeepEqual(got, want) {
 		t.Errorf("ListExports = %+v, want %+v", got, want)
 	}
 }
@@ -320,7 +205,7 @@ func TestReadClusterID(t *testing.T) {
 		{name: "no cluster ID property", aboutAPI: true, objects: []client.Object{otherProperty}},
 		{name: "no About API"},
 		{
-			name: "no permission, as in a namespace-restricted install", aboutAPI: true,
+			name: "no permission is an error, not a missing ID", aboutAPI: true, wantError: true,
 			getError: apierrors.NewForbidden(schema.GroupResource{Group: "about.k8s.io", Resource: "clusterproperties"}, ClusterIDProperty, failure),
 		},
 		{name: "another failure", aboutAPI: true, getError: failure, wantError: true},
