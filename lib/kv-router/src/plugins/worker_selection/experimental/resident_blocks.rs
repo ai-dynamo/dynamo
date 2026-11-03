@@ -17,7 +17,9 @@
 //!
 //! A read is `None` when the component did not declare [`RESIDENT_BLOCKS`], when the host has no
 //! local indexer, when the indexer has held no blocks for the rank while counting or has removed
-//! it, and after an indexer thread stops. A rank cleared of blocks reads `Some(0)`.
+//! it, and after an indexer thread stops. A rank cleared of blocks reads `Some(0)`. Only filters,
+//! scorers, and pickers receive counts: a request classifier that declares [`RESIDENT_BLOCKS`]
+//! reads `None`.
 //!
 //! [`RESIDENT_BLOCKS`] requires [`WorkerInputs::CACHE`], because the counts come from the indexer
 //! that `CACHE` starts. The host checks this for every policy it builds for a routing partition.

@@ -1852,4 +1852,58 @@ mod tests {
         assert_eq!(stats.leases, 0);
         assert_eq!(stats.inactive_blocks, 2);
     }
+
+    #[tokio::test]
+    async fn lru_output_blocks_update_resident_block_counts() {
+        let indexer = ThreadPoolIndexer::new_with_metrics_and_approximate_retention(
+            ConcurrentRadixTreeCompressed::new(),
+            2,
+            4,
+            None,
+            Some(ApproximateRetentionConfig::Lru {
+                fallback_ttl: PruneConfig {
+                    ttl: Duration::from_secs(120),
+                },
+            }),
+        );
+        let worker = worker();
+        // Track before any block lands, so the count comes from the LRU-emitted
+        // events rather than the backfill.
+        let counts = indexer.track_resident_blocks();
+        assert_eq!(counts.load().get(worker), None);
+
+        let local_hashes = vec![LocalBlockHash(11), LocalBlockHash(22)];
+        let sequence_hashes = compute_seq_hash_for_block(&local_hashes);
+        indexer
+            .set_approximate_lru_capacity(worker, 1, Some(4))
+            .await
+            .unwrap();
+        let lease = indexer
+            .begin_approximate_lru_request(worker, 1, attempt(1))
+            .unwrap();
+        lease
+            .acquire(
+                vec![ApproximateLruBlock {
+                    local_hash: local_hashes[0],
+                    sequence_hash: sequence_hashes[0],
+                }],
+                0,
+            )
+            .await
+            .unwrap();
+        lease
+            .materialize(
+                Some(sequence_hashes[0]),
+                vec![ApproximateLruBlock {
+                    local_hash: local_hashes[1],
+                    sequence_hash: sequence_hashes[1],
+                }],
+                1,
+                0,
+            )
+            .unwrap();
+        lease.finish().await.unwrap();
+
+        assert_eq!(counts.load().get(worker), Some(2));
+    }
 }
