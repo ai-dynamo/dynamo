@@ -22,6 +22,7 @@ use super::extensions::{AgentContext, RouterParams};
 use super::llm_backend::DecoderCheckpoint;
 use super::timing::{RequestPhase, RequestTracker};
 use super::{OutputOptions, SamplingOptions, StopConditions};
+use crate::kv_router::RequestAttemptRelease;
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
@@ -136,6 +137,7 @@ struct MigrationStateInner {
     excluded_worker_ids: Vec<WorkerId>,
     last_error: Option<DynamoError>,
     request_lifecycle: Option<Box<RequestLifecycle>>,
+    prefill_release: Option<RequestAttemptRelease>,
 }
 
 impl MigrationState {
@@ -224,6 +226,26 @@ impl MigrationState {
             return;
         };
         lifecycle.abort(error.map(owned_abort_error));
+    }
+
+    /// Park the latest attempt's remote prefill booking. Its prefill can
+    /// outlive a failed decode to serve an in-flight KV transfer, so only a
+    /// committed retry, which re-books the same request ID, releases it early.
+    pub(crate) fn store_prefill_release(&self, release: RequestAttemptRelease) {
+        self.inner
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prefill_release = Some(release);
+    }
+
+    pub(crate) fn take_prefill_release(&self) -> Option<RequestAttemptRelease> {
+        self.inner
+            .get()?
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prefill_release
+            .take()
     }
 }
 
@@ -1043,6 +1065,34 @@ mod tests {
                     .unwrap();
                 assert_eq!(request.dp_rank(), expected, "{body}");
             }
+        }
+    }
+
+    #[test]
+    fn worker_extension_numbers_remain_native_for_independent_receivers() {
+        use dynamo_runtime::pipeline::network::RequestPlanePayloadCodec;
+        #[derive(Deserialize)]
+        struct BackendSettings {
+            temperature: f64,
+            ranks: Vec<u64>,
+        }
+        #[derive(Deserialize)]
+        struct BackendRequest {
+            extra_args: BackendSettings,
+        }
+        let request: PreprocessedRequest = serde_json::from_value(serde_json::json!({
+            "model": "m", "token_ids": [1, 2, 3], "stop_conditions": {},
+            "sampling_options": {}, "output_options": {},
+            "extra_args": {"temperature": 0.7, "ranks": [0, 5]}
+        }))
+        .unwrap();
+        for codec in [
+            RequestPlanePayloadCodec::Json,
+            RequestPlanePayloadCodec::Msgpack,
+        ] {
+            let received: BackendRequest = codec.decode(&codec.encode(&request).unwrap()).unwrap();
+            assert_eq!(received.extra_args.temperature, 0.7);
+            assert_eq!(received.extra_args.ranks, vec![0, 5]);
         }
     }
 

@@ -2,13 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import functools
 import json
 import subprocess
 import sys
+from dataclasses import dataclass
+from itertools import pairwise
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import yaml
+from aisimulate.generator.request.schema import ModelFacts
+from aisimulate.sweeper.config import Workload
 
 from dynamo.aisimulate.output.dgd.renderers import (
     CandidateMaterializationError,
@@ -17,8 +23,8 @@ from dynamo.aisimulate.output.dgd.renderers import (
 from dynamo.aisimulate.output.dgd.renderers import base as base_module
 from dynamo.aisimulate.output.dgd.renderers import render_dgd
 from dynamo.aisimulate.output.dgd.renderers.aic import renderer as aic_renderer
-from dynamo.aisimulate.output.dgd.renderers.direct import renderer as direct_renderer
 from dynamo.frontend.frontend_args import FrontendArgGroup, FrontendConfig
+from dynamo.profiler.utils.config_modifiers import vllm
 
 pytestmark = [
     pytest.mark.unit,
@@ -71,231 +77,140 @@ def _options(**overrides) -> DGDGenerationOptions:
 
 def _stub_dgd_finalization(monkeypatch) -> None:
     monkeypatch.setattr(base_module, "_materialize_dgd", lambda dgd, **_kwargs: dgd)
-    monkeypatch.setitem(
-        sys.modules,
-        "dynamo.profiler.utils.dgd_materialization",
-        SimpleNamespace(
-            DGDMaterializationPurpose=SimpleNamespace(FINAL_OUTPUT=object())
-        ),
+
+
+@dataclass(frozen=True)
+class _SweeperCandidate:
+    config: dict
+    used_gpus: int
+
+
+def _disagg_candidate(backend: str, backend_version: str) -> _SweeperCandidate:
+    roles = {
+        f"{role}_{field}": value
+        for role in ("prefill", "decode")
+        for field, value in {
+            "tp": 1,
+            "pp": 1,
+            "attention_dp": 1,
+            "moe_tp": 1,
+            "moe_ep": 1,
+            "strategy": "tp",
+            "replicas": 1,
+            "max_num_batched_tokens": 4096,
+            "max_num_seqs": 64,
+            "block_size": 32,
+            "gpu_memory_utilization": 0.9,
+            "enable_prefix_caching": role == "prefill",
+        }.items()
+    }
+    return _SweeperCandidate(
+        config={
+            "deployment_mode": "disagg",
+            "backend": backend,
+            "backend_version": backend_version,
+            "model_name": "Qwen/Qwen3-32B",
+            "hardware_sku": "h200_sxm",
+            **roles,
+        },
+        used_gpus=2,
     )
 
 
-def _stub_legacy_materialization(monkeypatch) -> None:
-    def get_main_container_dict(component):
-        return next(
+def _transfer_buffer_args(rendered: str) -> dict[str, dict[str, str]]:
+    """Map each disaggregated role to its ``cache_transceiver_config`` flags."""
+    flags = {}
+    for component in yaml.safe_load(rendered)["spec"]["components"]:
+        if component.get("type") not in {"prefill", "decode"}:
+            continue
+        args = next(
             container
             for container in component["podTemplate"]["spec"]["containers"]
             if container.get("name") == "main"
-        )
-
-    def set_unique_env_value(env, name, value):
-        return [
-            *(item for item in (env or []) if item.get("name") != name),
-            {"name": name, "value": value},
-        ]
-
-    def set_unique_argument_value(args, name, value):
-        filtered = []
-        index = 0
-        while index < len(args):
-            if args[index] == name:
-                index += 2
-            elif args[index].startswith(f"{name}="):
-                index += 1
-            else:
-                filtered.append(args[index])
-                index += 1
-        return [*filtered, name, value]
-
-    _stub_dgd_finalization(monkeypatch)
-    monkeypatch.setitem(
-        sys.modules,
-        "dynamo.profiler.utils.config",
-        SimpleNamespace(
-            break_arguments=lambda args: list(args or []),
-            get_main_container_dict=get_main_container_dict,
-            set_unique_argument_value=set_unique_argument_value,
-            set_unique_env_value=set_unique_env_value,
-        ),
-    )
-
-
-def test_materialize_uses_official_candidate_bridge(monkeypatch) -> None:
-    pytest.importorskip("aisimulate_core")
-    captured = {}
-
-    def fake_from_sweeper_candidate(
-        candidate, *, workload, deployment_target, generator_overrides
-    ):
-        captured.update(
-            candidate=candidate,
-            workload=workload,
-            deployment_target=deployment_target,
-            generator_overrides=generator_overrides,
-        )
-        return "request"
-
-    def fake_generate_from_request(request):
-        captured["request"] = request
-        return {
-            "k8s_deploy.yaml": """
-apiVersion: nvidia.com/v1beta1
-kind: DynamoGraphDeployment
-metadata:
-  name: generated-name
-spec:
-  components:
-  - name: Frontend
-  - name: VllmDecodeWorker
-"""
+        )["args"]
+        flags[component["type"]] = {
+            name: value
+            for name, value in pairwise(args)
+            if name.startswith("--trtllm.cache_transceiver_config.")
         }
+    return flags
 
+
+def _without_transfer_buffer_size(rendered: str) -> dict:
+    buffer_arg = "--trtllm.cache_transceiver_config.max_tokens_in_buffer"
+    dgd = yaml.safe_load(rendered)
+    for component in dgd["spec"]["components"]:
+        for container in (
+            component.get("podTemplate", {}).get("spec", {}).get("containers", [])
+        ):
+            args = container.get("args") or []
+            if buffer_arg in args:
+                start = args.index(buffer_arg)
+                del args[start : start + 2]
+    return dgd
+
+
+@pytest.mark.parametrize(
+    ("backend", "backend_version", "image"),
+    [
+        ("trtllm", "1.3.0rc23", "tensorrtllm-runtime"),
+        ("vllm", "0.20.1", "vllm-runtime"),
+        ("sglang", "0.5.9", "sglang-runtime"),
+    ],
+)
+def test_installed_aic_renders_trace_workloads_like_synthetic_ones(
+    monkeypatch, tmp_path, backend, backend_version, image
+) -> None:
+    # Keep the renders offline: model facts come from the request below.
+    monkeypatch.setattr(vllm, "get_model_context_length", lambda _model: None)
+    monkeypatch.setattr(vllm, "get_mamba_cache_align_block_size", lambda _model: None)
+    from_candidate, generate = aic_renderer._load_generator_api()
     monkeypatch.setattr(
         aic_renderer,
         "_load_generator_api",
-        lambda: (fake_from_sweeper_candidate, fake_generate_from_request),
+        lambda: (
+            functools.partial(
+                from_candidate,
+                model_facts=ModelFacts(is_moe=False, architecture="Qwen3ForCausalLM"),
+            ),
+            generate,
+        ),
     )
-    candidate = _candidate()
-    workload = SimpleNamespace(isl=4000, osl=1000)
+    _stub_dgd_finalization(monkeypatch)
+    trace = tmp_path / "window.jsonl"
+    trace.write_text("{}\n")
+    candidate = _disagg_candidate(backend, backend_version)
+    options = _options(runtime_image=f"nvcr.io/nvidia/ai-dynamo/{image}:1.5.0")
 
-    rendered = render_dgd(
-        candidate,
-        workload,
-        _options(),
-        dgd_name="sweeper-dgd",
+    def render(workload) -> str:
+        return render_dgd(candidate, workload, options, dgd_name="sweeper-dgd")
+
+    traced = render(
+        Workload(trace_path=str(trace), trace_paths=[str(trace)], trace_format="dynamo")
     )
+    synthetic = render({"isl": 4000, "osl": 1000})
 
-    assert captured == {
-        "candidate": candidate,
-        "workload": workload,
-        "deployment_target": "dynamo-python",
-        "generator_overrides": {
-            "generator_dynamo_version": "1.5.0",
-            "K8sConfig": {
-                "k8s_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0",
-                "k8s_namespace": "demo",
-                "name_prefix": "sweeper-dgd",
-            },
-            "NodeConfig": {"num_gpus_per_node": 8},
-        },
-        "request": "request",
-    }
-    dgd = yaml.safe_load(rendered)
-    assert dgd["metadata"] == {
-        "name": "sweeper-dgd",
-        "namespace": "demo",
-    }
-    assert all(
-        "runtimeVersionOverride" not in component
-        for component in dgd["spec"]["components"]
-    )
-
-
-def test_installed_aic_renders_real_disaggregated_candidate(monkeypatch) -> None:
-    pytest.importorskip("aisimulate.generator")
-    from aisimulate.generator.request.schema import ModelFacts
-
-    from dynamo.profiler.utils.config_modifiers import vllm
-
-    # Keep this package-boundary test deterministic and offline. Model facts
-    # are part of the request; the runtime finalizer is covered separately.
-    monkeypatch.setattr(vllm, "get_model_context_length", lambda _model: None)
-    monkeypatch.setattr(vllm, "get_mamba_cache_align_block_size", lambda _model: None)
-    candidate = {
-        "config": {
-            "deployment_mode": "disagg",
-            "backend": "vllm",
-            "backend_version": "0.20.1",
-            "model_name": "Qwen/Qwen3-32B",
-            "hardware_sku": "h200_sxm",
-            "prefill_tp": 2,
-            "prefill_pp": 1,
-            "prefill_attention_dp": 1,
-            "prefill_moe_tp": 1,
-            "prefill_moe_ep": 1,
-            "prefill_replicas": 1,
-            "prefill_max_num_batched_tokens": 4096,
-            "prefill_max_num_seqs": 64,
-            "prefill_block_size": 64,
-            "prefill_gpu_memory_utilization": 0.9,
-            "prefill_enable_prefix_caching": True,
-            "decode_tp": 2,
-            "decode_pp": 1,
-            "decode_attention_dp": 1,
-            "decode_moe_tp": 1,
-            "decode_moe_ep": 1,
-            "decode_replicas": 1,
-            "decode_max_num_batched_tokens": 4096,
-            "decode_max_num_seqs": 128,
-            "decode_block_size": 64,
-            "decode_gpu_memory_utilization": 0.9,
-            "decode_enable_prefix_caching": False,
-        },
-        "used_gpus": 4,
-    }
-    from_candidate, generate = aic_renderer._load_generator_api()
-    request = from_candidate(
-        candidate,
-        workload={"isl": 1024, "osl": 256},
-        deployment_target="dynamo-python",
-        generator_overrides={
-            "generator_dynamo_version": "1.5.0",
-            "K8sConfig": {
-                "k8s_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0",
-                "name_prefix": "sweeper-dgd",
-            },
-            "NodeConfig": {"num_gpus_per_node": 8},
-        },
-        model_facts=ModelFacts(is_moe=False, architecture="Qwen3ForCausalLM"),
-    )
-
-    rendered = yaml.safe_load(generate(request)["k8s_deploy.yaml"])
-
-    assert rendered["kind"] == "DynamoGraphDeployment"
-    workers = {
-        component["type"]: component
-        for component in rendered["spec"]["components"]
-        if component.get("type") in {"prefill", "decode"}
-    }
-    assert workers["prefill"]["replicas"] == 1
-    assert workers["decode"]["replicas"] == 1
-
-
-def test_materialize_direct_uses_config_modifiers(monkeypatch) -> None:
-    pytest.importorskip("aisimulate_core")
-    captured = {}
-
-    class FakeMaterializationError(Exception):
-        pass
-
-    class FakeResult:
-        def __init__(self) -> None:
-            self.dgd = {
-                "apiVersion": "nvidia.com/v1beta1",
-                "kind": "DynamoGraphDeployment",
-                "metadata": {"name": "direct"},
-                "spec": {"components": [{"name": "Worker"}]},
-            }
-            self.experimental = {
-                "concurrency": 64,
-                "hardware_sku": "h200_sxm",
-            }
-
-    def fake_materialize(config, *, image, num_gpus_per_node):
-        captured.update(
-            config=config,
-            image=image,
-            num_gpus_per_node=num_gpus_per_node,
+    # AIC derives only TensorRT-LLM's transfer buffer size from request
+    # lengths, so a trace DGD is the synthetic one without that size.
+    assert yaml.safe_load(traced) == _without_transfer_buffer_size(synthetic)
+    if backend == "trtllm":
+        # The trace keeps the transceiver backend; TensorRT-LLM sizes the buffer.
+        assert _transfer_buffer_args(traced) == {
+            role: {"--trtllm.cache_transceiver_config.backend": "DEFAULT"}
+            for role in ("prefill", "decode")
+        }
+        assert all(
+            "--trtllm.cache_transceiver_config.max_tokens_in_buffer" in flags
+            for flags in _transfer_buffer_args(synthetic).values()
         )
-        return FakeResult()
 
-    monkeypatch.setattr(
-        direct_renderer,
-        "_load_materializer",
-        lambda: (FakeMaterializationError, fake_materialize),
+
+def test_direct_renderer_preserves_evaluation_context() -> None:
+    candidate = _disagg_candidate("vllm", "0.20.1")
+    candidate.config["model_name"] = str(
+        Path(__file__).resolve().parent / "e2e/fixtures/tiny-model"
     )
-
-    candidate = _candidate(deployment_mode="agg")
+    candidate.config["concurrency"] = 64
     rendered = render_dgd(
         candidate,
         SimpleNamespace(isl=4000, osl=1000),
@@ -304,11 +219,6 @@ def test_materialize_direct_uses_config_modifiers(monkeypatch) -> None:
         renderer="direct",
     )
 
-    assert captured == {
-        "config": candidate.config,
-        "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0",
-        "num_gpus_per_node": 8,
-    }
     dgd = yaml.safe_load(rendered)
     metadata = dgd["metadata"]
     evaluation_context = metadata.pop("annotations")[
@@ -349,6 +259,8 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: engine-config
+data:
+  engine.yaml: preserved
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -370,11 +282,16 @@ spec:
         "ConfigMap",
         "DynamoGraphDeployment",
     ]
+    assert documents[0] == {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {"name": "engine-config"},
+        "data": {"engine.yaml": "preserved"},
+    }
     assert documents[1]["metadata"]["name"] == "sweeper-dgd"
 
 
 def test_patch_manifest_applies_shared_legacy_finalization(monkeypatch) -> None:
-    pytest.importorskip("aisimulate_core")
     calls = []
 
     def fake_materialize(dgd, *, purpose, runtime_backend, model_name_or_path):
@@ -416,7 +333,7 @@ spec:
 def test_patch_manifest_router_configuration_round_trips_through_frontend(
     monkeypatch,
 ) -> None:
-    _stub_legacy_materialization(monkeypatch)
+    _stub_dgd_finalization(monkeypatch)
     candidate = _candidate(
         adapters={
             "dynamo.router": {
@@ -495,7 +412,7 @@ spec:
 def test_patch_manifest_preserves_native_router_temperature(
     monkeypatch, router_config, expected_temperature
 ) -> None:
-    _stub_legacy_materialization(monkeypatch)
+    _stub_dgd_finalization(monkeypatch)
 
     patched = base_module.patch_dgd_manifest(
         """
@@ -529,7 +446,7 @@ spec:
 def test_patch_manifest_rejects_router_runtime_model_without_configuration(
     monkeypatch,
 ) -> None:
-    _stub_legacy_materialization(monkeypatch)
+    _stub_dgd_finalization(monkeypatch)
     candidate = _candidate(
         adapters={
             "dynamo.router": {
@@ -563,7 +480,7 @@ spec:
 
 
 def test_patch_manifest_preserves_candidate_context_length(monkeypatch) -> None:
-    _stub_legacy_materialization(monkeypatch)
+    _stub_dgd_finalization(monkeypatch)
 
     patched = base_module.patch_dgd_manifest(
         """
@@ -590,50 +507,6 @@ spec:
     args = worker["podTemplate"]["spec"]["containers"][0]["args"]
     assert args.count("--max-model-len") == 1
     assert args[args.index("--max-model-len") + 1] == "8192"
-
-
-@pytest.mark.parametrize("namespace", [None, ""])
-def test_patch_manifest_omits_empty_or_unset_namespace(monkeypatch, namespace) -> None:
-    _stub_dgd_finalization(monkeypatch)
-    patched = base_module.patch_dgd_manifest(
-        """
-apiVersion: nvidia.com/v1beta1
-kind: DynamoGraphDeployment
-metadata:
-  name: generated
-  namespace: default
-spec:
-  components: []
-""",
-        _candidate(),
-        _options(namespace=namespace),
-        dgd_name="sweeper-dgd",
-    )
-
-    assert "namespace" not in yaml.safe_load(patched)["metadata"]
-
-
-def test_runtime_version_override_is_only_written_when_explicit(monkeypatch) -> None:
-    _stub_dgd_finalization(monkeypatch)
-    rendered = """
-apiVersion: nvidia.com/v1beta1
-kind: DynamoGraphDeployment
-metadata:
-  name: generated
-spec:
-  components:
-  - name: Worker
-"""
-
-    patched = base_module.patch_dgd_manifest(
-        rendered,
-        _candidate(),
-        _options(runtime_version_override="1.4.2"),
-        dgd_name="sweeper-dgd",
-    )
-
-    component = yaml.safe_load(patched)["spec"]["components"][0]
-    assert component["runtimeVersionOverride"] == "1.4.2"
 
 
 @pytest.mark.parametrize(

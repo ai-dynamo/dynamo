@@ -219,6 +219,7 @@ pub struct ModelWatcher {
     /// Worker capabilities accepted by the frontend's engine-native Generate routes.
     /// Keep raw pipelines out of default-off and backend-mismatched paths.
     generate_engine_capabilities: Vec<&'static str>,
+    systemone_enabled: bool,
     plugins: RouterPluginBuilder,
 }
 
@@ -330,6 +331,7 @@ impl ModelWatcher {
             tokenizer_backend: None,
             tokenizer_fallback_enabled: None,
             generate_engine_capabilities: Vec::new(),
+            systemone_enabled: false,
             plugins,
         }
     }
@@ -356,6 +358,10 @@ impl ModelWatcher {
 
     pub(crate) fn set_generate_engine_capabilities(&mut self, capabilities: Vec<&'static str>) {
         self.generate_engine_capabilities = capabilities;
+    }
+
+    pub(crate) fn set_systemone_enabled(&mut self, enabled: bool) {
+        self.systemone_enabled = enabled;
     }
     /// Compatibility wrapper for callers that enable the vLLM Generate route.
     pub fn set_generate_engine_enabled(&mut self, enabled: bool) {
@@ -560,10 +566,24 @@ impl ModelWatcher {
             let needs_local_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_none();
             let needs_local_completions_pipeline = card.model_type.supports_completions();
-            let tokenizer = if (needs_local_chat_pipeline || needs_local_completions_pipeline)
-                && card.has_tokenizer()
-            {
+            let needs_systemone_preprocessor =
+                self.systemone_enabled && card.is_systemone_serial_eligible();
+            let needs_local_tokenizer =
+                needs_local_chat_pipeline || needs_local_completions_pipeline;
+            let tokenizer = if needs_local_tokenizer && card.has_tokenizer() {
                 Some(card.tokenizer().context("tokenizer")?)
+            } else if needs_systemone_preprocessor && card.has_tokenizer() {
+                match card.tokenizer().context("System One tokenizer") {
+                    Ok(tokenizer) => Some(tokenizer),
+                    Err(cause) => {
+                        tracing::warn!(
+                            model_name = card.name(),
+                            error = %format!("{cause:#}"),
+                            "System One tokenizer is unavailable; keeping other model surfaces active"
+                        );
+                        None
+                    }
+                }
             } else {
                 None
             };
@@ -577,8 +597,7 @@ impl ModelWatcher {
             let needs_preprocessed_routing =
                 needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
 
-            let load_thresholds =
-                LoadThresholdHandle::new(router_config.load_threshold_config.clone());
+            let load_thresholds = load_threshold_handle(&router_config);
             let load_context = if needs_preprocessed_routing {
                 let source = RouterLoadSource::from_worker_type(effective_worker_type(
                     card.worker_type,
@@ -686,6 +705,31 @@ impl ModelWatcher {
             });
             worker_set.encoder_router = encoder_chooser.clone();
 
+            if needs_systemone_preprocessor {
+                worker_set.systemone_preprocessor = match tokenizer.clone() {
+                    Some(tokenizer) => {
+                        match worker_set_chat_preprocessor(card, tokenizer, &cancellation) {
+                            Ok(preprocessor) => Some(preprocessor),
+                            Err(error) => {
+                                tracing::warn!(
+                                    model = card.name(),
+                                    error = %format!("{error:#}"),
+                                    "System One preprocessor is unavailable"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    None => {
+                        tracing::warn!(
+                            model = card.name(),
+                            "System One preprocessor is unavailable: model has no supported Rust tokenizer"
+                        );
+                        None
+                    }
+                };
+            }
+
             let preprocessed_routing = if needs_preprocessed_routing {
                 Some(
                     entrypoint::input::build_preprocessed_routing_with_session_affinity_mode(
@@ -730,8 +774,10 @@ impl ModelWatcher {
                     )
                 } else if let Some(tk) = tokenizer.clone() {
                     // Only chat pipelines use speculative prefill.
-                    let preprocessor =
-                        worker_set_chat_preprocessor(card, tk.clone(), &cancellation)?;
+                    let preprocessor = match worker_set.systemone_preprocessor.clone() {
+                        Some(preprocessor) => preprocessor,
+                        None => worker_set_chat_preprocessor(card, tk.clone(), &cancellation)?,
+                    };
                     Some(
                         routing
                             .build_pipeline::<
@@ -830,8 +876,7 @@ impl ModelWatcher {
             // OpenAI surfaces. Build each declared surface independently:
             // ModelType is a bitflag, so choosing one mutually-exclusive branch
             // would silently omit engines for mixed-capability cards.
-            let load_thresholds =
-                LoadThresholdHandle::new(router_config.load_threshold_config.clone());
+            let load_thresholds = load_threshold_handle(&router_config);
             let load_context = RoutingLoadContext::start(
                 client,
                 RouterLoadSource::from_worker_type(effective_worker_type(
@@ -1418,6 +1463,24 @@ fn should_validate_parser_version(card: &ModelDeploymentCard) -> bool {
         && effective_worker_type(card.worker_type, card.model_type) != WorkerType::Prefill
 }
 
+/// A frontend in direct routing mode does not pick workers, so its handle
+/// ignores busy-worker thresholds: they belong to the caller that picks workers.
+/// The prefill router shares this handle, because in direct mode the caller
+/// (EPP) picks both workers, decode and prefill.
+fn load_threshold_handle(router_config: &RouterConfig) -> LoadThresholdHandle {
+    if !router_config.router_mode.is_direct_routing() {
+        return LoadThresholdHandle::new(router_config.load_threshold_config.clone());
+    }
+    if router_config.load_threshold_config.is_configured() {
+        tracing::warn!(
+            thresholds = ?router_config.load_threshold_config,
+            "ignoring busy-worker thresholds in direct routing mode: the caller picks workers, \
+             not this frontend"
+        );
+    }
+    LoadThresholdHandle::disabled()
+}
+
 fn effective_router_config<'a>(
     worker_config: Option<&'a RouterConfig>,
     frontend_config: &'a RouterConfig,
@@ -1513,6 +1576,23 @@ mod tests {
     use dynamo_runtime::pipeline::Error;
     use dynamo_runtime::{Runtime, distributed::DistributedConfig};
     use futures::StreamExt;
+
+    #[test]
+    fn direct_routing_gets_a_threshold_handle_that_ignores_thresholds() {
+        let thresholds = crate::discovery::LoadThresholdConfig {
+            active_decode_blocks_threshold: Some(0.9),
+            ..Default::default()
+        };
+        let config = |router_mode| {
+            RouterConfig::new(router_mode, dynamo_kv_router::KvRouterConfig::default())
+                .with_load_threshold_config(thresholds.clone())
+        };
+        let direct = load_threshold_handle(&config(RouterMode::Direct));
+        direct.update(&thresholds);
+        assert!(!direct.is_enabled());
+        assert!(!direct.is_configured());
+        assert!(load_threshold_handle(&config(RouterMode::KV)).is_configured());
+    }
 
     #[test]
     fn qwen_video_contract_digest_is_canonical_and_engine_specific() {
@@ -2225,6 +2305,7 @@ mod tests {
             crate::test_utils::assert_isolated_success(&output);
             return;
         }
+        use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
         use dynamo_kv_router::scheduling::{
             ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
         };
@@ -2237,7 +2318,11 @@ mod tests {
         }
         #[async_trait]
         impl RequestClassifier for RejectingClassifier {
-            fn classify(&mut self, _request: ClassifyRequest) -> ClassifyFuture {
+            fn classify(
+                &mut self,
+                _request: ClassifyRequest,
+                _workers: WorkerCandidates<'_>,
+            ) -> ClassifyFuture {
                 self.calls += 1;
                 self.events
                     .send((self.instance, "classify", self.calls))
@@ -2918,6 +3003,7 @@ request_classifier:
                 serde_json::from_str(r#"[{"role":"user","content":"populate tokenizer cache"}]"#)
                     .unwrap();
             let request = NvCreateChatCompletionRequest {
+                responses_tools: None,
                 inner: dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
                     .model(adapter_card.name())
                     .messages(messages)
@@ -2928,6 +3014,7 @@ request_classifier:
                 chat_template_args: None,
                 thinking: None,
                 thinking_token_budget: None,
+                preserve_thinking: None,
                 media_io_kwargs: None,
                 return_tokens_as_token_ids: None,
                 unsupported_fields: Default::default(),

@@ -15,8 +15,8 @@ use super::prefill_load::effective_prefill_tokens;
 use crate::kv_hints::{KvTransferCandidates, KvTransferSourceChoice};
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
-    LocalBlockHash, RoutingConstraints, SelectionTrace, SharedCacheHits, WorkerAffinityTarget,
-    WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    LocalBlockHash, RoutingConstraints, SelectionLogFields, SelectionTrace, SharedCacheHits,
+    WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::policy_queue::QueueRejection;
 use crate::sequences::WorkerLoadProjection;
@@ -45,7 +45,7 @@ impl std::fmt::Display for AttemptId {
 }
 
 pub type OverloadedWorkerProvider =
-    Arc<dyn Fn() -> Option<HashSet<WorkerId>> + Send + Sync + 'static>;
+    Arc<dyn Fn() -> Option<Arc<HashSet<WorkerId>>> + Send + Sync + 'static>;
 
 /// Supplies the authoritative set of workers currently available for selection.
 ///
@@ -166,6 +166,9 @@ pub struct SchedulingResponse {
     /// Per-candidate costs, present only when the scheduler has a selection
     /// trace spec installed and this selection was admitted.
     pub selection_trace: Option<SelectionTrace>,
+    /// Fields the routing task logs the selection with; see
+    /// [`crate::protocols::WorkerSelectionResult::log_fields`].
+    pub log_fields: Option<SelectionLogFields>,
 }
 
 /// Internal result that pairs a public scheduling response with its attempt identity.
@@ -580,13 +583,17 @@ impl SchedulingRequest {
         self.worker_loads
             .get(&worker)
             .copied()
-            .unwrap_or_else(|| WorkerLoadProjection {
-                // A configured worker can precede its load projection. With no
-                // active-prefix evidence, count the full tracked request rather
-                // than treating its blocks as already present on that worker.
-                additional_active_blocks: self.token_seq.as_ref().map_or(0, Vec::len),
-                ..Default::default()
-            })
+            .unwrap_or_else(|| self.unobserved_worker_load())
+    }
+
+    /// Load assumed for a configured worker that precedes its load projection. With no
+    /// active-prefix evidence, count the full tracked request rather than treating its
+    /// blocks as already present on that worker.
+    pub(crate) fn unobserved_worker_load(&self) -> WorkerLoadProjection {
+        WorkerLoadProjection {
+            additional_active_blocks: self.token_seq.as_ref().map_or(0, Vec::len),
+            ..Default::default()
+        }
     }
 
     pub(crate) fn request_blocks(&self, block_size: u32) -> u64 {

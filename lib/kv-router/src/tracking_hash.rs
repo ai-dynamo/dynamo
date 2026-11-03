@@ -81,7 +81,7 @@ pub(crate) fn validate_tracking_hash_options(
 /// same derived tracking identities.
 ///
 /// TODO(#11971): Evaluate deriving the static tracking-domain identity from
-/// `IndexerDomainId`. `PoolId` and `DcId` represent placement and must remain
+/// `IndexerDomainId`. `PoolId` and `ClusterId` represent placement and must remain
 /// excluded from tracking identity.
 #[derive(Clone, Copy, Debug)]
 pub struct TrackingHashScope<'a> {
