@@ -11,6 +11,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use dynamo_llm::admission_gate::{AdmissionEngine, WorkerAdmissionGate};
@@ -35,7 +36,7 @@ use tokio_util::sync::CancellationToken;
 use crate::adapter::{EngineAdapter, RawEngineAdapter};
 use crate::disagg::DisaggregationMode;
 use crate::engine::{
-    EngineConfig, KvEventSource, LLMEngine, MetricsBindings, MetricsCtx, RawEngine,
+    EngineConfig, EngineRecovery, KvEventSource, LLMEngine, MetricsBindings, MetricsCtx, RawEngine,
 };
 use crate::error::{BackendError, DynamoError, ErrorType};
 use crate::publisher::{PublisherHandles, setup_publishers};
@@ -54,6 +55,8 @@ const DEFAULT_DRAIN_TIMEOUT_S: f64 = 30.0;
 const DRAIN_TIMEOUT_ENV: &str = "DYN_PREFILL_DRAIN_TIMEOUT_S";
 /// Interval between `engine.is_quiescent()` polls during drain.
 const DRAIN_POLL_INTERVAL_S: f64 = 0.5;
+/// Pause before retrying serving recovery when the engine is not ready to register.
+const RECOVERY_RETRY_BACKOFF: Duration = Duration::from_millis(500);
 /// Cadence at which the drain loop emits a progress log.
 const DRAIN_HEARTBEAT_INTERVAL_S: f64 = 5.0;
 /// Budget reserved for `cleanup()` so the drain loop can't consume the whole
@@ -293,7 +296,58 @@ enum LifecycleState {
 enum EngineRouteLifecycle {
     Starting,
     Running,
+    Recovering,
     ShuttingDown,
+}
+
+struct EngineRouteRecovery {
+    /// Cancelled when recovery begins, ending routes from the previous engine lifetime.
+    generation: tokio::sync::watch::Sender<CancellationToken>,
+    /// Cancelled when recovery finishes, so it never waits behind a resume still running.
+    resumes: tokio::sync::watch::Sender<CancellationToken>,
+    /// False while an operator pause is in effect; recovery then leaves the worker unregistered.
+    is_routing_enabled: AtomicBool,
+}
+
+/// Shared state that serializes engine control routes with recovery and shutdown.
+#[derive(Clone)]
+struct EngineRouteState {
+    lifecycle: Arc<tokio::sync::RwLock<EngineRouteLifecycle>>,
+    mutation: Arc<tokio::sync::Mutex<()>>,
+    shutdown: CancellationToken,
+    recovery: Arc<EngineRouteRecovery>,
+}
+
+impl Default for EngineRouteRecovery {
+    fn default() -> Self {
+        Self {
+            generation: tokio::sync::watch::channel(CancellationToken::new()).0,
+            resumes: tokio::sync::watch::channel({
+                let token = CancellationToken::new();
+                token.cancel();
+                token
+            })
+            .0,
+            is_routing_enabled: AtomicBool::new(true),
+        }
+    }
+}
+
+fn recovery_guard(
+    callback: EngineRouteCallback,
+    recovery: Arc<EngineRouteRecovery>,
+) -> EngineRouteCallback {
+    Arc::new(move |body| {
+        let generation = recovery.generation.borrow().clone();
+        let callback = callback.clone();
+        Box::pin(async move {
+            tokio::select! {
+                biased;
+                _ = generation.cancelled() => Ok(engine_route_lifecycle_error(EngineRouteLifecycle::Recovering)),
+                result = callback(body) => result,
+            }
+        })
+    })
 }
 
 /// The engine a [`Worker`] drives, tagged by request modality. Both variants
@@ -342,6 +396,44 @@ impl EngineKind {
             EngineKind::Llm(e) => e.kv_event_sources().await,
             // Raw media engines have no block-structured KV cache to route on.
             EngineKind::Raw(_) => Ok(Vec::new()),
+        }
+    }
+
+    async fn recover_startup(&self) -> Result<Option<EngineRecovery>, DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.recover_startup().await,
+            EngineKind::Raw(_) => Ok(None),
+        }
+    }
+
+    async fn wait_for_startup(&self) -> Result<(), DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.wait_for_startup().await,
+            EngineKind::Raw(_) => Ok(()),
+        }
+    }
+
+    async fn wait_for_unavailable(&self) -> Result<(), DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.wait_for_unavailable().await,
+            EngineKind::Raw(_) => std::future::pending().await,
+        }
+    }
+
+    async fn recover_serving(&self) -> Result<EngineRecovery, DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.recover_serving().await,
+            EngineKind::Raw(_) => Err(err(
+                ErrorType::Backend(BackendError::EngineShutdown),
+                "engine does not support serving recovery",
+            )),
+        }
+    }
+
+    async fn on_recovery_complete(&self) -> Result<(), DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.on_recovery_complete().await,
+            EngineKind::Raw(_) => Ok(()),
         }
     }
 
@@ -447,6 +539,9 @@ pub struct Worker {
     /// adapters that detach work (such as a separately scheduled language
     /// runtime task) remain responsible for cancelling that work themselves.
     engine_route_shutdown: CancellationToken,
+    engine_route_recovery: Arc<EngineRouteRecovery>,
+    /// Caller-managed taints from the taint route, reapplied to a replacement's model card.
+    model_taints: Arc<parking_lot::Mutex<Option<HashSet<String>>>>,
     /// KV-aware-routing publisher handles. Drained in `cleanup_once` while NATS is alive.
     publishers: Option<PublisherHandles>,
     /// Framework-owned lifecycle gauges. Set in `setup_publishing` after
@@ -482,6 +577,8 @@ impl Worker {
             )),
             engine_route_mutation: Arc::new(tokio::sync::Mutex::new(())),
             engine_route_shutdown: CancellationToken::new(),
+            engine_route_recovery: Arc::new(EngineRouteRecovery::default()),
+            model_taints: Arc::default(),
             publishers: None,
             lifecycle: None,
             admission_gate: WorkerAdmissionGate::default(),
@@ -833,6 +930,15 @@ impl Worker {
         Ok(())
     }
 
+    fn engine_route_state(&self) -> EngineRouteState {
+        EngineRouteState {
+            lifecycle: self.engine_route_lifecycle.clone(),
+            mutation: self.engine_route_mutation.clone(),
+            shutdown: self.engine_route_shutdown.clone(),
+            recovery: self.engine_route_recovery.clone(),
+        }
+    }
+
     /// Register advertised engine controls on the runtime system server.
     async fn register_engine_controls(
         &self,
@@ -853,9 +959,7 @@ impl Worker {
                 callback,
                 self.engine.clone(),
                 endpoint.clone(),
-                self.engine_route_lifecycle.clone(),
-                self.engine_route_mutation.clone(),
-                self.engine_route_shutdown.clone(),
+                self.engine_route_state(),
             );
             // Namespace control routes under `/engine/control/<name>` so they
             // share the `/engine/{*path}` route without colliding with updates.
@@ -900,7 +1004,10 @@ impl Worker {
                 self.engine_route_shutdown.clone(),
             );
             // Namespace update routes under `/engine/update/<name>`.
-            registry.register(&format!("update/{update_name}"), callback);
+            registry.register(
+                &format!("update/{update_name}"),
+                recovery_guard(callback, self.engine_route_recovery.clone()),
+            );
         }
         tracing::info!(update_count, "registered engine management updates");
         Ok(())
@@ -910,6 +1017,174 @@ impl Worker {
         let mut lifecycle = self.engine_route_lifecycle.write().await;
         debug_assert_eq!(*lifecycle, EngineRouteLifecycle::Starting);
         *lifecycle = EngineRouteLifecycle::Running;
+    }
+
+    async fn begin_engine_recovery(
+        &self,
+        endpoint: &dynamo_runtime::component::Endpoint,
+    ) -> Result<(), DynamoError> {
+        self.engine_route_recovery.generation.borrow().cancel();
+        set_worker_health(endpoint, HealthStatus::NotReady);
+        let _mutation = self.engine_route_mutation.lock().await;
+        *self.engine_route_lifecycle.write().await = EngineRouteLifecycle::Recovering;
+        self.engine_route_recovery
+            .resumes
+            .send_replace(CancellationToken::new());
+        if !self
+            .engine_route_recovery
+            .is_routing_enabled
+            .load(Ordering::Acquire)
+        {
+            // An operator pause already withdrew the endpoint.
+            return Ok(());
+        }
+        endpoint.unregister_endpoint_instance().await.map_err(|e| {
+            err(
+                ErrorType::Backend(BackendError::CannotConnect),
+                format!("withdraw unavailable engine: {e}"),
+            )
+        })
+    }
+
+    async fn finish_engine_recovery(
+        &self,
+        endpoint: &dynamo_runtime::component::Endpoint,
+    ) -> Result<(), DynamoError> {
+        self.engine_route_recovery.resumes.borrow().cancel();
+        let _mutation = self.engine_route_mutation.lock().await;
+        let mut lifecycle = self.engine_route_lifecycle.write().await;
+        if self.engine_route_shutdown.is_cancelled() {
+            return Err(err(
+                ErrorType::Backend(BackendError::EngineShutdown),
+                "worker is shutting down",
+            ));
+        }
+        if self
+            .engine_route_recovery
+            .is_routing_enabled
+            .load(Ordering::Acquire)
+        {
+            endpoint.register_endpoint_instance().await.map_err(|e| {
+                err(
+                    ErrorType::Backend(BackendError::CannotConnect),
+                    format!("register recovered engine: {e}"),
+                )
+            })?;
+        }
+        *lifecycle = EngineRouteLifecycle::Running;
+        self.engine_route_recovery
+            .generation
+            .send_replace(CancellationToken::new());
+        Ok(())
+    }
+
+    async fn stop_kv_publishers(&mut self) -> Result<(), DynamoError> {
+        if let Some(publishers) = self.publishers.as_mut() {
+            publishers.stop_kv().await?;
+        }
+        Ok(())
+    }
+
+    async fn replace_kv_publishers(
+        &mut self,
+        endpoint: &dynamo_runtime::component::Endpoint,
+        config: &EngineConfig,
+    ) -> Result<(), DynamoError> {
+        if !self.config.enable_kv_routing {
+            return Ok(());
+        }
+        let sources = self.engine.kv_event_sources().await?;
+        let kv_state_endpoint = self
+            .config
+            .kv_state_endpoint
+            .clone()
+            .unwrap_or_else(|| endpoint.id());
+        let enable_local_indexer = self.config.effective_enable_local_indexer();
+        self.publishers
+            .get_or_insert_with(|| PublisherHandles::lifecycle_only(None))
+            .replace_kv(
+                endpoint,
+                &kv_state_endpoint,
+                sources,
+                config.llm.as_ref().and_then(|llm| llm.kv_cache_block_size),
+                enable_local_indexer,
+            )
+    }
+
+    async fn wait_for_consistent_startup(
+        &mut self,
+        endpoint: &dynamo_runtime::component::Endpoint,
+        mut config: EngineConfig,
+    ) -> Result<EngineConfig, DynamoError> {
+        loop {
+            let failure = match self.engine.wait_for_startup().await {
+                Ok(()) => return Ok(config),
+                Err(error) => error,
+            };
+            match self.engine.recover_startup().await? {
+                None => return Err(failure),
+                Some(EngineRecovery::SameInstance) => {}
+                Some(EngineRecovery::Replacement(replacement)) => {
+                    config = *replacement;
+                    self.stop_kv_publishers().await?;
+                    self.replace_kv_publishers(endpoint, &config).await?;
+                }
+            }
+        }
+    }
+
+    async fn recover_serving(
+        &mut self,
+        endpoint: &dynamo_runtime::component::Endpoint,
+    ) -> Result<(), DynamoError> {
+        self.begin_engine_recovery(endpoint).await?;
+        loop {
+            if let EngineRecovery::Replacement(config) = self.engine.recover_serving().await? {
+                self.stop_kv_publishers().await?;
+                self.replace_kv_publishers(endpoint, &config).await?;
+                let config = self.wait_for_consistent_startup(endpoint, *config).await?;
+                let mut model =
+                    build_local_model(&self.config, &config, self.engine.is_raw()).await?;
+                let (worker_type, needs) = resolve_worker_type_and_needs(&self.config);
+                let model_type = resolve_model_type(&self.config)?;
+                let taints = self.model_taints.lock().clone();
+                let registration: anyhow::Result<()> = async {
+                    LocalModel::detach_from_endpoint(endpoint, None).await?;
+                    model
+                        .attach(
+                            endpoint,
+                            model_type,
+                            self.config.model_input,
+                            None,
+                            Some(worker_type),
+                            needs,
+                        )
+                        .await?;
+                    if let Some(taints) = taints {
+                        update_model_taints(endpoint, taints).await?;
+                    }
+                    Ok(())
+                }
+                .await;
+                registration.map_err(|e| {
+                    err(
+                        ErrorType::Backend(BackendError::CannotConnect),
+                        format!("attach replacement engine: {e}"),
+                    )
+                })?;
+                self.admission_gate
+                    .get_or_create(endpoint.component())
+                    .record_model_card(model.card());
+            }
+            match self.engine.on_recovery_complete().await {
+                Ok(()) => break,
+                Err(error) => {
+                    tracing::warn!(%error, "Engine not ready to register after recovery; retrying");
+                    tokio::time::sleep(RECOVERY_RETRY_BACKOFF).await;
+                }
+            }
+        }
+        self.finish_engine_recovery(endpoint).await
     }
 
     async fn begin_engine_route_shutdown(&self) {
@@ -926,10 +1201,14 @@ impl Worker {
     fn register_model_taint_update_route(&self, endpoint: &dynamo_runtime::component::Endpoint) {
         endpoint.drt().engine_routes().register(
             MODEL_TAINT_UPDATE_ROUTE,
-            model_taint_update_callback(
-                endpoint.clone(),
-                self.engine_route_lifecycle.clone(),
-                self.engine_route_shutdown.clone(),
+            recovery_guard(
+                model_taint_update_callback(
+                    endpoint.clone(),
+                    self.engine_route_lifecycle.clone(),
+                    self.engine_route_shutdown.clone(),
+                    self.model_taints.clone(),
+                ),
+                self.engine_route_recovery.clone(),
             ),
         );
     }
@@ -1016,6 +1295,15 @@ impl Worker {
         endpoint: dynamo_runtime::component::Endpoint,
         shutdown: CancellationToken,
     ) -> Result<(), DynamoError> {
+        // Held through the startup gate and until every endpoint, including RL, is registered.
+        let readiness_hold = ReadinessHold::take(endpoint.drt().system_health(), endpoint.name());
+        let engine_config = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return Ok(()),
+            result = self.wait_for_consistent_startup(&endpoint, engine_config.clone()) => result?,
+        };
+        let engine_config = &engine_config;
+
         let model_type = resolve_model_type(&self.config)?;
         let (worker_type, needs) = resolve_worker_type_and_needs(&self.config);
         let rl_config = if self.config.enable_rl {
@@ -1074,6 +1362,7 @@ impl Worker {
         self.register_engine_controls(&endpoint).await?;
         self.register_engine_updates(&endpoint).await?;
         self.register_model_taint_update_route(&endpoint);
+        self.engine.on_recovery_complete().await?;
 
         let served = resolve_served_name(&self.config, engine_config)
             .unwrap_or_else(|| engine_config.model.clone());
@@ -1198,12 +1487,6 @@ impl Worker {
                 )
             })?;
         }
-        // Readiness is this worker's to publish: it is not serviceable until every
-        // mandatory endpoint is registered and the engine routes are open. The
-        // hold suppresses the whole process's readiness, so covering the primary
-        // endpoint also covers the RL endpoint registered further down.
-        let readiness_hold = ReadinessHold::take(endpoint.drt().system_health(), endpoint.name());
-
         let start_fut = builder.start_with_registration();
         tokio::pin!(start_fut);
         let primary_endpoint = tokio::select! {
@@ -1295,32 +1578,42 @@ impl Worker {
         let serve_fut = primary_endpoint.wait();
         tokio::pin!(serve_fut);
 
-        let serve_result = tokio::select! {
-            biased;
-            result = &mut serve_fut => {
-                match result {
-                    // Endpoint exited cleanly (e.g. DRT primary token
-                    // cancelled it) — run the orchestrator so drain/cleanup
-                    // don't race transport teardown.
-                    Ok(()) => {
-                        tracing::info!(
-                            "Endpoint completed gracefully; running shutdown orchestration"
-                        );
-                        Ok(())
-                    }
-                    // Serve errored; cleanup_once in run() is the safety net.
-                    Err(e) => {
-                        Err(err(
-                            ErrorType::Backend(BackendError::Unknown),
-                            format!("serve: {e}"),
-                        ))
-                    }
-                }
+        let serve_result = loop {
+            let engine = self.engine.clone();
+            let unavailable = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break Ok(()),
+                result = &mut serve_fut => break result.map_err(|e| {
+                    err(ErrorType::Backend(BackendError::Unknown), format!("serve: {e}"))
+                }),
+                result = engine.wait_for_unavailable() => result,
+            };
+            if let Err(error) = unavailable {
+                tracing::warn!(%error, "engine availability watch failed; withdrawing worker");
             }
-            _ = shutdown.cancelled() => {
-                tracing::info!("Received shutdown signal; running graceful orchestration");
-                Ok(())
+            tracing::info!("Engine unavailable; withdrawing worker for recovery");
+            let readiness_hold =
+                ReadinessHold::take(endpoint.drt().system_health(), endpoint.name());
+            let recovery = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break Ok(()),
+                result = &mut serve_fut => break result.map_err(|e| {
+                    err(ErrorType::Backend(BackendError::Unknown), format!("serve during recovery: {e}"))
+                }),
+                result = self.recover_serving(&endpoint) => result,
+            };
+            if let Err(error) = recovery {
+                break Err(error);
             }
+            drop(readiness_hold);
+            if self
+                .engine_route_recovery
+                .is_routing_enabled
+                .load(Ordering::Acquire)
+            {
+                set_worker_health(&endpoint, HealthStatus::Ready);
+            }
+            tracing::info!("Engine recovery complete");
         };
 
         // Cancel accepted Rust route futures, wait for their shared lifecycle
@@ -1675,6 +1968,7 @@ fn engine_route_lifecycle_error(lifecycle: EngineRouteLifecycle) -> serde_json::
     let state = match lifecycle {
         EngineRouteLifecycle::Starting => "starting",
         EngineRouteLifecycle::Running => "running",
+        EngineRouteLifecycle::Recovering => "recovering",
         EngineRouteLifecycle::ShuttingDown => "shutting down",
     };
     control_error_response(format!(
@@ -1759,11 +2053,13 @@ fn model_taint_update_callback(
     endpoint: dynamo_runtime::component::Endpoint,
     route_lifecycle: Arc<tokio::sync::RwLock<EngineRouteLifecycle>>,
     route_shutdown: CancellationToken,
+    applied_taints: Arc<parking_lot::Mutex<Option<HashSet<String>>>>,
 ) -> EngineRouteCallback {
     Arc::new(move |body| {
         let endpoint = endpoint.clone();
         let route_lifecycle = route_lifecycle.clone();
         let route_shutdown = route_shutdown.clone();
+        let applied_taints = applied_taints.clone();
         Box::pin(async move {
             let taints = parse_model_taint_update_request(body)?;
             let _lifecycle =
@@ -1778,6 +2074,7 @@ fn model_taint_update_callback(
                 }
                 result = update_model_taints(&endpoint, taints.clone()) => result?,
             }
+            *applied_taints.lock() = Some(taints.clone());
 
             let mut response_taints: Vec<_> = taints.into_iter().collect();
             response_taints.sort();
@@ -1840,19 +2137,29 @@ fn wrap_engine_control_callback(
     callback: EngineRouteCallback,
     engine: EngineKind,
     endpoint: dynamo_runtime::component::Endpoint,
-    route_lifecycle: Arc<tokio::sync::RwLock<EngineRouteLifecycle>>,
-    route_mutation: Arc<tokio::sync::Mutex<()>>,
-    route_shutdown: CancellationToken,
+    routes: EngineRouteState,
 ) -> EngineRouteCallback {
     let policy = engine_control_policy(&control_name);
-    Arc::new(move |body| {
+    let recovery = routes.recovery.clone();
+    let recovery_resume = (policy == EngineControlPolicy::RegisterAfter).then(|| {
+        recovery_resume_callback(
+            control_name.clone(),
+            callback.clone(),
+            engine.clone(),
+            routes.clone(),
+        )
+    });
+    let callback: EngineRouteCallback = Arc::new(move |body| {
         let callback = callback.clone();
         let engine = engine.clone();
         let endpoint = endpoint.clone();
         let control_name = control_name.clone();
-        let route_lifecycle = route_lifecycle.clone();
-        let route_mutation = route_mutation.clone();
-        let route_shutdown = route_shutdown.clone();
+        let EngineRouteState {
+            lifecycle: route_lifecycle,
+            mutation: route_mutation,
+            shutdown: route_shutdown,
+            recovery: route_recovery,
+        } = routes.clone();
         Box::pin(async move {
             if let Some(response) = control_request_body_error(&body) {
                 return Ok(response);
@@ -1906,6 +2213,9 @@ fn wrap_engine_control_callback(
                     // left unregistered, so readiness stays withdrawn until a
                     // resume control re-registers it.
                     set_worker_health(&endpoint, HealthStatus::NotReady);
+                    route_recovery
+                        .is_routing_enabled
+                        .store(false, Ordering::Release);
 
                     let callback_result = tokio::select! {
                         biased;
@@ -1981,8 +2291,66 @@ fn wrap_engine_control_callback(
                         )));
                     }
                     set_worker_health(&endpoint, HealthStatus::Ready);
+                    route_recovery
+                        .is_routing_enabled
+                        .store(true, Ordering::Release);
                     Ok(response)
                 }
+            }
+        })
+    });
+    let guarded = recovery_guard(callback, recovery.clone());
+    Arc::new(move |body| {
+        if recovery.generation.borrow().is_cancelled()
+            && let Some(callback) = &recovery_resume
+        {
+            callback(body)
+        } else {
+            guarded(body)
+        }
+    })
+}
+
+fn recovery_resume_callback(
+    control_name: String,
+    callback: EngineRouteCallback,
+    engine: EngineKind,
+    routes: EngineRouteState,
+) -> EngineRouteCallback {
+    Arc::new(move |body| {
+        let control_name = control_name.clone();
+        let callback = callback.clone();
+        let engine = engine.clone();
+        let EngineRouteState {
+            lifecycle: route_lifecycle,
+            mutation: route_mutation,
+            shutdown: route_shutdown,
+            recovery: route_recovery,
+        } = routes.clone();
+        let resume = route_recovery.resumes.borrow().clone();
+        Box::pin(async move {
+            if let Some(response) = control_request_body_error(&body) {
+                return Ok(response);
+            }
+            if let Err(error) = engine.validate_engine_control(&control_name, &body) {
+                return Ok(control_error_response(error.to_string()));
+            }
+            tokio::select! {
+                biased;
+                _ = route_shutdown.cancelled() => Ok(engine_route_lifecycle_error(EngineRouteLifecycle::ShuttingDown)),
+                _ = resume.cancelled() => Ok(engine_route_lifecycle_error(EngineRouteLifecycle::Recovering)),
+                result = async {
+                    let _mutation = route_mutation.lock().await;
+                    let lifecycle = route_lifecycle.read().await;
+                    if *lifecycle != EngineRouteLifecycle::Recovering {
+                        return Ok(engine_route_lifecycle_error(*lifecycle));
+                    }
+                    let response = callback(body).await?;
+                    if control_response_allows_registration(&response) {
+                        route_recovery.is_routing_enabled.store(true, Ordering::Release);
+                    }
+                    Ok(response)
+                } => result,
             }
         })
     })
@@ -4045,9 +4413,7 @@ mod handoff_and_lifecycle_tests {
             callback,
             EngineKind::Llm(Arc::new(DefaultsEngine)),
             endpoint.clone(),
-            worker.engine_route_lifecycle.clone(),
-            worker.engine_route_mutation.clone(),
-            worker.engine_route_shutdown.clone(),
+            worker.engine_route_state(),
         );
         let request = tokio::spawn(async move { callback(serde_json::json!({})).await.unwrap() });
         entered.notified().await;
@@ -4103,9 +4469,7 @@ mod handoff_and_lifecycle_tests {
             resume_callback,
             EngineKind::Llm(Arc::new(DefaultsEngine)),
             endpoint.clone(),
-            worker.engine_route_lifecycle.clone(),
-            worker.engine_route_mutation.clone(),
-            worker.engine_route_shutdown.clone(),
+            worker.engine_route_state(),
         );
         let resume_request =
             tokio::spawn(async move { resume_callback(serde_json::json!({})).await.unwrap() });
@@ -4118,9 +4482,7 @@ mod handoff_and_lifecycle_tests {
             direct_callback,
             EngineKind::Llm(Arc::new(DefaultsEngine)),
             endpoint,
-            worker.engine_route_lifecycle.clone(),
-            worker.engine_route_mutation.clone(),
-            worker.engine_route_shutdown.clone(),
+            worker.engine_route_state(),
         );
         let response = tokio::time::timeout(
             Duration::from_secs(1),
@@ -4351,6 +4713,555 @@ mod handoff_and_lifecycle_tests {
         );
 
         worker.begin_engine_route_shutdown().await;
+    }
+
+    struct StartupGateEngine(tokio::sync::watch::Receiver<bool>);
+
+    struct ServingRecoveryEngine {
+        unavailable: Notify,
+        recovering: Notify,
+        recovered: Notify,
+        bootstrap_entered: Notify,
+        bootstrap: tokio::sync::watch::Receiver<bool>,
+        is_replacement: AtomicBool,
+        has_completion_failure: AtomicBool,
+    }
+
+    #[async_trait]
+    impl LLMEngine for ServingRecoveryEngine {
+        async fn start(&self, id: u64) -> Result<EngineConfig, DynamoError> {
+            DefaultsEngine.start(id).await
+        }
+
+        async fn generate(
+            &self,
+            request: PreprocessedRequest,
+            ctx: crate::engine::GenerateContext,
+        ) -> Result<
+            BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
+            DynamoError,
+        > {
+            DefaultsEngine.generate(request, ctx).await
+        }
+
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            Ok(())
+        }
+
+        async fn wait_for_startup(&self) -> Result<(), DynamoError> {
+            self.bootstrap_entered.notify_one();
+            let mut bootstrap = self.bootstrap.clone();
+            bootstrap.wait_for(|ready| *ready).await.unwrap();
+            Ok(())
+        }
+
+        async fn wait_for_unavailable(&self) -> Result<(), DynamoError> {
+            self.unavailable.notified().await;
+            Ok(())
+        }
+
+        async fn recover_serving(&self) -> Result<EngineRecovery, DynamoError> {
+            self.recovering.notify_one();
+            self.recovered.notified().await;
+            Ok(if self.is_replacement.load(Ordering::Acquire) {
+                EngineRecovery::Replacement(Box::new(EngineConfig {
+                    model: "recovery-test".into(),
+                    runtime_data: [("incarnation".into(), serde_json::json!(2))].into(),
+                    ..Default::default()
+                }))
+            } else {
+                EngineRecovery::SameInstance
+            })
+        }
+
+        async fn on_recovery_complete(&self) -> Result<(), DynamoError> {
+            if self.has_completion_failure.swap(false, Ordering::AcqRel) {
+                return Err(err(
+                    ErrorType::Backend(BackendError::EngineShutdown),
+                    "late health loss",
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn serving_recovery_withdraws_until_consistent_and_refreshes_replacement_metadata() {
+        let endpoint = test_local_endpoint().await;
+        let health = endpoint.drt().system_health();
+        let (bootstrap, rx) = tokio::sync::watch::channel(true);
+        let engine = Arc::new(ServingRecoveryEngine {
+            unavailable: Notify::new(),
+            recovering: Notify::new(),
+            recovered: Notify::new(),
+            bootstrap_entered: Notify::new(),
+            bootstrap: rx,
+            is_replacement: AtomicBool::new(false),
+            has_completion_failure: AtomicBool::new(false),
+        });
+        let mut worker = Worker::new(engine.clone(), WorkerConfig::default());
+        let shutdown = CancellationToken::new();
+        let serve = tokio::spawn({
+            let endpoint = endpoint.clone();
+            let shutdown = shutdown.clone();
+            async move {
+                worker
+                    .serve_with_orchestrator(
+                        &EngineConfig {
+                            model: "recovery-test".into(),
+                            ..Default::default()
+                        },
+                        endpoint,
+                        shutdown,
+                    )
+                    .await
+            }
+        });
+        assert!(health_reaches(&health, true).await);
+        engine.bootstrap_entered.notified().await;
+        let response = endpoint
+            .drt()
+            .engine_routes()
+            .get(MODEL_TAINT_UPDATE_ROUTE)
+            .unwrap()(serde_json::json!({"taints": ["operator/keep"]}))
+        .await
+        .unwrap();
+        assert_eq!(response["status"], "ok");
+        let id = endpoint.id();
+        let query = DiscoveryQuery::Endpoint {
+            namespace: id.namespace.clone(),
+            component: id.component.clone(),
+            endpoint: id.name.clone(),
+        };
+        for is_replacement in [false, true] {
+            engine
+                .is_replacement
+                .store(is_replacement, Ordering::Release);
+            engine
+                .has_completion_failure
+                .store(!is_replacement, Ordering::Release);
+            bootstrap.send_replace(!is_replacement);
+            engine.unavailable.notify_one();
+            tokio::time::timeout(Duration::from_secs(5), engine.recovering.notified())
+                .await
+                .unwrap();
+            assert!(!health.lock().get_health_status().0);
+            assert!(
+                endpoint
+                    .drt()
+                    .discovery()
+                    .list(query.clone())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            engine.recovered.notify_one();
+            if !is_replacement {
+                tokio::time::timeout(Duration::from_secs(5), engine.recovering.notified())
+                    .await
+                    .unwrap();
+                assert!(
+                    endpoint
+                        .drt()
+                        .discovery()
+                        .list(query.clone())
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+                engine.recovered.notify_one();
+            }
+            if is_replacement {
+                tokio::time::timeout(Duration::from_secs(5), engine.bootstrap_entered.notified())
+                    .await
+                    .unwrap();
+                assert!(!health.lock().get_health_status().0);
+                assert!(
+                    endpoint
+                        .drt()
+                        .discovery()
+                        .list(query.clone())
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+                bootstrap.send_replace(true);
+            }
+            assert!(health_reaches(&health, true).await);
+            assert_eq!(
+                endpoint
+                    .drt()
+                    .discovery()
+                    .list(query.clone())
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+        let cards = endpoint
+            .drt()
+            .discovery()
+            .list(DiscoveryQuery::EndpointModels {
+                namespace: id.namespace,
+                component: id.component,
+                endpoint: id.name,
+            })
+            .await
+            .unwrap();
+        let card = cards[0]
+            .deserialize_model::<dynamo_llm::model_card::ModelDeploymentCard>()
+            .unwrap();
+        assert_eq!(
+            card.runtime_config.runtime_data["incarnation"],
+            serde_json::json!(2)
+        );
+        assert!(card.runtime_config.taints.contains("operator/keep"));
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(30), serve)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovery_cancels_old_controls_and_preserves_operator_pause() {
+        // File discovery rejects removing an endpoint that a pause already removed.
+        let store = tempfile::tempdir().unwrap();
+        let config = dynamo_runtime::distributed::DistributedConfig {
+            discovery_backend: dynamo_runtime::distributed::DiscoveryBackend::KvStore(
+                dynamo_runtime::storage::kv::Selector::File(store.path().to_path_buf()),
+            ),
+            ..dynamo_runtime::distributed::DistributedConfig::process_local()
+        };
+        let runtime = dynamo_runtime::Runtime::from_current().unwrap();
+        let drt = dynamo_runtime::DistributedRuntime::new(runtime, config)
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("lifecycle_ns")
+            .unwrap()
+            .component("lifecycle_comp")
+            .unwrap()
+            .endpoint("generate");
+        endpoint.register_endpoint_instance().await.unwrap();
+        let (engine, _) = HandoffMockEngine::new(
+            false,
+            vec!["pause_generation".into(), "resume_generation".into()],
+            Vec::new(),
+        );
+        let worker = Worker::new(engine, WorkerConfig::default());
+        worker.register_engine_controls(&endpoint).await.unwrap();
+        worker.activate_engine_routes().await;
+        let routes = endpoint.drt().engine_routes();
+        routes.get("control/pause_generation").unwrap()(serde_json::json!({}))
+            .await
+            .unwrap();
+        let entered = Arc::new(Notify::new());
+        let callback: EngineRouteCallback = Arc::new({
+            let entered = entered.clone();
+            move |_| {
+                let entered = entered.clone();
+                Box::pin(async move {
+                    entered.notify_one();
+                    std::future::pending().await
+                })
+            }
+        });
+        let callback = wrap_engine_control_callback(
+            "resume_generation".into(),
+            callback,
+            worker.engine.clone(),
+            endpoint.clone(),
+            worker.engine_route_state(),
+        );
+        let request = tokio::spawn({
+            let callback = callback.clone();
+            async move { callback(serde_json::json!({})).await.unwrap() }
+        });
+        entered.notified().await;
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            worker.begin_engine_recovery(&endpoint),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(control_response_is_error(&request.await.unwrap()));
+        worker.finish_engine_recovery(&endpoint).await.unwrap();
+        let id = endpoint.id();
+        let query = DiscoveryQuery::Endpoint {
+            namespace: id.namespace,
+            component: id.component,
+            endpoint: id.name,
+        };
+        assert!(
+            endpoint
+                .drt()
+                .discovery()
+                .list(query.clone())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        worker.begin_engine_recovery(&endpoint).await.unwrap();
+        routes.get("control/resume_generation").unwrap()(serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(
+            endpoint
+                .drt()
+                .discovery()
+                .list(query.clone())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let request = tokio::spawn(async move { callback(serde_json::json!({})).await.unwrap() });
+        entered.notified().await;
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            worker.finish_engine_recovery(&endpoint),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(control_response_is_error(&request.await.unwrap()));
+        assert_eq!(
+            endpoint.drt().discovery().list(query).await.unwrap().len(),
+            1
+        );
+    }
+
+    #[async_trait]
+    impl LLMEngine for StartupGateEngine {
+        async fn start(&self, id: u64) -> Result<EngineConfig, DynamoError> {
+            DefaultsEngine.start(id).await
+        }
+        async fn generate(
+            &self,
+            request: PreprocessedRequest,
+            ctx: crate::engine::GenerateContext,
+        ) -> Result<
+            BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
+            DynamoError,
+        > {
+            DefaultsEngine.generate(request, ctx).await
+        }
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            Ok(())
+        }
+        async fn wait_for_startup(&self) -> Result<(), DynamoError> {
+            let mut result = self.0.clone();
+            loop {
+                if *result.borrow_and_update() {
+                    return Ok(());
+                }
+                result.changed().await.map_err(|_| {
+                    err(
+                        ErrorType::Backend(BackendError::EngineShutdown),
+                        "bootstrap failed".to_string(),
+                    )
+                })?;
+            }
+        }
+    }
+
+    struct RetryingStartupEngine {
+        stage: tokio::sync::watch::Receiver<u8>,
+        attempts: std::sync::atomic::AtomicUsize,
+        is_replacement: bool,
+        source_requests: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LLMEngine for RetryingStartupEngine {
+        async fn start(&self, id: u64) -> Result<EngineConfig, DynamoError> {
+            DefaultsEngine.start(id).await
+        }
+        async fn generate(
+            &self,
+            request: PreprocessedRequest,
+            ctx: crate::engine::GenerateContext,
+        ) -> Result<
+            BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
+            DynamoError,
+        > {
+            DefaultsEngine.generate(request, ctx).await
+        }
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            Ok(())
+        }
+        async fn wait_for_startup(&self) -> Result<(), DynamoError> {
+            if self
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 0
+            {
+                return Err(DynamoError::msg("missing history"));
+            }
+            let mut stage = self.stage.clone();
+            stage.wait_for(|value| *value >= 2).await.unwrap();
+            Ok(())
+        }
+        async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
+            self.source_requests
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+        async fn recover_startup(&self) -> Result<Option<EngineRecovery>, DynamoError> {
+            let mut stage = self.stage.clone();
+            stage.wait_for(|value| *value >= 1).await.unwrap();
+            Ok(Some(if self.is_replacement {
+                EngineRecovery::Replacement(Box::new(EngineConfig {
+                    model: "recovery-test".into(),
+                    ..Default::default()
+                }))
+            } else {
+                EngineRecovery::SameInstance
+            }))
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn startup_recovery_stays_unready_until_the_retried_gate_passes() {
+        with_each_health_route_shape(|| async {
+            for is_replacement in [false, true] {
+                let endpoint = test_local_endpoint().await;
+                let health = endpoint.drt().system_health();
+                let (stage, rx) = tokio::sync::watch::channel(0);
+                let engine = Arc::new(RetryingStartupEngine {
+                    stage: rx,
+                    attempts: std::sync::atomic::AtomicUsize::new(0),
+                    is_replacement,
+                    source_requests: std::sync::atomic::AtomicUsize::new(0),
+                });
+                let mut worker = Worker::new(engine.clone(), WorkerConfig::default());
+                let shutdown = CancellationToken::new();
+                let serve = tokio::spawn({
+                    let endpoint = endpoint.clone();
+                    let shutdown = shutdown.clone();
+                    async move {
+                        worker
+                            .serve_with_orchestrator(
+                                &EngineConfig {
+                                    model: "recovery-test".into(),
+                                    ..Default::default()
+                                },
+                                endpoint,
+                                shutdown,
+                            )
+                            .await
+                    }
+                });
+                let id = endpoint.id();
+                let query = DiscoveryQuery::Endpoint {
+                    namespace: id.namespace,
+                    component: id.component,
+                    endpoint: id.name,
+                };
+                for attempt in [1, 2] {
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        while engine.attempts.load(std::sync::atomic::Ordering::SeqCst) < attempt {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    assert!(!health.lock().get_health_status().0);
+                    assert!(
+                        endpoint
+                            .drt()
+                            .discovery()
+                            .list(query.clone())
+                            .await
+                            .unwrap()
+                            .is_empty()
+                    );
+                    stage.send_replace(attempt as u8);
+                }
+                assert!(health_reaches(&health, true).await);
+                assert!(
+                    !endpoint
+                        .drt()
+                        .discovery()
+                        .list(query)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+                // Only a replacement asks for fresh KV sources; the same engine keeps its publishers.
+                assert_eq!(
+                    engine
+                        .source_requests
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                    usize::from(is_replacement)
+                );
+                shutdown.cancel();
+                tokio::time::timeout(Duration::from_secs(120), serve)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn failed_startup_gate_never_registers() {
+        with_each_health_route_shape(|| async {
+            let endpoint = test_local_endpoint().await;
+            let health = endpoint.drt().system_health();
+            let (tx, rx) = tokio::sync::watch::channel(false);
+            let mut worker = Worker::new(Arc::new(StartupGateEngine(rx)), WorkerConfig::default());
+            let shutdown = CancellationToken::new();
+            let serve = tokio::spawn({
+                let endpoint = endpoint.clone();
+                let shutdown = shutdown.clone();
+                async move {
+                    worker
+                        .serve_with_orchestrator(
+                            &EngineConfig {
+                                model: "recovery-test".into(),
+                                ..Default::default()
+                            },
+                            endpoint,
+                            shutdown,
+                        )
+                        .await
+                }
+            });
+            let id = endpoint.id();
+            let query = DiscoveryQuery::Endpoint {
+                namespace: id.namespace,
+                component: id.component,
+                endpoint: id.name,
+            };
+            drop(tx); // The startup hook returns failure.
+            assert!(
+                tokio::time::timeout(Duration::from_secs(5), serve)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_err()
+            );
+            assert!(!health.lock().get_health_status().0);
+            assert!(
+                endpoint
+                    .drt()
+                    .discovery()
+                    .list(query)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        })
+        .await;
     }
 
     /// Ensures a payload-free Rust backend publishes readiness while it is
