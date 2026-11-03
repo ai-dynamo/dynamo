@@ -30,6 +30,8 @@ from dynamo.runtime import DistributedRuntime
 
 MSG_CONTAINS_ERROR = "This message contains an 400error."
 MSG_CONTAINS_STATUS_ERROR = "This message contains a 415 status error."
+MSG_CONTAINS_UNPROCESSABLE_CODE = "This message contains a 422 code error."
+MSG_CONTAINS_UNPROCESSABLE_STATUS = "This message contains a 422 status error."
 MSG_CONTAINS_INVALID_ARGUMENT = "This message contains an invalid argument."
 MSG_CONTAINS_INTERNAL_ERROR = "This message contains an internal server error."
 
@@ -74,6 +76,10 @@ class MockHttpEngine:
             raise HttpError(code=400, message=MSG_CONTAINS_ERROR)
         elif MSG_CONTAINS_STATUS_ERROR.lower() in user_message.lower():
             raise _StatusLikeError(status=415, message=MSG_CONTAINS_STATUS_ERROR)
+        elif MSG_CONTAINS_UNPROCESSABLE_CODE.lower() in user_message.lower():
+            raise HttpError(code=422, message="private token=secret")
+        elif MSG_CONTAINS_UNPROCESSABLE_STATUS.lower() in user_message.lower():
+            raise _StatusLikeError(status=422, message="private token=secret")
         elif MSG_CONTAINS_INVALID_ARGUMENT.lower() in user_message.lower():
             raise ValueError(MSG_CONTAINS_INVALID_ARGUMENT)
         elif MSG_CONTAINS_INTERNAL_ERROR.lower() in user_message.lower():
@@ -250,6 +256,18 @@ HTTP_ERROR_CASES = (
         415,
         "Unsupported Media Type",
         "Unsupported Media Type",
+    ),
+    (
+        MSG_CONTAINS_UNPROCESSABLE_CODE,
+        422,
+        "Unprocessable Entity",
+        "Unprocessable Entity",
+    ),
+    (
+        MSG_CONTAINS_UNPROCESSABLE_STATUS,
+        422,
+        "Unprocessable Entity",
+        "Unprocessable Entity",
     ),
     (
         MSG_CONTAINS_INVALID_ARGUMENT,
