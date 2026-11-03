@@ -728,6 +728,13 @@ async fn runtime_lora_pin_is_rechecked_after_transport_fallback() {
             .contains("runtime_lora_capability_unavailable")
     );
     assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[101, 202]);
+    let mut untainted = config.clone();
+    untainted.taints.remove("dynamo.runtime-lora/v2");
+    configs_tx
+        .send(HashMap::from([(101, untainted.clone()), (202, untainted)]))
+        .unwrap();
+    assert!(host.generate(Context::new(input.clone())).await.is_err());
+    assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[101, 202]);
     configs_tx
         .send(HashMap::from([(101, config.clone()), (202, config)]))
         .unwrap();
@@ -2775,6 +2782,7 @@ async fn runtime_lora_rechecks_worker_metadata_after_queued_selection() {
         "supports_runtime_lora_resolution",
         "runtime_lora_protocol_versions",
         "runtime_lora_schemes",
+        "capability_taint",
     ] {
         configs_tx.send(initial.clone()).unwrap();
         let selected = {
@@ -2792,6 +2800,9 @@ async fn runtime_lora_rechecks_worker_metadata_after_queued_selection() {
             }
             "runtime_lora_protocol_versions" => {
                 changed.set_engine_specific(field, vec![3_u32]).unwrap()
+            }
+            "capability_taint" => {
+                changed.taints.remove("dynamo.runtime-lora/v2");
             }
             _ => changed
                 .set_engine_specific(field, vec!["different"])

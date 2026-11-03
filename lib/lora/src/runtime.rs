@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const RUNTIME_LORA_PROTOCOL_VERSION: u16 = 2;
+pub const RUNTIME_LORA_CAPABILITY_TAINT: &str = "dynamo.runtime-lora/v2";
 pub const RUNTIME_LORA_KEY_PREFIX: &str = "dyn-lora-";
 pub const MAX_RUNTIME_MODEL_ID_BYTES: usize = 4096;
 pub const MAX_RUNTIME_BASE_MODEL_BYTES: usize = 512;
@@ -35,7 +36,7 @@ pub fn supports_runtime_lora<
     is_base
         && requires_preprocessing
         && is_aggregated
-        && config.taints().contains("dynamo.runtime-lora/v2")
+        && config.taints().contains(RUNTIME_LORA_CAPABILITY_TAINT)
         && runtime_lora_worker_schemes(config).is_some()
 }
 
@@ -106,7 +107,9 @@ pub fn constrain_runtime_lora_workers<
     eligible.retain(|worker_id| {
         live_worker_ids.contains(worker_id)
             && worker_configs.get(worker_id).is_some_and(|config| {
-                if !routing_constraints.is_compatible_with_worker_taints(config.taints()) {
+                if !config.taints().contains(RUNTIME_LORA_CAPABILITY_TAINT)
+                    || !routing_constraints.is_compatible_with_worker_taints(config.taints())
+                {
                     return false;
                 }
                 if runtime_lora_worker_schemes(config).is_none() {
@@ -332,7 +335,7 @@ where
 mod tests {
     use super::*;
 
-    struct TestWorker(serde_json::Value);
+    struct TestWorker(serde_json::Value, HashSet<String>);
 
     impl RuntimeLoraWorkerFacts for TestWorker {
         fn runtime_value(&self, key: &str) -> Option<&serde_json::Value> {
@@ -353,14 +356,20 @@ mod tests {
         fn total_kv_blocks(&self) -> Option<u64> {
             None
         }
+        fn taints(&self) -> &HashSet<String> {
+            &self.1
+        }
     }
 
     fn capable_worker(schemes: &[&str]) -> TestWorker {
-        TestWorker(serde_json::json!({
-            "supports_runtime_lora_resolution": true,
-            "runtime_lora_protocol_versions": [2],
-            "runtime_lora_schemes": schemes,
-        }))
+        TestWorker(
+            serde_json::json!({
+                "supports_runtime_lora_resolution": true,
+                "runtime_lora_protocol_versions": [2],
+                "runtime_lora_schemes": schemes,
+            }),
+            HashSet::from([RUNTIME_LORA_CAPABILITY_TAINT.to_string()]),
+        )
     }
 
     #[test]
@@ -376,7 +385,7 @@ mod tests {
             serde_json::json!({"supports_runtime_lora_resolution": true, "runtime_lora_protocol_versions": [2, -1], "runtime_lora_schemes": ["a"]}),
             serde_json::json!({"supports_runtime_lora_resolution": true, "runtime_lora_protocol_versions": [2], "runtime_lora_schemes": [null]}),
         ] {
-            assert!(runtime_lora_worker_schemes(&TestWorker(facts)).is_none());
+            assert!(runtime_lora_worker_schemes(&TestWorker(facts, HashSet::new())).is_none());
         }
     }
 
@@ -411,6 +420,34 @@ mod tests {
         );
         assert_eq!(
             constrain_runtime_lora_workers(false, None, &live, &configs, &constraints),
+            None
+        );
+    }
+
+    #[test]
+    fn runtime_restriction_requires_capability_taint_without_caller_constraints() {
+        let mut untainted = capable_worker(&["a"]);
+        untainted.1.clear();
+        let configs = HashMap::from([(1, capable_worker(&["a"])), (2, untainted)]);
+        let live = HashSet::from([1, 2]);
+        assert_eq!(
+            constrain_runtime_lora_workers(
+                true,
+                None,
+                &live,
+                &configs,
+                &RoutingConstraints::default()
+            ),
+            Some(HashSet::from([1]))
+        );
+        assert_eq!(
+            constrain_runtime_lora_workers(
+                false,
+                None,
+                &live,
+                &configs,
+                &RoutingConstraints::default()
+            ),
             None
         );
     }
