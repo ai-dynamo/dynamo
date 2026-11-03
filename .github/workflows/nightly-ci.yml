@@ -71,7 +71,7 @@ jobs:
   # and workflow_dispatch from main, this is just github.sha.
   resolve-source-sha:
     name: Resolve source SHA
-    runs-on: prod-default-v2
+    runs-on: dynamo-cpu-4gi-amd64
     permissions:
       contents: read
     outputs:
@@ -94,7 +94,7 @@ jobs:
   # wheel_builder stage carry the dev version.
   compute-dev-version:
     name: Compute dev version suffix
-    runs-on: prod-default-v2
+    runs-on: dynamo-cpu-4gi-amd64
     permissions:
       contents: read
     outputs:
@@ -116,7 +116,7 @@ jobs:
   # into release.yml.
   compute-release-mode:
     name: Compute release mode
-    runs-on: prod-default-v2
+    runs-on: dynamo-cpu-4gi-amd64
     permissions:
       contents: read
     outputs:
@@ -158,7 +158,7 @@ jobs:
   # block the nightly — downstream jobs skip on empty outputs.
   notify-slack-start:
     name: Notify Slack — nightly started
-    runs-on: prod-default-v2
+    runs-on: dynamo-cpu-4gi-amd64
     needs: [compute-release-mode, resolve-source-sha, compute-dev-version]
     if: ${{ needs.compute-release-mode.outputs.release == 'true' }}
     permissions:
@@ -361,7 +361,7 @@ jobs:
   operator-build:
     name: kubernetes-operator
     needs: [create-fresh-builder, resolve-source-sha]
-    runs-on: prod-default-v2
+    runs-on: dynamo-cpu-4gi-amd64
     outputs:
       operator_default_tag: ${{ steps.build.outputs.image_tag }}
     permissions:
@@ -1759,5 +1759,5 @@ jobs:
     uses: $/.github/workflows/notify-slack.yml
     with:
       pipeline_name: Nightly
-      runs_on: prod-default-v2
+      runs_on: dynamo-cpu-4gi-amd64
     secrets: inherit
