@@ -751,6 +751,7 @@ _COLLECTOR_LABELS = {"model_name": "test-attention-dp", "engine_type": "trtllm"}
 
 
 def _unregister_trtllm_collectors():
+    """Remove TRT-LLM collectors and return them so the fixture can restore them."""
     removed = []
     for collector in list(REGISTRY._collector_to_names.keys()):
         names = REGISTRY._collector_to_names.get(collector, set())
@@ -779,6 +780,7 @@ def trtllm_metrics_collector():
 
 
 def _collector_sample(name):
+    """Read a native metric for the test model and engine."""
     return REGISTRY.get_sample_value(name, _COLLECTOR_LABELS)
 
 
@@ -812,6 +814,7 @@ def _engine_rank_row(rank, *, queued, ibs_overrides):
 
 
 async def _drain_rows_through_publisher(rows, metrics_collector):
+    """Run the real stats publisher until it has published every supplied row."""
     pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
     pub._stop_event = threading.Event()
     pub.engine = MagicMock()
@@ -822,10 +825,12 @@ async def _drain_rows_through_publisher(rows, metrics_collector):
     pub._fpm_schema_checked = False
 
     async def fetch_stats(timeout):
+        """Yield the supplied engine stats without starting an engine."""
         for row in rows:
             yield row
 
     def publish_metric(*_args, **_kwargs):
+        """Stop polling once Dynamo has received all supplied rows."""
         if pub.metrics_publisher.publish.call_count == len(rows):
             pub._stop_event.set()
 
@@ -840,6 +845,7 @@ async def _drain_rows_through_publisher(rows, metrics_collector):
 async def test_native_collector_keeps_rank0_queue_under_attention_dp(
     trtllm_metrics_collector,
 ):
+    """Keep native metrics from rank 0 while Dynamo still receives both ranks."""
     rows = [
         _engine_rank_row(
             0,
