@@ -1,8 +1,9 @@
 # lib/kv-hints
 
-- This crate owns the KV transfer hint wire (`KvHint`, `KvHintAction`, `KvSourceLocationsPayload`, the `KV_HINT_TRANSFER_*` runtime keys), the source choice (`WorkerKvTransferKeys`, `KvTransferTarget`, `KvTransferScope`, `ResolvedTransferSource`, `KvTransferSourceSummary`), and the worker transfer keys (`WorkerKvTransferKeys::from_worker`, `WorkerKvTransferKeysCache`, `KvHintTransferWorkerMetadata`, `KvTransferEnforcement`). `KvTransferCandidateSource`, `label_key`, and `topology_keys` are re-exported from `dynamo-kv-indexer`, which produces them; keep the re-exports, never redefine them. Nothing else belongs here.
-- Depend only on `dynamo-router-protocol`, `dynamo-kv-hashing` (the block hash identities the wire carries), `dynamo-kv-indexer` (the transfer candidate vocabulary and the residency owner key), serde, serde_json, rustc-hash. The edge points one way: a feature crate depends on the stage that produces its types, and the indexer must never name this crate. Never add `dynamo-runtime`, `dynamo-kv-router`, `dynamo-kv-events` directly (it arrives through the indexer), another stage crate (`dynamo-slot-tracker`, `dynamo-session-affinity`, `dynamo-worker-selection`, `dynamo-admission`), `dynamo-scheduler`, tokio, zmq, axum, reqwest, or prometheus as a direct dependency; the gate checks the direct set exactly and the router closure by equality.
-- Stage logic stays out: `KvTransferCandidates` and `CacheOwnerKvTransferKeys` belong to `dynamo-kv-indexer` (they carry its residency snapshot); `resolve_transfer_sources` and the `WorkerConfigLike` adapter belong to `dynamo-scheduler`. A function that needs a stage's type goes in that stage or the kernel.
-- Changing a wire shape here changes what engines and sidecars receive. Keep serde compatibility tests next to the type.
-- Every public item is documented; no `#[doc(hidden)]`.
-- Run `scripts/router_layering_check.sh` before committing.
+`dynamo-kv-hints` owns the KV transfer hint wire (`KvHint`, `KvHintAction`, `KvSourceLocationsPayload`, the `KV_HINT_TRANSFER_*` keys), the transfer source choice, and the worker transfer keys; the transfer candidate vocabulary is re-exported from `dynamo-kv-indexer`, which produces it. Changing a wire shape changes what engines and sidecars receive; keep serde compatibility tests next to the type.
+
+- Depends on (Dynamo crates): `dynamo-kv-hashing`, `dynamo-kv-indexer`, `dynamo-router-protocol`.
+- Must not depend on: the runtime, tokio, any transport, any other stage, the kernel, kv-router; the edge points one way (a feature crate depends on the stage that produces its types; the indexer never names this crate).
+- Hosts import this crate directly.
+- Check: `bash scripts/router_layering_check.sh` (and `--host`).
+- Design: `lib/router/README.md`.

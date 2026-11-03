@@ -1,35 +1,9 @@
 # lib/kv-router
 
-KV-router contains hot-path routing, indexing, scheduling, and active-sequence
-state. Keep edits scoped and read the more specific `AGENTS.md` in subdirectories
-when one exists.
+`dynamo-kv-router` is the composition crate: it assembles the kernel and the stages into a running router behind features (HTTP servers, the ZMQ KV-event listener and registry, the replica mesh, peer recovery, Prometheus exposition), carries the flat `KvRouterConfig` and the YAML policy file, and is the one crate plugins name through `plugins::prelude`. Subdirectories keep their own `AGENTS.md` where one exists.
 
-When router configuration is serialized inside a model deployment card, it is
-part of the N-2 worker/frontend wire contract described in
-[`lib/llm/AGENTS.md`](../llm/AGENTS.md). Keep compatibility handling narrow and
-give deprecated wire fields a versioned removal TODO.
-
-## Dependencies
-
-- `validator` and `rand` carry a disproportionate transitive footprint for the
-  small amount of functionality KV-router needs. Prefer local validation and
-  `fastrand`; do not reintroduce them without a measured need.
-- Keep `axum` and `reqwest` default features disabled and enable only features
-  used by KV-router. Their unused feature sets add substantial build weight.
-
-## Hash Collections
-
-- Use `FxHashMap` / `FxHashSet` when possible for internal numeric keys and hot
-  paths.
-- Do not use `FxHashMap` / `FxHashSet` for text keys or externally controlled
-  values such as `request_id`; use the standard hash collections there.
-
-## Engine Hash Invariant
-
-- Within one indexer/hash domain, engine-published local block hashes and
-  external sequence hashes are deterministic and consistent across workers: a
-  unique local block chain maps to one unique external sequence-hash chain, and
-  vice versa.
-- Treat a violation as a producer, configuration, or protocol error. Do not
-  revalidate this invariant by scanning per-worker external-hash ownership on
-  request lookup or scheduling hot paths.
+- Depends on (Dynamo crates): the gate's composition row `dynamo-admission`, `dynamo-kv-events`, `dynamo-kv-hashing`, `dynamo-kv-hints`, `dynamo-kv-indexer`, `dynamo-multimodal`, `dynamo-router-protocol`, `dynamo-scheduler`, `dynamo-session-affinity`, `dynamo-slot-tracker`, `dynamo-worker-selection`; also `dynamo-tokens`, `dynamo-truthy`, and `dynamo-zmq` behind the ZMQ features.
+- Must not depend on: the runtime; a transport crate outside a feature (with no features its tree carries none of axum, hyper, reqwest, zmq).
+- Hosts import this crate directly; plugins import `plugins::prelude` and nothing else.
+- Check: `bash scripts/router_layering_check.sh` (and `--host`).
+- Design: `lib/router/README.md`; the migration map and the working rules are in `README.md`.

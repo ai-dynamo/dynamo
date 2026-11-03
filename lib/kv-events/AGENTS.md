@@ -1,7 +1,9 @@
 # lib/kv-events
 
-- This crate owns KV cache event types, the `RouterEvent` envelope, the engine ZMQ codec, the replay cursor, the publisher placement helpers, and the residency vocabulary engines publish (`residency`: storage tiers, residency domains and owners, the reset scope). Nothing else belongs here.
-- Depend only on `dynamo-router-protocol`, `dynamo-kv-hashing`, `dynamo-multimodal`, serde, serde_json, rmp-serde, rustc-hash, thiserror, tracing. Never add `dynamo-runtime`, `dynamo-kv-router`, tokio, zmq, axum, reqwest, or prometheus; the gate rejects them.
-- Worker and owner identities live in `dynamo-router-protocol`; the block hash identities (`LocalBlockHash`, `ExternalSequenceBlockHash`) and the functions that compute them live in `dynamo-kv-hashing`; the multimodal block metadata, the pad rules, and the extra-key marker (`mark_mm_hash_for_extra_key`, `parse_mm_hash_from_extra_key`) live in `dynamo-multimodal`. Import them, do not redefine them. The `extra_keys_to_*` codec and the placeholder-run normalization stay here: they take the vLLM wire item. The residency vocabulary is owned here: consumers (the indexer, the kernel, lib/llm) import `dynamo_kv_events::residency` directly. The compact `ResidencyOwnerKey` is not: the indexer computes it, so it lives in `dynamo_kv_indexer::residency`.
-- Changing a wire shape here changes what engines and sidecars publish. Keep serde compatibility tests next to the type.
-- Run `scripts/router_layering_check.sh` before committing.
+`dynamo-kv-events` owns the KV cache event types, the `RouterEvent` envelope, the engine ZMQ codec, the replay cursor, the publisher placement helpers, and the residency vocabulary engines publish (`residency`). Changing a wire shape changes what engines and sidecars publish; keep serde compatibility tests next to the type.
+
+- Depends on (Dynamo crates): `dynamo-kv-hashing`, `dynamo-multimodal`, `dynamo-router-protocol`.
+- Must not depend on: the runtime, tokio, any transport (zmq, axum, hyper, reqwest, prometheus), any router crate beyond those three.
+- Hosts import this crate directly.
+- Check: `bash scripts/router_layering_check.sh` (and `--host`).
+- Design: `lib/router/README.md`.

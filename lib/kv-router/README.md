@@ -121,6 +121,13 @@ owner's `host` module; plugins import `plugins::prelude`.
 | `services::overlap` | `dynamo_scheduler::overlap_summary` |
 | features `standalone-indexer`, `standalone-slot-tracker`, `standalone-selection`, `runtime-protocols` | the adapter features they expanded to (`http` + `ingest-zmq` + `peer-recovery`; `http` + `replica-sync-zmq`; all four); `runtime-protocols` was empty |
 
+## Working rules
+
+- Router configuration serialized inside a model deployment card is part of the N-2 worker/frontend wire contract described in `lib/llm/AGENTS.md`; keep compatibility handling narrow and give a deprecated wire field a versioned removal TODO.
+- `validator` and `rand` carry a disproportionate transitive footprint for the small amount of functionality this crate needs; prefer local validation and `fastrand`, and do not reintroduce them without a measured need. Keep `axum` and `reqwest` default features disabled and enable only the features this crate uses.
+- Use `FxHashMap` / `FxHashSet` for internal numeric keys and hot paths; use the standard hash collections for text keys or externally controlled values such as `request_id`.
+- Engine hash invariant: within one indexer/hash domain, engine-published local block hashes and external sequence hashes are deterministic and consistent across workers (a unique local block chain maps to one unique external sequence-hash chain, and vice versa). Treat a violation as a producer, configuration, or protocol error; do not revalidate it by scanning per-worker external-hash ownership on request lookup or scheduling hot paths.
+
 ## Further Reading
 
 - Router guide: <https://docs.nvidia.com/dynamo/components/router>
