@@ -41,9 +41,11 @@ supported, even when `--context-length` is supplied.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
-| Kubernetes multinode tensor parallelism (TP) and attention data parallelism (DP) | Experimental |
+| Kubernetes multinode tensor parallelism (TP) and attention data parallelism (DP) | Yes |
 
 For child-agent context affinity, enable frontend session affinity and TensorRT-LLM conversation affinity. Set `TRTLLM_SUBAGENT_AFFINITY_AUTH_KEY` on the prefill sidecar and set `internal_request_auth_key` to the same private value in the OpenEngine server YAML configuration. The sidecar requires the server to advertise signed affinity support. It sends the child's own conversation ID and a signed parent hint for context requests; decode requests retain the child's identity. The gateway must authorize client parent-session headers before they reach the router.
+
+See [support notes](../SUPPORT_NOTES.md#tensorrt-llm) for feature restrictions and operational limits.
 
 ## Run locally
 
