@@ -224,7 +224,7 @@ impl GrpcTransport {
             let connection_cancel = server_cancel.clone();
             let incoming = TcpListenerStream::new(listener).map(move |connection| {
                 connection.map(|stream| {
-                    let io = CancellableIo::new(stream, connection_cancel.clone());
+                    let io = accept_connection(stream, connection_cancel.clone());
                     #[cfg(test)]
                     let io = io.notify_when_polled(accepted_for_server.clone());
                     io
@@ -302,6 +302,17 @@ impl Drop for GrpcTransport {
     }
 }
 
+/// Prepares one accepted connection for tonic. tonic sets `TCP_NODELAY` only on
+/// listeners it binds itself; this incoming stream is hand-built, so it has to
+/// disable Nagle here or small gRPC replies can wait on the peer's delayed ACK.
+fn accept_connection(stream: TcpStream, cancel: CancellationToken) -> CancellableIo {
+    if let Err(error) = stream.set_nodelay(true) {
+        let peer = stream.peer_addr().ok();
+        tracing::debug!(?peer, %error, "Failed to set TCP_NODELAY");
+    }
+    CancellableIo::new(stream, cancel)
+}
+
 async fn supervise_transport(
     mut server: JoinHandle<anyhow::Result<()>>,
     mut load: JoinHandle<anyhow::Result<()>>,
@@ -352,6 +363,18 @@ async fn supervise_transport(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn accepted_connections_disable_nagle() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (accepted, _) = listener.accept().await.unwrap();
+        let io = accept_connection(accepted, CancellationToken::new());
+        assert!(io.stream.nodelay().unwrap());
+        drop(client);
+    }
 
     #[tokio::test]
     async fn supervised_load_task_failure_cancels_the_relay() {
