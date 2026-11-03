@@ -21,7 +21,7 @@ Setting this up is two steps: one thing that always runs, then two optional feat
     With a chat processor in place, configure tool-call extraction, reasoning extraction, or both for the model output format:
 
     - **Tool call parsing** extracts `tool_calls` from a model that emits tool-call markup. See [Tool Call Parsing](tool-call-parsing.mdx).
-    - **Reasoning parsing** splits chain-of-thought into `reasoning_content` for a model that emits thinking content. See [Reasoning Parsing](reasoning-parsing.md).
+    - **Reasoning parsing** splits chain-of-thought into `reasoning_content` for a model that emits thinking content. See [Reasoning Parsing](reasoning-parsing.mdx).
 
     Unified routes use a compatible family grammar. Auto uses the V1 split route for mixed formats supported by V1 and rejects combinations unavailable in both generations. See [Parser Generation Routing](troubleshooting-tool-calls.md#parser-generation-routing) for shared grammars and Beam/Qwen/Nemotron exceptions.
 
@@ -39,7 +39,7 @@ In `vllm serve`, `sglang serve`, and `trtllm-serve`, tool-call and reasoning par
 
 - [Chat Processors](chat-processors.mdx) — the `--dyn-chat-processor` flag, the `dynamo` default, and engine fallback
 - [Tool Call Parsing](tool-call-parsing.mdx) — Dynamo-native tool-call parser names and request examples
-- [Reasoning Parsing](reasoning-parsing.md) — Dynamo-native reasoning parser names
+- [Reasoning Parsing](reasoning-parsing.mdx) — Dynamo-native reasoning parser names
 - [Structural Tag (Guided Decoding for Tool Calls)](structural-tag.md) — constrain output to a valid tool-call format with xgrammar
 - [Troubleshooting Tool Calls](troubleshooting-tool-calls.md) — capture `logprobs` so issues can be localized
 - [Frontend Configuration Reference](../../reference/components/frontend-configuration.mdx) — full CLI flag reference

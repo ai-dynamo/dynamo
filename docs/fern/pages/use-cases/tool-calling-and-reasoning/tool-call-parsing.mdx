@@ -38,7 +38,7 @@ See [Parser Generation Routing](troubleshooting-tool-calls.md#parser-generation-
     </Info>
 
     <Tip>
-    If the model emits reasoning content that should be separated from normal output, see [Reasoning Parsing (Dynamo)](reasoning-parsing.md) for supported `--dyn-reasoning-parser` values.
+    If the model emits reasoning content that should be separated from normal output, see [Reasoning Parsing (Dynamo)](reasoning-parsing.mdx) for supported `--dyn-reasoning-parser` values.
     </Tip>
   </Step>
 
@@ -194,7 +194,7 @@ The **Upstream name** column shows where the vLLM or SGLang parser name differs 
 
         **Upstream name:** Same name across Dynamo, vLLM, and SGLang
 
-        **Notes:** For the default Unified route, pair with `--dyn-reasoning-parser kimi_k25`. The legacy Unicode-delimiter reasoning parser `kimi` is a separate V1 format; pairing it with `kimi_k2` uses the split route under auto and is rejected by explicit V2. For Kimi K2.5 thinking models, use `kimi_k25` so `<think>` blocks and tool calls are parsed from the same response. See [Reasoning Parsing (Dynamo)](reasoning-parsing.md).
+        **Notes:** For the default Unified route, pair with `--dyn-reasoning-parser kimi_k25`. The legacy Unicode-delimiter reasoning parser `kimi` is a separate V1 format; pairing it with `kimi_k2` uses the split route under auto and is rejected by explicit V2. For Kimi K2.5 thinking models, use `kimi_k25` so `<think>` blocks and tool calls are parsed from the same response. See [Reasoning Parsing (Dynamo)](reasoning-parsing.mdx).
       </Accordion>
     </AccordionGroup>
   </Accordion>
@@ -214,7 +214,7 @@ The **Upstream name** column shows where the vLLM or SGLang parser name differs 
 
         **Upstream name:** vLLM: `minimax_m3`
 
-        **Notes:** MiniMax namespace-token XML. Aliases: `minimax-m3`, `minimax_m3_nom`, `minimax-m3-nom`
+        **Notes:** MiniMax namespace-token XML. V2 requires `minimax_m3` or `minimax-m3`. The aliases `minimax_m3_nom` and `minimax-m3-nom` are V1-only.
       </Accordion>
     </AccordionGroup>
   </Accordion>

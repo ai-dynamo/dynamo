@@ -55,7 +55,7 @@ For Rust V1/V2 selection, see [Parser Generation Routing](troubleshooting-tool-c
               - qwen3
     ```
 
-    For the parser names, see [Tool Call Parsing](tool-call-parsing.mdx) and [Reasoning Parsing](reasoning-parsing.md).
+    For the parser names, see [Tool Call Parsing](tool-call-parsing.mdx) and [Reasoning Parsing](reasoning-parsing.mdx).
   </Tab>
   <Tab title="vLLM" language="vllm">
     vLLM parsing is an **engine fallback** — use it only when Dynamo lacks a parser for your model. Set `--dyn-chat-processor vllm` on the **Frontend**, and put the bare `--tool-call-parser` / `--reasoning-parser` there too — no `--dyn-` prefix, and using **vLLM's** parser names. The worker does not select Dynamo response parsers for this fallback.
@@ -143,6 +143,6 @@ Engine fallback is supported on vLLM and SGLang only. TRT-LLM engine fallback is
 
 - [Overview](overview.mdx) — how the chat processor, tool-call parser, and reasoning parser fit together
 - [Tool Call Parsing](tool-call-parsing.mdx) — Dynamo-native tool-call parser names
-- [Reasoning Parsing](reasoning-parsing.md) — Dynamo-native reasoning parser names
+- [Reasoning Parsing](reasoning-parsing.mdx) — Dynamo-native reasoning parser names
 - [vLLM Chat Processor](../../developer-guide/knowledge-base/modular-components/backends/vllm/chat-processor.md) / [SGLang Chat Processor](../../developer-guide/knowledge-base/modular-components/backends/sglang/chat-processor.md) — engine-fallback processor details and engine parser names
 - [Frontend Configuration Reference](../../reference/components/frontend-configuration.mdx) — full CLI flag reference
