@@ -100,6 +100,7 @@ pub(crate) struct LoraCandidatePolicy {
     estimator: Option<Arc<LoadEstimator>>,
     picker: Option<BuiltinRoutePicker>,
     runtime_configs: Option<RuntimeConfigWatch>,
+    runtime_enabled: bool,
 }
 
 impl LoraCandidatePolicy {
@@ -109,6 +110,9 @@ impl LoraCandidatePolicy {
             estimator: None,
             picker: None,
             runtime_configs: None,
+            runtime_enabled: dynamo_runtime::config::env_is_truthy(
+                dynamo_runtime::config::environment_names::llm::DYN_LORA_RUNTIME_LOAD_ENABLED,
+            ),
         })
     }
 
@@ -127,6 +131,7 @@ impl LoraCandidatePolicy {
             filter,
             estimator: Some(estimator),
             picker: Some(picker),
+            runtime_enabled: runtime_configs.is_some(),
             runtime_configs,
         }))
     }
@@ -143,7 +148,7 @@ impl CandidatePolicy for LoraCandidatePolicy {
         let policy = policy(request);
         let routing = request.routing.as_ref();
         let name = routing.and_then(|routing| routing.lora_name.as_deref());
-        policy.check_capability(true, name)?;
+        policy.check_capability(self.runtime_enabled, name)?;
         let Some(name) = name else {
             return Ok(None);
         };
@@ -162,21 +167,37 @@ impl CandidatePolicy for LoraCandidatePolicy {
             .filter(|_| policy.requires_candidate_policy())
             .map(|watch| watch.borrow());
         let default_constraints = RoutingConstraints::default();
-        let candidates = policy.candidates(
-            &self.filter,
-            name,
-            live,
-            policy
-                .requires_candidate_policy()
-                .then(|| routing.and_then(|routing| routing.allowed_worker_ids.as_ref()))
-                .flatten(),
-            configs.as_deref(),
-            routing
-                .and_then(|routing| routing.routing_constraints.as_ref())
-                .unwrap_or(&default_constraints),
-        )?;
-        drop(configs);
+        let constraints = routing
+            .and_then(|routing| routing.routing_constraints.as_ref())
+            .unwrap_or(&default_constraints);
         let pin = pin.filter(|_| policy.requires_candidate_policy());
+        let candidates: Vec<u64> = if policy.requires_candidate_policy() {
+            policy
+                .restrict_workers(
+                    &self.filter,
+                    Some(name),
+                    configs
+                        .as_deref()
+                        .ok_or_else(RequestPolicy::capability_error)?,
+                    &live.into_iter().collect(),
+                    routing.and_then(|routing| routing.allowed_worker_ids.clone()),
+                    constraints,
+                    pin.as_slice(),
+                )?
+                .unwrap_or_default()
+                .into_iter()
+                .collect()
+        } else {
+            policy.candidates(
+                &self.filter,
+                name,
+                live,
+                None,
+                configs.as_deref(),
+                constraints,
+            )?
+        };
+        drop(configs);
         if pin.is_some_and(|worker| !candidates.contains(&worker)) {
             return Err(RequestPolicy::affinity_error().into());
         }
@@ -215,6 +236,13 @@ impl CandidatePolicy for LoraCandidatePolicy {
         constraints: &RoutingConstraints,
         pins: &[u64],
     ) -> Result<Option<HashSet<u64>>, Error> {
+        policy(request).check_capability(
+            self.runtime_enabled,
+            request
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.lora_name.as_deref()),
+        )?;
         Ok(policy(request).restrict_workers(
             &self.filter,
             request
@@ -268,6 +296,13 @@ impl CandidatePolicy for LoraCandidatePolicy {
         allowed: Option<HashSet<u64>>,
         constraints: &RoutingConstraints,
     ) -> Result<(), Error> {
+        policy(request).check_capability(
+            self.runtime_enabled,
+            request
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.lora_name.as_deref()),
+        )?;
         policy(request).check_worker_eligible(worker, Some(workers), live, allowed, constraints)?;
         Ok(())
     }
@@ -308,6 +343,86 @@ impl CandidatePolicy for LoraCandidatePolicy {
 mod tests {
     use super::*;
     use crate::lora::{LoraRoutingTable, LoraStateTracker};
+
+    #[test]
+    fn kv_policy_rejects_runtime_requests_when_runtime_loading_is_disabled() {
+        use crate::protocols::common::preprocessor::RoutingHints;
+
+        temp_env::with_vars(
+            [
+                ("DYN_LORA_ENABLED", Some("true")),
+                ("DYN_LORA_RUNTIME_LOAD_ENABLED", Some("false")),
+            ],
+            || {
+                let policy = LoraCandidatePolicy::kv(Arc::new(LoraFilter::new(
+                    LoraRoutingTable::new(),
+                    LoraStateTracker::new(),
+                )));
+                let mut request = PreprocessedRequest::builder()
+                    .model("base".to_string())
+                    .token_ids(vec![1])
+                    .stop_conditions(Default::default())
+                    .sampling_options(Default::default())
+                    .output_options(Default::default())
+                    .build()
+                    .unwrap();
+                request.routing = Some(RoutingHints {
+                    lora_name: Some(crate::lora::runtime::adapter_key(
+                        "base",
+                        "custom:///opaque",
+                    )),
+                    base_model_name: Some("base".into()),
+                    lora_source_uri: Some(crate::lora::runtime::RuntimeLoraSourceUri::new(
+                        "custom:///opaque".into(),
+                    )),
+                    lora_resolution_version: Some(2),
+                    ..Default::default()
+                });
+                let mut config = ModelRuntimeConfig::default();
+                config.taints.insert("dynamo.runtime-lora/v2".into());
+                config
+                    .set_engine_specific("supports_runtime_lora_resolution", true)
+                    .unwrap();
+                config
+                    .set_engine_specific("runtime_lora_protocol_versions", vec![2_u32])
+                    .unwrap();
+                config
+                    .set_engine_specific("runtime_lora_schemes", vec!["custom"])
+                    .unwrap();
+                let error = policy
+                    .restrict(
+                        &request,
+                        &HashMap::from([(1, config)]),
+                        &HashSet::from([1]),
+                        None,
+                        &Default::default(),
+                        &[],
+                    )
+                    .unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("runtime_lora_capability_unavailable")
+                );
+                request.routing = Some(RoutingHints {
+                    lora_name: Some("legacy".into()),
+                    ..Default::default()
+                });
+                assert!(
+                    policy
+                        .restrict(
+                            &request,
+                            &HashMap::new(),
+                            &HashSet::new(),
+                            None,
+                            &Default::default(),
+                            &[]
+                        )
+                        .is_ok()
+                );
+            },
+        );
+    }
 
     #[test]
     fn accounting_uses_typed_runtime_metadata_not_adapter_name() {

@@ -232,8 +232,17 @@ impl LoraFilter {
         lora_name: &str,
         available: &[WorkerId],
     ) -> Vec<WorkerId> {
-        let observed = self.state_tracker.snapshot();
-        self.bounded_fallback(&observed, lora_name, available)
+        available
+            .iter()
+            .copied()
+            .max_by_key(|&worker| {
+                (
+                    RendezvousHasher::compute_score(lora_name, WorkerWithDpRank::new(worker, 0)),
+                    worker,
+                )
+            })
+            .into_iter()
+            .collect()
     }
 
     /// Filter workers for a LoRA request (HashMap variant for KV routing).
@@ -316,6 +325,30 @@ mod tests {
 
         assert_eq!(first.len(), 1);
         assert_eq!(first, reordered);
+    }
+
+    #[test]
+    fn runtime_placement_ignores_frontend_loaded_state() {
+        let key = "dyn-lora-74bbe88c562d9d177d098e3ba118851a";
+        let empty = LoraFilter::new(LoraRoutingTable::new(), LoraStateTracker::new());
+        let expected = empty.filter_worker_ids_for_runtime_lora(key, &[1, 2, 3]);
+        assert_eq!(expected.len(), 1);
+        for loaded in [vec![1, 2], vec![3]] {
+            let tracker = LoraStateTracker::new();
+            for worker in loaded {
+                tracker.handle_mdc_addition(make_worker(worker), &make_lora_info(key));
+            }
+            let filter = LoraFilter::new(LoraRoutingTable::new(), tracker);
+            assert_eq!(
+                filter.filter_worker_ids_for_runtime_lora(key, &[3, 2, 1]),
+                expected
+            );
+        }
+        assert!(
+            empty
+                .filter_worker_ids_for_runtime_lora(key, &[])
+                .is_empty()
+        );
     }
 
     #[test]

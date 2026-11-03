@@ -401,6 +401,8 @@ async fn builtin_direct_uses_bound_soft_affinity_as_exact_target() {
 struct CompletedBuiltinDispatch {
     worker_ids: Mutex<Vec<u64>>,
     dp_ranks: Mutex<Vec<Option<u32>>>,
+    fails: AtomicBool,
+    unfinished: AtomicBool,
 }
 
 #[async_trait]
@@ -421,6 +423,15 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
             .lock()
             .unwrap()
             .push(instance.expect("selected worker instance").id());
+        if self.fails.load(Ordering::SeqCst) {
+            return Err(anyhow::anyhow!("dispatch failed"));
+        }
+        if self.unfinished.load(Ordering::SeqCst) {
+            return Ok(ResponseStream::new(
+                Box::pin(stream::pending()),
+                context.context(),
+            ));
+        }
         let output = Annotated::from_data(LLMEngineOutput {
             finish_reason: Some(FinishReason::Stop),
             ..Default::default()
@@ -611,6 +622,21 @@ async fn builtin_lora_keeps_separate_selection_and_cleanup() {
     ));
     assert_eq!(dispatch.worker_ids.lock().unwrap().len(), 2);
 
+    let mut adapter_request = request();
+    adapter_request.routing_mut().lora_name = Some("adapter".into());
+    dispatch.unfinished.store(true, Ordering::SeqCst);
+    let stream = host
+        .generate(Context::new(adapter_request.clone()))
+        .await
+        .unwrap();
+    assert_eq!(estimator.get_inflight_counts().get("adapter"), Some(&1));
+    drop(stream);
+    assert!(!estimator.get_inflight_counts().contains_key("adapter"));
+
+    dispatch.fails.store(true, Ordering::SeqCst);
+    assert!(host.generate(Context::new(adapter_request)).await.is_err());
+    assert!(!estimator.get_inflight_counts().contains_key("adapter"));
+
     drop(host);
     runtime.shutdown();
 }
@@ -651,7 +677,10 @@ async fn runtime_lora_pin_is_rechecked_after_transport_fallback() {
     client.override_instance_avail(vec![101, 202]);
     let load_context = test_load_context(&client).await;
     let tracker = LoraStateTracker::new();
-    let mut config = ModelRuntimeConfig::default();
+    let mut config = ModelRuntimeConfig {
+        data_parallel_size: 2,
+        ..Default::default()
+    };
     config.taints.insert("dynamo.runtime-lora/v2".into());
     config
         .set_engine_specific("supports_runtime_lora_resolution", true)
@@ -702,9 +731,8 @@ async fn runtime_lora_pin_is_rechecked_after_transport_fallback() {
     };
     let first = select();
     let second = select();
-    // Two picks return the round-robin cursor to the first worker.
-    assert_ne!(first.worker, second.worker);
-    assert_eq!(first.fallback, HashSet::from([101, 202]));
+    assert_eq!(first.worker, second.worker);
+    assert_eq!(first.fallback, HashSet::from([first.worker]));
 
     let dispatch = Arc::new(CompletedBuiltinDispatch::default());
     let host = RoutingHost::builder(client, RouterMode::RoundRobin)
@@ -725,10 +753,12 @@ async fn runtime_lora_pin_is_rechecked_after_transport_fallback() {
         assert_eq!(selected.fallback, HashSet::from([pinned_worker]));
         let mut pinned = input.clone();
         pinned.routing_mut().backend_instance_id = Some(pinned_worker);
+        pinned.routing_mut().dp_rank = Some(1);
         let mut stream = host.generate(Context::new(pinned)).await.unwrap();
         while stream.next().await.is_some() {}
     }
     assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[101, 202]);
+    assert_eq!(dispatch.dp_ranks.lock().unwrap().as_slice(), &[Some(1); 2]);
 
     let mut changed = config.clone();
     changed
