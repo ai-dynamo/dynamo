@@ -724,6 +724,51 @@ async fn load_loss_withdraws_worker_and_fails_the_process() {
     peer.shutdown().await;
 }
 
+#[tokio::test]
+async fn vllm_engine_loss_withdraws_worker_and_fails_the_process() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        engine_loss_withdraws_worker_and_fails_the_process(),
+    )
+    .await
+    .expect("process scenario exceeded its overall deadline");
+}
+
+/// A vLLM engine lost after startup withdraws the worker, and the sidecar then
+/// exits with an error.
+async fn engine_loss_withdraws_worker_and_fails_the_process() {
+    let env = Environment::new().await;
+    let mut peer = vllm::Fixture::start(
+        Controller::default(),
+        FixtureConfig {
+            model: env.model.clone(),
+            ..Default::default()
+        },
+    )
+    .await;
+    // The grace keeps the withdrawn process up while the test observes it.
+    let mut child =
+        env.spawn_with_grace::<vllm::Fixture>(&peer.endpoint(), DisaggregationMode::Aggregated, 5);
+    let router = env.ready("backend").await;
+    peer.shutdown().await;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while !env.registrations("backend").await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("engine loss did not withdraw the worker\n{}", child.logs()));
+    env.withdrawn("backend", &router).await;
+    assert!(child.is_running(), "withdrawal must precede process exit");
+    // 1 is the engine-loss error; a forced shutdown (exit 911) would read 143.
+    assert_eq!(child.exit().await.code(), Some(1), "{}", child.logs());
+    assert!(
+        child.logs().contains("vLLM engine lost"),
+        "{}",
+        child.logs()
+    );
+}
+
 async fn ready(router: &PrefillRouter) {
     bounded("real PrefillRouter availability", async {
         loop {
