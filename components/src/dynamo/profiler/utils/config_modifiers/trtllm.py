@@ -273,6 +273,10 @@ _KV_EVENT_FLAGS = frozenset(
 )
 
 
+def _has_explicit_kv_event_flag(args: list[str]) -> bool:
+    return any(arg.split("=", 1)[0] in _KV_EVENT_FLAGS for arg in args)
+
+
 class TrtllmConfigModifier(BaseConfigModifier):
     BACKEND = "trtllm"
 
@@ -295,9 +299,18 @@ class TrtllmConfigModifier(BaseConfigModifier):
         )
         # The disagg blueprint publishes prefill KV events for the KV router; an
         # explicit choice stays authoritative.
-        if role == SubComponentType.PREFILL and not any(
-            arg.split("=", 1)[0] in _KV_EVENT_FLAGS for arg in finalized
+        if role == SubComponentType.PREFILL and not _has_explicit_kv_event_flag(
+            finalized
         ):
+            finalized = append_argument(finalized, "--publish-kv-events")
+        return finalized
+
+    @classmethod
+    def _finalize_agg_cli_args(cls, args: list[str]) -> list[str]:
+        # The agg blueprint publishes KV events for the KV router, and
+        # dynamo.trtllm defaults them off; an explicit choice stays authoritative.
+        finalized = break_arguments(args)
+        if not _has_explicit_kv_event_flag(finalized):
             finalized = append_argument(finalized, "--publish-kv-events")
         return finalized
 
