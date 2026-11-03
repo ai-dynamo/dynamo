@@ -303,6 +303,9 @@ def test_allowlist_must_intersect_declared_schemes():
         ResolvedLoRA(Path("adapter"), "revision\nsecret"),
         ResolvedLoRA(Path("adapter"), "revision\ud800"),
         ResolvedLoRA(Path("adapter"), "immutable", size_bytes=-1),
+        ResolvedLoRA(Path("adapter"), "immutable", size_bytes=True),
+        ResolvedLoRA(Path("adapter"), "immutable", size_bytes="1024"),
+        ResolvedLoRA(Path("adapter"), "immutable", size_bytes=1024.0),
     ],
 )
 async def test_invalid_resolver_result_is_rejected(result, tmp_path):
@@ -327,8 +330,31 @@ async def test_invalid_resolver_result_is_rejected(result, tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reservation", [0, 512])
+async def test_cached_snapshot_size_can_exceed_write_reservation(tmp_path, reservation):
+    snapshot = tmp_path / "adapter"
+    snapshot.mkdir()
+    (snapshot / "adapter_model.safetensors").write_bytes(b"x" * 1024)
+    result = ResolvedLoRA(snapshot, "immutable", size_bytes=1024)
+    chain = RuntimeLoRAResolverChain([Resolver(result)], {"wandb-artifact"})
+    context = ResolveContext(
+        adapter_key="dyn-lora-0123456789abcdef0123456789abcdef",
+        base_model_name="base",
+        cache_root=tmp_path,
+        deadline_monotonic=asyncio.get_running_loop().time() + 1,
+        max_download_bytes=reservation,
+        request_id="request-id",
+    )
+
+    assert (
+        await chain.resolve(source_uri="wandb-artifact:///adapter:v1", context=context)
+        is result
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("size_bytes", [None, 1023, 1024, 1025])
-async def test_reported_snapshot_size_respects_download_limit(tmp_path, size_bytes):
+async def test_reported_snapshot_size_is_advisory(tmp_path, size_bytes):
     result = ResolvedLoRA(tmp_path / "adapter", "immutable", size_bytes=size_bytes)
     chain = RuntimeLoRAResolverChain([Resolver(result)], {"wandb-artifact"})
     context = ResolveContext(
@@ -340,18 +366,7 @@ async def test_reported_snapshot_size_respects_download_limit(tmp_path, size_byt
         request_id="request-id",
     )
 
-    if size_bytes == 1025:
-        with pytest.raises(RuntimeLoRAPluginError) as error:
-            await chain.resolve(
-                source_uri="wandb-artifact:///adapter:v1", context=context
-            )
-        assert (
-            str(error.value) == "runtime LoRA resolver returned an invalid size_bytes"
-        )
-    else:
-        assert (
-            await chain.resolve(
-                source_uri="wandb-artifact:///adapter:v1", context=context
-            )
-            is result
-        )
+    assert (
+        await chain.resolve(source_uri="wandb-artifact:///adapter:v1", context=context)
+        is result
+    )
