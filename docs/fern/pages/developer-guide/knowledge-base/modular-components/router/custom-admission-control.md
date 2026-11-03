@@ -286,6 +286,8 @@ Every row also returns its `WorkerInfo` from `info()` without a declaration. To 
 | `set_policy_class(name)` | Select a configured policy family or standalone class; family selection preserves uncached-input bucketing |
 | `set_due_at(instant)` | Set a deadline for router queue waiting |
 | `set_scheduling_cost_tokens(tokens)` | Override the cost used by queue scheduling |
+| `set_priority_jump(seconds)` | Replace the request's queue priority boost; negative values count as zero |
+| `set_strict_priority(tier)` | Replace the request's strict queue tier; a higher tier is always dequeued first |
 | `set_worker_selection_target(worker)` | Set a soft worker/rank preference, subject to hard pins and eligibility |
 | `clear_worker_selection_target()` | Clear the soft preference |
 
