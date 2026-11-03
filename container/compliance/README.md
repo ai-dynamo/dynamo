@@ -21,6 +21,7 @@ own filesystem; CI extracts `/legal` and `/sboms` from that stage with a warm ca
 | `native_packages.yaml` | From-source / binary components attributed via a hand-curated overlay (optional `license_text_path`). |
 | `verify_sbom_diff.py` | Cross-checks generated NOTICES against the base SBOM corpus; fails on drift. |
 | `resolve_diff_base.py` | Picks the baseline commit to diff a build's OSRB CSV against (PR→main / post-merge→main / release branch→prior release tag). |
+| `resolve_diff_base.sh` | CI wrapper for the "Resolve diff baseline" steps: fetches the history and tags the resolver needs into the shallow checkout, reads the version from `pyproject.toml`, and appends `resolve_diff_base.py`'s outputs to `$GITHUB_OUTPUT`. |
 | `diff_osrb_csv.py` | Diffs two OSRB CSVs into a change-typed `*.diff.csv` (additions, version bumps, license changes, removals). |
 
 ## How it works
