@@ -126,6 +126,7 @@
 /components/src/dynamo/sglang/request_handlers/                                                         @ai-dynamo/dynamo-backend-sglang-codeowners
 
 # === backend-triton  (@ai-dynamo/dynamo-backend-triton-codeowners) ===
+/lib/sidecar/triton/                                                                                    @ai-dynamo/dynamo-backend-triton-codeowners
 /components/src/dynamo/triton/**                                                                        @ai-dynamo/dynamo-backend-triton-codeowners
 
 # === kv-memory  (@ai-dynamo/dynamo-kv-memory-codeowners) ===

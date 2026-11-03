@@ -126,6 +126,7 @@ areas:
   path_globs:
   - components/src/dynamo/triton/**
   - docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/triton/
+  - lib/sidecar/triton/
 - label: sidecar
   github_team: '@ai-dynamo/dynamo-sidecar-codeowners'
   path_globs: []
