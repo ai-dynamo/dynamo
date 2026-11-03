@@ -213,7 +213,17 @@ impl Server {
             .await
             .unwrap();
         let status = response.status();
-        (status, response.json().await.unwrap())
+        let request_id = response.headers()["request-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(!request_id.is_empty());
+        let body: Value = response.json().await.unwrap();
+        if !status.is_success() {
+            assert_eq!(body["type"], "error");
+            assert_eq!(body["request_id"], request_id);
+        }
+        (status, body)
     }
 
     async fn count(&self, body: &Value) -> u64 {
@@ -341,6 +351,64 @@ async fn count_tokens_honors_thinking_and_tool_choice() {
 }
 
 #[tokio::test]
+async fn count_tokens_admission_observes_interleaved_beta_and_current_modes() {
+    let fixture = Fixture::new("model", "", "WhitespaceSplit", |_| {});
+    let (server, _workers) = Server::start(&[(&fixture, true)], false).await;
+    for (thinking, beta, accepted) in [
+        (json!({"type": "between_tools"}), None, true),
+        (
+            json!({"type": "enabled", "budget_tokens": 4096}),
+            None,
+            false,
+        ),
+        (
+            json!({"type": "enabled", "budget_tokens": 4096}),
+            Some("other-beta, interleaved-thinking-2025-05-14"),
+            true,
+        ),
+        (
+            json!({"type": "enabled", "budget_tokens": 4096}),
+            Some("interleaved-thinking-2025-05-14-extra"),
+            false,
+        ),
+        (
+            json!({"type": "between_tools", "budget_tokens": 1024}),
+            None,
+            false,
+        ),
+    ] {
+        let mut request = body("model", "hello");
+        request["max_tokens"] = json!(2048);
+        request["thinking"] = thinking;
+        let mut post = server
+            .client
+            .post(format!("{}/v1/messages/count_tokens", server.url))
+            .json(&request);
+        if let Some(beta) = beta {
+            post = post.header("anthropic-beta", beta);
+        }
+        let response = post.send().await.unwrap();
+        let status = response.status();
+        let request_id = response.headers()["request-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(!request_id.is_empty());
+        let body: Value = response.json().await.unwrap();
+        if accepted {
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert!(body["input_tokens"].is_u64(), "{body}");
+        } else {
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(body["error"]["type"], "invalid_request_error");
+            assert_eq!(body["request_id"], request_id);
+        }
+    }
+    assert!(server.backend.0.lock().unwrap().is_empty());
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn count_tokens_supports_in_process_registration_without_changing_thinking_defaults() {
     let fixture = Fixture::new("model", "", "WhitespaceSplit", |card| {
         card.runtime_config.reasoning_parser = Some("deepseek_r1".into());
@@ -456,7 +524,14 @@ async fn count_tokens_rejects_duplicate_model_keys() {
         .send()
         .await
         .unwrap();
-    assert!(!response.status().is_success());
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.unwrap();
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("duplicate field")
+    );
     assert!(server.backend.0.lock().unwrap().is_empty());
     server.shutdown().await;
 }
