@@ -42,6 +42,7 @@ use super::replay::{
     materialize_mocker_config, mocker_config_from_json, mocker_config_from_python,
 };
 use dynamo_mocker::config::MockerConfig;
+use dynamo_runtime::CancellationToken;
 use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
 use dynamo_runtime::protocols::EndpointId;
 
@@ -74,6 +75,25 @@ pub enum EngineType {
     Echo = 1,
     Dynamic = 2,
     Mocker = 3,
+}
+
+/// Process-level signal for the HTTP frontend's staged shutdown sequence.
+#[pyclass]
+#[derive(Clone, Default)]
+pub(crate) struct FrontendShutdown {
+    token: CancellationToken,
+}
+
+#[pymethods]
+impl FrontendShutdown {
+    #[new]
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn shutdown(&self) {
+        self.token.cancel();
+    }
 }
 
 #[pyclass]
@@ -891,13 +911,15 @@ async fn select_engine(
 }
 
 #[pyfunction]
-#[pyo3(signature = (distributed_runtime, input, engine_config, frontend_route_extensions=None))]
+#[pyo3(signature = (distributed_runtime, input, engine_config, frontend_route_extensions=None, *, shutdown=None, http_endpoint_drain_delay_secs=0))]
 pub fn run_input<'p>(
     py: Python<'p>,
     distributed_runtime: super::DistributedRuntime,
     input: &str,
     engine_config: EngineConfig,
     frontend_route_extensions: Option<PyObject>,
+    shutdown: Option<FrontendShutdown>,
+    http_endpoint_drain_delay_secs: u64,
 ) -> PyResult<Bound<'p, PyAny>> {
     let input_enum: Input = input.parse().map_err(to_pyerr)?;
     let frontend_route_extensions =
@@ -923,9 +945,16 @@ pub fn run_input<'p>(
     .map_err(PyValueError::new_err)?;
     crate::future_into_py(py, async move {
         if matches!(&input_enum, Input::Http) {
-            HttpFrontend::default()
+            let mut frontend = HttpFrontend::default()
                 .frontend_route_extensions(frontend_route_extensions)
-                .plugins(plugins)
+                .plugins(plugins);
+            if let Some(shutdown) = shutdown {
+                frontend = frontend.shutdown_signal(
+                    shutdown.token,
+                    std::time::Duration::from_secs(http_endpoint_drain_delay_secs),
+                );
+            }
+            frontend
                 .run(distributed_runtime.inner.clone(), engine_config.inner)
                 .await
                 .map_err(to_pyerr)?;

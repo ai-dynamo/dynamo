@@ -26,8 +26,8 @@ use dynamo_kv_router::{
     KvRouterConfig, RoutingPartitionRef, WorkerSelectionPolicy, WorkerType,
     plugins::{RouterPlugins, request_classifier::RequestClassifierFactory},
 };
-use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::metrics::MetricsHierarchy;
+use dynamo_runtime::{CancellationToken, DistributedRuntime};
 
 /// Dynamo's complete discovery-backed HTTP frontend.
 ///
@@ -37,6 +37,8 @@ use dynamo_runtime::metrics::MetricsHierarchy;
 pub struct HttpFrontend {
     frontend_route_extensions: Vec<FrontendRouteExtension>,
     plugins: RouterPlugins,
+    shutdown_token: Option<CancellationToken>,
+    endpoint_drain_delay: std::time::Duration,
 }
 
 impl HttpFrontend {
@@ -56,6 +58,17 @@ impl HttpFrontend {
         frontend_route_extensions: Vec<FrontendRouteExtension>,
     ) -> Self {
         self.frontend_route_extensions = frontend_route_extensions;
+        self
+    }
+
+    /// Install a process-shutdown signal that quiesces HTTP before cancelling runtime state.
+    pub fn shutdown_signal(
+        mut self,
+        shutdown_token: CancellationToken,
+        endpoint_drain_delay: std::time::Duration,
+    ) -> Self {
+        self.shutdown_token = Some(shutdown_token);
+        self.endpoint_drain_delay = endpoint_drain_delay;
         self
     }
 
@@ -127,6 +140,8 @@ impl HttpFrontend {
             engine_config,
             self.frontend_route_extensions,
             plugins,
+            self.shutdown_token,
+            self.endpoint_drain_delay,
         )
         .await;
 
@@ -163,6 +178,8 @@ async fn run_with_router_plugins(
     engine_config: EngineConfig,
     frontend_route_extensions: Vec<FrontendRouteExtension>,
     plugins: RouterPluginBuilder,
+    shutdown_token: Option<CancellationToken>,
+    endpoint_drain_delay: std::time::Duration,
 ) -> anyhow::Result<()> {
     let local_model = engine_config.local_model();
     let mut http_service_builder = match (
@@ -206,8 +223,14 @@ async fn run_with_router_plugins(
     if let Some(http_host) = local_model.http_host() {
         http_service_builder = http_service_builder.host(http_host);
     }
-    http_service_builder =
-        http_service_builder.cancel_token(Some(distributed_runtime.primary_token()));
+    http_service_builder = http_service_builder
+        .cancel_token(Some(distributed_runtime.primary_token()))
+        .force_shutdown_token(distributed_runtime.runtime().shutdown_started_token());
+    if let Some(shutdown_token) = shutdown_token {
+        http_service_builder = http_service_builder
+            .shutdown_token(Some(shutdown_token))
+            .endpoint_drain_delay(endpoint_drain_delay);
+    }
     http_service_builder =
         http_service_builder.with_request_template(engine_config.local_model().request_template());
     http_service_builder = http_service_builder

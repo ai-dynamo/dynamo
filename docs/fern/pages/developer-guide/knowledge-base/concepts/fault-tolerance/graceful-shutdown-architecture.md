@@ -90,15 +90,18 @@ generate_endpoint.serve_endpoint(
 
 The Frontend uses a separate HTTP drain state before it cancels the distributed runtime:
 
-1. Mark the server as draining.
-2. Return `503 Service Unavailable` from `/health` and reject new OpenAI-compatible requests with 503.
-3. Keep `/live` at `200 OK` so liveness probes do not restart the process while requests drain.
+1. A process signal triggers a dedicated Frontend shutdown token instead of cancelling the distributed runtime.
+2. Enter the quiescing state. Return `503 Service Unavailable` from `/health`, keep `/live` at `200 OK`, and continue admitting inference traffic while upstream endpoint removal propagates.
+3. After `DYN_HTTP_ENDPOINT_DRAIN_DELAY_SECS` (default `10` seconds), enter the draining state and reject new OpenAI-compatible inference requests with 503.
 4. Wait for admitted response bodies, including streaming responses, to complete.
 5. Continue tracking accepted `/v1/realtime` WebSocket sessions until their tasks exit, even though the HTTP upgrade response has completed.
-6. After `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` expires (default `5` seconds), enter the stopping state and cancel runtime state.
+6. After requests finish or `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` expires (default `5` seconds), enter the stopping state and cancel runtime state.
+7. Return control to the Python entrypoint, which shuts down discovery and the rest of the distributed runtime.
 
 This separates readiness from liveness: traffic is removed promptly without turning an intentional
-drain into a restart loop.
+drain into a restart loop. The endpoint propagation delay also closes the interval where Kubernetes
+still routes to a terminating Frontend after that process has stopped accepting requests. A second
+`SIGTERM` or `SIGINT` skips the staged path and cancels the runtime immediately.
 
 ### Migration Integration
 
