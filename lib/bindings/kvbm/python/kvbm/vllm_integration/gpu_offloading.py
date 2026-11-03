@@ -476,10 +476,12 @@ class GPUOffloadingSpec(OffloadingSpec):
         super().__init__(config)
         parallel = config.parallel
         world_size = parallel.world_size
+        tp_size = getattr(parallel, "tp_size", 1)
         if (
             type(world_size) is not int
-            or world_size not in (1, 2)
-            or getattr(parallel, "tp_size", 1) != world_size
+            or world_size <= 0
+            or type(tp_size) is not int
+            or tp_size != world_size
             or any(
                 getattr(parallel, name, 1) != 1
                 for name in ("pp_size", "pcp_size", "dcp_size")
@@ -488,7 +490,7 @@ class GPUOffloadingSpec(OffloadingSpec):
             or config.replicated_layout
         ):
             raise ValueError(
-                "Direct GPU KV cache requires raw-layout TP1 or TP2 without PP/CP"
+                "Direct GPU KV cache requires raw-layout TP without PP/CP"
             )
         self.gpu_rank_devices = self.extra_config.get("gpu_rank_devices")
         if world_size > 1 and (
@@ -500,11 +502,11 @@ class GPUOffloadingSpec(OffloadingSpec):
             )
             or len(set(self.gpu_rank_devices)) != world_size
         ):
-            raise ValueError("TP2 requires an explicit unique gpu_rank_devices mapping")
-        if world_size > 1 and getattr(parallel, "data_parallel_size", 1) != 1:
             raise ValueError(
-                "Retained GPU TP2 currently requires data parallel size one"
+                "TP greater than one requires an explicit unique gpu_rank_devices mapping"
             )
+        if world_size > 1 and getattr(parallel, "data_parallel_size", 1) != 1:
+            raise ValueError("Retained GPU TP requires data parallel size one")
         if (
             not self.kv_events_config.enable_kv_cache_events
             or not self.kv_events_config.self_describing_kv_events
@@ -565,7 +567,7 @@ class GPUOffloadingSpec(OffloadingSpec):
             # Raw TP shards are not interchangeable with a TP1 row. KVCR also
             # validates each labeled part's byte geometry before starting DMA.
             if self.tiers[0].get("compatibility_domain") != domain:
-                raise ValueError("TP2 tier must match its certified layout domain")
+                raise ValueError("TP tier must match its certified layout domain")
             self.base_domain = parallel_layout_domain(domain, world_size)
         self._manager = self._worker = None
 

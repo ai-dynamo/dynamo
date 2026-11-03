@@ -4,8 +4,8 @@
 
 
 def parallel_layout_domain(domain, tp_size):
-    if type(tp_size) is not int or tp_size not in (1, 2):
-        raise ValueError("Retained GPU layout supports TP1 or TP2")
+    if type(tp_size) is not int or tp_size <= 0:
+        raise ValueError("Retained GPU layout requires a positive integer TP size")
     if (
         not isinstance(domain, str)
         or not domain

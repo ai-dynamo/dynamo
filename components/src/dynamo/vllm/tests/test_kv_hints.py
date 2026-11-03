@@ -740,10 +740,13 @@ def test_mnnvl_and_cpu_hint_providers_cannot_partially_publish_a_shared_domain()
     runtime.set_engine_specific.assert_not_called()
 
 
-def test_tp2_gpu_and_cpu_hints_reject_shared_domain_before_publication(monkeypatch):
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+def test_tp_gpu_and_cpu_hints_reject_shared_domain_before_publication(
+    monkeypatch, tp_size
+):
     runtime = MagicMock()
     layout = SimpleNamespace(
-        parallel_layout_domain=MagicMock(return_value="tp2-domain")
+        parallel_layout_domain=MagicMock(return_value="transformed-domain")
     )
     loader = MagicMock(return_value=layout)
     monkeypatch.setattr(kv_hints, "importlib", SimpleNamespace(import_module=loader))
@@ -752,7 +755,7 @@ def test_tp2_gpu_and_cpu_hints_reject_shared_domain_before_publication(monkeypat
         [_gpu_connector(), _kvcr_connector(control_ports=[24124])],
         router_hint_transfer_domain="gpu-certified-layout-v1",
     )
-    args.tensor_parallel_size = 2
+    args.tensor_parallel_size = tp_size
 
     with pytest.raises(ValueError, match="CPU-hint runtime domain"):
         publish_kv_hint_capabilities(runtime, args, WorkerType.Decode)
@@ -788,10 +791,42 @@ def test_tp1_gpu_and_cpu_hints_preserve_same_domain_publication():
     assert all(json.loads(value) == "gpu-certified-layout-v1" for value in domain_calls)
 
 
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+def test_gpu_tp_discovery_accepts_matching_raw_layout(monkeypatch, tp_size):
+    base = "gpu-certified-layout-v1"
+    domain = f"{base}|gpu-raw-tp-v1:tp={tp_size}"
+    layout = SimpleNamespace(parallel_layout_domain=MagicMock(return_value=domain))
+    loader = MagicMock(return_value=layout)
+    monkeypatch.setattr(kv_hints, "importlib", SimpleNamespace(import_module=loader))
+    args = _wrapped_engine_args(
+        "PdConnector", [_gpu_connector()], router_hint_transfer_domain=base
+    )
+    args.tensor_parallel_size = tp_size
+    args.distributed_executor_backend = "mp"
+    runtime = MagicMock()
+
+    publish_kv_hint_capabilities(runtime, args, WorkerType.Decode)
+
+    fields = {
+        call.args[0]: json.loads(call.args[1])
+        for call in runtime.set_engine_specific.call_args_list
+    }
+    assert fields["router_hint_gpu_direct"] is True
+    assert fields["router_hint_transfer_domain"] == domain
+    assert fields["router_hint_gpu_source_control_endpoints"] == {
+        "0": "tcp://worker-a:24123"
+    }
+    assert KV_HINT_TRANSFER_CAPABILITY_KEY not in fields
+    loader.assert_called_once_with("kvbm.vllm_integration.gpu_layout")
+    layout.parallel_layout_domain.assert_called_once_with(base, tp_size)
+    assert args.kv_transfer_config.kv_connector_extra_config[
+        "router_hint_transfer_domain"
+    ] == base
+
+
 @pytest.mark.parametrize(
     "changes",
     [
-        {"tensor_parallel_size": 4},
         {"data_parallel_size": 2},
         {"distributed_executor_backend": "ray"},
         {"pipeline_parallel_size": 2},
@@ -799,16 +834,43 @@ def test_tp1_gpu_and_cpu_hints_preserve_same_domain_publication():
         {"decode_context_parallel_size": 2},
     ],
 )
-def test_gpu_tp2_discovery_rejects_unsupported_parallel_topologies(changes):
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+def test_gpu_tp_discovery_rejects_unsupported_parallel_topologies(
+    monkeypatch, changes, tp_size
+):
+    loader = MagicMock(side_effect=AssertionError("Invalid topology must fail first"))
+    monkeypatch.setattr(kv_hints, "importlib", SimpleNamespace(import_module=loader))
     args = _wrapped_engine_args(
         "PdConnector",
         [_gpu_connector()],
         router_hint_transfer_domain="gpu-certified-layout-v1",
     )
-    args.tensor_parallel_size = 2
+    args.tensor_parallel_size = tp_size
     for field, value in changes.items():
         setattr(args, field, value)
     runtime = MagicMock()
-    with pytest.raises(ValueError, match="TP1 or TP2|single local MP"):
+    with pytest.raises(ValueError, match="single local MP"):
         publish_kv_hint_capabilities(runtime, args, WorkerType.Decode)
     runtime.set_engine_specific.assert_not_called()
+    loader.assert_not_called()
+
+
+@pytest.mark.parametrize("tp_size", [True, False, 0, -1, 3.0, "3", None])
+def test_gpu_discovery_rejects_invalid_tp_count_before_import_or_publication(
+    monkeypatch, tp_size
+):
+    loader = MagicMock(side_effect=AssertionError("Invalid TP count must fail first"))
+    monkeypatch.setattr(kv_hints, "importlib", SimpleNamespace(import_module=loader))
+    args = _wrapped_engine_args(
+        "PdConnector",
+        [_gpu_connector()],
+        router_hint_transfer_domain="gpu-certified-layout-v1",
+    )
+    args.tensor_parallel_size = tp_size
+    runtime = MagicMock()
+
+    with pytest.raises(ValueError):
+        publish_kv_hint_capabilities(runtime, args, WorkerType.Decode)
+
+    runtime.set_engine_specific.assert_not_called()
+    loader.assert_not_called()

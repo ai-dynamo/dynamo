@@ -129,23 +129,28 @@ Local model-cache stores and loads use device-to-device
 copies. CPU memory carries control messages and pointer/size descriptors; it
 does not hold KV payloads. Budget additional VRAM on both workers.
 
-The implementation requires one engine per role, tensor parallel size one or two,
-and identical raw cache layouts. TP2 requires a single local multiprocessing
-engine with data parallel size one and no pipeline or context parallelism.
-The default transport uses a same-host GPU pair
-with working CUDA IPC. The MNNVL profile supports hosts in the same healthy
-NVLink fabric and clique. Canonical layouts, replicated layouts, RDMA, CPU/disk payload
+The implementation requires one engine per role with the same valid tensor
+parallel size and identical raw cache layouts on the source and target. Each
+engine's TP group uses local multiprocessing, with data parallel size one and
+no pipeline or context parallelism. Transfers between different TP sizes and
+TP engines spanning multiple hosts are unsupported.
+The default transport uses same-host GPUs with working CUDA IPC between the
+source and target allocations. The MNNVL profile supports hosts in the same healthy
+NVLink fabric and clique. Canonical or replicated offload layouts, RDMA, CPU/disk payload
 pools and the versioned state-agent ingress are unsupported. Use the native
 worker event publisher and a compatible vLLM offloading/tiering API.
 
-For TP2, set `gpu_rank_devices` to the explicit CUDA device ordinal for each
-rank, such as `[0, 1]`, in the connector's `kv_connector_extra_config`. Each
+For TP greater than one, set `gpu_rank_devices` to one explicit, distinct local
+CUDA device ordinal per rank, such as `[0, 1, 2, 3]` for TP4, in the connector's
+`kv_connector_extra_config`. Each
 worker imports only its own bank and verifies the physical GPU UUID. The
-`gpu_bytes_to_use` budget counts both rank banks together: a 2-GiB budget
-allocates at most 1 GiB on each GPU. KVCR transfers both labeled rank parts in
-one operation, and ready inventory waits for both model workers to complete
-their stores. A TP2 compatibility suffix separates this inventory from TP1;
+`gpu_bytes_to_use` budget counts all rank banks together: a 2-GiB budget with
+TP4 allocates at most 512 MiB on each GPU. KVCR transfers all labeled rank parts
+in one operation, and ready inventory waits for every model worker to complete
+its stores. A TP-size compatibility suffix separates multi-rank inventory from
+TP1 and from other TP sizes;
 the certified base domain must still identify the exact model and raw layout.
+The local device count, VRAM budget and 64-KiB rank-manifest limit also apply.
 
 Use the following same-host TP1 `--kv-transfer-config` example. Replace the
 certified domain with the contract for your model and raw cache layout, and
@@ -180,8 +185,9 @@ publishing with `--kv-events-config` as in the CPU setup above.
 The tier requires exactly one integer control port and the exact GPU capability
 list shown above. Its `compatibility_domain` must match the connector's certified
 base domain. The tier's `module_path` is also required when the factory builds
-Prometheus metric definitions. For TP2, add `"gpu_rank_devices": [0, 1]` to the
-extra configuration and run the engine with tensor parallel size two.
+Prometheus metric definitions. For TP4, add `"gpu_rank_devices": [0, 1, 2, 3]`
+to the extra configuration and run both engines with tensor parallel size four.
+For another TP size, provide exactly one device ordinal for each rank.
 
 Leave `engine_id` unset so vLLM generates a fresh identity for each engine
 lifetime. If supplying it explicitly, use a fresh value for every process

@@ -510,10 +510,13 @@ class GPUMultiRankCacheRegion:
                 "fabric_domain": self.fabric_domain,
                 "banks": entries,
             }
+            raw_group = json.dumps(self.metadata).encode()
+            if len(raw_group) > 65536:
+                raise ValueError("GPU bank group metadata exceeds 64 KiB")
             temporary = self.path / "group.json.pending"
             fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            with os.fdopen(fd, "w") as output:
-                json.dump(self.metadata, output)
+            with os.fdopen(fd, "wb") as output:
+                output.write(raw_group)
                 output.flush()
                 os.fsync(output.fileno())
             os.rename(temporary, self.path / "group.json")

@@ -31,7 +31,7 @@ pytestmark = [
 
 @pytest.fixture
 def fake_banks(monkeypatch, tmp_path):
-    state = SimpleNamespace(device=0, created=[])
+    state = SimpleNamespace(device=0, visible_devices=2, created=[])
 
     def identity(device):
         return gpu_mnnvl.FabricIdentity(f"GPU-{uuid.UUID(int=device + 1)}", "1" * 32, 1)
@@ -90,7 +90,9 @@ def fake_banks(monkeypatch, tmp_path):
                 self._closed = True
 
     monkeypatch.setattr(gpu_memory.tempfile, "gettempdir", lambda: str(tmp_path))
-    monkeypatch.setattr(gpu_memory.torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(
+        gpu_memory.torch.cuda, "device_count", lambda: state.visible_devices
+    )
     monkeypatch.setattr(gpu_memory.torch.cuda, "device", device_context)
     monkeypatch.setattr(gpu_memory.torch.cuda, "current_device", lambda: state.device)
     monkeypatch.setattr(gpu_memory, "_process_start_ticks", lambda pid: 17)
@@ -101,10 +103,15 @@ def fake_banks(monkeypatch, tmp_path):
     return SimpleNamespace(state=state, identity=identity, bank_type=Bank)
 
 
-@pytest.fixture
-def bank_group(fake_banks):
+@pytest.fixture(params=[2, 3, 4, 8])
+def bank_group(fake_banks, request):
+    fake_banks.state.visible_devices = request.param
     group = GPUMultiRankCacheRegion(
-        "rank-bank-test", 4, 24, "test-layout", gpu_rank_devices=[1, 0]
+        "rank-bank-test",
+        4,
+        24,
+        "test-layout",
+        gpu_rank_devices=list(reversed(range(request.param))),
     )
     try:
         yield group
@@ -115,18 +122,22 @@ def bank_group(fake_banks):
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_rank_bank_group_commits_all_banks_and_explicit_device_order(bank_group):
-    assert bank_group.shape == (4, 48)
-    assert bank_group.strides == (48, 1)
+    world_size = bank_group.world_size
+    assert bank_group.shape == (4, 24 * world_size)
+    assert bank_group.strides == (24 * world_size, 1)
     assert not hasattr(bank_group, "tensor")
     manifest = json.loads((bank_group.path / "group.json").read_bytes())
     assert manifest == bank_group.metadata
-    assert [entry["device"] for entry in manifest["banks"]] == [1, 0]
+    assert len(manifest["banks"]) == world_size
+    assert [entry["device"] for entry in manifest["banks"]] == list(
+        reversed(range(world_size))
+    )
     for rank, bank in enumerate(bank_group.banks):
         assert bank.path == bank_group.path / f"rank-{rank}"
         assert bank.shape == (4, 24)
         entry = manifest["banks"][rank]
         assert entry["rank"] == rank
-        assert entry["world_size"] == 2
+        assert entry["world_size"] == world_size
         assert entry["owner_pid"] == os.getpid()
         assert entry["owner_start_ticks"] == 17
         assert (
@@ -160,12 +171,12 @@ def test_worker_import_selects_rank_then_checks_actual_gpu(
         return marker
 
     monkeypatch.setattr(gpu_memory, "import_fabric", import_selected)
-    # rank1 deliberately maps to device0; rank is not a CUDA device ordinal.
+    # The final rank maps to device zero; rank is not a CUDA device ordinal.
     result = gpu_memory.open_region(
         "rank-bank-test",
         (4, 24),
-        rank=1,
-        world_size=2,
+        rank=bank_group.world_size - 1,
+        world_size=bank_group.world_size,
         gpu_transport="mnnvl",
         base_domain="test-layout",
         compatibility_domain=bank_group.compatibility_domain,
@@ -180,7 +191,7 @@ def test_worker_import_selects_rank_then_checks_actual_gpu(
             "rank-bank-test",
             (4, 24),
             rank=0,
-            world_size=2,
+            world_size=bank_group.world_size,
             gpu_transport="mnnvl",
             base_domain="test-layout",
             compatibility_domain=bank_group.compatibility_domain,
@@ -191,21 +202,32 @@ def test_worker_import_selects_rank_then_checks_actual_gpu(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
-@pytest.mark.parametrize("change", ["rank", "width", "hash", "owner", "extra"])
+@pytest.mark.parametrize(
+    "change",
+    ["rank", "width", "hash", "owner", "extra", "missing", "world", "device", "uuid"],
+)
 def test_group_mismatch_rejects_before_any_handle_import(
     bank_group, monkeypatch, change
 ):
     manifest = json.loads((bank_group.path / "group.json").read_bytes())
     if change == "rank":
-        manifest["banks"][1]["rank"] = 0
+        manifest["banks"][-1]["rank"] = 0
     elif change == "width":
-        manifest["banks"][1]["shape"][1] += 1
+        manifest["banks"][-1]["shape"][1] += 1
     elif change == "hash":
         manifest["banks"][0]["descriptor_sha256"] = "0" * 64
     elif change == "owner":
         manifest["owner_start_ticks"] += 1
-    else:
+    elif change == "extra":
         manifest["arbitrary_path"] = "untrusted"
+    elif change == "missing":
+        manifest["banks"].pop()
+    elif change == "world":
+        manifest["world_size"] += 1
+    elif change == "device":
+        manifest["banks"][-1]["device"] = manifest["banks"][0]["device"]
+    else:
+        manifest["banks"][-1]["gpu_uuid"] = manifest["banks"][0]["gpu_uuid"]
     (bank_group.path / "group.json").write_text(json.dumps(manifest))
     monkeypatch.setattr(gpu_memory, "_OWNED_GPU_REGIONS", {})
     monkeypatch.setattr(
@@ -217,8 +239,8 @@ def test_group_mismatch_rejects_before_any_handle_import(
         gpu_memory.open_region(
             "rank-bank-test",
             (4, 24),
-            rank=1,
-            world_size=2,
+            rank=bank_group.world_size - 1,
+            world_size=bank_group.world_size,
             gpu_transport="mnnvl",
             base_domain="test-layout",
             compatibility_domain=bank_group.compatibility_domain,
@@ -228,21 +250,76 @@ def test_group_mismatch_rejects_before_any_handle_import(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
+@pytest.mark.parametrize("world_size", [2, 3, 4, 8])
 def test_partial_allocation_never_publishes_group_and_cleans_ready_bank(
-    fake_banks, monkeypatch
+    fake_banks, monkeypatch, world_size
 ):
+    fake_banks.state.visible_devices = world_size
+
     def allocate(*args, **kwargs):
-        if fake_banks.state.created:
-            raise RuntimeError("second bank allocation failed")
+        if len(fake_banks.state.created) == world_size - 1:
+            raise RuntimeError("final bank allocation failed")
         return fake_banks.bank_type(*args, **kwargs)
 
     monkeypatch.setattr(gpu_memory, "GPUFabricCacheRegion", allocate)
-    with pytest.raises(RuntimeError, match="second bank"):
+    with pytest.raises(RuntimeError, match="final bank"):
         GPUMultiRankCacheRegion(
-            "partial-allocation", 4, 24, "test-layout", gpu_rank_devices=[0, 1]
+            "partial-allocation",
+            4,
+            24,
+            "test-layout",
+            gpu_rank_devices=list(range(world_size)),
         )
-    assert fake_banks.state.created[0]._closed
+    assert len(fake_banks.state.created) == world_size - 1
+    assert all(bank._closed for bank in fake_banks.state.created)
     assert not gpu_memory.region_path("partial-allocation").exists()
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parametrize("world_size", [3, 4, 8])
+def test_duplicate_physical_gpu_rejects_catalog_and_cleans_every_bank(
+    fake_banks, monkeypatch, world_size
+):
+    fake_banks.state.visible_devices = world_size
+    bank_type = fake_banks.bank_type
+
+    def duplicate_uuid(*args, **kwargs):
+        bank = bank_type(*args, **kwargs)
+        bank.metadata["gpu_uuid"] = fake_banks.identity(0).gpu_uuid
+        (bank.path / "ipc.json").write_text(json.dumps(bank.metadata))
+        return bank
+
+    monkeypatch.setattr(gpu_memory, "GPUFabricCacheRegion", duplicate_uuid)
+    with pytest.raises(ValueError, match="distinct physical GPUs"):
+        GPUMultiRankCacheRegion(
+            "duplicate-physical-gpu",
+            4,
+            24,
+            "test-layout",
+            gpu_rank_devices=list(range(world_size)),
+        )
+    assert len(fake_banks.state.created) == world_size
+    assert all(bank._closed for bank in fake_banks.state.created)
+    assert not gpu_memory.region_path("duplicate-physical-gpu").exists()
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_oversize_group_metadata_is_never_published_and_releases_banks(fake_banks):
+    fake_banks.state.visible_devices = 8
+    engine_id = "large-engine-" + "x" * 8192
+    with pytest.raises(ValueError, match="group metadata exceeds 64 KiB"):
+        GPUMultiRankCacheRegion(
+            engine_id,
+            4,
+            24,
+            "test-layout",
+            gpu_rank_devices=list(range(8)),
+        )
+    assert len(fake_banks.state.created) == 8
+    assert all(bank._closed for bank in fake_banks.state.created)
+    assert not gpu_memory.region_path(engine_id).exists()
 
 
 @pytest.mark.pre_merge
@@ -260,7 +337,29 @@ def test_failed_cleanup_retains_bank_owner_and_withdraws_group(bank_group, monke
     assert any(owner is bank_group for owner in gpu_memory._RETAINED_FAILED_GPU_GROUPS)
     assert bank.tensor is not None
     assert not (bank_group.path / "group.json").exists()
+    assert all(not other._closed for other in bank_group.banks)
+    assert all(
+        gpu_memory._OWNED_GPU_REGIONS[other.path] is other for other in bank_group.banks
+    )
     monkeypatch.setattr(bank, "cleanup", original_cleanup)
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parametrize(
+    "rank,world_size",
+    [(True, 3), (-1, 3), (3, 3), (1.0, 3), (0, True), (0, 0), (0, -1), (0, 3.0)],
+)
+def test_invalid_rank_or_world_size_fails_before_descriptor_read(
+    monkeypatch, rank, world_size
+):
+    monkeypatch.setattr(
+        gpu_memory,
+        "_read_private_json",
+        lambda *args: pytest.fail("Invalid rank must fail before descriptor access"),
+    )
+    with pytest.raises(ValueError):
+        gpu_memory.open_region("invalid-rank", (4, 24), rank=rank, world_size=world_size)
 
 
 @pytest.mark.pre_merge
@@ -278,7 +377,10 @@ def test_rank_local_copy_still_rejects_cross_gpu_payload():
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
-def test_worker_passes_rank_identity_and_uses_only_local_row_stride(monkeypatch):
+@pytest.mark.parametrize("world_size", [2, 3, 4, 8])
+def test_worker_passes_rank_identity_and_uses_only_local_row_stride(
+    monkeypatch, world_size
+):
     opened, views, handlers = [], [], []
 
     class ByteTensor:
@@ -309,17 +411,23 @@ def test_worker_passes_rank_identity_and_uses_only_local_row_stride(monkeypatch)
     )
     spec = SimpleNamespace(
         config=SimpleNamespace(
-            engine_id="worker-mapping", parallel=SimpleNamespace(rank=1, world_size=2)
+            engine_id="worker-mapping",
+            parallel=SimpleNamespace(rank=world_size - 1, world_size=world_size),
         ),
         gpu_transport="cuda_ipc",
         num_chunks=7,
         row_bytes=16,
-        logical_row_bytes=32,
+        logical_row_bytes=16 * world_size,
         blocks_per_chunk=2,
     )
     worker = GPUCacheWorker(spec, caches)
     worker._initialize()
-    assert opened == [(("worker-mapping", (7, 16)), {"rank": 1, "world_size": 2})]
+    assert opened == [
+        (
+            ("worker-mapping", (7, 16)),
+            {"rank": world_size - 1, "world_size": world_size},
+        )
+    ]
     assert views == [((7, 6), (16, 1), 0), ((7, 10), (16, 1), 6)]
     assert len(handlers) == 2
     assert all(arguments[3] is groups for arguments in handlers)

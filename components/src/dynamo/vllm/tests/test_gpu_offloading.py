@@ -20,7 +20,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-from kvbm.vllm_integration import gpu_memory, gpu_mnnvl, gpu_offloading
+from kvbm.vllm_integration import gpu_layout, gpu_memory, gpu_mnnvl, gpu_offloading
 from kvbm.vllm_integration.gpu_memory import GPUCacheRegion, GPUCacheWorker, import_ipc
 from kvbm.vllm_integration.gpu_offloading import (
     GPUKVCRSecondaryTierManager,
@@ -120,18 +120,41 @@ def test_gpu_spec_rejects_cpu_or_uncertified_configuration(changes):
 def test_gpu_spec_rejects_uncertified_parallelism():
     config = make_config()
     config.parallel.world_size = 2
-    with pytest.raises(ValueError, match="TP1"):
+    with pytest.raises(ValueError, match="raw-layout"):
         GPUOffloadingSpec(config)
 
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
-def test_gpu_kvcr_port_probe_is_local_and_closed_before_native_start(monkeypatch):
-    spec = GPUOffloadingSpec(make_config())
-    region = SimpleNamespace(
-        shape=(spec.num_chunks, spec.row_bytes),
-        strides=(spec.row_bytes, 1),
-        tensor=SimpleNamespace(device=SimpleNamespace(index=0), data_ptr=lambda: 4096),
+@pytest.mark.parametrize("tp_size", [1, 2, 3, 4, 8])
+@pytest.mark.parametrize("native_failure", [False, True])
+def test_gpu_kvcr_rank_registration_and_failed_start_preserve_bank_owners(
+    monkeypatch, tp_size, native_failure
+):
+    config = (
+        make_config()
+        if tp_size == 1
+        else make_tp_config(tp_size, gpu_rank_devices=list(reversed(range(tp_size))))
+    )
+    spec = GPUOffloadingSpec(config)
+    spec._resolve_gpu_transport()
+    banks = [
+        SimpleNamespace(
+            shape=(spec.num_chunks, spec.row_bytes),
+            strides=(spec.row_bytes, 1),
+            tensor=SimpleNamespace(
+                device=SimpleNamespace(index=tp_size - rank - 1),
+                data_ptr=lambda rank=rank: 4096 * (rank + 1),
+            ),
+        )
+        for rank in range(tp_size)
+    ]
+    region = (
+        banks[0]
+        if tp_size == 1
+        else SimpleNamespace(
+            shape=(spec.num_chunks, spec.logical_row_bytes), banks=banks
+        )
     )
     listener = MagicMock()
     listener.__enter__.return_value = listener
@@ -147,29 +170,56 @@ def test_gpu_kvcr_port_probe_is_local_and_closed_before_native_start(monkeypatch
         assert config.nixl_listen_port == 49152
         assert bindings.framework_control is control
         forwarded.append(backends)
+        if native_failure:
+            raise RuntimeError("native startup failed after registration")
         return client
 
     monkeypatch.setattr(gpu_offloading.socket, "socket", socket_factory)
     monkeypatch.setattr(gpu_offloading, "ZmqPeerControlChannel", control_factory)
     monkeypatch.setattr(gpu_offloading, "KVCR", create_kvcr)
-    manager = GPUKVCRSecondaryTierManager(
-        spec,
-        region,
-        {
-            "compatibility_domain": spec.base_domain,
-            "control_ports": [49153],
-            "control_host": "0.0.0.0",
-            "control_advertise_host": "gpu-cache.example",
-            "router_capabilities": ["router_hint_gpu_direct"],
-        },
+    retained = []
+    monkeypatch.setattr(gpu_offloading, "_RETAINED_FAILED_GPU_MANAGERS", retained)
+    expected = (
+        pytest.raises(RuntimeError, match="native startup failed")
+        if native_failure
+        else nullcontext()
     )
+    with expected:
+        manager = GPUKVCRSecondaryTierManager(
+            spec,
+            region,
+            {
+                "compatibility_domain": spec.base_domain,
+                "control_ports": [49153],
+                "control_host": "0.0.0.0",
+                "control_advertise_host": "gpu-cache.example",
+                "router_capabilities": ["router_hint_gpu_direct"],
+            },
+        )
 
     socket_factory.assert_called_once_with()
     listener.bind.assert_called_once_with(("127.0.0.1", 0))
     listener.getsockname.assert_called_once_with()
     control_factory.assert_called_once_with("0.0.0.0", 49153, "gpu-cache.example")
-    assert manager._kvcr is client
-    assert forwarded[0].framework_regions[0].addr == 4096
+    if native_failure:
+        assert len(retained) == 1
+        assert retained[0]._region is region
+    else:
+        assert manager._kvcr is client
+        assert retained == []
+    assert [
+        (entry.label, entry.device_Id, entry.addr, entry.count, entry.size)
+        for entry in forwarded[0].framework_regions
+    ] == [
+        (
+            "" if tp_size == 1 else f":rank{rank}",
+            tp_size - rank - 1,
+            4096 * (rank + 1),
+            spec.num_chunks,
+            spec.row_bytes,
+        )
+        for rank in range(tp_size)
+    ]
 
 
 @pytest.mark.pre_merge
@@ -585,9 +635,9 @@ def test_local_fabric_descriptor_mismatch_fails_before_importing_any_gpu_handle(
             )
 
 
-def make_tp2_config(**changes):
+def make_tp_config(tp_size=2, **changes):
     defaults = {
-        "gpu_rank_devices": [0, 1],
+        "gpu_rank_devices": list(range(tp_size)),
         "secondary_tiers": [
             {
                 "type": "GPUKVCRSecondaryTierManager",
@@ -597,20 +647,24 @@ def make_tp2_config(**changes):
     }
     defaults.update(changes)
     config = make_config(**defaults)
-    config.parallel.world_size = config.parallel.tp_size = 2
+    config.parallel.world_size = config.parallel.tp_size = tp_size
     return config
 
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
-def test_tp2_budget_counts_all_rank_shards_and_isolates_raw_layout_domain():
-    config = make_tp2_config()
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+def test_tp_budget_counts_all_rank_shards_and_isolates_raw_layout_domain(tp_size):
+    logical_width = tp_size * 384
+    capacity = 3 * logical_width + logical_width - 1
+    config = make_tp_config(tp_size, gpu_bytes_to_use=capacity)
     spec = GPUOffloadingSpec(config)
     assert spec.row_bytes == 384
-    assert spec.logical_row_bytes == 768
-    assert spec.num_chunks == 4
+    assert spec.logical_row_bytes == logical_width
+    assert spec.num_chunks == 3
+    assert spec.num_chunks * spec.logical_row_bytes <= capacity
     spec._resolve_gpu_transport()
-    assert spec.base_domain.endswith("|gpu-raw-tp-v1:tp=2")
+    assert spec.base_domain == f"test-gpu-layout-v1|gpu-raw-tp-v1:tp={tp_size}"
     assert spec.extra_config["router_hint_transfer_domain"] == spec.base_domain
     assert spec.tiers[0]["compatibility_domain"] == spec.base_domain
     assert config.extra_config["router_hint_transfer_domain"] == "test-gpu-layout-v1"
@@ -618,17 +672,36 @@ def test_tp2_budget_counts_all_rank_shards_and_isolates_raw_layout_domain():
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
-@pytest.mark.parametrize("devices", [None, [], [0], [0, 0], [0, True], [-1, 0], (0, 1)])
-def test_tp2_requires_an_explicit_unique_rank_device_mapping(devices):
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+@pytest.mark.parametrize(
+    "invalid", ["missing", "short", "duplicate", "bool", "negative", "float", "tuple"]
+)
+def test_tp_requires_an_explicit_unique_rank_device_mapping(tp_size, invalid):
+    devices = list(range(tp_size))
+    if invalid == "missing":
+        devices = None
+    elif invalid == "short":
+        devices.pop()
+    elif invalid == "duplicate":
+        devices[-1] = devices[0]
+    elif invalid == "bool":
+        devices[-1] = True
+    elif invalid == "negative":
+        devices[-1] = -1
+    elif invalid == "float":
+        devices[-1] = 1.0
+    else:
+        devices = tuple(devices)
     with pytest.raises(ValueError, match="gpu_rank_devices"):
-        GPUOffloadingSpec(make_tp2_config(gpu_rank_devices=devices))
+        GPUOffloadingSpec(make_tp_config(tp_size, gpu_rank_devices=devices))
 
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.parametrize("field", ["pp_size", "pcp_size", "dcp_size"])
-def test_tp2_rejects_other_parallel_dimensions(field):
-    config = make_tp2_config()
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+def test_tp_rejects_other_parallel_dimensions(field, tp_size):
+    config = make_tp_config(tp_size)
     setattr(config.parallel, field, 2)
     with pytest.raises(ValueError, match="without PP/CP"):
         GPUOffloadingSpec(config)
@@ -636,15 +709,73 @@ def test_tp2_rejects_other_parallel_dimensions(field):
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
-def test_tp2_rejects_a_budget_that_only_fits_one_rank():
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+def test_tp_rejects_a_budget_short_of_one_complete_logical_row(tp_size):
     with pytest.raises(ValueError, match="one full KV row"):
-        GPUOffloadingSpec(make_tp2_config(gpu_bytes_to_use=767))
+        GPUOffloadingSpec(make_tp_config(tp_size, gpu_bytes_to_use=tp_size * 384 - 1))
 
 
-def _multipart_tier():
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_parallel_layout_domains_separate_every_tp_count_and_preserve_tp1():
+    base = "same-certified-layout"
+    counts = [1, 2, 3, 4, 8]
+    domains = [gpu_layout.parallel_layout_domain(base, count) for count in counts]
+    assert domains[0] == base
+    assert domains[1:] == [f"{base}|gpu-raw-tp-v1:tp={count}" for count in counts[1:]]
+    assert len(set(domains)) == len(counts)
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parametrize("tp_size", [True, False, 0, -1, 3.0, "3", None])
+def test_parallel_layout_domain_rejects_nonpositive_or_inexact_tp_count(tp_size):
+    with pytest.raises(ValueError):
+        gpu_layout.parallel_layout_domain("certified-layout", tp_size)
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parametrize(
+    "world_size,tp_size",
+    [
+        (True, True),
+        (False, False),
+        (0, 0),
+        (-1, -1),
+        (3.0, 3.0),
+        ("3", "3"),
+        (None, None),
+        (1, True),
+        (1, 1.0),
+        (3, True),
+        (3, 3.0),
+        (3, 2),
+    ],
+)
+def test_gpu_spec_rejects_invalid_or_mismatched_parallel_counts(world_size, tp_size):
+    config = make_tp_config(3)
+    config.parallel.world_size = world_size
+    config.parallel.tp_size = tp_size
+    with pytest.raises(ValueError):
+        GPUOffloadingSpec(config)
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parametrize("tp_size", [3, 4, 8])
+@pytest.mark.parametrize("layout", ["canonical_layout", "replicated_layout"])
+def test_tp_spec_rejects_nonraw_layouts(tp_size, layout):
+    config = make_tp_config(tp_size)
+    setattr(config, layout, True)
+    with pytest.raises(ValueError, match="raw-layout"):
+        GPUOffloadingSpec(config)
+
+
+def _multipart_tier(tp_size=2):
     tier = GPUKVCRSecondaryTierManager.__new__(GPUKVCRSecondaryTierManager)
-    tier._part_labels = (":rank0", ":rank1")
-    tier._region = SimpleNamespace(shape=(4, 768))
+    tier._part_labels = tuple(f":rank{rank}" for rank in range(tp_size))
+    tier._region = SimpleNamespace(shape=(4, 384 * tp_size))
     tier._key_adapter = gpu_offloading._VllmKeyAdapter()
     tier._finished_jobs = []
     tier._jobs_by_op = {}
@@ -721,8 +852,9 @@ def test_gpu_lookup_and_delivery_keep_framework_keys_through_router_hint_gate():
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
-def test_tp2_delivers_both_rank_parts_in_one_logical_operation():
-    tier, calls = _multipart_tier()
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+def test_tp_delivers_every_rank_part_in_one_logical_operation(tp_size):
+    tier, calls = _multipart_tier(tp_size)
     keys = [make_offload_key(value, 0) for value in (b"first", b"second")]
     tier.submit_load(
         SimpleNamespace(
@@ -735,8 +867,7 @@ def test_tp2_delivers_both_rank_parts_in_one_logical_operation():
     assert len(blocks) == 2
     for key, slot in zip(keys, [3, 1], strict=True):
         assert [(ref.label, ref.element_index) for ref in blocks[BlockKey(key)]] == [
-            (":rank0", slot),
-            (":rank1", slot),
+            (f":rank{rank}", slot) for rank in range(tp_size)
         ]
     assert tier._jobs_by_op == {91: (7, 2, True, set())}
     assert tier._finished_jobs == []
@@ -754,8 +885,9 @@ def test_tp2_descriptor_bounds_fail_before_native_transfer(slot):
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
-def test_tp2_source_pin_holds_one_primary_job_for_all_rank_parts():
-    tier, _ = _multipart_tier()
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+def test_tp_source_pin_holds_one_primary_job_for_all_rank_parts(tp_size):
+    tier, _ = _multipart_tier(tp_size)
     adapter = _GPUFrameworkPinAdapter(tier)
     key, missing = BlockKey(b"present"), BlockKey(b"missing")
     jobs, finished = [], []
@@ -772,8 +904,7 @@ def test_tp2_source_pin_holds_one_primary_job_for_all_rank_parts():
     assert jobs == [(key,)] and len(finished) == 1
     assert descriptors[missing] is None
     assert [(ref.label, ref.element_index) for ref in descriptors[key]] == [
-        (":rank0", 3),
-        (":rank1", 3),
+        (f":rank{rank}", 3) for rank in range(tp_size)
     ]
     assert adapter.has_active_pins()
     assert adapter.take_pin_job_results() == []
@@ -786,8 +917,9 @@ def test_tp2_source_pin_holds_one_primary_job_for_all_rank_parts():
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
-def test_tp2_pin_expansion_failure_releases_the_primary_job():
-    tier, _ = _multipart_tier()
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+def test_tp_pin_expansion_failure_releases_the_primary_job(tp_size):
+    tier, _ = _multipart_tier(tp_size)
     adapter = _GPUFrameworkPinAdapter(tier)
     key = BlockKey(b"present")
     parent = SimpleNamespace(
@@ -820,7 +952,8 @@ def test_gpu_adapter_preserves_the_typed_vllm_hint_envelope():
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
-def test_tp2_retained_inventory_waits_for_both_worker_completions():
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+def test_tp_retained_inventory_waits_for_every_worker_completion(tp_size):
     primary = GPUPrimaryManager(
         SimpleNamespace(
             num_chunks=4,
@@ -830,12 +963,14 @@ def test_tp2_retained_inventory_waits_for_both_worker_completions():
         SimpleNamespace(),
     )
     context = ReqContext("store")
-    key = make_offload_key(b"both-ranks", 0)
+    key = make_offload_key(b"all-ranks", 0)
     primary.prepare_store([key], context)
     scheduler = OffloadingConnectorScheduler.__new__(OffloadingConnectorScheduler)
     scheduler.manager = primary
     scheduler._jobs = {
-        7: TransferJobStatus(req_id="store", pending_count=2, keys={key}, is_store=True)
+        7: TransferJobStatus(
+            req_id="store", pending_count=tp_size, keys={key}, is_store=True
+        )
     }
     scheduler._req_status = {
         "store": SimpleNamespace(
@@ -849,10 +984,11 @@ def test_tp2_retained_inventory_waits_for_both_worker_completions():
     output = SimpleNamespace(
         kv_connector_worker_meta=OffloadingWorkerMetadata(completed_jobs={7: 1})
     )
-    scheduler.update_connector_output(output)
-    assert primary.lookup(key, context) is LookupResult.HIT_PENDING
-    assert list(primary.take_events()) == []
-    assert scheduler._jobs[7].pending_count == 1
+    for pending in range(tp_size - 1, 0, -1):
+        scheduler.update_connector_output(output)
+        assert primary.lookup(key, context) is LookupResult.HIT_PENDING
+        assert list(primary.take_events()) == []
+        assert scheduler._jobs[7].pending_count == pending
     scheduler.update_connector_output(output)
     assert primary.lookup(key, context) is LookupResult.HIT
     assert [event.keys for event in primary.take_events()] == [[key]]
@@ -862,7 +998,10 @@ def test_tp2_retained_inventory_waits_for_both_worker_completions():
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.parametrize("transport", ["cuda_ipc", "mnnvl"])
-def test_tp2_discovery_and_storage_publish_the_same_domain(monkeypatch, transport):
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+def test_tp_discovery_and_storage_publish_the_same_domain(
+    monkeypatch, transport, tp_size
+):
     tier = {
         "type": "GPUKVCRSecondaryTierManager",
         "gpu_transport": transport,
@@ -875,14 +1014,14 @@ def test_tp2_discovery_and_storage_publish_the_same_domain(monkeypatch, transpor
         tier["ucx_tls"] = ["cuda_ipc", "tcp", "self"]
         observed = SimpleNamespace(domain="mnnvl:" + "1" * 32 + ":0")
         monkeypatch.setattr(gpu_mnnvl, "observe_fabric", lambda: observed)
-    config = make_tp2_config(gpu_transport=transport, secondary_tiers=[tier])
+    config = make_tp_config(tp_size, gpu_transport=transport, secondary_tiers=[tier])
     spec = GPUOffloadingSpec(config)
     spec._resolve_gpu_transport()
     runtime = MagicMock()
     publish_kv_hint_capabilities(
         runtime,
         SimpleNamespace(
-            tensor_parallel_size=2,
+            tensor_parallel_size=tp_size,
             kv_transfer_config=SimpleNamespace(
                 kv_connector="GPUOffloadingConnector",
                 kv_connector_extra_config=config.extra_config,
@@ -906,8 +1045,9 @@ def test_tp2_discovery_and_storage_publish_the_same_domain(monkeypatch, transpor
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
-def test_tp2_spec_rejects_multiple_data_parallel_replicas():
-    config = make_tp2_config()
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+def test_tp_spec_rejects_multiple_data_parallel_replicas(tp_size):
+    config = make_tp_config(tp_size)
     config.parallel.data_parallel_size = 2
     with pytest.raises(ValueError, match="data parallel size one"):
         GPUOffloadingSpec(config)

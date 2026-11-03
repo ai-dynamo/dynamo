@@ -332,7 +332,7 @@ def publish_kv_hint_capabilities(
             or (
                 tier.get("gpu_transport", "cuda_ipc") == "cuda_ipc"
                 and type(tp_size) is int
-                and tp_size == 2
+                and tp_size > 1
             )
         )
         for tier in _secondary_tiers(engine_args)
@@ -399,8 +399,8 @@ def _publish_gpu_transfer_hint_capability(
     if transport not in ("cuda_ipc", "mnnvl"):
         raise ValueError("GPU transport must be cuda_ipc or mnnvl")
     tp_size = getattr(engine_args, "tensor_parallel_size", 1)
-    if type(tp_size) is not int or tp_size not in (1, 2):
-        raise ValueError("Direct GPU KV transfer supports raw-layout TP1 or TP2")
+    if type(tp_size) is not int or tp_size <= 0:
+        raise ValueError("Direct GPU KV transfer requires a positive integer TP size")
     if tp_size > 1:
         if (
             getattr(engine_args, "data_parallel_size", 1) != 1
@@ -416,7 +416,7 @@ def _publish_gpu_transfer_hint_capability(
             )
         ):
             raise ValueError(
-                "Retained GPU TP2 requires a single local MP engine without DP/PP/CP"
+                "Retained GPU TP requires a single local MP engine without DP/PP/CP"
             )
         layout = importlib.import_module("kvbm.vllm_integration.gpu_layout")
         domain = layout.parallel_layout_domain(domain, tp_size)
