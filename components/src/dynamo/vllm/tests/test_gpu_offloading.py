@@ -92,6 +92,7 @@ def make_config(**changes):
     )
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.parametrize(
     "changes",
@@ -112,6 +113,7 @@ def test_gpu_spec_rejects_cpu_or_uncertified_configuration(changes):
         GPUOffloadingSpec(make_config(**changes))
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_gpu_spec_rejects_uncertified_parallelism():
     config = make_config()
@@ -120,6 +122,7 @@ def test_gpu_spec_rejects_uncertified_parallelism():
         GPUOffloadingSpec(config)
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_gpu_inventory_has_its_own_medium(monkeypatch):
     event = BlockRemoved(block_hashes=[123], medium="CPU")
@@ -130,6 +133,7 @@ def test_gpu_inventory_has_its_own_medium(monkeypatch):
     assert event.medium == "CPU"
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_gpu_reset_does_not_release_native_owned_slots():
     manager = GPUTieringManager.__new__(GPUTieringManager)
@@ -145,6 +149,7 @@ def test_gpu_reset_does_not_release_native_owned_slots():
         manager.reset_cache()
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_failed_native_shutdown_preserves_primary_gpu_owner():
     manager = GPUTieringManager.__new__(GPUTieringManager)
@@ -167,6 +172,7 @@ def test_failed_native_shutdown_preserves_primary_gpu_owner():
     assert released == []
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_gpu_reset_revokes_published_keys_and_drops_unpublished_stores():
     spec = SimpleNamespace(
@@ -198,6 +204,7 @@ def test_gpu_reset_revokes_published_keys_and_drops_unpublished_stores():
     assert list(manager.take_events()) == []
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_gpu_connector_reset_revokes_every_hash_in_a_published_chunk():
     events_config = SimpleNamespace(
@@ -250,12 +257,14 @@ def test_gpu_connector_reset_revokes_every_hash_in_a_published_chunk():
     assert tracker._pending_event_metadata == {}
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_ipc_rejects_different_geometry_before_touching_cuda():
     with pytest.raises(ValueError, match="layout"):
         import_ipc({"schema": 1, "shape": [9, 384]}, (8, 384))
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_uniprocess_worker_uses_owned_gpu_storage_without_self_ipc(monkeypatch):
     engine_id = f"uniprocess-test-{uuid.uuid4()}"
@@ -405,6 +414,7 @@ def _mnnvl_tier(**changes):
     }
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.parametrize(
     "changes",
@@ -437,6 +447,7 @@ def test_mnnvl_spec_requires_matching_explicit_gpu_only_transport(changes):
         GPUOffloadingSpec(make_config(**changes))
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_mnnvl_spec_resolves_actual_fabric_without_rewriting_original_model_config(
     monkeypatch,
@@ -465,6 +476,7 @@ def test_mnnvl_spec_resolves_actual_fabric_without_rewriting_original_model_conf
     assert spec.base_domain == "test-gpu-layout-v1"
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_local_fabric_descriptor_mismatch_fails_before_importing_any_gpu_handle(
     monkeypatch,
@@ -538,6 +550,7 @@ def make_tp2_config(**changes):
     return config
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_tp2_budget_counts_all_rank_shards_and_isolates_raw_layout_domain():
     config = make_tp2_config()
@@ -552,6 +565,7 @@ def test_tp2_budget_counts_all_rank_shards_and_isolates_raw_layout_domain():
     assert config.extra_config["router_hint_transfer_domain"] == "test-gpu-layout-v1"
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.parametrize("devices", [None, [], [0], [0, 0], [0, True], [-1, 0], (0, 1)])
 def test_tp2_requires_an_explicit_unique_rank_device_mapping(devices):
@@ -559,6 +573,7 @@ def test_tp2_requires_an_explicit_unique_rank_device_mapping(devices):
         GPUOffloadingSpec(make_tp2_config(gpu_rank_devices=devices))
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.parametrize("field", ["pp_size", "pcp_size", "dcp_size"])
 def test_tp2_rejects_other_parallel_dimensions(field):
@@ -568,6 +583,7 @@ def test_tp2_rejects_other_parallel_dimensions(field):
         GPUOffloadingSpec(config)
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_tp2_rejects_a_budget_that_only_fits_one_rank():
     with pytest.raises(ValueError, match="one full KV row"):
@@ -589,6 +605,7 @@ def _multipart_tier():
     return tier, calls
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_tp2_delivers_both_rank_parts_in_one_logical_operation():
     tier, calls = _multipart_tier()
@@ -611,6 +628,7 @@ def test_tp2_delivers_both_rank_parts_in_one_logical_operation():
     assert tier._finished_jobs == []
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.parametrize("slot", [-1, 4, True])
 def test_tp2_descriptor_bounds_fail_before_native_transfer(slot):
@@ -620,6 +638,7 @@ def test_tp2_descriptor_bounds_fail_before_native_transfer(slot):
     assert calls == []
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_tp2_source_pin_holds_one_primary_job_for_all_rank_parts():
     tier, _ = _multipart_tier()
@@ -651,6 +670,7 @@ def test_tp2_source_pin_holds_one_primary_job_for_all_rank_parts():
     assert not adapter.has_active_pins()
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_tp2_pin_expansion_failure_releases_the_primary_job():
     tier, _ = _multipart_tier()
@@ -670,6 +690,7 @@ def test_tp2_pin_expansion_failure_releases_the_primary_job():
     assert [result.job_id for result in adapter.take_pin_job_results()] == [17]
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_gpu_adapter_preserves_the_typed_vllm_hint_envelope():
     tier, _ = _multipart_tier()
@@ -683,6 +704,7 @@ def test_gpu_adapter_preserves_the_typed_vllm_hint_envelope():
     assert submitted[0]["hints"] is hint
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_tp2_retained_inventory_waits_for_both_worker_completions():
     primary = GPUPrimaryManager(
@@ -723,6 +745,7 @@ def test_tp2_retained_inventory_waits_for_both_worker_completions():
     assert scheduler._jobs == {}
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.parametrize("transport", ["cuda_ipc", "mnnvl"])
 def test_tp2_discovery_and_storage_publish_the_same_domain(monkeypatch, transport):
@@ -767,6 +790,7 @@ def test_tp2_discovery_and_storage_publish_the_same_domain(monkeypatch, transpor
     )
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_tp2_spec_rejects_multiple_data_parallel_replicas():
     config = make_tp2_config()

@@ -112,6 +112,7 @@ def bank_group(fake_banks):
         group.cleanup()
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_rank_bank_group_commits_all_banks_and_explicit_device_order(bank_group):
     assert bank_group.shape == (4, 48)
@@ -136,6 +137,7 @@ def test_rank_bank_group_commits_all_banks_and_explicit_device_order(bank_group)
     assert gpu_memory.region_path("rank-bank-test:rank0") != bank_group.banks[0].path
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.parametrize("devices", [None, [], [0], [0, 0], [True, 1], [-1, 0], [0, 2]])
 def test_rank_bank_group_rejects_invalid_catalog_before_allocation(fake_banks, devices):
@@ -144,6 +146,7 @@ def test_rank_bank_group_rejects_invalid_catalog_before_allocation(fake_banks, d
     assert fake_banks.state.created == []
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_worker_import_selects_rank_then_checks_actual_gpu(
     bank_group, fake_banks, monkeypatch
@@ -186,6 +189,7 @@ def test_worker_import_selects_rank_then_checks_actual_gpu(
     assert len(imported) == 1
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.parametrize("change", ["rank", "width", "hash", "owner", "extra"])
 def test_group_mismatch_rejects_before_any_handle_import(
@@ -222,6 +226,7 @@ def test_group_mismatch_rejects_before_any_handle_import(
         )
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_partial_allocation_never_publishes_group_and_cleans_ready_bank(
     fake_banks, monkeypatch
@@ -240,6 +245,7 @@ def test_partial_allocation_never_publishes_group_and_cleans_ready_bank(
     assert not gpu_memory.region_path("partial-allocation").exists()
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_failed_cleanup_retains_bank_owner_and_withdraws_group(bank_group, monkeypatch):
     bank = bank_group.banks[0]
@@ -257,6 +263,7 @@ def test_failed_cleanup_retains_bank_owner_and_withdraws_group(bank_group, monke
     monkeypatch.setattr(bank, "cleanup", original_cleanup)
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_rank_local_copy_still_rejects_cross_gpu_payload():
     original = SimpleNamespace(
@@ -269,6 +276,7 @@ def test_rank_local_copy_still_rejects_cross_gpu_payload():
         GPUCacheCopyHandler([original], [cached], 1, [], True)
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_worker_passes_rank_identity_and_uses_only_local_row_stride(monkeypatch):
     opened, views, handlers = [], [], []
@@ -321,6 +329,7 @@ def test_worker_passes_rank_identity_and_uses_only_local_row_stride(monkeypatch)
         GPUCacheWorker(spec, caches)._initialize()
 
 
+@pytest.mark.pre_merge
 @pytest.mark.gpu_0
 def test_rank_descriptor_symlink_is_rejected_before_read(fake_banks, tmp_path):
     target = tmp_path / "target.json"
