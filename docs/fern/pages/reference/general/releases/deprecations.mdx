@@ -49,6 +49,10 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** Replace `WorkerInputs::OCCUPANCY` with `WorkerInputs::ACTIVE_REQUESTS` in custom worker-selection policies.
 
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Your own Rust code that constructs a round-robin, random or least-loaded `PushRouter` must pass the router-mode plugins** ([#17713](https://github.com/ai-dynamo/dynamo/pull/17713)). Without them, the router fails to build.
+
+  > **Migrate:** CLI, Python and Kubernetes deployments need no change. If your Rust code creates a `PushRouter` in one of these modes, replace `PushRouter::from_client(client, RouterMode::RoundRobin)` with `PushRouter::from_client_with_options(client, RouterMode::RoundRobin, dynamo_llm::kv_router::plugins::push_router_options())`. If your code depends only on `dynamo-runtime`, add `dynamo-llm`, or implement `InstanceSelector`.
+
 <a id="v160"></a>
 
 ## v1.6.0 - Oct 22, 2026
