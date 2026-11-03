@@ -294,7 +294,12 @@ async fn assert_anthropic_error(
     message: &str,
 ) {
     assert_eq!(response.status(), expected.status());
+    let request_id = response.headers()["request-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
     let body: Value = response.json().await.unwrap();
+    assert_eq!(body["request_id"], request_id);
     assert_eq!(body["type"], "error");
     assert_eq!(body["error"]["type"], expected.anthropic_type());
     assert!(
@@ -312,7 +317,14 @@ async fn assert_anthropic_status(
     message: &str,
 ) {
     assert_eq!(response.status(), status);
+    assert_eq!(response.headers()["content-type"], "application/json");
+    let request_id = response.headers()["request-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(!request_id.is_empty());
     let body: Value = response.json().await.unwrap();
+    assert_eq!(body["request_id"], request_id);
     assert_eq!(body["type"], "error");
     assert_eq!(body["error"]["type"], error_type);
     assert!(
@@ -1322,6 +1334,19 @@ async fn anthropic_handler_errors_record_classification_with_response() {
             )
             .await;
 
+            for (fields, diagnostic) in [
+                (format!(r#""model":"{MODEL}","model":"{MODEL}","messages":[{{"role":"user","content":"ping"}}]"#), "duplicate field"),
+                (format!(r#""model":"{MODEL}","messages":[{{"role":"invalid","content":"ping"}}]"#), "messages[0].role"),
+                (format!(r#""model":"{MODEL}","messages":[{{"role":"user","content":"ping"}}],"metadata":true"#), "metadata"),
+                (format!(r#""model":"{MODEL}","messages":[{{"role":"user","content":"ping"}}],"metadata":{{"extra":1e999}}"#), "metadata"),
+            ] {
+                let response = svc.client.post(format!("{}/v1/messages", svc.base_url))
+                    .header("content-type", "application/json")
+                    .body(format!("{{{fields},\"max_tokens\":16,\"stream\":{stream}}}"))
+                    .send().await.unwrap();
+                assert_anthropic_status(response, reqwest::StatusCode::BAD_REQUEST, "invalid_request_error", diagnostic).await;
+            }
+
             assert_error_metrics(
                 &svc,
                 &Endpoint::AnthropicMessages,
@@ -1330,7 +1355,7 @@ async fn anthropic_handler_errors_record_classification_with_response() {
                     (ErrorType::Overload, 1),
                     (ErrorType::Unavailable, 1),
                     (ErrorType::Cancelled, 1),
-                    (ErrorType::Validation, 1),
+                    (ErrorType::Validation, 5),
                     (ErrorType::Internal, 1),
                 ],
             );

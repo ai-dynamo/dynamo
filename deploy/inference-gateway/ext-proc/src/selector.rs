@@ -288,7 +288,7 @@ mod tests {
 
     impl WorkerPicker for ExpectedOutputRecorder {
         fn pick(
-            &mut self,
+            &self,
             context: &WorkerSelectionContext<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -459,7 +459,7 @@ models:
 
         impl WorkerPicker for FirstEligiblePicker {
             fn pick(
-                &mut self,
+                &self,
                 _context: &WorkerSelectionContext<'_>,
                 input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {

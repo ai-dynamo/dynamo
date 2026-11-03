@@ -761,6 +761,7 @@ impl DeltaAggregator {
                         // The complete text shows its own channels; `detect_prefill`
                         // reads them back without a first-bytes probe.
                         explicit_guidance: false,
+                        ..Default::default()
                     },
                 ) {
                     Ok(parsed) => {

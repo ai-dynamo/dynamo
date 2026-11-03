@@ -45,6 +45,14 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** Set `DYN_ENABLE_FRONTEND_ADMIN_API=1` on frontends that need these routes and call port `8002` (`DYN_FRONTEND_ADMIN_PORT`). The listener binds to `127.0.0.1` (`DYN_FRONTEND_ADMIN_HOST`), so on Kubernetes use `kubectl port-forward pod/<frontend-pod> 8002:8002`. Remove `DYN_DISABLE_FRONTEND_ADMIN_API`; it is ignored.
 
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Worker-selection plugin callbacks take `&self` and require `Send + Sync`** ([#17712](https://github.com/ai-dynamo/dynamo/pull/17712)). `WorkerFilter::keep`, `WorkerScorer::score` and `WorkerPicker::pick` no longer take `&mut self`, and one plugin instance may be called from several threads at once.
+
+  > **Migrate:** Change each callback's receiver to `&self`. Move state that changes between calls behind atomics, a lock or a thread-local, and make sure the plugin type is `Sync`.
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Deprecated the `WorkerInputs::OCCUPANCY` worker-selection input group** in favor of `WorkerInputs::ACTIVE_REQUESTS`, which custom pickers read through `WorkerInputView::active_requests(row)`. The alias still compiles with a deprecation warning and is slated for removal in Dynamo v1.9.0.
+
+  > **Migrate:** Replace `WorkerInputs::OCCUPANCY` with `WorkerInputs::ACTIVE_REQUESTS` in custom worker-selection policies.
+
 <a id="v160"></a>
 
 ## v1.6.0 - Oct 22, 2026
