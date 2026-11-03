@@ -134,13 +134,14 @@ impl DiscoveredModel {
         parse_proto_version(&self.server.proto_version).is_some_and(|version| version >= PROTO_0_6)
     }
 
-    /// Whether vLLM reports version 0.33 or later, whose gRPC server compiles
-    /// structural tags with xgrammar (vllm-project/vllm#61892).
+    /// Whether vLLM reports version 0.33 or later, including its pre-releases and
+    /// nightlies, whose gRPC server compiles structural tags with xgrammar
+    /// (vllm-project/vllm#61892).
     pub(crate) fn compiles_structural_tags(&self) -> bool {
         self.server
             .engine_version
             .parse::<Version>()
-            .is_ok_and(|version| version >= Version::new([0, 33]))
+            .is_ok_and(|version| version.only_release() >= Version::new([0, 33]))
     }
 
     pub(crate) fn rl_capabilities(&self) -> Option<&pb::RlCapabilities> {

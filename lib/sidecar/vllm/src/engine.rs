@@ -1678,6 +1678,7 @@ mod tests {
     fn structural_tags_default_on_from_vllm_0_33() {
         for (flags, engine_version, expected) in [
             (&[][..], "0.33.0", true),
+            (&[][..], "0.33.0rc1.dev649+gc3fd4ff44", true),
             (&[][..], "0.32.0", false),
             (&[][..], "", false),
             (&["--dyn-structural-tag"][..], "0.32.0", true),
