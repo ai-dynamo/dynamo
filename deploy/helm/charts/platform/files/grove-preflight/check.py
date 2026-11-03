@@ -8,14 +8,15 @@ import sys
 
 
 def version(tag):
-    # Recognize Grove alpha releases and stable releases; custom/RC tags are unverifiable.
-    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)(?:-alpha\.(\d+))?", tag)
+    # Recognize Grove alpha, beta, and stable releases; custom/RC tags are unverifiable.
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)(?:-(alpha\.|beta)(\d+))?", tag)
     if not match:
         raise ValueError(
             f"Unverifiable Grove version {tag!r}; use a release-tagged image."
         )
     return tuple(int(n) for n in match.group(1, 2, 3)) + (
-        int(match[4]) if match[4] else float("inf"),
+        {"alpha.": 0, "beta": 1, None: 2}[match[4]],
+        int(match[5] or 0),
     )
 
 
