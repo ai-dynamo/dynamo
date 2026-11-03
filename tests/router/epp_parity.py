@@ -53,6 +53,7 @@ from tests.router.router_process import (
 from tests.utils.constants import DynamoPortRange
 from tests.utils.http_checks import check_http_ok
 from tests.utils.port_utils import allocate_ports, deallocate_ports
+from tests.utils.router_logs import completed_utf8_log_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -4384,19 +4385,7 @@ class EppFrontendPriorityParityStack:
         if self.trace_path is None or not self.trace_path.is_file():
             return []
         data = self.trace_path.read_bytes()
-        if not data:
-            return []
-        split_at = data.rfind(b"\n")
-        if not data.endswith(b"\n"):
-            if split_at < 0:
-                return []
-            data = data[: split_at + 1]
-        try:
-            text = data.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise AssertionError(
-                "owned FE request-trace completed bytes are not UTF-8"
-            ) from exc
+        text = completed_utf8_log_prefix(data, label="owned FE request-trace")
         records = []
         for line in text.splitlines():
             if not line.strip():
@@ -4434,18 +4423,7 @@ class EppFrontendPriorityParityStack:
         data = path.read_bytes()
         if after_bytes > len(data):
             return []
-        data = data[after_bytes:]
-        if not data:
-            return []
-        split_at = data.rfind(b"\n")
-        if not data.endswith(b"\n"):
-            if split_at < 0:
-                return []
-            data = data[: split_at + 1]
-        try:
-            text = data.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise AssertionError("owned FE log completed bytes are not UTF-8") from exc
+        text = completed_utf8_log_prefix(data[after_bytes:], label="owned FE log")
         records = []
         for line in text.splitlines():
             if not line.strip():
@@ -4483,18 +4461,7 @@ class EppFrontendPriorityParityStack:
         data = path.read_bytes()
         if after_bytes > len(data):
             return ""
-        data = data[after_bytes:]
-        if not data:
-            return ""
-        split_at = data.rfind(b"\n")
-        if not data.endswith(b"\n"):
-            if split_at < 0:
-                return ""
-            data = data[: split_at + 1]
-        try:
-            return data.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise AssertionError("owned EPP log completed bytes are not UTF-8") from exc
+        return completed_utf8_log_prefix(data[after_bytes:], label="owned EPP log")
 
     def epp_queue_ordering_records(self, *, after_bytes: int = 0) -> list[str]:
         text = self._owned_epp_completed_log(after_bytes=after_bytes)

@@ -58,6 +58,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 
+from tests.utils.router_logs import completed_utf8_log_prefix
+
 # Compiled KvRouterConfig and FrontendArgGroup stay function-local so this
 # helper can be imported during pytest collection without pulling native or
 # frontend runtime. That is optional-runtime test selection, not a hidden
@@ -1762,23 +1764,26 @@ def _require_collected_item(item: Any) -> Any:
     return item
 
 
-def _assert_measured_xfail_marker(name: str, mark: Any) -> None:
-    spec = MEASURED_GAP_SIGNATURES[name]
+def _assert_strict_xfail_marker(label: str, mark: Any, exception: type) -> None:
     if mark.args:
-        raise AssertionError(f"{name} xfail has positional condition {mark.args!r}")
+        raise AssertionError(f"{label} xfail has positional condition {mark.args!r}")
     if "condition" in mark.kwargs:
-        raise AssertionError(f"{name} xfail has condition={mark.kwargs['condition']!r}")
+        raise AssertionError(f"{label} xfail has condition={mark.kwargs['condition']!r}")
     if mark.kwargs.get("strict") is not True:
         raise AssertionError(
-            f"{name} xfail strict={mark.kwargs.get('strict')!r} is not True"
+            f"{label} xfail strict={mark.kwargs.get('strict')!r} is not True"
         )
-    if mark.kwargs.get("raises") is not spec.exception:
+    if mark.kwargs.get("raises") is not exception:
         raise AssertionError(
-            f"{name} xfail raises={mark.kwargs.get('raises')!r} "
-            f"!= {spec.exception!r}"
+            f"{label} xfail raises={mark.kwargs.get('raises')!r} != {exception!r}"
         )
     if mark.kwargs.get("run", True) is not True:
-        raise AssertionError(f"{name} xfail run={mark.kwargs.get('run')!r} is disabled")
+        raise AssertionError(f"{label} xfail run={mark.kwargs.get('run')!r} is disabled")
+
+
+def _assert_measured_xfail_marker(name: str, mark: Any) -> None:
+    spec = MEASURED_GAP_SIGNATURES[name]
+    _assert_strict_xfail_marker(name, mark, spec.exception)
 
 
 def _collect_parametrized_items(
@@ -2045,28 +2050,7 @@ def _assert_remote_indexer_binding(row: SettingDecision, items: Iterable[Any]) -
 def _assert_session_ttl_xfail_marker(mark: Any) -> None:
     from tests.router.common import SessionAffinityParityMismatch
 
-    if mark.args:
-        raise AssertionError(
-            f"{SESSION_TTL_ROW} xfail has positional condition {mark.args!r}"
-        )
-    if "condition" in mark.kwargs:
-        raise AssertionError(
-            f"{SESSION_TTL_ROW} xfail has condition={mark.kwargs['condition']!r}"
-        )
-    if mark.kwargs.get("strict") is not True:
-        raise AssertionError(
-            f"{SESSION_TTL_ROW} xfail strict={mark.kwargs.get('strict')!r} "
-            "is not True"
-        )
-    if mark.kwargs.get("raises") is not SessionAffinityParityMismatch:
-        raise AssertionError(
-            f"{SESSION_TTL_ROW} xfail raises={mark.kwargs.get('raises')!r} "
-            f"!= {SessionAffinityParityMismatch!r}"
-        )
-    if mark.kwargs.get("run", True) is not True:
-        raise AssertionError(
-            f"{SESSION_TTL_ROW} xfail run={mark.kwargs.get('run')!r} is disabled"
-        )
+    _assert_strict_xfail_marker(SESSION_TTL_ROW, mark, SessionAffinityParityMismatch)
 
 
 def _assert_session_ttl_binding(row: SettingDecision, items: Iterable[Any]) -> None:
@@ -2167,29 +2151,9 @@ def _assert_tracking_approximate_binding(
 
 
 def _assert_decode_threshold_xfail_marker(mark: Any) -> None:
-    if mark.args:
-        raise AssertionError(
-            f"{DECODE_THRESHOLD_ROW} xfail has positional condition {mark.args!r}"
-        )
-    if "condition" in mark.kwargs:
-        raise AssertionError(
-            f"{DECODE_THRESHOLD_ROW} xfail has condition="
-            f"{mark.kwargs['condition']!r}"
-        )
-    if mark.kwargs.get("strict") is not True:
-        raise AssertionError(
-            f"{DECODE_THRESHOLD_ROW} xfail strict={mark.kwargs.get('strict')!r} "
-            "is not True"
-        )
-    if mark.kwargs.get("raises") is not ActiveDecodeThresholdConfigMismatch:
-        raise AssertionError(
-            f"{DECODE_THRESHOLD_ROW} xfail raises={mark.kwargs.get('raises')!r} "
-            f"!= {ActiveDecodeThresholdConfigMismatch!r}"
-        )
-    if mark.kwargs.get("run", True) is not True:
-        raise AssertionError(
-            f"{DECODE_THRESHOLD_ROW} xfail run={mark.kwargs.get('run')!r} is disabled"
-        )
+    _assert_strict_xfail_marker(
+        DECODE_THRESHOLD_ROW, mark, ActiveDecodeThresholdConfigMismatch
+    )
 
 
 def _assert_decode_threshold_binding(
@@ -3841,17 +3805,7 @@ def _owned_process_log_text(
     if not log.is_file():
         raise AssertionError(f"{label} log is missing: {log}")
     data = log.read_bytes()
-    if data.endswith(b"\n"):
-        completed = data
-    else:
-        last_nl = data.rfind(b"\n")
-        completed = data[: last_nl + 1] if last_nl >= 0 else b""
-    try:
-        text = completed.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise AssertionError(
-            f"{label} log {log} completed prefix is not valid UTF-8: {exc}"
-        ) from exc
+    text = completed_utf8_log_prefix(data, label=f"{label} log {log}")
     return proc.pid, log, text
 
 
