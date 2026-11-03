@@ -3,15 +3,19 @@
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use validator::Validate;
+
+use super::MediaDelivery;
+use crate::engines::ValidateRequest;
 
 mod aggregator;
 mod nvext;
 
-pub use nvext::{NvExt, NvExtProvider};
+pub use nvext::NvExt;
 
 /// Request for video generation (/v1/videos endpoint)
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateVideoRequest {
     /// The text prompt for video generation
     pub prompt: String,
@@ -23,8 +27,11 @@ pub struct NvCreateVideoRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_reference: Option<String>,
 
-    /// Clip duration in seconds
+    /// Clip duration in seconds, at least 1. The frontend rejects a value
+    /// outside the range, so a worker never sees one.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(minimum = 1)]
+    #[validate(range(min = 1, message = "seconds must be at least 1"))]
     pub seconds: Option<i32>,
 
     /// Video size in WxH format (default: "832x480")
@@ -35,9 +42,10 @@ pub struct NvCreateVideoRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
 
-    /// How the generated data should be returned: "url" or "b64_json" (default: "url")
+    /// Delivery mode of the generated video. If absent, the worker applies its
+    /// own default.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub response_format: Option<String>,
+    pub response_format: Option<MediaDelivery>,
 
     /// Output container format: "mp4", "webm", "gif", etc.
     /// This field is used as model hint and the model may not
@@ -52,6 +60,7 @@ pub struct NvCreateVideoRequest {
 
     /// NVIDIA extensions
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[validate(nested)]
     pub nvext: Option<NvExt>,
 
     /// Worker-boundary contract, not a public field: the frontend moves
@@ -67,6 +76,7 @@ pub struct NvCreateVideoRequest {
     /// extra_body option, which merges into the top level of the body.
     /// Stable knobs can be promoted to typed fields over time.
     #[serde(default, flatten)]
+    #[schema(ignore)]
     pub passthrough: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -79,7 +89,7 @@ impl NvCreateVideoRequest {
 }
 
 /// Video data in response
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
 pub struct VideoData {
     /// Actual container format of this video: "mp4", "webm", "gif"
     pub output_format: String,
@@ -102,13 +112,14 @@ pub struct VideoData {
 }
 
 /// Response structure for video generation
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
 pub struct NvVideosResponse {
     /// Unique identifier for the response
     pub id: String,
 
     /// Object type (always "video")
     #[serde(default = "default_object_type")]
+    #[schema(default = default_object_type)]
     pub object: String,
 
     /// Model used for generation
@@ -116,10 +127,12 @@ pub struct NvVideosResponse {
 
     /// Status of the generation ("completed", "failed", etc.)
     #[serde(default = "default_status")]
+    #[schema(default = default_status)]
     pub status: String,
 
     /// Progress percentage (0-100)
     #[serde(default = "default_progress")]
+    #[schema(default = default_progress)]
     pub progress: i32,
 
     /// Unix timestamp of creation
@@ -127,6 +140,7 @@ pub struct NvVideosResponse {
 
     /// Generated video data
     #[serde(default)]
+    #[schema(default = json!([]))]
     pub data: Vec<VideoData>,
 
     /// Error message if generation failed
@@ -166,17 +180,16 @@ impl NvVideosResponse {
     }
 }
 
-/// Implements `NvExtProvider` for `NvCreateVideoRequest`,
-/// providing access to NVIDIA-specific extensions.
-impl NvExtProvider for NvCreateVideoRequest {
-    /// Returns a reference to the optional `NvExt` extension, if available.
-    fn nvext(&self) -> Option<&NvExt> {
-        self.nvext.as_ref()
+/// Implements `AnnotationsProvider` for `NvCreateVideoRequest`,
+/// enabling retrieval and management of request annotations.
+impl ValidateRequest for NvCreateVideoRequest {
+    fn validate(&self) -> Result<(), anyhow::Error> {
+        // `Validate` and `ValidateRequest` share the method name, so the
+        // derived one is called by trait path.
+        Validate::validate(self).map_err(anyhow::Error::from)
     }
 }
 
-/// Implements `AnnotationsProvider` for `NvCreateVideoRequest`,
-/// enabling retrieval and management of request annotations.
 impl AnnotationsProvider for NvCreateVideoRequest {
     /// Retrieves the list of annotations from `NvExt`, if present.
     fn annotations(&self) -> Option<Vec<String>> {
@@ -249,6 +262,27 @@ mod tests {
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("stream"));
+    }
+
+    #[test]
+    fn video_request_response_format_round_trips() {
+        let json = r#"{"prompt":"cat","model":"wan","response_format":"b64_json"}"#;
+        let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.response_format, Some(MediaDelivery::B64Json));
+
+        let out = serde_json::to_string(&req).unwrap();
+        assert!(out.contains("\"response_format\":\"b64_json\""));
+    }
+
+    #[test]
+    fn video_request_unknown_response_format_is_rejected() {
+        let json = r#"{"prompt":"cat","model":"wan","response_format":"ftp"}"#;
+        let err = serde_json::from_str::<NvCreateVideoRequest>(json).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("url") && message.contains("b64_json"),
+            "expected the parse error to list the valid values; got: {message}"
+        );
     }
 
     #[test]
@@ -390,5 +424,49 @@ mod tests {
         let d2: VideoData = serde_json::from_str(&json).unwrap();
         assert_eq!(d2.fps, Some(24));
         assert_eq!(d2.audio_sample_rate, Some(32000));
+    }
+
+    #[test]
+    fn video_request_counts_in_range_pass_validation() {
+        // Absent counts are the worker's defaults; 1 is the smallest valid value.
+        for json in [
+            r#"{"prompt":"cat","model":"wan"}"#,
+            r#"{"prompt":"cat","model":"wan","seconds":1,"nvext":{"fps":1,"num_frames":1,"num_inference_steps":1}}"#,
+        ] {
+            let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+            assert!(
+                ValidateRequest::validate(&req).is_ok(),
+                "expected {json} to pass validation"
+            );
+        }
+    }
+
+    #[test]
+    fn video_request_non_positive_counts_fail_validation() {
+        for (json, rule) in [
+            (
+                r#"{"prompt":"cat","model":"wan","seconds":0}"#,
+                "seconds must be at least 1",
+            ),
+            (
+                r#"{"prompt":"cat","model":"wan","nvext":{"fps":0}}"#,
+                "fps must be at least 1",
+            ),
+            (
+                r#"{"prompt":"cat","model":"wan","nvext":{"num_frames":-1}}"#,
+                "num_frames must be at least 1",
+            ),
+            (
+                r#"{"prompt":"cat","model":"wan","nvext":{"num_inference_steps":0}}"#,
+                "num_inference_steps must be at least 1",
+            ),
+        ] {
+            let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+            let message = ValidateRequest::validate(&req).unwrap_err().to_string();
+            assert!(
+                message.contains(rule),
+                "expected the error for {json} to state the rule; got: {message}"
+            );
+        }
     }
 }

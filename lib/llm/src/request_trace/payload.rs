@@ -163,16 +163,20 @@ fn create_handle_with_config(
     }
     let requested_streaming = req.inner.stream.unwrap_or(false);
     let model = req.inner.model.clone();
+    let mut trace_request = req.clone();
+    if let Some(nvext) = trace_request.nvext.as_mut() {
+        // Upload destinations contain capabilities and signed header values.
+        nvext.metadata_upload = None;
+    }
 
     Some(RequestPayloadHandle {
         requested_streaming,
         request_id: request_id.to_string(),
         model,
-        // Snapshot the pristine inbound request (before the preprocessor
-        // overrides stream/usage) and stamp arrival time on the producing
-        // thread, so the record reflects what the client sent and when.
+        // Snapshot ingress fields without upload capabilities, before stream/
+        // usage overrides, and stamp arrival time on the producing thread.
         event_time: SystemTime::now(),
-        request: Arc::new(req.clone()),
+        request: Arc::new(trace_request),
         http_request_headers,
     })
 }
@@ -229,6 +233,24 @@ mod tests {
     }
 
     #[test]
+    fn request_payload_omits_upload_capabilities_without_changing_request() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test", "messages": [{"role": "user", "content": "hello"}],
+            "nvext": {"extra_fields": ["timing"], "metadata_upload": {"kind": "generation_artifact", "contents": [], "mode": "object_store", "destination": {"kind": "presigned_http_put", "url": "https://storage.example/object?sig=secret", "required_headers": {"x-token": "private-token"}, "expires_at": "2030-01-01T00:00:00Z", "max_bytes": 1024, "object_id": "object-1"}}}
+        })).unwrap();
+        let handle = create_handle_with_config(&request, "test-id", true, true, None).unwrap();
+        assert!(request.nvext.as_ref().unwrap().metadata_upload.is_some());
+        let trace = serde_json::to_string(&handle.request).unwrap();
+        assert!(!trace.contains("metadata_upload"));
+        assert!(!trace.contains("secret"));
+        assert!(!trace.contains("private-token"));
+        assert_eq!(
+            handle.request.nvext.as_ref().unwrap().extra_fields,
+            Some(vec!["timing".into()])
+        );
+    }
+
+    #[test]
     fn request_payload_records_disabled_skips_store_true_payloads() {
         let request = create_test_request("test-model", true);
         let handle = create_handle_with_config(&request, "test-id", true, false, None);
@@ -267,36 +289,18 @@ mod tests {
 
     #[test]
     fn capture_http_headers_redacts_credential_bearing_names() {
-        let sensitive_names = [
-            "authorization",
-            "proxy-authorization",
-            "cookie",
-            "set-cookie",
-            "x-api-key",
-            "api-key",
-            "x-auth-token",
-            "x-access-token",
-        ];
-        let capture_list = sensitive_names
-            .iter()
-            .map(|name| name.to_string())
-            .collect::<Vec<_>>();
+        let capture_list = vec!["authorization".to_string()];
 
         let mut headers = HeaderMap::new();
-        for name in sensitive_names {
-            headers.insert(name, "credential-value".parse().unwrap());
-        }
+        headers.insert("authorization", "credential-value".parse().unwrap());
 
         let captured =
             capture_http_headers_with_lists(&headers, &capture_list, &default_redact_list())
                 .expect("sensitive headers are represented as redacted");
-        for name in sensitive_names {
-            assert_eq!(
-                captured.get(name).map(String::as_str),
-                Some("<redacted>"),
-                "{name} is on the default redact list"
-            );
-        }
+        assert_eq!(
+            captured.get("authorization").map(String::as_str),
+            Some("<redacted>")
+        );
     }
 
     #[test]

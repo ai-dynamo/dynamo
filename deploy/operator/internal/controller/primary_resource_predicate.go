@@ -18,21 +18,15 @@
 package controller
 
 import (
-	"sigs.k8s.io/controller-runtime/pkg/event"
+	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
-func generationOrDeletionChangedPredicate() predicate.Predicate {
+// DGD renderers consume metadata as well as spec; status alone is not input.
+func dgdPrimaryPredicate() predicate.Predicate {
 	return predicate.Or(
-		predicate.GenerationChangedPredicate{},
-		predicate.Funcs{
-			CreateFunc:  func(event.CreateEvent) bool { return false },
-			DeleteFunc:  func(event.DeleteEvent) bool { return false },
-			GenericFunc: func(event.GenericEvent) bool { return false },
-			UpdateFunc: func(update event.UpdateEvent) bool {
-				return update.ObjectOld.GetDeletionTimestamp().IsZero() &&
-					!update.ObjectNew.GetDeletionTimestamp().IsZero()
-			},
-		},
+		commoncontroller.GenerationOrDeletionChangedPredicate(),
+		predicate.AnnotationChangedPredicate{},
+		predicate.LabelChangedPredicate{},
 	)
 }

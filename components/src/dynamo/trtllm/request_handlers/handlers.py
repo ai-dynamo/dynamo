@@ -10,6 +10,7 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
+from dynamo.common.utils.token_ids import normalize_request_token_ids
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.encode_helper import EncodeHelper
 from dynamo.trtllm.multimodal.embedding_fetcher import fetch_embeddings_from_encoder
@@ -121,7 +122,12 @@ class PrefillHandler(HandlerBase):
         if self.encode_client is None:
             raise RuntimeError("Encode client is not configured.")
         encode_response = None
-        async for res in await self.encode_client.round_robin(request, context=context):
+        # The encode worker may sit behind a JSON codec, which would spell a packed
+        # buffer out one byte per element; forward a list.
+        forwarded = normalize_request_token_ids(dict(request))
+        async for res in await self.encode_client.round_robin(
+            forwarded, context=context
+        ):
             encode_response = res.data()
             break
 

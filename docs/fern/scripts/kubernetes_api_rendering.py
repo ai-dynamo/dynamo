@@ -94,9 +94,12 @@ def render_mdx(reference: KubernetesReference) -> str:
         "",
         _package_index(reference),
     ]
+    valid_anchors = {
+        type_.anchor for package in reference.packages for type_ in package.types
+    }
     for package in reference.packages:
         parts.append("")
-        parts.append(_package_section(package))
+        parts.append(_package_section(package, valid_anchors))
     parts.append("")
     parts.append(_operator_defaults(reference.operator_defaults))
     parts.append("")
@@ -122,9 +125,8 @@ def _package_index(reference: KubernetesReference) -> str:
     return "\n".join(lines)
 
 
-def _package_section(package: KubernetesPackage) -> str:
+def _package_section(package: KubernetesPackage, valid_anchors: set[str]) -> str:
     """One package heading, its resource-type cards, and every typed section."""
-    valid_anchors = {type_.anchor for type_ in package.types}
     # A bare <div> target, not an <a>: package tables link to #anchor, but an
     # <a> with no text is an empty link to assistive tech.
     lines = [f'<div id="{_attr(package.anchor)}" />', "", f"## {package.name}"]
@@ -174,7 +176,7 @@ def _type_metadata(type_: KubernetesType, valid_anchors: set[str]) -> list[str]:
         lines.append(f"**Underlying type:** `{_plain(type_.underlying_type)}`")
     if type_.validation:
         lines.append(f"**Validation:** {_prose(type_.validation)}")
-    refs = [ref for ref in type_.appears_in if ref.anchor in valid_anchors]
+    refs = dict.fromkeys(ref for ref in type_.appears_in if ref.anchor in valid_anchors)
     if refs:
         joined = ", ".join(f"[{ref.name}](#{ref.anchor})" for ref in refs)
         lines.append(f"**Appears in:** {joined}")

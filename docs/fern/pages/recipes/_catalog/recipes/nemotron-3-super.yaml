@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 id: nemotron-3-super
-title: Nemotron-3-Super
+title: Nemotron 3 Super
 page: pages/recipes/model-recipes/nemotron-3-super.mdx
 provider: nvidia
 model:

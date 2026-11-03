@@ -14,7 +14,7 @@
 //! every block in a sequence. Callers that need it should read it once from
 //! [`crate::Request::salt_hash`].
 
-use dynamo_tokens::{BlockHash, PositionalLineageHash, SequenceHash, TokenBlock};
+use dynamo_tokens::{BlockHash, BlockLineage, PositionalLineageHash, SequenceHash, TokenBlock};
 use serde::{Deserialize, Serialize};
 
 /// Per-block hashing result. PLH is self-contained for chain extension via
@@ -52,6 +52,15 @@ impl From<&TokenBlock> for UniversalBlock {
         Self {
             block_hash: b.block_hash(),
             plh: b.positional_lineage_hash(),
+        }
+    }
+}
+
+impl From<BlockLineage> for UniversalBlock {
+    fn from(lineage: BlockLineage) -> Self {
+        Self {
+            block_hash: lineage.block_hash,
+            plh: lineage.positional_lineage_hash,
         }
     }
 }

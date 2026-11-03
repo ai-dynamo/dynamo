@@ -1,0 +1,179 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Mistral Large 4 on GB300: aggregated TP4 x 2 with DSpark3, hybrid KV cache manager off.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: mistral-large-4-vllm-gb300-agg-agentic
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    type: frontend
+    runtimeVersionOverride: "1.6.0"
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-mistral-large-4-dev.1
+          imagePullPolicy: IfNotPresent
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          args:
+          - --http-port
+          - '8000'
+          - --dyn-chat-processor
+          - dynamo
+          - --router-kv-events
+          - --kv-cache-block-size
+          - '64'
+          - --router-session-affinity-mode
+          - hard
+          - --tokenizer
+          - fastokens
+          - --no-tokenizer-fallback
+          env:
+          - name: FASTOKENS_BPE_THREADS
+            value: '16'
+          - name: DYN_PARSER_VERSION
+            value: '2'
+          - name: DYN_ROUTER_MODE
+            value: kv
+          - name: DYN_ROUTER_SESSION_AFFINITY_TTL_SECS
+            value: '7200'
+          - name: HF_HUB_OFFLINE
+            value: '1'
+          - name: TRANSFORMERS_OFFLINE
+            value: '1'
+          resources:
+            requests:
+              cpu: '16'
+              memory: 128Gi
+        nodeSelector:
+          kubernetes.io/arch: arm64
+  - name: Worker
+    type: worker
+    runtimeVersionOverride: "1.6.0"
+    replicas: 2
+    sharedMemorySize: 264Gi
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-mistral-large-4-dev.1
+          imagePullPolicy: IfNotPresent
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+          - --model
+          - $(MODEL_PATH)
+          - --served-model-name
+          - $(SERVED_MODEL_NAME)
+          - --enable-multimodal
+          - --tokenizer-mode
+          - mistral
+          - --config-format
+          - mistral
+          - --load-format
+          - mistral
+          - --tensor-parallel-size
+          - '4'
+          - --distributed-executor-backend
+          - mp
+          - --max-model-len
+          - '1048576'
+          - --max-num-seqs
+          - '128'
+          - --max-num-batched-tokens
+          - '16384'
+          - --gpu-memory-utilization
+          - '0.85'
+          - --enable-prefix-caching
+          - --block-size
+          - '64'
+          - --prefix-cache-retention-interval
+          - None
+          - --speculative-config
+          - '{"method":"dspark","num_speculative_tokens":3}'
+          # For performance benchmarks only, replace the value above with:
+          # '{"method":"dspark","num_speculative_tokens":3,"rejection_sample_method":"synthetic","synthetic_acceptance_length":2.697}'
+          # Synthetic acceptance length 2.697 at draft length 3.
+          - --kernel-config
+          - '{"enable_flashinfer_autotune":false}'
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+          - --kv-offloading-size
+          - '200'
+          - --kv-offloading-backend
+          - native
+          - --kv-transfer-config
+          - '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"blocks_per_chunk":1,"self_describing_kv_events":true,"offload_prompt_only":true}}'
+          - --dyn-reasoning-parser
+          - mistral
+          - --dyn-tool-call-parser
+          - mistral
+          - --disable-hybrid-kv-cache-manager
+          env:
+          - name: MODEL_PATH
+            value: /shared-model-cache/mistral-large-4-nvfp4
+          - name: SERVED_MODEL_NAME
+            value: mistral-large-4
+          - name: HF_HOME
+            value: /tmp/huggingface
+          - name: HF_HUB_OFFLINE
+            value: '1'
+          - name: TRANSFORMERS_OFFLINE
+            value: '1'
+          - name: DYN_SELF_HOST_METADATA
+            value: '1'
+          - name: VLLM_USE_SIMPLE_KV_OFFLOAD
+            value: '0'
+          - name: VLLM_USE_V2_MODEL_RUNNER
+            value: '1'
+          - name: PYTHONHASHSEED
+            value: '0'
+          resources:
+            requests:
+              cpu: '64'
+              memory: 704Gi
+              ephemeral-storage: 64Gi
+              nvidia.com/gpu: '4'
+            limits:
+              nvidia.com/gpu: '4'
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_PTRACE
+              - SYS_RESOURCE
+          volumeMounts:
+          - name: shared-model-cache
+            mountPath: /shared-model-cache
+            readOnly: true
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        nodeSelector:
+          kubernetes.io/arch: arm64
+          nvidia.com/gpu.product: NVIDIA-GB300

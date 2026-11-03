@@ -32,24 +32,45 @@ import (
 
 const testDGDName = "my-dgd"
 
+func TestV1Beta2EnvelopeSerializesWithoutNativeFields(t *testing.T) {
+	spec := DynamoGraphDeploymentRequestSpec{
+		V1Beta2: &apiextensionsv1.JSON{Raw: []byte(`{"model":{"name":"test"}}`)},
+	}
+
+	data, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if len(fields) != 1 {
+		t.Fatalf("serialized fields = %v, want only v1beta2", fields)
+	}
+	if _, ok := fields["v1beta2"]; !ok {
+		t.Fatalf("serialized fields = %v, want v1beta2", fields)
+	}
+}
+
 // newV1alpha1DGDR builds a fully-populated v1alpha1 DGDR for use in tests.
 func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
-	profilingBlob := map[string]interface{}{
-		"sla": map[string]interface{}{
+	profilingBlob := map[string]any{
+		"sla": map[string]any{
 			"ttft":             float64(500),
 			"itl":              float64(20),
 			"isl":              float64(2048),
 			"osl":              float64(512),
 			"optimizationType": "latency",
 		},
-		"deployment": map[string]interface{}{
-			"modelCache": map[string]interface{}{
+		"deployment": map[string]any{
+			"modelCache": map[string]any{
 				"pvcName":        "model-pvc",
 				"modelPathInPvc": "llama-3",
 				"pvcMountPath":   "/data/model",
 			},
 		},
-		"planner": map[string]interface{}{
+		"planner": map[string]any{
 			"enable_load_scaling": false,
 		},
 		"extra_key": "preserved",
@@ -58,17 +79,15 @@ func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
 
 	trueVal := true
 	return &DynamoGraphDeploymentRequest{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgdr",
-			Namespace: "default",
-		},
+		Name:      "test-dgdr",
+		Namespace: "default",
 		Spec: DynamoGraphDeploymentRequestSpec{
 			Model:                  "meta-llama/Llama-3.1-8B",
 			Backend:                "vllm",
 			RuntimeVersionOverride: "1.2.3",
 			AutoApply:              true,
 			UseMocker:              true,
-			ProfilingConfig: ProfilingConfigSpec{
+			ProfilingConfig: &ProfilingConfigSpec{
 				ProfilerImage: "nvcr.io/nvidia/dynamo:latest",
 				OutputPVC:     "output-pvc",
 				Config:        &apiextensionsv1.JSON{Raw: blobRaw},
@@ -103,15 +122,13 @@ func newV1beta1DGDR() *v1beta1.DynamoGraphDeploymentRequest {
 	isl := int32(1024)
 	osl := int32(256)
 
-	rawDGD, _ := json.Marshal(map[string]interface{}{"apiVersion": "nvidia.com/v1alpha1", "kind": "DynamoGraphDeployment"})
-	rawPlanner, _ := json.Marshal(map[string]interface{}{"enable_load_scaling": false})
+	rawDGD, _ := json.Marshal(map[string]any{"apiVersion": "nvidia.com/v1alpha1", "kind": "DynamoGraphDeployment"})
+	rawPlanner, _ := json.Marshal(map[string]any{"enable_load_scaling": false})
 	autoApplyFalse := false
 
 	return &v1beta1.DynamoGraphDeploymentRequest{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "hub-dgdr",
-			Namespace: "default",
-		},
+		Name:      "hub-dgdr",
+		Namespace: "default",
 		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
 			Model:                  "Qwen/Qwen3-32B",
 			Backend:                v1beta1.BackendTypeVllm,
@@ -308,11 +325,11 @@ func TestAlpha1RoundTrip(t *testing.T) {
 	if restored.Spec.ProfilingConfig.Config == nil {
 		t.Fatal("ProfilingConfig.Config is nil after round-trip")
 	}
-	var blob map[string]interface{}
+	var blob map[string]any
 	if err := json.Unmarshal(restored.Spec.ProfilingConfig.Config.Raw, &blob); err != nil {
 		t.Fatalf("failed to unmarshal restored ProfilingConfig.Config: %v", err)
 	}
-	slaMap, _ := blob["sla"].(map[string]interface{})
+	slaMap, _ := blob["sla"].(map[string]any)
 	if slaMap == nil {
 		t.Fatal("sla key missing in restored JSON blob")
 	}
@@ -327,7 +344,7 @@ func TestAlpha1RoundTrip(t *testing.T) {
 		t.Errorf("extra_key: got %v, want %q", blob["extra_key"], "preserved")
 	}
 	// Planner round-trip via profiling-config projection helpers.
-	plannerMap, _ := blob["planner"].(map[string]interface{})
+	plannerMap, _ := blob["planner"].(map[string]any)
 	if plannerMap == nil {
 		t.Fatal("planner key missing in restored JSON blob")
 	}

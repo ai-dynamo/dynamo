@@ -295,9 +295,6 @@ impl SyncIndexer for PositionalIndexer {
                 } => {
                     self.remove_worker_dp_rank_impl(&mut worker_blocks, worker_id, dp_rank);
                 }
-                WorkerTask::CleanupStaleChildren => {
-                    self.run_cleanup_task();
-                }
                 WorkerTask::DumpEvents(sender) => {
                     let events = self.dump_events(&worker_blocks);
                     if let Err(e) = sender.send(Ok(events)) {
@@ -464,6 +461,11 @@ impl PositionalIndexer {
         seq_hashes: &Vec<ExternalSequenceBlockHash>,
         event_id: u64,
     ) -> Result<(), KvCacheEventError> {
+        // An empty removal is a no-op, even for a worker this index has not seen:
+        // normalizers emit one for a dropped store to keep event ids contiguous.
+        if seq_hashes.is_empty() {
+            return Ok(());
+        }
         let worker_map = worker_blocks.get_mut(&worker).ok_or_else(|| {
             tracing::warn!(
                 worker_id = worker.worker_id.to_string(),

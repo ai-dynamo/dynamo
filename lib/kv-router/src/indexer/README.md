@@ -166,6 +166,9 @@ RadixBlock
 Children and worker lookups hold strong references; parent links are weak to avoid
 reference cycles. A child is keyed by its first local block hash. Splits preserve
 that key for the prefix and update the parent links of children moved to the suffix.
+A split moves only the worker lookup entries that still name the split node: a
+detached node can keep stale coverage for a worker whose lookup has since moved to
+a live node or been cleared.
 Cleanup detaches an unowned node only if the parent's slot still points to it, so
 an old detached node cannot remove a replacement.
 

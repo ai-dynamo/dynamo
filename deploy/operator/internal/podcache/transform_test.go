@@ -26,22 +26,25 @@ func TestProjectConsumerContract(t *testing.T) {
 	now := metav1.Now()
 	mode := int32(0440)
 	pod := &corev1.Pod{
-		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "worker-0",
-			Namespace:         "inference",
-			UID:               types.UID("pod-uid"),
-			ResourceVersion:   "42",
-			Generation:        3,
-			Labels:            map[string]string{"dynamo": "worker", "dcd": "old-worker"},
-			Annotations:       map[string]string{"topology-label": "topology.kubernetes.io/zone"},
-			OwnerReferences:   []metav1.OwnerReference{{Name: "worker", UID: types.UID("owner-uid"), Controller: ptr.To(true)}},
-			Finalizers:        []string{"test.example/finalizer"},
-			DeletionTimestamp: &now,
-			ManagedFields:     []metav1.ManagedFieldsEntry{{Manager: "large-manager"}},
-		},
+		APIVersion: "v1", Kind: "Pod",
+		Name:              "worker-0",
+		Namespace:         "inference",
+		UID:               types.UID("pod-uid"),
+		ResourceVersion:   "42",
+		Generation:        3,
+		Labels:            map[string]string{"dynamo": "worker", "dcd": "old-worker"},
+		Annotations:       map[string]string{"topology-label": "topology.kubernetes.io/zone"},
+		OwnerReferences:   []metav1.OwnerReference{{Name: "worker", UID: types.UID("owner-uid"), Controller: new(true)}},
+		Finalizers:        []string{"test.example/finalizer"},
+		DeletionTimestamp: &now,
+		ManagedFields:     []metav1.ManagedFieldsEntry{{Manager: "large-manager"}},
 		Spec: corev1.PodSpec{
-			NodeName: "node-a",
+			NodeName:      "node-a",
+			SchedulerName: "lpx-scheduler",
+			ResourceClaims: []corev1.PodResourceClaim{{
+				Name:              "lpu-partition",
+				ResourceClaimName: new("lpu-partition-0"),
+			}},
 			Containers: []corev1.Container{{
 				Name:    "main",
 				Image:   "large-image",
@@ -69,8 +72,8 @@ func TestProjectConsumerContract(t *testing.T) {
 			Volumes: []corev1.Volume{
 				{
 					Name: "pod-labels",
-					VolumeSource: corev1.VolumeSource{DownwardAPI: &corev1.DownwardAPIVolumeSource{
-						DefaultMode: ptr.To(int32(0644)),
+					DownwardAPI: &corev1.DownwardAPIVolumeSource{
+						DefaultMode: new(int32(0644)),
 						Items: []corev1.DownwardAPIVolumeFile{
 							{
 								Path: "zone",
@@ -85,9 +88,10 @@ func TestProjectConsumerContract(t *testing.T) {
 								ResourceFieldRef: &corev1.ResourceFieldSelector{Resource: "limits.memory"},
 							},
 						},
-					}},
+					},
 				},
-				{Name: "discarded-secret", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "large"}}},
+				{Name: "discarded-secret", Secret: &corev1.SecretVolumeSource{SecretName: "large"}},
+				{Name: "discarded-config", ConfigMap: &corev1.ConfigMapVolumeSource{Name: "config"}},
 			},
 		},
 		Status: corev1.PodStatus{
@@ -102,6 +106,7 @@ func TestProjectConsumerContract(t *testing.T) {
 					Reason:  podcontract.RestoreReasonFailed,
 					Message: "discard-me",
 				},
+				{Type: corev1.DisruptionTarget, Status: corev1.ConditionTrue, Reason: "EvictionByEvictionAPI", Message: "discard-me"},
 			},
 			ContainerStatuses: []corev1.ContainerStatus{
 				{
@@ -155,6 +160,9 @@ func TestProjectConsumerContract(t *testing.T) {
 	t.Run("model retains Ready identity command and arguments", func(t *testing.T) {
 		require.Len(t, got.Spec.Containers, 1)
 		assert.Equal(t, corev1.Container{Name: "main", Command: []string{"python"}, Args: []string{"-m", "dynamo"}}, got.Spec.Containers[0])
+	})
+	t.Run("snapshot retains restore state", func(t *testing.T) {
+		assert.Empty(t, got.Spec.SchedulerName)
 		assert.Equal(t, []corev1.PodCondition{
 			{Type: corev1.PodReady, Status: corev1.ConditionTrue},
 			{
@@ -201,7 +209,7 @@ func TestProjectConsumerContract(t *testing.T) {
 }
 
 func TestTransformLeavesOtherObjectsUnchanged(t *testing.T) {
-	configMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "config"}}
+	configMap := &corev1.ConfigMap{Name: "config"}
 	got, err := Transform(configMap)
 	require.NoError(t, err)
 	assert.Same(t, configMap, got)
@@ -209,11 +217,9 @@ func TestTransformLeavesOtherObjectsUnchanged(t *testing.T) {
 
 func TestProjectedPodSupportsNarrowMetadataPatch(t *testing.T) {
 	before := Project(&corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "worker-0",
-			Namespace: "inference",
-			Labels:    map[string]string{"existing": "value"},
-		},
+		Name:      "worker-0",
+		Namespace: "inference",
+		Labels:    map[string]string{"existing": "value"},
 		Spec: corev1.PodSpec{
 			NodeName: "node-a",
 			Containers: []corev1.Container{{
