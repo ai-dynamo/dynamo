@@ -6,48 +6,54 @@ SPDX-License-Identifier: Apache-2.0
 # Sidecar support notes
 
 > [!NOTE]
-> Sidecar integration is under active development. These notes may become stale as Dynamo and the native engines evolve. Check the versions you deploy.
+> Sidecar integration is under active development. These notes can become out of date when Dynamo or a native engine changes.
+
+Check the versions in your deployment.
 
 ## vLLM
 
-The standard generation path requires `n=1`. It accepts image, video, and audio input, but rejects prompt embeddings and per-request `mm_processor_kwargs`. Basic structured output is implemented with a narrower set of constraint controls than the in-process backend.
+The standard generation path requires one completion per request (`n=1`). It accepts image, video, and audio input. It does not accept prompt embeddings or per-request `mm_processor_kwargs`. The sidecar provides basic structured output. It supports fewer constraint controls than the in-process backend.
 
-Runtime weight updates and sleep/wake controls require the engine to advertise the corresponding capabilities. Configure speculative decoding in the native engine; model, algorithm, routing, disaggregation, and telemetry combinations require separate qualification.
+Runtime weight updates require the engine to report support for weight updates. Sleep and wake controls require engine support for sleep mode. Configure speculative decoding in the native engine. Test each model, algorithm, routing, disaggregation, and telemetry combination separately.
 
-Premature clean stream closure is a non-migratable protocol error. See the [shared operational limits](#operational-limits) for migration eligibility, observability, planning, cache offloading, and shutdown behavior.
+If an output stream closes early without an error, the sidecar treats the closure as a protocol error. Request migration does not retry this error. See the [shared operational limits](#operational-limits) for migration rules, observability, planning, cache offloading, and shutdown behavior.
 
 ## SGLang
 
-The standard gRPC generation path requires `n=1` and rejects multimodal input. Basic structured output is implemented with a narrower set of constraint controls than the in-process backend.
+The standard gRPC generation path requires one completion per request (`n=1`). It does not accept multimodal input. The sidecar provides basic structured output. It supports fewer constraint controls than the in-process backend.
 
-The sidecar does not register the engine's LoRA adapter inventory or expose Dynamo-managed adapter loading/unloading. Forwarding an adapter name internally does not make it available through OpenAI model lookup. The separate, opt-in native `/generate` passthrough can select a preloaded adapter using `lora_path`; native passthrough and manually published adapter records are separate integration choices.
+The sidecar does not register the engine's LoRA adapter list. Dynamo cannot load or unload adapters through this sidecar. An adapter name in an internal request does not add the adapter to OpenAI model lookup.
 
-Configure HiCache and speculative decoding in the native engine. The sidecar reports HiCache capacity for recognized configurations and handles EAGLE-family routing metadata and draft-token reserves. Model, algorithm, routing, disaggregation, and telemetry combinations require separate qualification.
+The optional native `/generate` passthrough can select a preloaded adapter with `lora_path`. You must enable this passthrough separately. This passthrough is separate from the standard generation path. Manually published adapter records are another integration option.
 
-Premature clean stream closure is eligible for request migration. See the [shared operational limits](#operational-limits) for migration eligibility, observability, planning, cache offloading, and shutdown behavior.
+Configure HiCache and speculative decoding in the native engine. The sidecar reports HiCache capacity for configurations that it recognizes. It also handles EAGLE-family routing metadata and draft-token reserves. Test each model, algorithm, routing, disaggregation, and telemetry combination separately.
+
+Request migration can retry a stream that closes early without an error. See the [shared operational limits](#operational-limits) for migration rules, observability, planning, cache offloading, and shutdown behavior.
 
 ## TensorRT-LLM
 
-The standard generation path requires `n=1`. It accepts images, but rejects separate encoder handoffs, video, and audio. Basic structured output is implemented with a narrower set of constraint controls than the in-process backend. Output logprobs are supported; prompt logprobs are not.
+The standard generation path requires one completion per request (`n=1`). It accepts images. It does not accept separate encoder handoffs, video, or audio. The sidecar provides basic structured output. It supports fewer constraint controls than the in-process backend. The sidecar returns output logprobs (token log probabilities). It does not return prompt logprobs.
 
-The sidecar publishes routing-load snapshots. These differ from the per-iteration Forward Pass Metrics (FPM) required by load-based planning. Premature clean stream closure and KV-session/transfer failures are non-migratable.
+The sidecar publishes routing-load snapshots. These are not the per-iteration Forward Pass Metrics (FPM) that load-based planning needs. Request migration does not retry an output stream that closes early without an error. It also does not retry KV-session or KV-transfer failures.
 
-Configure speculative decoding in the native engine. The sidecar preserves generation output and native handoffs, but model, algorithm, routing, disaggregation, and telemetry combinations require separate qualification. The aggregated convenience launcher rejects custom config files; merge the required `guided_decoding_backend: xgrammar` setting into your configuration and start the native engine directly.
+Configure speculative decoding in the native engine. The sidecar passes generation output and native handoff data. Test each model, algorithm, routing, disaggregation, and telemetry combination separately.
 
-See the [shared operational limits](#operational-limits) for migration eligibility, observability, planning, cache offloading, and shutdown behavior.
+The aggregated launcher does not accept custom configuration files. Add `guided_decoding_backend: xgrammar` to your engine configuration. Then start the native engine directly.
+
+See the [shared operational limits](#operational-limits) for migration rules, observability, planning, cache offloading, and shutdown behavior.
 
 ## Operational limits
 
-Dynamo runtime metrics, logs, and request spans are implemented. Scrape native engine metrics separately; the sidecars do not provide full engine-internal tracing or parity with existing dashboards.
+Dynamo provides runtime metrics, logs, and request spans. Collect native engine metrics separately. The sidecars do not provide full tracing inside the engine. They do not provide full support for existing dashboards.
 
-A supported service-level agreement (SLA) autoscaling workflow is not available for these sidecars. Kubernetes worker discovery is implemented, but built-in per-iteration Forward Pass Metrics (FPM) emission/relay is missing, so default load-based scaling has no input and cannot make scaling decisions. A separate predictive-scaling path does not establish an integrated sidecar workflow. See [Planner Limitations](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/overview.md#current-limitations).
+The sidecars do not have a supported workflow for service-level agreement (SLA) autoscaling. The planner can discover workers in Kubernetes. The sidecars do not publish or forward per-iteration Forward Pass Metrics (FPM). The default load-based planner needs these metrics to make scaling decisions. Predictive scaling uses a separate code path. That path does not provide a supported autoscaling workflow for sidecars. See [Planner Limitations](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/overview.md#current-limitations).
 
-The GPU Memory Service (GMS), checkpoint/restore, and shadow-engine failover entries require separate engine/container integration. A Dynamo engine container or upstream engine configuration can supply components for such integrations, but backend-specific setup and validation are required. This does not establish support for every backend or deployment mode.
+GPU Memory Service (GMS), checkpoint/restore, and shadow-engine failover require separate integration. A Dynamo engine container or upstream engine settings can provide components for these integrations. Each backend and deployment mode needs its own setup and tests. These requirements do not mean that every combination works.
 
-The Kubernetes operator rejects sidecar mode combined with GMS, enabled checkpointing, or shadow-engine failover, regardless of the engine image. Replacing the engine image alone does not enable these operator-managed features. See the [sidecar deployment contract](../../docs/fern/pages/reference/kubernetes-api/dynamo-component-deployment.mdx#dynamo-sidecar-mode).
+The Kubernetes operator rejects sidecar mode with GMS, enabled checkpointing, or shadow-engine failover. This restriction applies to all engine images. Changing the engine image alone does not enable these operator-managed features. See the [sidecar deployment contract](../../docs/fern/pages/reference/kubernetes-api/dynamo-component-deployment.mdx#dynamo-sidecar-mode).
 
-Enable request migration with `--migration-limit > 0`; it is off by default. Eligible requests can retry connection failures, timeouts, and supported interrupted streams, continuing from delivered tokens. Structured-output requests and explicit worker pins are excluded, and not all engine errors are migratable. See each engine's support notes for error-specific restrictions. Request migration is distinct from shadow-engine failover.
+To enable request migration, set `--migration-limit` to a value greater than `0`. Request migration is off by default. Eligible requests can retry connection failures, timeouts, and some interrupted streams. Retries continue from the tokens already sent to the client. Request migration excludes structured-output requests and requests pinned to a worker. Some engine errors cannot trigger request migration. See each engine's notes for the error restrictions. Request migration and shadow-engine failover are separate features.
 
-The shared worker unregisters, waits, and cleans up during shutdown. The sidecars do not report engine quiescence, so prefill draining uses a bounded wait rather than proving that engine KV transfers have completed.
+During shutdown, the shared worker removes its registration. It then waits and releases its resources. Sidecars do not report when all engine work has stopped. The prefill worker therefore waits for a limited time. This wait does not prove that engine KV transfers are complete.
 
-Configure cache offloading in the native engine, with any required plugin installed in the engine container. Sidecar separation does not prevent engine-local caching. Offload-aware routing, storage tiers, and combinations with prefill/decode transfer require separate qualification; a prefix-cache hit or KV event alone does not prove them. Implementation support does not certify every model and feature combination.
+Configure cache offloading in the native engine. Install any required plugin in the engine container. Running the sidecar in a separate process does not prevent caching inside the engine. Test offload-aware routing, storage tiers, and prefill/decode transfer combinations separately. A prefix-cache hit or KV event alone does not prove that these combinations work. Support for a feature does not mean that all model and feature combinations are verified.
