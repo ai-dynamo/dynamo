@@ -305,6 +305,106 @@ This scope is needed for "multiple agg pools sharing a budget" deployments such 
 
 **Soft floor at startup.** If the discovered initial total GPUs is below `min_total_gpus`, the Global Planner logs a warning and continues. Scale-down requests that breach the floor are still denied, and natural scale-ups from local planners will drift toward the floor. No proactive fill is issued; if load is permanently low, the deployment may remain below the floor. The floor is a target enforced on the way down, not a hard invariant.
 
+## Offline Allocation Planning (Experimental)
+
+[DEP #16064](https://github.com/ai-dynamo/dynamo/issues/16064) proposes active
+reclamation from lower-priority pools. The standalone allocation planner below
+implements the policy and settled-allocation calculation for that proposal. It
+does not contact Kubernetes or execute a transfer, and the running Global
+Planner service does not consume this policy format.
+
+Each pool explicitly owns one prefill-only or decode-only worker component in
+its own DGD. GPU cost per replica must be a positive integer; zero-cost and
+composite pools are outside this allocation model. Identities are exact, without
+selectors. Higher static priorities are more important.
+
+For example, save this as `allocation-policy.json`:
+
+```json
+{
+  "min_total_gpus": 16,
+  "max_total_gpus": 16,
+  "pools": [
+    {
+      "pool_id": "interactive",
+      "participant_id": "prod/interactive",
+      "component_name": "DecodeWorker",
+      "role": "decode",
+      "gpu_per_replica": 4,
+      "min_gpus": 4,
+      "max_gpus": 16,
+      "priority": 100
+    },
+    {
+      "pool_id": "batch",
+      "participant_id": "prod/batch",
+      "component_name": "DecodeWorker",
+      "role": "decode",
+      "gpu_per_replica": 4,
+      "min_gpus": 4,
+      "max_gpus": 16,
+      "priority": 10
+    }
+  ]
+}
+```
+
+Save the complete current allocation as `allocations.json`:
+
+```json
+{"interactive": 8, "batch": 8}
+```
+
+Then inspect a request for three interactive replicas:
+
+```bash
+python -m dynamo.global_planner.plan_allocation \
+  --policy allocation-policy.json \
+  --allocations allocations.json \
+  --pool interactive --replicas 3
+```
+
+The resulting plan assigns 12 GPUs to `interactive` and 4 to `batch`, with exact
+targets of three and one replicas. No voluntary downscale request from `batch`
+is needed to calculate the plan. Both pools' minima and the exact shared total
+remain satisfied. Asking `batch` to grow cannot reclaim from `interactive`.
+
+Pool minima round up and maxima round down to whole replicas. For example, a
+pool costing 4 GPUs per replica with bounds `[5, 15]` has effective bounds
+`[8, 12]`. A configuration is rejected if a pool's interval becomes empty or if
+no actual allocation vector satisfies the exact global bounds. Scalar sums of
+pool minima and maxima alone are insufficient to establish feasibility.
+
+The supplied allocation must name every configured pool, use whole replicas,
+and already satisfy all bounds. Desired replicas are clamped to the pool's
+effective interval; the output retains both desired and effective targets.
+Voluntary downscaling retains enough warm replicas to preserve the global
+allocation floor. Growth uses spare capacity first, then considers reductions
+only from strictly lower-priority pools above their minima. Among feasible
+plans, the search minimizes reclamation from higher donor priority classes
+first, then excess reclamation, then the number of affected pools. Pool IDs
+break remaining ties deterministically.
+
+Use `--unavailable-pool <id>` repeatedly to exclude pools from changes. This is
+an offline eligibility constraint, not reservation accounting. The input
+represents settled committed allocations; it cannot describe in-flight
+transfers or physical holdings. The command returns a complete hypothetical
+plan or a pending decision with no partial plan. Exit status is `0` for a plan,
+`1` for pending, and `2` for invalid input. Reasons identify normalized pool
+bounds, retained global floor, a busy requester, insufficient eligible capacity,
+incompatible replica sizes, or search exhaustion. `--max-search-steps` bounds
+allocation search work (default 100,000 units, accounting for candidate
+transitions and score width). Policy feasibility validation has its own fixed
+100,000-unit limit; an exhausted proof is rejected as unverified.
+
+The Python entry points are `AllocationPolicy` in `allocation_policy.py` and
+`plan_allocation` in `allocation.py`. They are independent of backend execution.
+The allocation floor here applies to settled targets: it does not establish a
+live-serving floor during a release-before-start transfer. Active execution
+still requires exclusive allocation ownership, durable transfer records and
+reservations, authoritative GPU-release observation, and restart reconciliation
+as described in the DEP.
+
 ## Related Documentation
 
 - [Planner Guide](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/planner-guide.md) — Planner configuration and deployment workflow
