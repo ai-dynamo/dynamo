@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Triton sidecar
+# Triton Sidecar
 
 > [!WARNING]
 > **Experimental.** The sidecars and their deployment examples are experimental.
@@ -50,15 +50,15 @@ At startup, the sidecar writes each endpoint it uses back to its environment var
 `--grpc-endpoint` and `--http-endpoint` are the same as `--grpc` and `--http`, matching the options of the other Dynamo sidecars: each takes a required `host:port` or URL.
 Both require a value to be provided and neither support bare port values.
 When multiple `--gprc` and/or `--grpc-endpoint` options are provided, the last provided value is accepted.
-Same rule applied to `--http` and `--http-endpoint`.
+Same rule applied to the `--http` and `--http-endpoint` options.
 
 > [!WARNING]
-> Unlike the `--grpc` and `--http` options, the `--grpc-endpoint` and `--http-endpoint` options require a value and *do not* support `<port>` only values.
+> Unlike the `--grpc` and `--http` options, the `--grpc-endpoint` and `--http-endpoint` options require a value and **do not** support `<port>` only values.
 
 When both protocols are enabled:
 
 - Model discovery and model configuration use gRPC.
-- Startup waits until both endpoints report ready, and a model is served only when it is ready on both.
+- Startup waits until both endpoints report ready. If a model to serve is not ready on both, startup fails, the error names one such model, and no model is served.
 - Inference requests alternate between gRPC and HTTP.
 
 The HTTP transport uses Triton's binary tensor data extension for every input and output.
@@ -72,7 +72,7 @@ Ready models are discovered through Triton's `RepositoryIndex` API.
 Use `--export <model>` to restrict which models hosted by Triton Server are available via the sidecar's interface.
 Repeat `--export <model>`, or pass a comma-separated list of models, to serve several models.
 
-## OpenAI classify and embeddings
+## OpenAI Classify and Embeddings
 
 Each model is served through one endpoint, chosen by the flags that name it:
 
@@ -96,8 +96,7 @@ dynamo-triton-sidecar --grpc \
 ```
 
 A classify or embeddings model must declare exactly one `TYPE_STRING` input with `dims: [1]` or `dims: [-1]` and exactly one `TYPE_FP32` output.
-A name model does not meeting these requirement will cause a failure during sidecar startup.
-A named model that does not fit fails startup with its name in the error.
+A named model that does not meet these requirements fails during sidecar startup; the model's name will be provided in the error message.
 
 - Each request's text prompts are sent to Triton as one `BYTES` tensor, shaped `[N, 1]` for a batching model and `[N]` otherwise, and Triton returns one `FP32` row per prompt.
 - Ensemble steps (tokenizer, encoder, and so on) that are not named are served as tensor models like any other model; pass `--export <model>` to register only the models you want.
@@ -107,7 +106,40 @@ A named model that does not fit fails startup with its name in the error.
 - Embeddings travel to the frontend as base64 little-endian `FP32`; the frontend returns floats unless the client asks for `encoding_format: "base64"`.
 - Health-check probes answer from Triton's model readiness without running inference.
 
-## Support matrix
+## Metrics
+
+Metrics related to the health, performance, and current state of Triton Server must be collected directly from the Triton Server process.
+The Triton Sidecar does not collect or provide metrics for Triton Server.
+
+To ensure that Triton Server metrics are available, use the `--allow-metrics=true` option when starting the Triton Server process.
+The network port Trion Server provides metrics data can be controlled using the `--metrics-port=<port>` option.
+Metrics are served over port `8002` by default.
+
+For additional information, see [NVIDIA Triton Inference Server Metrics](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/metrics.html).
+
+Triton Sidecar metrics are available on port `8081` when `DYN_SYSTEM_PORT=8081` is set before starting the sidecar process.
+
+## Dataflow Diagrams
+
+### KServe v2 gRPC
+
+```mermaid
+graph LR
+  A(Client) -- GRPC --> B(Dynamo Frontend)
+  B(Dynamo Frontend) -- TCP --> C(Dynamo Triton Sidecar)
+  C(Dynamo Triton Sidecar) -- GRPC --> D(Triton Server)
+```
+
+### OpenAI `v1/classify` and `v1/embeddings`
+
+```mermaid
+graph LR
+  A(Client) -- HTTP --> B(Dynamo Frontend)
+  B(Dynamo Frontend) -- TCP --> C(Dynamo Triton Sidecar)
+  C(Dynamo Triton Sidecar) -- HTTP --> D(Triton Server)
+```
+
+## Support Matrix
 
 | Feature                           | Supported                                  |
 | :-------------------------------- | :----------------------------------------- |
