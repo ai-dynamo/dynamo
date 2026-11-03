@@ -75,6 +75,10 @@ def check_entry(entry: dict) -> list[str]:
     baseline_ref = f"{entry['baseline_image']}:{entry['baseline_tag']}"
     platform = entry.get("platform", _DEFAULT_PLATFORM)
 
+    if entry.get("drift_check_skipped"):
+        print(f"  {from_ref} ({platform}) skipped (drift_check_skipped)")
+        return problems
+
     # Check 1: from_image digest still matches.
     try:
         from_current = resolve_index_digest(from_ref)
@@ -246,7 +250,7 @@ def check(manifest_path: Path) -> int:
         if problems:
             failed.append((entry, problems))
             all_problems.extend(problems)
-        else:
+        elif not entry.get("drift_check_skipped"):
             from_ref = f"{entry['from_image']}:{entry['from_tag']}"
             print(f"  {from_ref} OK ({entry['from_digest'][:19]}...)")
 
