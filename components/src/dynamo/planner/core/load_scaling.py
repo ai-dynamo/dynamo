@@ -135,7 +135,13 @@ class LoadScalingMixin:
             # cancel replicas that are still starting.
             if budget_reason is not None:
                 self._diag_load_reason = budget_reason
-            return None
+            if not (
+                self._config.environment == "global-planner"
+                and self._diag_load_reason
+                in ("no_change", "scale_down_refused_consolidation")
+                and not self._pending_startup(component)
+            ):
+                return None
 
         if desired < num_workers + self._pending_startup(component):
             if desired > original_desired:
@@ -144,7 +150,7 @@ class LoadScalingMixin:
                 self._diag_load_reason = "scale_down"
         elif desired > num_workers:
             self._diag_load_reason = "scale_up"
-        else:
+        elif not load_unchanged:
             self._diag_load_reason = "no_change"
         if budget_reason is not None:
             self._diag_load_reason = budget_reason
@@ -330,6 +336,23 @@ class LoadScalingMixin:
                     if candidate is not None and candidate != "no_change":
                         self._diag_load_reason = candidate
                         break
+            if self._config.environment == "global-planner":
+                # Preserve measured ready-equal demand, but never manufacture
+                # demand for a role whose observation/model was unavailable.
+                managed_p = (
+                    final_p
+                    if p_desired is not None
+                    or p_reason in ("no_change", "scale_down_refused_consolidation")
+                    else None
+                )
+                managed_d = (
+                    final_d
+                    if d_desired is not None
+                    or d_reason in ("no_change", "scale_down_refused_consolidation")
+                    else None
+                )
+                if managed_p is not None or managed_d is not None:
+                    return ScalingDecision(num_prefill=managed_p, num_decode=managed_d)
             return None
 
         logger.info(
@@ -366,7 +389,14 @@ class LoadScalingMixin:
             # For agg easy mode, we directly get a single decision
             # _agg_easy_decision already sets _diag_load_reason before returning None
             if desired is None:
-                return None
+                if (
+                    self._config.environment == "global-planner"
+                    and self._diag_load_reason == "no_change"
+                    and not self._pending_num_d
+                ):
+                    desired = num_workers
+                else:
+                    return None
 
             if (self._pending_num_p or self._pending_num_d) and desired > num_workers:
                 return None
@@ -395,6 +425,7 @@ class LoadScalingMixin:
                 idle_target is not None
                 and desired == num_workers
                 and not self._pending_num_d
+                and self._config.environment != "global-planner"
             ):
                 return None
             logger.info("Agg load scaling: %s -> %s", num_workers, desired)
@@ -495,6 +526,8 @@ class LoadScalingMixin:
                 self._diag_load_reason = (
                     "scale_down_capped_by_throughput" if floor_capped else "no_change"
                 )
+            if self._config.environment == "global-planner" and not self._pending_num_d:
+                return ScalingDecision(num_decode=desired)
             return None
 
         if desired < num_workers + self._pending_num_d:

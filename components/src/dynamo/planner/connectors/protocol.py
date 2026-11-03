@@ -6,7 +6,7 @@
 from enum import Enum
 from typing import List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StrictInt
 
 from dynamo.planner.config.defaults import TargetReplica
 
@@ -45,6 +45,37 @@ class ScaleRequest(BaseModel):
     # Optional context (for debugging/logging)
     timestamp: Optional[float] = None
     predicted_load: Optional[dict] = None
+    # Identifies a submitted demand update, including retries of that update.
+    # Optional so existing Local Planners can still use the legacy endpoint.
+    request_id: Optional[str] = None
+
+
+class AllocationStatusRequest(BaseModel):
+    """Identify a managed pool without changing its retained demand."""
+
+    caller_namespace: str
+    graph_deployment_name: str
+    k8s_namespace: str
+
+
+class ManagedAllocationStatus(BaseModel):
+    """Demand, grant, and observed capacity reported by a managed controller.
+
+    A grant is an allocation target, not a ready worker count. Nullable counts
+    mean the controller has no valid observation for that field yet.
+    """
+
+    pool_id: str
+    controller_id: str
+    phase: str
+    reason: str
+    desired_replicas: Optional[StrictInt] = Field(default=None, ge=0)
+    granted_replicas: Optional[StrictInt] = Field(default=None, ge=0)
+    observed_replicas: Optional[StrictInt] = Field(default=None, ge=0)
+    ready_replicas: Optional[StrictInt] = Field(default=None, ge=0)
+    terminating_replicas: Optional[StrictInt] = Field(default=None, ge=0)
+    request_id: Optional[str] = None
+    transfer_id: Optional[str] = None
 
 
 class ScaleResponse(BaseModel):
@@ -53,3 +84,4 @@ class ScaleResponse(BaseModel):
     status: ScaleStatus
     message: str
     current_replicas: dict  # {"prefill": 3, "decode": 5}
+    allocation: Optional[ManagedAllocationStatus] = None

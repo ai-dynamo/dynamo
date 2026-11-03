@@ -58,6 +58,8 @@ STUB_MODULES = [
     "kubernetes.client",
     "kubernetes.config",
     "kubernetes.config.config_exception",
+    "urllib3",
+    "urllib3.exceptions",
     "kr8s",
     "kr8s.objects",
     "tritonclient",

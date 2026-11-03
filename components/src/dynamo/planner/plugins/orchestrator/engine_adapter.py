@@ -1319,7 +1319,10 @@ class OrchestratorEngineAdapter:
 
     def _project_scale_to(self, outcome, worker_counts: WorkerCounts):
         """Project the pipeline outcome onto ``PlannerEffects.scale_to``
-        with planner "no change -> None" detection.
+        with planner "no change -> None" detection for local execution.
+
+        Global Planner also receives explicit stable same-count recommendations
+        so they can replace older retained demand.
 
         ``type_aware_merge`` fills omitted roles from the ready-count baseline.
         ``PipelineOutcome.proposed_components`` preserves which roles PROPOSE
@@ -1361,6 +1364,12 @@ class OrchestratorEngineAdapter:
             worker_counts.expected_num_decode,
             worker_counts.decode_scaling_in_progress,
         )
+        # A stable ready-equal recommendation can cancel older retained demand
+        # at Global Planner. Only explicit proposals carry demand: merged
+        # baseline echoes and observation-only ticks must leave it unchanged.
+        publish_unchanged_demand = (
+            self._config.environment == "global-planner" and not deployment_scaling
+        )
         gpu_budget_reconcile = (
             not deployment_scaling and self._gpu_budget_reconcile_needed(worker_counts)
         )
@@ -1388,7 +1397,7 @@ class OrchestratorEngineAdapter:
         decode_key = ComponentKey(sub_component_type="decode")
         prefill_proposed = prefill_key in outcome.proposed_components
         decode_proposed = decode_key in outcome.proposed_components
-        if self._config.enable_power_awareness:
+        if self._config.enable_power_awareness or publish_unchanged_demand:
             # Restore the explicit PROPOSE-stage mask before the final budget
             # boundary. Omitted roles are still charged via ``current_*`` inside
             # the clamps, but can never become emitted targets. A disaggregated
@@ -1437,7 +1446,7 @@ class OrchestratorEngineAdapter:
             ):
                 num_d = None
 
-        if self._config.enable_power_awareness:
+        if self._config.enable_power_awareness and not publish_unchanged_demand:
             # Suppress only a proven stable no-op. During a rollout ``expected``
             # is unknown, so an explicit target equal to transient ready may be
             # intentional cancellation of the in-flight desired count.
@@ -1452,7 +1461,7 @@ class OrchestratorEngineAdapter:
         else:
             p_unchanged = (num_p is None) or (num_p == current_p)
             d_unchanged = (num_d is None) or (num_d == current_d)
-            if p_unchanged and d_unchanged:
+            if p_unchanged and d_unchanged and not publish_unchanged_demand:
                 return None
 
         return ScalingDecision(num_prefill=num_p, num_decode=num_d)

@@ -25,6 +25,9 @@ from dynamo.global_planner.argparse_config import (
     resolve_config,
 )
 from dynamo.global_planner.config import GlobalPlannerConfig
+from dynamo.global_planner.managed_controller import ManagedAllocationController
+from dynamo.global_planner.managed_handler import ManagedRequestHandler
+from dynamo.global_planner.managed_kubernetes import ManagedKubernetesCapacity
 from dynamo.global_planner.scale_handler import ScaleRequestHandler
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -73,17 +76,28 @@ async def main(runtime: DistributedRuntime, config: GlobalPlannerConfig):
     logger.info(f"Running in Kubernetes namespace: {k8s_namespace}")
 
     # Create scale request handler
-    handler = ScaleRequestHandler(
-        runtime=runtime,
-        managed_namespaces=config.managed_namespaces,
-        k8s_namespace=k8s_namespace,
-        no_operation=config.no_operation,
-        max_total_gpus=config.max_total_gpus,
-        min_total_gpus=config.min_total_gpus,
-        intent_cache_ttl_seconds=config.intent_cache_ttl_seconds,
-        priority_config=config.priority,
-        gpu_cost_config=config.gpu_cost,
-    )
+    controller = None
+    if config.managed_allocation is not None:
+        managed = config.managed_allocation
+        controller = ManagedAllocationController(
+            managed.policy,
+            ManagedKubernetesCapacity(managed.policy, k8s_namespace),
+            poll_interval_seconds=managed.poll_interval_seconds,
+            operation_timeout_seconds=managed.operation_timeout_seconds,
+        )
+        handler = ManagedRequestHandler(managed, controller)
+    else:
+        handler = ScaleRequestHandler(
+            runtime=runtime,
+            managed_namespaces=config.managed_namespaces,
+            k8s_namespace=k8s_namespace,
+            no_operation=config.no_operation,
+            max_total_gpus=config.max_total_gpus,
+            min_total_gpus=config.min_total_gpus,
+            intent_cache_ttl_seconds=config.intent_cache_ttl_seconds,
+            priority_config=config.priority,
+            gpu_cost_config=config.gpu_cost,
+        )
 
     logger.info("Serving endpoints...")
     scale_endpoint = runtime.endpoint(f"{namespace}.GlobalPlanner.scale_request")
@@ -95,7 +109,13 @@ async def main(runtime: DistributedRuntime, config: GlobalPlannerConfig):
             "status": "healthy",
             "component": "GlobalPlanner",
             "namespace": namespace,
-            "managed_namespaces": config.managed_namespaces or "all",
+            "managed_namespaces": list(
+                config.managed_allocation.caller_namespaces.values()
+            )
+            if config.managed_allocation
+            else config.managed_namespaces or "all",
+            "allocation_phase": controller.phase if controller else "legacy",
+            "allocation_reason": controller.reason if controller else None,
         }
 
     logger.info("  ✓ scale_request - Receives scaling requests from Planners")
@@ -115,13 +135,30 @@ async def main(runtime: DistributedRuntime, config: GlobalPlannerConfig):
     # health-check target so system_health flips to Ready once the endpoint
     # is live. The payload shape matches HealthCheckRequest so if canary
     # probing is ever enabled it can deserialize cleanly.
-    await asyncio.gather(
+    operations = [
         scale_endpoint.serve_endpoint(handler.scale_request),
         health_endpoint.serve_endpoint(
             health_check,
             health_check_payload={"text": "health"},
         ),
-    )
+    ]
+    if controller is not None:
+        status_endpoint = runtime.endpoint(
+            f"{namespace}.GlobalPlanner.allocation_status"
+        )
+        operations.extend(
+            [
+                status_endpoint.serve_endpoint(handler.allocation_status),
+                controller.run(),
+            ]
+        )
+    tasks = [asyncio.ensure_future(operation) for operation in operations]
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 if __name__ == "__main__":

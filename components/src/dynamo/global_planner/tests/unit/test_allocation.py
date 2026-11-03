@@ -147,6 +147,186 @@ def test_equal_global_bounds_allow_only_exact_committed_transfer():
     assert downscale.plan.allocations_gpus == {"requester": 8, "donor": 8}
 
 
+def test_retained_voluntary_demand_releases_warm_capacity_at_exact_floor():
+    policy = _policy(
+        _pool("interactive", priority=100),
+        _pool("batch", priority=10),
+        floor=16,
+        ceiling=16,
+    )
+    current = {"interactive": 12, "batch": 4}
+    desired = {"interactive": 2, "batch": 2}
+
+    # A standalone reduction cannot cross the shared floor. The later growth
+    # request can use that retained voluntary demand in one complete transfer.
+    standalone = plan_allocation(policy, current, "interactive", 2)
+    assert standalone.reason is AllocationReason.GLOBAL_MINIMUM
+    assert standalone.plan.allocations_gpus == current
+    transfer = plan_allocation(
+        policy, current, "batch", 2, desired_replicas_by_pool=desired
+    )
+    assert transfer.plan.allocations_gpus == {"interactive": 8, "batch": 8}
+    assert transfer.plan.reclaimed_gpus == {"interactive": 4}
+    assert current == {"interactive": 12, "batch": 4}
+    assert desired == {"interactive": 2, "batch": 2}
+
+
+@pytest.mark.parametrize("donor_priority", [100, 101])
+def test_protected_priority_can_release_only_above_normalized_desired(donor_priority):
+    policy = _policy(
+        _pool("requester", priority=100),
+        _pool("donor", priority=donor_priority),
+    )
+    current = {"requester": 4, "donor": 12}
+    granted = plan_allocation(
+        policy, current, "requester", 2, desired_replicas_by_pool={"donor": 2}
+    )
+    assert granted.plan.allocations_gpus == {"requester": 8, "donor": 8}
+    pending = plan_allocation(
+        policy, current, "requester", 3, desired_replicas_by_pool={"donor": 2}
+    )
+    assert pending.reason is AllocationReason.INSUFFICIENT_CAPACITY
+    assert pending.plan is None
+    normalized = plan_allocation(
+        policy, current, "requester", 3, desired_replicas_by_pool={"donor": 0}
+    )
+    assert normalized.plan.allocations_gpus == {"requester": 12, "donor": 4}
+
+
+def test_voluntary_releases_precede_disrupting_lower_priority_demand():
+    policy = _policy(
+        _pool("requester", priority=50),
+        _pool("voluntary", priority=100),
+        _pool("forced", priority=0),
+        floor=20,
+        ceiling=20,
+    )
+    decision = plan_allocation(
+        policy,
+        {"requester": 4, "voluntary": 8, "forced": 8},
+        "requester",
+        2,
+        desired_replicas_by_pool={"voluntary": 1, "forced": 2},
+    )
+    assert decision.plan.reclaimed_gpus == {"voluntary": 4}
+
+
+def test_free_capacity_does_not_eagerly_apply_voluntary_donor_reductions():
+    policy = _policy(_pool("requester"), _pool("donor", priority=100), ceiling=24)
+    decision = plan_allocation(
+        policy,
+        {"requester": 8, "donor": 8},
+        "requester",
+        3,
+        desired_replicas_by_pool={"donor": 0},
+    )
+    assert decision.plan.allocations_gpus == {"requester": 12, "donor": 8}
+    assert decision.plan.reclaimed_gpus == {}
+
+
+def test_voluntary_and_forced_donors_can_form_one_complete_plan():
+    policy = _policy(
+        _pool("requester", priority=50),
+        _pool("voluntary", priority=100),
+        _pool("forced", priority=0),
+        floor=20,
+        ceiling=20,
+    )
+    current = {"requester": 4, "voluntary": 8, "forced": 8}
+    decision = plan_allocation(
+        policy,
+        current,
+        "requester",
+        3,
+        desired_replicas_by_pool={"voluntary": 1, "forced": 99},
+    )
+    assert decision.plan.allocations_gpus == {
+        "requester": 12,
+        "voluntary": 4,
+        "forced": 4,
+    }
+    assert decision.plan.reclaimed_gpus == {"voluntary": 4, "forced": 4}
+
+
+def test_unavailable_voluntary_donors_do_not_release_capacity():
+    policy = _policy(_pool("requester"), _pool("donor", priority=100))
+    decision = plan_allocation(
+        policy,
+        {"requester": 8, "donor": 8},
+        "requester",
+        3,
+        desired_replicas_by_pool={"donor": 1},
+        unavailable_pool_ids={"donor"},
+    )
+    assert decision.reason is AllocationReason.INSUFFICIENT_CAPACITY
+    assert decision.plan is None
+
+
+def test_partial_demand_mapping_does_not_authorize_omitted_protected_donors():
+    policy = _policy(_pool("requester"), _pool("donor", priority=100))
+    decision = plan_allocation(
+        policy,
+        {"requester": 8, "donor": 8},
+        "requester",
+        3,
+        desired_replicas_by_pool={"requester": 0},
+    )
+    assert decision.reason is AllocationReason.INSUFFICIENT_CAPACITY
+    assert decision.effective_replicas == 3
+    assert decision.plan is None
+
+
+def test_voluntary_search_exhaustion_never_authorizes_partial_release():
+    policy = _policy(_pool("requester"), _pool("donor", priority=100))
+    current = {"requester": 8, "donor": 8}
+    desired = {"donor": 1}
+    complete = plan_allocation(
+        policy,
+        current,
+        "requester",
+        3,
+        desired_replicas_by_pool=desired,
+    )
+    assert complete.admitted
+    for limit in range(1, complete.search_steps):
+        pending = plan_allocation(
+            policy,
+            current,
+            "requester",
+            3,
+            desired_replicas_by_pool=desired,
+            max_search_steps=limit,
+        )
+        assert pending.reason is AllocationReason.SEARCH_LIMIT
+        assert pending.plan is None
+    assert current == {"requester": 8, "donor": 8}
+    assert desired == {"donor": 1}
+
+
+@pytest.mark.parametrize(
+    "desired",
+    [
+        [],
+        1,
+        {"missing": 1},
+        {"donor": True},
+        {"donor": -1},
+        {"donor": 1.0},
+        {"donor": "1"},
+    ],
+)
+def test_invalid_retained_demand_is_rejected_even_without_reclamation(desired):
+    policy = _policy(_pool("requester"), _pool("donor", priority=100), ceiling=24)
+    with pytest.raises(ValueError):
+        plan_allocation(
+            policy,
+            {"requester": 8, "donor": 8},
+            "requester",
+            3,
+            desired_replicas_by_pool=desired,
+        )
+
+
 def test_skip_a_coarse_donor_that_would_cross_the_exact_floor():
     policy = _policy(
         _pool("requester", cost=2, minimum=0, priority=100),
@@ -333,31 +513,44 @@ def test_decisions_serialize_without_exposing_input_dictionaries():
     assert current == {"requester": 8}
 
 
-def _exhaustive_growth_oracle(policy, current, requester_id, desired_replicas):
+def _exhaustive_growth_oracle(
+    policy, current, requester_id, desired_replicas, retained_demand=None
+):
     """Enumerate final vectors directly; no dynamic-programming implementation."""
     pools = sorted(policy.pools, key=lambda pool: pool.pool_id)
     requester = next(pool for pool in pools if pool.pool_id == requester_id)
-    donors = [
-        pool
+    retained_demand = retained_demand or {}
+    demand_gpus = {
+        pool.pool_id: (
+            max(
+                pool.min_replicas, min(pool.max_replicas, retained_demand[pool.pool_id])
+            )
+            * pool.gpu_per_replica
+            if pool.pool_id in retained_demand
+            else current[pool.pool_id]
+        )
         for pool in pools
-        if pool.priority < requester.priority
-        and current[pool.pool_id] > pool.effective_min_gpus
-    ]
-    priorities = sorted({pool.priority for pool in donors}, reverse=True)
+    }
+    donors = [pool for pool in pools if pool.pool_id != requester_id]
+    priorities = sorted(
+        {pool.priority for pool in donors if pool.priority < requester.priority},
+        reverse=True,
+    )
     domains = []
     for pool in pools:
         if pool.pool_id == requester_id:
             domains.append([desired_replicas * pool.gpu_per_replica])
-        elif pool in donors:
+        else:
+            minimum = pool.effective_min_gpus
+            if pool.priority >= requester.priority:
+                minimum = min(current[pool.pool_id], demand_gpus[pool.pool_id])
             domains.append(
                 range(
-                    pool.effective_min_gpus,
+                    minimum,
                     current[pool.pool_id] + 1,
                     pool.gpu_per_replica,
                 )
             )
-        else:
-            domains.append([current[pool.pool_id]])
 
     candidates = []
     required = max(
@@ -377,7 +570,11 @@ def _exhaustive_growth_oracle(policy, current, requester_id, desired_replicas):
         score = (
             tuple(
                 sum(
-                    reductions[pool.pool_id]
+                    max(
+                        0,
+                        min(current[pool.pool_id], demand_gpus[pool.pool_id])
+                        - final[pool.pool_id],
+                    )
                     for pool in donors
                     if pool.priority == priority
                 )
@@ -427,6 +624,52 @@ def test_all_small_growth_plans_match_exhaustive_final_vector_oracle():
         assert (
             result.plan.allocations_gpus if result.admitted else None
         ) == expected, (costs, priorities, slack, headroom, growth, result)
+
+
+def test_voluntary_growth_matches_exhaustive_final_vectors():
+    for costs, priorities, demand, slack, growth in product(
+        product((2, 3), repeat=2),
+        product((0, 2, 3), repeat=2),
+        product((0, 1, 2), repeat=2),
+        range(2),
+        range(1, 4),
+    ):
+        current = {"requester": 2, "a": costs[0] * 2, "b": costs[1] * 2}
+        total = sum(current.values())
+        policy = _policy(
+            _pool("requester", cost=1, minimum=0, maximum=8, priority=2),
+            *(
+                _pool(
+                    name, cost=cost, minimum=cost, maximum=cost * 2, priority=priority
+                )
+                for name, cost, priority in zip(
+                    ("a", "b"), costs, priorities, strict=True
+                )
+            ),
+            floor=total - slack,
+            ceiling=total,
+        )
+        desired = dict(zip(("a", "b"), demand, strict=True))
+        expected = _exhaustive_growth_oracle(
+            policy, current, "requester", 2 + growth, desired
+        )
+        result = plan_allocation(
+            policy,
+            current,
+            "requester",
+            2 + growth,
+            desired_replicas_by_pool=desired,
+        )
+        assert (
+            result.plan.allocations_gpus if result.admitted else None
+        ) == expected, (
+            costs,
+            priorities,
+            demand,
+            slack,
+            growth,
+            result,
+        )
 
 
 def test_feasibility_matches_exhaustive_vectors_for_all_small_bands():

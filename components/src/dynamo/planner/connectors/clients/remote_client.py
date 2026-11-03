@@ -8,7 +8,11 @@ import logging
 
 from dynamo._core import Client
 from dynamo.planner.config.defaults import SubComponentType
-from dynamo.planner.connectors.protocol import ScaleRequest, ScaleResponse
+from dynamo.planner.connectors.protocol import (
+    AllocationStatusRequest,
+    ScaleRequest,
+    ScaleResponse,
+)
 from dynamo.runtime import DistributedRuntime
 
 logger = logging.getLogger(__name__)
@@ -31,90 +35,97 @@ class RemotePlannerClient:
         self.connection_timeout = connection_timeout
         self.max_retries = max_retries
         self._client: Client | None = None
+        self._status_client: Client | None = None
 
     async def _ensure_client(self):
         """Lazy initialization of endpoint client with retry mechanism"""
         if self._client is None:
-            endpoint = self.runtime.endpoint(
-                f"{self.central_namespace}.{self.central_component}.scale_request"
-            )
+            self._client = await self._connect("scale_request")
 
-            # Retry logic with exponential backoff
-            last_error: Exception | None = None
-            for attempt in range(self.max_retries):
-                try:
-                    logger.info(
-                        f"Attempting to connect to GlobalPlanner at "
-                        f"{self.central_namespace}.{self.central_component} "
-                        f"(attempt {attempt + 1}/{self.max_retries})"
-                    )
-
-                    self._client = await endpoint.client()
-
-                    # Wait for instances with timeout
-                    await asyncio.wait_for(
-                        self._client.wait_for_instances(),
-                        timeout=self.connection_timeout,
-                    )
-
-                    logger.info(
-                        f"Successfully connected to centralized planner at "
-                        f"{self.central_namespace}.{self.central_component}"
-                    )
-                    return
-
-                except asyncio.TimeoutError as e:
-                    last_error = e
-                    logger.warning(
-                        f"Connection attempt {attempt + 1} timed out after "
-                        f"{self.connection_timeout}s"
-                    )
-                    self._client = None
-
-                except Exception as e:
-                    last_error = e
-                    logger.warning(f"Connection attempt {attempt + 1} failed: {e}")
-                    self._client = None
-
-                # Exponential backoff before retry (except on last attempt)
-                if attempt < self.max_retries - 1:
-                    backoff = 2**attempt  # 1s, 2s, 4s, ...
-                    logger.info(f"Retrying in {backoff}s...")
-                    await asyncio.sleep(backoff)
-
-            # All retries exhausted
-            raise RuntimeError(
-                f"Failed to connect to GlobalPlanner at "
-                f"{self.central_namespace}.{self.central_component} after "
-                f"{self.max_retries} attempts. Last error: {last_error}"
-            )
+    async def _connect(self, endpoint_name: str) -> Client:
+        """Resolve either endpoint with the same bounded connection retries."""
+        address = f"{self.central_namespace}.{self.central_component}.{endpoint_name}"
+        endpoint = self.runtime.endpoint(address)
+        last_error: Exception | None = None
+        for attempt in range(self.max_retries):
+            try:
+                logger.info(
+                    "Connecting to GlobalPlanner at %s (attempt %s/%s)",
+                    address,
+                    attempt + 1,
+                    self.max_retries,
+                )
+                client = await endpoint.client()
+                await asyncio.wait_for(
+                    client.wait_for_instances(), timeout=self.connection_timeout
+                )
+                logger.info("Connected to GlobalPlanner at %s", address)
+                return client
+            except Exception as e:
+                # Runtime discovery can fail before a request is submitted.
+                # Retry connection only; never replay a mutation implicitly.
+                last_error = e
+                logger.warning("Connection attempt %s failed: %s", attempt + 1, e)
+                if attempt == self.max_retries - 1:
+                    raise RuntimeError(
+                        f"Failed to connect to GlobalPlanner at {address} after "
+                        f"{self.max_retries} attempts. Last error: {last_error}"
+                    ) from e
+            await asyncio.sleep(2**attempt)
+        raise ValueError("max_retries must be positive")
 
     async def send_scale_request(self, request: ScaleRequest) -> ScaleResponse:
         """Send scale request to centralized planner"""
         await self._ensure_client()
 
         logger.info(
-            f"Sending scale request to centralized planner: "
-            f"prefill={[r.desired_replicas for r in request.target_replicas if r.sub_component_type == SubComponentType.PREFILL]}, "
-            f"decode={[r.desired_replicas for r in request.target_replicas if r.sub_component_type == SubComponentType.DECODE]}"
+            "Sending scale request to centralized planner: prefill=%s, decode=%s",
+            [
+                r.desired_replicas
+                for r in request.target_replicas
+                if r.sub_component_type == SubComponentType.PREFILL
+            ],
+            [
+                r.desired_replicas
+                for r in request.target_replicas
+                if r.sub_component_type == SubComponentType.DECODE
+            ],
         )
 
         # Send request via the runtime client's generate method (the correct API for
         # calling any dynamo endpoint, regardless of its registered name)
-        request_json = request.model_dump_json()
-        assert self._client is not None
-        stream = await self._client.generate(request_json)
+        if self._client is None:
+            raise RuntimeError("Scale request client was not initialized")
+        response = await self._send(self._client, request.model_dump_json())
+        logger.info(
+            "Scale request response: %s - %s", response.status, response.message
+        )
+        return response
+
+    async def get_allocation_status(
+        self, request: AllocationStatusRequest
+    ) -> ScaleResponse:
+        """Read a pool's allocation without submitting or replacing demand."""
+
+        async def read_status() -> ScaleResponse:
+            if self._status_client is None:
+                self._status_client = await self._connect("allocation_status")
+            return await self._send(self._status_client, request.model_dump_json())
+
+        # Bound discovery and response streaming together. This observational
+        # request must not indefinitely delay independent worker readiness reads.
+        return await asyncio.wait_for(read_status(), timeout=self.connection_timeout)
+
+    @staticmethod
+    async def _send(client: Client, request_json: str) -> ScaleResponse:
+        stream = await client.generate(request_json)
 
         response_data = None
         async for output in stream:
             response_data = output.data() if hasattr(output, "data") else output
-            break  # scale_request yields a single response
+            break  # Both planner endpoints yield a single response.
 
         if response_data is None:
             raise RuntimeError("No response from centralized planner")
 
-        # Parse response
-        response = ScaleResponse(**response_data)
-        logger.info(f"Scale request response: {response.status} - {response.message}")
-
-        return response
+        return ScaleResponse(**response_data)

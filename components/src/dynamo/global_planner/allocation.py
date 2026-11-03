@@ -164,6 +164,7 @@ def plan_allocation(
     desired_replicas: int,
     *,
     unavailable_pool_ids: Collection[str] = (),
+    desired_replicas_by_pool: Mapping[str, int] | None = None,
     max_search_steps: int = DEFAULT_MAX_SEARCH_STEPS,
 ) -> AllocationDecision:
     """Plan a full growth target, or a voluntary reduction retaining warm GPUs.
@@ -174,9 +175,16 @@ def plan_allocation(
     floor. Growth is never partially granted. Busy pools cannot be requesters
     or donors. No scale-down intent is needed from a lower-priority donor.
 
-    Donor plans minimize GPU reclamation by descending donor priority class,
-    then excess reclamation, then the number of affected pools. Final ties
-    prefer reclaiming from lexicographically earlier pool IDs. Dynamic
+    Optional retained demand authorizes voluntary releases above each donor's
+    normalized demand, including equal/higher-priority donors. Omitted pools
+    supply no voluntary release; callers must supply only current demand.
+    This authorization never changes allocations without a complete plan.
+    The explicit request remains authoritative for the requester.
+
+    Donor plans minimize forced GPU reclamation by descending donor priority
+    class, then excess reclamation, then the number of affected pools. Thus
+    voluntary releases are preferred over forced reductions. Final ties prefer
+    reclaiming from lexicographically earlier pool IDs. Dynamic
     programming retains only the best prefix for each reclaimed total: future
     choices add the same objective terms to either prefix, preserving order.
 
@@ -193,6 +201,18 @@ def plan_allocation(
     unavailable = set(unavailable_pool_ids)
     if unavailable - pools.keys():
         raise ValueError("unavailable_pool_ids contains an unknown pool")
+    voluntary_releases: dict[str, int] = {}
+    if desired_replicas_by_pool is not None:
+        if not isinstance(desired_replicas_by_pool, Mapping):
+            raise ValueError("desired_replicas_by_pool must be a mapping")
+        if set(desired_replicas_by_pool) - pools.keys():
+            raise ValueError("desired_replicas_by_pool contains an unknown pool")
+        for pool_id, desired in desired_replicas_by_pool.items():
+            pool = pools[pool_id]
+            normalized = pool.normalize_replicas(desired) * pool.gpu_per_replica
+            voluntary_releases[pool_id] = max(
+                0, current_allocations_gpus[pool_id] - normalized
+            )
     requester = pools[requester_id]
     effective_replicas = requester.normalize_replicas(desired_replicas)
     effective_gpus = effective_replicas * requester.gpu_per_replica
@@ -250,36 +270,36 @@ def plan_allocation(
         return decision(reason, {})
 
     reclaim_ceiling = proposed_total - policy.min_total_gpus
-    donors = sorted(
-        (
-            pool
-            for pool in policy.pools
+    available_releases = {
+        pool.pool_id: (
+            current_allocations_gpus[pool.pool_id] - pool.effective_min_gpus
             if pool.priority < requester.priority
-            and pool.pool_id not in unavailable
-            and current_allocations_gpus[pool.pool_id] > pool.effective_min_gpus
-        ),
+            else voluntary_releases.get(pool.pool_id, 0)
+        )
+        for pool in policy.pools
+        if pool.pool_id != requester_id and pool.pool_id not in unavailable
+    }
+    donors = sorted(
+        (pool for pool in policy.pools if available_releases.get(pool.pool_id, 0) > 0),
         key=lambda pool: pool.pool_id,
     )
-    if (
-        sum(
-            current_allocations_gpus[pool.pool_id] - pool.effective_min_gpus
-            for pool in donors
-        )
-        < required
-    ):
+    if sum(available_releases.values()) < required:
         return decision(AllocationReason.INSUFFICIENT_CAPACITY)
 
     # Above this bound, returning any reclaimed replica still meets the needed
-    # reduction and strictly improves its priority-class objective. Excluding
-    # those totals preserves the optimum without exploring needless reclaim.
+    # reduction without worsening its priority objective, and reduces excess.
+    # Excluding those totals preserves the optimum without needless reclaim.
     reclaim_ceiling = min(
         reclaim_ceiling,
         required + max(pool.gpu_per_replica for pool in donors) - 1,
     )
 
-    # A score contains priority-class totals, affected pools, and negated
+    # A score contains forced priority-class totals, affected pools, and negated
     # reductions in pool-ID order. Negative values implement the stable tie.
-    priorities = sorted({pool.priority for pool in donors}, reverse=True)
+    priorities = sorted(
+        {pool.priority for pool in donors if pool.priority < requester.priority},
+        reverse=True,
+    )
     priority_indexes = {priority: index for index, priority in enumerate(priorities)}
     states: dict[int, tuple[tuple[int, ...], int, tuple[int, ...]]] = {}
     try:
@@ -287,7 +307,7 @@ def plan_allocation(
         states[0] = ((0,) * len(priorities), 0, ())
         for index, pool in enumerate(donors):
             following = {}
-            available = current_allocations_gpus[pool.pool_id] - pool.effective_min_gpus
+            available = available_releases[pool.pool_id]
             for total, (class_totals, affected, reductions) in states.items():
                 largest = min(available, reclaim_ceiling - total)
                 for amount in range(0, largest + 1, pool.gpu_per_replica):
@@ -295,7 +315,9 @@ def plan_allocation(
                     # so a very wide policy cannot bypass the search-work bound.
                     budget.consume(1 + len(priorities) + index + 1)
                     updated_classes = list(class_totals)
-                    updated_classes[priority_indexes[pool.priority]] += amount
+                    forced = max(0, amount - voluntary_releases.get(pool.pool_id, 0))
+                    if forced:
+                        updated_classes[priority_indexes[pool.priority]] += forced
                     score = (
                         tuple(updated_classes),
                         affected + (amount > 0),
