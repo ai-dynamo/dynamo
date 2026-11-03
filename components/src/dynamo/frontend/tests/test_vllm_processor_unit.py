@@ -26,6 +26,7 @@ from _tool_guidance_parity import (
 from transformers import AutoTokenizer
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tool_parsers import ToolParser
+from vllm.tool_parsers.utils import get_json_schema_from_tools
 
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.frontend import prepost as prepost_module
@@ -3602,6 +3603,137 @@ class TestToolCallGuidedDecoding:
         assert guided is not None
         assert guided["json"]["type"] == "array"
         assert "maxItems" not in guided["json"]
+
+    @staticmethod
+    def _function_tool(name, parameters):
+        return {
+            "type": "function",
+            "function": {"name": name, "parameters": parameters},
+        }
+
+    @staticmethod
+    def _resolve(document, ref):
+        target = document
+        for token in ref[1:].split("/")[1:]:
+            token = token.replace("~1", "/").replace("~0", "~")
+            if not isinstance(target, dict) or token not in target:
+                return None
+            target = target[token]
+        return target
+
+    # Local references must still resolve once the parameter document is nested
+    # in the required tool-call array.
+    @pytest.mark.parametrize(
+        ("parameters", "property_name", "target"),
+        [
+            pytest.param(
+                {
+                    "type": "object",
+                    "properties": {"value": {"$ref": "#/definitions/value"}},
+                    "definitions": {"value": {"type": "string", "enum": ["a", "b"]}},
+                },
+                "value",
+                {"type": "string", "enum": ["a", "b"]},
+                id="legacy-definitions",
+            ),
+            pytest.param(
+                {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "integer"},
+                        "alias": {"$ref": "#/properties/value"},
+                    },
+                },
+                "alias",
+                {"type": "integer"},
+                id="property-pointer",
+            ),
+            pytest.param(
+                {
+                    "type": "object",
+                    "properties": {"child": {"$ref": "#"}},
+                },
+                "child",
+                {
+                    "type": "object",
+                    "properties": {"child": {"$ref": "#/$defs/tool_0"}},
+                },
+                id="recursive-root",
+            ),
+        ],
+    )
+    def test_required_choice_preserves_local_references(
+        self, tokenizer, parameters, property_name, target
+    ):
+        request = self._request(
+            tokenizer,
+            tools=[self._function_tool("lookup", parameters)],
+            tool_choice="required",
+        )
+
+        guided = build_tool_call_guided_decoding(request, tool_parser=None)
+
+        assert guided is not None
+        schema = guided["json"]
+        entry = schema["items"]["anyOf"][0]
+        assert entry["properties"]["parameters"] == {"$ref": "#/$defs/tool_0"}
+        reference = schema["$defs"]["tool_0"]["properties"][property_name]["$ref"]
+        assert self._resolve(schema, reference) == target
+        assert request.tools[0].function.parameters == parameters
+
+    def test_required_choice_isolates_conflicting_definitions(self, tokenizer):
+        tools = [
+            self._function_tool(
+                name,
+                {
+                    "type": "object",
+                    "properties": {"value": {"$ref": "#/$defs/shared"}},
+                    "$defs": {"shared": {"type": kind}},
+                },
+            )
+            for name, kind in [("as_text", "string"), ("as_number", "number")]
+        ]
+        request = self._request(tokenizer, tools=tools, tool_choice="required")
+
+        guided = build_tool_call_guided_decoding(request, tool_parser=None)
+
+        assert guided is not None
+        schema = guided["json"]
+        for index, kind in enumerate(["string", "number"]):
+            root = f"#/$defs/tool_{index}"
+            entry = schema["items"]["anyOf"][index]
+            assert entry["properties"]["parameters"] == {"$ref": root}
+            reference = self._resolve(schema, root)["properties"]["value"]["$ref"]
+            assert self._resolve(schema, reference) == {"type": kind}
+        assert request.tools[0].function.parameters["$defs"] == {
+            "shared": {"type": "string"}
+        }
+
+    @pytest.mark.parametrize("parallel_tool_calls", [None, True, False])
+    def test_required_choice_keeps_vllm_shape_for_plain_tools(
+        self, tokenizer, parallel_tool_calls
+    ):
+        overrides = {"tool_choice": "required"}
+        if parallel_tool_calls is not None:
+            overrides["parallel_tool_calls"] = parallel_tool_calls
+        request = self._request(tokenizer, **overrides)
+
+        guided = build_tool_call_guided_decoding(request, tool_parser=None)
+
+        expected = get_json_schema_from_tools(
+            "required", request.tools, request.parallel_tool_calls
+        )
+        assert guided == {"json": expected}
+
+    def test_required_choice_rejects_non_object_defs(self, tokenizer):
+        request = self._request(
+            tokenizer,
+            tools=[self._function_tool("lookup", {"type": "object", "$defs": []})],
+            tool_choice="required",
+        )
+
+        with pytest.raises(InvalidArgument, match=r"tool 'lookup' must be an"):
+            build_tool_call_guided_decoding(request, tool_parser=None)
 
     # Parsers that require native tool syntax must not get a forced JSON schema.
     @pytest.mark.parametrize(

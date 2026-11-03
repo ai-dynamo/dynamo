@@ -34,7 +34,10 @@ from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.async_utils import make_async
 
-from dynamo.common.utils.guided_json import admits_only_empty_object
+from dynamo.common.utils.guided_json import (
+    admits_only_empty_object,
+    build_required_tool_schema,
+)
 from dynamo.llm.exceptions import InvalidArgument
 
 from .responses_history import responses_history_template, responses_tools_request
@@ -361,6 +364,20 @@ def build_tool_call_guided_decoding(
             tool_parser, "supports_required_and_named", True
         ):
             return None
+        if tool_choice == "required":
+            # vLLM's builder nests each parameter document without rebasing its
+            # local $refs and merges every tool's $defs into one map.
+            try:
+                json_schema = build_required_tool_schema(
+                    (
+                        (tool.function.name, tool.function.parameters)
+                        for tool in request.tools or []
+                    ),
+                    parallel_tool_calls=request.parallel_tool_calls,
+                )
+            except ValueError as exc:
+                raise InvalidArgument(str(exc)) from exc
+            return {"json": json_schema}
         # tool_choice is already the typed named param by here; see
         # _validate_chat_completion_request.
         json_schema = get_json_schema_from_tools(tool_choice, request.tools)
@@ -369,12 +386,6 @@ def build_tool_call_guided_decoding(
                 json_schema
             ):
                 return {"regex": r"\{\}"}
-            if (
-                request.parallel_tool_calls is False
-                and tool_choice == "required"
-                and json_schema.get("type") == "array"
-            ):
-                json_schema["maxItems"] = 1
             return {"json": json_schema}
     return None
 
