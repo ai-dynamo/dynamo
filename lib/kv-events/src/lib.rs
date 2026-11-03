@@ -8,8 +8,8 @@
 //! the KV-event wire depend on this crate: workers and sidecars publish, the router's indexer
 //! ingests.
 //!
-//! No sockets, no tasks, no servers live here; the ZMQ socket itself is `dynamo-zmq` and the
-//! listener that drives it is a `dynamo-kv-router` adapter.
+//! No sockets, no tasks, no servers live here; the ZMQ socket helper and the listener that
+//! drives it are `dynamo-kv-router` adapters behind its ZMQ features.
 
 pub mod cursor;
 pub mod event;

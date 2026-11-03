@@ -23,7 +23,6 @@ members = [
     "lib/router/session-affinity",
     "lib/router/slot-tracker",
     "lib/router/worker-selection",
-    "lib/zmq",
     "lib/global-common",
     "lib/global-discovery-client",
     "lib/global-discovery-service",
@@ -106,7 +105,6 @@ dynamo-scheduler = { path = "lib/router/scheduler", version = "1.7.0" }
 dynamo-session-affinity = { path = "lib/router/session-affinity", version = "1.7.0" }
 dynamo-slot-tracker = { path = "lib/router/slot-tracker", version = "1.7.0" }
 dynamo-worker-selection = { path = "lib/router/worker-selection", version = "1.7.0" }
-dynamo-zmq = { path = "lib/zmq", version = "1.7.0" }
 dynamo-protocols = { version = "=8.4.0" }
 dynamo-decisions = { version = "=0.1.0", features = ["utoipa"] }
 dynamo-parsers = { version = "=10.2.2" }

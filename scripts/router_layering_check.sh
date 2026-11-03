@@ -46,20 +46,19 @@ TABLE=(
   "dynamo-router-protocol | - | dynamo-runtime dynamo-kv-router dynamo-kv-hashing dynamo-multimodal dynamo-tokens tokio anyhow tracing async-trait derive_builder prometheus axum hyper reqwest zmq"
   "dynamo-kv-hashing | dynamo-multimodal dynamo-tokens | dynamo-runtime dynamo-kv-router dynamo-router-protocol tokio anyhow tracing async-trait prometheus axum hyper reqwest zmq"
   "dynamo-kv-events | dynamo-kv-hashing dynamo-multimodal dynamo-router-protocol | dynamo-runtime dynamo-kv-router tokio anyhow async-trait prometheus axum hyper reqwest zmq"
-  "dynamo-zmq | - | dynamo-runtime dynamo-kv-router dynamo-router-protocol dynamo-kv-events dynamo-kv-hashing dynamo-multimodal prometheus axum hyper reqwest"
   "dynamo-kv-hints | dynamo-kv-hashing dynamo-kv-indexer dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-slot-tracker dynamo-session-affinity dynamo-worker-selection dynamo-admission dynamo-scheduler prometheus axum hyper reqwest zmq"
-  "dynamo-kv-indexer | dynamo-kv-events dynamo-kv-hashing dynamo-router-protocol dynamo-tokens | dynamo-runtime dynamo-kv-router dynamo-kv-hints dynamo-zmq axum hyper reqwest zmq"
-  "dynamo-slot-tracker | dynamo-router-protocol dynamo-tokens | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-kv-events dynamo-kv-hashing dynamo-multimodal dynamo-zmq axum hyper reqwest zmq prometheus"
-  "dynamo-session-affinity | dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-slot-tracker dynamo-worker-selection dynamo-admission dynamo-kv-events dynamo-kv-hashing dynamo-multimodal dynamo-zmq axum hyper reqwest zmq prometheus"
-  "dynamo-worker-selection | dynamo-router-protocol dynamo-session-affinity dynamo-slot-tracker | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-kv-events dynamo-kv-hashing dynamo-multimodal dynamo-zmq axum hyper reqwest zmq prometheus"
-  "dynamo-admission | dynamo-router-protocol dynamo-session-affinity dynamo-slot-tracker dynamo-tokens | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-worker-selection dynamo-kv-events dynamo-kv-hashing dynamo-multimodal dynamo-zmq axum hyper reqwest zmq prometheus"
-  "dynamo-scheduler | dynamo-admission dynamo-kv-events dynamo-kv-hashing dynamo-kv-hints dynamo-kv-indexer dynamo-multimodal dynamo-router-protocol dynamo-session-affinity dynamo-slot-tracker dynamo-tokens dynamo-worker-selection | dynamo-runtime dynamo-kv-router dynamo-zmq axum hyper reqwest zmq prometheus"
+  "dynamo-kv-indexer | dynamo-kv-events dynamo-kv-hashing dynamo-router-protocol dynamo-tokens | dynamo-runtime dynamo-kv-router dynamo-kv-hints axum hyper reqwest zmq"
+  "dynamo-slot-tracker | dynamo-router-protocol dynamo-tokens | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-kv-events dynamo-kv-hashing dynamo-multimodal axum hyper reqwest zmq prometheus"
+  "dynamo-session-affinity | dynamo-router-protocol | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-slot-tracker dynamo-worker-selection dynamo-admission dynamo-kv-events dynamo-kv-hashing dynamo-multimodal axum hyper reqwest zmq prometheus"
+  "dynamo-worker-selection | dynamo-router-protocol dynamo-session-affinity dynamo-slot-tracker | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-kv-events dynamo-kv-hashing dynamo-multimodal axum hyper reqwest zmq prometheus"
+  "dynamo-admission | dynamo-router-protocol dynamo-session-affinity dynamo-slot-tracker dynamo-tokens | dynamo-runtime dynamo-kv-router dynamo-kv-indexer dynamo-worker-selection dynamo-kv-events dynamo-kv-hashing dynamo-multimodal axum hyper reqwest zmq prometheus"
+  "dynamo-scheduler | dynamo-admission dynamo-kv-events dynamo-kv-hashing dynamo-kv-hints dynamo-kv-indexer dynamo-multimodal dynamo-router-protocol dynamo-session-affinity dynamo-slot-tracker dynamo-tokens dynamo-worker-selection | dynamo-runtime dynamo-kv-router axum hyper reqwest zmq prometheus"
 )
 
 # Every crate the split produces (SPLIT_V2 3a-final). The composition check
 # below compares the ROUTER_FAMILY crates found in dynamo-kv-router's
 # no-features tree against COMPOSITION_ROUTER_DEPS.
-ROUTER_FAMILY="dynamo-multimodal dynamo-error dynamo-kv-hashing dynamo-router-protocol dynamo-kv-events dynamo-kv-hints dynamo-zmq dynamo-kv-indexer dynamo-slot-tracker dynamo-session-affinity dynamo-worker-selection dynamo-admission dynamo-scheduler dynamo-metrics dynamo-kv-router"
+ROUTER_FAMILY="dynamo-multimodal dynamo-error dynamo-kv-hashing dynamo-router-protocol dynamo-kv-events dynamo-kv-hints dynamo-kv-indexer dynamo-slot-tracker dynamo-session-affinity dynamo-worker-selection dynamo-admission dynamo-scheduler dynamo-metrics dynamo-kv-router"
 
 # Plugin crates: a statically linked policy or classifier crate depends on
 # dynamo-kv-router alone and imports through plugins::prelude. Each row is the
@@ -91,8 +90,6 @@ HOSTS_EXTERNAL="dynamo-py3|lib/bindings/python/Cargo.toml|kv-indexer,slot-tracke
 # prometheus joins this list in step 9c, when exposition moves to dynamo-metrics; today the
 # kv-indexer `export` feature (kv-router `metrics`) reaches it by design.
 HOST_FORBIDDEN="axum hyper reqwest zmq"
-# The ZMQ socket helper is the one router crate allowed to reach zmq.
-HOST_ADAPTER_EXEMPT="dynamo-zmq:zmq"
 
 # Executable behavior the protocol crate must not contain (SPLIT_V2 G9).
 PROTOCOL_CRATE="dynamo-router-protocol"
@@ -304,7 +301,7 @@ fi
 # composition crate is exempt for its one remaining glob: `test_utils` over
 # the kernel's test helpers, compiled for tests and the `bench` feature only.
 # ---------------------------------------------------------------------------
-ROUTER_CRATE_DIRS="lib/multimodal lib/error lib/router/protocol lib/router/kv-indexer lib/router/slot-tracker lib/router/session-affinity lib/router/worker-selection lib/router/admission lib/router/scheduler lib/kv-router lib/kv-events lib/kv-hashing lib/kv-hints lib/zmq"
+ROUTER_CRATE_DIRS="lib/multimodal lib/error lib/router/protocol lib/router/kv-indexer lib/router/slot-tracker lib/router/session-affinity lib/router/worker-selection lib/router/admission lib/router/scheduler lib/kv-router lib/kv-events lib/kv-hashing lib/kv-hints"
 GLOB_EXEMPT_DIRS="lib/kv-router"
 for d in $ROUTER_CRATE_DIRS; do [ -d "$d/src" ] || die "$d/src does not exist"; done
 mapfile -t src_files < <(for d in $ROUTER_CRATE_DIRS; do find "$d/src" -type f -name '*.rs'; done | sort)
@@ -352,15 +349,7 @@ check_host() {
       spec="$x@${v#v}"
       tree "$host" "$x" "$@" -i "$spec" >"$tmp/inv_tree.txt"
       awk '{ print $1 }' "$tmp/inv_tree.txt" | lines >"$tmp/inv.txt"
-      comm -12 "$tmp/inv.txt" "$tmp/table_crates.txt" >"$tmp/inv_hits_all.txt"
-      # drop the adapter crate that exists to reach this dependency, if one is declared for it
-      exempt=""
-      for e in $HOST_ADAPTER_EXEMPT; do [ "${e#*:}" = "$x" ] && exempt="${e%%:*}"; done
-      if [ -n "$exempt" ]; then
-        grep -vxF -- "$exempt" "$tmp/inv_hits_all.txt" >"$tmp/inv_hits.txt" || true
-      else
-        cp "$tmp/inv_hits_all.txt" "$tmp/inv_hits.txt"
-      fi
+      comm -12 "$tmp/inv.txt" "$tmp/table_crates.txt" >"$tmp/inv_hits.txt"
       if [ ! -s "$tmp/inv_hits.txt" ]; then
         ok "$host: no router crate reaches $spec"
       else

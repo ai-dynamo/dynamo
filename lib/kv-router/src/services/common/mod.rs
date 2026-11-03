@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #[cfg(any(feature = "ingest-zmq", feature = "replica-sync-zmq"))]
-pub(crate) use dynamo_zmq as zmq;
+pub(crate) mod zmq;
 
 #[cfg(all(feature = "http", feature = "replica-sync-zmq"))]
 pub(crate) mod http;

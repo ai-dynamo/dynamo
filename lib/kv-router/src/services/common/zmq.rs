@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! One ZMQ socket helper for Dynamo: an async [`ZmqSocket`] over `tokio::io::unix::AsyncFd`,
-//! multipart send and receive, a process-wide context pool sized by `DYN_ZMQ_IO_THREADS`, the
-//! SUB, DEALER, and bound PUB constructors the router adapters and publishers use, and
-//! [`validate_endpoint`]. Nothing here knows about KV events or routing; the codec that reads
-//! the frames is `dynamo-kv-events`, and the listeners that drive these sockets are
-//! `dynamo-kv-router` adapters.
+//! One ZMQ socket helper: an async [`ZmqSocket`] over `tokio::io::unix::AsyncFd`, multipart
+//! send and receive, a process-wide context pool sized by `DYN_ZMQ_IO_THREADS`, the SUB,
+//! DEALER, and bound PUB constructors the ZMQ adapters use, and [`validate_endpoint`]. Nothing
+//! here knows about KV events or routing; the codec that reads the frames is
+//! `dynamo-kv-events`, and the listeners that drive these sockets are the adapters in
+//! `services` (the indexer listener, the replica mesh, the direct ingress).
 
 use std::collections::VecDeque;
 use std::future::poll_fn;
@@ -133,6 +133,7 @@ impl ZmqSocket {
         Ok(())
     }
 
+    #[cfg(feature = "replica-sync-zmq")]
     pub fn disconnect(&self, endpoint: &str) -> Result<()> {
         self.socket().disconnect(endpoint)?;
         Ok(())
@@ -254,12 +255,14 @@ fn configure_receive_socket(socket: &zmq::Socket) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "ingest-zmq")]
 fn configure_bidirectional_socket(socket: &zmq::Socket) -> Result<()> {
     configure_receive_socket(socket)?;
     socket.set_sndtimeo(ZMQ_SNDTIMEOUT_MS)?;
     Ok(())
 }
 
+#[cfg(any(feature = "replica-sync-zmq", test))]
 fn configure_send_socket(socket: &zmq::Socket) -> Result<()> {
     configure_common_socket(socket)?;
     socket.set_sndtimeo(ZMQ_SNDTIMEOUT_MS)?;
@@ -275,6 +278,7 @@ where
     ZmqSocket::new(socket)
 }
 
+#[cfg(any(test, feature = "ingest-zmq"))]
 pub fn create_sub_socket(topic: &[u8]) -> Result<ZmqSocket> {
     create_sub_socket_topics(&[topic])
 }
@@ -289,12 +293,14 @@ pub fn create_sub_socket_topics(topics: &[&[u8]]) -> Result<ZmqSocket> {
     })
 }
 
+#[cfg(feature = "ingest-zmq")]
 pub fn connect_sub_socket(endpoint: &str) -> Result<ZmqSocket> {
     let socket = create_sub_socket(b"")?;
     socket.connect(endpoint)?;
     Ok(socket)
 }
 
+#[cfg(feature = "ingest-zmq")]
 pub fn connect_dealer_socket(endpoint: &str) -> Result<ZmqSocket> {
     build_socket(zmq::DEALER, |socket| {
         configure_bidirectional_socket(socket)?;
@@ -304,6 +310,7 @@ pub fn connect_dealer_socket(endpoint: &str) -> Result<ZmqSocket> {
     })
 }
 
+#[cfg(any(feature = "replica-sync-zmq", test))]
 pub fn create_bound_pub_socket(endpoint: &str) -> Result<ZmqSocket> {
     // Not pooled: the socket holds the only reference to its context, so dropping it
     // terminates the context, which waits until libzmq has closed the listener. The port is
