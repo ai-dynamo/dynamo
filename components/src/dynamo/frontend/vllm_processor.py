@@ -1278,6 +1278,7 @@ class VllmProcessor:
         )
         return_tokens_as_token_ids = request.get("return_tokens_as_token_ids") is True
         prompt_logprobs = PromptLogprobsAccumulator(request)
+        include_stop_reason = nvext_extra_field_requested(request, "stop_reason")
         pending_terminals: dict[int, dict[str, Any]] = {}
         locally_stopped_requests: set[str] = set()
 
@@ -1464,6 +1465,8 @@ class VllmProcessor:
                             break
                         choice = post.process_output(output)
                         if output.index == output_idx:
+                            if include_stop_reason and output.stop_reason is not None:
+                                stop_reason = output.stop_reason
                             if choice_top_logprobs is not None:
                                 _apply_choice_logprobs(
                                     choice,
@@ -1496,6 +1499,8 @@ class VllmProcessor:
                         "model": request["model"],
                         "object": "chat.completion.chunk",
                     }
+                    if include_stop_reason and stop_reason is not None:
+                        dynamo_out["nvext"] = {"stop_reason": stop_reason}
                     attach_usage(
                         dynamo_out,
                         finished=bool(raw_finish_reason)

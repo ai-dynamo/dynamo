@@ -1989,6 +1989,73 @@ async def _run_generate(
 
 class TestRoutedEnginePath:
     @pytest.mark.asyncio
+    @pytest.mark.core
+    @pytest.mark.parametrize("stop_reason", [None, 0, 42, "backend-stop", ""])
+    @pytest.mark.parametrize("include_stop_reason", [False, True])
+    async def test_stop_reason_metadata_is_opt_in(
+        self, tokenizer, real_vllm_processor_module, stop_reason, include_stop_reason
+    ):
+        module = real_vllm_processor_module
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+        }
+        if include_stop_reason:
+            request["nvext"] = {"extra_fields": ["stop_reason"]}
+        sampling_params = SamplingParams(output_kind=module.RequestOutputKind.DELTA)
+        tokens = tokenizer.encode("Hello", add_special_tokens=False)
+        vllm_preproc = module.EngineCoreRequest(
+            request_id="stop-reason",
+            external_req_id="stop-reason",
+            prompt_token_ids=tokens,
+            mm_features=None,
+            sampling_params=sampling_params,
+            pooling_params=None,
+            arrival_time=0.0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+        )
+        post = StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=prepost_module.ChatCompletionRequest.model_validate(
+                request
+            ),
+            sampling_params=sampling_params,
+            prompt_token_ids=tokens,
+            tool_parser=None,
+            reasoning_parser_class=None,
+            chat_template_kwargs={},
+        )
+        frames = [
+            {"token_ids": tokenizer.encode(" world", add_special_tokens=False)},
+            {"token_ids": [], "finish_reason": "stop", "stop_reason": stop_reason},
+        ]
+        engine = _FakeRoutedEngine(frames)
+        processor = _make_processor(module, engine)
+        processor.output_processor = module.OutputProcessor(tokenizer, log_stats=False)
+        chunks = [
+            item["data"]
+            async for item in processor._generate_and_stream(
+                "stop-reason", request, _base_preproc(), tokens, vllm_preproc, {0: post}
+            )
+            if "data" in item
+        ]
+
+        assert len(chunks) == 2
+        assert "nvext" not in chunks[0]
+        assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+        if include_stop_reason and stop_reason is not None:
+            assert chunks[-1]["nvext"] == {"stop_reason": stop_reason}
+            assert type(chunks[-1]["nvext"]["stop_reason"]) is type(stop_reason)
+        else:
+            assert "nvext" not in chunks[-1]
+        assert frames[-1]["stop_reason"] == stop_reason
+        assert not processor.output_processor.request_states
+        assert engine.stream_released
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "stream,stream_options,intermediate_usage",
         [
@@ -2253,6 +2320,8 @@ class TestRoutedEnginePath:
             "prompt_logprobs": 0,
             "nvext": {"extra_fields": ["prompt_logprobs"]},
         }
+        if len(texts) == 1:
+            request["nvext"]["extra_fields"].append("stop_reason")
         sampling_params = SamplingParams(
             n=len(texts),
             max_tokens=16,
@@ -2294,6 +2363,10 @@ class TestRoutedEnginePath:
             }
             for index, text in enumerate(texts)
         ]
+        if len(texts) == 1:
+            # The detokenizer's local string stop takes precedence over a raw
+            # worker token ID, even while waiting for late prompt logprobs.
+            frames[0]["stop_reason"] = 0
         output_tokens = sum(len(frame["token_ids"]) for frame in frames)
         frames.append(
             {"token_ids": tokenizer.encode(" hidden", add_special_tokens=False)}
@@ -2373,9 +2446,17 @@ class TestRoutedEnginePath:
                 if "prompt_logprobs" in chunk
             ] == ([payload] if backend_end == "metadata" else [])
         metadata = [
-            chunk["nvext"]["prompt_logprobs"] for chunk in chunks if "nvext" in chunk
+            chunk["nvext"]["prompt_logprobs"]
+            for chunk in chunks
+            if "prompt_logprobs" in chunk.get("nvext", {})
         ]
         assert metadata == ([payload] if backend_end == "metadata" else [])
+        if len(texts) == 1:
+            assert [
+                chunk["nvext"]["stop_reason"]
+                for chunk in chunks
+                if "stop_reason" in chunk.get("nvext", {})
+            ] == ["STOP"]
         if backend_end == "metadata":
             terminal_chunks = [
                 chunk
