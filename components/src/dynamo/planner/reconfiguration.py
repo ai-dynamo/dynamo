@@ -249,9 +249,12 @@ def live_retune_sla_errors(
 ) -> list[str]:
     """Return why ``candidate`` cannot replace ``config`` under live retune.
 
-    The live retune controller and its state fingerprint take the scoring SLA
-    when they are built and are not rebuilt on a runtime update, so a change
-    of an inherited ``ttft_ms`` or ``itl_ms`` would never reach them.
+    The live retune controller and the supervisor's state fingerprint read
+    the scoring SLA only when they are built: at startup, or at a rebuild for
+    a spec, P4 or DGD change. A runtime change of an inherited ``ttft_ms`` or
+    ``itl_ms`` would leave the running controller scoring with the old SLA
+    until such a rebuild, which would then apply the new SLA and, through its
+    new fingerprint, reset the persisted retune state.
     """
 
     if config.retune is None or candidate.retune is None:

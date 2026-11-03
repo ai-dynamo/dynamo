@@ -2165,8 +2165,11 @@ class LiveRetuneSupervisor:
 
         A renewal in flight is waited for first: cancelled, its thread would
         go on and race the next step on the resourceVersion. If this task is
-        cancelled meanwhile (``stop``), the renewal is cancelled in flight,
-        as the lease loop's own step is, rather than left running.
+        cancelled meanwhile (``stop``), the renewal task is cancelled without
+        waiting, as the lease loop's own step is: the renewal's thread may
+        still finish its step, and once ``stop`` has released the
+        ``LeaseLeadership``, a step that reads the Lease after that is a
+        no-op.
         """
 
         try:

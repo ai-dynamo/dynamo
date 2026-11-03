@@ -600,6 +600,21 @@ def test_empty_holder_is_taken_over_at_once_and_release_is_conditional() -> None
     assert holder(kube) == "b/1"
 
 
+def test_a_step_after_release_never_leads_again() -> None:
+    clock = FakeClock()
+    kube = FakeRetuneKube()
+    a = leadership(kube, clock, identity="a/1")
+    assert a.step() == "acquired"
+    assert a.release() and holder(kube) is None
+    # A step still running when the Lease was released stands by instead of
+    # taking the empty holder over, or creating the Lease again.
+    assert a.step() == "standby"
+    assert holder(kube) is None and not a.is_leader()
+    del kube.leases[a.name]
+    assert a.step() == "standby"
+    assert a.name not in kube.leases and not a.is_leader()
+
+
 def test_leadership_conflicts_and_errors() -> None:
     clock = FakeClock()
     kube = FakeRetuneKube()

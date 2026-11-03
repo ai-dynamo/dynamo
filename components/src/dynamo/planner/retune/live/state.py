@@ -695,7 +695,7 @@ class LeaseLeadership:
       expired foreign holder, or its own lease after it had lost track).
     - ``renewed``: it led and still does.
     - ``lost``: it led and another holder now owns the lease.
-    - ``standby``: another holder leads.
+    - ``standby``: another holder leads, or ``release`` has run.
     - ``error``: the API call failed; leadership, if any, lasts until
       ``leader_until``.
 
@@ -744,6 +744,8 @@ class LeaseLeadership:
         self._held = False
         self._leader_until = -math.inf
         self._acquisitions = 0
+        # Set by ``release``: a step that reads the Lease after it never leads.
+        self._released = False
         self.transitions = 0
         # resourceVersion of this process's last successful write.
         self.resource_version: Optional[str] = None
@@ -829,6 +831,10 @@ class LeaseLeadership:
                 "retune leadership: reading lease %s failed: %s", self.name, error
             )
             return "error"
+        with self._lock:
+            if self._released:
+                # A step still running on another thread when release ran.
+                return "standby"
         if lease is None:
             return self._create(t_send)
 
@@ -889,8 +895,16 @@ class LeaseLeadership:
         return self._take_over(lease, t_send, transitions, lost)
 
     def release(self) -> bool:
-        """Clear the holder if it is still this process (conditional update)."""
+        """Clear the holder if it is still this process (conditional update).
 
+        Final: a ``step`` whose read of the Lease returns after this started
+        reports ``standby`` and writes nothing. A step that read the Lease
+        earlier can still write; this clears that write only if it lands
+        before this method's own read.
+        """
+
+        with self._lock:
+            self._released = True
         held = self.held
         self.drop()
         if not held:

@@ -82,6 +82,7 @@ from dynamo.planner.retune.live.supervisor import (
     LiveRetuneSupervisor,
     SpecEvaluation,
     SupervisorSettings,
+    _to_thread,
     current_window_end_ms,
     due_window_end_ms,
     plan_initialization,
@@ -2204,18 +2205,28 @@ async def test_a_cancelled_initialization_leaves_no_renewal_behind() -> None:
     process = await started(world)
     sup = process.sup
     steps = 0
-    in_flight, gate = asyncio.Event(), asyncio.Event()
+    in_flight = asyncio.Event()
+    gate, returned = threading.Event(), threading.Event()
+    late: list[str] = []
+
+    def gated_step(call):
+        gate.wait(10)
+        try:
+            late.append(call())
+        finally:
+            returned.set()
 
     async def gated(call):
         # The third leadership step, after the acquiring and the confirming
-        # ones, is the initialization's first renewal: it stays in flight,
-        # and the initialization goes on only once it is.
+        # ones, is the initialization's first renewal: it runs on a thread,
+        # as the production runner's steps do, and blocks there until the
+        # gate opens. The initialization goes on only once it is in flight.
         nonlocal steps
         if getattr(call, "func", None) == sup._leadership.step:
             steps += 1
             if steps == 3:
                 in_flight.set()
-                await gate.wait()
+                return await _to_thread(lambda: gated_step(call))
         elif steps >= 2:
             await in_flight.wait()
         return call()
@@ -2227,7 +2238,7 @@ async def test_a_cancelled_initialization_leaves_no_renewal_behind() -> None:
         if sup.initialized:
             break
         await asyncio.sleep(0)
-    # Initialized; the round now waits for the renewal in flight.
+    # Initialized; the round waits for the renewal in flight.
     assert sup.initialized and in_flight.is_set() and not task.done()
     task.cancel()
     await asyncio.wait([task])
@@ -2238,9 +2249,93 @@ async def test_a_cancelled_initialization_leaves_no_renewal_behind() -> None:
     ]
     assert pending == []
     await sup.stop()
+    assert world.holder() is None
+    # The cancelled renewal's thread goes on and reads the Lease after stop
+    # released it: it neither takes it over nor leads.
     gate.set()
-    await asyncio.sleep(0)
-    assert world.holder() is None and not sup.is_leader()
+    assert await asyncio.to_thread(returned.wait, 10)
+    assert late == ["standby"]
+    assert world.holder() is None and not sup._leadership.is_leader()
+
+
+async def test_a_lapse_reported_after_initialization_ends_the_term() -> None:
+    world = World()
+    process = await started(world)
+    sup = process.sup
+    steps = 0
+    in_flight, gate = asyncio.Event(), asyncio.Event()
+
+    async def gated(call):
+        # The third leadership step, the initialization's first renewal,
+        # stays in flight until the initialization has finished and returns
+        # after local leadership ended: it reports a lapse (acquired).
+        nonlocal steps
+        if getattr(call, "func", None) == sup._leadership.step:
+            steps += 1
+            if steps == 3:
+                in_flight.set()
+                await gate.wait()
+                world.clock.advance(LEASE)
+        elif steps >= 2:
+            await in_flight.wait()
+        return call()
+
+    sup._blocking = gated
+    sup._sleep = lambda _seconds: asyncio.sleep(0)
+    task = asyncio.create_task(sup.lease_round())
+    for _ in range(1000):
+        if sup.initialized:
+            break
+        await asyncio.sleep(0)
+    assert sup.initialized and in_flight.is_set()
+    term_seq = sup.term_seq
+    # The round waits for the renewal in flight.
+    for _ in range(100):
+        await asyncio.sleep(0)
+    assert not task.done()
+    gate.set()
+    assert await task == "acquired"
+    lease = world.kube.leases[LEADER_NAME]
+    assert sup._leadership.resource_version == lease["metadata"]["resourceVersion"]
+    # The lapse ends the term the initialization started.
+    assert sup._leadership.acquisitions == 2 and not sup.initialized
+    sup._blocking = inline
+    await sup.lease_round()
+    assert sup.initialized and sup.term_seq == term_seq + 1
+    assert world.shared_state().leader_term == sup.term
+
+
+async def test_leadership_steps_of_a_rebuild_and_the_lease_loop_never_overlap() -> None:
+    world = World()
+    process = await leading(world)
+    sup = process.sup
+    active = overlaps = cancelled = 0
+
+    async def counting(call):
+        # Every leadership step yields to the event loop while in flight.
+        nonlocal active, overlaps, cancelled
+        if getattr(call, "func", None) != sup._leadership.step:
+            return call()
+        active += 1
+        if active > 1:
+            overlaps += 1
+        try:
+            for _ in range(5):
+                await asyncio.sleep(0)
+            return call()
+        except asyncio.CancelledError:
+            cancelled += 1
+            raise
+        finally:
+            active -= 1
+
+    sup._blocking = counting
+    # P8 breaks: the rebuild re-initializes next to a lease round.
+    world.spec.spec_ok = False
+    world.clock.advance(20)
+    await asyncio.gather(sup.control_round(), sup.lease_round())
+    assert sup.generation == 1 and sup.is_leader() and sup.initialized
+    assert overlaps == 0 and cancelled == 0
 
 
 async def test_failed_renewals_are_retried_a_request_timeout_apart() -> None:
