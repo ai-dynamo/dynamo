@@ -123,7 +123,7 @@ Set `DYN_PARSER_VERSION` on the frontend running the `dynamo` processor and on w
 | `1` | V1 if each configured name exists in its V1 registry | Reject names unavailable in V1 |
 | `2` | V2 | Reject; no V1 configuration fallback |
 
-Only `auto`, `1`, and `2` are accepted; `v1` and `v2` stop startup. Invalid combinations are rejected during model setup with an error naming the configured selectors and the missing implementation. Runtime V2 parse errors never retry through V1. On V1 routes, an empty tool selector is treated as unset; an empty reasoning selector is rejected. V1 reasoning names are case-insensitive; tool names are case-sensitive. Omit selectors you do not need.
+Only `auto`, `1`, and `2` are accepted; `v1` and `v2` stop startup. Invalid combinations are rejected during model setup with an error naming the configured selectors and the missing implementation. Runtime V2 parse errors never retry through V1. On V1 routes, an empty tool selector is treated as unset; an empty reasoning selector is rejected. Dynamo requires exact, case-sensitive V1 selector names. Omit selectors you do not need.
 
 For token-input chat using a [Python chat processor](chat-processors.mdx), the processor owns both parser registries, so Dynamo does not validate those names against its Rust registries. Parser-generation environment values are still validated. Completions do not use chat parsers; text-input chat retains Rust selector validation.
 

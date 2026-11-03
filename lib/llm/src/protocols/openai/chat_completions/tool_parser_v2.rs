@@ -160,10 +160,9 @@ fn validate_parser_version_for_mode(
             {
                 unavailable.push(format!("--dyn-tool-call-parser={name:?}"));
             }
+            // The V1 library folds case, but preprocessing controls use exact names.
             if let Some(name) = reasoning_parser
-                && !V1_REASONING_PARSER_NAMES
-                    .iter()
-                    .any(|parser| parser.eq_ignore_ascii_case(name))
+                && !V1_REASONING_PARSER_NAMES.contains(&name)
             {
                 unavailable.push(format!("--dyn-reasoning-parser={name:?}"));
             }
@@ -176,7 +175,7 @@ fn validate_parser_version_for_mode(
                 anyhow::bail!(
                     "{}={mode}: configured selectors --dyn-tool-call-parser={tool_call_parser}, \
                     --dyn-reasoning-parser={reasoning_parser} select V1, which has no compatible v1 parser for {}. \
-                     Use names supported by V1 in each selector, or use auto/2 with selectors for \
+                     Use exact, case-sensitive names supported by V1 in each selector, or use auto/2 with selectors for \
                      the same Unified V2 family (one selector may be omitted).",
                     env_llm::DYN_PARSER_VERSION,
                     unavailable.join(", "),
@@ -1739,8 +1738,6 @@ mod tests {
                 (Some("hermes"), Some("qwen3")),
                 (None, Some("qwen3")),
                 (Some(""), Some("qwen3")),
-                (None, Some("QWEN3")),
-                (None, Some("DEEPSEEK_R1")),
             ] {
                 assert!(
                     validate_parser_version_for_mode(version, tool, reasoning).is_ok(),
@@ -1802,6 +1799,22 @@ mod tests {
             "same Unified V2 family",
         ] {
             assert!(error.contains(expected), "missing {expected:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn v1_reasoning_selector_spelling_matches_preprocessing() {
+        for version in [ParserVersion::Auto, ParserVersion::V1] {
+            for name in ["qwen3", "deepseek_r1", "kimi_k25"] {
+                assert!(validate_parser_version_for_mode(version, None, Some(name)).is_ok());
+            }
+            for name in ["QWEN3", "DEEPSEEK_R1", "KIMI_K25", "Kimi_k25"] {
+                let error = validate_parser_version_for_mode(version, None, Some(name))
+                    .expect_err("V1 spelling must match preprocessing's selector controls")
+                    .to_string();
+                assert!(error.contains(name), "{error}");
+                assert!(error.contains("case-sensitive"), "{error}");
+            }
         }
     }
 
