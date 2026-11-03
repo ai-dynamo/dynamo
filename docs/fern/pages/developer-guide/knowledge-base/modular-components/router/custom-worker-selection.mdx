@@ -421,6 +421,16 @@ Hard affinity remains the default. A hard binding and every explicit request tar
 
 The [custom policy examples](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/README.md) include an overload-aware soft pinning policy that retains the advisory target until its active-request count exceeds a configured threshold, then selects the least-loaded alternative. Its two-Mocker walkthrough holds the first request open and verifies an `A -> B -> B` worker sequence: overload moves the second request to B, and the third request retains B after load drains, proving that the plugin-selected dispatch updated the binding.
 
+### Adaptive Policies
+
+A policy may own a background task and shared state, for example a control loop that rewrites cost weights from pool-level load. The factory creates the task and the state together, so each partition gets its own.
+
+- Read the shared weights with one lock-free load in each component per request. If the scorer feeds the loop, have it write at most one bounded load sample per interval.
+- Never block or take a lock on the request path.
+- Publish updates from the background task, and keep working at baseline values when the task is not running.
+
+The [`adaptive-imbalance` example](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/adaptive-imbalance/README.md) shows the pattern.
+
 ### Worker Identity and Cost
 
 | Accessor | Meaning |
