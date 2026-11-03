@@ -159,7 +159,6 @@ async def test_kv_router_propagates_stream_errors(
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(30)
-@pytest.mark.parametrize("response_buffer_size", [0, 100])
 @pytest.mark.parametrize(
     "handler, message",
     [
@@ -169,10 +168,10 @@ async def test_kv_router_propagates_stream_errors(
     ids=["generic-fallback", "public-message"],
 )
 async def test_kv_router_preserves_invalid_argument(
-    router_runtime, handler, message, response_buffer_size, monkeypatch
+    router_runtime, handler, message, monkeypatch
 ):
-    # response_buffer_size=0 takes the demand-driven iterator; 100 takes the
-    # buffered AsyncResponseStream. Both must raise the typed InvalidArgument.
+    # response_buffer_size=0 takes the demand-driven iterator, which must raise the
+    # typed InvalidArgument for a classified stream item.
     monkeypatch.setenv("DYN_ROUTER_MIN_INITIAL_WORKERS", "1")
     async with _Worker.serve(
         f"invalid-router-{uuid.uuid4().hex}.worker.generate", handler
@@ -182,7 +181,31 @@ async def test_kv_router_preserves_invalid_argument(
         router = KvRouter(endpoint, 4, KvRouterConfig(use_kv_events=False))
 
         with pytest.raises(InvalidArgument, match=message):
-            await _generate_and_collect(router, response_buffer_size)
+            await _generate_and_collect(router, 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(30)
+@pytest.mark.parametrize("response_buffer_size", [0, 100])
+async def test_kv_router_unknown_worker_id_raises_invalid_argument(
+    error_router_endpoint, response_buffer_size, monkeypatch
+):
+    # The router rejects an unknown pinned worker before any stream exists, so the
+    # error comes from the generate await. Its diagnostic has no public message.
+    monkeypatch.setenv("DYN_ROUTER_MIN_INITIAL_WORKERS", "1")
+    router = KvRouter(
+        error_router_endpoint,
+        4,
+        KvRouterConfig(use_kv_events=False),
+    )
+
+    with pytest.raises(InvalidArgument, match="^Invalid request$"):
+        await router.generate(
+            [1, 2, 3],
+            "test-model",
+            worker_id=123456789,
+            response_buffer_size=response_buffer_size,
+        )
 
 
 @pytest.mark.asyncio
