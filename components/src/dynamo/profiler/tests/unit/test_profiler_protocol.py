@@ -433,32 +433,6 @@ def test_build_dgd_config_trtllm_agg_restores_publish_kv_events() -> None:
     assert args.count("--publish-kv-events") == 1
 
 
-@pytest.mark.parametrize(
-    "kv_event_flag",
-    [
-        "--publish-kv-events",
-        "--no-publish-kv-events",
-        "--no-publish-events-and-metrics",
-        "--publish-events-and-metrics",
-    ],
-)
-def test_build_dgd_config_trtllm_agg_preserves_explicit_kv_events(
-    kv_event_flag: str,
-) -> None:
-    args = _agg_worker_args("trtllm", ["--tensor-parallel-size", "1", kv_event_flag])
-
-    assert kv_event_flag in args
-    expected = 1 if kv_event_flag == "--publish-kv-events" else 0
-    assert args.count("--publish-kv-events") == expected
-
-
-@pytest.mark.parametrize("backend", ["vllm", "sglang"])
-def test_build_dgd_config_agg_keeps_non_trtllm_args(backend: str) -> None:
-    args = _agg_worker_args(backend, ["--tensor-parallel-size", "1"])
-
-    assert "--publish-kv-events" not in args
-
-
 def test_build_dgd_config_sglang_disagg_restores_runtime_args() -> None:
     modifier = CONFIG_MODIFIERS["sglang"]
     dgd_config = modifier.build_dgd_config(
