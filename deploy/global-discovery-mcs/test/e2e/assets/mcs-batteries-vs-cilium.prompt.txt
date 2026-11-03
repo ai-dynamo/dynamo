@@ -60,4 +60,3 @@ Edit the supplied technical slide with one precise correction only. Preserve eve
 
 Stray-arrow cleanup prompt:
 Make a tiny cleanup to this exact image. Keep the full slide unchanged apart from erasing TWO stray short vertical arrow fragments: one above the right half of the left-panel Service document, and the corresponding one above the right half of the right-panel Service document. These are dangling downward arrowheads with no connection to "Deployment integration"; they are approximately at (12.3% image width,48.5% height) and (62.3% image width,48.5% height). Erase only those two short dangling arrow fragments and restore the plain underlying background. Keep the long connected arrow to Service in each panel, and keep the newly routed L-shaped arrow to the right edge of ServiceExport in each panel. Do not move anything, do not alter text, do not add arrows. Preserve all other pixels and 16:9 dimensions.
-
