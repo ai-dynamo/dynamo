@@ -7,7 +7,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::lora::routing::AllocationAlgorithmType;
+use crate::routing::AllocationAlgorithmType;
 use dynamo_runtime::config::environment_names::llm;
 
 /// Which predictor to use for smoothing per-LoRA load estimates.
