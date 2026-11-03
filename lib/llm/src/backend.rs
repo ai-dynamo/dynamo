@@ -2609,6 +2609,118 @@ mod tests {
         );
     }
 
+    /// The engine's stream, which records when it is dropped.
+    struct DropFlagStream {
+        inner: std::pin::Pin<Box<dyn futures::Stream<Item = Annotated<LLMEngineOutput>> + Send>>,
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl futures::Stream for DropFlagStream {
+        type Item = Annotated<LLMEngineOutput>;
+
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            self.inner.as_mut().poll_next(cx)
+        }
+    }
+
+    impl Drop for DropFlagStream {
+        fn drop(&mut self) {
+            self.dropped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Sends `chunks`, then ends, through a [`DropFlagStream`].
+    struct DropFlagEngine {
+        chunks: Vec<Annotated<LLMEngineOutput>>,
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for DropFlagEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let stream = DropFlagStream {
+                inner: Box::pin(futures::stream::iter(self.chunks.clone())),
+                dropped: self.dropped.clone(),
+            };
+            Ok(ResponseStream::new(Box::pin(stream), request.context()))
+        }
+    }
+
+    /// Backend's response, from an engine that sends `chunks` for `request`, and the flag that
+    /// says the engine's stream was dropped.
+    async fn drop_flag_response(
+        request: PreprocessedRequest,
+        chunks: Vec<Annotated<LLMEngineOutput>>,
+    ) -> (
+        ManyOut<Annotated<BackendOutput>>,
+        Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(JailingTokenizer);
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(DropFlagEngine {
+                chunks,
+                dropped: dropped.clone(),
+            });
+        let stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            .await
+            .expect("backend generation succeeds");
+        (stream, dropped)
+    }
+
+    /// Backend lets go of the engine's stream when its own stream ends, not when its caller
+    /// drops it, and it stays ended. A caller may hold an ended stream for a while (an HTTP
+    /// response still being written); the stages below must see their stream end at once.
+    #[tokio::test]
+    async fn backend_drops_the_engine_stream_when_its_stream_ends() {
+        let chunk = |token| {
+            Annotated::from_data(LLMEngineOutput {
+                token_ids: vec![token],
+                index: Some(0),
+                ..Default::default()
+            })
+        };
+
+        // The engine's stream ends on its own.
+        let (mut stream, dropped) = drop_flag_response(jailing_request(1), vec![chunk(1)]).await;
+        let first = stream.next().await.expect("one chunk");
+        assert_eq!(
+            first.data.and_then(|data| data.text).as_deref(),
+            Some("abc")
+        );
+        assert!(!dropped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(stream.next().await.is_none());
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the engine's stream must be dropped when Backend's stream ends"
+        );
+        assert!(stream.next().await.is_none(), "an ended stream stays ended");
+
+        // Backend stops it: a local stop string ends the stream before the engine's ends.
+        let mut request = jailing_request(1);
+        request.stop_conditions.stop = Some(vec!["abc".to_string()]);
+        let (mut stream, dropped) = drop_flag_response(request, vec![chunk(1), chunk(1)]).await;
+        let first = stream.next().await.expect("the stopping chunk");
+        assert!(first.data.is_some_and(|data| data.finish_reason.is_some()));
+        assert!(!dropped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(stream.next().await.is_none());
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the engine's stream must be dropped when a local stop ends Backend's stream"
+        );
+        assert!(stream.next().await.is_none(), "an ended stream stays ended");
+    }
+
     struct ErrorThenBareEofEngine;
 
     #[async_trait]
