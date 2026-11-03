@@ -150,13 +150,13 @@
       "platform": "linux/arm64"
     },
     {
-      "baseline_digest": "sha256:a66de2a4b337f4a5ac55fdb5d5b7f7ff2a33ff76b970ae4773caabf2795695b4",
+      "baseline_digest": "sha256:f5627c5ee6b094ae16e2bf38694b2c375b609aa8b5a3f4fab6af47ea461b20e9",
       "baseline_image": "lmsysorg/sglang",
-      "baseline_sbom": "sglang@a66de2a4-amd64.cdx.json",
-      "baseline_tag": "v0.5.22-xpu",
-      "from_digest": "sha256:a66de2a4b337f4a5ac55fdb5d5b7f7ff2a33ff76b970ae4773caabf2795695b4",
+      "baseline_sbom": "sglang@f5627c5e-amd64.cdx.json",
+      "baseline_tag": "v0.5.23-xpu",
+      "from_digest": "sha256:f5627c5ee6b094ae16e2bf38694b2c375b609aa8b5a3f4fab6af47ea461b20e9",
       "from_image": "lmsysorg/sglang",
-      "from_tag": "v0.5.22-xpu",
+      "from_tag": "v0.5.23-xpu",
       "platform": "linux/amd64"
     }
   ],
@@ -172,6 +172,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-11-03T04:29:35+00:00",
+  "generated_at": "2026-11-03T22:00:56+00:00",
   "schema_version": 2
 }

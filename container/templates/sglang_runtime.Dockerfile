@@ -217,8 +217,9 @@ RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compl
 # mooncake and PyNvVideoCodec are CUDA-only. The mooncake floor names the CUDA 13
 # distribution, and PyNvVideoCodec decodes on NVDEC through libnvcuvid, so both
 # are inert on the XPU image and neither is present in its base. The diffusers pin
-# is stripped too: the XPU framework stage installs its own diffusion extra, and
-# this pin is tested on CUDA only. The patterns are
+# is stripped too: the published XPU base installs its own diffusion extra (0.38.0
+# via pyproject_xpu.toml's .[dev,diffusion]), and this pin is tested on CUDA only.
+# The patterns are
 # anchored to the line start so they cannot match inside another requirement, and
 # the checks fail the build if either package arrives by another route -- a filter
 # that silently stopped matching would otherwise look like success. Both checks

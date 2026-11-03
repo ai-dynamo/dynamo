@@ -155,12 +155,12 @@ sglang:
     baseline_sbom: cuda@0230b7f2
   xpu:
     base_image: lmsysorg/sglang
-    base_image_tag: v0.5.22-xpu
+    base_image_tag: v0.5.23-xpu
     runtime_image: lmsysorg/sglang
-    runtime_image_tag: v0.5.22-xpu
+    runtime_image_tag: v0.5.23-xpu
     # Self-baseline of the published XPU image, same convention as vllm.xpu's
     # vllm-openai-xpu@..., so NOTICES attribute only what Dynamo adds on top.
-    baseline_sbom: sglang@a66de2a4
+    baseline_sbom: sglang@f5627c5e
     # The NIXL versions in the XPU and CUDA base images are sometimes out of sync,
     # so Dynamo builds and installs its own at this ref rather than using
     # whatever the base ships. Stated per-device even though it currently matches
