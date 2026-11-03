@@ -47,10 +47,10 @@ ROOT = Path(__file__).resolve().parents[2]
 # The spec every image installs: pinned exactly, so the declared version is the
 # version, and `container/deps/README.md`'s "every installed version should be
 # explicitly tested" holds without an audit.
-EXPECTED_SPEC = "==2.2.3"
+EXPECTED_SPEC = "==2.2.4"
 # The bare version, which is what the shell guards in the templates compare
 # against -- they check an installed version string, not a specifier.
-EXPECTED_VERSION = "2.2.3"
+EXPECTED_VERSION = "2.2.4"
 
 DISTRIBUTION = "pynvvideocodec"
 
@@ -237,10 +237,12 @@ def test_the_spec_is_bounded_above() -> None:
 def test_templates_install_the_same_spec() -> None:
     """A template that installs PyNvVideoCodec inline must use the declared specifier.
 
-    None does today: the images install it from the requirements files and the
-    TRT-LLM base ships its own system-site copy. An inline install added later
-    would be a second, unchecked spec, so any found must match. The guard tests
-    below are what keep the templates from going blind.
+    The TRT-LLM template replaces the base image's system-site copy with an inline
+    install while the base ships an older release; the other images install it
+    from the requirements files only. An inline install is a second spec, so any
+    found must match. None is required, so the replacement can go once the base
+    catches up. The guard tests below are what keep the templates from going
+    blind.
     """
     staged = [path for path in TEMPLATES if (ROOT / path).is_file()]
     if not staged:

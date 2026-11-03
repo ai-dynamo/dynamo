@@ -397,19 +397,25 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
     done; \
     /usr/bin/python3 -c 'import nvidia.dali'
 
-# The base image ships PyNvVideoCodec, and it must be the version
-# requirements.trtllm.txt pins. 2.2.x links libavcodec statically into
-# libavformat, so a filename test cannot see a release that re-enables decoders
-# there. check_pynvvideocodec asserts the version, the bundled libraries against
-# codec_policy.yaml and the single FFmpeg source tarball; the enumeration then
-# reads what the shipped libraries actually register. For 2.2.x it reports "0
-# decoders, 0 encoders" and every "expected present" entry as ABSENT -- that is
-# the correct answer, and the probe fails closed if av_codec_iterate is missing.
+# Replace the base image's PyNvVideoCodec with the version
+# requirements.trtllm.txt pins. The base ships an older release in system site,
+# and the pre_runtime whiteout below drops that copy before the overlay: the
+# overlay COPY cannot delete the base image's files, and the dist-info name
+# carries the version. The step fails once the base ships the pin or newer, so
+# it is removed together with the whiteout entries instead of lingering.
 #
-# If a base bump moves PyNvVideoCodec off the pin, move the pin with it
-# (test_pynvvideocodec_spec.py lists every copy). Replacing the base copy here
-# instead also needs a pre_runtime whiteout: the overlay COPY cannot delete the
-# base image's files.
+# Uninstall first, then remove what is left. The wheel's RECORD is the only full
+# list of what it wrote, including the FFmpeg source tarball under
+# /usr/local/external/ffmpeg. The presence test is find_spec, not an import,
+# because the import dlopens a driver library that the builder does not have.
+#
+# 2.2.x links libavcodec statically into libavformat, so a filename test cannot
+# see a release that re-enables decoders there. check_pynvvideocodec asserts the
+# version, the bundled libraries against codec_policy.yaml and the single FFmpeg
+# source tarball; the enumeration then reads what the shipped libraries actually
+# register. For 2.2.x it reports "0 decoders, 0 encoders" and every "expected
+# present" entry as ABSENT -- that is the correct answer, and the probe fails
+# closed if av_codec_iterate is missing.
 #
 # The venv cross-check reads dist-info directly rather than asking the venv
 # interpreter: the venv is --system-site-packages, so the interpreter would
@@ -420,7 +426,33 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
 # does not have.
 RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compliance \
     set -eu; \
-    PYTHONPATH=/tmp/compliance /usr/bin/python3 -m compliance.check_pynvvideocodec --pinned 2.2.3; \
+    before=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("pynvvideocodec"))' 2>/dev/null || echo none); \
+    echo "PyNvVideoCodec in base image: $before"; \
+    if [ "$before" = "none" ]; then \
+        echo "ERROR: the base image no longer ships PyNvVideoCodec, so this step has" >&2; \
+        echo "       nothing to replace. Delete the replacement and its pre_runtime" >&2; \
+        echo "       whiteout entries; keep the checks." >&2; \
+        exit 1; \
+    fi; \
+    newest=$(printf '%s\n2.2.4\n' "$before" | sort -V | tail -1); \
+    if [ "$before" = "2.2.4" ] || [ "$newest" != "2.2.4" ]; then \
+        echo "ERROR: the base image already ships PyNvVideoCodec $before, so the" >&2; \
+        echo "       replacement is obsolete. Delete it and its pre_runtime whiteout" >&2; \
+        echo "       entries, and move the pin to the base version; keep the checks." >&2; \
+        exit 1; \
+    fi; \
+    /usr/bin/python3 -m pip uninstall --break-system-packages --yes pynvvideocodec; \
+    rm -rf /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec \
+        /usr/local/lib/python3.12/dist-packages/pynvvideocodec* \
+        /usr/local/external/ffmpeg; \
+    if /usr/bin/python3 -c 'import importlib.util, sys; sys.exit(0 if importlib.util.find_spec("PyNvVideoCodec") else 1)'; then \
+        echo "ERROR: PyNvVideoCodec is still importable after the removal above; the" >&2; \
+        echo "       base image ships it somewhere these paths do not reach." >&2; \
+        exit 1; \
+    fi; \
+    /usr/bin/python3 -m pip install --break-system-packages --no-cache-dir \
+        'PyNvVideoCodec==2.2.4'; \
+    PYTHONPATH=/tmp/compliance /usr/bin/python3 -m compliance.check_pynvvideocodec --pinned 2.2.4; \
     v=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("pynvvideocodec"))'); \
     echo "PyNvVideoCodec version: $v"; \
     examined=0; \
@@ -564,6 +596,13 @@ RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
 # would leave the base image's dist-info beside the new one, and the inventory
 # reads that directory, so the upgrade would not show.
 #
+# PyNvVideoCodec is here for the aiohttp reason: runtime_full replaces the base
+# image's copy, and the dist-info name carries the version. Without this entry the
+# image would ship two dist-info directories, and the codec scan runs on this
+# stage. /usr/local/external/ffmpeg is the same package: the wheel installs its
+# FFmpeg source tarball there, outside dist-packages. The overlay restores
+# runtime_full's single tarball, which matches the shipped libraries.
+#
 # Its runtime dependencies are listed for the same reason. pip upgrades those too
 # when the new aiohttp requires versions the base does not carry, and each rename
 # has the same doubling problem. Dropping them here is free: the overlay restores
@@ -585,6 +624,9 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/opencv_python_headless* \
     /usr/local/lib/python3.12/dist-packages/nvidia/dali \
     /usr/local/lib/python3.12/dist-packages/nvidia_dali_* \
+    /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec \
+    /usr/local/lib/python3.12/dist-packages/pynvvideocodec* \
+    /usr/local/external/ffmpeg \
     /usr/local/share/jupyter/lab \
     /usr/local/share/jupyter/labextensions/@jupyter-notebook/lab-extension \
     /usr/local/lib/python3.12/dist-packages/jupyter_server \
@@ -690,10 +732,18 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
     tarballs=$(find /usr/local/external/ffmpeg -name 'ffmpeg-*.tar.*' 2>/dev/null | wc -l); \
     if [ "$tarballs" -gt 1 ]; then \
         echo "ERROR: more than one PyNvVideoCodec FFmpeg source tarball survived" >&2; \
-        echo "       the overlay." >&2; \
+        echo "       the overlay. The /usr/local/external/ffmpeg whiteout entry in" >&2; \
+        echo "       pre_runtime is missing." >&2; \
         find /usr/local/external/ffmpeg -name 'ffmpeg-*.tar.*' >&2; \
         exit 1; \
     fi
+
+# The PyNvVideoCodec replacement in runtime_full needs the same post-overlay
+# check. A missed whiteout leaves the base image's dist-info beside the new one,
+# and the tarball count above cannot see that when both releases ship the same
+# FFmpeg source. The shared guard counts distributions, so it runs again here.
+RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compliance \
+    PYTHONPATH=/tmp/compliance /usr/bin/python3 -m compliance.check_pynvvideocodec --pinned 2.2.4
 
 # The Nsight Systems CLI in the CUDA base ships an optional efa_metrics sampler
 # for EFA network counters. Nothing in the Dynamo tree references it, and AWS
