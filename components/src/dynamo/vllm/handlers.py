@@ -2840,6 +2840,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self, lora_name: str, lora_capacity: int | None
     ) -> int | None:
         """Reserve a bounded engine ID and placeholder for a new admin adapter."""
+        coordinator = getattr(self, "_runtime_lora_coordinator", None)
+        if coordinator is not None and coordinator.enabled:
+            return await coordinator.reserve_admin_slot(lora_name, lora_capacity)
         async with self._lora_capacity_guard:
             occupied_slots = len(self._lora_state.loaded_loras) + len(
                 self._lora_state.uncertain_engine_lora_ids

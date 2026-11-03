@@ -3,6 +3,9 @@
 
 # ruff: noqa: E402 - optional vLLM dependency is checked before Dynamo imports
 
+from dataclasses import replace
+from unittest.mock import AsyncMock
+
 import pytest
 
 pytest.importorskip("vllm.lora.request")
@@ -83,4 +86,56 @@ async def test_reused_client_id_has_independent_handler_admission_owners(
     finally:
         await first_stack.aclose()
         await second_stack.aclose()
+        await coordinator.close()
+
+
+@pytest.mark.parametrize("busy", [False, True])
+@pytest.mark.asyncio
+async def test_administrative_load_reclaims_only_idle_runtime_capacity(
+    monkeypatch, tmp_path, busy
+):
+    snapshot = _snapshot(tmp_path)
+    state_handler, coordinator = _coordinator(
+        monkeypatch, tmp_path, ResolvedLoRA(snapshot, "digest:immutable")
+    )
+    coordinator._settings = replace(
+        coordinator.settings, max_registered_loras=1, max_resident_runtime_loras=1
+    )
+    state_handler._lora_capacity = 1
+    resident = await coordinator.ensure_from_request(
+        _request("wandb-artifact:///entity/project/adapter:v1"), "runtime-request"
+    )
+    handler = handlers_mod.DecodeWorkerHandler.__new__(handlers_mod.DecodeWorkerHandler)
+    handler.__dict__.update(vars(state_handler))
+    handler._runtime_lora_coordinator = coordinator
+    handler._resolve_lora_source_path = AsyncMock(return_value=(True, str(snapshot)))
+    handler._register_lora_discovery = AsyncMock()
+    handler._unregister_lora_discovery = AsyncMock()
+    try:
+        if not busy:
+            await coordinator.release_pending_admission("runtime-request")
+        results = [
+            result
+            async for result in handler.load_lora(
+                {"lora_name": "administrative", "source": {"uri": "file:///adapter"}}
+            )
+        ]
+
+        state = handler._lora_state
+        assert results[-1]["status"] == ("error" if busy else "success")
+        assert not state.admin_reserved_ids
+        assert not state.runtime_eviction_events
+        if busy:
+            assert state.loaded_loras[resident.lora_name].id == resident.lora_int_id
+            handler.engine_client.remove_lora.assert_not_awaited()
+            handler._register_lora_discovery.assert_not_awaited()
+        else:
+            assert set(state.loaded_loras) == {"administrative"}
+            assert state.loaded_loras["administrative"].id > 0
+            assert not state.runtime_loras
+            handler.engine_client.remove_lora.assert_awaited_once_with(
+                resident.lora_int_id
+            )
+            handler._register_lora_discovery.assert_awaited_once()
+    finally:
         await coordinator.close()
