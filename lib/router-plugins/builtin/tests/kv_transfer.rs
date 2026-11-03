@@ -112,6 +112,7 @@ fn request(workers: &[(u64, usize, usize, usize)]) -> SchedulingRequest {
             .filter(|(_, prefix_blocks, ..)| *prefix_blocks > 0)
             .map(|&(id, prefix_blocks, ..)| (worker(id).into(), prefix_blocks))
             .collect(),
+        source_intervals: Vec::new(),
         routing_snapshot: None,
     });
     request

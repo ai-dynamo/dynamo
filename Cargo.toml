@@ -69,6 +69,7 @@ aisimulate-core = { version = "=0.13.0-dev.202610290000000087" }
 
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.7.0" }
+dynamo-global-discovery-client = { path = "lib/global-discovery-client", version = "1.7.0" }
 dynamo-llm = { path = "lib/llm", version = "1.7.0", default-features = false }
 dynamo-sglang-generate = { path = "lib/generate-formats/sglang", version = "1.7.0" }
 dynamo-vllm-generate = { path = "lib/generate-formats/vllm", version = "1.7.0" }
