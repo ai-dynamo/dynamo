@@ -460,12 +460,12 @@ func restoreDGDRHubOnlySpec(restored *v1beta1.DynamoGraphDeploymentRequestSpec, 
 
 // projectSLAAndWorkloadFromProfilingConfigBlob extracts SLA and Workload fields from the v1alpha1 JSON blob.
 // Both are nested under blob["sla"] in the v1alpha1 schema.
-func projectSLAAndWorkloadFromProfilingConfigBlob(blob map[string]interface{}, dst *v1beta1.DynamoGraphDeploymentRequestSpec) {
+func projectSLAAndWorkloadFromProfilingConfigBlob(blob map[string]any, dst *v1beta1.DynamoGraphDeploymentRequestSpec) {
 	slaRaw, ok := blob["sla"]
 	if !ok {
 		return
 	}
-	slaMap, ok := slaRaw.(map[string]interface{})
+	slaMap, ok := slaRaw.(map[string]any)
 	if !ok {
 		return
 	}
@@ -503,12 +503,12 @@ func projectSLAAndWorkloadFromProfilingConfigBlob(blob map[string]interface{}, d
 }
 
 // projectModelCacheFromProfilingConfigBlob extracts ModelCache from blob["deployment"]["modelCache"].
-func projectModelCacheFromProfilingConfigBlob(blob map[string]interface{}, dst *v1beta1.DynamoGraphDeploymentRequestSpec) {
+func projectModelCacheFromProfilingConfigBlob(blob map[string]any, dst *v1beta1.DynamoGraphDeploymentRequestSpec) {
 	deployRaw, ok := blob["deployment"]
 	if !ok {
 		return
 	}
-	deployMap, ok := deployRaw.(map[string]interface{})
+	deployMap, ok := deployRaw.(map[string]any)
 	if !ok {
 		return
 	}
@@ -516,7 +516,7 @@ func projectModelCacheFromProfilingConfigBlob(blob map[string]interface{}, dst *
 	if !ok {
 		return
 	}
-	mcMap, ok := mcRaw.(map[string]interface{})
+	mcMap, ok := mcRaw.(map[string]any)
 	if !ok {
 		return
 	}
@@ -968,10 +968,10 @@ func migrateLegacyUnnamedProfilerContainers(containers []corev1.Container) {
 
 // projectSLAAndWorkloadToProfilingConfigBlob writes SLA and Workload structured fields back into the JSON blob.
 // It overwrites existing typed values for those keys and reports whether it wrote or retained SLA data.
-func projectSLAAndWorkloadToProfilingConfigBlob(src *v1beta1.DynamoGraphDeploymentRequestSpec, blob map[string]interface{}) bool {
-	slaMap, hadSLA := blob["sla"].(map[string]interface{})
+func projectSLAAndWorkloadToProfilingConfigBlob(src *v1beta1.DynamoGraphDeploymentRequestSpec, blob map[string]any) bool {
+	slaMap, hadSLA := blob["sla"].(map[string]any)
 	if slaMap == nil {
-		slaMap = make(map[string]interface{})
+		slaMap = make(map[string]any)
 	}
 	wroteSLA := false
 	if src.SLA != nil {
@@ -1005,12 +1005,12 @@ func projectSLAAndWorkloadToProfilingConfigBlob(src *v1beta1.DynamoGraphDeployme
 }
 
 // projectModelCacheToProfilingConfigBlob writes ModelCache structured fields back into blob["deployment"]["modelCache"].
-func projectModelCacheToProfilingConfigBlob(mc *v1beta1.ModelCacheSpec, blob map[string]interface{}) bool {
-	deployMap, _ := blob["deployment"].(map[string]interface{})
+func projectModelCacheToProfilingConfigBlob(mc *v1beta1.ModelCacheSpec, blob map[string]any) bool {
+	deployMap, _ := blob["deployment"].(map[string]any)
 	if deployMap == nil {
-		deployMap = make(map[string]interface{})
+		deployMap = make(map[string]any)
 	}
-	mcMap := make(map[string]interface{})
+	mcMap := make(map[string]any)
 	if mc.PVCName != "" {
 		mcMap["pvcName"] = mc.PVCName
 	}
@@ -1030,11 +1030,11 @@ func projectModelCacheToProfilingConfigBlob(mc *v1beta1.ModelCacheSpec, blob map
 
 // projectPlannerToProfilingConfigBlob writes the planner RawExtension into blob["planner"].
 // The RawExtension is the full PlannerConfig JSON blob (opaque to Go).
-func projectPlannerToProfilingConfigBlob(planner *runtime.RawExtension, blob map[string]interface{}) bool {
+func projectPlannerToProfilingConfigBlob(planner *runtime.RawExtension, blob map[string]any) bool {
 	if planner == nil || planner.Raw == nil {
 		return false
 	}
-	var plannerMap map[string]interface{}
+	var plannerMap map[string]any
 	if err := json.Unmarshal(planner.Raw, &plannerMap); err != nil || len(plannerMap) == 0 {
 		return false
 	}
@@ -1043,12 +1043,12 @@ func projectPlannerToProfilingConfigBlob(planner *runtime.RawExtension, blob map
 }
 
 // projectPlannerFromProfilingConfigBlob extracts blob["planner"] and populates v1beta1 Features.Planner.
-func projectPlannerFromProfilingConfigBlob(blob map[string]interface{}, dst *v1beta1.DynamoGraphDeploymentRequestSpec) {
+func projectPlannerFromProfilingConfigBlob(blob map[string]any, dst *v1beta1.DynamoGraphDeploymentRequestSpec) {
 	plannerRaw, ok := blob["planner"]
 	if !ok {
 		return
 	}
-	plannerMap, ok := plannerRaw.(map[string]interface{})
+	plannerMap, ok := plannerRaw.(map[string]any)
 	if !ok || len(plannerMap) == 0 {
 		return
 	}

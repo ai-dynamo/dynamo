@@ -3,6 +3,7 @@
 
 import asyncio
 import functools
+import gc
 import json
 import logging
 import os
@@ -21,6 +22,7 @@ from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
@@ -163,6 +165,24 @@ def publish_vllm_structural_tag_reasoning_policy(
         TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
         json.dumps(has_reasoning_parser and not enable_in_reasoning),
     )
+
+
+def configure_muse_structural_tag_reasoning(
+    config: Config, vllm_config: VllmConfig
+) -> None:
+    """Activate Muse's native grammar before the model chooses a recipient.
+
+    Muse's engine reasoner leaves reasoning only after a tool channel opens.
+    Deferring a required/named grammar until then cannot force a call. The
+    Dynamo ATEM grammar includes the reasoning channel, so it owns that boundary.
+    Unguided requests are unaffected by this structured-output setting.
+    """
+    spark = ("muse_spark_open", "muse_spark")
+    # Match the frontend's effective parser selection for reasoning-only Spark.
+    if config.dyn_tool_call_parser in spark or (
+        config.dyn_tool_call_parser is None and config.dyn_reasoning_parser in spark
+    ):
+        vllm_config.structured_outputs_config.enable_in_reasoning = True
 
 
 def should_register_model_ignore_weights(config: Config) -> bool:
@@ -739,6 +759,7 @@ def setup_vllm_engine(
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    configure_muse_structural_tag_reasoning(config, vllm_config)
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
 
@@ -871,6 +892,32 @@ def setup_vllm_engine(
     )
 
 
+_gc_frozen_after_init = False
+
+
+def maybe_freeze_gc_after_init(enabled: bool) -> None:
+    """Freeze this process's GC heap once, before the model is registered.
+
+    vLLM calls ``freeze_gc_heap()`` in EngineCore, each GPU worker and its own
+    API server. Dynamo replaces the API server with this process, which holds
+    the engine client, tokenizer and config (~1M tracked objects), so without
+    a freeze every gen2 collection re-walks them on the request loop. Runs at
+    most once per process: the collect blocks, and the frontend only routes
+    here after ``register_model`` returns.
+    """
+    global _gc_frozen_after_init
+    if not enabled or _gc_frozen_after_init:
+        return
+    start = time.perf_counter()
+    freeze_gc_heap()
+    _gc_frozen_after_init = True
+    logger.info(
+        "Froze %d GC-tracked objects in the worker process after init (%.0f ms)",
+        gc.get_freeze_count(),
+        (time.perf_counter() - start) * 1000,
+    )
+
+
 async def register_vllm_model(
     model_input: ModelInput,
     model_type: ModelType,
@@ -998,6 +1045,8 @@ async def register_vllm_model(
     media_decoder, media_fetcher = create_frontend_media_config(
         config.frontend_decoding
     )
+
+    maybe_freeze_gc_after_init(config.freeze_gc_after_init)
 
     await register_model(
         model_input,

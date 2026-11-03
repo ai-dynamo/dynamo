@@ -9,7 +9,9 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 func TestReadManifestsPreservesHistoricalScalars(t *testing.T) {
@@ -40,7 +42,60 @@ func TestReadManifestsPreservesHistoricalScalars(t *testing.T) {
 	require.True(t, found, "export must not mutate its input")
 	again, err := ReadManifests(path)
 	require.NoError(t, err)
-	require.Equal(t, []unstructured.Unstructured{*object}, again, "only managedFields may be omitted")
+	object.SetUID(again[0].GetUID())
+	object.SetResourceVersion(again[0].GetResourceVersion())
+	object.SetCreationTimestamp(again[0].GetCreationTimestamp())
+	require.Equal(t, []unstructured.Unstructured{*object}, again, "only server metadata may be normalized")
+}
+
+func TestWriteManifestsNormalizesOnlyServerMetadata(t *testing.T) {
+	t.Log("Record different API metadata without changing controller state or the observed object")
+	object := unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "example.com/v1", "kind": "Record",
+		"metadata": map[string]any{
+			"name": "old", "namespace": "history", "generation": int64(7),
+			"annotations": map[string]any{"origin": "1.4.0", "worker-hash": "92221e36", "last-applied-generation": "7"},
+		},
+		"spec":   map[string]any{"image": "runtime:fixed"},
+		"status": map[string]any{"observedGeneration": int64(7), "lastTransitionTime": "2026-01-01T00:00:00Z"},
+	}}
+	original := object.DeepCopy()
+	var baseline []byte
+	for _, value := range []string{"first", "second"} {
+		observed := object.DeepCopy()
+		observed.SetUID(types.UID(value))
+		observed.SetResourceVersion(value)
+		observed.Object["metadata"].(map[string]any)["creationTimestamp"] = value
+		observed.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: "example.com/v1", Kind: "Record", Name: "parent", UID: types.UID(value)}})
+		require.NoError(t, unstructured.SetNestedSlice(observed.Object, []any{map[string]any{"manager": value}}, "metadata", "managedFields"))
+		before := observed.DeepCopy()
+		path := filepath.Join(t.TempDir(), "input.yaml")
+		require.NoError(t, WriteManifests(path, []unstructured.Unstructured{*observed}))
+		require.Equal(t, before, observed, "recording must not mutate the live observations")
+		data, err := os.ReadFile(path)
+		require.NoError(t, err)
+		if baseline != nil {
+			require.Equal(t, baseline, data)
+		}
+		baseline = data
+
+		t.Log("Read and rewrite the normalized input with the same formatting and concrete field types")
+		again, err := ReadManifests(path)
+		require.NoError(t, err)
+		require.Equal(t, types.UID("00000000-0000-0000-0000-000000000000"), again[0].GetUID())
+		require.Equal(t, "1", again[0].GetResourceVersion())
+		require.Equal(t, "2000-01-01T00:00:00Z", again[0].Object["metadata"].(map[string]any)["creationTimestamp"])
+		require.Equal(t, again[0].GetUID(), again[0].GetOwnerReferences()[0].UID)
+		semantic := again[0].DeepCopy()
+		for _, key := range []string{"uid", "resourceVersion", "creationTimestamp", "ownerReferences"} {
+			unstructured.RemoveNestedField(semantic.Object, "metadata", key)
+		}
+		require.Equal(t, original, semantic, "generation, annotations, spec and status remain exact")
+		require.NoError(t, WriteManifests(path, again))
+		rewritten, err := os.ReadFile(path)
+		require.NoError(t, err)
+		require.Equal(t, data, rewritten)
+	}
 }
 
 // Embed TB so matcher failures can be inspected without failing the containing test.

@@ -91,8 +91,8 @@ func EnsureClient(podSpec *corev1.PodSpec, container *corev1.Container) {
 		return
 	}
 	sharedVolume := corev1.Volume{
-		Name:         SharedVolumeName,
-		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		Name:     SharedVolumeName,
+		EmptyDir: &corev1.EmptyDirVolumeSource{},
 	}
 	foundVolume := false
 	for i := range podSpec.Volumes {

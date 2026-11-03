@@ -13,7 +13,7 @@ use super::registry::Registry;
 
 pub struct Context<T: Data> {
     current: T,
-    controller: Arc<Controller>, //todo: hold this as an arc
+    controller: Arc<Controller>,
     registry: Registry,
     stages: Vec<String>,
     metadata: BTreeMap<String, String>,
@@ -98,6 +98,11 @@ impl<T: Send + Sync + 'static> Context<T> {
     /// Insert an object into the registry with a specific key.
     pub fn insert<K: ToString, U: Send + Sync + 'static>(&mut self, key: K, value: U) {
         self.registry.insert_shared(key, value);
+    }
+
+    /// Insert an existing shared object without allocating another Arc.
+    pub fn insert_arc<K: ToString, U: Send + Sync + 'static>(&mut self, key: K, value: Arc<U>) {
+        self.registry.insert_arc(key, value);
     }
 
     /// Insert a unique and takable object into the registry with a specific key.

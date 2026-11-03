@@ -28,7 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-func TestDGDRDefaulter_defaultImageFor(t *testing.T) {
+func TestDefaultPlannerImageFor(t *testing.T) {
 	// Note: the default planner image is only published starting from Dynamo 1.1.0,
 	// so these tests use 1.1.0 as the earliest known valid version.
 	tests := []struct {
@@ -77,10 +77,9 @@ func TestDGDRDefaulter_defaultImageFor(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := NewDGDRDefaulter(tt.operatorVersion, tt.defaultImage)
-			got := d.defaultImageFor()
+			got := PlannerImageFor(tt.operatorVersion, tt.defaultImage)
 			if got != tt.expectedImage {
-				t.Errorf("defaultImageFor() = %q, want %q", got, tt.expectedImage)
+				t.Errorf("PlannerImageFor() = %q, want %q", got, tt.expectedImage)
 			}
 		})
 	}
@@ -88,13 +87,11 @@ func TestDGDRDefaulter_defaultImageFor(t *testing.T) {
 
 func makeAdmissionCtx(op admissionv1.Operation) context.Context {
 	req := admission.Request{
-		AdmissionRequest: admissionv1.AdmissionRequest{
-			Operation: op,
-			Kind: metav1.GroupVersionKind{
-				Group:   nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.Group,
-				Version: nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.Version,
-				Kind:    nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.Kind,
-			},
+		Operation: op,
+		Kind: metav1.GroupVersionKind{
+			Group:   nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.Group,
+			Version: nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.Version,
+			Kind:    nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.Kind,
 		},
 	}
 	return admission.NewContextWithRequest(context.Background(), req)
@@ -135,8 +132,8 @@ func TestDGDRDefaulter_Default(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			d := NewDGDRDefaulter(tt.version, "")
 			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
-				Spec:       nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{Image: tt.initialImage},
+				Name: "test", Namespace: "default",
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{Image: tt.initialImage},
 			}
 			ctx := makeAdmissionCtx(tt.operation)
 			if err := d.Default(ctx, dgdr); err != nil {

@@ -143,6 +143,7 @@ class DynamoReplayRunner:
             router_mode,
             router_config,
             ais_perf_config,
+            conversation_affinity,
         ) = self._resolve_hooks(spec.runtime_hooks)
         common: dict[str, Any] = {
             "router_mode": router_mode,
@@ -169,6 +170,10 @@ class DynamoReplayRunner:
             **self._goodput_sla_kwargs(spec),
         }
 
+        if conversation_affinity is not None:
+            if not self._is_trace(spec):
+                raise ValueError("conversation_affinity requires an agentic trace")
+            common["conversation_affinity"] = conversation_affinity
         if self._is_trace(spec):
             report = self._run_trace(spec, common, execution_model=execution_model)
         else:
@@ -206,11 +211,13 @@ class DynamoReplayRunner:
         str,
         KvRouterConfig | None,
         AisPerfConfig | None,
+        dict[str, JSONValue] | None,
     ]:
         planner_config: dict[str, JSONValue] | None = None
         router_mode = "round_robin"
         router_config: KvRouterConfig | None = None
         ais_perf_config: AisPerfConfig | None = None
+        conversation_affinity = None
         planner_seen = False
         router_seen = False
         for hook in hooks:
@@ -233,6 +240,7 @@ class DynamoReplayRunner:
                         "ReplaySpec contains multiple Router placement hooks"
                     )
                 router_seen = True
+                conversation_affinity = hook.config.get("conversation_affinity")
                 router_mode = str(hook.config.get("router_mode", "kv_router"))
                 raw_config = hook.config.get("router_config")
                 if not isinstance(raw_config, dict):
@@ -252,7 +260,13 @@ class DynamoReplayRunner:
                 f"unsupported Dynamo runtime hook "
                 f"{hook.provider}:{hook.kind}@{hook.api_version}"
             )
-        return planner_config, router_mode, router_config, ais_perf_config
+        return (
+            planner_config,
+            router_mode,
+            router_config,
+            ais_perf_config,
+            conversation_affinity,
+        )
 
     @staticmethod
     def _is_trace(spec: ReplaySpec) -> bool:

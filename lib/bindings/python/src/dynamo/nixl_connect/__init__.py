@@ -893,10 +893,16 @@ class Connector:
         op = WritableOperation(conn, local_descriptors)
         return op
 
+    async def warmup(self) -> None:
+        """Create the shared NIXL agent before the first transfer.
+
+        Repeated calls reuse the same connection as transfer operations. Setup
+        errors propagate to the caller so startup can fail before serving traffic.
+        """
+        await self._create_connection()
+
     async def initialize(self) -> None:
-        """
-        Deprecated method.
-        """
+        """Deprecated no-op; use warmup() for eager NIXL agent creation."""
         logger.debug(
             f"dynamo.nixl_connect.{self.__class__.__name__}: Initialized {{ name: '{self._worker_id}' }} (This method is deprecated)."
         )

@@ -10,6 +10,7 @@ import pytest
 
 from tests.conftest import NatsServer
 from tests.fault_tolerance.etcd_ha.utils import (
+    ETCD_LEASE_TTL_SECS,
     DynamoFrontendProcess,
     EtcdCluster,
     send_inference_request,
@@ -71,7 +72,10 @@ class DynamoWorkerProcess(ManagedProcess):
 
         health_check_urls = [
             (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
-            (f"http://localhost:{FRONTEND_PORT}/health", check_health_generate),
+            (
+                f"http://localhost:{FRONTEND_PORT}/health?instances=true",
+                check_health_generate,
+            ),
         ]
 
         # Set port based on worker type
@@ -92,6 +96,7 @@ class DynamoWorkerProcess(ManagedProcess):
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
         env["ETCD_ENDPOINTS"] = ",".join(etcd_endpoints)
+        env["ETCD_LEASE_TTL"] = str(ETCD_LEASE_TTL_SECS)
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = port
 
