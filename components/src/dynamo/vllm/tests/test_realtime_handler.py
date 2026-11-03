@@ -443,10 +443,12 @@ class _StreamingEngine:
         self.chunks = []
         self.calls = []
         self.aborted = []
+        self.held_aborted_before_direct = None
 
     async def generate(self, prompt, sampling_params, request_id, **kwargs):
         self.calls.append((prompt, request_id))
         if isinstance(prompt, dict):
+            self.held_aborted_before_direct = bool(self.aborted)
             yield SimpleNamespace(text="direct", finished=True)
             return
         async for chunk in prompt:
@@ -547,6 +549,7 @@ def test_held_request_engine_falls_back_to_a_new_request(prompt, params):
     assert outputs == ["direct"]
     assert all(chunk.params is _PREFILL_PARAMS for chunk in engine.chunks)
     assert engine.calls[-1] == ({"prompt_token_ids": prompt}, "chat-1")
+    assert engine.held_aborted_before_direct
     assert engine.aborted == [held._request_id]
 
 

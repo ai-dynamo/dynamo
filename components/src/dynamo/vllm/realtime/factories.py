@@ -219,7 +219,8 @@ class _HeldRequestEngine:
     vLLM's chat serving still validates the request, renders the prompt, and
     builds the sampling parameters. Only the engine call reuses the held
     request, when the final prompt extends it and the answer needs no
-    per-request engine options or seed.
+    per-request engine options or seed. Otherwise the held request is closed
+    before the new request starts, so the two never hold KV cache at once.
     """
 
     def __init__(self, engine_client: Any) -> None:
@@ -247,7 +248,25 @@ class _HeldRequestEngine:
             and kwargs.get("lora_request") is None
         ):
             return held.answer(list(token_ids), sampling_params)
+        if held is not None:
+            return self._generate_after_close(
+                held, prompt, sampling_params, request_id, **kwargs
+            )
         return self._engine.generate(prompt, sampling_params, request_id, **kwargs)
+
+    async def _generate_after_close(
+        self,
+        held: HeldTextRequest,
+        prompt: Any,
+        sampling_params: Any,
+        request_id: str,
+        **kwargs: Any,
+    ) -> AsyncGenerator[Any, None]:
+        await held.close()
+        async for output in self._engine.generate(
+            prompt, sampling_params, request_id, **kwargs
+        ):
+            yield output
 
 
 def _build_models(*, engine_client: Any, model_name: str, model_path: str) -> Any:
