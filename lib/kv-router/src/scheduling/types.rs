@@ -15,8 +15,8 @@ use super::prefill_load::effective_prefill_tokens;
 use crate::kv_hints::{KvTransferCandidates, KvTransferSourceChoice};
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
-    LocalBlockHash, RoutingConstraints, SelectionTrace, SharedCacheHits, WorkerAffinityTarget,
-    WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    LocalBlockHash, RoutingConstraints, SelectionLogFields, SelectionTrace, SharedCacheHits,
+    WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::policy_queue::QueueRejection;
 use crate::sequences::WorkerLoadProjection;
@@ -166,6 +166,9 @@ pub struct SchedulingResponse {
     /// Per-candidate costs, present only when the scheduler has a selection
     /// trace spec installed and this selection was admitted.
     pub selection_trace: Option<SelectionTrace>,
+    /// Fields the routing task logs the selection with; see
+    /// [`crate::protocols::WorkerSelectionResult::log_fields`].
+    pub log_fields: Option<SelectionLogFields>,
 }
 
 /// Internal result that pairs a public scheduling response with its attempt identity.
@@ -521,40 +524,6 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
 }
 
 impl SchedulingRequest {
-    /// The request behind hosted selection, which has no KV path. Every KV-only field is
-    /// empty, and the host applies pins and session affinity before selecting, so neither
-    /// is set here. Every field is named, so a new one fails to compile until it is handled.
-    ///
-    /// Construction does not allocate: the hash collections start at zero capacity and
-    /// every other field is a scalar or `None`.
-    #[inline]
-    pub(crate) fn hosted(isl_tokens: usize) -> Self {
-        Self {
-            // Hosted selection books nothing in the scheduler, so it needs no request ID.
-            mode: ScheduleMode::QueryOnly { request_id: None },
-            token_seq: None,
-            isl_tokens,
-            lora_name: None,
-            expected_output_tokens: None,
-            affinity_target: None,
-            pinned_worker: None,
-            allowed_worker_ids: None,
-            routing_constraints: RoutingConstraints::default(),
-            router_config_override: None,
-            track_prefill_tokens: false,
-            priority_jump: 0.0,
-            strict_priority: 0,
-            policy_class: None,
-            session_context: None,
-            overlap: OverlapSignals::default(),
-            kv_transfer_candidates: None,
-            retain_kv_transfer_chain: false,
-            shared_cache_hits: None,
-            worker_loads: FxHashMap::default(),
-            resp_tx: None,
-        }
-    }
-
     #[inline]
     pub fn eligibility(&self) -> RoutingEligibility<'_> {
         self.eligibility_with_overloaded(None)

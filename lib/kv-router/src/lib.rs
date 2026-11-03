@@ -78,6 +78,7 @@ pub use selector::DefaultWorkerSelector;
 pub use selector::{WorkerSelectionInput, WorkerSelector};
 pub use session_prefix_index::{
     LogicalNode, NodeId, SessionId, SessionPrefixIndexError, SessionPrefixIndexer,
+    SessionResidencyOwner, SharedCacheBackend,
 };
 pub use tracking_hash::{TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope};
 pub use worker_type::WorkerType;

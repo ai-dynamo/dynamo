@@ -6,7 +6,7 @@ use dynamo_kv_router::selector::HostedSelectionRequest;
 /// The request metadata a hosted picker reads. The routing host tracks no KV block size, so
 /// [`request_blocks`](dynamo_kv_router::plugins::worker_selection::WorkerSelectionContext::request_blocks) reads 0.
 pub(super) fn hosted_request(request: &PreprocessedRequest) -> HostedSelectionRequest {
-    HostedSelectionRequest::new(request.token_ids.len(), 0)
+    HostedSelectionRequest::new(request.token_ids.len())
 }
 
 use super::*;
@@ -57,9 +57,7 @@ impl RoutingHost {
         }
         let target = lora
             .picker
-            .select(&candidates, None, &hosted_request(request))?
-            .worker
-            .worker_id;
+            .select(&candidates, None, &hosted_request(request))?;
         tracing::debug!(
             lora = %lora_name,
             worker_id = target,
@@ -137,9 +135,7 @@ impl RoutingHost {
                             if let Some(worker_id) = preferred_worker {
                                 Ok(worker_id)
                             } else {
-                                picker
-                                    .select(ids, None, &hosted_request(request.content()))
-                                    .map(|selection| selection.worker.worker_id)
+                                picker.select(ids, None, &hosted_request(request.content()))
                             }
                         })??,
                     };
@@ -448,15 +444,11 @@ mod tests {
     use super::*;
 
     fn request() -> HostedSelectionRequest {
-        HostedSelectionRequest::new(0, 0)
+        HostedSelectionRequest::new(0)
     }
 
     fn select(picker: &HostedWorkerPicker, worker_ids: &[u64]) -> u64 {
-        picker
-            .select(worker_ids, None, &request())
-            .unwrap()
-            .worker
-            .worker_id
+        picker.select(worker_ids, None, &request()).unwrap()
     }
 
     #[test]
@@ -467,8 +459,6 @@ mod tests {
             picker
                 .select(&[10, 20], None, &request().with_preview(true))
                 .unwrap()
-                .worker
-                .worker_id
         };
         assert_eq!(peek(&picker), 10);
         assert_eq!(peek(&picker), 10);
@@ -500,7 +490,7 @@ mod tests {
         let picker = hosted_picker(RouterMode::LeastLoaded).unwrap();
         let active = |worker_id| if worker_id == 10 { 4 } else { 1 };
         let selected = picker.select(&[10, 20], Some(&active), &request()).unwrap();
-        assert_eq!(selected.worker.worker_id, 20);
+        assert_eq!(selected, 20);
     }
 
     #[test]

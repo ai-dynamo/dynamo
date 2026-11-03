@@ -450,12 +450,11 @@ impl RoutingHost {
                         picker.select(
                             ids,
                             None,
-                            &HostedSelectionRequest::new(0, 0).with_preview(true),
+                            &HostedSelectionRequest::new(0).with_preview(true),
                         )
                     })
                     .ok()
-                    .and_then(Result::ok)
-                    .map(|selection| selection.worker.worker_id),
+                    .and_then(Result::ok),
             },
             RoutingPolicy::DeviceAwareWeighted => self.inner.peek_next_worker(),
             RoutingPolicy::Direct => None,

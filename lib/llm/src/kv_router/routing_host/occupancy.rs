@@ -47,9 +47,7 @@ impl HostedOccupancy {
         let selection = self
             .state
             .select_and_reserve_with(&candidates, |occupancy| {
-                picker
-                    .select(&candidates, Some(occupancy), &request)
-                    .map(|selection| selection.worker.worker_id)
+                picker.select(&candidates, Some(occupancy), &request)
             })?;
         let result = HostedOccupancySelection {
             worker_id: selection.worker_id(),
@@ -71,10 +69,9 @@ impl HostedOccupancy {
             .select(
                 &candidates,
                 Some(&occupancy),
-                &HostedSelectionRequest::new(0, 0).with_preview(true),
+                &HostedSelectionRequest::new(0).with_preview(true),
             )
             .ok()
-            .map(|selection| selection.worker.worker_id)
     }
 }
 
