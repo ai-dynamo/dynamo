@@ -3030,7 +3030,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     if lora is None:
                         yield {
                             "status": "error",
-                            "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self._lora_state.loaded_loras.keys())}",
+                            "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self._lora_state.list_lora_ids())}",
                         }
                         return
 
