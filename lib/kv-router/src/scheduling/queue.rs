@@ -234,12 +234,16 @@ enum RefreshEvent {
 /// How the optional overlap refresh of an extracted candidate ended. A transient return value,
 /// never stored, so its refreshed scores stay unboxed.
 #[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
 enum RefreshEnd {
     /// The refresh finished: the scores to use, or `None` to keep the queued ones.
     Finished(Option<RefreshedOverlap>),
-    /// The candidate's due time passed or its response closed first. The refresh was dropped
-    /// unfinished, and the candidate keeps its queued scores.
-    Abandoned,
+    /// The candidate's due time passed first. The refresh was dropped unfinished, and the
+    /// candidate keeps its queued scores.
+    DueTimePassed,
+    /// The candidate's response closed first. The refresh was dropped unfinished, and the
+    /// candidate keeps its queued scores.
+    ResponseClosed,
     /// The caller released the candidate's lifecycle first. The candidate leaves unanswered,
     /// as a queued entry that cleanup removes does.
     Released,
@@ -2187,9 +2191,17 @@ impl<
                                 None
                             };
                     }
-                    RefreshEnd::Finished(None) | RefreshEnd::Abandoned => {}
-                    RefreshEnd::Released => released = true,
-                    RefreshEnd::Shutdown => stopping = true,
+                    RefreshEnd::Finished(None) => {}
+                    end => {
+                        tracing::debug!(
+                            request_id = queued.request.mode.request_id().unwrap_or("unknown"),
+                            wait_ms = queued.enqueue_at.elapsed().as_millis() as u64,
+                            outcome = ?end,
+                            "overlap refresh ended unfinished"
+                        );
+                        released = matches!(end, RefreshEnd::Released);
+                        stopping = matches!(end, RefreshEnd::Shutdown);
+                    }
                 }
             }
             let queued = candidate.into_payload();
@@ -2271,12 +2283,12 @@ impl<
                     if let Some(response) = response {
                         response.closed().await;
                     }
-                } => return RefreshEnd::Abandoned,
+                } => return RefreshEnd::ResponseClosed,
                 _ = async {
                     if let Some(due_at) = due_at {
                         tokio::time::sleep_until(due_at).await;
                     }
-                }, if due_at.is_some() => return RefreshEnd::Abandoned,
+                }, if due_at.is_some() => return RefreshEnd::DueTimePassed,
                 _ = async {
                     if let Some(timer) = timer {
                         tokio::time::sleep_until(timer).await;
