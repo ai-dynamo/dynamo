@@ -47,7 +47,7 @@ def create_runtime(
     request_plane: str,
     event_plane: Optional[str] = None,
     use_kv_events: Optional[bool] = None,
-    response_plane: str = "tcp",
+    response_plane: Optional[str] = None,
 ) -> Tuple[DistributedRuntime, asyncio.AbstractEventLoop]:
     """Create a DistributedRuntime.
 
@@ -60,7 +60,8 @@ def create_runtime(
             from the event-plane configuration. This parameter is accepted for
             backwards compatibility but will be removed in a future release.
         response_plane: Response transport (tcp, quic, or velo). Frontend and workers
-            must use the same value.
+            must use the same value. When None, the Rust runtime reads
+            DYN_RESPONSE_PLANE and defaults to tcp.
 
     Returns:
         Tuple of (runtime, event_loop).
@@ -74,7 +75,7 @@ def create_runtime(
             stacklevel=2,
         )
 
-    if response_plane not in {"tcp", "quic", "velo"}:
+    if response_plane is not None and response_plane not in {"tcp", "quic", "velo"}:
         raise ValueError("response_plane must be 'tcp', 'quic', or 'velo'")
 
     loop = asyncio.get_running_loop()
