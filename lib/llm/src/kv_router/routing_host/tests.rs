@@ -2702,7 +2702,12 @@ async fn runtime_lora_rechecks_worker_metadata_after_queued_selection() {
         .component("workers".to_string())
         .unwrap()
         .endpoint("generate".to_string());
-    let client = endpoint.client().await.unwrap();
+    let monitor = tokio_util::sync::CancellationToken::new();
+    let client = endpoint
+        .client_with_cancellation(monitor.clone())
+        .await
+        .unwrap();
+    monitor.cancel();
     client.override_discovered_instances(vec![101, 202]);
     client.override_instance_avail(vec![101, 202]);
     let mut capable = ModelRuntimeConfig::default();
