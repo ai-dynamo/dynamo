@@ -41,7 +41,7 @@ func TestDGDPVCReconciler_Reconcile(t *testing.T) {
 		g := gomega.NewGomegaWithT(t)
 		ctx := context.Background()
 		dgd := &v1beta1.DynamoGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "native", Namespace: "default"},
+			Name: "native", Namespace: "default",
 		}
 		fakeClient := fake.NewClientBuilder().
 			WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
@@ -65,7 +65,7 @@ func TestDGDPVCReconciler_Reconcile(t *testing.T) {
 		create := false
 		pvcName := VolumeNameModelCache
 		dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "converted", Namespace: "default"},
+			Name: "converted", Namespace: "default",
 			Spec: v1alpha1.DynamoGraphDeploymentSpec{
 				PVCs: []v1alpha1.PVC{{
 					Create: &create,
@@ -99,7 +99,7 @@ func TestDGDPVCReconciler_Reconcile(t *testing.T) {
 		pvcName := VolumeNameModelCache
 		storage := resource.MustParse("5Gi")
 		dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "converted", Namespace: "default"},
+			Name: "converted", Namespace: "default",
 			Spec: v1alpha1.DynamoGraphDeploymentSpec{
 				PVCs: []v1alpha1.PVC{{
 					Create:           &create,
@@ -137,7 +137,7 @@ func TestDGDPVCReconciler_Reconcile(t *testing.T) {
 		create := true
 		pvcName := VolumeNameModelCache
 		dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "converted", Namespace: "default"},
+			Name: "converted", Namespace: "default",
 			Spec: v1alpha1.DynamoGraphDeploymentSpec{
 				PVCs: []v1alpha1.PVC{{
 					Create: &create,

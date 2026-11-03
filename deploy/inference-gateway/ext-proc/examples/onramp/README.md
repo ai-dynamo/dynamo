@@ -87,8 +87,17 @@ flowchart LR
    selector with the pod's endpoint, block size, and KV-event socket.
 3. The selector subscribes directly to each pod's KV-cache event socket and
    maintains the KV index, scheduler, and load accounting.
-4. On each request the EPP sends the unchanged body to the configured vLLM
+4. On each request the EPP sends the unchanged body to the configured
    `/v1/chat/completions/render` endpoint, uses the returned tokens to select a
    currently-Ready worker (booking its load via select-and-reserve), and returns
-   the worker's endpoint to Envoy as routing headers. The selected
-   worker processes the original forwarded request.
+   the worker's endpoint to Envoy as routing headers. The selected worker
+   processes the forwarded request. Before forwarding, the EPP removes the
+   Dynamo-only `nvext` object it consumed (routing hints, cache salt) and, when
+   a cache namespace applies, writes the engine's native top-level `cache_salt`.
+   This is the same for every engine: vLLM and SGLang would ignore `nvext`,
+   TensorRT-LLM would reject the request over it, so every worker receives the
+   same plain OpenAI body. With `trtllm-render`, a request that carries a cache
+   salt (`x-tenant-id`, `nvext.cache_salt`, or `cache_salt`) is rejected with
+   HTTP 400 before rendering: TensorRT-LLM's KV events do not carry the salt, so
+   the EPP could neither credit the salted request nor keep its blocks from
+   being credited to unsalted ones.

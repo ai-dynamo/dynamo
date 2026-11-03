@@ -34,9 +34,13 @@ class FakeClient:
         self.fail_before_output = fail_before_output
         self.fail_after_output = fail_after_output
         self.calls = 0
+        self.contexts: list[object | None] = []
+        self.requests: list[dict[str, Any]] = []
 
-    async def generate(self, request: dict[str, Any]):
+    async def generate(self, request: dict[str, Any], context: object | None = None):
         self.calls += 1
+        self.contexts.append(context)
+        self.requests.append(request)
         if self.fail_on_generate:
             raise RuntimeError(f"{self.name} generate failed")
 
@@ -49,6 +53,18 @@ class FakeClient:
                     raise RuntimeError(f"{self.name} stream failed after output")
 
         return stream()
+
+
+class FakeContext:
+    def __init__(self, *, stopped: bool = False, killed: bool = False):
+        self.stopped = stopped
+        self.killed = killed
+
+    def is_stopped(self) -> bool:
+        return self.stopped or self.killed
+
+    def is_killed(self) -> bool:
+        return self.killed
 
 
 async def _collect_outputs(generator) -> list[dict[str, Any]]:
@@ -146,12 +162,18 @@ async def test_prefill_retries_faster_pools_until_success(tmp_path):
         "prefill-slow": slow,
     }
 
-    outputs = await _collect_outputs(handler.handle_prefill({"token_ids": [1, 2, 3]}))
+    context = FakeContext()
+    outputs = await _collect_outputs(
+        handler.handle_prefill({"token_ids": [1, 2, 3]}, context=context)
+    )
 
     assert outputs == [{"pool": "prefill-fast"}]
     assert slow.calls == 1
     assert mid.calls == 1
     assert fast.calls == 1
+    assert slow.contexts == [context]
+    assert mid.contexts == [context]
+    assert fast.contexts == [context]
 
 
 @pytest.mark.asyncio
@@ -194,6 +216,30 @@ async def test_priority_retry_disabled_raises_first_failure(tmp_path):
         await _collect_outputs(handler.handle_prefill({"token_ids": [1, 2, 3]}))
 
     assert slow.calls == 1
+    assert fast.calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_state", ["stopped", "killed"])
+async def test_cancelled_context_is_not_retried(tmp_path, cancel_state):
+    handler = _handler(_write_config(tmp_path, _disagg_config()))
+    fast = FakeClient("prefill-fast", outputs=[{"pool": "prefill-fast"}])
+    mid = FakeClient("prefill-mid", outputs=[{"pool": "prefill-mid"}])
+    slow = FakeClient("prefill-slow", fail_on_generate=True)
+    handler.prefill_clients = {
+        "prefill-fast": fast,
+        "prefill-mid": mid,
+        "prefill-slow": slow,
+    }
+
+    context = FakeContext(**{cancel_state: True})
+    with pytest.raises(RuntimeError, match="prefill-slow generate failed"):
+        await _collect_outputs(
+            handler.handle_prefill({"token_ids": [1, 2, 3]}, context=context)
+        )
+
+    assert slow.calls == 1
+    assert mid.calls == 0
     assert fast.calls == 0
 
 
@@ -269,3 +315,33 @@ async def test_agg_handler_routes_by_input_sequence_length(tmp_path):
 
     assert short_outputs == [{"pool": "agg-short"}]
     assert long_outputs == [{"pool": "agg-long"}]
+
+
+@pytest.mark.asyncio
+async def test_agg_handler_measures_packed_token_ids_by_count(tmp_path):
+    config = _agg_config()
+    config["enable_priority_retry"] = False
+    config["num_agg_pools"] = 2
+    config["agg_pool_dynamo_namespaces"] = ["agg-short", "agg-long"]
+    config["agg_pool_priorities"] = [0, 1]
+    config["agg_pool_selection_strategy"].update(
+        {
+            "isl_min": 0,
+            "isl_max": 24576,
+            "isl_resolution": 2,
+            "agg_pool_mapping": [[[0]], [[1]]],
+        }
+    )
+    handler = _handler(_write_config(tmp_path, config))
+    short = FakeClient("agg-short", outputs=[{"pool": "agg-short"}])
+    long = FakeClient("agg-long", outputs=[{"pool": "agg-long"}])
+    handler.agg_clients = {"agg-short": short, "agg-long": long}
+
+    # 4096 packed ids are 16384 bytes; counting bytes would pick the long pool.
+    packed_short = (1).to_bytes(4, "little") * 4096
+    outputs = await _collect_outputs(
+        handler.handle_generate({"token_ids": packed_short})
+    )
+
+    assert outputs == [{"pool": "agg-short"}]
+    assert short.requests[0]["token_ids"] == [1] * 4096

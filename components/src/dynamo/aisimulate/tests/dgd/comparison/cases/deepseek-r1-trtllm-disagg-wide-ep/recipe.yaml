@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+source: recipes/deepseek-r1/trtllm/disagg/wide_ep/gb200/deploy.yaml
+requirements:
+  gb200-sxm-36gpu:
+    gpus: 36

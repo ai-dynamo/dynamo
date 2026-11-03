@@ -43,7 +43,7 @@ inputs:
     description: 'Name for the buildx builder'
     required: true
   flavor:
-    description: 'Buildkit flavor (vllm, trtllm, sglang, general)'
+    description: 'Buildkit flavor (vllm, trtllm, sglang, triton, general)'
     required: false
     default: 'general'
   arch:

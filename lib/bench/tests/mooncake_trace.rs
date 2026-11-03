@@ -6,6 +6,9 @@ mod support;
 #[path = "../kv_router/common/dc_ckf_parity.rs"]
 mod dc_ckf_parity;
 #[allow(dead_code)]
+#[path = "../kv_router/mooncake_lower_tier.rs"]
+mod mooncake_lower_tier;
+#[allow(dead_code)]
 #[path = "../kv_router/mooncake_open_loop.rs"]
 mod mooncake_open_loop;
 #[path = "../kv_router/mooncake_shared.rs"]
@@ -17,10 +20,12 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use clap::Parser;
 use dc_ckf_parity::{DirectCkfParityConfig, DirectCkfParityIndexer, DirectCkfParityMatchMode};
+use dynamo_bench::kv_router_common::args::CommonArgs;
 use dynamo_bench::kv_router_common::replay::{
     WorkerReplayArtifacts, generate_replay_artifacts, generate_replay_artifacts_with_args,
-    process_mooncake_trace,
+    host_offload_mock_engine_args, process_mooncake_trace,
 };
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::indexer::pruning::PruneConfig;
@@ -30,11 +35,12 @@ use dynamo_kv_router::protocols::{
     KvCacheStoredBlockData, OverlapScores, StorageTier, TokensWithHashes, WorkerWithDpRank,
 };
 use dynamo_kv_router::{ConcurrentRadixTreeCompressed, ThreadPoolIndexer};
-use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs, SglangArgs};
+use dynamo_mocker::common::protocols::{EngineType, MockerConfig};
 use dynamo_mocker::loadgen::{ReplayRequestHashes, SessionTrace, Trace, TurnTrace};
 use dynamo_mocker::replay::{
     ReplayTimedKvEvent, ReplayTimedRequest, ReplayWorkerArtifacts, native_g1_parent_chain_artifact,
 };
+use mooncake_lower_tier::LowerTierRun;
 use mooncake_open_loop::{
     MooncakeOperationPayload, OpenLoopConfig, PreparedMooncakeCorpus, prepare_mooncake_corpus,
     prepare_open_loop_trial, run_open_loop,
@@ -105,26 +111,25 @@ impl MockEngineParityKind {
         }
     }
 
-    fn mock_engine_args(self) -> anyhow::Result<MockEngineArgs> {
-        let mut builder = MockEngineArgs::builder()
-            .engine_type(self.engine_type())
-            .num_gpu_blocks(PARITY_NUM_GPU_BLOCKS)
-            .block_size(BLOCK_SIZE as usize)
-            .speedup_ratio(10.0)
-            .enable_prefix_caching(true)
-            .max_num_batched_tokens(None)
-            .max_num_seqs(None);
-
+    fn mock_engine_args(self) -> anyhow::Result<MockerConfig> {
+        let mut config = serde_json::json!({
+            "engine": {
+                "backend": self.engine_type(),
+                "num_gpu_blocks": PARITY_NUM_GPU_BLOCKS,
+                "block_size": BLOCK_SIZE as usize,
+                "speedup_ratio": 10.0,
+                "enable_prefix_caching": true,
+                "max_num_batched_tokens": usize::MAX,
+                "max_num_seqs": usize::MAX
+            }
+        });
         if matches!(self, Self::Sglang) {
-            builder = builder.sglang(Some(SglangArgs {
-                page_size: Some(BLOCK_SIZE as usize),
-                max_prefill_tokens: Some(SGLANG_PARITY_PREFILL_TOKENS),
-                chunked_prefill_size: Some(SGLANG_PARITY_PREFILL_TOKENS),
-                ..Default::default()
-            }));
+            config["engine"]["sglang"] = serde_json::json!({
+                "max_prefill_tokens":SGLANG_PARITY_PREFILL_TOKENS,
+                "chunked_prefill_size":SGLANG_PARITY_PREFILL_TOKENS
+            });
         }
-
-        builder.build()?.normalized()
+        MockerConfig::from_value(config)
     }
 }
 
@@ -826,6 +831,38 @@ fn process_mooncake_trace_expands_and_duplicates_hash_space() -> anyhow::Result<
     Ok(())
 }
 
+#[derive(Parser)]
+struct CommonArgsCli {
+    #[clap(flatten)]
+    common: CommonArgs,
+}
+
+#[test]
+fn default_cli_args_load_the_canonical_512_token_fixture() -> anyhow::Result<()> {
+    let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
+    let parse = |extra: &[&str]| {
+        let mut argv = vec![
+            "mooncake_bench",
+            fixture.as_str(),
+            "--num-unique-inference-workers",
+            "2",
+        ];
+        argv.extend_from_slice(extra);
+        CommonArgsCli::try_parse_from(argv).map(|cli| cli.common)
+    };
+
+    // The Mooncake, Active Sequences, and approximate-LRU benches all load traces
+    // through `load_mooncake_trace`; default arguments must expand 512-token hash_ids.
+    assert!(!parse(&[])?.load_mooncake_trace(&fixture)?.is_empty());
+    // The 128-token engine block size cannot expand this fixture's prompts.
+    assert!(
+        parse(&["--trace-block-size", "128"])?
+            .load_mooncake_trace(&fixture)
+            .is_err()
+    );
+    Ok(())
+}
+
 #[test]
 fn removed_legacy_branch_sharded_name_is_rejected() {
     let removed_name = format!("{}-{}-branch-sharded-crtc", "anchor", "aware");
@@ -1045,6 +1082,7 @@ async fn mooncake_open_loop_smoke_completes_exact_ids_and_drains() -> anyhow::Re
     let result = run_open_loop(
         "concurrent-radix-tree-compressed",
         indexer,
+        None,
         trial,
         OpenLoopConfig {
             query_lanes: 2,
@@ -1068,6 +1106,172 @@ async fn mooncake_open_loop_smoke_completes_exact_ids_and_drains() -> anyhow::Re
     );
     assert_eq!(result.queue_depth_at_stop.len(), 2);
     assert!(result.update_scheduled_to_finished.max_ns > 0);
+    Ok(())
+}
+
+fn host_store(
+    event_id: u64,
+    parent: Option<u64>,
+    start: u32,
+    hashes: &[u64],
+    timestamp_us: u64,
+) -> ReplayTimedKvEvent {
+    ReplayTimedKvEvent {
+        event: KvCacheEvent {
+            event_id,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: parent.map(ExternalSequenceBlockHash),
+                start_position: Some(start),
+                blocks: hashes
+                    .iter()
+                    .map(|&hash| KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(hash),
+                        tokens_hash: LocalBlockHash(hash + 100),
+                        mm_extra_info: None,
+                    })
+                    .collect(),
+            }),
+            dp_rank: 0,
+        },
+        storage_tier: StorageTier::HostPinned,
+        timestamp_us,
+    }
+}
+
+#[test]
+fn kvcr_layer_copies_cpu_tier_stores_and_evicts_tails_first() -> anyhow::Result<()> {
+    // A KVCR tier of 3 blocks behind four CPU-tier stores: [1, 2, 3], then [4] after 3, then
+    // [1, 5], then [1, 5, 6, 7]. Copies touch tail to head, so 3 (the tail of the first chain)
+    // goes before 1, and the last store, longer than the tier, copies only [1, 5, 6].
+    let artifacts = vec![ReplayWorkerArtifacts {
+        requests: Vec::new(),
+        output_signals: Vec::new(),
+        kv_events: vec![
+            host_store(0, None, 0, &[1, 2, 3], 10),
+            host_store(1, Some(3), 3, &[4], 20),
+            host_store(2, None, 0, &[1, 5], 30),
+            host_store(3, None, 0, &[1, 5, 6, 7], 40),
+        ],
+    }];
+    let merged = merge_worker_traces(artifacts, BLOCK_SIZE)?.with_kvcr_layer(3)?;
+    let prepared = prepare_scaled_benchmark(merged, 1_000);
+
+    let kvcr: Vec<(u64, KvCacheEventData)> = prepared
+        .worker_traces
+        .iter()
+        .next()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| match &entry.entry {
+            WorkerTraceEntry::Event {
+                event,
+                cache_owner: true,
+                ..
+            } => Some((event.event_id, event.data.clone())),
+            _ => None,
+        })
+        .collect();
+    let stored = |parent: Option<u64>, start: u32, hashes: &[u64]| {
+        let KvCacheEventData::Stored(store) = host_store(0, parent, start, hashes, 0).event.data
+        else {
+            unreachable!()
+        };
+        KvCacheEventData::Stored(store)
+    };
+    let removed = |hash: u64| {
+        KvCacheEventData::Removed(KvCacheRemoveData {
+            block_hashes: vec![ExternalSequenceBlockHash(hash)],
+        })
+    };
+    assert_eq!(
+        kvcr,
+        vec![
+            (0, stored(None, 0, &[1, 2, 3])),
+            (1, removed(3)),
+            (2, stored(Some(3), 3, &[4])),
+            (3, removed(2)),
+            (4, stored(Some(1), 1, &[5])),
+            (5, removed(4)),
+            (6, stored(Some(5), 2, &[6])),
+        ]
+    );
+    let (cpu_tier, kvcr) = (prepared.totals.cpu_tier, prepared.totals.kvcr);
+    assert_eq!(
+        (
+            cpu_tier.stored_events,
+            cpu_tier.stored_blocks,
+            cpu_tier.live_memberships
+        ),
+        (4, 10, 7)
+    );
+    assert_eq!(
+        (
+            kvcr.stored_blocks,
+            kvcr.removed_blocks,
+            kvcr.live_memberships
+        ),
+        (6, 3, 3)
+    );
+    assert_eq!(
+        prepared.totals.events(),
+        0,
+        "host-tier events stay out of the device totals"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mooncake_lower_tier_open_loop_routes_both_host_streams() -> anyhow::Result<()> {
+    let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
+    let traces = process_mooncake_trace(&fixture, TRACE_BLOCK_SIZE, 1, 1, 2, 42)?;
+    // Small device and KVCR tiers, so both evict.
+    let engine = host_offload_mock_engine_args(1024, BLOCK_SIZE as usize, 2048, 131072)?;
+    let artifacts = generate_replay_artifacts_with_args(&traces, engine, None).await?;
+    let merged = merge_worker_traces(artifacts, BLOCK_SIZE)?.with_kvcr_layer(1024)?;
+    let prepared = prepare_scaled_benchmark(merged, 1_000);
+    let corpus = prepare_mooncake_corpus(prepared, 1)?;
+    let trial = prepare_open_loop_trial(corpus, 2)?;
+    let indexer = Arc::new(ThreadPoolIndexer::new(
+        ConcurrentRadixTreeCompressed::new(),
+        2,
+        BLOCK_SIZE,
+    ));
+
+    let result = run_open_loop(
+        "concurrent-radix-tree-compressed",
+        indexer,
+        Some(LowerTierRun::crtc(2, BLOCK_SIZE, None, true)),
+        trial,
+        OpenLoopConfig {
+            query_lanes: 2,
+            issuer_threads: 3,
+            spin_us: 50,
+            issue_lag_diagnostic_threshold_us: 250,
+            pre_run_quiescence_ms: 0,
+            issuer_cpus: Vec::new(),
+            query_issuer_cpu: None,
+            backend_cpus: Vec::new(),
+        },
+    )
+    .await?;
+
+    assert!(
+        result.failure_reasons.is_empty(),
+        "{:?}",
+        result.failure_reasons
+    );
+    assert!(result.total_events > 0 && result.update_scheduled_to_finished.max_ns > 0);
+    let lower = result
+        .lower_tier
+        .expect("a lower-tier run reports its lower tier");
+    assert!(lower.cpu_tier.stored_events > 0 && lower.kvcr.removed_events > 0);
+    // Each stream lands in its own domain: the worker's, or its KVCR cache owner's.
+    assert_eq!(
+        lower.cpu_tier_indexed_memberships,
+        lower.cpu_tier.live_memberships
+    );
+    assert_eq!(lower.kvcr_indexed_memberships, lower.kvcr.live_memberships);
+    assert!(lower.query_service.max_ns > 0);
     Ok(())
 }
 

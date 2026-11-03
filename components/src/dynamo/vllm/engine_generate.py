@@ -16,8 +16,6 @@ if TYPE_CHECKING:
 from dynamo.common.utils.guided_json import reject_nonprogressing_guided_json_ref_cycles
 from dynamo.llm import HttpError, ModelInput, ModelRuntimeConfig, ModelType, WorkerType
 
-from .kv_hints import _apply_kv_hint
-
 VLLM_GENERATE_CAPABILITY = "vllm_inference_v1_generate"
 VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY = "vllm_enable_tower_connector_lora"
 DYNAMO_CACHE_SALT_PREFIX = "dynamo-cache-salt:"
@@ -246,7 +244,6 @@ def adapt_engine_generate_request(
             **(sampling_params.extra_args or {}),
             "kv_transfer_params": native_request.kv_transfer_params,
         }
-    _apply_kv_hint(sampling_params, request.get("kv_hint"))
     if not sampling_params.stop:
         sampling_params.detokenize = False
     max_num_seqs = vllm_config.scheduler_config.max_num_seqs

@@ -17,6 +17,7 @@ Run through pre-commit's rust-doc-coverage hook for isolated parser dependencies
 import argparse
 import collections
 import dataclasses
+import os
 import subprocess
 import sys
 
@@ -117,21 +118,43 @@ def git(*args):
     return subprocess.check_output(["git", *args])
 
 
+def merge_in_progress():
+    """Return whether Git has a merge commit waiting to be created."""
+    return (
+        subprocess.run(
+            ["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
+def display_path(path):
+    """Render path bytes that are not valid UTF-8 without breaking output."""
+    return path.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
+
+
 def staged_files(base, all_files=False):
     """Yield current and previous Rust paths, including Git-detected renames."""
     if all_files:
         for path in git("ls-files", "-z", "--", "*.rs").split(b"\0"):
             if path:
-                yield path.decode(), None
+                yield os.fsdecode(path), None
+        return
+    if not base and merge_in_progress():
+        # A merge brings the other branch's functions into the index. Blame those
+        # on the merge, not on the developer resolving its conflicts.
         return
     args = ["diff", "--cached", "--name-status", "-z", "--find-renames"]
     if base:
         args.append(base)
     entries = iter(git(*args, "--", "*.rs").split(b"\0")[:-1])
     for status in entries:
-        path = next(entries).decode()
+        path = os.fsdecode(next(entries))
         if status.startswith(b"R"):
-            yield next(entries).decode(), path
+            yield os.fsdecode(next(entries)), path
         elif status == b"A":
             yield path, None
         elif status == b"M":
@@ -142,6 +165,9 @@ def staged_files(base, all_files=False):
 
 def check(base=None, all_files=False):
     """Print changed-function coverage and return a failing status below 80%."""
+    if not all_files and not base and merge_in_progress():
+        print("Rust doc coverage: merge in progress; skipped staged check.")
+        return 0
     checked = []
     for path, old_path in staged_files(base, all_files):
         before = git("show", f"{base or 'HEAD'}:{old_path}") if old_path else b""
@@ -160,7 +186,10 @@ def check(base=None, all_files=False):
     )
     for path, function in checked:
         if not function.documented:
-            print(f"{path}:{function.line}: missing doc comment on {function.name}")
+            print(
+                f"{display_path(path)}:{function.line}: "
+                f"missing doc comment on {function.name}"
+            )
     return int(documented * 100 < total * 80)
 
 

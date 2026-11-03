@@ -390,6 +390,15 @@ impl KVStoreDiscovery {
 
 #[async_trait]
 impl Discovery for KVStoreDiscovery {
+    async fn check_connection(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.cancel_token.is_cancelled(),
+            "discovery is shutting down"
+        );
+        self.store.check_connection().await?;
+        Ok(())
+    }
+
     fn instance_id(&self) -> u64 {
         self.store.connection_id()
     }

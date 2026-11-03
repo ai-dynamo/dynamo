@@ -9,10 +9,12 @@ mod prompt_membership_trie;
 mod prompt_registry;
 mod replica_sync;
 mod request_maps;
+mod sharded_lock;
 pub mod single;
 pub mod topology;
 
 pub use multi_worker::*;
 pub use prefill_tracker::PrefillTokenDeltas;
+pub(crate) use prompt_registry::WorkerLoadReader;
 pub use prompt_registry::{PotentialLoadMaps, WorkerLoadProjection};
 pub use single::*;

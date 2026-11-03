@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Downloads the checkpoint from Hugging Face into the shared-model-cache PVC, in the directory the
+# deploy.yaml files read (MODEL_PATH). MODEL_NAME is the checkpoint's Hugging Face repo ID.
+# Create the token first:
+#   kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=<token>
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-download
+spec:
+  backoffLimit: 3
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: model-download
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: model-download
+          image: python:3.10-slim
+          securityContext:
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          command: ["sh", "-c"]
+          envFrom:
+            - secretRef:
+                name: hf-token-secret
+          env:
+            - name: MODEL_NAME
+              value: mistralai/Mistral-Large-4-1T-A52B-NVFP4
+            - name: HF_HOME
+              value: /shared-model-cache
+            # Uses up to 64 GB RAM for XET buffers; set "0" on low-memory nodes (8 GB cap): https://huggingface.co/docs/hub/en/xet/using-xet-storage#download-buffers
+            - name: HF_XET_HIGH_PERFORMANCE
+              value: "1"
+          args:
+            - |
+              set -eux
+              pip install --no-cache-dir huggingface_hub==1.16.4
+              hf download "$MODEL_NAME" --local-dir /shared-model-cache/mistral-large-4-nvfp4
+              ls /shared-model-cache/mistral-large-4-nvfp4
+          resources:
+            requests:
+              cpu: "2"
+              memory: "64Gi"
+            limits:
+              cpu: "8"
+              memory: "64Gi"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /shared-model-cache
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache

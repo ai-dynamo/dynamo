@@ -36,6 +36,7 @@ RESTORE_RUNTIME_ENV_NAMES = {
     "DYN_TCP_RPC_PORT",
     "DYN_TCP_RESPONSE_STREAM_HOST",
     "DYN_TCP_RESPONSE_STREAM_PORT",
+    "DYN_TCP_LISTEN_BACKLOG",
     "NATS_SERVER",
     "ETCD_ENDPOINTS",
     # Runtime system server/readiness env read after restore.
