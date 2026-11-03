@@ -1194,7 +1194,7 @@ fn runtime_lora_error_response(error: RuntimeLoraError) -> ErrorResponse {
             ErrorClass::NotFound,
             HttpError {
                 code: 404,
-                message: "runtime_lora_base_model_not_found".to_string(),
+                message: "model_not_found".to_string(),
             },
         ),
         RuntimeLoraError::BaseModelUnsupported(_) => ErrorMessage::from_http_error(
@@ -3105,7 +3105,16 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
             return Some(BackendErrorInfo {
                 message,
                 status: code,
-                semantic: if overloaded { semantic.cloned() } else { None },
+                semantic: semantic
+                    .filter(|error| {
+                        overloaded
+                            || (error.public_details().is_some()
+                                && matches!(
+                                    http_action_for_error(error),
+                                    ClientErrorAction::Respond { status, .. } if status == code
+                                ))
+                    })
+                    .cloned(),
                 sanitized: overloaded.then_some(SanitizedError::Overloaded),
                 metric_error_type,
             });
@@ -7631,6 +7640,86 @@ mod tests {
     }
 
     #[test]
+    fn public_details_do_not_override_legacy_backend_status() {
+        let error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .diagnostic(
+                serde_json::json!({"code": 415, "message": "private token=secret"}).to_string(),
+            )
+            .public_message("safe but incompatible status")
+            .build();
+        let event = Annotated::<serde_json::Value> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(error),
+        };
+        let response =
+            backend_error_response(extract_backend_error_if_present(&event).unwrap(), false);
+        assert_eq!(response.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(response.1.message, "Unsupported Media Type");
+        assert!(
+            !serde_json::to_string(&response.1.0)
+                .unwrap()
+                .contains("secret")
+        );
+    }
+
+    #[test]
+    fn public_runtime_symbols_survive_legacy_envelope_rendering() {
+        use dynamo_runtime::error::{DynamoError, ErrorClass, ErrorReason};
+
+        for (status, class, symbol) in [
+            (400, ErrorClass::InvalidRequest, "invalid_lora_model_id"),
+            (404, ErrorClass::NotFound, "lora_not_found"),
+            (422, ErrorClass::InvalidRequest, "invalid_lora_adapter"),
+            (429, ErrorClass::RateLimited, "lora_capacity_exceeded"),
+            (500, ErrorClass::Internal, "lora_plugin_error"),
+            (503, ErrorClass::Unavailable, "lora_resolver_unavailable"),
+            (
+                504,
+                ErrorClass::DeadlineExceeded,
+                "runtime_lora_resolve_timeout",
+            ),
+        ] {
+            let builder = DynamoError::builder()
+                .class(class)
+                .diagnostic(
+                    serde_json::json!({
+                        "code": status,
+                        "message": "private token=secret provider:///path",
+                    })
+                    .to_string(),
+                )
+                .public_message(symbol);
+            let builder = if status == 422 {
+                builder.reason(ErrorReason::unprocessable_entity())
+            } else {
+                builder
+            };
+            let error =
+                serde_json::from_value(serde_json::to_value(builder.build()).unwrap()).unwrap();
+            let event = Annotated::<serde_json::Value> {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: None,
+                error: Some(error),
+            };
+            let response =
+                backend_error_response(extract_backend_error_if_present(&event).unwrap(), false);
+            assert_eq!(response.0.as_u16(), status);
+            assert_eq!(response.1.message, symbol);
+            assert!(
+                !serde_json::to_string(&response.1.0)
+                    .unwrap()
+                    .contains("secret")
+            );
+        }
+    }
+
+    #[test]
     #[serial_test::serial(failure_metrics)]
     fn direct_unprocessable_reason_is_read_without_a_compatibility_marker() {
         let error: DynamoError = serde_json::from_value(serde_json::json!({
@@ -10426,6 +10515,7 @@ mod tests {
         assert!(!format!("{error:?}").contains("opaque-secret-reference"));
         let response = runtime_lora_error_response(error);
         assert_eq!(response.0, StatusCode::NOT_FOUND);
+        assert_eq!(response.1.0.message, "model_not_found");
         assert!(!response.1.0.message.contains("opaque-secret-reference"));
     }
 

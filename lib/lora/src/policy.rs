@@ -204,6 +204,7 @@ impl RequestPolicy {
         DynamoError::builder()
             .error_type(ErrorType::Unavailable)
             .message("runtime_lora_capability_unavailable")
+            .public_message("runtime_lora_capability_unavailable")
             .build()
     }
 
@@ -218,6 +219,7 @@ impl RequestPolicy {
         DynamoError::builder()
             .error_type(ErrorType::InvalidArgument)
             .message("runtime_lora_affinity_conflict")
+            .public_message("runtime_lora_affinity_conflict")
             .build()
     }
 
@@ -233,6 +235,7 @@ impl RequestPolicy {
         Err(DynamoError::builder()
             .error_type(ErrorType::InvalidArgument)
             .message(message)
+            .public_message("runtime_lora_unsupported")
             .build())
     }
 }
@@ -289,8 +292,19 @@ mod tests {
         assert!(runtime.check_capability(false, Some("adapter")).is_err());
         assert!(runtime.check_capability(true, None).is_err());
         assert!(runtime.check_affinity(1, Some(2)).is_err());
+        assert_eq!(
+            RequestPolicy::capability_error().public_message(),
+            Some("runtime_lora_capability_unavailable")
+        );
+        assert_eq!(
+            RequestPolicy::affinity_error().public_message(),
+            Some("runtime_lora_affinity_conflict")
+        );
         for stage in [Stage::Prefill, Stage::Encoder, Stage::SpeculativePrefill] {
-            assert!(runtime.check_stage(stage).is_err());
+            assert_eq!(
+                runtime.check_stage(stage).unwrap_err().public_message(),
+                Some("runtime_lora_unsupported")
+            );
             assert!(RequestPolicy::new(None).check_stage(stage).is_ok());
         }
     }
