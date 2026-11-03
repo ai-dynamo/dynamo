@@ -2767,6 +2767,11 @@ async fn runtime_lora_rechecks_worker_metadata_after_queued_selection() {
             .await
             .unwrap(),
     );
+    router
+        .inner
+        .client
+        .override_discovered_instances(vec![101, 202]);
+    router.inner.client.override_instance_avail(vec![101, 202]);
     let mut input = request();
     input.routing = Some(RoutingHints {
         lora_name: Some("adapter".into()),
@@ -2785,14 +2790,25 @@ async fn runtime_lora_rechecks_worker_metadata_after_queued_selection() {
         "capability_taint",
     ] {
         configs_tx.send(initial.clone()).unwrap();
-        let selected = {
+        let mut selected = {
             let router = router.clone();
             let input = input.clone();
             tokio::spawn(async move { router.generate(Context::new(input)).await })
         };
-        tokio::time::timeout(Duration::from_secs(5), entered.notified())
-            .await
-            .unwrap();
+        tokio::select! {
+            _ = entered.notified() => {}
+            result = &mut selected => {
+                let detail = match result {
+                    Ok(Err(error)) => format!("{error:#}"),
+                    Ok(Ok(_)) => "request unexpectedly dispatched".to_string(),
+                    Err(error) => error.to_string(),
+                };
+                panic!("{field}: request ended before classification: {detail}");
+            }
+            _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                panic!("{field}: classifier was not reached");
+            }
+        }
         let mut changed = capable.clone();
         match field {
             "supports_runtime_lora_resolution" => {
