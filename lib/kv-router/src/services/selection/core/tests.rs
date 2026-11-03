@@ -138,6 +138,7 @@ fn worker(worker_id: WorkerId) -> WorkerRequest {
         router_hint_worker_type: None,
         router_hint_source_control_endpoints: HashMap::new(),
         kv_event_source_mode: None,
+        engine_owned_mm_identity: None,
     }
 }
 
@@ -1152,6 +1153,59 @@ async fn shutdown_cancels_listeners_but_keeps_parent_alive() {
     assert!(core.cancel_token.is_cancelled());
     assert!(!parent.is_cancelled());
     assert_eq!(core.indexer_registry.listener_cancelled(1, 0), Some(true));
+}
+
+#[tokio::test]
+async fn upsert_carries_engine_owned_mm_identity_to_the_listener() {
+    let core = local_core_with(test_config(true), 1, CancellationToken::new());
+    core.upsert_worker(WorkerRequest {
+        engine_owned_mm_identity: Some(true),
+        ..worker_with_kv_events(1)
+    })
+    .await
+    .expect("worker upsert");
+
+    let listed = serde_json::to_value(core.indexer_registry.list()).unwrap();
+    assert_eq!(
+        listed[0]["listeners"]["0"]["engine_owned_mm_identity"],
+        true
+    );
+    core.shutdown();
+}
+
+#[tokio::test]
+async fn equivalent_mm_identity_defaults_preserve_cached_overlap() {
+    let core = local_core_with(test_config(true), 1, CancellationToken::new());
+    core.upsert_worker(worker_with_kv_events(1)).await.unwrap();
+    let indexer = core
+        .indexer_registry
+        .get_indexer(&default_key())
+        .unwrap()
+        .indexer
+        .clone();
+    indexer
+        .apply_event_routed(store_event(1, 0, 1, &[], &[11], StorageTier::Device))
+        .await
+        .unwrap();
+    indexer.dump_events().await.expect("flush indexer");
+    for (capability, expected_overlap) in [(Some(false), 4), (None, 4), (Some(true), 0)] {
+        core.upsert_worker(WorkerRequest {
+            engine_owned_mm_identity: capability,
+            ..worker_with_kv_events(1)
+        })
+        .await
+        .unwrap();
+        let mut request = select_request();
+        request.prompt.token_ids = None;
+        request.prompt.block_hashes = Some(vec![11]);
+        request.prompt.sequence_hashes = Some(vec![101]);
+        request.prompt.isl_tokens = Some(4);
+        assert_eq!(
+            core.select(request).await.unwrap().overlap.gpu,
+            expected_overlap
+        );
+    }
+    core.shutdown();
 }
 
 #[rstest::rstest]
