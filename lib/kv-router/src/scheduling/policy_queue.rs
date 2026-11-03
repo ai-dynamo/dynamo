@@ -100,7 +100,7 @@ struct QueuePriority {
     /// stays 24 bytes and an entry stays within one cache line.
     due_low: u32,
     /// `DueKey::high` of the ordering due time.
-    due_high: i64,
+    due_high: u64,
     policy_score: OrderedFloat<f64>,
 }
 
@@ -121,60 +121,38 @@ impl QueuePriority {
 
 /// Marks an explicit deadline in `QueuePriority::due_low`.
 const EXPIRES: u32 = 1 << 31;
-const NANOS_PER_SEC: u32 = 1_000_000_000;
 
-/// A due time's offset from the queue's fixed origin: `high` holds the whole seconds, floored,
-/// and `low` the nanoseconds after them, so `(high, low)` orders exactly as the due times do
-/// within about 292 billion years of the origin. An offset beyond that saturates.
+/// A due time's offset from the queue's fixed origin: `high` holds the whole seconds and `low`
+/// the nanoseconds after them, so `(high, low)` orders exactly as the due times do. A due time
+/// before the origin clamps to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct DueKey {
-    high: i64,
+    high: u64,
     low: u32,
 }
 
 impl DueKey {
     /// An absent due time, after every finite one.
     const NONE: Self = Self {
-        high: i64::MAX,
+        high: u64::MAX,
         low: !EXPIRES,
     };
 
     fn new(origin: Instant, due_at: Instant) -> Self {
-        match due_at.checked_duration_since(origin) {
-            Some(after) => Self {
-                high: i64::try_from(after.as_secs()).unwrap_or(i64::MAX),
-                low: after.subsec_nanos(),
-            },
-            None => {
-                // Floor a negative offset: borrow a second for any sub-second part, so -0.2 s
-                // becomes -1 s plus 0.8 s.
-                let before = origin.duration_since(due_at);
-                let secs = 0_i64.saturating_sub_unsigned(before.as_secs());
-                match before.subsec_nanos() {
-                    0 => Self { high: secs, low: 0 },
-                    nanos => Self {
-                        high: secs.saturating_sub(1),
-                        low: NANOS_PER_SEC - nanos,
-                    },
-                }
-            }
+        let offset = due_at.saturating_duration_since(origin);
+        Self {
+            high: offset.as_secs(),
+            low: offset.subsec_nanos(),
         }
     }
 
-    /// The due time this key was made from, relative to the same origin. `NONE` decodes to
-    /// `None`.
+    /// The due time this key was made from, or the origin for one before it, relative to the
+    /// same origin. `NONE` decodes to `None`.
     fn due_at(self, origin: Instant) -> Option<Instant> {
         if self == Self::NONE {
             return None;
         }
-        match u64::try_from(self.high) {
-            Ok(secs) => origin.checked_add(Duration::new(secs, self.low)),
-            // Undo the floor: return the borrowed second to the sub-second part.
-            Err(_) => origin.checked_sub(match self.low {
-                0 => Duration::from_secs(self.high.unsigned_abs()),
-                nanos => Duration::new((self.high + 1).unsigned_abs(), NANOS_PER_SEC - nanos),
-            }),
-        }
+        origin.checked_add(Duration::new(self.high, self.low))
     }
 }
 
@@ -633,12 +611,8 @@ impl<T> PolicyQueue<T> {
 
     pub(crate) fn next_due_at(&self) -> Option<Instant> {
         let &(due, _) = self.due_entries.first()?;
-        // The key was made from a representable instant, so it converts back. Should a past
-        // deadline ever not, the origin is an equally past wake-up.
-        Some(
-            due.due_at(self.deadline_origin)
-                .unwrap_or(self.deadline_origin),
-        )
+        // A deadline before the origin has the origin's key, so its timer wakes at the origin.
+        due.due_at(self.deadline_origin)
     }
 
     pub fn class_count(&self) -> usize {
@@ -1618,9 +1592,10 @@ policy_classes:
     }
 
     #[tokio::test(start_paused = true)]
-    async fn due_times_before_the_queue_origin_keep_their_order() {
+    async fn due_times_before_the_queue_origin_clamp_to_it() {
         // A due time can precede the queue's construction, for example one counted from an
-        // ingress passed in from an earlier clock reading.
+        // ingress passed in from an earlier clock reading. Such due times all key as the
+        // origin, so they tie there and keep enqueue order.
         let early = Instant::now();
         tokio::time::advance(std::time::Duration::from_secs(60)).await;
         let mut queue = PolicyQueue::new(&edf_profile());
@@ -1654,27 +1629,27 @@ policy_classes:
             "explicit-2",
         );
 
-        // The explicit deadline's timer wakes at its own, already passed, time.
-        assert_eq!(queue.next_due_at(), Some(at(2)));
+        // The explicit deadline's timer wakes at the origin.
+        assert_eq!(queue.next_due_at(), Some(queue.deadline_origin));
         assert_eq!(
             drain_payloads(&mut queue, |_, _, _| true),
-            ["class-1", "explicit-2", "class-3", "class-120"]
+            ["class-3", "class-1", "explicit-2", "class-120"]
         );
         assert!(queue.due_entries.is_empty());
     }
 
     #[test]
-    fn due_keys_order_and_round_trip_on_both_sides_of_the_origin() {
+    fn due_keys_clamp_before_the_origin_and_round_trip_after_it() {
         let origin = Instant::now();
-        let before = |span| origin.checked_sub(span).expect("representable");
+        // A due time before the origin keys as the origin itself.
+        for span in [Duration::from_millis(1500), Duration::from_nanos(1)] {
+            let key = DueKey::new(origin, origin.checked_sub(span).expect("representable"));
+            assert_eq!(key, DueKey { high: 0, low: 0 });
+            assert_eq!(key.due_at(origin), Some(origin));
+        }
         let after = |span| origin.checked_add(span).expect("representable");
-        // Ascending. A key before the origin floors its seconds and borrows one for a
-        // sub-second part, and 400 years is past the range of signed nanoseconds.
+        // Ascending from the origin. 400 years is past the range of signed nanoseconds.
         let instants = [
-            before(Duration::from_millis(1500)),
-            before(Duration::from_secs(1)),
-            before(Duration::from_millis(200)),
-            before(Duration::from_nanos(1)),
             origin,
             after(Duration::from_nanos(1)),
             after(Duration::from_millis(200)),
