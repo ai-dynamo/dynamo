@@ -447,3 +447,30 @@ func TestFailNextCallCountServerInfoAndServeLocal(t *testing.T) {
 		return err == nil
 	}, 5*time.Second, 10*time.Millisecond)
 }
+
+func TestImportTrafficPolicies(t *testing.T) {
+	clk := newClock()
+	srv, c := start(t, fakeregistry.WithClock(clk.Now), fakeregistry.WithRefreshInterval(0))
+	srv.EnsureCluster(cs, "a", "us-east-1")
+	srv.EnsureCluster(cs, "b", "us-west-2")
+
+	// The older export's policies survive the fake's independent import projection.
+	older := fakeregistry.ServiceSpec(fakeregistry.TCPPort("http", 80))
+	older.ExportCreationTimestamp = timestamppb.New(clk.Now().Add(-time.Hour))
+	older.InternalTrafficPolicy = mcsv1.InternalTrafficPolicy_INTERNAL_TRAFFIC_POLICY_LOCAL
+	older.TrafficDistribution = "PreferClose"
+	srv.PutExport(cs, "a", "ns", "svc", older, nil)
+	newer := fakeregistry.ServiceSpec(fakeregistry.TCPPort("http", 80))
+	newer.InternalTrafficPolicy = mcsv1.InternalTrafficPolicy_INTERNAL_TRAFFIC_POLICY_CLUSTER
+	newer.TrafficDistribution = "PreferSameZone"
+	srv.PutExport(cs, "b", "ns", "svc", newer, nil)
+
+	for _, endpoints := range []bool{false, true} {
+		resp, err := c.imports.GetServiceImport(ctx(t), &mcsv1.GetServiceImportRequest{
+			Clusterset: cs, Namespace: "ns", Name: "svc", IncludeEndpoints: endpoints,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, older.InternalTrafficPolicy, resp.GetServiceImport().GetInternalTrafficPolicy())
+		assert.Equal(t, older.TrafficDistribution, resp.GetServiceImport().GetTrafficDistribution())
+	}
+}

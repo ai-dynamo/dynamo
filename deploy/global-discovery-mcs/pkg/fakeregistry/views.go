@@ -123,6 +123,8 @@ func importsView(cs *clusterSet, active map[string]bool, region map[string]strin
 			IpFamilies:            slices.Clone(spec.GetIpFamilies()),
 			SessionAffinity:       spec.GetSessionAffinity(),
 			SessionAffinityConfig: proto.CloneOf(spec.GetSessionAffinityConfig()),
+			InternalTrafficPolicy: spec.GetInternalTrafficPolicy(),
+			TrafficDistribution:   spec.GetTrafficDistribution(),
 			Annotations:           maps.Clone(spec.GetAnnotations()),
 			Labels:                maps.Clone(spec.GetLabels()),
 		}

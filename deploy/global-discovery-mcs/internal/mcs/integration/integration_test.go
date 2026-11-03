@@ -78,6 +78,9 @@ func run(m *testing.M) int {
 		return 1
 	}
 	env := &envtest.Environment{CRDDirectoryPaths: []string{dir}, ErrorIfCRDPathMissing: true}
+
+	// Kubernetes 1.30 otherwise prunes the alpha Service trafficDistribution field.
+	env.ControlPlane.GetAPIServer().Configure().Append("feature-gates", "ServiceTrafficDistribution=true")
 	cfg, err := env.Start()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "starting envtest: %v\n", err)

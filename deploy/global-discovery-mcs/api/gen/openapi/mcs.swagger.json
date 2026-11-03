@@ -1526,6 +1526,14 @@
         "updatedAt": {
           "type": "string",
           "format": "date-time"
+        },
+        "internalTrafficPolicy": {
+          "$ref": "#/definitions/v1InternalTrafficPolicy",
+          "description": "Internal traffic policy of the winning export; unspecified means unset."
+        },
+        "trafficDistribution": {
+          "type": "string",
+          "description": "Kubernetes spec.trafficDistribution of the winning export; empty means unset."
         }
       },
       "description": "ServiceImport is the merged, clusterset-wide view of an exported Service.\nIt is computed, never stored."

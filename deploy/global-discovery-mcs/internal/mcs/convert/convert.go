@@ -136,6 +136,17 @@ func InternalTrafficPolicyToRegistry(p *corev1.ServiceInternalTrafficPolicy) mcs
 	return mcsv1.InternalTrafficPolicy_INTERNAL_TRAFFIC_POLICY_UNSPECIFIED
 }
 
+// InternalTrafficPolicyFromRegistry maps an internal traffic policy; unspecified remains unset.
+func InternalTrafficPolicyFromRegistry(p mcsv1.InternalTrafficPolicy) *corev1.ServiceInternalTrafficPolicy {
+	switch p {
+	case mcsv1.InternalTrafficPolicy_INTERNAL_TRAFFIC_POLICY_CLUSTER:
+		return new(corev1.ServiceInternalTrafficPolicyCluster)
+	case mcsv1.InternalTrafficPolicy_INTERNAL_TRAFFIC_POLICY_LOCAL:
+		return new(corev1.ServiceInternalTrafficPolicyLocal)
+	}
+	return nil
+}
+
 // AddressTypeToRegistry maps an EndpointSlice address type.
 func AddressTypeToRegistry(t discoveryv1.AddressType) mcsv1.AddressType {
 	switch t {
