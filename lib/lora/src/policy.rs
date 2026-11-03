@@ -124,14 +124,17 @@ impl RequestPolicy {
         eligible: &HashSet<u64>,
         pins: impl IntoIterator<Item = u64>,
     ) -> Result<HashSet<u64>, DynamoError> {
-        let placed = filter
-            .filter_worker_ids_for_runtime_lora(name, &eligible.iter().copied().collect::<Vec<_>>())
-            .into_iter()
-            .collect::<HashSet<_>>();
-        if pins.into_iter().any(|worker| !placed.contains(&worker)) {
+        let pins = pins.into_iter().collect::<HashSet<_>>();
+        if pins.len() > 1 || !pins.is_subset(eligible) {
             return Err(Self::affinity_error());
         }
-        Ok(placed)
+        if !pins.is_empty() {
+            return Ok(pins);
+        }
+        Ok(filter
+            .filter_worker_ids_for_runtime_lora(name, &eligible.iter().copied().collect::<Vec<_>>())
+            .into_iter()
+            .collect())
     }
 
     pub fn free_candidates(
@@ -277,6 +280,24 @@ mod tests {
             assert!(runtime.check_stage(stage).is_err());
             assert!(RequestPolicy::new(None).check_stage(stage).is_ok());
         }
+    }
+
+    #[test]
+    fn eligible_explicit_pin_overrides_default_placement_without_widening() {
+        let filter = LoraFilter::new(
+            crate::routing::table::LoraRoutingTable::new(),
+            crate::state_tracker::LoraStateTracker::new(),
+        );
+        let eligible = HashSet::from([1, 2, 3]);
+        let default = RequestPolicy::pin_workers(&filter, "adapter", &eligible, []).unwrap();
+        assert_eq!(default.len(), 1);
+        let pin = *eligible.difference(&default).next().unwrap();
+        assert_eq!(
+            RequestPolicy::pin_workers(&filter, "adapter", &eligible, [pin, pin]).unwrap(),
+            HashSet::from([pin])
+        );
+        assert!(RequestPolicy::pin_workers(&filter, "adapter", &eligible, [4]).is_err());
+        assert!(RequestPolicy::pin_workers(&filter, "adapter", &eligible, [1, 2]).is_err());
     }
 
     #[test]
