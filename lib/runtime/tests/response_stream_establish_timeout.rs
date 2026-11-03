@@ -17,7 +17,9 @@ use tokio::sync::{Notify, watch};
 
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS;
 use dynamo_runtime::config::environment_names::response_plane::DYN_RESPONSE_STREAM_ESTABLISH_TIMEOUT_SECS;
-use dynamo_runtime::pipeline::network::egress::push_router::{PushRouter, RouterMode};
+use dynamo_runtime::pipeline::network::egress::push_router::{
+    PushRouter, PushRouterOptions, RouterMode,
+};
 use dynamo_runtime::{
     DistributedRuntime, Runtime,
     component::{Endpoint, Instance},
@@ -390,10 +392,13 @@ async fn assert_local_admission_wait_is_not_bounded(distributed: &DistributedRun
         proxy: proxy.addr,
     });
     let router = Arc::new(
-        PushRouter::<u64, TestResponse>::from_client_with_dispatch(
+        PushRouter::<u64, TestResponse>::from_client_with_options(
             client.clone(),
             RouterMode::RoundRobin,
-            dispatch,
+            PushRouterOptions {
+                dispatch: Some(dispatch),
+                ..PushRouterOptions::default()
+            },
         )
         .await
         .unwrap(),

@@ -20,12 +20,17 @@ package v1beta2
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// DynamoGraphDeploymentRunSpec is an immutable, resolved copy of an accepted DGDR spec.
-// Run creators resolve optional Request inputs before persisting the Run.
-// +kubebuilder:validation:XValidation:rule="has(self.model)",message="model is required"
+// DynamoGraphDeploymentRunSpec is an immutable snapshot of an accepted DGDR spec.
+// Request admission resolves its structural defaults before the Request controller copies it;
+// Request admission defaulting does not apply to Runs.
+// +kubebuilder:validation:XValidation:rule="has(self.model) && has(self.backends) && size(self.backends) > 0 && has(self.hardware) && ((!has(self.hardware.gpu) && !has(self.hardware.numGpusPerNode)) || (has(self.hardware.gpu) && has(self.hardware.gpu.sku) && has(self.hardware.gpu.budget) && has(self.hardware.numGpusPerNode))) && has(self.workload) && has(self.workload.static) && ((!has(self.workload.static.inputTokens) && !has(self.workload.static.outputTokens) && !has(self.workload.static.load)) || (has(self.workload.static.inputTokens) && has(self.workload.static.outputTokens) && has(self.workload.static.load))) && has(self.objective) && has(self.objective.mode) && has(self.objective.metric) && has(self.objective.sla) && has(self.recommendation) && has(self.recommendation.maxCandidates) && self.recommendation.maxCandidates > 0",message="spec must be a fully resolved Request admission snapshot"
+//
+// The Run reconciler lowers this immutable typed snapshot plus inputOverrides exactly once and
+// records the resulting public recommendation input in status.aisimulate.input.
 type DynamoGraphDeploymentRunSpec struct {
 	NativeSearchInput `json:",inline"`
 }
@@ -119,6 +124,17 @@ type DGDRRunProgress struct {
 	Candidates *CandidateProgress `json:"candidates,omitempty"`
 }
 
+// AISimulateRunStatus reports the exact public recommendation input used for this execution.
+type AISimulateRunStatus struct {
+	// Input is the fully lowered AISimulate input after typed fields, derived defaults and
+	// spec.aisimulate.inputOverrides have been merged. Field names and nesting use the
+	// upstream AISimulate JSON contract.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Type=object
+	Input *runtime.RawExtension `json:"input,omitempty"`
+}
+
 // DynamoGraphDeploymentRunStatus represents one search execution's observed state.
 type DynamoGraphDeploymentRunStatus struct {
 	// Phase is a concise presentation state. Conditions remain authoritative.
@@ -132,6 +148,10 @@ type DynamoGraphDeploymentRunStatus struct {
 	// Progress contains branch-aware optimizer and evaluation outcome counters.
 	// +optional
 	Progress *DGDRRunProgress `json:"progress,omitempty"`
+
+	// AISimulate reports the effective input executed by AISimulate.
+	// +optional
+	AISimulate *AISimulateRunStatus `json:"aisimulate,omitempty"`
 
 	// CandidateRefs identifies the current bounded DGDC projection. List order
 	// represents rank, best first, for scalar searches.

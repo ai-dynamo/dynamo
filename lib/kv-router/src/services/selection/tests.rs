@@ -44,11 +44,33 @@ fn app() -> Router {
     create_router(Arc::new(AppState { service }))
 }
 
+#[tokio::test]
+async fn binding_stream_rejects_invalid_config() {
+    let builder = || {
+        SelectionServiceBuilder::new(
+            test_config(),
+            crate::WorkerType::Aggregated,
+            RouterPluginRegistry::default(),
+        )
+        .session_binding_replication(11)
+    };
+    let error = builder().build().await.err().expect("affinity disabled");
+    assert!(error.to_string().contains("requires session affinity"));
+    let error = builder()
+        .session_affinity(Duration::from_secs(10))
+        .replica_sync(0, Vec::new())
+        .build()
+        .await
+        .err()
+        .expect("mesh enabled");
+    assert!(error.to_string().contains("cannot be combined"));
+}
+
 struct WorkerIdScorer;
 
 impl WorkerScorer for WorkerIdScorer {
     fn score(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -64,7 +86,7 @@ struct LowestCostPicker;
 
 impl WorkerPicker for LowestCostPicker {
     fn pick(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -82,7 +104,7 @@ struct NonFiniteScorer;
 
 impl WorkerScorer for NonFiniteScorer {
     fn score(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -98,7 +120,7 @@ struct InvalidRowPicker;
 
 impl WorkerPicker for InvalidRowPicker {
     fn pick(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -110,7 +132,7 @@ struct RejectAllFilter;
 
 impl WorkerFilter for RejectAllFilter {
     fn keep(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         _candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
@@ -122,7 +144,7 @@ struct RejectWorker(WorkerId);
 
 impl WorkerFilter for RejectWorker {
     fn keep(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {

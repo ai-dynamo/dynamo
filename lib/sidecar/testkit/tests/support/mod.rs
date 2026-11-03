@@ -124,21 +124,29 @@ pub trait HandoffFixture<D: ProcessFixture = Self>: ProcessFixture {
 pub fn sidecar_command(binary_name: &str, override_env: &str) -> Command {
     let binary = std::env::var_os(override_env)
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::current_exe()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .join(binary_name)
-        });
+        .unwrap_or_else(|| sidecar_path(binary_name));
     assert!(
         binary.is_file(),
         "build {binary_name} first or set {override_env}: {}",
         binary.display()
     );
     Command::new(binary)
+}
+
+/// `<profile>/` beside the test binary's `deps/`, or `$CARGO_TARGET_DIR/<profile>/` when
+/// `build.build-dir` keeps them apart. A relative target dir or `--target` reaches the assert.
+fn sidecar_path(binary_name: &str) -> PathBuf {
+    let exe = std::env::current_exe().unwrap();
+    let profile_dir = exe.parent().unwrap().parent().unwrap();
+    let beside_tests = profile_dir.join(binary_name);
+    if beside_tests.is_file() {
+        return beside_tests;
+    }
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR");
+    match (target_dir, profile_dir.file_name()) {
+        (Some(dir), Some(profile)) => PathBuf::from(dir).join(profile).join(binary_name),
+        _ => beside_tests,
+    }
 }
 
 async fn wait_scheduler_active(

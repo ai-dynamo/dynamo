@@ -232,6 +232,22 @@ async def test_validate_url_http_allowed_when_opted_in() -> None:
     await validate_url("http://example.com/x.png", policy)
 
 
+@pytest.mark.parametrize(
+    "url", ["https://example.com/x.png", "http://example.com/x.png"]
+)
+async def test_validate_url_rejects_remote_when_disabled(url: str) -> None:
+    policy = UrlValidationPolicy(
+        allow_http=True, allow_private_ips=True, allow_remote_urls=False
+    )
+    with pytest.raises(UrlValidationError, match="DYN_MM_ALLOW_REMOTE_URLS=0"):
+        await validate_url(url, policy)
+
+
+async def test_validate_url_accepts_data_url_when_remote_disabled() -> None:
+    policy = UrlValidationPolicy(allow_remote_urls=False)
+    await validate_url("data:image/png;base64,iVBORw0KGgoAAAA=", policy)
+
+
 # ---------------------------------------------------------------------------
 # validate_url() — IP literal handling
 # ---------------------------------------------------------------------------
@@ -408,11 +424,19 @@ def test_validate_local_path_missing_prefix(tmp_path) -> None:
 def test_policy_from_env_defaults(monkeypatch) -> None:
     monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
     monkeypatch.delenv("DYN_MM_LOCAL_PATH", raising=False)
+    monkeypatch.delenv("DYN_MM_ALLOW_REMOTE_URLS", raising=False)
 
     policy = UrlValidationPolicy.from_env()
     assert policy.allow_http is False
     assert policy.allow_private_ips is False
     assert policy.allowed_local_path is None
+    assert policy.allow_remote_urls is True
+
+
+@pytest.mark.parametrize("raw, expected", [("0", False), ("on", True), ("", True)])
+def test_policy_from_env_allow_remote_urls(monkeypatch, raw, expected) -> None:
+    monkeypatch.setenv("DYN_MM_ALLOW_REMOTE_URLS", raw)
+    assert UrlValidationPolicy.from_env().allow_remote_urls is expected
 
 
 def test_policy_from_env_allow_internal(monkeypatch) -> None:

@@ -17,6 +17,42 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 <UpgradeSelector />
 
+<a id="v170"></a>
+
+## v1.7.0 - Upcoming
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **DGDR v1beta1: hardware overrides that differ from discovery require `hardware.totalGpus`** ([#17308](https://github.com/ai-dynamo/dynamo/pull/17308)). When `hardware.totalGpus` is omitted, `hardware.numGpusPerNode` must match the auto-selected node shape and `hardware.vramMb` must be within 10% of its measured VRAM. Otherwise, the DGDR is stored but profiling fails with `phase: Failed` before a profiling Job is created. Previously, these overrides could use an automatically derived budget. Automatic budgets now count only nodes matching the selected GPU type, GPUs per node, and measured VRAM; a cluster with one 8-GPU and one 4-GPU node of the same type and VRAM now yields a budget of 8. Previously, it was incorrectly computed as 2 nodes × 8 GPUs = 16.
+
+  > **Migrate:** Set `hardware.totalGpus` explicitly to retain an intentional node-size or VRAM override. A DGDR that already failed this check (`cannot auto-detect hardware.totalGpus: ...`) is not retried when its spec changes; delete and re-create it with `totalGpus` set. Explicit budgets remain authoritative; nominal VRAM values within the 10% tolerance continue to work with automatic budgets.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **KV DC Relay is renamed Pool Relay** ([#17215](https://github.com/ai-dynamo/dynamo/pull/17215)). The old names are removed without aliases. The gRPC service name and pool ID hash domain stay unchanged until separate protocol work.
+
+| Old | New |
+| :---- | :---- |
+| `dynamo.kv_dc_relay` | `dynamo.pool_relay` |
+| Python `KvDcRelay`; Rust `KvDcRelay*` | `PoolRelay`; `PoolRelay*` |
+| `--dc-id`, `DYN_DC_ID`, `DcId` | `--cluster-id`, `DYN_CLUSTER_ID`, `ClusterId` |
+| `DcPoolCatalog`, `DcPoolDescriptor`, `DcRelayIdentity` | `PoolCatalogSnapshot`, `PoolDescriptor`, `PoolRelayIdentity` |
+| `ProducerIdentity::dc_id()`, `GlobalCkfBuildError::DuplicateDcLane` | `cluster_id()`, `DuplicateClusterLane` |
+| `{ns}.kv_dc_relay.control` | `{ns}.pool_relay.control` |
+| `kv_dc_relay_<hash>` diagnostic component; `service="kv_dc_relay"` metrics label | `pool_relay_<hash>`; `service="pool_relay"` |
+| `dc_id` in `PoolId`, in `health()`/`stats()`/`snapshot()` JSON, and in the `state_source` of KV state-agent events | `cluster_id` |
+| `kv-dc-relay.md`, `kv-dc-relay-configuration.md` | `pool-relay.md`, `pool-relay-configuration.md` (old URLs redirect) |
+
+  > **Migrate:** Update launch commands, imports, dashboards, alerts, and saved JSON together. Upgrade KV state agents and the routers that read their events together, because a router cannot decode state-agent events from the other version. Regenerate version-3 `dc_ckf_consumer_bench` corpora as version 4 before loading them.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Frontend admin API is off by default and moves to a separate loopback port** ([#17165](https://github.com/ai-dynamo/dynamo/pull/17165)). `/router_policy`, `/router_policy/busy_threshold`, and `/busy_threshold` are no longer served on the inference port, and `DYN_DISABLE_FRONTEND_ADMIN_API` is removed.
+
+  > **Migrate:** Set `DYN_ENABLE_FRONTEND_ADMIN_API=1` on frontends that need these routes and call port `8002` (`DYN_FRONTEND_ADMIN_PORT`). The listener binds to `127.0.0.1` (`DYN_FRONTEND_ADMIN_HOST`), so on Kubernetes use `kubectl port-forward pod/<frontend-pod> 8002:8002`. Remove `DYN_DISABLE_FRONTEND_ADMIN_API`; it is ignored.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Worker-selection plugin callbacks take `&self` and require `Send + Sync`** ([#17712](https://github.com/ai-dynamo/dynamo/pull/17712)). `WorkerFilter::keep`, `WorkerScorer::score` and `WorkerPicker::pick` no longer take `&mut self`, and one plugin instance may be called from several threads at once.
+
+  > **Migrate:** Change each callback's receiver to `&self`. Move state that changes between calls behind atomics, a lock or a thread-local, and make sure the plugin type is `Sync`.
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Deprecated the `WorkerInputs::OCCUPANCY` worker-selection input group** in favor of `WorkerInputs::ACTIVE_REQUESTS`, which custom pickers read through `WorkerInputView::active_requests(row)`. The alias still compiles with a deprecation warning and is slated for removal in Dynamo v1.9.0.
+
+  > **Migrate:** Replace `WorkerInputs::OCCUPANCY` with `WorkerInputs::ACTIVE_REQUESTS` in custom worker-selection policies.
+
 <a id="v160"></a>
 
 ## v1.6.0 - Oct 22, 2026

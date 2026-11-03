@@ -3,12 +3,8 @@
 
 """Read-only external Grove check for the Helm pre-install/pre-upgrade Job."""
 
-import json
 import re
-import ssl
 import sys
-from pathlib import Path
-from urllib.request import Request, urlopen
 
 
 def version(tag):
@@ -66,18 +62,7 @@ def check(get, minimum, namespace="", deployment=""):
 
 
 def main():
-    account = Path("/var/run/secrets/kubernetes.io/serviceaccount")
-    context = ssl.create_default_context(cafile=str(account / "ca.crt"))
-    token = (account / "token").read_text().strip()
-
-    def get(path):
-        request = Request(
-            "https://kubernetes.default.svc" + path,
-            headers={"Authorization": "Bearer " + token},
-        )
-        with urlopen(request, context=context, timeout=10) as response:
-            return json.load(response)
-
+    get = globals()["kubernetes_client"]()
     check(get, *sys.argv[1:])
 
 
