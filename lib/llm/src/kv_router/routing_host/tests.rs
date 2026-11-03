@@ -2797,37 +2797,34 @@ async fn runtime_lora_rechecks_worker_metadata_after_queued_selection() {
             ("DYN_LORA_ENABLED", Some("true")),
             ("DYN_LORA_RUNTIME_LOAD_ENABLED", Some("true")),
         ],
-        async {
-            KvRouter::new(
-                endpoint,
-                client.clone(),
-                configs_rx,
-                None,
-                16,
-                SelectionPolicySource::Registry,
-                Some(KvRouterConfig {
-                    skip_initial_worker_wait: true,
-                    use_kv_events: false,
-                    router_track_active_blocks: false,
-                    ..Default::default()
-                }),
-                None,
-                "decode",
-                None,
-                false,
-                None,
-                Some(filter),
-            )
-            .await
-            .unwrap()
-            .with_request_classifier(PausingClassifier {
-                entered: entered.clone(),
-                resumed: resumed.clone(),
-            })
-            .unwrap()
-        },
+        KvRouter::new(
+            endpoint,
+            client.clone(),
+            configs_rx,
+            None,
+            16,
+            SelectionPolicySource::Registry,
+            Some(KvRouterConfig {
+                skip_initial_worker_wait: true,
+                use_kv_events: false,
+                router_track_active_blocks: false,
+                ..Default::default()
+            }),
+            None,
+            "decode",
+            None,
+            false,
+            None,
+            Some(filter),
+        ),
     )
-    .await;
+    .await
+    .unwrap()
+    .with_request_classifier(PausingClassifier {
+        entered: entered.clone(),
+        resumed: resumed.clone(),
+    })
+    .unwrap();
     let dispatch = Arc::new(PendingThenCompletedDispatch::default());
     let router = Arc::new(
         RoutingHost::builder(client, RouterMode::KV)
