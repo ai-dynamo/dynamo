@@ -19,12 +19,17 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	disaggregatedsetv1 "sigs.k8s.io/lws/api/disaggregatedset/v1"
 )
 
 // disaggregatedSetRestartProgressResolver owns the read-only DisaggregatedSet
@@ -75,8 +80,15 @@ func (r *disaggregatedSetRestartProgressResolver) Resolve(
 		if err != nil {
 			dsReason = err.Error()
 		} else {
-			dsReady = readiness.Ready
+			// A ready previous revision cannot satisfy the currently requested restart.
+			restartApplied, restartErr := disaggregatedSetRestartApplied(ds, selection, dgd.Spec.Restart.ID)
+			dsReady = readiness.Ready && restartErr == nil && restartApplied
 			dsReason = readiness.Reason
+			if restartErr != nil {
+				dsReason = restartErr.Error()
+			} else if !restartApplied {
+				dsReason = "DisaggregatedSet has not observed the requested restart"
+			}
 		}
 	}
 
@@ -107,4 +119,37 @@ func (r *disaggregatedSetRestartProgressResolver) Resolve(
 		}
 	}
 	return updatedInProgress
+}
+
+// disaggregatedSetRestartApplied requires the requested restart on every selected
+// leader and worker template. ds is non-nil and is never mutated.
+func disaggregatedSetRestartApplied(ds *unstructured.Unstructured, selection disaggregatedSetSelection, restartID string) (bool, error) {
+	// Decode the observed spec, keeping absent or malformed templates pending.
+	spec, found, err := unstructured.NestedMap(ds.Object, "spec")
+	if err != nil {
+		return false, fmt.Errorf("failed to read DisaggregatedSet restart spec: %w", err)
+	}
+	if !found || restartID == "" {
+		return false, nil
+	}
+	typedSpec := disaggregatedsetv1.DisaggregatedSetSpec{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(spec, &typedSpec); err != nil {
+		return false, fmt.Errorf("failed to decode DisaggregatedSet restart spec: %w", err)
+	}
+
+	// Observe both templates rather than accepting a leader-only restart marker.
+	appliedRoles := make(map[string]bool, len(typedSpec.Roles))
+	for i := range typedSpec.Roles {
+		role := &typedSpec.Roles[i]
+		leader := role.Spec.LeaderWorkerTemplate.LeaderTemplate
+		appliedRoles[role.Name] = leader != nil &&
+			leader.Annotations[consts.RestartAnnotation] == restartID &&
+			role.Spec.LeaderWorkerTemplate.WorkerTemplate.Annotations[consts.RestartAnnotation] == restartID
+	}
+	for _, roleName := range selection.componentToRole {
+		if !appliedRoles[roleName] {
+			return false, nil
+		}
+	}
+	return true, nil
 }

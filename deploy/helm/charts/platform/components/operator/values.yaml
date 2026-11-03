@@ -30,6 +30,17 @@ lpx:
   # -- Configure the LPU model registry used by the LPX integration.
   modelRegistryURL: ""
 
+dgdrV1Beta2:
+  # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Serve the unfinished DGDR v1beta2
+  # Request API with conversion and install the Run and Candidate APIs. Run and
+  # Candidate objects are persisted in etcd; incompatible schema changes may make
+  # them unreadable or block future CRD upgrades. When false, the CRD init container
+  # installs the legacy Request schemas without v1beta2 conversion envelopes and
+  # omits Run and Candidate. When true, the operator reconciles v1beta2
+  # Requests into Runs and executes each Run as an AISimulate planner Job with
+  # a publisher sidecar that persists deployment Candidates.
+  enabled: false
+
 # Environment variables to pass to operator Deployment.
 env: []
 
@@ -102,9 +113,9 @@ controllerManager:
       repository: nvcr.io/nvidia/ai-dynamo/kubernetes-operator
       # tag is optional - if not set, will use Chart.AppVersion
       tag: ""
-    # Default DGDR profiler image, put into DGDR spec.image when unset. Empty
-    # derives dynamo-planner:<chart appVersion>, which only exists for GA
-    # releases.
+    # Planner image used to execute v1beta2 DGDR Runs and default v1beta1
+    # spec.image. Empty derives dynamo-planner:<chart appVersion>, which only
+    # exists for GA releases.
     dgdrDefaultImage: ""
     resources:
       limits:

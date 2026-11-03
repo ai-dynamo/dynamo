@@ -261,6 +261,15 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
     config = FrontendConfig.from_cli_args(args)
     config.validate()
 
+    if config.chat_processor != "dynamo" and (
+        config.interactive or config.kserve_grpc_server
+    ):
+        mode_flag = "--interactive" if config.interactive else "--kserve-grpc-server"
+        parser.error(
+            f"--dyn-chat-processor {config.chat_processor} is only supported by the "
+            f"HTTP frontend, so it cannot be combined with {mode_flag}"
+        )
+
     vllm_flags = None
     sglang_flags = None
 
@@ -432,6 +441,7 @@ async def async_main():
         "migration_limit": config.migration_limit,
         "metrics_prefix": metrics_prefix,
         "enable_anthropic_api": config.enable_anthropic_api,
+        "enable_systemone_api": config.enable_systemone_api,
         "strip_anthropic_preamble": config.strip_anthropic_preamble,
         "enable_streaming_tool_dispatch": config.enable_streaming_tool_dispatch,
         "enable_streaming_reasoning_dispatch": config.enable_streaming_reasoning_dispatch,

@@ -128,10 +128,16 @@ These flags control which role this worker plays in a disaggregated deployment. 
   Environment variable: `DYN_VLLM_HEADLESS`
 </ParamField>
 
+<ParamField path="--freeze-gc-after-init" type="boolean" default="false">
+  Collect and freeze tracked objects in the Dynamo worker process once the engine is initialized, before the model is registered. Later full (gen2) collections then skip the static heap (engine client, tokenizer, config), which otherwise causes multi-hundred-millisecond request stalls under load. vLLM already freezes its EngineCore, GPU-worker and API-server heaps; this covers the Dynamo process that replaces the API server. Reference counting still reclaims objects, but unreachable cycles among frozen objects remain until they are unfrozen or the process exits. Validate memory usage before enabling it. Not supported with `--headless` or `--disaggregation-mode=encode`.
+
+  Environment variable: `DYN_VLLM_FREEZE_GC_AFTER_INIT`
+</ParamField>
+
 ## Tokenizer and multimodal
 
 <ParamField path="--use-vllm-tokenizer" type="boolean" default="false">
-  Use vLLM's tokenizer for pre- and post-processing. This bypasses Dynamo's preprocessor; only the `/v1/chat/completions` endpoint will be available through the Dynamo frontend. Dedicated embedding workers currently ignore this option and use vLLM tokenization by default. To enable Dynamo frontend tokenization for text embeddings, set `--embedding-frontend-tokenization`.
+  Use vLLM's tokenizer for pre- and post-processing. This bypasses Dynamo's preprocessor; only the `/v1/chat/completions` endpoint will be available through the Dynamo frontend. Dedicated embedding workers currently ignore this option and use vLLM tokenization by default. To enable Dynamo frontend tokenization for text embeddings, set `--embedding-frontend-tokenization`. Discovery rejects text-input workers using KV-aware routing; enable frontend tokenization or select a non-KV router mode.
 
   Environment variable: `DYN_VLLM_USE_TOKENIZER`
 </ParamField>

@@ -19,16 +19,17 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use super::block_lookup::BlockLookup;
+use super::block_lookup::{BlockLookup, Slot};
+use super::node::CleanupEdge;
 use super::types::SharedNode;
 use crate::protocols::{ExternalSequenceBlockHash, WorkerWithDpRank};
 
 /// A lane-local name for a node the lane holds. Non-zero so a lookup slot holding a key
-/// and an id stays 16 bytes.
+/// and an id stays 12 bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct NodeId(NonZeroU32);
 
-const _: () = assert!(size_of::<Option<(ExternalSequenceBlockHash, NodeId)>>() == 16);
+const _: () = assert!(size_of::<Option<Slot<NodeId>>>() == 12);
 
 impl NodeId {
     fn from_index(index: usize) -> Self {
@@ -139,6 +140,9 @@ impl NodeHolds {
 pub(super) struct LaneLookup {
     workers: FxHashMap<WorkerWithDpRank, BlockLookup<NodeId>>,
     nodes: NodeHolds,
+    /// Leaves this lane's removals left dead, with their parents, awaiting a batched
+    /// unlink when the lane goes idle.
+    pub(super) pending_unlinks: Vec<CleanupEdge>,
 }
 
 impl LaneLookup {
@@ -215,7 +219,7 @@ impl LaneLookup {
     where
         I: Iterator<Item = ExternalSequenceBlockHash> + Clone,
     {
-        let Self { workers, nodes } = self;
+        let Self { workers, nodes, .. } = self;
         let id = nodes.hold(node);
         let changed = workers
             .entry(worker)
@@ -310,7 +314,7 @@ impl LaneLookup {
             if !target(worker) {
                 return true;
             }
-            for (&hash, &id) in blocks.iter() {
+            for (hash, &id) in blocks.iter() {
                 nodes.drop_refs(id, 1);
                 on_removed(worker, hash);
             }

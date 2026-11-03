@@ -139,9 +139,6 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                         sweep_tree,
                     );
                 }
-                WorkerTask::CleanupStaleChildren => {
-                    self.run_cleanup_task();
-                }
                 WorkerTask::DumpEvents(_sender) => {
                     let _ = _sender.send(Ok(Vec::new()));
                 }
@@ -158,11 +155,18 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                     let _ = resp.send(resident);
                 }
                 WorkerTask::Flush(sender) => {
+                    // A flush offers every dead leaf this lane queued for unlinking first.
+                    self.drain_pending_unlinks(&mut lookup, None);
                     let _ = sender.send(());
                 }
                 WorkerTask::Terminate => {
                     break;
                 }
+            }
+            // Dead leaves this lane queued are unlinked while it has nothing else to do, in
+            // bounded drains, so a drain never holds up the next event for long.
+            while !lookup.pending_unlinks.is_empty() && event_receiver.is_empty() {
+                self.drain_pending_unlinks(&mut lookup, Some(IDLE_UNLINK_LIMIT));
             }
         }
 
@@ -239,18 +243,12 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
         Ok(scores)
     }
 
-    fn try_schedule_cleanup(&self) -> bool {
-        self.cleanup.try_schedule()
+    fn background_maintenance_interval(&self) -> Option<std::time::Duration> {
+        self.sweep_schedule.tick
     }
 
-    fn cancel_scheduled_cleanup(&self) {
-        self.cleanup.cancel();
-    }
-
-    fn run_cleanup_task(&self) {
-        let mut cleanup_guard = CleanupGuard::new(&self.cleanup);
-        self.sweep_stale_children();
-        cleanup_guard.mark_completed();
+    fn run_background_maintenance(&self) {
+        self.sweep_if_due();
     }
 
     fn timing_report(&self) -> String {

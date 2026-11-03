@@ -24,6 +24,7 @@ pub(super) struct PreparedRequest {
     pub(super) has_decode_handoff: bool,
     output_token_ids: Vec<u32>,
     stop_token: Option<u32>,
+    return_text: bool,
     response_metadata: ResponseMetadata,
 }
 
@@ -134,6 +135,7 @@ impl PreparedRequest {
                 && request.disaggregated_params.is_some(),
             output_token_ids,
             stop_token,
+            return_text: request.return_text.unwrap_or(false),
             response_metadata,
         })
     }
@@ -147,6 +149,10 @@ impl PreparedRequest {
             dp_rank: DP_RANK,
             ..Default::default()
         }
+    }
+
+    pub(super) fn output_text(&self, token_id: u32) -> Option<String> {
+        self.return_text.then(|| format!("<token:{token_id}>"))
     }
 
     pub(super) fn meta_info(

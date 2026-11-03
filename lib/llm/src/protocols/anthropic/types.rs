@@ -123,7 +123,11 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             .transpose()?;
 
         // Convert tool_choice
-        let tool_choice = req.tool_choice.as_ref().map(convert_anthropic_tool_choice);
+        let tool_choice = req
+            .tool_choice
+            .as_ref()
+            .map(convert_anthropic_tool_choice)
+            .transpose()?;
         let parallel_tool_calls = req
             .tool_choice
             .as_ref()
@@ -167,6 +171,8 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             .transpose()?;
 
         Ok(NvCreateChatCompletionRequest {
+            preserve_thinking: None,
+            responses_tools: None,
             inner: dynamo_protocols::types::CreateChatCompletionRequest {
                 messages,
                 model: req.model,
@@ -201,17 +207,19 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             // when a reasoning parser is configured. The conversion layer only
             // forwards the client's explicit thinking preference here; the handler
             // has access to parsing_options and makes the final decision.
-            chat_template_args: if req
-                .thinking
-                .as_ref()
-                .is_some_and(|t| t.thinking_type == "enabled")
-            {
+            chat_template_args: req.thinking.as_ref().and_then(|thinking| {
+                let enabled = match thinking.thinking_type.as_str() {
+                    "enabled" => true,
+                    "disabled" => false,
+                    _ => return None,
+                };
                 let mut args = std::collections::HashMap::new();
-                args.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
+                args.insert(
+                    "enable_thinking".to_string(),
+                    serde_json::Value::Bool(enabled),
+                );
                 Some(args)
-            } else {
-                None
-            },
+            }),
             thinking: None,
             thinking_token_budget: None,
             media_io_kwargs: None,
@@ -452,6 +460,7 @@ fn convert_assistant_blocks(
                 // same as client tool use for conversion purposes.
                 segments.push(std::mem::take(&mut pending_reasoning));
                 tool_calls.push(ChatCompletionMessageToolCall {
+                    custom: None,
                     id: id.clone(),
                     r#type: FunctionType::Function,
                     function: dynamo_protocols::types::FunctionCall {
@@ -531,12 +540,15 @@ fn convert_anthropic_tools(
                 anyhow::anyhow!("tools[{tool_index}].input_schema: field required for client tools")
             })?;
             Ok(ChatCompletionTool {
+                custom: None,
                 r#type: ChatCompletionToolType::Function,
+                defer_loading: None,
                 function: FunctionObject {
                     name: tool.name.clone(),
                     description: tool.description.clone(),
                     parameters: Some(schema),
                     strict: tool.strict,
+                    defer_loading: None,
                 },
             })
         })
@@ -544,24 +556,27 @@ fn convert_anthropic_tools(
 }
 
 /// Convert Anthropic tool_choice to ChatCompletionToolChoiceOption.
-fn convert_anthropic_tool_choice(tc: &AnthropicToolChoice) -> ChatCompletionToolChoiceOption {
-    match tc {
+fn convert_anthropic_tool_choice(
+    tc: &AnthropicToolChoice,
+) -> anyhow::Result<ChatCompletionToolChoiceOption> {
+    Ok(match tc {
         AnthropicToolChoice::Simple(simple) => match simple.choice_type {
             AnthropicToolChoiceMode::Auto => ChatCompletionToolChoiceOption::Auto,
             AnthropicToolChoiceMode::Any => ChatCompletionToolChoiceOption::Required,
             AnthropicToolChoiceMode::None => ChatCompletionToolChoiceOption::None,
             AnthropicToolChoiceMode::Tool => {
-                // {"type": "tool"} without a "name" field is invalid per the Anthropic spec.
-                // It deserialized as Simple because Named requires the name field.
-                // Treat as "any" (required) since the caller wants a specific tool but
-                // didn't specify which — this is the closest semantic match.
-                tracing::warn!(
-                    "tool_choice has type 'tool' without a 'name' field; treating as 'any' (required)"
-                );
-                ChatCompletionToolChoiceOption::Required
+                anyhow::bail!("tool_choice.name: field required when tool_choice.type is \"tool\"");
             }
         },
         AnthropicToolChoice::Named(named) => {
+            anyhow::ensure!(
+                named.choice_type == AnthropicToolChoiceMode::Tool,
+                "tool_choice.name: only allowed for type tool"
+            );
+            anyhow::ensure!(
+                !named.name.is_empty(),
+                "tool_choice.name: must be a non-empty string"
+            );
             ChatCompletionToolChoiceOption::Named(ChatCompletionNamedToolChoice {
                 r#type: ChatCompletionToolType::Function,
                 function: FunctionName {
@@ -569,7 +584,7 @@ fn convert_anthropic_tool_choice(tc: &AnthropicToolChoice) -> ChatCompletionTool
                 },
             })
         }
-    }
+    })
 }
 
 /// Convert Dynamo's OpenAI-compatible usage into Anthropic's non-overlapping
@@ -1446,6 +1461,30 @@ mod tests {
     }
 
     #[test]
+    fn test_tool_choice_conversion_rejects_malformed_discriminators() {
+        for tool_choice in [
+            serde_json::json!({"type": "none", "name": "read"}),
+            serde_json::json!({"type": "auto", "name": "read"}),
+            serde_json::json!({"type": "any", "name": "read"}),
+            serde_json::json!({"type": "tool"}),
+            serde_json::json!({"type": "tool", "name": ""}),
+        ] {
+            let request: AnthropicCreateMessageRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test", "max_tokens": 16,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "tool_choice": tool_choice,
+                }))
+                .unwrap();
+            let error = NvCreateChatCompletionRequest::try_from(request).unwrap_err();
+            assert!(
+                error.to_string().contains("tool_choice.name"),
+                "{tool_choice}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn test_tool_choice_conversion_preserves_request_level_parser_policy() {
         for (label, tool_choice, parsing_enabled) in [
             ("auto", serde_json::json!({"type": "auto"}), true),
@@ -1498,6 +1537,7 @@ mod tests {
     #[test]
     fn test_chat_completion_to_anthropic_response() {
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -1557,6 +1597,7 @@ mod tests {
         // cached tokens (11). Anthropic input_tokens must report only the
         // uncached portion (12 - 11 = 1), with cache_read reported separately.
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-cache".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -1633,6 +1674,7 @@ mod tests {
     #[test]
     fn test_anthropic_response_emits_zero_cache_creation_when_backend_reports_no_usage() {
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-no-usage".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -1673,6 +1715,7 @@ mod tests {
     #[test]
     fn test_anthropic_response_does_not_emit_nvext() {
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -2774,6 +2817,7 @@ mod anthropic_types_tests {
             .enumerate()
             .map(
                 |(index, arguments)| dynamo_protocols::types::ChatCompletionMessageToolCall {
+                    custom: None,
                     id: format!("call_{}", index + 1),
                     r#type: dynamo_protocols::types::FunctionType::Function,
                     function: dynamo_protocols::types::FunctionCall {
@@ -2784,6 +2828,7 @@ mod anthropic_types_tests {
             )
             .collect();
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-wiring".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -3037,5 +3082,109 @@ mod anthropic_types_tests {
             Some(r#"he said "hi", ok"#)
         );
         assert_eq!(recovered.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod thinking_control_tests {
+    use super::*;
+
+    fn request_with_thinking(thinking: Option<serde_json::Value>) -> AnthropicCreateMessageRequest {
+        let mut request = serde_json::json!({
+            "model": "test-model",
+            "max_tokens": 2048,
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+        if let Some(thinking) = thinking {
+            request["thinking"] = thinking;
+        }
+        serde_json::from_value(request).unwrap()
+    }
+
+    #[test]
+    fn enabled_thinking_survives_conversion() {
+        let converted = NvCreateChatCompletionRequest::try_from(request_with_thinking(Some(
+            serde_json::json!({"type": "enabled", "budget_tokens": 1024}),
+        )))
+        .unwrap();
+        assert_eq!(
+            converted.chat_template_args.unwrap()["enable_thinking"],
+            true
+        );
+    }
+
+    #[test]
+    fn disabled_thinking_survives_conversion() {
+        let converted = NvCreateChatCompletionRequest::try_from(request_with_thinking(Some(
+            serde_json::json!({"type": "disabled"}),
+        )))
+        .unwrap();
+        assert_eq!(
+            converted.chat_template_args.unwrap()["enable_thinking"],
+            false
+        );
+    }
+
+    #[test]
+    fn omitted_thinking_keeps_template_default() {
+        let converted =
+            NvCreateChatCompletionRequest::try_from(request_with_thinking(None)).unwrap();
+        assert!(converted.chat_template_args.is_none());
+    }
+
+    #[test]
+    fn null_thinking_keeps_template_default() {
+        let converted = NvCreateChatCompletionRequest::try_from(request_with_thinking(Some(
+            serde_json::Value::Null,
+        )))
+        .unwrap();
+        assert!(converted.chat_template_args.is_none());
+    }
+
+    #[test]
+    fn other_thinking_modes_keep_existing_behavior() {
+        for mode in ["adaptive", "unknown"] {
+            let converted = NvCreateChatCompletionRequest::try_from(request_with_thinking(Some(
+                serde_json::json!({"type": mode}),
+            )))
+            .unwrap();
+            assert!(converted.chat_template_args.is_none(), "{mode}");
+        }
+    }
+
+    #[test]
+    fn disabling_thinking_preserves_history_and_tools() {
+        let mut value = serde_json::json!({
+            "model": "test-model", "max_tokens": 2048,
+            "messages": [
+                {"role": "user", "content": "Read x"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "Inspect the file", "signature": "sig"},
+                    {"type": "tool_use", "id": "call_1", "name": "read", "input": {"path": "x"}}
+                ]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "hello"}]}
+            ],
+            "tools": [{"name": "read", "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}],
+            "tool_choice": {"type": "tool", "name": "read"},
+            "nvext": {"cache_salt": "test-salt"}
+        });
+        let unspecified = NvCreateChatCompletionRequest::try_from(
+            serde_json::from_value::<AnthropicCreateMessageRequest>(value.clone()).unwrap(),
+        )
+        .unwrap();
+        value["thinking"] = serde_json::json!({"type": "disabled"});
+        let mut disabled = NvCreateChatCompletionRequest::try_from(
+            serde_json::from_value::<AnthropicCreateMessageRequest>(value).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            disabled.chat_template_args.as_ref().unwrap()["enable_thinking"],
+            false
+        );
+        disabled.chat_template_args = None;
+        assert_eq!(
+            serde_json::to_value(unspecified).unwrap(),
+            serde_json::to_value(disabled).unwrap()
+        );
     }
 }

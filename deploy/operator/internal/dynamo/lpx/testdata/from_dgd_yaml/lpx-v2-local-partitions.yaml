@@ -57,36 +57,6 @@ data:
     12
     13
     14
-  partition_indices: |-
-    0
-    1
-    2
-    3
-    4
-    5
-    6
-    7
-    8
-    9
-    10
-    11
-    12
-    13
-  partition_models: |-
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
-    default
   partition_node_offsets: |-
     0
     1
@@ -117,28 +87,13 @@ data:
     part-12
     part-13
     part-14
-  topologies: |-
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
-    test-topology
 immutable: true
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: lpx-v2-local-partitions
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: lpx-v2-local-partitions-a708-lpu-2c2f74b5dc9e0648
+  name: lpx-v2-local-partitions-a708-lpu-a6d832f0ec8201c0
   namespace: inference-engine
 ---
 metadata:
@@ -156,9 +111,9 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: lpx-v2-local-partitions
-        nvidia.com/extra-resources-hash: 2c2f74b5dc9e06482ae806feeca59ef92588bd41dfe19531e33da0f5c6d0e224
-        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:ddd723d746da78065c032312c775dd3ad545eb3ddddaf6d3d81fb04bd4d849ba
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:7df77aa0b1fe9e9a0fc937051e0f78cb5f86e80f95797db7fa21b4f2d24bafb8
+        nvidia.com/extra-resources-hash: a6d832f0ec8201c018ed4a42fc8dd82543b4fdae073a4b1173019d34514ff313
+        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:e2abf3fda8e87a95a1fedee6a4e63287f15b0c63a6eed72f30113634dd177ab1
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:3a9418c21f2b2636593f05b7174ae6b6300edf92b6ba84d5d4b3b67a7a482853
         scheduling.lpu.nvidia.com/model: default
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v2StrictHybrid
@@ -277,7 +232,7 @@ spec:
             - name: UCX_TLS
               value: tcp
             image: example.invalid/lpu-runtime:test
-            name: agent
+            name: main
             readinessProbe:
               failureThreshold: 6
               httpGet:
@@ -358,14 +313,14 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: lpx-v2-local-partitions-a708-lpu-2c2f74b5dc9e0648
+              name: lpx-v2-local-partitions-a708-lpu-a6d832f0ec8201c0
             name: config
         replicas: 14
         roleName: agt
     - annotations:
         lpx.nvidia.com/deployment-name: lpx-v2-local-partitions
         nvidia.com/extra-resources-hash: df54a9803233327f2a9b061e34cdd5f780498fe4df663ff5fb813fb24336e5fc
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:7df77aa0b1fe9e9a0fc937051e0f78cb5f86e80f95797db7fa21b4f2d24bafb8
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:3a9418c21f2b2636593f05b7174ae6b6300edf92b6ba84d5d4b3b67a7a482853
         scheduling.lpu.nvidia.com/role: cyborg-worker
       labels:
         lpx.nvidia.com/serving: "true"
@@ -409,6 +364,8 @@ spec:
               value: 0,15,16
             - name: GBUILD_MANIFEST_PATH
               value: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c/manifest.v2.capnp.bin
+            - name: LPX_MODEL_PATH
+              value: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
             - name: CYBORG_FPGA_GPI_REPLICA_INDEX
               valueFrom:
                 fieldRef:
@@ -547,7 +504,7 @@ spec:
     podCliqueScalingGroups:
     - annotations:
         lpx.nvidia.com/deployment-name: lpx-v2-local-partitions
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:7df77aa0b1fe9e9a0fc937051e0f78cb5f86e80f95797db7fa21b4f2d24bafb8
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:3a9418c21f2b2636593f05b7174ae6b6300edf92b6ba84d5d4b3b67a7a482853
       cliqueNames:
       - agt
       - cond

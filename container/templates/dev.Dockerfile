@@ -110,13 +110,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         clang \
         libclang-dev \
         libfontconfig-dev && \
-    # Use system python explicitly: some runtime bases put a framework venv first on PATH.
-    # PIP_BREAK_SYSTEM_PACKAGES env var works across pip versions: pip >=23 honours
-    # it; older pip silently ignores it but predates the PEP 668 EXTERNALLY-MANAGED
-    # marker (Ubuntu <23.04), so no override is needed there in the first place.
-    # pip >=26 made the --break-system-packages flag require a boolean argument,
-    # so the env-var form is the only portable spelling.
-    PIP_BREAK_SYSTEM_PACKAGES=1 /usr/bin/python3 -m pip install --no-cache-dir yq && \
+    # Target system Python even when a framework venv is first on PATH.
+    # Debian pip lacks RECORD metadata; overlay it instead of uninstalling it.
+    PIP_BREAK_SYSTEM_PACKAGES=1 /usr/bin/python3 -m pip install --no-cache-dir --ignore-installed --upgrade certifi==2026.10.23 pip==26.2.2 yq && \
     rm -rf /var/lib/apt/lists/* && \
     # Initialize Git LFS for the dynamo user (required for requirements with lfs=true)
     git lfs install
@@ -356,7 +352,7 @@ RUN cp /tmp/uv-binary ${VIRTUAL_ENV}/bin/uv && \
     pip install maturin[patchelf]
 {% else %}
 # SGLang CUDA: Create a writable Dynamo venv and seed it from the upstream
-# SGLang venv. The 0.5.21 runtime keeps its packages outside the system Python's
+# SGLang venv. The runtime keeps its packages outside the system Python's
 # dist-packages directory to /opt/sglang.
 COPY --from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }} /uv /tmp/uv-binary
 RUN mkdir -p /opt/dynamo/venv && \
@@ -444,9 +440,9 @@ RUN mkdir -p ${WORKSPACE_DIR} && chmod g+w ${WORKSPACE_DIR}
 # Space is only recovered if the image is later squashed / compacted (e.g. docker-squash,
 # `docker build --squash`, or export/import).
 {% if device == "xpu" and framework == "sglang" %}
-RUN uv pip uninstall --python ${VIRTUAL_ENV}/bin/python ai-dynamo ai-dynamo-runtime kvbm 2>/dev/null || true
+RUN uv pip uninstall --python ${VIRTUAL_ENV}/bin/python ai-dynamo ai-dynamo-runtime 2>/dev/null || true
 {% else %}
-RUN uv pip uninstall ai-dynamo ai-dynamo-runtime kvbm 2>/dev/null || true
+RUN uv pip uninstall ai-dynamo ai-dynamo-runtime 2>/dev/null || true
 {% endif %}
 
 # Install maturin only (no editable install of the dynamo package).

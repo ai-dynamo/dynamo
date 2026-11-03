@@ -52,7 +52,7 @@ func addDefaultingFuncs(scheme *runtime.Scheme) error {
 // RegisterDefaults adds defaulters functions to the given scheme.
 // Public to allow building arbitrary schemes.
 func RegisterDefaults(scheme *runtime.Scheme) error {
-	scheme.AddTypeDefaultingFunc(&OperatorConfiguration{}, func(obj interface{}) {
+	scheme.AddTypeDefaultingFunc(&OperatorConfiguration{}, func(obj any) {
 		SetDefaultsOperatorConfiguration(obj.(*OperatorConfiguration))
 	})
 	return nil

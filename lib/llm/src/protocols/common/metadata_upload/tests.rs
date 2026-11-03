@@ -50,6 +50,26 @@ fn legacy_round_trip_preserves_main_shape_and_optional_fallback() {
 }
 
 #[test]
+fn legacy_shape_errors_name_safe_categories_without_values() {
+    for (input, category) in [
+        (
+            json!({"url": "s3://private-bucket", "unknown": "private-value"}),
+            "unknown legacy metadata_upload field",
+        ),
+        (
+            json!({"fallback_url": "s3://private-bucket"}),
+            "missing legacy metadata_upload url",
+        ),
+    ] {
+        let error = serde_json::from_value::<MetadataUpload>(input).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains(category), "{message}");
+        assert!(!message.contains("private-bucket"));
+        assert!(!message.contains("private-value"));
+    }
+}
+
+#[test]
 fn rejects_duplicate_fields_in_raw_json() {
     for input in [
         r#"{"url":"s3://a","url":"s3://b"}"#,
