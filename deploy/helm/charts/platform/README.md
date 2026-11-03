@@ -145,7 +145,9 @@ in the CRD schemas; they have no compatibility alias or automatic migration.
 **Affected:** DGDR v1beta2 manifests, stored Requests and Runs, and clients reading
 Run status, including v1beta2 payloads carried through older API versions.
 
-**Action:** Finish active Runs before upgrading the CRDs and operator. Update
+**Action:** Finish active Runs, then export affected Requests and Runs, including
+Run status, before upgrading the CRDs and operator. Keep these backups: after the
+schema upgrade, the API may no longer return the old `aisimulate` fields. Update
 manifests to `spec.aisim.inputOverrides` and status readers to `status.aisim.input`.
 Recreate Requests and immutable Runs that need to retain overrides stored under
 the old name. Do not rely on unknown-field pruning to migrate those values.

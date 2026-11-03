@@ -83,7 +83,9 @@ fully lowered input in the controller-owned `status.aisim.input`. These replace
 `spec.aisimulate` and `status.aisimulate`; the old names are no longer schema fields.
 Update manifests and status consumers before using the new CRDs and operator.
 Existing immutable Runs must finish before the upgrade or be recreated afterward;
-there is no automatic migration of stored `aisimulate` values.
+there is no automatic migration of stored `aisimulate` values. Before upgrading the
+CRDs, export affected Requests and Runs, including Run status, and keep the backups.
+After the schema upgrade, the API may no longer return the old `aisimulate` fields.
 
 `aisim` is optional and has no default. Omitting it preserves typed-input defaults.
 `inputOverrides` remains an RFC 7386 JSON Merge Patch: supplied values win over
