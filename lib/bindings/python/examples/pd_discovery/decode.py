@@ -1,22 +1,32 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Mock decode worker that advertises a side-channel server to prefill workers.
+"""Mock decode worker that publishes its side-channel address in discovery.
 
-It serves two endpoints from one process, so both share one instance id:
-- `decode.generate`: the decode endpoint (mock output).
-- `decode.side_channel`: returns the host and port of this worker's TCP server.
+It starts a TCP server and puts the server's address in the runtime config of
+its model card. Prefill workers read the address from discovery, so they never
+have to ask this worker for it.
 """
 
 import argparse
 import asyncio
+import json
 import socket
+import uuid
 
 import uvloop
 
+from dynamo.llm import (
+    ModelInput,
+    ModelRuntimeConfig,
+    ModelType,
+    WorkerType,
+    register_model,
+)
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 NAMESPACE = "pd-discovery"
+SIDE_CHANNEL_KEY = "side_channel"
 
 uvloop.install()
 
@@ -38,9 +48,8 @@ def parse_args():
 async def worker(runtime: DistributedRuntime):
     args = parse_args()
     host = args.host or socket.gethostbyname(socket.gethostname())
-    generate = runtime.endpoint(f"{NAMESPACE}.decode.generate")
-    side_channel = runtime.endpoint(f"{NAMESPACE}.decode.side_channel")
-    my_id = generate.connection_id()
+    endpoint = runtime.endpoint(f"{NAMESPACE}.decode.generate")
+    my_id = endpoint.connection_id()
 
     # 1. Start the server that prefill workers connect to. It stands in for
     #    whatever the prefill side needs to reach, such as a KV receiver.
@@ -55,17 +64,29 @@ async def worker(runtime: DistributedRuntime):
     port = server.sockets[0].getsockname()[1]
     print(f"decode {my_id:x}: side-channel server on {host}:{port}")
 
-    # 2. Advertise the server: the side_channel endpoint returns its address.
-    async def side_channel_handler(request):
-        yield {"host": host, "port": port}
+    # 2. Publish the address in the runtime config of this worker's model card.
+    #    A real decode worker already registers its model; only the
+    #    set_engine_specific call is new. The incarnation changes on every
+    #    start, so prefill workers can tell a restarted worker from the old
+    #    one: on Kubernetes, a restarted container keeps its instance ID.
+    runtime_config = ModelRuntimeConfig()
+    side_channel = {"host": host, "port": port, "incarnation": uuid.uuid4().hex}
+    runtime_config.set_engine_specific(SIDE_CHANNEL_KEY, json.dumps(side_channel))
+    await register_model(
+        ModelInput.Tokens,
+        ModelType.Chat,
+        endpoint,
+        "pd-discovery-mock",
+        worker_type=WorkerType.Decode,
+        needs=[[WorkerType.Prefill]],
+        runtime_config=runtime_config,
+        skip_model_assets=True,
+    )
 
     async def generate_handler(request):
         yield f"decoded by {my_id:x}: {request}"
 
-    await asyncio.gather(
-        generate.serve_endpoint(generate_handler),
-        side_channel.serve_endpoint(side_channel_handler),
-    )
+    await endpoint.serve_endpoint(generate_handler)
 
 
 asyncio.run(worker())

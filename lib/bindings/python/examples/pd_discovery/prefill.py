@@ -1,21 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Mock prefill worker that watches decode workers and connects to each new one.
+"""Mock prefill worker that finds decode workers in discovery and connects.
 
-While it serves `prefill.generate`, a background task polls the decode
-workers. For each new decode worker it asks for the worker's side-channel
-address and connects to it; when a decode worker disappears it forgets it.
+While it serves `prefill.generate`, it watches the runtime configs that decode
+workers publish in their model cards. Each decode worker publishes its
+side-channel address there, so this worker reads it from discovery instead of
+asking the decode worker. It connects to each new decode worker and drops the
+ones that leave.
 """
 
 import argparse
 import asyncio
+import json
 
 import uvloop
 
-from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
+from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 NAMESPACE = "pd-discovery"
+SIDE_CHANNEL_KEY = "side_channel"
 
 uvloop.install()
 
@@ -23,18 +27,17 @@ uvloop.install()
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--interval", type=float, default=2.0, help="Seconds between polls"
+        "--interval",
+        type=float,
+        default=2.0,
+        help="Most seconds between checks; a change in discovery wakes it sooner",
     )
     return parser.parse_args()
 
 
-async def on_new_decode(client: Client, decode_id: int, my_id: int):
-    """Look up a decode worker's address, then run the operation against it."""
-    # Ask that decode worker, by instance id, for its side-channel address.
-    async for address in await client.direct({}, decode_id, annotated=False):
-        host, port = address["host"], address["port"]
-
-    # The operation: connect to the server on the decode side.
+async def connect(decode_id: int, address: dict, my_id: int):
+    """The operation to run against a new decode worker: connect to its server."""
+    host, port = address["host"], address["port"]
     reader, writer = await asyncio.open_connection(host, port)
     writer.write(f"hello from prefill {my_id:x}\n".encode())
     await writer.drain()
@@ -42,34 +45,48 @@ async def on_new_decode(client: Client, decode_id: int, my_id: int):
     writer.close()
     await writer.wait_closed()
     print(f"prefill {my_id:x}: decode {decode_id:x} at {host}:{port} -> {reply!r}")
-    return host, port
 
 
 async def watch_decode_workers(
     runtime: DistributedRuntime, my_id: int, interval: float
 ):
-    client = await runtime.endpoint(f"{NAMESPACE}.decode.side_channel").client()
-    known = {}  # (decode instance id, transport address) -> (host, port)
+    # Discovery keeps this view of every ready decode worker's runtime config
+    # up to date. Reading it makes no network calls.
+    decode = runtime.endpoint(f"{NAMESPACE}.decode.generate")
+    configs = await decode.watch_runtime_configs()
+    known = {}  # (decode instance ID, published side channel) -> address
     while True:
-        # A local snapshot that Dynamo keeps current from discovery. The
-        # transport address tells a restarted worker apart: on Kubernetes, a
-        # restarted container keeps its pod's instance id but gets a new port.
-        current = {(i.instance_id, i.transport.address) for i in client.instances()}
+        current = {
+            (decode_id, side_channel)
+            for decode_id, config in configs.snapshot().items()
+            if (side_channel := config.runtime_data.get(SIDE_CHANNEL_KEY))
+        }
 
         for key in known.keys() - current:
-            host, port = known.pop(key)
-            print(f"prefill {my_id:x}: decode {key[0]:x} at {host}:{port} left")
+            address = known.pop(key)
+            print(
+                f"prefill {my_id:x}: decode {key[0]:x} at "
+                f"{address['host']}:{address['port']} left"
+            )
 
         for key in current - known.keys():
-            decode_id = key[0]
-            # A worker can stop between the snapshot and this call, so log the
-            # failure and retry on the next poll instead of stopping the watch.
+            decode_id, side_channel = key
+            address = json.loads(side_channel)
+            # A worker can stop before this connection, so log the failure and
+            # retry on a later check instead of stopping the watch.
             try:
-                known[key] = await on_new_decode(client, decode_id, my_id)
-            except Exception as e:
+                await connect(decode_id, address, my_id)
+            except OSError as e:
                 print(f"prefill {my_id:x}: decode {decode_id:x} failed: {e}")
+                continue
+            known[key] = address
 
-        await asyncio.sleep(interval)
+        # Wake when a decode worker joins, leaves, or republishes, or after
+        # `interval` seconds to retry failed connections.
+        try:
+            await asyncio.wait_for(configs.changed(), timeout=interval)
+        except TimeoutError:
+            pass
 
 
 @dynamo_worker()
