@@ -18,7 +18,12 @@ from dynamo._core import Context
 from dynamo.common.http.base import HttpStatusError
 from dynamo.common.http.media_reference import local_media_reference
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
-from dynamo.common.protocols.image_protocol import ImageData, NvImagesResponse
+from dynamo.common.protocols.image_protocol import (
+    ImageAccounting,
+    ImageData,
+    ImagesResponseNvExt,
+    NvImagesResponse,
+)
 from dynamo.common.protocols.request_parsing import parse_media_request
 from dynamo.common.storage import upload_to_fs
 from dynamo.llm.exceptions import InvalidArgument
@@ -186,9 +191,21 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             await self._cleanup_uploads(uploaded_paths)
             raise
 
-        response = NvImagesResponse(created=int(time.time()), data=image_data)
+        # Image accounting: the images returned, the one reference every
+        # generation consumed, and the clamped step count the generator ran.
+        response = NvImagesResponse(
+            created=int(time.time()),
+            data=image_data,
+            nvext=ImagesResponseNvExt(
+                usage=ImageAccounting(
+                    output_images=len(image_data),
+                    input_images=1 if input_reference is not None else 0,
+                    num_inference_steps=num_inference_steps,
+                )
+            ),
+        )
 
-        yield response.model_dump()
+        yield response.model_dump(exclude_none=True)
 
     async def _generate_images(
         self,

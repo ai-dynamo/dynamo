@@ -17,8 +17,10 @@ from typing import Any, AsyncGenerator, Optional
 
 from dynamo._core import Context
 from dynamo.common.protocols.image_protocol import (
+    ImageAccounting,
     ImageData,
     ImageNvExt,
+    ImagesResponseNvExt,
     NvCreateImageRequest,
     NvImagesResponse,
 )
@@ -261,11 +263,19 @@ class ImageGenerationHandler(BaseGenerativeHandler):
         response = NvImagesResponse(
             created=int(time.time()),
             data=data_items,
+            nvext=ImagesResponseNvExt(
+                usage=ImageAccounting(
+                    output_images=len(data_items),
+                    # This handler does not read input_reference.
+                    input_images=0,
+                    num_inference_steps=num_inference_steps,
+                )
+            ),
         )
 
         logger.debug(f"Request {request_id} completed in {inference_time:.2f}s")
 
-        yield response.model_dump()
+        yield response.model_dump(exclude_none=True)
 
     def cleanup(self) -> None:
         """Cleanup handler resources."""

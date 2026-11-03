@@ -808,3 +808,49 @@ class TestNParameter:
             async for _ in handler.generate(req, mock_context):
                 pass
         handler._cleanup_uploads.assert_awaited_once_with(uploads)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("with_reference", [False, True])
+    @pytest.mark.parametrize(
+        "requested_steps, ran_steps",
+        [(10, 10), (80, 50)],
+        ids=["steps-as-sent", "steps-clamped"],
+    )
+    async def test_generate_reports_image_accounting_not_token_usage(
+        self,
+        handler,
+        mock_context,
+        tmp_path,
+        monkeypatch,
+        with_reference,
+        requested_steps,
+        ran_steps,
+    ):
+        """nvext.usage counts the images returned, the reference consumed and
+        the step count the generator ran (after clamping), and the response
+        carries no token usage."""
+        self._mock_one_image(handler)
+        req = self._request(n=2)
+        req["nvext"]["num_inference_steps"] = requested_steps
+        if with_reference:
+            monkeypatch.setenv("DYN_MM_LOCAL_PATH", str(tmp_path))
+            input_ref = tmp_path / "input.png"
+            input_ref.write_bytes(b"x")
+            req["input_reference"] = str(input_ref)
+
+        results = [r async for r in handler.generate(req, mock_context)]
+
+        assert len(results) == 1
+        response = results[0]
+        assert "usage" not in response
+        assert response["nvext"] == {
+            "usage": {
+                "output_images": 2,
+                "input_images": 1 if with_reference else 0,
+                "num_inference_steps": ran_steps,
+            }
+        }
+        sampling_params = handler.generator.generate.call_args.kwargs[
+            "sampling_params_kwargs"
+        ]
+        assert sampling_params["num_inference_steps"] == ran_steps
