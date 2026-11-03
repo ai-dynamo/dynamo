@@ -74,7 +74,7 @@ For every request-trace environment variable and default, see [Request Trace Ref
 
 ### Record Tool Calls Automatically
 
-When request tracing is enabled and the worker uses `--dyn-tool-call-parser`, Dynamo records the final finish reason and each parsed tool call's name and ID in `request_end.finish_reason_metadata`. Tool-call arguments are intentionally omitted.
+When request tracing is enabled and the worker uses `--dyn-tool-call-parser`, Dynamo records the final finish reason and each parsed tool call's name and ID in `request_end.finish_reason_metadata`. Tool-call arguments are intentionally omitted. Native `/generate` rows get the same metadata, without tool-call IDs, from a request-end parse of the generated tokens; reasoning-parser models also report `request.reasoning_tokens`.
 
 The Perfetto converter infers a tool span from the end of a tool-call response to the next request in the same trajectory. You can calculate the same interval from the trace:
 
@@ -180,7 +180,7 @@ Dynamo emits `request_end` after an eligible response stream finishes or is drop
 
 Requests with recognized session identity can include opaque strings in `agent_context.agent_headers`. Trace consumers decide how to interpret the headers and must tolerate unknown names, values, and embedded JSON fields. Captured headers do not change request placement or evict cached blocks. See [Agent Harnesses](agent-harnesses.mdx#agent-headers) for capture rules and limits. Older frontends cannot supply the map during a rolling upgrade.
 
-For chat streams, Dynamo records finish metadata after parser and jail rewrites. Completion streams record the final OpenAI-compatible completion finish reason.
+For chat streams, Dynamo records finish metadata after parser and jail rewrites. Completion streams record the final OpenAI-compatible completion finish reason. The shared `/generate` handler records backend finish metadata when agent session headers are present. This applies to SGLang, vLLM, and custom format plugins. These routes do not parse tool-call names or IDs.
 
 > [!WARNING]
-> Request tracing currently covers eligible Rust OpenAI chat-completions and completions requests. It skips unsupported replay shapes, including `n > 1`, `best_of > 1`, `prompt_embeds`, multimodal inputs, and requests without a tracker or usable KV cache block size. Sinks use best-effort delivery and can drop records when they lag, so check warnings and validate row counts before treating a capture as complete.
+> Request tracing currently covers eligible Rust OpenAI chat-completions, completions, and plugin `/generate` requests. It skips unsupported replay shapes, including `n > 1`, `best_of > 1`, `prompt_embeds`, multimodal inputs, and requests without a tracker or usable KV cache block size. Sinks use best-effort delivery and can drop records when they lag, so check warnings and validate row counts before treating a capture as complete.
