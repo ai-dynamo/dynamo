@@ -68,6 +68,25 @@ async def test_standard_handler_preserves_administrative_registration_capacity(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("quarantined", [False, True])
+async def test_admin_name_cannot_reclaim_quarantined_rollback_id(
+    monkeypatch, quarantined
+):
+    handler = _make_prefill_handler()
+    if quarantined:
+        handler._lora_state.rollback_reserved_ids.add(123)
+        handler._lora_state.uncertain_engine_lora_ids.add(123)
+    monkeypatch.setattr(handlers, "lora_name_to_id", lambda _name: 123)
+
+    reserved = await handler._reserve_admin_lora_slot("<rollback-reserved>", None)
+
+    assert reserved == (124 if quarantined else 123)
+    if quarantined:
+        assert 123 in handler._lora_state.rollback_reserved_ids
+        assert 123 in handler._lora_state.uncertain_engine_lora_ids
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "generation_error", [None, RuntimeError("engine failed"), GeneratorExit()]
 )
