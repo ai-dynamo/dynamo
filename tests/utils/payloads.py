@@ -1694,12 +1694,17 @@ class LoraLifecycleChatPayload(LoraTestChatPayload):
     inference, unloads it, checks that the adapter is gone from the worker and
     the frontend while the base model keeps serving, and then reloads it. The
     harness requests that follow run against the reloaded adapter.
+
+    Requests use greedy decoding, so the adapter's answer must differ from the
+    base model's, and the reloaded adapter must repeat its first answer. The
+    keyword check alone would also pass if the base weights served the request.
     """
 
     def __init__(self, body: dict, base_model: str, **kwargs: Any):
         super().__init__(body=body, **kwargs)
         self.base_model = base_model
         self._lifecycle_done = False
+        self._adapter_content: Optional[str] = None
 
     def _system_url(self, path: str) -> str:
         return f"http://{self.host}:{self.system_ports[0]}/{path.lstrip('/')}"
@@ -1720,7 +1725,7 @@ class LoraLifecycleChatPayload(LoraTestChatPayload):
         assert (
             self.lora_name in self._listed_loras()
         ), f"Loaded LoRA '{self.lora_name}' missing from worker /v1/loras"
-        self.process_response(self._post_chat(self.body))
+        adapter_content = self.process_response(self._post_chat(self.body))
 
         logger.info(f"Unloading LoRA adapter: {self.lora_name}")
         response = requests.delete(
@@ -1741,11 +1746,25 @@ class LoraLifecycleChatPayload(LoraTestChatPayload):
         ), f"Request to unloaded LoRA returned {response.status_code}, expected 404: {response.text}"
 
         response = self._post_chat({**self.body, "model": self.base_model})
-        ChatPayload.extract_content(response)
+        base_content = ChatPayload.extract_content(response)
+        assert adapter_content != base_content, (
+            f"LoRA '{self.lora_name}' answered exactly like base model "
+            f"'{self.base_model}', so the adapter weights may not be applied: "
+            f"{adapter_content!r}"
+        )
 
         # The next url() call reloads the adapter for the harness requests.
+        self._adapter_content = adapter_content
         self._lora_loaded = False
         self._lifecycle_done = True
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        if self._adapter_content is not None:
+            assert content == self._adapter_content, (
+                f"Reloaded LoRA '{self.lora_name}' answered differently than "
+                f"before unload: {content!r} != {self._adapter_content!r}"
+            )
 
     def url(self) -> str:
         """Run load/unload once, reload the LoRA, then return URL"""

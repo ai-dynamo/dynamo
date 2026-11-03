@@ -28,6 +28,8 @@ LORA = "org/test-lora"
 BASE = "org/base-model"
 SYSTEM = f"http://localhost:{DefaultPort.SYSTEM1.value}"
 FRONTEND = f"http://localhost:{DefaultPort.FRONTEND.value}"
+ADAPTER_ANSWER = "Deep learning trains neural networks on data."
+BASE_ANSWER = "Deep learning is a kind of machine learning model."
 
 
 def _response(status_code: int = 200, body: Any = None) -> MagicMock:
@@ -45,9 +47,15 @@ def _response(status_code: int = 200, body: Any = None) -> MagicMock:
 class FakeDeployment:
     """One worker plus frontend whose state is a single loaded flag."""
 
-    def __init__(self, unload_status: int = 200):
+    def __init__(
+        self,
+        unload_status: int = 200,
+        adapter_answers: tuple[str, ...] = (ADAPTER_ANSWER,),
+    ):
         self.loaded = False
         self.unload_status = unload_status
+        # One adapter answer per successful adapter request; the last repeats.
+        self.adapter_answers = list(adapter_answers)
         self.calls: list[tuple[str, str, Any]] = []
 
     def get(self, url: str, timeout: float = 0) -> MagicMock:
@@ -67,9 +75,13 @@ class FakeDeployment:
         if url == f"{FRONTEND}/v1/chat/completions":
             if json["model"] == LORA and not self.loaded:
                 return _response(404, {"message": "Model not found"})
-            return _response(
-                body={"choices": [{"message": {"content": "A neural network."}}]}
-            )
+            if json["model"] == LORA:
+                answer = self.adapter_answers[0]
+                if len(self.adapter_answers) > 1:
+                    self.adapter_answers.pop(0)
+            else:
+                answer = BASE_ANSWER
+            return _response(body={"choices": [{"message": {"content": answer}}]})
         raise AssertionError(f"unexpected POST {url}")
 
     def delete(self, url: str, timeout: float = 0) -> MagicMock:
@@ -136,3 +148,37 @@ def test_unload_failure_raises(monkeypatch):
 
     with pytest.raises(RuntimeError, match="Failed to unload LoRA adapter"):
         _payload().url()
+
+
+def test_adapter_matching_base_model_raises(monkeypatch):
+    """An adapter that answers like the base model fails the lifecycle."""
+    deployment = FakeDeployment(adapter_answers=(BASE_ANSWER,))
+    _install(monkeypatch, deployment)
+
+    with pytest.raises(AssertionError, match="adapter weights may not be applied"):
+        _payload().url()
+
+
+def test_reloaded_adapter_must_repeat_first_answer(monkeypatch):
+    """A reloaded adapter that serves base weights fails harness validation."""
+    deployment = FakeDeployment(adapter_answers=(ADAPTER_ANSWER, BASE_ANSWER))
+    _install(monkeypatch, deployment)
+    payload = _payload()
+
+    url = payload.url()
+    response = requests.post(url, json=payload.body, timeout=payload.timeout)
+
+    with pytest.raises(AssertionError, match="answered differently than before"):
+        payload.process_response(response)
+
+
+def test_reloaded_adapter_repeating_first_answer_passes(monkeypatch):
+    """The harness request passes when the reloaded adapter repeats itself."""
+    deployment = FakeDeployment()
+    _install(monkeypatch, deployment)
+    payload = _payload()
+
+    url = payload.url()
+    response = requests.post(url, json=payload.body, timeout=payload.timeout)
+
+    assert payload.process_response(response) == ADAPTER_ANSWER
