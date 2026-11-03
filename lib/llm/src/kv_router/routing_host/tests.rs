@@ -2792,25 +2792,31 @@ async fn runtime_lora_rechecks_worker_metadata_after_queued_selection() {
     let filter = Arc::new(LoraFilter::new(LoraRoutingTable::new(), tracker));
     let entered = Arc::new(Notify::new());
     let resumed = Arc::new(Notify::new());
-    let chooser = KvRouter::new(
-        endpoint,
-        client.clone(),
-        configs_rx,
-        None,
-        16,
-        SelectionPolicySource::Registry,
-        Some(KvRouterConfig {
-            skip_initial_worker_wait: true,
-            use_kv_events: false,
-            router_track_active_blocks: false,
-            ..Default::default()
-        }),
-        None,
-        "decode",
-        None,
-        false,
-        None,
-        Some(filter),
+    let chooser = temp_env::async_with_vars(
+        [
+            ("DYN_LORA_ENABLED", Some("true")),
+            ("DYN_LORA_RUNTIME_LOAD_ENABLED", Some("true")),
+        ],
+        KvRouter::new(
+            endpoint,
+            client.clone(),
+            configs_rx,
+            None,
+            16,
+            SelectionPolicySource::Registry,
+            Some(KvRouterConfig {
+                skip_initial_worker_wait: true,
+                use_kv_events: false,
+                router_track_active_blocks: false,
+                ..Default::default()
+            }),
+            None,
+            "decode",
+            None,
+            false,
+            None,
+            Some(filter),
+        ),
     )
     .await
     .unwrap()
