@@ -416,20 +416,18 @@ def _validate_snapshot(
             or any(ord(char) < 0x20 or ord(char) == 0x7F for char in raw_targets)
         ):
             raise _runtime_error(422, "invalid_lora_adapter")
-        targets = None
     elif isinstance(raw_targets, list):
-        targets = raw_targets
-        if not targets or any(
+        if not raw_targets or any(
             not isinstance(target, str)
             or not target
             or len(target.encode("utf-8")) > 256
             or any(ord(char) < 0x20 or ord(char) == 0x7F for char in target)
-            for target in targets
+            for target in raw_targets
         ):
             raise _runtime_error(422, "invalid_lora_adapter")
     else:
         raise _runtime_error(422, "invalid_lora_adapter")
-    tensor_names = _validate_safetensors(
+    _validate_safetensors(
         weights_path,
         max_lora_rank,
         num_experts,
@@ -440,8 +438,4 @@ def _validate_snapshot(
         _validate_safetensors(
             embeddings_path, expected_metadata=scanned_files.get(embeddings_path)
         )
-    if targets is not None and any(
-        not any(target in name for name in tensor_names) for target in targets
-    ):
-        raise _runtime_error(422, "invalid_lora_adapter")
     return canonical_snapshot
