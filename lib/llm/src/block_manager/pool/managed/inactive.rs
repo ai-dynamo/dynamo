@@ -529,10 +529,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
 pub(crate) mod tests {
     use crate::{
         block_manager::{
-            block::{
-                Blocks, PrivateBlockExt, locality::Local, registry::BlockRegistry,
-                state::CompleteState,
-            },
+            block::{Blocks, locality::Local, registry::BlockRegistry, state::CompleteState},
             events::NullEventManager,
             kv_consolidator::StorageTier,
             layout::{BlockLayout, FullyContiguous, LayoutConfigBuilder},
