@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::cache::LoRACache;
-use crate::hub::{self, HfRepoSpec};
+use crate::huggingface::{self as hub, HfRepoSpec};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use aws_credential_types::provider::{ProvideCredentials, SharedCredentialsProvider};

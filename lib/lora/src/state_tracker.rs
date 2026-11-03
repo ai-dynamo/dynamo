@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 
-use crate::lora::LoraInfo;
+use crate::LoraInfo;
 use dynamo_kv_router::protocols::WorkerWithDpRank;
 
 const DEFAULT_MAX_GPU_LORA_COUNT: u32 = 4;
@@ -310,7 +310,7 @@ impl LoraStateTracker {
     ///
     /// Desired entries are installed before obsolete entries are withdrawn, so lock-free
     /// routing readers never observe an unchanged adapter as temporarily unloaded.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn replace_worker_projection(
         &self,
         worker: WorkerWithDpRank,
@@ -511,7 +511,7 @@ impl Default for LoraStateTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lora::LoraInfo;
+    use crate::LoraInfo;
 
     fn make_worker(id: u64) -> WorkerWithDpRank {
         WorkerWithDpRank::new(id, 0)

@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use dynamo_kv_router::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
 
-use crate::lora::config::PredictorType;
-use crate::lora::predictor::{EmaPredictor, LoadPredictor};
+use crate::config::PredictorType;
+use crate::predictor::{EmaPredictor, LoadPredictor};
 
 // ─── BucketedRateCounter ────────────────────────────────────────────────────
 
@@ -248,7 +248,7 @@ impl Default for LoadEstimatorConfig {
 impl LoadEstimatorConfig {
     /// Derive a config synchronized with the allocation controller.
     pub fn from_controller_timestep(timestep_secs: u64, multiplier: u64) -> Self {
-        let min_window = crate::lora::config::MIN_RATE_WINDOW_SECS;
+        let min_window = crate::config::MIN_RATE_WINDOW_SECS;
         Self {
             // saturating_mul: both operands are operator-supplied and could
             // otherwise overflow u64.

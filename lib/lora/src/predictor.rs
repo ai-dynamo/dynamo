@@ -3,7 +3,7 @@
 
 //! Load prediction traits and implementations for smoothing per-LoRA load estimates.
 
-use crate::lora::load_estimator::BucketedRateCounter;
+use crate::load_estimator::BucketedRateCounter;
 use std::time::Instant;
 
 /// Trait for load predictors that smooth or forecast per-LoRA load.
