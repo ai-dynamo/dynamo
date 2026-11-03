@@ -9,8 +9,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, LazyLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -23,6 +24,7 @@ use dynamo_llm::kv_router::{FindBestMatchOutcome, ManagedKvRouter, PrefillRouter
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::extensions::{NvExt, NvExtProvider, routing_constraints_to_kv};
+use dynamo_llm::tokenizers::Encoding;
 use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
 use dynamo_llm::worker_type::WorkerType;
 use dynamo_protocols::types::Prompt;
@@ -32,6 +34,7 @@ use dynamo_runtime::discovery::{
 use dynamo_runtime::namespace::{NamespaceFilter, NamespacePrefixMode};
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::epp_router::{endpoint_in_subset, requested_policy_class};
@@ -74,6 +77,25 @@ struct TokenizeTimings {
     blocking_wait: Option<Duration>,
     template: Option<Duration>,
     tokenize: Option<Duration>,
+}
+
+/// Chat renders and tokenizations that may run at once: one per core, as the
+/// frontend's runtime caps its blocking pool at the core count. The EPP's
+/// runtime keeps tokio's default of 512 blocking threads, so without this a
+/// burst could tokenize hundreds of prompts at once and take the CPU from the
+/// async workers that relay every other stream.
+static TOKENIZE_SLOTS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| {
+    let cores = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
+    Arc::new(Semaphore::new(cores))
+});
+
+/// The encoding's token ids, taking the buffer when the encoder already holds
+/// one, as the frontend's preprocessor does.
+fn into_token_ids(encoding: Encoding) -> Vec<u32> {
+    match encoding {
+        Encoding::Sp(token_ids) => token_ids,
+        encoding => encoding.token_ids().to_vec(),
+    }
 }
 
 /// Validate `DYN_KUBE_DISCOVERY_MODE` and report whether *container* discovery
@@ -349,8 +371,10 @@ impl Router {
     /// Rendering and tokenizing a long prompt takes tens of milliseconds of
     /// CPU, so it runs on the blocking pool, as the frontend's preprocessor
     /// does. Inline, it held an async worker that also streams other requests'
-    /// bodies and response tokens through this EPP. A cancelled pick does not
-    /// stop the blocking task; it finishes and its result is dropped.
+    /// bodies and response tokens through this EPP. At most one render per
+    /// core runs at a time (see [`TOKENIZE_SLOTS`]). A pick cancelled while it
+    /// waits for a slot never starts its render; one cancelled during the
+    /// render lets it finish and drops the result.
     async fn tokenize_chat(
         &self,
         request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
@@ -366,7 +390,9 @@ impl Router {
 
         let preprocessor = Arc::clone(&self.preprocessor);
         let queued = Instant::now();
-        let (encoding, timings) = tokio::task::spawn_blocking(move || {
+        let slot = Arc::clone(&TOKENIZE_SLOTS).acquire_owned().await?;
+        let (tokens, timings) = tokio::task::spawn_blocking(move || {
+            let _slot = slot;
             let started = Instant::now();
             let blocking_wait = started - queued;
             metrics::observe_stage(Stage::BlockingWait, blocking_wait);
@@ -386,7 +412,9 @@ impl Router {
                 template: Some(template),
                 tokenize: Some(tokenize),
             };
-            encoding.map(|encoding| (encoding, timings))
+            // Take the ids here, so a large encoding is freed on this thread
+            // rather than on the async worker.
+            encoding.map(|encoding| (into_token_ids(encoding), timings))
         })
         .await
         .map_err(|e| match e.try_into_panic() {
@@ -396,7 +424,7 @@ impl Router {
             Err(cancelled) => anyhow::anyhow!("tokenization task was cancelled: {cancelled}"),
         })??;
         Ok(TokenizeResult {
-            tokens: encoding.token_ids().to_vec(),
+            tokens,
             cache_namespace,
             priority_jump,
             strict_priority,
@@ -1344,30 +1372,33 @@ fn spawn_prefill_discovery_watcher(
                 let target_namespace = target_namespace.clone();
                 let runtime = tokio::runtime::Handle::current();
                 tokio::task::spawn_blocking(move || {
-                    let instances = runtime
+                    runtime
                         .block_on(discovery.list(DiscoveryQuery::AllModels))
-                        .ok()?;
-                    find_prefill_worker(instances, &target_namespace)
+                        .map(|instances| prefill_workers(instances, &target_namespace))
+                        .unwrap_or_default()
                 })
             };
             match pass.await {
-                Ok(Some(found)) => {
-                    tracing::info!(
-                        model_name = found.model_name,
-                        namespace = found.namespace.as_str(),
-                        "Prefill worker discovered, activating PrefillRouter"
-                    );
-                    if let Ok(ns) = drt.namespace(&found.namespace)
-                        && let Ok(comp) = ns.component(&found.component)
-                    {
-                        let ep = comp.endpoint(&found.endpoint);
-                        if tx.send(ep).is_err() {
-                            tracing::debug!("PrefillRouter activation channel already closed");
+                // Try each in turn: one whose endpoint cannot be built must
+                // not hide the prefill workers listed after it.
+                Ok(found) => {
+                    for worker in found {
+                        tracing::info!(
+                            model_name = worker.model_name,
+                            namespace = worker.namespace.as_str(),
+                            "Prefill worker discovered, activating PrefillRouter"
+                        );
+                        if let Ok(ns) = drt.namespace(&worker.namespace)
+                            && let Ok(comp) = ns.component(&worker.component)
+                        {
+                            let ep = comp.endpoint(&worker.endpoint);
+                            if tx.send(ep).is_err() {
+                                tracing::debug!("PrefillRouter activation channel already closed");
+                            }
+                            return;
                         }
-                        return;
                     }
                 }
-                Ok(None) => {}
                 Err(error) => tracing::warn!(%error, "Prefill worker discovery pass failed"),
             }
 
@@ -1384,35 +1415,38 @@ struct PrefillWorker {
     model_name: String,
 }
 
-/// The first prefill worker in `target_namespace`, if `instances` hold one.
-fn find_prefill_worker(
+/// The prefill workers in `target_namespace`, in listing order.
+fn prefill_workers(
     instances: Vec<DiscoveryInstance>,
     target_namespace: &str,
-) -> Option<PrefillWorker> {
-    instances.into_iter().find_map(|instance| {
-        let DiscoveryInstance::Model {
-            namespace,
-            component,
-            endpoint,
-            ..
-        } = &instance
-        else {
-            return None;
-        };
-        if namespace != target_namespace {
-            return None;
-        }
-        let card = instance.deserialize_model::<ModelDeploymentCard>().ok()?;
-        if card.effective_worker_type() != WorkerType::Prefill {
-            return None;
-        }
-        Some(PrefillWorker {
-            namespace: namespace.clone(),
-            component: component.clone(),
-            endpoint: endpoint.clone(),
-            model_name: card.name().to_string(),
+) -> Vec<PrefillWorker> {
+    instances
+        .into_iter()
+        .filter_map(|instance| {
+            let DiscoveryInstance::Model {
+                namespace,
+                component,
+                endpoint,
+                ..
+            } = &instance
+            else {
+                return None;
+            };
+            if namespace != target_namespace {
+                return None;
+            }
+            let card = instance.deserialize_model::<ModelDeploymentCard>().ok()?;
+            if card.effective_worker_type() != WorkerType::Prefill {
+                return None;
+            }
+            Some(PrefillWorker {
+                namespace: namespace.clone(),
+                component: component.clone(),
+                endpoint: endpoint.clone(),
+                model_name: card.name().to_string(),
+            })
         })
-    })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -2923,5 +2957,34 @@ mod tests {
             endpoint_in_subset(&endpoint, &candidates, &candidate_ips),
             "bracketed IPv6 endpoint must match its bare-IP candidate"
         );
+    }
+
+    /// Every prefill worker in the namespace is listed, in order, so the
+    /// watcher can move past one whose endpoint it cannot build.
+    #[test]
+    fn prefill_workers_lists_every_prefill_worker_in_the_namespace() {
+        let instance = |namespace: &str, component: &str, worker_type: WorkerType| {
+            let mut card = ModelDeploymentCard::with_name_only("test-model");
+            card.worker_type = Some(worker_type);
+            DiscoveryInstance::Model {
+                namespace: namespace.to_string(),
+                component: component.to_string(),
+                endpoint: "generate".to_string(),
+                instance_id: 1,
+                card_json: serde_json::to_value(&card).expect("card serializes"),
+                model_suffix: None,
+            }
+        };
+        let found = prefill_workers(
+            vec![
+                instance("ns", "prefill-a", WorkerType::Prefill),
+                instance("ns", "decode", WorkerType::Decode),
+                instance("other", "prefill-c", WorkerType::Prefill),
+                instance("ns", "prefill-b", WorkerType::Prefill),
+            ],
+            "ns",
+        );
+        let components: Vec<&str> = found.iter().map(|w| w.component.as_str()).collect();
+        assert_eq!(components, ["prefill-a", "prefill-b"]);
     }
 }

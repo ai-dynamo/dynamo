@@ -19,7 +19,9 @@ use axum::{
     routing::get,
 };
 use dynamo_llm::http::service::metrics::generate_log_buckets;
-use prometheus::{Encoder, HistogramOpts, HistogramVec, Registry, TEXT_FORMAT, TextEncoder};
+use prometheus::{
+    Encoder, Histogram, HistogramOpts, HistogramVec, Registry, TEXT_FORMAT, TextEncoder,
+};
 
 use crate::tokio_runtime::TaskKind;
 
@@ -108,11 +110,14 @@ pub enum Stage {
     ModelProbe,
     /// Parsing the request body into the typed request.
     Parse,
-    /// Waiting for a blocking-pool thread to start the chat template.
+    /// Chat requests: waiting for a tokenization slot (one per core) and a
+    /// blocking-pool thread before the chat template.
     BlockingWait,
     /// Rendering the chat template.
     Template,
-    /// Tokenizing the rendered prompt, excluding any wait for a thread.
+    /// Tokenizing the prompt: for chat, the rendered prompt, after
+    /// [`Stage::BlockingWait`]; for a completions text prompt, including the
+    /// tokenizer's own wait for a blocking-pool thread.
     Tokenize,
     /// Choosing the prefill and decode workers, including router queueing.
     Select,
@@ -129,11 +134,12 @@ pub enum Stage {
     ResponseHeaders,
     /// Routing decision ready until the first non-empty response body
     /// chunk: the gateway, sidecar and worker producing the first token.
+    /// Streamed 2xx responses only.
     FirstResponse,
     /// Request headers received until the first non-empty response body
     /// chunk: the time to first token as the EPP sees it. Client time to
     /// first token minus this is the time spent outside the EPP's view,
-    /// without comparing clocks across nodes.
+    /// without comparing clocks across nodes. Streamed 2xx responses only.
     EppTtft,
 }
 
@@ -180,7 +186,7 @@ static STAGE_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| {
             "dynamo_epp_stage_duration_seconds",
             "Time one routed request spends in each EPP stage",
         )
-        .buckets(generate_log_buckets(0.000_05, 60.0, 24)),
+        .buckets(generate_log_buckets(0.000_01, 60.0, 26)),
         &["model", "stage"],
     )
     .expect("stage histogram options are statically valid");
@@ -216,7 +222,7 @@ static TASK_POLL_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| {
             "Task polls that held an async worker thread at least DYN_EPP_TASK_METRICS_MIN_US",
         )
         .buckets(stall_buckets()),
-        &["model", "task"],
+        &["task"],
     )
     .expect("task_poll histogram options are statically valid");
     REGISTRY
@@ -233,7 +239,7 @@ static TASK_SCHEDULE_DELAY_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| {
              woken and being polled",
         )
         .buckets(stall_buckets()),
-        &["model", "task"],
+        &["task"],
     )
     .expect("task_schedule_delay histogram options are statically valid");
     REGISTRY
@@ -242,14 +248,13 @@ static TASK_SCHEDULE_DELAY_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| {
     histogram
 });
 
-static EVENT_LOOP_DELAY_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| {
-    let histogram = HistogramVec::new(
+static EVENT_LOOP_DELAY_SECONDS: LazyLock<Histogram> = LazyLock::new(|| {
+    let histogram = Histogram::with_opts(
         HistogramOpts::new(
             "dynamo_epp_event_loop_delay_seconds",
             "How late a 10 ms sleep on the async runtime wakes",
         )
         .buckets(stall_buckets()),
-        &["model"],
     )
     .expect("event_loop_delay histogram options are statically valid");
     REGISTRY
@@ -258,36 +263,36 @@ static EVENT_LOOP_DELAY_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| {
     histogram
 });
 
+// The stall families describe the process's runtime, not a request, so they
+// carry no `model` label. Their first observations also come before discovery
+// binds the served model.
+
 pub(crate) fn observe_task_poll(task: TaskKind, elapsed: Duration) {
     TASK_POLL_SECONDS
-        .with_label_values(&[served_model_label(), task.label()])
+        .with_label_values(&[task.label()])
         .observe(elapsed.as_secs_f64());
 }
 
 pub(crate) fn observe_task_schedule_delay(task: TaskKind, delay: Duration) {
     TASK_SCHEDULE_DELAY_SECONDS
-        .with_label_values(&[served_model_label(), task.label()])
+        .with_label_values(&[task.label()])
         .observe(delay.as_secs_f64());
 }
 
 pub(crate) fn observe_event_loop_delay(delay: Duration) {
-    EVENT_LOOP_DELAY_SECONDS
-        .with_label_values(&[served_model_label()])
-        .observe(delay.as_secs_f64());
+    EVENT_LOOP_DELAY_SECONDS.observe(delay.as_secs_f64());
 }
 
 #[cfg(test)]
 pub(crate) fn task_polls_recorded(task: TaskKind) -> u64 {
     TASK_POLL_SECONDS
-        .with_label_values(&[served_model_label(), task.label()])
+        .with_label_values(&[task.label()])
         .get_sample_count()
 }
 
 #[cfg(test)]
 pub(crate) fn event_loop_delays_recorded() -> u64 {
-    EVENT_LOOP_DELAY_SECONDS
-        .with_label_values(&[served_model_label()])
-        .get_sample_count()
+    EVENT_LOOP_DELAY_SECONDS.get_sample_count()
 }
 
 /// Register every family up front, so a scrape shows them before the first
@@ -300,20 +305,9 @@ fn register_all() {
     LazyLock::force(&EVENT_LOOP_DELAY_SECONDS);
 }
 
-/// Aborts the event-loop watcher when the metrics server stops.
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
-/// Serve `/metrics` until the process exits, and watch the async runtime for
-/// stalls (see [`crate::tokio_runtime`]) for as long as it does.
+/// Serve `/metrics` until the process exits.
 pub async fn serve(port: u16) -> anyhow::Result<()> {
     register_all();
-    let _watcher = AbortOnDrop(tokio::spawn(crate::tokio_runtime::watch_event_loop()));
     let app = AxumRouter::new().route("/metrics", get(render));
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     tracing::info!(port, "Serving Prometheus metrics on /metrics");
@@ -470,12 +464,9 @@ mod tests {
     async fn scrape_lists_the_stage_and_stall_families() {
         register_all();
         // A labeled family appears in a scrape only once it has a series, so
-        // record one of each here rather than rely on another test.
+        // record a stage here rather than rely on another test.
         const MODEL: &str = "scrape-test";
         observe_stage_for(MODEL, Stage::Pick, Duration::from_millis(1));
-        EVENT_LOOP_DELAY_SECONDS
-            .with_label_values(&[MODEL])
-            .observe(0.001);
         let response = render().await.into_response();
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await

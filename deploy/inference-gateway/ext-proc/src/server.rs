@@ -145,6 +145,14 @@ impl RequestContext {
         self.headers_received_at.map(|received| received.elapsed())
     }
 
+    /// Whether the response status is 2xx, or unknown because the gateway
+    /// sent no `:status`.
+    fn response_succeeded(&self) -> bool {
+        self.response_headers
+            .get(":status")
+            .is_none_or(|status| status.starts_with('2'))
+    }
+
     /// Advance the state machine and collect responses that are ready to send.
     fn drain_pending_responses(&mut self) -> Vec<ProcessingResponse> {
         let mut out = Vec::new();
@@ -302,15 +310,18 @@ impl StreamTrace {
 
     /// Whether the stream stalled somewhere the EPP can see: a response chunk
     /// held back, a slow trip from the routing decision to the response
-    /// headers, or a slow body or pick.
-    fn is_slow(&self) -> bool {
+    /// headers, or a slow body or pick. `end` is the stream's end, which
+    /// bounds a pick that never finished, because the request was cancelled
+    /// or failed while it waited.
+    fn is_slow(&self, end: Option<Duration>) -> bool {
         let elapsed = |from: Option<Duration>, to: Option<Duration>| {
             from.zip(to).map(|(from, to)| to.saturating_sub(from))
         };
+        let pick = elapsed(self.body_eos, self.routed.or(end));
         self.max_chunk_gap >= SLOW_GAP
             || elapsed(self.routed, self.response_headers).is_some_and(|d| d >= SLOW_GAP)
             || self.body_eos.is_some_and(|d| d >= SLOW_PHASE)
-            || elapsed(self.body_eos, self.routed).is_some_and(|d| d >= SLOW_PHASE)
+            || pick.is_some_and(|d| d >= SLOW_PHASE)
     }
 }
 
@@ -434,8 +445,8 @@ fn log_stream_summary(ctx: &RequestContext) {
     } else {
         Outcome::ClosedEarly
     });
-    let slow = trace.is_slow();
     let end = ctx.since_headers();
+    let slow = trace.is_slow(end);
     macro_rules! summary {
         ($level:ident, $suppressed:expr) => {
             tracing::$level!(
@@ -1023,11 +1034,20 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                 && !body.body.is_empty()
                             {
                                 ctx.prefill_complete_signaled = true;
-                                if let Some(routed) = ctx.routed_at.take() {
-                                    metrics::observe_stage(Stage::FirstResponse, routed.elapsed());
-                                }
-                                if let Some(received) = ctx.headers_received_at {
-                                    metrics::observe_stage(Stage::EppTtft, received.elapsed());
+                                // A first token only in a streamed 2xx response:
+                                // a unary response's first chunk is the whole
+                                // answer, and an error body is no token.
+                                let routed = ctx.routed_at.take();
+                                if ctx.model_server_streaming && ctx.response_succeeded() {
+                                    if let Some(routed) = routed {
+                                        metrics::observe_stage(
+                                            Stage::FirstResponse,
+                                            routed.elapsed(),
+                                        );
+                                    }
+                                    if let Some(received) = ctx.headers_received_at {
+                                        metrics::observe_stage(Stage::EppTtft, received.elapsed());
+                                    }
                                 }
                                 ctx.trace.first_chunk = ctx.since_headers();
                                 // Hand back the picker's own booking id (falls
@@ -2281,10 +2301,13 @@ mod tests {
         assert_eq!(trace.chunks, 3);
         assert_eq!(trace.max_chunk_gap, ms(50));
         assert_eq!(trace.notable_chunk_gaps, 1);
-        assert!(!trace.is_slow());
+        assert!(!trace.is_slow(None));
 
         trace.record_chunk(start + ms(170));
-        assert!(trace.is_slow(), "a 110 ms hold between chunks is a stall");
+        assert!(
+            trace.is_slow(None),
+            "a 110 ms hold between chunks is a stall"
+        );
     }
 
     #[test]
@@ -2296,12 +2319,45 @@ mod tests {
             response_headers: Some(ms(response_headers)),
             ..Default::default()
         };
-        assert!(!trace(5, 20, 30).is_slow());
+        assert!(!trace(5, 20, 30).is_slow(None));
         assert!(
-            trace(5, 20, 150).is_slow(),
+            trace(5, 20, 150).is_slow(None),
             "slow trip to the sidecar and back"
         );
-        assert!(trace(5, 1_200, 1_210).is_slow(), "slow pick");
-        assert!(trace(1_100, 1_110, 1_120).is_slow(), "slow request body");
+        assert!(trace(5, 1_200, 1_210).is_slow(None), "slow pick");
+        assert!(
+            trace(1_100, 1_110, 1_120).is_slow(None),
+            "slow request body"
+        );
+    }
+
+    /// A pick that never finishes, because the gateway gave up on it or it
+    /// failed, is as slow as the time it ran before the stream ended.
+    #[test]
+    fn an_unfinished_pick_marks_the_stream_slow() {
+        let ms = Duration::from_millis;
+        let waiting = StreamTrace {
+            body_eos: Some(ms(5)),
+            ..Default::default()
+        };
+        assert!(!waiting.is_slow(Some(ms(300))));
+        assert!(
+            waiting.is_slow(Some(ms(4_000))),
+            "a pick cancelled after 4 s is slow"
+        );
+    }
+
+    /// The first-token stages count only a 2xx response, or one whose status
+    /// the gateway did not send.
+    #[test]
+    fn only_a_2xx_or_missing_status_is_a_success() {
+        let mut ctx = RequestContext::new();
+        assert!(ctx.response_succeeded());
+        ctx.response_headers
+            .insert(":status".to_string(), "200".to_string());
+        assert!(ctx.response_succeeded());
+        ctx.response_headers
+            .insert(":status".to_string(), "503".to_string());
+        assert!(!ctx.response_succeeded());
     }
 }

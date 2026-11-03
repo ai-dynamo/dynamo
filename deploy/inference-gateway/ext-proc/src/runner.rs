@@ -172,6 +172,7 @@ async fn wait_for_shutdown_signal() {
 struct BackgroundTasks {
     health_task: JoinHandle<()>,
     metrics_task: Option<JoinHandle<()>>,
+    stall_watcher: JoinHandle<()>,
     shutdown_task: JoinHandle<()>,
 }
 
@@ -180,6 +181,7 @@ impl BackgroundTasks {
         let Self {
             health_task,
             metrics_task,
+            stall_watcher,
             shutdown_task,
         } = self;
 
@@ -187,12 +189,14 @@ impl BackgroundTasks {
         if let Some(task) = &metrics_task {
             task.abort();
         }
+        stall_watcher.abort();
         shutdown_task.abort();
 
         let _ = health_task.await;
         if let Some(task) = metrics_task {
             let _ = task.await;
         }
+        let _ = stall_watcher.await;
         let _ = shutdown_task.await;
     }
 }
@@ -243,6 +247,9 @@ async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry
             }
         }))
     };
+    // Independent of the metrics server: the "EPP runtime stall" lines go to
+    // the log even when `/metrics` is disabled or fails to bind.
+    let stall_watcher = tokio::spawn(tokio_runtime::watch_event_loop());
 
     // Shutdown coordination: on SIGTERM/SIGINT, flip health to NOT_SERVING
     // (the gateway stops routing new requests to this EPP), allow the endpoint
@@ -278,6 +285,7 @@ async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry
     let background_tasks = BackgroundTasks {
         health_task,
         metrics_task,
+        stall_watcher,
         shutdown_task,
     };
 

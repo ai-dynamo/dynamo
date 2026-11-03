@@ -152,7 +152,16 @@ where
 /// runtime, where `block_in_place` is not available.
 pub(crate) fn off_runtime<T>(f: impl FnOnce() -> T) -> T {
     match tokio::runtime::Handle::try_current().map(|handle| handle.runtime_flavor()) {
-        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => {
+            let started = TASK_METRICS_MIN.get().map(|_| Instant::now());
+            let result = tokio::task::block_in_place(f);
+            // The worker's queue ran on another thread meanwhile, so the poll
+            // hooks leave this time out of the poll.
+            if let Some(started) = started {
+                OFF_RUNTIME.set(OFF_RUNTIME.get().saturating_add(started.elapsed()));
+            }
+            result
+        }
         _ => f(),
     }
 }
@@ -208,6 +217,9 @@ fn build_runtime_with(
 thread_local! {
     /// When the task on this worker thread started its current poll.
     static POLL_STARTED: Cell<Option<Instant>> = const { Cell::new(None) };
+    /// Time the current poll spent in [`off_runtime`], with the worker's
+    /// queue handed to another thread: not time the task held a worker.
+    static OFF_RUNTIME: Cell<Duration> = const { Cell::new(Duration::ZERO) };
 }
 
 struct TaskHooks {
@@ -224,6 +236,7 @@ impl TaskHooks {
             metrics::observe_task_schedule_delay(kind, delay);
             self.report(StallKind::ScheduleDelay, kind, meta, delay);
         }
+        OFF_RUNTIME.set(Duration::ZERO);
         POLL_STARTED.set(Some(Instant::now()));
     }
 
@@ -231,7 +244,7 @@ impl TaskHooks {
         let Some(started) = POLL_STARTED.take() else {
             return;
         };
-        let poll = started.elapsed();
+        let poll = started.elapsed().saturating_sub(OFF_RUNTIME.take());
         if poll >= self.min {
             let kind = TaskKind::of(meta.spawned_at());
             metrics::observe_task_poll(kind, poll);
@@ -279,7 +292,8 @@ struct Stall {
 }
 
 /// Time a 10 ms sleep forever, recording how late each one wakes, and log
-/// the stalls the task hooks queue. Runs next to the metrics server.
+/// the stalls the task hooks queue. Runs for the life of the EPP, whether or
+/// not the metrics server does.
 pub(crate) async fn watch_event_loop() {
     let stalls = STALL_EVENTS
         .lock()
@@ -348,11 +362,15 @@ mod tests {
         spawn(TaskKind::PrefillWatcher, future)
     }
 
+    /// Serializes the tests that count recorded polls, which are
+    /// process-wide.
+    static RECORDING: Mutex<()> = Mutex::new(());
+
     /// A task that holds its worker for 5 ms is recorded as a slow poll of
     /// its kind, and a task spawned some other way is labeled `other`.
     #[test]
     fn hooks_record_slow_polls_by_task_kind() {
-        metrics::set_served_model("test-model");
+        let _recording = RECORDING.lock().unwrap_or_else(PoisonError::into_inner);
         let runtime = build_runtime_with(Some(Duration::from_millis(1))).expect("runtime builds");
         let watcher_before = metrics::task_polls_recorded(TaskKind::PrefillWatcher);
         let other_before = metrics::task_polls_recorded(TaskKind::Other);
@@ -372,6 +390,28 @@ mod tests {
 
         assert!(metrics::task_polls_recorded(TaskKind::PrefillWatcher) > watcher_before);
         assert!(metrics::task_polls_recorded(TaskKind::Other) > other_before);
+    }
+
+    /// Time in `off_runtime`, with the worker's queue on another thread, is
+    /// not a slow poll.
+    #[test]
+    fn time_off_the_runtime_is_not_a_slow_poll() {
+        let _recording = RECORDING.lock().unwrap_or_else(PoisonError::into_inner);
+        let runtime = build_runtime_with(Some(Duration::from_millis(10))).expect("runtime builds");
+        let before = metrics::task_polls_recorded(TaskKind::PrefillWatcher);
+
+        runtime.block_on(async {
+            spawn_watcher(async {
+                off_runtime(|| std::thread::sleep(Duration::from_millis(50)));
+            })
+            .await
+            .expect("task runs");
+        });
+
+        assert_eq!(
+            metrics::task_polls_recorded(TaskKind::PrefillWatcher),
+            before
+        );
     }
 
     #[test]
@@ -401,7 +441,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn event_loop_watcher_records_its_delay() {
-        metrics::set_served_model("test-model");
         let before = metrics::event_loop_delays_recorded();
         let watcher = tokio::spawn(watch_event_loop());
         tokio::time::sleep(Duration::from_millis(60)).await;

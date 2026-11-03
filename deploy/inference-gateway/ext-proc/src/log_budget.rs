@@ -42,8 +42,11 @@ impl LogBudget {
     }
 
     fn take_at(&self, second: u64) -> Option<u64> {
+        // Only a later second opens a new window: a caller that read the
+        // clock just before another moved the window must not move it back
+        // and refill the budget.
         let window = self.window.load(Ordering::Relaxed);
-        if window != second
+        if second > window
             && self
                 .window
                 .compare_exchange(window, second, Ordering::Relaxed, Ordering::Relaxed)
@@ -77,5 +80,9 @@ mod tests {
         assert_eq!(budget.take_at(8), Some(2));
         assert_eq!(budget.take_at(8), Some(0));
         assert_eq!(budget.take_at(8), None);
+
+        // A caller still holding the previous second spends from the current
+        // window instead of refilling it.
+        assert_eq!(budget.take_at(7), None);
     }
 }

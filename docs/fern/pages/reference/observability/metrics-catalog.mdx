@@ -935,7 +935,7 @@ Requires the client to request usage accounting on streaming calls (`"stream_opt
 </ParamField>
 
 <ParamField path="dynamo_epp_task_poll_seconds" type="histogram">
-  Task polls that held an async worker thread for at least `DYN_EPP_TASK_METRICS_MIN_US` microseconds (default 1000), labeled by `task` (see the table below). Recorded only with `DYN_EPP_TASK_METRICS=1`. A slow poll names the kind of task that kept a worker from everything else queued on it.
+  Task polls that held an async worker thread for at least `DYN_EPP_TASK_METRICS_MIN_US` microseconds (default 1000), labeled by `task` (see the table below). Recorded only with `DYN_EPP_TASK_METRICS=1`. A slow poll names the kind of task that kept a worker from everything else queued on it. Time a poll spends in `block_in_place`, after the worker's queue has moved to another thread, does not count.
 </ParamField>
 
 <ParamField path="dynamo_epp_task_schedule_delay_seconds" type="histogram">
@@ -949,18 +949,18 @@ The `stage` label of `dynamo_epp_stage_duration_seconds`:
 | `receive_body` | From the request headers to the end of the request body: the gateway streaming the client's body to the EPP |
 | `model_probe` | Reading the `model` field out of the request body |
 | `parse` | Parsing the request body into the typed request |
-| `blocking_wait` | Waiting for a blocking-pool thread before rendering the chat template, for chat requests |
+| `blocking_wait` | Waiting for a tokenization slot (one per core) and a blocking-pool thread before rendering the chat template, for chat requests |
 | `template` | Rendering the chat template, for chat requests |
-| `tokenize` | Tokenizing the rendered prompt, or a text `/v1/completions` prompt |
+| `tokenize` | Tokenizing the rendered prompt, or a text `/v1/completions` prompt; for the latter it includes the tokenizer's own wait for a blocking-pool thread |
 | `select` | Choosing the prefill and decode workers, including router queueing |
 | `book` | Registering the request with the router's load bookkeeping |
 | `pick` | The whole worker pick: `parse` through `book` and the waits between them |
 | `rewrite` | Rewriting the forwarded body: injecting `nvext.token_data`, stripping `nvext`, setting the cache salt |
 | `response_headers` | From the routing decision to the response headers: the gateway sending the body to the sidecar, and the sidecar reading it and answering |
-| `first_response` | From the routing decision to the first non-empty response chunk: the gateway, sidecar and worker producing the first token |
-| `epp_ttft` | From the request headers to the first non-empty response chunk: the time to first token as the EPP sees it. The client's time to first token minus this is the time spent outside the EPP's view, without comparing clocks across nodes |
+| `first_response` | From the routing decision to the first non-empty response chunk: the gateway, sidecar and worker producing the first token. Streamed 2xx responses only |
+| `epp_ttft` | From the request headers to the first non-empty response chunk: the time to first token as the EPP sees it. The client's time to first token minus this is the time spent outside the EPP's view, without comparing clocks across nodes. Streamed 2xx responses only |
 
-`parse` through `book` are recorded when the EPP discovers Dynamo workers. In standalone mode, which tokenizes through a render service, only `receive_body`, `model_probe`, `pick`, `rewrite`, `response_headers`, `first_response` and `epp_ttft` are recorded. Every series carries the same `model` label as `dynamo_epp_cached_tokens`.
+`parse` through `book` are recorded when the EPP discovers Dynamo workers. In standalone mode, which tokenizes through a render service, only `receive_body`, `model_probe`, `pick`, `rewrite`, `response_headers`, `first_response` and `epp_ttft` are recorded. Every stage series carries the same `model` label as `dynamo_epp_cached_tokens`. The event-loop and task metrics describe the process's runtime and carry no `model` label.
 
 The `task` label of `dynamo_epp_task_poll_seconds` and `dynamo_epp_task_schedule_delay_seconds`:
 
@@ -980,7 +980,7 @@ These settings add signals for tracing latency through the EPP. "EPP runtime sta
 |---|---|---|
 | `DYN_EPP_TASK_METRICS` | off | `1` records `dynamo_epp_task_poll_seconds` and `dynamo_epp_task_schedule_delay_seconds`, and logs an "EPP runtime stall" warning for each poll or wait of 20 ms or more, with the task's kind, spawn site and id. It adds two clock reads to every task poll. |
 | `DYN_EPP_TASK_METRICS_MIN_US` | `1000` | The shortest poll or wait the task metrics record, in microseconds. |
-| `DYN_EPP_STREAM_SUMMARY` | `slow` | Which ext_proc streams get an "ext_proc stream summary" line at INFO: `slow` for streams with a response-chunk gap or a routing-to-response-headers time of 100 ms or more, or a body receipt or pick of 1 s or more, at most 20 lines per second; `all` for every stream, as a benchmark wants; `off` for none. Other streams' summaries are logged at DEBUG. |
+| `DYN_EPP_STREAM_SUMMARY` | `slow` | Which ext_proc streams get an "ext_proc stream summary" line at INFO: `slow` for streams with a response-chunk gap or a routing-to-response-headers time of 100 ms or more, or a body receipt or pick of 1 s or more (a pick that never finished counts until the stream ends), at most 20 lines per second; `all` for every stream, as a benchmark wants; `off` for none. Other streams' summaries are logged at DEBUG. |
 
 The summary line carries the request's `x-request-id` as `request_id`, its gateway connection (`conn_id`, `conn_streams`), its outcome, its body sizes, and offsets in microseconds from the request headers' arrival to the end of the body, the routing decision, the response headers, the first response chunk and the end of the stream, plus its largest response-chunk gap. The "Request routed" line carries the same `request_id` and the time each step of the pick took. The "ext_proc connection opened" and "ext_proc connection closed" lines name each connection's `conn_id`, peer and `task_id`.
 
