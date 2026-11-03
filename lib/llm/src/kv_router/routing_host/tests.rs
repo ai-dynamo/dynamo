@@ -35,6 +35,7 @@ use dynamo_runtime::{
 use tokio::sync::{Notify, mpsc, watch};
 
 use super::*;
+use crate::lora::{LoadEstimator, LoraFilter};
 use crate::{
     http::service::metrics::Metrics,
     kv_router::{RoutingLoadContext, routing_host::request_guard::RouteObservation},
@@ -134,6 +135,22 @@ async fn builtin_host_constructs_only_declared_capabilities() {
         .build()
         .await
         .unwrap();
+
+    let mut runtime_request = request();
+    runtime_request.routing = Some(RoutingHints {
+        lora_name: Some("dyn-lora-test".to_string()),
+        lora_resolution_version: Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION),
+        ..Default::default()
+    });
+    let error = match host.generate(Context::new(runtime_request)).await {
+        Err(error) => error,
+        Ok(_) => panic!("runtime LoRA requires an enabled routing filter"),
+    };
+    assert!(match_error_chain(
+        error.as_ref(),
+        &[ErrorType::Unavailable],
+        &[]
+    ));
 
     assert_eq!(host.required_worker_inputs(), WorkerInputs::NONE);
     assert!(host.hosted_occupancy.is_none());
@@ -500,9 +517,31 @@ async fn builtin_lora_keeps_separate_selection_and_cleanup() {
     );
     let filter = Arc::new(LoraFilter::new(routing_table, LoraStateTracker::new()));
     let estimator = Arc::new(LoadEstimator::new());
+    let mut runtime_config = ModelRuntimeConfig::default();
+    runtime_config
+        .taints
+        .insert("dynamo.runtime-lora/v2".into());
+    runtime_config
+        .set_engine_specific("supports_runtime_lora_resolution", true)
+        .unwrap();
+    runtime_config
+        .set_engine_specific("runtime_lora_protocol_versions", vec![2_u32])
+        .unwrap();
+    runtime_config
+        .set_engine_specific("runtime_lora_schemes", vec!["custom"])
+        .unwrap();
+    let (_runtime_configs_tx, runtime_configs_rx) =
+        watch::channel(HashMap::from([(worker_id, runtime_config)]));
+    let policy = crate::lora_routing::LoraCandidatePolicy::hosted(
+        filter,
+        Arc::clone(&estimator),
+        RouterMode::RoundRobin,
+        Some(runtime_configs_rx),
+    )
+    .unwrap();
     let host = RoutingHost::builder(client, RouterMode::RoundRobin)
         .load_context(load_context)
-        .lora((filter, Arc::clone(&estimator)))
+        .candidate_policy(Some(policy))
         .dispatch(Arc::clone(&dispatch) as LlmDispatch)
         .build()
         .await
@@ -522,6 +561,157 @@ async fn builtin_lora_keeps_separate_selection_and_cleanup() {
     assert_eq!(dispatch.worker_ids.lock().unwrap()[1], worker_id);
     assert!(!estimator.get_inflight_counts().contains_key("adapter"));
 
+    let mut incomplete_request = request();
+    incomplete_request.routing = Some(RoutingHints {
+        lora_name: Some("adapter".into()),
+        lora_source_uri: Some(crate::lora::runtime::RuntimeLoraSourceUri::new(
+            "custom:///opaque".into(),
+        )),
+        ..Default::default()
+    });
+    let incomplete_request: PreprocessedRequest =
+        serde_json::from_value(serde_json::to_value(incomplete_request).unwrap()).unwrap();
+    let error = host
+        .generate(Context::new(incomplete_request))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("invalid_lora_model_id"));
+    assert_eq!(dispatch.worker_ids.lock().unwrap().len(), 2);
+
+    let mut runtime_request = request();
+    runtime_request.routing = Some(RoutingHints {
+        lora_name: Some("dyn-lora-test".to_string()),
+        base_model_name: Some("base".into()),
+        lora_source_uri: Some(crate::lora::runtime::RuntimeLoraSourceUri::new(
+            "custom:///opaque".into(),
+        )),
+        lora_resolution_version: Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION),
+        backend_instance_id: Some(stale_worker),
+        ..Default::default()
+    });
+    let error = match host.generate(Context::new(runtime_request)).await {
+        Err(error) => error,
+        Ok(_) => panic!("runtime LoRA must not ignore a conflicting explicit worker pin"),
+    };
+    assert!(match_error_chain(
+        error.as_ref(),
+        &[ErrorType::InvalidArgument],
+        &[]
+    ));
+    assert_eq!(dispatch.worker_ids.lock().unwrap().len(), 2);
+
+    drop(host);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn runtime_lora_pin_is_rechecked_after_transport_fallback() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace("runtime-lora-final-pin")
+        .unwrap()
+        .component("workers")
+        .unwrap()
+        .endpoint("generate");
+    let mut client = endpoint.client().await.unwrap();
+    tokio::task::yield_now().await;
+    let id = endpoint.id();
+    let instances = [101, 202]
+        .into_iter()
+        .map(|instance_id| Instance {
+            namespace: id.namespace.clone(),
+            component: id.component.clone(),
+            endpoint: id.name.clone(),
+            instance_id,
+            transport: dynamo_runtime::component::TransportType::Nats(format!(
+                "final-pin.{instance_id}"
+            )),
+            device_type: None,
+            request_plane_codec: None,
+        })
+        .collect::<Vec<_>>();
+    let (source_tx, source_rx) = watch::channel(instances.clone());
+    client.instance_source = Arc::new(source_rx);
+    client.override_discovered_instances(vec![101, 202]);
+    client.override_instance_avail(vec![101, 202]);
+    let load_context = test_load_context(&client).await;
+    let tracker = LoraStateTracker::new();
+    let mut config = ModelRuntimeConfig::default();
+    config.taints.insert("dynamo.runtime-lora/v2".into());
+    config
+        .set_engine_specific("supports_runtime_lora_resolution", true)
+        .unwrap();
+    config
+        .set_engine_specific("runtime_lora_protocol_versions", vec![2_u32])
+        .unwrap();
+    config
+        .set_engine_specific("runtime_lora_schemes", vec!["custom"])
+        .unwrap();
+    for worker in [101, 202] {
+        tracker.handle_mdc_addition(
+            WorkerWithDpRank::new(worker, 0),
+            &crate::lora::LoraInfo {
+                name: "adapter".into(),
+                max_gpu_lora_count: Some(2),
+            },
+        );
+    }
+    let (_configs_tx, configs_rx) =
+        watch::channel(HashMap::from([(101, config.clone()), (202, config)]));
+    let policy = crate::lora_routing::LoraCandidatePolicy::hosted(
+        Arc::new(LoraFilter::new(LoraRoutingTable::new(), tracker)),
+        Arc::new(LoadEstimator::new()),
+        RouterMode::RoundRobin,
+        Some(configs_rx),
+    )
+    .unwrap();
+    let mut input = request();
+    input.routing = Some(RoutingHints {
+        lora_name: Some("adapter".into()),
+        base_model_name: Some("base".into()),
+        lora_source_uri: Some(crate::lora::runtime::RuntimeLoraSourceUri::new(
+            "custom:///opaque".into(),
+        )),
+        lora_resolution_version: Some(2),
+        allowed_worker_ids: Some(HashSet::from([101, 202])),
+        ..Default::default()
+    });
+    let select = || {
+        policy
+            .select(&input, &|| vec![101, 202], &|| vec![101, 202])
+            .unwrap()
+            .unwrap()
+    };
+    let first = select();
+    let second = select();
+    // Two picks return the round-robin cursor to the first worker.
+    assert_ne!(first.worker, second.worker);
+    assert_eq!(first.fallback, HashSet::from([101, 202]));
+    input.routing_mut().backend_instance_id = Some(first.worker);
+    source_tx
+        .send(
+            instances
+                .into_iter()
+                .filter(|instance| instance.id() != first.worker)
+                .collect(),
+        )
+        .unwrap();
+    assert!(!client.is_instance_live(first.worker));
+    let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+    let host = RoutingHost::builder(client, RouterMode::RoundRobin)
+        .load_context(load_context)
+        .candidate_policy(Some(policy))
+        .dispatch(dispatch.clone() as LlmDispatch)
+        .build()
+        .await
+        .unwrap();
+    let error = host.generate(Context::new(input)).await.unwrap_err();
+    assert!(error.to_string().contains("runtime_lora_affinity_conflict"));
+    assert!(dispatch.worker_ids.lock().unwrap().is_empty());
     drop(host);
     runtime.shutdown();
 }
@@ -1927,6 +2117,25 @@ async fn router_with_recorded_dispatch(
     namespace: &str,
 ) -> (RoutingHost, Arc<PendingThenCompletedDispatch>, u64, Runtime) {
     router_with_recorded_dispatch_and_affinity(namespace, None).await
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_rejects_partial_runtime_metadata_before_dispatch() {
+    let (router, dispatch, _, runtime) =
+        router_with_recorded_dispatch("kv-partial-runtime-lora").await;
+    let mut input = request();
+    input.routing = Some(RoutingHints {
+        lora_name: Some("adapter".into()),
+        base_model_name: Some("base".into()),
+        ..Default::default()
+    });
+    let input: PreprocessedRequest =
+        serde_json::from_value(serde_json::to_value(input).unwrap()).unwrap();
+    assert!(router.generate(Context::new(input)).await.is_err());
+    assert!(dispatch.worker_ids.lock().unwrap().is_empty());
+    drop(router);
+    runtime.shutdown();
 }
 
 async fn router_with_recorded_dispatch_and_affinity(

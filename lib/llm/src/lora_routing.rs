@@ -1,20 +1,236 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashSet, sync::Arc};
-
-use dynamo_kv_router::scheduling::SchedulingRequest;
-use dynamo_runtime::{
-    error::{DynamoError, ErrorType},
-    pipeline::{BuiltinRoutePicker, Error},
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
 };
+
+use dynamo_kv_router::{protocols::RoutingConstraints, scheduling::SchedulingRequest};
+use dynamo_lora::policy::{LoadGuard, RequestPolicy, Stage};
+use dynamo_runtime::pipeline::{BuiltinRoutePicker, Error, RouterMode};
 
 use crate::{
     discovery::RuntimeConfigWatch,
+    local_model::runtime_config::ModelRuntimeConfig,
     lora::{LoadEstimator, LoraFilter},
     preprocessor::PreprocessedRequest,
-    routing_policy::{AttemptLease, CandidatePolicy, CandidateSelection},
+    routing_policy::{CandidatePolicy, CandidateSelection, ExecutionRequirements, ExecutionStage},
 };
+
+fn policy(request: &PreprocessedRequest) -> RequestPolicy {
+    let version = request.routing.as_ref().and_then(|routing| {
+        routing.lora_resolution_version.or_else(|| {
+            (routing.base_model_name.is_some() || routing.lora_source_uri.is_some()).then_some(0)
+        })
+    });
+    RequestPolicy::new(version)
+}
+
+pub(crate) fn execution_requirements(request: &PreprocessedRequest) -> ExecutionRequirements {
+    let policy = policy(request);
+    ExecutionRequirements {
+        allows_replay: policy.allows_replay(),
+        policy_required: policy.requires_candidate_policy(),
+        accounting_attribution: if policy.tracks_legacy_load() {
+            dynamo_kv_router::scheduling::AccountingAttribution::UseRoutingName
+        } else {
+            dynamo_kv_router::scheduling::AccountingAttribution::Exclude
+        },
+    }
+}
+
+pub(crate) fn check_candidate_policy(
+    request: &PreprocessedRequest,
+    installed: bool,
+) -> Result<(), Error> {
+    policy(request).check_capability(
+        installed,
+        request
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.lora_name.as_deref()),
+    )?;
+    if let Some(routing) = request.routing.as_ref()
+        && policy(request).requires_candidate_policy()
+        && (routing.base_model_name.is_none()
+            || routing.lora_source_uri.is_none()
+            || routing.lora_resolution_version
+                != Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION))
+    {
+        return Err(dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .message("invalid_lora_model_id")
+            .build()
+            .into());
+    }
+    Ok(())
+}
+
+pub(crate) fn check_stage(
+    request: &PreprocessedRequest,
+    stage: ExecutionStage,
+) -> Result<(), Error> {
+    policy(request).check_stage(match stage {
+        ExecutionStage::Prefill => Stage::Prefill,
+        ExecutionStage::Encoder => Stage::Encoder,
+    })?;
+    Ok(())
+}
+
+pub(crate) struct LoraCandidatePolicy {
+    filter: Arc<LoraFilter>,
+    estimator: Option<Arc<LoadEstimator>>,
+    picker: Option<BuiltinRoutePicker>,
+    runtime_configs: Option<RuntimeConfigWatch>,
+}
+
+impl LoraCandidatePolicy {
+    pub(crate) fn kv(filter: Arc<LoraFilter>) -> Arc<dyn CandidatePolicy> {
+        Arc::new(Self {
+            filter,
+            estimator: None,
+            picker: None,
+            runtime_configs: None,
+        })
+    }
+
+    pub(crate) fn hosted(
+        filter: Arc<LoraFilter>,
+        estimator: Arc<LoadEstimator>,
+        mode: RouterMode,
+        runtime_configs: Option<RuntimeConfigWatch>,
+    ) -> Result<Arc<dyn CandidatePolicy>, Error> {
+        let picker = match mode {
+            RouterMode::RoundRobin => BuiltinRoutePicker::round_robin(),
+            RouterMode::Random => BuiltinRoutePicker::random(),
+            _ => anyhow::bail!("LoRA filtering is unsupported with {mode:?} routing"),
+        };
+        Ok(Arc::new(Self {
+            filter,
+            estimator: Some(estimator),
+            picker: Some(picker),
+            runtime_configs,
+        }))
+    }
+}
+
+impl CandidatePolicy for LoraCandidatePolicy {
+    fn select(
+        &self,
+        request: &PreprocessedRequest,
+        live: &dyn Fn() -> Vec<u64>,
+        free: &dyn Fn() -> Vec<u64>,
+    ) -> Result<Option<CandidateSelection>, Error> {
+        let policy = policy(request);
+        let routing = request.routing.as_ref();
+        let name = routing.and_then(|routing| routing.lora_name.as_deref());
+        policy.check_capability(true, name)?;
+        let Some(name) = name else {
+            return Ok(None);
+        };
+        let lease = if policy.tracks_legacy_load() {
+            self.estimator.as_ref().map(|estimator| {
+                Box::new(LoadGuard::new(estimator.clone(), name.into()))
+                    as crate::routing_policy::AttemptLease
+            })
+        } else {
+            None
+        };
+        let live = live();
+        let configs = self
+            .runtime_configs
+            .as_ref()
+            .filter(|_| policy.requires_candidate_policy())
+            .map(|watch| watch.borrow());
+        let default_constraints = RoutingConstraints::default();
+        let candidates = policy.candidates(
+            &self.filter,
+            name,
+            live,
+            routing.and_then(|routing| routing.allowed_worker_ids.as_ref()),
+            configs.as_deref(),
+            routing
+                .and_then(|routing| routing.routing_constraints.as_ref())
+                .unwrap_or(&default_constraints),
+        )?;
+        drop(configs);
+        let candidates = RequestPolicy::free_candidates(name, candidates, free)?;
+        let worker = self
+            .picker
+            .as_ref()
+            .and_then(|picker| picker.select_worker(&candidates, |_| 0))
+            .ok_or_else(RequestPolicy::capability_error)?;
+        Ok(Some(CandidateSelection {
+            worker,
+            fallback: candidates.into_iter().collect(),
+            lease,
+        }))
+    }
+
+    fn restrict(
+        &self,
+        request: &PreprocessedRequest,
+        workers: &HashMap<u64, ModelRuntimeConfig>,
+        live: &HashSet<u64>,
+        allowed: Option<HashSet<u64>>,
+        constraints: &RoutingConstraints,
+        pins: &[u64],
+    ) -> Result<Option<HashSet<u64>>, Error> {
+        Ok(policy(request).restrict_workers(
+            &self.filter,
+            request
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.lora_name.as_deref()),
+            workers,
+            live,
+            allowed,
+            constraints,
+            pins,
+        )?)
+    }
+
+    fn refresh_admission(
+        &self,
+        request: &SchedulingRequest,
+        available: Option<Arc<HashSet<u64>>>,
+        workers: &RuntimeConfigWatch,
+    ) -> Option<Arc<HashSet<u64>>> {
+        let Some(name) = request.lora_name.as_deref() else {
+            return available;
+        };
+        let candidates = match (&request.allowed_worker_ids, available.as_ref()) {
+            (Some(allowed), _) => allowed
+                .iter()
+                .filter(|id| available.as_ref().is_none_or(|live| live.contains(*id)))
+                .copied()
+                .collect::<Vec<_>>(),
+            (None, Some(available)) => available.iter().copied().collect(),
+            (None, None) => workers.borrow().keys().copied().collect(),
+        };
+        Some(Arc::new(
+            self.filter
+                .filter_worker_ids_for_lora_with_pin(
+                    Some(name),
+                    &candidates,
+                    request.pinned_worker.map(|worker| worker.worker_id),
+                )
+                .into_iter()
+                .collect(),
+        ))
+    }
+
+    fn check_selected(
+        &self,
+        request: &PreprocessedRequest,
+        worker: u64,
+        pin: Option<u64>,
+    ) -> Result<(), Error> {
+        policy(request).check_affinity(worker, pin)?;
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -22,16 +238,105 @@ mod tests {
     use crate::lora::{LoraRoutingTable, LoraStateTracker};
 
     #[test]
-    fn base_requests_do_not_read_candidates_or_update_load() {
-        let estimator = Arc::new(LoadEstimator::new());
-        let policy = LegacyLoraPolicy::hosted(
+    fn accounting_uses_typed_runtime_metadata_not_adapter_name() {
+        use crate::protocols::common::preprocessor::RoutingHints;
+        use dynamo_kv_router::scheduling::AccountingAttribution;
+
+        let mut request = PreprocessedRequest::builder()
+            .model("base".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap();
+        request.routing = Some(RoutingHints {
+            lora_name: Some("dyn-lora-legacy-alias".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            execution_requirements(&request).accounting_attribution,
+            AccountingAttribution::UseRoutingName
+        );
+        request.routing = Some(RoutingHints {
+            lora_name: Some("runtime-key".into()),
+            base_model_name: Some("base".into()),
+            lora_source_uri: Some(crate::lora::runtime::RuntimeLoraSourceUri::new(
+                "custom:///opaque|reference".into(),
+            )),
+            lora_resolution_version: Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION),
+            ..Default::default()
+        });
+        assert_eq!(
+            execution_requirements(&request).accounting_attribution,
+            AccountingAttribution::Exclude
+        );
+    }
+
+    #[test]
+    fn partial_runtime_metadata_is_rejected_and_never_replayed() {
+        use crate::protocols::common::preprocessor::RoutingHints;
+        use dynamo_kv_router::scheduling::AccountingAttribution;
+
+        let mut request = PreprocessedRequest::builder()
+            .model("base".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap();
+        let complete = RoutingHints {
+            lora_name: Some("adapter".into()),
+            base_model_name: Some("base".into()),
+            lora_source_uri: Some(crate::lora::runtime::RuntimeLoraSourceUri::new(
+                "custom:///opaque".into(),
+            )),
+            lora_resolution_version: Some(crate::lora::runtime::RUNTIME_LORA_PROTOCOL_VERSION),
+            ..Default::default()
+        };
+        for missing in 0..3 {
+            let mut routing = complete.clone();
+            match missing {
+                0 => routing.base_model_name = None,
+                1 => routing.lora_source_uri = None,
+                _ => routing.lora_resolution_version = None,
+            }
+            request.routing = Some(routing);
+            let requirements = execution_requirements(&request);
+            assert!(!requirements.allows_replay);
+            assert_eq!(
+                requirements.accounting_attribution,
+                AccountingAttribution::Exclude
+            );
+            assert!(check_candidate_policy(&request, true).is_err());
+            assert!(check_stage(&request, ExecutionStage::Prefill).is_err());
+            assert!(check_stage(&request, ExecutionStage::Encoder).is_err());
+        }
+        request.routing = Some(complete.clone());
+        assert!(check_candidate_policy(&request, true).is_ok());
+        request.routing.as_mut().unwrap().lora_resolution_version = Some(u16::MAX);
+        assert!(check_candidate_policy(&request, true).is_err());
+        request.routing = Some(RoutingHints {
+            lora_name: Some("legacy-adapter".into()),
+            ..Default::default()
+        });
+        assert!(execution_requirements(&request).allows_replay);
+        assert!(check_candidate_policy(&request, true).is_ok());
+    }
+
+    #[test]
+    fn base_request_does_not_read_candidate_or_capacity_state() {
+        let policy = LoraCandidatePolicy::hosted(
             Arc::new(LoraFilter::new(
                 LoraRoutingTable::new(),
                 LoraStateTracker::new(),
             )),
-            estimator.clone(),
-            BuiltinRoutePicker::round_robin(),
-        );
+            Arc::new(LoadEstimator::new()),
+            RouterMode::RoundRobin,
+            None,
+        )
+        .unwrap();
         let request = PreprocessedRequest::builder()
             .model("base".to_string())
             .token_ids(vec![1])
@@ -40,28 +345,29 @@ mod tests {
             .output_options(Default::default())
             .build()
             .unwrap();
-        assert!(
-            policy
-                .select(&request, &|| panic!("unexpected discovery"), &|| panic!(
-                    "unexpected capacity read"
-                ))
-                .unwrap()
-                .is_none()
-        );
-        assert!(estimator.get_current_load().is_empty());
+        let result = policy
+            .select(
+                &request,
+                &|| panic!("base request must not collect live workers"),
+                &|| panic!("base request must not read free capacity"),
+            )
+            .unwrap();
+        assert!(result.is_none());
     }
 
     #[test]
     fn hosted_policy_releases_load_after_selection_and_on_error() {
         let estimator = Arc::new(LoadEstimator::new());
-        let policy = LegacyLoraPolicy::hosted(
+        let policy = LoraCandidatePolicy::hosted(
             Arc::new(LoraFilter::new(
                 LoraRoutingTable::new(),
                 LoraStateTracker::new(),
             )),
             estimator.clone(),
-            BuiltinRoutePicker::round_robin(),
-        );
+            RouterMode::RoundRobin,
+            None,
+        )
+        .unwrap();
         let mut request = PreprocessedRequest::builder()
             .model("base".to_string())
             .token_ids(vec![1])
@@ -78,8 +384,8 @@ mod tests {
             .select(&request, &|| vec![1, 2], &|| vec![2])
             .unwrap()
             .unwrap();
-        assert_eq!(selection.target, 2);
-        assert_eq!(selection.allowed_fallback, HashSet::from([2]));
+        assert_eq!(selection.worker, 2);
+        assert_eq!(selection.fallback, HashSet::from([2]));
         assert_eq!(estimator.get_current_load().get("adapter"), Some(&1));
         drop(selection);
         assert_eq!(
@@ -104,7 +410,7 @@ mod tests {
     #[test]
     fn kv_admission_intersects_live_and_allowed_workers_on_each_refresh() {
         use dynamo_kv_router::{protocols::WorkerWithDpRank, scheduling::ScheduleMode};
-        let policy = LegacyLoraPolicy::kv(Arc::new(LoraFilter::new(
+        let policy = LoraCandidatePolicy::kv(Arc::new(LoraFilter::new(
             LoraRoutingTable::new(),
             LoraStateTracker::new(),
         )));
@@ -157,127 +463,5 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-    }
-}
-
-pub(crate) struct LegacyLoraPolicy {
-    filter: Arc<LoraFilter>,
-    hosted: Option<(Arc<LoadEstimator>, BuiltinRoutePicker)>,
-}
-
-impl LegacyLoraPolicy {
-    pub(crate) fn hosted(
-        filter: Arc<LoraFilter>,
-        estimator: Arc<LoadEstimator>,
-        selector: BuiltinRoutePicker,
-    ) -> Arc<dyn CandidatePolicy> {
-        Arc::new(Self {
-            filter,
-            hosted: Some((estimator, selector)),
-        })
-    }
-
-    pub(crate) fn kv(filter: Arc<LoraFilter>) -> Arc<dyn CandidatePolicy> {
-        Arc::new(Self {
-            filter,
-            hosted: None,
-        })
-    }
-}
-
-struct LoadLease {
-    estimator: Arc<LoadEstimator>,
-    name: String,
-}
-
-impl Drop for LoadLease {
-    fn drop(&mut self) {
-        self.estimator.decrement_load(&self.name);
-    }
-}
-
-impl CandidatePolicy for LegacyLoraPolicy {
-    fn select(
-        &self,
-        request: &PreprocessedRequest,
-        live: &dyn Fn() -> Vec<u64>,
-        free: &dyn Fn() -> Vec<u64>,
-    ) -> Result<Option<CandidateSelection>, Error> {
-        let Some(name) = request
-            .routing
-            .as_ref()
-            .and_then(|routing| routing.lora_name.as_deref())
-        else {
-            return Ok(None);
-        };
-        let Some((estimator, selector)) = &self.hosted else {
-            anyhow::bail!("hosted selection requires a hosted policy")
-        };
-        estimator.increment_load(name);
-        let lease: AttemptLease = Box::new(LoadLease {
-            estimator: estimator.clone(),
-            name: name.to_string(),
-        });
-        let routable = live();
-        let candidates = self
-            .filter
-            .filter_worker_ids_for_lora(Some(name), &routable);
-        if candidates.is_empty() {
-            anyhow::bail!("No workers available after LoRA filtering (lora={name})");
-        }
-        let free = free().into_iter().collect::<HashSet<_>>();
-        let candidates = candidates
-            .into_iter()
-            .filter(|worker| free.contains(worker))
-            .collect::<Vec<_>>();
-        if candidates.is_empty() {
-            return Err(anyhow::anyhow!(
-                DynamoError::builder()
-                    .error_type(ErrorType::ResourceExhausted)
-                    .message(format!(
-                        "All eligible LoRA workers are overloaded (lora={name})"
-                    ))
-                    .build()
-            ));
-        }
-        let target = selector
-            .select_worker(&candidates, |_| 0)
-            .ok_or_else(|| anyhow::anyhow!("no eligible workers"))?;
-        tracing::debug!(lora = %name, worker_id = target, candidates = candidates.len(), routable = routable.len(), free = free.len(), "LoRA-filtered router selected worker");
-        Ok(Some(CandidateSelection {
-            target,
-            allowed_fallback: candidates.into_iter().collect(),
-            lease: Some(lease),
-        }))
-    }
-
-    fn refresh_admission(
-        &self,
-        request: &SchedulingRequest,
-        available: Option<Arc<HashSet<u64>>>,
-        workers: &RuntimeConfigWatch,
-    ) -> Option<Arc<HashSet<u64>>> {
-        let Some(name) = request.lora_name.as_deref() else {
-            return available;
-        };
-        let candidates = match (&request.allowed_worker_ids, available.as_ref()) {
-            (Some(allowed), _) => allowed
-                .iter()
-                .filter(|id| available.as_ref().is_none_or(|live| live.contains(*id)))
-                .copied()
-                .collect::<Vec<_>>(),
-            (None, Some(available)) => available.iter().copied().collect(),
-            (None, None) => workers.borrow().keys().copied().collect(),
-        };
-        Some(Arc::new(
-            self.filter
-                .filter_worker_ids_for_lora_with_pin(
-                    Some(name),
-                    &candidates,
-                    request.pinned_worker.map(|worker| worker.worker_id),
-                )
-                .into_iter()
-                .collect(),
-        ))
     }
 }

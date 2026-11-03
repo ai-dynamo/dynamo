@@ -153,6 +153,7 @@ impl RoutingHost {
                         ));
                     }
                     if crate::migration::is_migratable(error.as_ref())
+                        && crate::routing_policy::execution_requirements(request).allows_replay
                         && let Some(state) = request.migration_state.as_ref()
                     {
                         lifecycle.prepare_retry();

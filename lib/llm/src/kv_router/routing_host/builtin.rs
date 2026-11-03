@@ -236,7 +236,8 @@ impl RoutingHost {
         // the first stage that can spend it.
         let budget = CleanupBudget::default();
         let staged_kv = StagedKv::for_request(request.content());
-        let selected = self
+        check_candidate_policy(request.content(), self.candidate_policy.is_some())?;
+        let candidate = self
             .candidate_policy
             .as_ref()
             .map(|policy| {
@@ -248,15 +249,18 @@ impl RoutingHost {
             })
             .transpose()?
             .flatten();
-        let (lora_target, lora_fallback, lora_load) = match selected {
+        let (candidate_target, candidate_fallback, attempt_lease) = match candidate {
             Some(selection) => (
-                Some(selection.target),
-                Some(selection.allowed_fallback),
+                Some(selection.worker),
+                Some(selection.fallback),
                 selection.lease,
             ),
             None => (None, None, None),
         };
-        let (selection, mut operation) = if let Some(target) = lora_target {
+        if let (Some(target), Some(policy)) = (candidate_target, self.candidate_policy.as_ref()) {
+            policy.check_selected(request.content(), target, explicit.map(|pin| pin.worker_id))?;
+        }
+        let (selection, mut operation) = if let Some(target) = candidate_target {
             (
                 HostedSelection {
                     initial_worker: target,
@@ -312,7 +316,7 @@ impl RoutingHost {
             self.request_metrics.clone(),
             initial_worker,
             occupancy_reservation,
-            lora_load,
+            attempt_lease,
             &request,
         );
         let tracker = request.tracker.clone();
@@ -401,8 +405,15 @@ impl RoutingHost {
                 self.inner.direct_within_prepared(
                     request,
                     initial_worker,
-                    lora_fallback.as_ref(),
+                    candidate_fallback.as_ref(),
                     |request, worker_id| {
+                        if let Some(policy) = self.candidate_policy.as_ref() {
+                            policy.check_selected(
+                                request,
+                                worker_id,
+                                explicit.map(|pin| pin.worker_id),
+                            )?;
+                        }
                         let occupancy = guard.retarget_worker(worker_id);
                         let target = target_for_worker(worker_id);
                         request.routing_mut().dp_rank = target.dp_rank;
@@ -481,9 +492,26 @@ impl RoutingHost {
 
 #[cfg(test)]
 mod tests {
+    use dynamo_kv_router::protocols::RoutingConstraints;
     use std::cell::Cell;
+    use std::collections::{HashMap, HashSet};
 
     use super::*;
+
+    fn runtime_config(capability: &str, scheme: &str) -> ModelRuntimeConfig {
+        let mut config = ModelRuntimeConfig::default();
+        config.taints.insert(capability.to_string());
+        config
+            .set_engine_specific("supports_runtime_lora_resolution", true)
+            .unwrap();
+        config
+            .set_engine_specific("runtime_lora_protocol_versions", vec![2_u32])
+            .unwrap();
+        config
+            .set_engine_specific("runtime_lora_schemes", vec![scheme])
+            .unwrap();
+        config
+    }
 
     fn select(selector: &BuiltinWorkerSelector, worker_ids: &[u64]) -> u64 {
         selector
@@ -491,6 +519,28 @@ mod tests {
             .unwrap()
             .worker
             .worker_id
+    }
+
+    #[test]
+    fn runtime_lora_routing_excludes_stale_heterogeneous_worker() {
+        let capability = "dynamo.runtime-lora/v2";
+        let configs = HashMap::from([
+            (1, runtime_config(capability, "custom")),
+            (2, runtime_config(capability, "wandb-artifact")),
+        ]);
+        let constraints = RoutingConstraints {
+            required_taints: HashSet::from([capability.to_string()]),
+            ..Default::default()
+        };
+
+        let routable = dynamo_lora::runtime::constrain_runtime_lora_workers(
+            true,
+            None,
+            &HashSet::from([2]),
+            &configs,
+            &constraints,
+        );
+        assert_eq!(routable, Some(HashSet::from([2])));
     }
 
     #[test]
