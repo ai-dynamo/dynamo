@@ -26,9 +26,14 @@ to preserve and republish a new upstream field.
 """
 
 import importlib
+import json
+from types import SimpleNamespace
 
 import pytest
 from packaging.version import Version
+
+from dynamo.vllm.args import update_engine_config_with_dynamo
+from dynamo.vllm.constants import DisaggregationMode
 
 # Import vllm first to ensure it's properly loaded before accessing submodules.
 # This works around potential issues with pytest's import machinery.
@@ -315,13 +320,32 @@ class TestVllmKvEventsApi:
             assert decoded["locality"] == "REMOTE"
 
 
-def test_kv_event_publisher_keeps_legacy_block_hashes():
-    """Dynamo's KV indexers hash each block's own tokens, so a worker publishing
-    KV events must not default to vLLM's EAGLE/MTP lookahead block hashes."""
-    from types import SimpleNamespace
+_SPECULATORS_CHECKPOINT_CONFIG = {
+    "speculators_model_type": "eagle3",
+    "speculators_config": {
+        "proposal_methods": [{"speculative_tokens": 1}],
+        "verifier": {"name_or_path": "Qwen/Qwen3-0.6B"},
+    },
+    "transformer_layer_config": {},
+}
 
-    from dynamo.vllm.args import update_engine_config_with_dynamo
-    from dynamo.vllm.constants import DisaggregationMode
+
+@pytest.mark.parametrize(
+    ("checkpoint_config", "speculative_config"),
+    [
+        (None, {"method": "eagle3", "num_speculative_tokens": 1}),
+        (_SPECULATORS_CHECKPOINT_CONFIG, None),
+    ],
+    ids=["speculative-config", "speculators-checkpoint"],
+)
+def test_kv_event_publisher_keeps_legacy_block_hashes(
+    tmp_path, checkpoint_config, speculative_config
+):
+    """Dynamo's KV indexers hash each block's own tokens, so a worker publishing
+    KV events must not default to vLLM's EAGLE/MTP lookahead block hashes,
+    including those vLLM derives from a speculators checkpoint."""
+    if checkpoint_config is not None:
+        (tmp_path / "config.json").write_text(json.dumps(checkpoint_config))
 
     dynamo_config = SimpleNamespace(
         disaggregation_mode=DisaggregationMode.AGGREGATED,
@@ -335,10 +359,16 @@ def test_kv_event_publisher_keeps_legacy_block_hashes():
     )
     # AsyncEngineArgs would resolve the model from Hugging Face on construction.
     engine_args = SimpleNamespace(
+        model=str(tmp_path),
+        tokenizer=None,
+        trust_remote_code=False,
+        revision=None,
+        hf_token=None,
         enable_prefix_caching=True,
         block_size=16,
         kv_transfer_config=None,
-        speculative_config={"method": "eagle3", "num_speculative_tokens": 1},
+        spec_method=None,
+        speculative_config=speculative_config,
         kv_events_config=_kv_events.KVEventsConfig(enable_kv_cache_events=True),
     )
 
@@ -347,6 +377,5 @@ def test_kv_event_publisher_keeps_legacy_block_hashes():
     assert dynamo_config.use_kv_events
     assert engine_args.speculative_config == {
         "disable_lookahead_block_hashes": True,
-        "method": "eagle3",
-        "num_speculative_tokens": 1,
+        **(speculative_config or {}),
     }

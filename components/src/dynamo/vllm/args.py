@@ -11,7 +11,11 @@ from typing import Any, Dict, Optional
 
 from vllm.config import SpeculativeConfig
 from vllm.distributed.kv_events import KVEventsConfig
-from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.arg_utils import (
+    AsyncEngineArgs,
+    is_cloud_storage,
+    maybe_override_with_speculators,
+)
 
 try:
     from vllm.utils import FlexibleArgumentParser
@@ -618,13 +622,31 @@ def _keep_legacy_block_hashes(engine_config: AsyncEngineArgs) -> None:
     # vLLM 0.32 (CPU and XPU images); remove once they ship 0.33.
     if "disable_lookahead_block_hashes" not in SpeculativeConfig.__dataclass_fields__:
         return
-    spec = getattr(engine_config, "speculative_config", None)
-    if spec is None and getattr(engine_config, "spec_method", None) is None:
+    spec = engine_config.speculative_config
+    if (
+        spec is None
+        and engine_config.spec_method is None
+        and not _is_speculators_checkpoint(engine_config)
+    ):
         return
     engine_config.speculative_config = {
         "disable_lookahead_block_hashes": True,
         **(spec or {}),
     }
+
+
+def _is_speculators_checkpoint(engine_config: AsyncEngineArgs) -> bool:
+    """Whether vLLM will derive a speculative config from the model checkpoint."""
+    if is_cloud_storage(engine_config.model):
+        return False
+    _, _, spec = maybe_override_with_speculators(
+        model=engine_config.model,
+        tokenizer=engine_config.tokenizer,
+        trust_remote_code=engine_config.trust_remote_code,
+        revision=engine_config.revision,
+        hf_token=engine_config.hf_token,
+    )
+    return spec is not None
 
 
 def _set_state_agent_topic(
