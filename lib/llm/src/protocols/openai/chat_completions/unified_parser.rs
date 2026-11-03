@@ -5297,6 +5297,9 @@ pub(crate) mod tests {
             NEMOTRON_V3_UNIFIED_FAMILY,
             GLM47_UNIFIED_FAMILY,
             KIMI_K2_UNIFIED_FAMILY,
+            "gpt_oss",
+            DEEPSEEK_V4_UNIFIED_FAMILY,
+            MUSE_SPARK_UNIFIED_FAMILY,
         ] {
             for mode in [
                 UnifiedToolOutputMode::Native,
@@ -5335,7 +5338,10 @@ pub(crate) mod tests {
                     | (
                         NativeGrammarState::None,
                         UnifiedToolOutputMode::Native,
-                        KIMI_K2_UNIFIED_FAMILY,
+                        KIMI_K2_UNIFIED_FAMILY
+                        | "gpt_oss"
+                        | DEEPSEEK_V4_UNIFIED_FAMILY
+                        | MUSE_SPARK_UNIFIED_FAMILY,
                     ) => {}
                     _ => panic!("wrong adapter grammar state for {family} / {mode:?}"),
                 }
