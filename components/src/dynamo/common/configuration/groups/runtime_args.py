@@ -70,7 +70,7 @@ class DynamoRuntimeConfig(ConfigBase):
     kv_state_endpoint: Optional[str] = None
     discovery_backend: str
     request_plane: str
-    response_plane: str = "tcp"
+    response_plane: Optional[str] = None
     event_plane: Optional[str] = None
     fpm_trace: bool = False
     connector: list[str]
@@ -176,7 +176,8 @@ class DynamoRuntimeConfig(ConfigBase):
             # the canonical one, which the gate reads ahead of the legacy alias.
             os.environ[_ENGINE_REQUEST_LIMIT_ENV] = str(self.engine_request_limit)
 
-        os.environ["DYN_RESPONSE_PLANE"] = self.response_plane
+        if self.response_plane is not None:
+            os.environ["DYN_RESPONSE_PLANE"] = self.response_plane
 
         # Propagate TCP TLS CLI flags to env vars so the Rust runtime picks them up.
         if self.tcp_tls_cert_path:
@@ -290,8 +291,11 @@ class DynamoRuntimeArgGroup(ArgGroup):
             g,
             flag_name="--response-plane",
             env_var="DYN_RESPONSE_PLANE",
-            default="tcp",
-            help="Select the response transport. Frontend and workers must match.",
+            default=None,
+            help=(
+                "Select the response transport. Frontend and workers must match. "
+                "When unset, the runtime uses tcp."
+            ),
             choices=["tcp", "quic", "velo"],
         )
         add_argument(

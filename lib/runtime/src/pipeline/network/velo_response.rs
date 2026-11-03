@@ -129,12 +129,11 @@ fn response_mux_config() -> Result<MuxConfig> {
     })
 }
 
-/// Velo has no TLS, so refuse to build a service while TLS is configured
-/// for the TCP planes.
-fn reject_tls_settings() -> Result<()> {
+/// The `DYN_TCP_TLS_*` settings present in this process.
+pub(crate) fn tcp_tls_settings() -> Vec<&'static str> {
     use crate::config::environment_names::tcp_response_stream::tls::*;
 
-    let set: Vec<&str> = [
+    [
         DYN_TCP_TLS_CERT_PATH,
         DYN_TCP_TLS_KEY_PATH,
         DYN_TCP_TLS_CA_CERT_PATH,
@@ -145,7 +144,13 @@ fn reject_tls_settings() -> Result<()> {
     .into_iter()
     .filter(|name| std::env::var_os(name).is_some())
     .chain(crate::config::env_is_truthy(DYN_TCP_TLS_INSECURE).then_some(DYN_TCP_TLS_INSECURE))
-    .collect();
+    .collect()
+}
+
+/// Velo has no TLS, so refuse to build a service while TLS is configured
+/// for the TCP planes.
+fn reject_tls_settings() -> Result<()> {
+    let set = tcp_tls_settings();
     ensure!(
         set.is_empty(),
         "the Velo response plane has no TLS, but {} is set; unset it or use DYN_RESPONSE_PLANE=tcp",
