@@ -32,7 +32,6 @@ parking_lot = { workspace = true }
 prometheus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
