@@ -1438,12 +1438,12 @@ func TestDGDRRunInputResolvesRuntimeVersion(t *testing.T) {
 //   - typed Pareto overridden to a scalar target → is_pareto must be false
 func TestDGDRRunInputIsParetoFollowsEffectiveTarget(t *testing.T) {
 	tests := []struct {
-		name           string
-		objectiveMode  nvidiacomv1beta2.ObjectiveMode
-		metric         *nvidiacomv1beta2.ObjectiveMetric
-		overrides      map[string]any
-		wantIsPareto   bool
-		wantTarget     string
+		name          string
+		objectiveMode nvidiacomv1beta2.ObjectiveMode
+		metric        *nvidiacomv1beta2.ObjectiveMetric
+		overrides     map[string]any
+		wantIsPareto  bool
+		wantTarget    string
 	}{
 		{
 			name:          "typed Optimize overridden to pareto via inputOverrides",
