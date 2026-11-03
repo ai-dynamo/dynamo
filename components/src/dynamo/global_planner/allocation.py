@@ -15,7 +15,10 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from dynamo.global_planner.allocation_policy import AllocationPolicy
+    from dynamo.global_planner.allocation_policy import (
+        AllocationPolicy,
+        PoolAllocationPolicy,
+    )
 
 
 DEFAULT_MAX_SEARCH_STEPS = 100_000
@@ -201,18 +204,9 @@ def plan_allocation(
     unavailable = set(unavailable_pool_ids)
     if unavailable - pools.keys():
         raise ValueError("unavailable_pool_ids contains an unknown pool")
-    voluntary_releases: dict[str, int] = {}
-    if desired_replicas_by_pool is not None:
-        if not isinstance(desired_replicas_by_pool, Mapping):
-            raise ValueError("desired_replicas_by_pool must be a mapping")
-        if set(desired_replicas_by_pool) - pools.keys():
-            raise ValueError("desired_replicas_by_pool contains an unknown pool")
-        for pool_id, desired in desired_replicas_by_pool.items():
-            pool = pools[pool_id]
-            normalized = pool.normalize_replicas(desired) * pool.gpu_per_replica
-            voluntary_releases[pool_id] = max(
-                0, current_allocations_gpus[pool_id] - normalized
-            )
+    voluntary_releases = _voluntary_releases(
+        pools, current_allocations_gpus, desired_replicas_by_pool
+    )
     requester = pools[requester_id]
     effective_replicas = requester.normalize_replicas(desired_replicas)
     effective_gpus = effective_replicas * requester.gpu_per_replica
@@ -294,42 +288,92 @@ def plan_allocation(
         required + max(pool.gpu_per_replica for pool in donors) - 1,
     )
 
+    try:
+        reclaim = _cheapest_reclaim(
+            donors,
+            available_releases,
+            voluntary_releases,
+            requester.priority,
+            required,
+            reclaim_ceiling,
+            budget,
+        )
+    except AllocationSearchLimit:
+        return decision(AllocationReason.SEARCH_LIMIT)
+    if reclaim is None:
+        return decision(AllocationReason.GRANULARITY)
+    return decision(reason, reclaim)
+
+
+def _voluntary_releases(
+    pools: Mapping[str, PoolAllocationPolicy],
+    current_allocations_gpus: Mapping[str, int],
+    desired_replicas_by_pool: Mapping[str, int] | None,
+) -> dict[str, int]:
+    """GPUs each pool would give up to reach its own normalized demand."""
+    if desired_replicas_by_pool is None:
+        return {}
+    if not isinstance(desired_replicas_by_pool, Mapping):
+        raise ValueError("desired_replicas_by_pool must be a mapping")
+    if set(desired_replicas_by_pool) - pools.keys():
+        raise ValueError("desired_replicas_by_pool contains an unknown pool")
+    releases = {}
+    for pool_id, desired in desired_replicas_by_pool.items():
+        pool = pools[pool_id]
+        normalized = pool.normalize_replicas(desired) * pool.gpu_per_replica
+        releases[pool_id] = max(0, current_allocations_gpus[pool_id] - normalized)
+    return releases
+
+
+def _cheapest_reclaim(
+    donors: Sequence[PoolAllocationPolicy],
+    available_releases: Mapping[str, int],
+    voluntary_releases: Mapping[str, int],
+    requester_priority: int,
+    required: int,
+    reclaim_ceiling: int,
+    budget: _SearchBudget,
+) -> dict[str, int] | None:
+    """Return the preferred GPU reduction per donor reclaiming ``required``.
+
+    Returns ``None`` when whole-replica granularity admits no reduction in
+    ``[required, reclaim_ceiling]``; raises :class:`AllocationSearchLimit` if
+    the search budget is exhausted first.
+    """
     # A score contains forced priority-class totals, affected pools, and negated
     # reductions in pool-ID order. Negative values implement the stable tie.
     priorities = sorted(
-        {pool.priority for pool in donors if pool.priority < requester.priority},
+        {pool.priority for pool in donors if pool.priority < requester_priority},
         reverse=True,
     )
     priority_indexes = {priority: index for index, priority in enumerate(priorities)}
-    states: dict[int, tuple[tuple[int, ...], int, tuple[int, ...]]] = {}
-    try:
-        budget.consume(len(donors) + len(priorities))
-        states[0] = ((0,) * len(priorities), 0, ())
-        for index, pool in enumerate(donors):
-            following = {}
-            available = available_releases[pool.pool_id]
-            for total, (class_totals, affected, reductions) in states.items():
-                largest = min(available, reclaim_ceiling - total)
-                for amount in range(0, largest + 1, pool.gpu_per_replica):
-                    # Charge tuple construction and comparison by their sizes,
-                    # so a very wide policy cannot bypass the search-work bound.
-                    budget.consume(1 + len(priorities) + index + 1)
-                    updated_classes = list(class_totals)
-                    forced = max(0, amount - voluntary_releases.get(pool.pool_id, 0))
-                    if forced:
-                        updated_classes[priority_indexes[pool.priority]] += forced
-                    score = (
-                        tuple(updated_classes),
-                        affected + (amount > 0),
-                        (*reductions, -amount),
-                    )
-                    candidate = total + amount
-                    incumbent = following.get(candidate)
-                    if incumbent is None or score < incumbent:
-                        following[candidate] = score
-            states = following
-    except AllocationSearchLimit:
-        return decision(AllocationReason.SEARCH_LIMIT)
+    budget.consume(len(donors) + len(priorities))
+    states: dict[int, tuple[tuple[int, ...], int, tuple[int, ...]]] = {
+        0: ((0,) * len(priorities), 0, ())
+    }
+    for index, pool in enumerate(donors):
+        following: dict[int, tuple[tuple[int, ...], int, tuple[int, ...]]] = {}
+        available = available_releases[pool.pool_id]
+        for total, (class_totals, affected, reductions) in states.items():
+            largest = min(available, reclaim_ceiling - total)
+            for amount in range(0, largest + 1, pool.gpu_per_replica):
+                # Charge tuple construction and comparison by their sizes,
+                # so a very wide policy cannot bypass the search-work bound.
+                budget.consume(1 + len(priorities) + index + 1)
+                updated_classes = list(class_totals)
+                forced = max(0, amount - voluntary_releases.get(pool.pool_id, 0))
+                if forced:
+                    updated_classes[priority_indexes[pool.priority]] += forced
+                score = (
+                    tuple(updated_classes),
+                    affected + (amount > 0),
+                    (*reductions, -amount),
+                )
+                candidate = total + amount
+                incumbent = following.get(candidate)
+                if incumbent is None or score < incumbent:
+                    following[candidate] = score
+        states = following
 
     candidates = (
         (class_totals, total - required, affected, reductions)
@@ -338,12 +382,9 @@ def plan_allocation(
     )
     best = min(candidates, default=None)
     if best is None:
-        return decision(AllocationReason.GRANULARITY)
-    return decision(
-        reason,
-        {
-            pool.pool_id: -amount
-            for pool, amount in zip(donors, best[3], strict=True)
-            if amount
-        },
-    )
+        return None
+    return {
+        pool.pool_id: -amount
+        for pool, amount in zip(donors, best[3], strict=True)
+        if amount
+    }

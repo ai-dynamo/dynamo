@@ -39,8 +39,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        policy = AllocationPolicy.model_validate_json(args.policy.read_text())
-        allocations = json.loads(args.allocations.read_text())
+        policy = AllocationPolicy.model_validate_json(
+            args.policy.read_text(encoding="utf-8")
+        )
+        allocations = json.loads(args.allocations.read_text(encoding="utf-8"))
         decision = plan_allocation(
             policy,
             allocations,

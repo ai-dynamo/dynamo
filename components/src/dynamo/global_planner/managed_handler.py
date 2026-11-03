@@ -16,6 +16,8 @@ from dynamo.runtime import dynamo_endpoint
 
 
 class ManagedRequestHandler:
+    """Bind each request to its enrolled pool, then delegate to the controller."""
+
     def __init__(
         self, config: ManagedAllocationConfig, controller: ManagedAllocationController
     ):
@@ -59,9 +61,7 @@ class ManagedRequestHandler:
                 pool.pool_id, target.desired_replicas, request.request_id
             )
         except ValueError as exc:
-            response = ScaleResponse(
-                status=ScaleStatus.ERROR, message=str(exc), current_replicas={}
-            )
+            response = _error(exc)
         yield response.model_dump(mode="json")
 
     @dynamo_endpoint(AllocationStatusRequest, ScaleResponse)
@@ -69,7 +69,12 @@ class ManagedRequestHandler:
         try:
             response = self.controller.status(self._pool(request).pool_id)
         except ValueError as exc:
-            response = ScaleResponse(
-                status=ScaleStatus.ERROR, message=str(exc), current_replicas={}
-            )
+            response = _error(exc)
         yield response.model_dump(mode="json")
+
+
+def _error(exc: ValueError) -> ScaleResponse:
+    """Reject an invalid request without touching retained demand."""
+    return ScaleResponse(
+        status=ScaleStatus.ERROR, message=str(exc), current_replicas={}
+    )

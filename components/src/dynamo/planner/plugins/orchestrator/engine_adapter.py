@@ -1368,7 +1368,7 @@ class OrchestratorEngineAdapter:
         # at Global Planner. Only explicit proposals carry demand: merged
         # baseline echoes and observation-only ticks must leave it unchanged.
         publish_unchanged_demand = (
-            self._config.environment == "global-planner" and not deployment_scaling
+            self._config.global_planner_managed_allocation and not deployment_scaling
         )
         gpu_budget_reconcile = (
             not deployment_scaling and self._gpu_budget_reconcile_needed(worker_counts)

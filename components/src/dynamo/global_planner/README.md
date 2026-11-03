@@ -309,53 +309,45 @@ This scope is needed for "multiple agg pools sharing a budget" deployments such 
 ## Managed Allocation (Experimental)
 
 Set `managed_allocation` to enable the first live slice of
-[DEP #16064](https://github.com/ai-dynamo/dynamo/issues/16064). Local Planners
-publish demand; the Global Planner grants allocations and can reclaim replicas
-from lower-priority pools above their minima. The legacy budget and pairing
-behavior described above remains the default when this setting is absent.
+[DEP #16064](https://github.com/ai-dynamo/dynamo/issues/16064): Local Planners
+publish demand, and the Global Planner grants allocations, reclaiming replicas
+from lower-priority pools above their minima. Without this setting the legacy
+budget and pairing behavior above is unchanged.
 
-### Supported deployment
+### Requirements
 
-This mode requires one Global Planner process, with no overlapping replacement
-process, and exclusive ownership of replica targets. Stop the old process before
-starting its replacement. Every enrolled DGD must be in `POD_NAMESPACE`, contain
-one prefill-only or decode-only worker component, and use the component workload
-provider with ordinary single-node Deployment workers and a scaling adapter
-(`scalingAdapter: {}`). Each replica must request the fixed, positive scalar
-`nvidia.com/gpu` cost in its pool policy. CPU-only frontends and planners in the
-same DGD are allowed. Pools are separate DGDs; aggregated/composite workers,
-Grove, multinode workers, DRA, GPU-free mockers, and changing GPU shapes are not
-supported by this mode.
+- **One controller.** Run a single Global Planner process; stop the old one
+  before starting a replacement. It must be the only writer of replica targets
+  (no HPA, manual scaling, worker rollouts or retuning).
+- **One pool per DGD.** Each enrolled DGD lives in `POD_NAMESPACE` and has one
+  prefill-only or decode-only worker component (CPU-only frontends and planners
+  are allowed). Workers use the component workload provider, ordinary
+  single-node Deployments, and `scalingAdapter: {}`.
+- **Fixed GPU shape.** Every replica requests exactly the pool's scalar
+  `nvidia.com/gpu` cost. Aggregated/composite workers, Grove, multinode, DRA,
+  GPU-free mockers and changing shapes are unsupported.
+- **Positive minimum.** Every pool keeps at least one replica: existing
+  Planner permissions cannot prove that a zero-target Deployment released its
+  GPUs.
+- **Trusted callers.** `caller_namespaces` checks the claimed caller, but does
+  not authenticate it. Scaling-adapter writer annotations fence late writes
+  from a stopped controller; they are not leader election.
 
-Every pool must retain at least one replica. The existing operator considers
-zero-target Deployments ready before downstream scale reconciliation has
-necessarily completed; this mode cannot prove release for zero targets using
-existing Planner permissions. Offline planning still supports zero minima.
-
-Configure every Local Planner with `environment: global-planner` and the same
-`global_planner_namespace`. Use single-role scaling without retuning, worker
-rollouts, HPA, manual scaling, or other replica writers. Keep node scheduling and
-GPU capacity sufficient for every allowed target. The shared budget counts only
-the enrolled pools, not unrelated workloads on the cluster.
-
-Writer annotations on scaling adapters fence late writes from a stopped
-controller using resource-version checks. They are cooperative ownership checks,
-not leader election or authorization against other Kubernetes writers. Runtime
-access must be restricted to trusted planners: caller namespace bindings validate
-the claimed caller and target but do not authenticate a principal.
+The shared budget counts only enrolled pools. Keep node capacity sufficient for
+every allowed target. Existing Planner RBAC (read DGDs, adapters and Pods; patch
+adapters and their scale subresource) is sufficient.
 
 ### Configuration
 
-Do not combine `managed_allocation` with legacy `managed_namespaces`, budget,
-priority, GPU-cost overrides, or `no_operation`. The offline command below can
-preview policy decisions without executing them.
+`managed_allocation` cannot be combined with `managed_namespaces`, legacy budget,
+priority or GPU-cost settings, or `no_operation`.
 
 ```yaml
 # Start with two ready replicas in each pool: 8 + 8 GPUs.
 managed_allocation:
   poll_interval_seconds: 2
   operation_timeout_seconds: 1800
-  caller_namespaces:
+  caller_namespaces:          # pool ID -> Local Planner Dynamo namespace
     interactive: chat-planner
     batch: batch-planner
   policy:
@@ -381,145 +373,76 @@ managed_allocation:
 ```
 
 Run the service with `POD_NAMESPACE=prod`, `DYN_NAMESPACE=global-infra`, and
-`--config <path-to-config>`. `caller_namespaces` maps each pool ID to its Local
-Planner's Dynamo namespace. Requests must match the enrolled Kubernetes
-namespace, DGD, role, and optional component name; each request contains exactly
-one replica target. Existing Planner permissions to read DGDs, adapters and Pods, and to patch
-adapters and their scale subresource suffice; no new CRD or storage service is
-introduced.
+`--config <path>`. Configure each Local Planner with
+`environment: global-planner`, the shared `global_planner_namespace`, single-role
+scaling, and `global_planner_managed_allocation: true`. With that flag, stable
+same-count recommendations are also published, so a hold cancels older
+unsatisfied demand; legacy deployments never send them.
 
 ### Allocation and execution
 
-The controller retains each pool's latest desired count separately from its
-grant and observed workers. Valid unchanged Local Planner recommendations also
-publish demand, so a hold can cancel an older unsatisfied request. Missing
-metrics and scaling-only observations do not invent a replacement demand.
-Demand remains until a new valid recommendation or controller restart; a lost
-Local Planner does not automatically withdraw its last demand.
+The controller tracks each pool's latest demand separately from its grant and
+its observed workers. Pending demand is reconsidered every poll in priority
+order (no fairness guarantee). Growth uses spare capacity first; forced
+reclamation only takes from strictly lower-priority pools above their minima,
+while any pool may voluntarily return capacity above its own demand. In the
+example, interactive demand moves `8/8` to `12/4`; when it falls and batch
+still wants its previous allocation, capacity returns to `8/8`.
 
-Growth uses available capacity first. Forced reclamation protects equal- and
-higher-priority pools and every pool's minimum. A pool can voluntarily give up
-capacity above its own retained demand regardless of priority. This allows the
-example to move from `8/8` to `12/4` for interactive demand, then back to `8/8`
-when interactive demand falls and batch still wants its previous allocation.
-Pending requests are reconsidered on the bounded reconciliation cadence in
-priority order. There is no fairness or starvation guarantee across priorities.
+Capacity changes are serialized, one complete plan at a time:
 
-Every operation starts with a complete feasible allocation vector. All
-capacity-changing operations are serialized globally:
+1. Commit the plan and reserve the requester's capacity in memory.
+2. Reduce donors through their scaling adapters.
+3. Wait until donor Pods are gone. Pending, failed and terminating Pods stay
+   charged.
+4. Grow the requester and wait for the whole plan to settle.
 
-1. Commit the plan and reserve requester capacity in memory.
-2. Apply donor reductions through the scaling adapters.
-3. Wait for current-generation readiness and replica status, and for the removed
-   worker Pods to disappear. Pending and terminating Pods remain charged.
-4. Apply requester growth and wait for the complete plan to settle.
-
-Demand and status endpoints remain responsive while Kubernetes operations and
-settlement are pending. A newer demand does not rewrite a transfer already in
-progress; it is considered after that transfer settles. The global floor applies
-to committed allocations and settled targets. Ready serving capacity can fall
-below that floor during the release-before-start interval.
-
-Release checks assume healthy nodes and normal graceful Pod deletion. Force
-deletion, node loss/partition, and out-of-band resource or label changes are
-outside the physical-release guarantee. Draining uses existing worker shutdown
-behavior and configured termination grace; this change does not extend those
-timeouts or guarantee that every in-flight request completes before termination.
+Demand and status requests stay responsive throughout; newer demand is planned
+after the current transfer settles. The global floor applies to committed
+targets, so ready serving capacity can dip during step 3. A worker restart
+outside a transfer only delays planning. Release checks assume graceful Pod
+deletion and healthy nodes; draining uses existing worker shutdown behavior.
 
 ### Status and recovery
 
-Managed responses add `allocation` with `pool_id`, `controller_id`,
+Managed responses include `allocation`: `pool_id`, `controller_id`,
 `request_id`, `transfer_id`, `phase`, `reason`, and separate desired, granted,
-observed, ready, and terminating replica counts. Unknown counts are `null`, never
-zero. Status is available without changing demand through
-`<ns>.GlobalPlanner.allocation_status`, accepting the caller namespace, Kubernetes
-namespace, and DGD name. `scaling` means accepted/pending; `success` means settled;
-`error` with phase `recovery_required` means mutations have stopped. The health
-endpoint also reports allocation phase and reason; transport health alone does
-not imply that allocations are progressing.
+observed, ready and terminating replica counts (`null` when unknown). The
+`<ns>.GlobalPlanner.allocation_status` endpoint returns the same status without
+changing demand, and the health endpoint reports the controller phase. A grant
+is a target, never evidence of ready workers: the Local Planner keeps reading
+readiness from Kubernetes.
 
-Managed requests return promptly even when `blocking` is true. The updated
-Local Planner connector recognizes managed pending responses and polls status
-while continuing to use Kubernetes for actual worker readiness. A known managed
-recovery status is an observable hold; an unavailable status RPC clears cached
-status and still permits local Kubernetes observation. Older Local
-Planners without request IDs are rejected. The most recent 256 request IDs per
-pool are deduplicated; a retry cannot change its payload or restore an older
-cached demand. Clients must not replay requests outside that window or across a
-controller restart. The bundled connector retries connection establishment only,
-not requests that have been sent.
+| `status` | Meaning |
+| --- | --- |
+| `scaling` | Demand accepted; a transfer is pending or in progress |
+| `success` | The pool's allocation is settled |
+| `error` + phase `recovery_required` | Mutations stopped; manual recovery needed |
 
-Unknown observations, target/identity/shape drift, uncertain writes, and
-settlement timeouts freeze mutations and retain existing reservations. There is
-no automatic rollback or endpoint that clears this state. For manual recovery:
+Requests must carry a `request_id` (older Local Planners are rejected). The last
+256 IDs per pool are deduplicated; the bundled connector never re-sends a request
+it has sent.
 
-1. Stop the controller and ensure no old instance remains.
-2. Inspect every enrolled DGD, adapter, and worker Pod; repair targets and wait
-   for all pools to become ready and settled inside both pool and global bounds.
-3. Restart the controller. It fences every adapter and reconstructs only a
-   complete settled allocation. Local Planners then republish current demand.
-   If a Local Planner had an ambiguous scaling-request transport failure, also
-   restart it: the existing effect-submission guard retains that unknown outcome
-   until restart. Read-only status outages do not trigger that guard.
+Unknown observations, target, identity or shape drift, uncertain writes and
+settlement timeouts freeze mutations while keeping reservations. To recover:
 
-Transfer records, reservations, and retained demand are in memory. A restart
-that cannot establish a settled allocation within all bounds requires manual
-repair. A valid settled donor-only intermediate allocation can become the new
-baseline; its old transfer intent is lost and current demand must be republished.
-The controller never resumes an assumed plan or spends unverified capacity. Durable
-recovery and HA require a later slice of the DEP.
+1. Stop the controller and make sure no old instance remains.
+2. Repair every enrolled DGD, adapter and Pod until all pools are settled within
+   pool and global bounds.
+3. Restart the controller. It fences every adapter and adopts only a complete,
+   settled, valid allocation; Local Planners then republish demand. Also restart
+   any Local Planner whose scale request failed in transport, since that unknown
+   outcome is held until restart.
+
+Transfers, reservations and demand live in memory; durable recovery and HA are
+later slices of the DEP.
 
 ## Offline Allocation Planning (Experimental)
 
-[DEP #16064](https://github.com/ai-dynamo/dynamo/issues/16064) proposes active
-reclamation from lower-priority pools. The standalone allocation planner below
-implements the policy and settled-allocation calculation for that proposal. It
-does not contact Kubernetes or execute a transfer. The running service consumes
-the same policy under `managed_allocation.policy` when managed mode is enabled.
-
-Each pool explicitly owns one prefill-only or decode-only worker component in
-its own DGD. GPU cost per replica must be a positive integer; zero-cost and
-composite pools are outside this allocation model. Identities are exact, without
-selectors. Higher static priorities are more important.
-
-For example, save this as `allocation-policy.json`:
-
-```json
-{
-  "min_total_gpus": 16,
-  "max_total_gpus": 16,
-  "pools": [
-    {
-      "pool_id": "interactive",
-      "participant_id": "prod/interactive",
-      "component_name": "DecodeWorker",
-      "role": "decode",
-      "gpu_per_replica": 4,
-      "min_gpus": 4,
-      "max_gpus": 16,
-      "priority": 100
-    },
-    {
-      "pool_id": "batch",
-      "participant_id": "prod/batch",
-      "component_name": "DecodeWorker",
-      "role": "decode",
-      "gpu_per_replica": 4,
-      "min_gpus": 4,
-      "max_gpus": 16,
-      "priority": 10
-    }
-  ]
-}
-```
-
-Save the complete current allocation as `allocations.json`:
-
-```json
-{"interactive": 8, "batch": 8}
-```
-
-Then inspect a request for three interactive replicas:
+`plan_allocation` computes the same decision the managed controller would make,
+without contacting Kubernetes. Save the policy (the `policy` block above, as
+JSON) as `allocation-policy.json` and the committed GPU vector as
+`allocations.json`, e.g. `{"interactive": 8, "batch": 8}`, then run:
 
 ```bash
 python -m dynamo.global_planner.plan_allocation \
@@ -528,46 +451,27 @@ python -m dynamo.global_planner.plan_allocation \
   --pool interactive --replicas 3
 ```
 
-The resulting plan assigns 12 GPUs to `interactive` and 4 to `batch`, with exact
-targets of three and one replicas. No voluntary downscale request from `batch`
-is needed to calculate the plan. Both pools' minima and the exact shared total
-remain satisfied. Asking `batch` to grow cannot reclaim from `interactive`.
+The plan assigns 12 GPUs to `interactive` and 4 to `batch` (targets 3 and 1);
+asking `batch` to grow cannot reclaim from `interactive`. The output is either a
+complete plan or a pending `reason`: `pool_minimum`/`pool_maximum` (demand was
+clamped), `global_minimum`, `requester_busy`, `insufficient_capacity`,
+`granularity` (replica sizes cannot fit), or `search_limit`. Exit status is `0`
+for a plan, `1` for pending and `2` for invalid input. `--unavailable-pool <id>`
+(repeatable) excludes pools from changes.
 
-Pool minima round up and maxima round down to whole replicas. For example, a
-pool costing 4 GPUs per replica with bounds `[5, 15]` has effective bounds
-`[8, 12]`. A configuration is rejected if a pool's interval becomes empty or if
-no actual allocation vector satisfies the exact global bounds. Scalar sums of
-pool minima and maxima alone are insufficient to establish feasibility.
+Semantics:
 
-The supplied allocation must name every configured pool, use whole replicas,
-and already satisfy all bounds. Desired replicas are clamped to the pool's
-effective interval; the output retains both desired and effective targets.
-Voluntary downscaling retains enough warm replicas to preserve the global
-allocation floor. Growth uses spare capacity first, then considers reductions
-only from strictly lower-priority pools above their minima. Among feasible
-plans, the search minimizes reclamation from higher donor priority classes
-first, then excess reclamation, then the number of affected pools. Pool IDs
-break remaining ties deterministically.
-
-Use `--unavailable-pool <id>` repeatedly to exclude pools from changes. This is
-an offline eligibility constraint, not reservation accounting. The input
-represents settled committed allocations; it cannot describe in-flight
-transfers or physical holdings. The command returns a complete hypothetical
-plan or a pending decision with no partial plan. Exit status is `0` for a plan,
-`1` for pending, and `2` for invalid input. Reasons identify normalized pool
-bounds, retained global floor, a busy requester, insufficient eligible capacity,
-incompatible replica sizes, or search exhaustion. `--max-search-steps` bounds
-allocation search work (default 100,000 units, accounting for candidate
-transitions and score width). Policy feasibility validation has its own fixed
-100,000-unit limit; an exhausted proof is rejected as unverified.
-
-The Python entry points are `AllocationPolicy` in `allocation_policy.py` and
-`plan_allocation` in `allocation.py`. They are independent of backend execution.
-The allocation floor here applies to settled targets: it does not establish a
-live-serving floor during a release-before-start transfer. The managed mode
-above supplies serialized execution, release observation, and conservative
-restart checks under its deployment restrictions. Durable transfer recovery
-and broader deployment support remain outside this slice.
+- Pool minima round up and maxima round down to whole replicas, so 4-GPU
+  replicas with bounds `[5, 15]` become `[8, 12]`. A policy is rejected if no
+  whole-replica vector satisfies the global bounds.
+- The input allocation must name every pool and satisfy all bounds. Voluntary
+  reductions keep enough warm replicas to preserve the global floor; growth is
+  never partially granted.
+- Among feasible plans, the search minimizes reclamation from the highest donor
+  priority first, then excess reclamation, then the number of affected pools;
+  pool IDs break ties.
+- `--max-search-steps` bounds the search (default 100,000 work units); policy
+  feasibility has its own fixed limit and is rejected if unproven.
 
 ## Related Documentation
 

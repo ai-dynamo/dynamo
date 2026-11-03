@@ -250,7 +250,7 @@ async def test_worker_observation_refreshes_status_without_substituting_grant(
     connector,
 ):
     connector.last_managed_allocation = _allocation(granted_replicas=2)
-    connector._managed_allocation_enabled = True
+    connector.managed_allocation = True
     connector.last_desired_replicas = [_target(3)]
     connector.remote_client.get_allocation_status.return_value = _response()
     local = MagicMock()
@@ -339,6 +339,7 @@ async def test_status_can_return_legacy_response(connector):
 async def test_status_outage_keeps_observing_and_retries_after_recovery(
     connector, failure
 ):
+    connector.managed_allocation = True
     connector.remote_client.send_scale_request.return_value = _response()
     await connector.set_component_replicas([_target(3)])
     connector.remote_client.get_allocation_status.side_effect = [
@@ -393,7 +394,7 @@ async def test_hanging_status_stream_times_out_and_allows_worker_observation(con
     remote._status_client = transport
     connector.remote_client = remote
     connector.last_managed_allocation = _allocation()
-    connector._managed_allocation_enabled = True
+    connector.managed_allocation = True
     local = MagicMock()
     local.get_actual_worker_counts = AsyncMock(return_value=(0, 2, True))
     connector._local_k8s_connector = local

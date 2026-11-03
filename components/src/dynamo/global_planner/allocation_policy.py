@@ -118,17 +118,13 @@ class AllocationPolicy(BaseModel):
         if self.min_total_gpus > self.max_total_gpus:
             raise ValueError("min_total_gpus must not exceed max_total_gpus")
 
+        # One pool per participant also makes worker ownership exclusive.
         pool_ids: set[str] = set()
-        ownership: set[tuple[str, str]] = set()
         participants: set[str] = set()
         for pool in self.pools:
             if pool.pool_id in pool_ids:
                 raise ValueError(f"duplicate pool_id {pool.pool_id!r}")
             pool_ids.add(pool.pool_id)
-            worker = (pool.participant_id, pool.component_name)
-            if worker in ownership:
-                raise ValueError(f"duplicate worker ownership for {worker!r}")
-            ownership.add(worker)
             if pool.participant_id in participants:
                 raise ValueError(
                     "only one pool per participant/DGD is supported: "

@@ -75,18 +75,23 @@ async def main(runtime: DistributedRuntime, config: GlobalPlannerConfig):
     k8s_namespace = os.environ.get("POD_NAMESPACE", "default")
     logger.info(f"Running in Kubernetes namespace: {k8s_namespace}")
 
-    # Create scale request handler
-    controller = None
-    if config.managed_allocation is not None:
-        managed = config.managed_allocation
+    # Create the scale request handler: managed allocation is opt-in.
+    managed = config.managed_allocation
+    controller: ManagedAllocationController | None = None
+    handler: ManagedRequestHandler | ScaleRequestHandler
+    if managed is not None:
         controller = ManagedAllocationController(
             managed.policy,
             ManagedKubernetesCapacity(managed.policy, k8s_namespace),
             poll_interval_seconds=managed.poll_interval_seconds,
             operation_timeout_seconds=managed.operation_timeout_seconds,
         )
-        handler = ManagedRequestHandler(managed, controller)
+        handler = managed_handler = ManagedRequestHandler(managed, controller)
+        authorized_namespaces: list[str] | str = list(
+            managed.caller_namespaces.values()
+        )
     else:
+        authorized_namespaces = config.managed_namespaces or "all"
         handler = ScaleRequestHandler(
             runtime=runtime,
             managed_namespaces=config.managed_namespaces,
@@ -109,17 +114,15 @@ async def main(runtime: DistributedRuntime, config: GlobalPlannerConfig):
             "status": "healthy",
             "component": "GlobalPlanner",
             "namespace": namespace,
-            "managed_namespaces": list(
-                config.managed_allocation.caller_namespaces.values()
-            )
-            if config.managed_allocation
-            else config.managed_namespaces or "all",
-            "allocation_phase": controller.phase if controller else "legacy",
+            "managed_namespaces": authorized_namespaces,
+            "allocation_phase": controller.phase.value if controller else "legacy",
             "allocation_reason": controller.reason if controller else None,
         }
 
     logger.info("  ✓ scale_request - Receives scaling requests from Planners")
     logger.info("  ✓ health - Health check endpoint")
+    if controller is not None:
+        logger.info("  ✓ allocation_status - Managed allocation status")
     logger.info("=" * 60)
     logger.info("GlobalPlanner is ready and waiting for scale requests")
     logger.info("=" * 60)
@@ -148,10 +151,12 @@ async def main(runtime: DistributedRuntime, config: GlobalPlannerConfig):
         )
         operations.extend(
             [
-                status_endpoint.serve_endpoint(handler.allocation_status),
+                status_endpoint.serve_endpoint(managed_handler.allocation_status),
                 controller.run(),
             ]
         )
+    # Cancel the remaining operations when any one fails, so a stopped
+    # controller never leaves endpoints accepting demand it cannot serve.
     tasks = [asyncio.ensure_future(operation) for operation in operations]
     try:
         await asyncio.gather(*tasks)

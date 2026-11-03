@@ -144,17 +144,17 @@ def test_rejects_duplicate_pool_ids():
         AllocationPolicy(min_total_gpus=0, max_total_gpus=32, pools=pools)
 
 
-def test_rejects_duplicate_worker_ownership_even_when_role_differs():
-    pools = [_pool(), _pool(pool_id="second", role="prefill")]
-    with pytest.raises(ValidationError, match="duplicate worker ownership"):
-        AllocationPolicy(min_total_gpus=0, max_total_gpus=32, pools=pools)
-
-
-def test_requires_separate_deployments_for_execution_isolation():
-    pools = [
-        _pool(),
-        _pool(pool_id="second", component_name="PrefillWorker", role="prefill"),
-    ]
+@pytest.mark.parametrize(
+    "second",
+    [
+        # The same worker, even under a different role.
+        {"role": "prefill"},
+        # A different worker in the same DGD shares its readiness.
+        {"component_name": "PrefillWorker", "role": "prefill"},
+    ],
+)
+def test_requires_separate_deployments_for_execution_isolation(second):
+    pools = [_pool(), _pool(pool_id="second", **second)]
     with pytest.raises(ValidationError, match="only one pool per participant/DGD"):
         AllocationPolicy(min_total_gpus=0, max_total_gpus=32, pools=pools)
 

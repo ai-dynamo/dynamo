@@ -41,10 +41,17 @@ pytestmark = [
 ]
 
 
-def _config(mode="decode", environment="global-planner", **kwargs):
+# "managed" is a Global Planner environment with managed allocation enabled;
+# plain "global-planner" is the legacy arbitration mode.
+_ENVIRONMENTS = ["managed", "global-planner", "kubernetes", "virtual"]
+
+
+def _config(mode="decode", environment="managed", **kwargs):
+    managed = environment == "managed"
     return PlannerConfig(
         mode=mode,
-        environment=environment,
+        environment="global-planner" if managed else environment,
+        global_planner_managed_allocation=managed,
         global_planner_namespace="global",
         served_model_name="test",
         optimization_target="load",
@@ -122,8 +129,8 @@ async def _load_tick(adapter, mode, *, now=30.0, high=False, counts=None, fpm=No
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["prefill", "decode", "agg", "disagg"])
-@pytest.mark.parametrize("environment", ["global-planner", "kubernetes", "virtual"])
-async def test_load_pipeline_publishes_valid_unchanged_demand_only_to_global(
+@pytest.mark.parametrize("environment", _ENVIRONMENTS)
+async def test_load_pipeline_publishes_valid_unchanged_demand_only_when_managed(
     mode, environment
 ):
     adapter = OrchestratorEngineAdapter(
@@ -132,7 +139,7 @@ async def test_load_pipeline_publishes_valid_unchanged_demand_only_to_global(
 
     effects = await _load_tick(adapter, mode)
 
-    if environment != "global-planner":
+    if environment != "managed":
         assert effects.scale_to is None
     else:
         assert effects.scale_to is not None
@@ -273,7 +280,7 @@ async def test_disagg_valid_hold_does_not_manufacture_demand_for_unobserved_peer
 
 
 @pytest.mark.parametrize("mode", ["prefill", "decode", "agg", "disagg"])
-@pytest.mark.parametrize("environment", ["global-planner", "kubernetes", "virtual"])
+@pytest.mark.parametrize("environment", _ENVIRONMENTS)
 @pytest.mark.parametrize("model_ready", [True, False])
 def test_throughput_publishes_unchanged_valid_model_result(
     mode, environment, model_ready, monkeypatch
@@ -304,7 +311,7 @@ def test_throughput_publishes_unchanged_valid_model_result(
         predicted_kv_hit_rate=0,
     )
 
-    if environment == "global-planner" and model_ready:
+    if environment == "managed" and model_ready:
         assert decision is not None
         assert decision.num_prefill == (2 if mode in ("prefill", "disagg") else None)
         assert decision.num_decode == (
@@ -343,3 +350,12 @@ def test_merged_baseline_and_rollout_echo_do_not_cancel_demand():
     counts = _counts("decode", decode_scaling_in_progress=True)
     counts.expected_num_decode = 3
     assert adapter._project_scale_to(outcome, counts) is None
+
+
+def test_managed_allocation_requires_global_planner_environment():
+    with pytest.raises(ValueError, match="requires environment='global-planner'"):
+        PlannerConfig(
+            environment="kubernetes",
+            global_planner_managed_allocation=True,
+            served_model_name="test",
+        )

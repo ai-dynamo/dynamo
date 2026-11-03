@@ -50,6 +50,22 @@ class ScaleRequest(BaseModel):
     request_id: Optional[str] = None
 
 
+class AllocationPhase(str, Enum):
+    """Managed allocation lifecycle, in reconciliation order."""
+
+    # Controller-wide phases.
+    RECOVERING = "recovering"  # waiting for a fenced, fully settled baseline
+    READY = "ready"  # baseline established; reported per pool as below
+    RECOVERY_REQUIRED = "recovery_required"  # mutations frozen; manual repair
+    # Per-pool phases while READY.
+    SETTLED = "settled"
+    PENDING = "pending"  # retained demand differs from the grant
+    REDUCING = "reducing"  # donor reductions being written
+    WAITING_RELEASE = "waiting_release"  # donor GPUs not yet released
+    STARTING = "starting"  # requester growth being written
+    SETTLING = "settling"  # waiting for the complete plan to settle
+
+
 class AllocationStatusRequest(BaseModel):
     """Identify a managed pool without changing its retained demand."""
 
@@ -67,6 +83,7 @@ class ManagedAllocationStatus(BaseModel):
 
     pool_id: str
     controller_id: str
+    # A plain string keeps older readers compatible with newly added phases.
     phase: str
     reason: str
     desired_replicas: Optional[StrictInt] = Field(default=None, ge=0)

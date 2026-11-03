@@ -300,7 +300,6 @@ async def test_restart_accepts_complete_settled_allocation(
     [
         {"identity": "replacement"},
         {"target_replicas": 1},
-        {"settled": False},
         {"observed_replicas": 3},
     ],
 )
@@ -311,6 +310,23 @@ async def test_external_drift_stops_mutations(controller, capacity, change):
     await controller.reconcile_once()
     assert controller.phase == "recovery_required"
     assert capacity.writes == []
+
+
+@pytest.mark.asyncio
+async def test_worker_restart_outside_transfer_defers_planning(controller, capacity):
+    await controller.reconcile_once()
+    capacity.snapshots["batch"] = replace(
+        capacity.snapshots["batch"], ready_replicas=1, settled=False
+    )
+    controller.submit("interactive", 3, "i1")
+    await controller.reconcile_once()
+    assert controller.phase == "ready" and controller.active is None
+    assert controller.status("interactive").allocation.phase == "pending"
+    assert capacity.writes == []
+
+    capacity.settle("batch")
+    await controller.reconcile_once()
+    assert capacity.writes == [("batch", 1)]
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,8 @@ healthy nodes, and exclusive scale ownership; force deletion and concurrent
 rollouts are outside this contract.
 """
 
+from __future__ import annotations
+
 import asyncio
 import copy
 import hashlib
@@ -50,6 +52,8 @@ _CURRENT_HASHES = (
     "nvidia.com/current-worker-hash-v2",
 )
 _PROVIDER = "nvidia.com/workload-provider"
+_GPU_RESOURCE = "nvidia.com/gpu"
+_IDLE_PHASES = (None, "", "Completed")
 _Result = TypeVar("_Result")
 
 
@@ -77,13 +81,14 @@ def _gpu_cost(spec: dict) -> int:
         requests = resources.get("requests") or {}
         limits = resources.get("limits") or {}
         for name in requests.keys() | limits.keys():
-            if name.startswith("nvidia.com/") and name != "nvidia.com/gpu":
+            vendor, _, _ = name.partition("/")
+            if vendor == "nvidia.com" and name != _GPU_RESOURCE:
                 raise ManagedCapacityError("only scalar nvidia.com/gpu is supported")
-        raw = requests.get("nvidia.com/gpu", limits.get("nvidia.com/gpu", 0))
+        raw = requests.get(_GPU_RESOURCE, limits.get(_GPU_RESOURCE, 0))
         if isinstance(raw, bool) or not str(raw).isdigit():
             raise ManagedCapacityError("GPU requests must be whole numbers")
         count = int(raw)
-        if "nvidia.com/gpu" in limits and str(limits["nvidia.com/gpu"]) != str(count):
+        if _GPU_RESOURCE in limits and str(limits[_GPU_RESOURCE]) != str(count):
             raise ManagedCapacityError("GPU requests and limits must agree")
         total += count
     # Reject GPU init containers (including native sidecars) instead of trying
@@ -285,9 +290,40 @@ class ManagedKubernetesCapacity:
         )
 
     def _read(self, pool: PoolAllocationPolicy, *, check_fence: bool = True) -> _Read:
-        assert self._api is not None
         name = self._names[pool.pool_id]
         deployment = self._get(DGD_PLURAL, name)
+        graph = self._read_graph(pool, name, deployment)
+        adapter = self._read_adapter(pool, name, deployment, check_fence=check_fence)
+        identity = self._check_identity(pool, graph, adapter)
+        target = _integer(adapter["spec"].get("replicas"), "DGDSA replicas")
+        dgd_target = _integer(graph.component.get("replicas"), "DGD replicas")
+        observed, ready, terminating = self._count_workers(pool, name, graph)
+        status_current = all(
+            graph.component_status.get(field) == target
+            for field in ("replicas", "updatedReplicas", "readyReplicas")
+        )
+        backing_ready = graph.status.get("state") == "successful" and any(
+            condition.get("type") == "Ready"
+            and condition.get("status") == "True"
+            and condition.get("observedGeneration") == graph.generation
+            for condition in graph.status.get("conditions") or []
+        )
+        settled = (
+            graph.generation_current
+            and status_current
+            and backing_ready
+            and target == dgd_target == observed == ready
+            and terminating == 0
+        )
+        snapshot = ManagedPoolSnapshot(
+            pool.pool_id, identity, target, observed, ready, terminating, settled
+        )
+        return _Read(snapshot, adapter)
+
+    def _read_graph(
+        self, pool: PoolAllocationPolicy, name: str, deployment: object
+    ) -> _Graph:
+        """Validate that the DGD has exactly the supported single-worker shape."""
         if not isinstance(deployment, dict) or not all(
             isinstance(deployment.get(field), dict) for field in ("metadata", "spec")
         ):
@@ -313,44 +349,19 @@ class ManagedKubernetesCapacity:
         if component.get("type") != pool.role:
             raise ManagedCapacityError("worker role does not match pool policy")
         for candidate in components:
-            if candidate is not component and candidate.get("type") not in (
-                "frontend",
-                "planner",
-            ):
-                raise ManagedCapacityError(
-                    "only one worker component per DGD is supported"
-                )
-            if (
-                candidate.get("multinode")
-                or candidate.get("roles")
-                or candidate.get("experimental")
-                or candidate.get("providerOverride")
-            ):
-                raise ManagedCapacityError(
-                    "multinode, multi-role and experimental providers are unsupported"
-                )
-            cost = _gpu_cost((candidate.get("podTemplate") or {}).get("spec") or {})
-            if cost != (pool.gpu_per_replica if candidate is component else 0):
-                raise ManagedCapacityError(
-                    "declared worker GPU cost does not match pool policy"
-                )
-        if "scalingAdapter" not in component or not isinstance(
-            component["scalingAdapter"], dict
-        ):
+            _check_component_shape(pool, candidate, is_worker=candidate is component)
+        if not isinstance(component.get("scalingAdapter"), dict):
             raise ManagedCapacityError("worker must declare scalingAdapter")
+
         annotations = metadata.get("annotations") or {}
         if annotations.get(_PROVIDER) != "component" or spec.get("providerOverride"):
             raise ManagedCapacityError(
                 "only the component workload provider is supported"
             )
         status = deployment.get("status") or {}
-        if (status.get("rollingUpdate") or {}).get("phase") not in (
-            None,
-            "",
-            "Completed",
-        ):
+        if (status.get("rollingUpdate") or {}).get("phase") not in _IDLE_PHASES:
             raise ManagedCapacityError("concurrent worker rollouts are unsupported")
-        if (status.get("restart") or {}).get("phase") not in (None, "", "Completed"):
+        if (status.get("restart") or {}).get("phase") not in _IDLE_PHASES:
             raise ManagedCapacityError("concurrent graph restarts are unsupported")
         if str(status.get("state", "")).lower() == "failed":
             raise ManagedCapacityError("DGD is failed")
@@ -368,6 +379,8 @@ class ManagedKubernetesCapacity:
         generation = _integer(metadata.get("generation"), "DGD generation")
         observed = _integer(status.get("observedGeneration"), "DGD observedGeneration")
         generation_current = observed == generation
+        # After enrollment, generation lag is expected while a scale write is
+        # reconciled; it only blocks settlement.
         if not generation_current and pool.pool_id not in self._identities:
             raise ManagedCapacityError("initial GPU shape is not current")
         if (
@@ -375,6 +388,29 @@ class ManagedKubernetesCapacity:
             != pool.gpu_per_replica
         ):
             raise ManagedCapacityError("projected GPU cost does not match pool policy")
+        return _Graph(
+            uid=uid,
+            spec=spec,
+            component_names=frozenset(by_name),
+            component=component,
+            annotations=annotations,
+            status=status,
+            component_status=component_status,
+            resource_name=resource_names[0],
+            generation=generation,
+            generation_current=generation_current,
+        )
+
+    def _read_adapter(
+        self,
+        pool: PoolAllocationPolicy,
+        name: str,
+        deployment: dict,
+        *,
+        check_fence: bool,
+    ) -> dict:
+        """Read the worker's scaling adapter and verify ownership and fencing."""
+        assert self._api is not None
         adapter = self._get(
             DGDSA_PLURAL, KubernetesAPI.scaling_adapter_name(name, pool.component_name)
         )
@@ -383,47 +419,55 @@ class ManagedKubernetesCapacity:
         )
         if rejection:
             raise ManagedCapacityError(rejection)
-        adapter_meta = adapter["metadata"]
-        adapter_uid = _text(adapter_meta.get("uid"), "DGDSA UID")
-        if adapter_meta.get("namespace") != self._namespace:
+        metadata = adapter["metadata"]
+        _text(metadata.get("uid"), "DGDSA UID")
+        if metadata.get("namespace") != self._namespace:
             raise ManagedCapacityError("DGDSA namespace differs from pool policy")
-        if (
-            check_fence
-            and (adapter_meta.get("annotations") or {}).get(
-                PLANNER_WRITER_FENCE_ANNOTATION
-            )
-            != self._writer_id
-        ):
+        fence = (metadata.get("annotations") or {}).get(PLANNER_WRITER_FENCE_ANNOTATION)
+        if check_fence and fence != self._writer_id:
             raise ManagedCapacityError(
                 "DGDSA writer fence belongs to another controller"
             )
-        fingerprint_spec = copy.deepcopy(spec)
-        for item in fingerprint_spec["components"]:
+        return adapter
+
+    def _check_identity(
+        self, pool: PoolAllocationPolicy, graph: _Graph, adapter: dict
+    ) -> str:
+        """Fingerprint everything but the replica count; it must never change."""
+        if not graph.worker_hashes:
+            raise ManagedCapacityError("current worker generation is unavailable")
+        spec = copy.deepcopy(graph.spec)
+        for item in spec["components"]:
             if item["name"] == pool.component_name:
                 item.pop("replicas", None)
-        hashes = {annotations[key] for key in _CURRENT_HASHES if annotations.get(key)}
-        if not hashes:
-            raise ManagedCapacityError("current worker generation is unavailable")
         fingerprint = hashlib.sha256(
             json.dumps(
                 [
-                    fingerprint_spec,
-                    sorted(hashes),
-                    resource_names,
-                    annotations.get(_PROVIDER),
+                    spec,
+                    sorted(graph.worker_hashes),
+                    [graph.resource_name],
+                    graph.annotations.get(_PROVIDER),
                 ],
                 sort_keys=True,
             ).encode()
         ).hexdigest()
-        identity = f"{uid}:{adapter_uid}:{fingerprint}"
-        previous = self._identities.get(pool.pool_id)
-        if previous is not None and identity != previous:
+        identity = f"{graph.uid}:{adapter['metadata']['uid']}:{fingerprint}"
+        previous = self._identities.setdefault(pool.pool_id, identity)
+        if identity != previous:
             raise ManagedCapacityError(
                 "pool UID, worker generation, or non-replica configuration changed"
             )
-        self._identities[pool.pool_id] = identity
-        target = _integer(adapter["spec"].get("replicas"), "DGDSA replicas")
-        dgd_target = _integer(component.get("replicas"), "DGD replicas")
+        return identity
+
+    def _count_workers(
+        self, pool: PoolAllocationPolicy, name: str, graph: _Graph
+    ) -> tuple[int, int, int]:
+        """Return (present, ready current-generation, terminating) worker Pods.
+
+        Every present worker Pod is charged, including old generations and
+        terminating or failed Pods, so release is never inferred early.
+        """
+        assert self._api is not None
         pod_list = self._api.core_api.list_namespaced_pod(
             namespace=self._namespace,
             label_selector=f"{DYNAMO_DGD_NAME_LABEL}={name}",
@@ -434,28 +478,27 @@ class ManagedKubernetesCapacity:
             raise ManagedCapacityError("incomplete worker Pod list")
         if pod_list.metadata._continue:
             raise ManagedCapacityError("worker Pod list is truncated")
-        pods = [pod.to_dict() for pod in pod_list.items]
-        workers = []
+        present = ready = terminating = 0
         seen_uids: set[str] = set()
-        for pod in pods:
+        for pod in (item.to_dict() for item in pod_list.items):
             if not all(
                 isinstance(pod.get(field), dict) for field in ("metadata", "spec")
             ):
                 raise ManagedCapacityError(
                     "malformed worker Pod metadata or specification"
                 )
-            pod_meta = pod["metadata"]
-            pod_uid = _text(pod_meta.get("uid"), "Pod UID")
-            labels = pod_meta.get("labels") or {}
+            metadata = pod["metadata"]
+            uid = _text(metadata.get("uid"), "Pod UID")
+            labels = metadata.get("labels") or {}
             if (
-                pod_uid in seen_uids
-                or pod_meta.get("namespace") != self._namespace
+                uid in seen_uids
+                or metadata.get("namespace") != self._namespace
                 or labels.get(DYNAMO_DGD_NAME_LABEL) != name
             ):
                 raise ManagedCapacityError("ambiguous Pod identity")
-            seen_uids.add(pod_uid)
+            seen_uids.add(uid)
             pod_component = labels.get(DYNAMO_COMPONENT_LABEL)
-            if pod_component not in by_name:
+            if pod_component not in graph.component_names:
                 raise ManagedCapacityError("Pod has unknown component ownership")
             cost = _gpu_cost(pod["spec"])
             if pod_component != pool.component_name:
@@ -466,62 +509,76 @@ class ManagedKubernetesCapacity:
                 raise ManagedCapacityError(
                     "actual Pod GPU cost differs from pool policy"
                 )
-            owners = pod_meta.get("owner_references") or []
-            if (
-                len(owners) != 1
-                or owners[0].get("kind") != "ReplicaSet"
-                or owners[0].get("api_version") != "apps/v1"
-                or owners[0].get("controller") is not True
-                or not owners[0].get("uid")
-            ):
-                raise ManagedCapacityError("worker Pod has unknown workload ownership")
-            # Old generations are deliberately included. Their presence blocks
-            # settlement rather than disappearing from capacity accounting.
-            current_worker = (
-                bool(hashes)
-                and labels.get(_WORKER_HASH) in hashes
-                and owners[0].get("name", "").startswith(resource_names[0] + "-")
-            )
-            workers.append((pod, current_worker))
-        terminating = sum(
-            bool(pod["metadata"].get("deletion_timestamp")) for pod, _ in workers
+            owner = _replica_set_owner(metadata)
+            current = labels.get(_WORKER_HASH) in graph.worker_hashes and owner.get(
+                "name", ""
+            ).startswith(graph.resource_name + "-")
+            deleting = bool(metadata.get("deletion_timestamp"))
+            present += 1
+            terminating += deleting
+            ready += current and not deleting and _pod_ready(pod)
+        return present, ready, terminating
+
+
+@dataclass(frozen=True)
+class _Graph:
+    """A validated DGD view of one pool's worker component."""
+
+    uid: str
+    spec: dict
+    component_names: frozenset[str]
+    component: dict
+    annotations: dict
+    status: dict
+    component_status: dict
+    resource_name: str
+    generation: int
+    generation_current: bool
+
+    @property
+    def worker_hashes(self) -> frozenset[str]:
+        return frozenset(
+            self.annotations[key]
+            for key in _CURRENT_HASHES
+            if self.annotations.get(key)
         )
-        ready = sum(
-            current
-            and not pod["metadata"].get("deletion_timestamp")
-            and (pod.get("status") or {}).get("phase") == "Running"
-            and any(
-                condition.get("type") == "Ready" and condition.get("status") == "True"
-                for condition in (pod.get("status") or {}).get("conditions") or []
-            )
-            for pod, current in workers
+
+
+def _check_component_shape(
+    pool: PoolAllocationPolicy, component: dict, *, is_worker: bool
+) -> None:
+    if not is_worker and component.get("type") not in ("frontend", "planner"):
+        raise ManagedCapacityError("only one worker component per DGD is supported")
+    if any(
+        component.get(field)
+        for field in ("multinode", "roles", "experimental", "providerOverride")
+    ):
+        raise ManagedCapacityError(
+            "multinode, multi-role and experimental providers are unsupported"
         )
-        status_current = all(
-            component_status.get(field) == target
-            for field in ("replicas", "updatedReplicas", "readyReplicas")
+    cost = _gpu_cost((component.get("podTemplate") or {}).get("spec") or {})
+    if cost != (pool.gpu_per_replica if is_worker else 0):
+        raise ManagedCapacityError(
+            "declared worker GPU cost does not match pool policy"
         )
-        backing_ready = status.get("state") == "successful" and any(
-            condition.get("type") == "Ready"
-            and condition.get("status") == "True"
-            and condition.get("observedGeneration") == generation
-            for condition in status.get("conditions") or []
-        )
-        settled = (
-            generation_current
-            and status_current
-            and backing_ready
-            and target == dgd_target == len(workers) == ready
-            and terminating == 0
-        )
-        return _Read(
-            ManagedPoolSnapshot(
-                pool.pool_id,
-                identity,
-                target,
-                len(workers),
-                ready,
-                terminating,
-                settled,
-            ),
-            adapter,
-        )
+
+
+def _replica_set_owner(metadata: dict) -> dict:
+    owners = metadata.get("owner_references") or []
+    if (
+        len(owners) != 1
+        or owners[0].get("kind") != "ReplicaSet"
+        or owners[0].get("api_version") != "apps/v1"
+        or owners[0].get("controller") is not True
+        or not owners[0].get("uid")
+    ):
+        raise ManagedCapacityError("worker Pod has unknown workload ownership")
+    return owners[0]
+
+
+def _pod_ready(pod: dict) -> bool:
+    status = pod.get("status") or {}
+    return status.get("phase") == "Running" and any(
+        condition.get("type") == "Ready" and condition.get("status") == "True"
+        for condition in status.get("conditions") or []
+    )

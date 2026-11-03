@@ -20,6 +20,7 @@ from dynamo.planner.connectors.protocol import (
     AllocationStatusRequest,
     ManagedAllocationStatus,
     ScaleRequest,
+    ScaleResponse,
     ScaleStatus,
 )
 from dynamo.planner.errors import (
@@ -41,6 +42,14 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
+def _recovery_required(response: ScaleResponse) -> bool:
+    """Whether a managed controller has frozen mutations for manual recovery."""
+    return (
+        response.allocation is not None
+        and response.allocation.phase == "recovery_required"
+    )
+
+
 class GlobalPlannerConnector(PlannerConnector):
     """
     Connector that delegates scaling decisions to a centralized GlobalPlanner.
@@ -57,6 +66,7 @@ class GlobalPlannerConnector(PlannerConnector):
         global_planner_namespace: str,
         global_planner_component: str = "GlobalPlanner",
         model_name: Optional[str] = None,
+        managed_allocation: bool = False,
     ):
         """
         Initialize GlobalPlannerConnector.
@@ -67,6 +77,8 @@ class GlobalPlannerConnector(PlannerConnector):
             global_planner_namespace: Namespace where GlobalPlanner is deployed
             global_planner_component: Component name of GlobalPlanner (default: "GlobalPlanner")
             model_name: Optional model name (will be managed remotely if not provided)
+            managed_allocation: GlobalPlanner runs managed allocation; poll its
+                allocation status alongside worker observations
         """
         self.runtime = runtime
         self.dynamo_namespace = dynamo_namespace
@@ -81,7 +93,7 @@ class GlobalPlannerConnector(PlannerConnector):
         # Neither value substitutes for Kubernetes readiness observations.
         self.last_desired_replicas: list[TargetReplica] = []
         self.last_managed_allocation: Optional[ManagedAllocationStatus] = None
-        self._managed_allocation_enabled = False
+        self.managed_allocation = managed_allocation
 
         # Lazily-initialized KubernetesConnector scoped to the pool's own DGD.
         # Used only to read pool-local MDC / DGD args for capability discovery
@@ -166,7 +178,6 @@ class GlobalPlannerConnector(PlannerConnector):
 
         response = await self.remote_client.send_scale_request(request)
         self.last_managed_allocation = response.allocation
-        self._managed_allocation_enabled = response.allocation is not None
 
         if response.status == ScaleStatus.SUCCESS:
             logger.info("GlobalPlanner scaling successful: %s", response.message)
@@ -179,10 +190,7 @@ class GlobalPlannerConnector(PlannerConnector):
             logger.warning(f"GlobalPlanner rejected scale request: {response.message}")
         elif response.status == ScaleStatus.ERROR:
             logger.error("GlobalPlanner scaling failed: %s", response.message)
-            if (
-                response.allocation is not None
-                and response.allocation.phase == "recovery_required"
-            ):
+            if _recovery_required(response):
                 # The managed controller has explicitly frozen mutations. Keep
                 # observing and publishing demand so a later recovery can use it.
                 return
@@ -226,12 +234,8 @@ class GlobalPlannerConnector(PlannerConnector):
             logger.warning("GlobalPlanner allocation status unavailable: %s", exc)
             return None
         self.last_managed_allocation = response.allocation
-        self._managed_allocation_enabled = response.allocation is not None
         if response.status == ScaleStatus.ERROR:
-            if (
-                response.allocation is not None
-                and response.allocation.phase == "recovery_required"
-            ):
+            if _recovery_required(response):
                 logger.error("GlobalPlanner requires recovery: %s", response.message)
                 return self.last_managed_allocation
             raise RuntimeError(
@@ -357,8 +361,8 @@ class GlobalPlannerConnector(PlannerConnector):
         """
         # The local planner already polls worker counts. Reuse that cadence for
         # managed status, including donor changes initiated by another pool.
-        # Legacy deployments never call the new endpoint implicitly.
-        if self._managed_allocation_enabled:
+        # Legacy deployments never call the new endpoint.
+        if self.managed_allocation:
             await self.get_allocation_status()
         local = self._get_local_k8s_connector()
         if local is None:
