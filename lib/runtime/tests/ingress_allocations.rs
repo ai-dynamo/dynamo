@@ -35,8 +35,8 @@ use common::ingress::{request_payload, start_response_peer};
 /// Allocations per request for a one-item and a 16-item response stream. These
 /// are ceilings, set to the counts measured on this code; lower them when the
 /// worker path gets cheaper.
-const MAX_ALLOCATIONS_ONE_ITEM: u64 = 67;
-const MAX_ALLOCATIONS_SIXTEEN_ITEMS: u64 = 127;
+const MAX_ALLOCATIONS_ONE_ITEM: u64 = 55;
+const MAX_ALLOCATIONS_SIXTEEN_ITEMS: u64 = 115;
 
 const WARMUP_REQUESTS: usize = 20;
 const MEASURED_REQUESTS: usize = 200;

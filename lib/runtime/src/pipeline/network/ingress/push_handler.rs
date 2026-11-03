@@ -829,12 +829,15 @@ where
         // generation itself.
         let nvtx_generate = dynamo_nvtx_range!("worker.ingress.generate");
         let stream = async {
-            self.segment
-                .get()
-                .expect("segment not set")
-                .generate(request)
-                .instrument(lifecycle.start(LifecycleStage::RequestDispatch))
-                .await
+            let engine = self.engine.get().expect("engine not set");
+            async {
+                // Held until the engine returns its stream, so the engine never
+                // sees a second call with this id at once.
+                let _claim = self.in_flight_ids.claim(request_context.id())?;
+                engine.generate(request).await
+            }
+            .instrument(lifecycle.start(LifecycleStage::RequestDispatch))
+            .await
         }
         .instrument(worker_operation.clone())
         .await
