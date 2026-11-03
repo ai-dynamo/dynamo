@@ -523,6 +523,7 @@ requirements.txt                                                                
 /lib/llm/src/grpc/service.rs                                                                            @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/http/service.rs                                                                            @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/preprocessor.rs                                                                            @ai-dynamo/dynamo-frontend-codeowners
+/lib/lora/src/huggingface.rs                                                                            @ai-dynamo/dynamo-runtime-codeowners
 /lib/llm/src/block_manager.md                                                                           @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager.rs                                                                           @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/generate_format/                                                                           @ai-dynamo/dynamo-frontend-codeowners
