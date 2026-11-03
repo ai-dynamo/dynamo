@@ -42,7 +42,9 @@ Dynamo runtime metrics, logs, and request spans are implemented. Scrape native e
 
 A supported service-level agreement (SLA) autoscaling workflow is not available for these sidecars. Kubernetes worker discovery is implemented, but built-in per-iteration Forward Pass Metrics (FPM) emission/relay is missing, so default load-based scaling has no input and cannot make scaling decisions. A separate predictive-scaling path does not establish an integrated sidecar workflow. See [Planner Limitations](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/overview.md#current-limitations).
 
-The Kubernetes operator rejects sidecar mode combined with GPU Memory Service (GMS), enabled checkpointing, or shadow-engine failover. See the [sidecar deployment contract](../../docs/fern/pages/reference/kubernetes-api/dynamo-component-deployment.mdx#dynamo-sidecar-mode).
+The GPU Memory Service (GMS), checkpoint/restore, and shadow-engine failover entries require separate engine/container integration. A Dynamo engine container or upstream engine configuration can supply components for such integrations, but backend-specific setup and validation are required. This does not establish support for every backend or deployment mode.
+
+The Kubernetes operator rejects sidecar mode combined with GMS, enabled checkpointing, or shadow-engine failover, regardless of the engine image. Replacing the engine image alone does not enable these operator-managed features. See the [sidecar deployment contract](../../docs/fern/pages/reference/kubernetes-api/dynamo-component-deployment.mdx#dynamo-sidecar-mode).
 
 Enable request migration with `--migration-limit > 0`; it is off by default. Eligible requests can retry connection failures, timeouts, and supported interrupted streams, continuing from delivered tokens. Structured-output requests and explicit worker pins are excluded, and not all engine errors are migratable. See each engine's support notes for error-specific restrictions. Request migration is distinct from shadow-engine failover.
 

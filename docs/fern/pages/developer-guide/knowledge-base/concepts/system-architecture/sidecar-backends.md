@@ -26,7 +26,7 @@ native gRPC API.
 | Multimodal input | Supported: image, video, audio | No | Limited: images only |
 | Separate multimodal encoder workers | Supported | No | No |
 | LoRA adapters | Supported | No | No |
-| Structured output and logprobs | Limited | Limited | Limited: no prompt logprobs |
+| Structured output and logprobs | Supported | Supported | Supported: no prompt logprobs |
 | Embedding endpoints | No | No | No |
 | Runtime weight updates and sleep/wake controls | Limited | No | No |
 
@@ -44,10 +44,10 @@ native gRPC API.
 | Observability: metrics, logs, and tracing | Limited | Limited | Limited |
 | SLA-based planner and autoscaling | No | No | No |
 | Native engine cache offloading | Engine-configured | Engine-configured | Engine-configured |
-| Operator-managed GPU Memory Service (GMS) | No | No | No |
-| Operator-managed checkpoint/restore | No | No | No |
-| Operator-managed shadow-engine failover | No | No | No |
-| In-flight request migration | Limited: opt-in token replay | Limited: opt-in token replay | Limited: opt-in token replay |
+| GPU Memory Service (GMS) | Requires separate integration | Requires separate integration | Requires separate integration |
+| Checkpoint/restore | Requires separate integration | Requires separate integration | Requires separate integration |
+| Shadow-engine failover | Requires separate integration | Requires separate integration | Requires separate integration |
+| In-flight request migration | Supported: opt-in token replay | Supported: opt-in token replay | Supported: opt-in token replay |
 | Graceful shutdown and draining | Limited: bounded drain | Limited: bounded drain | Limited: bounded drain |
 | Speculative decoding | Engine-configured | Engine-configured | Engine-configured |
 
