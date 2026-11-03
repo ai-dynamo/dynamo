@@ -499,15 +499,22 @@ class EncodeWorkerHandler:
                     coalesce=coalesce,
                     combined_embedding=combined_embedding,
                 )
-                send_tasks = [
-                    asyncio.create_task(
-                        self.embedding_sender.send_embeddings(
-                            transfer_tensor, stage_embeddings=True
+                if isinstance(self.embedding_sender, LocalEmbeddingSender):
+                    transfer_requests = (
+                        await self.embedding_sender.send_embeddings_batch(
+                            transfer_tensors, stage_embeddings=True
                         )
                     )
-                    for transfer_tensor in transfer_tensors
-                ]
-                transfer_requests = await asyncio.gather(*send_tasks)
+                else:
+                    send_tasks = [
+                        asyncio.create_task(
+                            self.embedding_sender.send_embeddings(
+                                transfer_tensor, stage_embeddings=True
+                            )
+                        )
+                        for transfer_tensor in transfer_tensors
+                    ]
+                    transfer_requests = await asyncio.gather(*send_tasks)
 
                 after_transfer_time = time.perf_counter()
 
