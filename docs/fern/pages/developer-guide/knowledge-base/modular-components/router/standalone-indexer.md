@@ -62,7 +62,7 @@ Multiple indexer replicas can subscribe to the same ZMQ worker endpoints for fau
 2. A 1-second delay biases peer recovery past the slow-joiner window, so the dump covers events that may have occurred before a fresh listener can safely start draining.
 3. The indexer fetches a `/dump` from the first reachable peer in `--peers`.
 4. Dump events are applied to populate the radix tree.
-5. After recovery completes (and, when `DYN_ROUTER_MIN_INITIAL_WORKERS` is set, after enough initial `--workers` are registered), the ready gate opens. Any listener whose initial ZMQ connect has already succeeded transitions to `active` and begins draining buffered events; listeners for workers that are still down remain `pending` until they connect.
+5. After recovery completes (and, when `DYN_ROUTER_MIN_INITIAL_WORKERS` is set, after enough initial `--workers` are registered), the ready gate opens. Each listener whose local ZMQ socket setup succeeded then transitions to `active` and begins draining buffered events. ZMQ `connect()` does not wait for the worker, so a listener for a worker that is still down is also `active`; ZMQ keeps retrying that endpoint in the background, and events arrive once the worker is up.
 
 If no peers are reachable, the indexer starts with an empty state.
 
