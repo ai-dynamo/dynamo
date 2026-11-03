@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 
 use rmp_serde as rmps;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::protocols::{DpRank, PlacementEvent, StorageTier, WorkerWithDpRank};
 
@@ -55,6 +55,11 @@ pub struct ZmqEventNormalizer {
     warning_count: Arc<AtomicU32>,
     group_metadata: FxHashMap<(DpRank, u32), KvCacheGroupMetadata>,
     cache_namespaces: FxHashMap<(WorkerWithDpRank, u64), CacheNamespaceState>,
+    /// Workers that have published at least one full-size block. Once a worker
+    /// has proven its block size matches, a smaller `BlockStored` event is a
+    /// partial tail (vLLM `--prefix-match-unit` below the block size), not a
+    /// misconfiguration, and is filtered quietly instead of warned about.
+    full_block_workers: FxHashSet<WorkerWithDpRank>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +86,7 @@ pub enum ZmqEventFilterReason {
     UnknownKind,
     NonMainAttentionGroup,
     UnlearnedGroupIdx,
+    PartialBlock,
 }
 
 impl ZmqEventFilterReason {
@@ -96,6 +102,7 @@ impl ZmqEventFilterReason {
             Self::UnknownKind => "unknown_kind",
             Self::NonMainAttentionGroup => "non_main_attention_group",
             Self::UnlearnedGroupIdx => "unlearned_group_idx",
+            Self::PartialBlock => "partial_block",
         }
     }
 }
@@ -109,6 +116,7 @@ impl ZmqEventNormalizer {
             warning_count: Arc::new(AtomicU32::new(0)),
             group_metadata: FxHashMap::default(),
             cache_namespaces: FxHashMap::default(),
+            full_block_workers: FxHashSet::default(),
         }
     }
 
@@ -120,6 +128,7 @@ impl ZmqEventNormalizer {
             warning_count,
             group_metadata: FxHashMap::default(),
             cache_namespaces: FxHashMap::default(),
+            full_block_workers: FxHashSet::default(),
         }
     }
 
@@ -216,6 +225,22 @@ impl ZmqEventNormalizer {
             Some(reason) => return Err(reason),
             None => {}
         }
+        // Only blocks that survived group filtering count toward a worker's
+        // full-block history, so a filtered (non-main-attention) group cannot
+        // suppress a size-mismatch warning for the routed group. A clear resets
+        // the history: the engine behind this worker may come back with a
+        // different block size.
+        match &raw {
+            RawKvEvent::BlockStored { block_size, .. } => {
+                if let Some(reason) = self.filter_partial_block(*block_size, worker) {
+                    return Err(reason);
+                }
+            }
+            RawKvEvent::AllBlocksCleared { .. } => {
+                self.full_block_workers.remove(&worker);
+            }
+            _ => {}
+        }
         if !is_lower_tier {
             self.propagate_cache_namespace(&mut raw, worker)?;
         }
@@ -247,6 +272,41 @@ impl ZmqEventNormalizer {
     ) -> Option<PlacementEvent> {
         let raw = self.preprocess(raw, worker)?;
         self.normalize_preprocessed(raw, event_id, worker)
+    }
+
+    /// Filter partial-tail `BlockStored` events from engines whose hash unit is
+    /// smaller than the KV block size (vLLM `--prefix-match-unit`).
+    ///
+    /// vLLM publishes full blocks at the engine block size and the trailing
+    /// partial block of a prompt at the hash-unit size. The router can only
+    /// index full blocks, so conversion drops the partial one, but it does so
+    /// with a block-size-mismatch warning that users read as a misconfiguration.
+    /// Once a worker has published a full-size block its block size is known to
+    /// match, so a smaller event from that worker is a partial tail and is
+    /// filtered here at debug level. A mismatch on the first event from a worker
+    /// is left to conversion, which still warns, so a real block-size
+    /// misconfiguration stays visible.
+    fn filter_partial_block(
+        &mut self,
+        block_size: usize,
+        worker: WorkerWithDpRank,
+    ) -> Option<ZmqEventFilterReason> {
+        let kv_block_size = self.kv_block_size as usize;
+        if block_size == kv_block_size {
+            self.full_block_workers.insert(worker);
+            return None;
+        }
+        if block_size < kv_block_size && self.full_block_workers.contains(&worker) {
+            tracing::debug!(
+                block_size,
+                kv_block_size,
+                worker_id = worker.worker_id,
+                dp_rank = worker.dp_rank,
+                "Filtering partial-tail KV block event (hash unit smaller than block size)"
+            );
+            return Some(ZmqEventFilterReason::PartialBlock);
+        }
+        None
     }
 
     fn learn_metadata(&mut self, metadata: KvCacheEventMetadata, dp_rank: DpRank) {

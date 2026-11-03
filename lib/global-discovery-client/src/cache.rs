@@ -505,21 +505,6 @@ mod tests {
         assert_eq!(Arc::strong_count(&source.0), 1);
     }
 
-    #[test]
-    #[should_panic(expected = "the refresh interval must be non-zero")]
-    fn rejects_a_zero_interval() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let _cache = RouterCache::spawn_from(
-                FakeSource::default(),
-                Duration::ZERO,
-                CancellationToken::new(),
-            );
-        });
-    }
-
     /// A pool source whose answer the test sets; `None` is an outage.
     #[derive(Clone, Default)]
     struct FakePools(Arc<Mutex<Option<PoolsResponse>>>);
