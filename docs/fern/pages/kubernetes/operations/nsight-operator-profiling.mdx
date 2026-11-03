@@ -225,7 +225,9 @@ the key off that machine:
 
 A rule selects every replica of a component: the injector decides when a pod is created, before the pod has its final
 name, so a rule cannot pick one replica by name. To profile one replica, give each pod its own tag and start the window
-on one pod's tag. Change the profile config above in two places:
+on one pod's tag. This uploads to the namespace's in-cluster storage, which Nsight creates with auto-provisioning; it
+was not tested with an S3 storage config such as `team-s3`, so leave out `cloudStorageConfigRef` on this rule. Change
+the profile config above in two places:
 
 ```yaml
   nsightToolConfigs:
@@ -246,7 +248,8 @@ on one pod's tag. Change the profile config above in two places:
     processIncludePatterns: ['^(.*/)?python(3([.][0-9]+)?)? -m dynamo[.](vllm|sglang|trtllm)( .*)?$']
 ```
 
-Then run the commands in [Capture](#capture) with one pod's name as the tag:
+Then run the commands in [Capture](#capture) with one pod's name as the tag. Set `T` to that pod name instead of
+`my-dgd`, and do not rerun the `T=my-dgd` line:
 
 ```bash
 kubectl get pods -n $NS -l nvidia.com/dynamo-graph-deployment-name=my-dgd,nvidia.com/dynamo-component-type=decode
