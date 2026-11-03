@@ -918,9 +918,7 @@ class SglangProcessor:
         """Shared streaming logic for both single-process and pool paths."""
         # Media expansion is backend-owned on this path, so only text-only
         # requests have an exact frontend-visible prompt length.
-        if self.token_budget is not None and not dynamo_preproc.get(
-            "multi_modal_data"
-        ):
+        if self.token_budget is not None and not dynamo_preproc.get("multi_modal_data"):
             stop_conditions = dynamo_preproc.get("stop_conditions")
             max_tokens = (
                 stop_conditions.get("max_tokens")

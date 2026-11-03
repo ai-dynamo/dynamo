@@ -3105,9 +3105,7 @@ class TestTokenBudgetValidation:
 
     def test_configured_budget_allows_missing_stop_conditions(self, tokenizer):
         """Use the default output allowance when stop conditions are absent."""
-        engine = FakeRoutedEngine(
-            items=[{"token_ids": [65], "finish_reason": "stop"}]
-        )
+        engine = FakeRoutedEngine(items=[{"token_ids": [65], "finish_reason": "stop"}])
         processor = SglangProcessor(
             tokenizer,
             engine,
