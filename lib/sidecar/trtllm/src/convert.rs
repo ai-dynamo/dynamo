@@ -207,6 +207,7 @@ fn max_tokens(
 }
 
 const IMAGE_KEY: &str = "image_url";
+const IMAGE_ROUTING_UUID_PREFIX: &str = "dynamo-image-v1:";
 
 /// The engine fetches passthrough media, so enforce Dynamo's policy before dispatch.
 pub(crate) fn validate_remote_media_urls(
@@ -268,6 +269,15 @@ fn image_media(
     let mut uuid_map = request.multi_modal_uuids.take();
     let user_image_uuids = if let Some(uuid_map) = uuid_map.as_mut() {
         for (modality, uuids) in uuid_map.iter() {
+            if uuids
+                .iter()
+                .flatten()
+                .any(|uuid| uuid.starts_with(IMAGE_ROUTING_UUID_PREFIX))
+            {
+                return Err(client::invalid_argument(format!(
+                    "caller multimodal UUIDs must not use the reserved `{IMAGE_ROUTING_UUID_PREFIX}` prefix"
+                )));
+            }
             if modality != IMAGE_KEY && !uuids.is_empty() {
                 return Err(client::invalid_argument(format!(
                     "multimodal UUIDs for `{modality}` cannot be forwarded by the image-only TensorRT-LLM sidecar"
@@ -315,14 +325,18 @@ fn image_media(
             .as_ref()
             .is_some_and(|info| !info.routing_token_ids.is_empty() && info.expanded_prompt_len > 0)
         && uuids.iter().all(Option::is_none)
-        && let Some(hashes) = request
-            .extra_args
-            .as_ref()
-            .and_then(|extra| extra.get("mm_hashes"))
+        && let Some(hashes) =
+            request
+                .extra_args
+                .as_ref()
+                .and_then(|extra| match extra.get("mm_hashes_by_modality") {
+                    Some(hashes) => hashes.get("image"),
+                    None => extra.get("mm_hashes"),
+                })
     {
-        let hashes = hashes.as_array().ok_or_else(|| {
-            client::invalid_argument("extra_args.mm_hashes must be an array for image routing")
-        })?;
+        let hashes = hashes
+            .as_array()
+            .ok_or_else(|| client::invalid_argument("image routing hashes must be an array"))?;
         if hashes.len() != images.len() {
             return Err(client::invalid_argument(
                 "image routing hash count must match image count",
@@ -335,7 +349,10 @@ fn image_media(
                 .ok_or_else(|| {
                     client::invalid_argument("image routing hashes must be 16 hexadecimal digits")
                 })?;
-            *uuid = Some(format!("dynamo-image-v1:{}", hash.to_ascii_lowercase()));
+            *uuid = Some(format!(
+                "{IMAGE_ROUTING_UUID_PREFIX}{}",
+                hash.to_ascii_lowercase()
+            ));
         }
     }
     images

@@ -170,6 +170,56 @@ fn image_routing_hints_require_capability_and_exact_frontend_metadata() {
 }
 
 #[test]
+fn caller_uuids_cannot_spoof_internal_image_routing_hints() {
+    let mut req = request();
+    add_images(
+        &mut req,
+        [
+            "https://example.com/first.png",
+            "https://example.com/second.png",
+        ],
+    );
+    req.multi_modal_uuids = Some(HashMap::from([(
+        "image_url".to_string(),
+        vec![
+            Some("caller-owned".to_string()),
+            Some("dynamo-image-v1:0123456789abcdef".to_string()),
+        ],
+    )]));
+    let error = build_generate_request(req, "req", "model", image_limits(4096), AGG)
+        .expect_err("caller UUIDs must not masquerade as adapter-generated routing hints");
+    assert!(
+        error
+            .to_string()
+            .contains("reserved `dynamo-image-v1:` prefix")
+    );
+}
+
+#[test]
+fn image_routing_uses_only_the_image_hashes_from_grouped_metadata() {
+    let mut req = request();
+    add_images(&mut req, ["https://example.com/first.png"]);
+    req.extra_args = Some(json!({
+        "mm_hashes": ["1111111111111111"],
+        "mm_hashes_by_modality": {"image": ["0123456789abcdef"], "video": ["fedcba9876543210"]}
+    }));
+    req.mm_routing_info = Some(dynamo_llm::protocols::common::preprocessor::MmRoutingInfo {
+        routing_token_ids: vec![11],
+        expanded_prompt_len: 1,
+        ..Default::default()
+    });
+    let mut limits = image_limits(4096).unwrap();
+    limits.supports_image_routing = true;
+    let proto = build_generate_request(req.clone(), "req", "model", Some(limits), AGG).unwrap();
+    assert_eq!(proto.media[0].uuid, "dynamo-image-v1:0123456789abcdef");
+
+    req.extra_args.as_mut().unwrap()["mm_hashes_by_modality"] =
+        json!({"video": ["fedcba9876543210"]});
+    let proto = build_generate_request(req, "req", "model", Some(limits), AGG).unwrap();
+    assert!(proto.media[0].uuid.is_empty());
+}
+
+#[test]
 fn image_url_aliases_keep_distinct_routing_hints() {
     let mut limits = image_limits(4096).unwrap();
     limits.supports_image_routing = true;
