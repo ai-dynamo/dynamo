@@ -6341,7 +6341,7 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
     // native calls before closure, so every route the v2 crate serves (explicit
     // v2 and auto) releases them early; only an explicit v1 selection still
     // buffers them until completion.
-    let flag = dynamo_runtime::config::selected_parser_version().unwrap()
+    let uses_unified = dynamo_runtime::config::selected_parser_version().unwrap()
         != dynamo_runtime::config::ParserVersion::V1;
     let q = "q".repeat(4096);
     let shapes = [
@@ -6380,7 +6380,8 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
         for size in [7, 1024] {
             for thinking in ["default", "disabled", "prefill"] {
                 for tail in ["complete", "truncated", "sibling", "unclosed_valid_json"] {
-                    if !flag && (thinking == "prefill" || !matches!(tail, "complete" | "truncated"))
+                    if !uses_unified
+                        && (thinking == "prefill" || !matches!(tail, "complete" | "truncated"))
                     {
                         continue;
                     }
@@ -6434,7 +6435,7 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
                             chunks.push(item.expect("source remains open"));
                         }
                         let early = kimi_native_calls(&chunks);
-                        if flag {
+                        if uses_unified {
                             assert_eq!(early.len(), 1, "{tool}/{size}/{thinking}");
                             let call = early.get(&0).unwrap();
                             assert_eq!(call.id.as_deref(), Some(expected_id));
@@ -6494,7 +6495,7 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
                             })
                             .collect();
                         let calls = kimi_native_calls(&chunks);
-                        if flag && tail != "truncated" {
+                        if uses_unified && tail != "truncated" {
                             assert_eq!(calls[&0].id.as_deref(), Some(expected_id));
                             assert_eq!(
                                 serde_json::from_str::<Value>(&calls[&0].arguments).unwrap(),
@@ -6514,8 +6515,8 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
                         // mid-string truncation still leaves the call incomplete.
                         let expected_count = usize::from(
                             tail == "complete"
-                                || (flag && tail == "sibling")
-                                || (flag && tail == "unclosed_valid_json"),
+                                || (uses_unified && tail == "sibling")
+                                || (uses_unified && tail == "unclosed_valid_json"),
                         );
                         assert_eq!(
                             final_calls.len(),
@@ -6528,7 +6529,7 @@ async fn kimi_native_adapter_releases_open_strings_and_keeps_completed_siblings(
                                     .unwrap(),
                                 serde_json::json!({"count":7,"content":q})
                             );
-                            if flag {
+                            if uses_unified {
                                 assert_eq!(final_calls[0].id, expected_id);
                             }
                         }

@@ -153,6 +153,38 @@ and then misbehaved at request time are now startup failures:
 - `intent_cache_ttl_seconds <= 0` — no cached intent is ever fresh, silently
   disabling all pool pairing.
 
+## Declared GPU Costs
+
+The GPU budget is computed from each pool's `gpu_per_replica`, read from the
+DGD's `resources.limits["nvidia.com/gpu"]`. A pool that requests no GPU has no
+cost to read — and with a budget enabled that fails the whole snapshot, so every
+scale request errors. That rules out **mocker topologies**, which exist to
+exercise a deployment without hardware but could not take part in the budget
+they are meant to help test.
+
+Declare what such a pool costs instead:
+
+```yaml
+gpu_cost:
+  pools:
+    - selector: sachalm/dsv4-**
+      gpu_per_replica: 8
+    - selector: sachalm/gpt-oss-**
+      gpu_per_replica: 4
+```
+
+Selectors work exactly as they do for priorities below — same syntax, same
+most-specific-wins rule, same shared implementation.
+
+**A declared cost is a fallback, not an override.** It applies only where the DGD
+is silent, so a pool that really does request GPUs is always charged what the
+cluster says and a stale config can never make the planner under-count real
+hardware. An explicit `gpu_per_replica: 0` is different from declaring nothing:
+zero keeps a pool out of budget totals, while undeclared leaves it unreadable.
+
+This mirrors the local planner, whose `_initialize_gpu_counts` already falls back
+to configured GPU counts for "mockers that don't specify GPU resources".
+
 ## Pool Priorities
 
 Pool priorities declare which pools should be served first when several compete
@@ -195,7 +227,8 @@ without special-casing, e.g.
 `global-pool/east-coast-regions/*/long-context/*`.
 
 The most specific match wins, independent of the order entries appear in the
-file. Specificity is the number of segments named exactly, then depth — so
+file. Specificity is the number of segments named exactly, then literal
+coverage within wildcard segments, then depth — so
 `prod/chat/prefill` beats `prod/chat`, which beats `prod/*`, which beats `**`.
 Ties fall back to declaration order. Pools matching nothing take
 `priority.default`, which is also what a pool this GlobalPlanner has never seen
@@ -229,11 +262,13 @@ ordering inverts with the direction of the transfer:
 | Scale-up (needs GPUs) | donors giving GPUs up | the **least** important pool (lowest number) |
 | Scale-down below the floor (frees GPUs) | recipients taking GPUs on | the **most** important pool (highest number) |
 
-Priority is the leading term, followed by the size of the GPU change. Among
-equal-priority pools, smaller changes come first; transfers inside one DGD
-are preferred only when those changes also tie. A candidate that cannot fit
-even one replica is skipped so a finer-grained partner can still satisfy the
-budget.
+Priority is the leading term. Among equal-priority pools, partners inside the
+requesting DGD are preferred, followed by smaller absolute GPU changes. This
+locality preference also applies when no priorities are configured, since every
+pool then resolves to the same priority. It intentionally changes the previous
+ordering, which preferred smaller absolute GPU changes and used locality only
+to break ties: a same-DGD partner can now precede a cross-DGD partner with a
+smaller GPU change.
 
 Priority does **not** add new denials. Pairing only ever consumes a scale
 *intent a pool already published*, so a high-priority pool never has capacity
@@ -258,7 +293,7 @@ If no packing brings totals into the band, the request is rejected (`REJECTED`) 
 
 When the selected partners span multiple DGDs:
 
-- **Intra-DGD partners** (same DGD as the request) are merged into the request's atomic `set_component_replicas` call — one patch updates request-side and intra-DGD partner pools together.
+- **Intra-DGD partners** (same DGD as the request) share the request's `set_component_replicas` call, which patches component targets separately rather than transactionally.
 - **Cross-DGD partners** (different DGD) get their own per-DGD patch.
 - **Direction-aware order**: scale-down DGDs apply first (freeing GPUs), then scale-up DGDs. If any second-or-later patch fails, the first has already landed and the system self-corrects from the new state on the next tick.
 

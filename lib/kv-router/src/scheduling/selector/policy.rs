@@ -1080,6 +1080,7 @@ mod tests {
         let (declared, undeclared) = select(Some(KvTransferCandidates {
             block_hashes: (101..=104).map(ExternalSequenceBlockHash).collect(),
             owner_prefix_blocks: vec![(warm.into(), 3)],
+            source_intervals: Vec::new(),
             routing_snapshot: None,
         }));
         // The warm worker holds the whole fetchable prefix; the cold one can fetch it.
@@ -1314,6 +1315,7 @@ mod tests {
                     request.kv_transfer_candidates = Some(KvTransferCandidates {
                         block_hashes: (101..=112).map(ExternalSequenceBlockHash).collect(),
                         owner_prefix_blocks: vec![(WorkerWithDpRank::from_worker_id(3).into(), 12)],
+                        source_intervals: Vec::new(),
                         routing_snapshot: None,
                     })
                 }
