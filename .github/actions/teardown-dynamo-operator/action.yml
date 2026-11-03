@@ -137,10 +137,8 @@ runs:
           exit 0
         fi
 
-        # Remove pods before deleting the namespace. If pods are still
-        # terminating on the namespace controller's first pass, it records
-        # ContentDeletionFailed and may not retry until after the namespace
-        # wait below has timed out, even once the pods are gone.
+        # Drain pods first: if pods are still terminating on the namespace
+        # controller's first pass, it may not retry before the wait below times out.
         echo "Pods in ${NAMESPACE} before namespace deletion:"
         kubectl get pods -n "${NAMESPACE}" -o wide || true
         if ! kubectl delete pods --all -n "${NAMESPACE}" \
