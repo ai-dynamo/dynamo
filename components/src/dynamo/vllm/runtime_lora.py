@@ -673,6 +673,53 @@ class RuntimeLoRACoordinator:
             resolved.source_revision,
         )
 
+    async def reserve_admin_slot(
+        self, lora_name: str, capacity: int | None
+    ) -> int | None:
+        """Reclaim idle runtime residency while reserving administrative capacity."""
+        state = self._handler._lora_state
+        async with self._handler._lora_capacity_guard:
+            occupied = len(state.loaded_loras) + len(state.uncertain_engine_lora_ids)
+            needed = 0 if capacity is None else max(0, occupied + 1 - capacity)
+            if self._closed or needed > sum(
+                self._can_evict(key) for key in state.runtime_loras
+            ):
+                return None
+            lora_id = self._allocate_lora_id(lora_name)
+            victims = [
+                self._reserve_runtime_lora_eviction(lora_name) for _ in range(needed)
+            ]
+            state.admin_reserved_ids[lora_name] = lora_id
+            state.loaded_loras[lora_name] = LoRAInfo(id=-1, path="")
+
+        committed = False
+        removed_ids: set[int] = set()
+        try:
+            removed_ids, cancelled, error = await self._remove_evicted_runtime_loras(
+                victims
+            )
+            if cancelled or isinstance(error, asyncio.CancelledError):
+                raise asyncio.CancelledError
+            if error is not None:
+                return None
+            async with self._handler._lora_capacity_guard:
+                for victim in victims:
+                    state.rollback_reserved_ids.discard(victim.id)
+                    self._handler._engine_loaded_loras.discard(victim.adapter_key)
+                self._finish_eviction_transitions_locked(victims)
+                committed = True
+            return lora_id
+        finally:
+            if not committed:
+                try:
+                    cancelled = await self._finish_runtime_rollback(
+                        lora_name, victims, removed_ids
+                    )
+                finally:
+                    state.admin_reserved_ids.pop(lora_name, None)
+                if cancelled:
+                    raise asyncio.CancelledError
+
     def _reserve_runtime_lora_eviction(self, exclude_key: str) -> RuntimeLoRAInfo:
         state = self._handler._lora_state
         victim = next(
