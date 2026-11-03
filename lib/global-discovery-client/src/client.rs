@@ -9,6 +9,8 @@ use serde::de::DeserializeOwned;
 use thiserror::Error;
 use url::Url;
 
+const MAX_ERROR_BODY: usize = 1024;
+
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum DiscoveryClientError {
@@ -23,6 +25,8 @@ pub enum DiscoveryClientError {
         #[source]
         source: reqwest::Error,
     },
+    /// `body` keeps at most the first 1 KiB of the response, so a proxy's
+    /// error page does not fill logs or health reports.
     #[error("{url} returned {status}: {body}")]
     Status {
         url: Url,
@@ -114,9 +118,27 @@ impl GlobalDiscoveryClient {
         Err(DiscoveryClientError::Status {
             url: url.clone(),
             status,
-            body: response.text().await.unwrap_or_default(),
+            body: read_error_body(response).await,
         })
     }
+}
+
+/// Reads only the start of an error body, so a large error page is never
+/// buffered whole. The 3 bytes past [`MAX_ERROR_BODY`] finish a character
+/// that the cut falls inside.
+async fn read_error_body(mut response: reqwest::Response) -> String {
+    const READ_LIMIT: usize = MAX_ERROR_BODY + 3;
+    let mut bytes = Vec::new();
+    while bytes.len() < READ_LIMIT {
+        let Ok(Some(chunk)) = response.chunk().await else {
+            break;
+        };
+        let take = chunk.len().min(READ_LIMIT - bytes.len());
+        bytes.extend_from_slice(&chunk[..take]);
+    }
+    let mut body = String::from_utf8_lossy(&bytes).into_owned();
+    body.truncate(body.floor_char_boundary(MAX_ERROR_BODY));
+    body
 }
 
 /// A body cut off mid-transfer is a `Request` error. Only JSON that does not
