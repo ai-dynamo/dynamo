@@ -593,7 +593,7 @@ fn cancelled_error(context_id: &str) -> anyhow::Error {
 /// A KvRouter only decides which worker you should use. It doesn't send you there.
 /// TODO: Rename this to indicate it only selects a worker, it does not route.
 pub struct KvRouter {
-    pub(crate) candidate_policy: Option<Arc<dyn routing_host::candidate_policy::CandidatePolicy>>,
+    pub(crate) candidate_policy: Option<Arc<dyn crate::routing_policy::CandidatePolicy>>,
     indexer: Indexer,
     selection: embedded::EmbeddedSelection,
     required_worker_inputs: dynamo_kv_router::selector::WorkerInputs,
@@ -842,8 +842,7 @@ impl KvRouter {
         let registration_availability_provider: metrics::RegistrationAvailabilityProvider =
             Arc::new(move || client_for_registration.available_instance_ids());
 
-        let candidate_policy =
-            lora_filter.map(routing_host::candidate_policy::LegacyLoraPolicy::kv);
+        let candidate_policy = lora_filter.map(crate::lora_routing::LegacyLoraPolicy::kv);
         let client_for_availability = client.clone();
         let workers_for_availability = workers_with_configs.clone();
         let admission_policy = candidate_policy.clone();

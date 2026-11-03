@@ -16,21 +16,20 @@ use dynamo_kv_router::selector::{WorkerInputs, WorkerSelector};
 use dynamo_runtime::{
     component::Client,
     pipeline::{
-        MultimodalCacheIndex, MultimodalCacheKeyExtractor, PushRouter, PushRouterOptions,
-        RouterMode, StreamingDispatch,
+        BuiltinRoutePicker, MultimodalCacheIndex, MultimodalCacheKeyExtractor, PushRouter,
+        PushRouterOptions, RouterMode, StreamingDispatch,
     },
     protocols::annotated::Annotated,
 };
 
-use super::{
-    BuiltinWorkerSelector, HostedOccupancy, RoutingHost, RoutingPolicy,
-    candidate_policy::{CandidatePolicy, LegacyLoraPolicy},
-};
+use super::{BuiltinWorkerSelector, HostedOccupancy, RoutingHost, RoutingPolicy};
 use crate::{
     kv_router::{KvRouter, RoutingLoadContext, metrics::RouterRequestMetrics},
     lora::{LoadEstimator, LoraFilter},
+    lora_routing::LegacyLoraPolicy,
     preprocessor::PreprocessedRequest,
     protocols::common::llm_backend::LLMEngineOutput,
+    routing_policy::CandidatePolicy,
     session_affinity::AffinityCoordinator,
 };
 
@@ -225,7 +224,11 @@ impl PolicyInputs {
                         Some(LegacyLoraPolicy::hosted(
                             filter,
                             load_estimator,
-                            builtin_selector(mode)?,
+                            match mode {
+                                RouterMode::RoundRobin => BuiltinRoutePicker::round_robin(),
+                                RouterMode::Random => BuiltinRoutePicker::random(),
+                                _ => unreachable!(),
+                            },
                         ))
                     }
                     (Some(_), mode) => {

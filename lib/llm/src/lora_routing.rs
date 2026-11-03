@@ -3,35 +3,23 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use dynamo_kv_router::{
-    scheduling::SchedulingRequest,
-    selector::{WorkerSelectionInput, WorkerSelector},
-};
+use dynamo_kv_router::scheduling::SchedulingRequest;
 use dynamo_runtime::{
     error::{DynamoError, ErrorType},
-    pipeline::Error,
+    pipeline::{BuiltinRoutePicker, Error},
 };
 
-use super::BuiltinWorkerSelector;
 use crate::{
     discovery::RuntimeConfigWatch,
     lora::{LoadEstimator, LoraFilter},
     preprocessor::PreprocessedRequest,
+    routing_policy::{AttemptLease, CandidatePolicy, CandidateSelection},
 };
-
-pub(crate) type AttemptLease = Box<dyn Send + Sync>;
-
-pub(crate) struct CandidateSelection {
-    pub target: u64,
-    pub allowed_fallback: HashSet<u64>,
-    pub lease: Option<AttemptLease>,
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::lora::{LoraRoutingTable, LoraStateTracker};
-    use dynamo_runtime::pipeline::RouterMode;
 
     #[test]
     fn base_requests_do_not_read_candidates_or_update_load() {
@@ -42,7 +30,7 @@ mod tests {
                 LoraStateTracker::new(),
             )),
             estimator.clone(),
-            BuiltinWorkerSelector::new(RouterMode::RoundRobin).unwrap(),
+            BuiltinRoutePicker::round_robin(),
         );
         let request = PreprocessedRequest::builder()
             .model("base".to_string())
@@ -72,7 +60,7 @@ mod tests {
                 LoraStateTracker::new(),
             )),
             estimator.clone(),
-            BuiltinWorkerSelector::new(RouterMode::RoundRobin).unwrap(),
+            BuiltinRoutePicker::round_robin(),
         );
         let mut request = PreprocessedRequest::builder()
             .model("base".to_string())
@@ -172,31 +160,16 @@ mod tests {
     }
 }
 
-pub(crate) trait CandidatePolicy: Send + Sync {
-    fn select(
-        &self,
-        request: &PreprocessedRequest,
-        live: &dyn Fn() -> Vec<u64>,
-        free: &dyn Fn() -> Vec<u64>,
-    ) -> Result<Option<CandidateSelection>, Error>;
-    fn refresh_admission(
-        &self,
-        request: &SchedulingRequest,
-        available: Option<Arc<HashSet<u64>>>,
-        workers: &RuntimeConfigWatch,
-    ) -> Option<Arc<HashSet<u64>>>;
-}
-
 pub(crate) struct LegacyLoraPolicy {
     filter: Arc<LoraFilter>,
-    hosted: Option<(Arc<LoadEstimator>, BuiltinWorkerSelector)>,
+    hosted: Option<(Arc<LoadEstimator>, BuiltinRoutePicker)>,
 }
 
 impl LegacyLoraPolicy {
-    pub(super) fn hosted(
+    pub(crate) fn hosted(
         filter: Arc<LoraFilter>,
         estimator: Arc<LoadEstimator>,
-        selector: BuiltinWorkerSelector,
+        selector: BuiltinRoutePicker,
     ) -> Arc<dyn CandidatePolicy> {
         Arc::new(Self {
             filter,
@@ -268,9 +241,8 @@ impl CandidatePolicy for LegacyLoraPolicy {
             ));
         }
         let target = selector
-            .select_worker(WorkerSelectionInput::hosted(&candidates, None))?
-            .worker
-            .worker_id;
+            .select_worker(&candidates, |_| 0)
+            .ok_or_else(|| anyhow::anyhow!("no eligible workers"))?;
         tracing::debug!(lora = %name, worker_id = target, candidates = candidates.len(), routable = routable.len(), free = free.len(), "LoRA-filtered router selected worker");
         Ok(Some(CandidateSelection {
             target,

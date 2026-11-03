@@ -50,16 +50,15 @@ use crate::{
 mod builder;
 mod builtin;
 mod cancellation;
-pub(crate) mod candidate_policy;
 mod kv;
 mod kv_selection;
 mod occupancy;
 mod request_guard;
 
+use crate::routing_policy::CandidatePolicy;
 pub use builder::{LlmDispatch, MultimodalCache, RoutingHostBuilder};
 use builtin::BuiltinWorkerSelector;
 use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cleanup_policy};
-use candidate_policy::CandidatePolicy;
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 use occupancy::HostedOccupancy;
 pub(crate) use request_guard::prompt_private_blocks;

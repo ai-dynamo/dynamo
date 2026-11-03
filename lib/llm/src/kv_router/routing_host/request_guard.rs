@@ -5,7 +5,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use prometheus::IntCounter;
 
-use super::candidate_policy::AttemptLease;
+use crate::routing_policy::AttemptLease;
 use crate::{
     kv_router::{
         KvRouter,
