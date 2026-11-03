@@ -410,6 +410,9 @@ func (r *reconciler) setStatus(ctx context.Context, relay *v1alpha1.DynamoPoolRe
 	return nil
 }
 
+// sourceNamespaces returns the runtime namespaces of the DGD's workers. During a
+// rolling update, the status keeps the old revision's namespace until cutover
+// and also lists the new revision's, so the Relay sees the workers of both.
 func sourceNamespaces(dgd *v1beta1.DynamoGraphDeployment) []string {
 	unique := map[string]struct{}{}
 	for i := range dgd.Spec.Components {
@@ -417,11 +420,15 @@ func sourceNamespaces(dgd *v1beta1.DynamoGraphDeployment) []string {
 		if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
 			continue
 		}
-		namespace := dgd.Status.Components[component.ComponentName].RuntimeNamespace
+		status := dgd.Status.Components[component.ComponentName]
+		namespace := status.RuntimeNamespace
 		if namespace == "" {
 			namespace = dgd.GetDynamoNamespaceForComponent(component)
 		}
 		unique[namespace] = struct{}{}
+		for _, namespace := range status.RuntimeNamespaces {
+			unique[namespace] = struct{}{}
+		}
 	}
 	namespaces := make([]string, 0, len(unique))
 	for namespace := range unique {

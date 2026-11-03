@@ -168,6 +168,53 @@ func TestOneDGDRelayLifecycle(t *testing.T) {
 	if deployment.ResourceVersion != deploymentVersion {
 		t.Fatal("changing the source file unexpectedly rolled the Relay Deployment")
 	}
+	t.Log("Watch the workers of both revisions while a rolling update keeps the old namespace active")
+	if err := client.Get(ctx, key, dgd); err != nil {
+		t.Fatal(err)
+	}
+	dgd.Status.Components["decode"] = v1beta1.ComponentReplicaStatus{
+		RuntimeNamespace:  "green-runtime-next",
+		RuntimeNamespaces: []string{"green-runtime-after", "green-runtime-next"},
+	}
+	if err := client.Status().Update(ctx, dgd); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Get(ctx, childKey, &sources); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(sources.Data["sources.json"]), &sourceDocument); err != nil {
+		t.Fatal(err)
+	}
+	if len(sourceDocument.Sources) != 2 || sourceDocument.Sources[0].Namespace != "green-runtime-after" ||
+		sourceDocument.Sources[1].Namespace != "green-runtime-next" {
+		t.Fatalf("Relay does not watch both revisions during the rolling update: %s", sources.Data["sources.json"])
+	}
+	t.Log("Watch only the new revision's workers after cutover")
+	dgd.Status.Components["decode"] = v1beta1.ComponentReplicaStatus{RuntimeNamespace: "green-runtime-after"}
+	if err := client.Status().Update(ctx, dgd); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Get(ctx, childKey, &sources); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(sources.Data["sources.json"]), &sourceDocument); err != nil {
+		t.Fatal(err)
+	}
+	if len(sourceDocument.Sources) != 1 || sourceDocument.Sources[0].Namespace != "green-runtime-after" {
+		t.Fatalf("Relay did not drop the old revision after cutover: %s", sources.Data["sources.json"])
+	}
+	if err := client.Get(ctx, childKey, &deployment); err != nil {
+		t.Fatal(err)
+	}
+	if deployment.ResourceVersion != deploymentVersion {
+		t.Fatal("following a rolling update unexpectedly rolled the Relay Deployment")
+	}
 	t.Log("Restore a source volume that no longer projects sources.json")
 	deployment.Spec.Template.Spec.Volumes[0].ConfigMap.Items = []corev1.KeyToPath{{Key: "wrong", Path: "wrong.json"}}
 	if err := client.Update(ctx, &deployment); err != nil {

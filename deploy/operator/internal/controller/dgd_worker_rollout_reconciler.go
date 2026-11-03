@@ -1359,6 +1359,11 @@ func (r *dgdWorkerRolloutReconciler) aggregateOldWorkerComponentStatuses(
 			copyActiveWorkerProjection(&status, activeDCD.Status.Component)
 			status.RuntimeNamespace = oldWorkerRuntimeNamespace(*activeDCD)
 		}
+		namespaces := make([]string, 0, len(dcds))
+		for _, dcd := range dcds {
+			namespaces = append(namespaces, oldWorkerRuntimeNamespace(dcd))
+		}
+		status.RuntimeNamespaces = dynamo.ComponentRuntimeNamespaces(status.RuntimeNamespace, namespaces...)
 		oldStatuses[componentName] = status
 	}
 
@@ -1584,8 +1589,12 @@ func mergeWorkerComponentStatuses(
 			continue
 		}
 
-		// Keep consumers on the old active worker projection until rollout cutover.
+		// Keep consumers on the old active worker projection until rollout cutover,
+		// and list both revisions' namespaces for consumers that follow every replica.
+		namespaces := append([]string{newStatus.RuntimeNamespace, oldStatus.RuntimeNamespace}, newStatus.RuntimeNamespaces...)
+		namespaces = append(namespaces, oldStatus.RuntimeNamespaces...)
 		copyActiveWorkerProjection(&newStatus, &oldStatus)
+		newStatus.RuntimeNamespaces = dynamo.ComponentRuntimeNamespaces(newStatus.RuntimeNamespace, namespaces...)
 
 		// Build sorted ComponentNames from old and new DCD names.
 		componentNames := append(slices.Clone(oldStatus.ComponentNames), newStatus.ComponentNames...)

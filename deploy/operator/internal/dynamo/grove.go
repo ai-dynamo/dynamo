@@ -221,6 +221,7 @@ func evaluateGroveComponents(
 		componentReadiness := componentReadinesses[component.ComponentName]
 		componentStatus := componentReadiness.status
 		componentStatus.RuntimeNamespace = namespacePlan.runtimeNamespace(dgd, component)
+		componentStatus.RuntimeNamespaces = namespacePlan.runtimeNamespaces(dgd, component, componentStatus.RuntimeNamespace)
 		componentStatuses[component.ComponentName] = componentStatus
 	}
 
@@ -333,6 +334,29 @@ func (p groveRuntimeNamespacePlan) runtimeNamespace(
 	if p.acceptedPCSRevisionHash == nil || !p.workersCompleted {
 		return previousNamespace
 	}
+	return p.acceptedRuntimeNamespace(baseNamespace, component)
+}
+
+// runtimeNamespaces lists a worker's namespaces while Grove rolls out the
+// accepted PCS revision: active, which runtimeNamespace keeps until cutover, and
+// the accepted revision's, whose replicas already run.
+func (p groveRuntimeNamespacePlan) runtimeNamespaces(
+	dgd *v1beta1.DynamoGraphDeployment,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	active string,
+) []string {
+	if !IsWorkerComponent(string(component.ComponentType)) || p.acceptedPCSRevisionHash == nil || p.workersCompleted {
+		return nil
+	}
+	return ComponentRuntimeNamespaces(active, p.acceptedRuntimeNamespace(dgd.GetDynamoNamespaceForComponent(component), component))
+}
+
+// acceptedRuntimeNamespace returns the runtime namespace of a worker of the
+// accepted PCS revision.
+func (p groveRuntimeNamespacePlan) acceptedRuntimeNamespace(
+	baseNamespace string,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+) string {
 	if !p.workersUseHashSuffix {
 		return baseNamespace
 	}
