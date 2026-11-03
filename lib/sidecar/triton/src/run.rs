@@ -2,8 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::BTreeSet;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{Context, ensure};
@@ -11,8 +9,7 @@ use clap::{CommandFactory, FromArgMatches};
 use dynamo_backend_common::{DisaggregationMode, ModelInput, RawEngine, Worker, WorkerConfig};
 use dynamo_llm::grpc::service::kserve::inference;
 use dynamo_llm::protocols::tensor::TensorModelConfig;
-use dynamo_runtime::Runtime;
-use dynamo_runtime::system_status_server::SystemProbePolicy;
+use dynamo_runtime::DistributedRuntime;
 use prost::Message;
 use sha2::{Digest, Sha256};
 use tokio::task::JoinSet;
@@ -23,32 +20,36 @@ use crate::client::TritonClient;
 use crate::engine::TritonModelEngine;
 use crate::pooling::{Classify, Embeddings, TextEngine, TextModel, TextTask};
 
-type RunFuture = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
-
-/// Parse and validate the command line, then write the resolved endpoints to their environment variables for subprocesses.
+/// Run the sidecar from the command line until a model worker stops or the process receives SIGTERM or SIGINT.
 ///
+/// Parses and validates the command line, then writes the resolved endpoints to their environment variables for subprocesses.
 /// Call this before starting any other thread: it modifies the process environment.
-pub fn from_cli() -> anyhow::Result<impl FnOnce(Runtime, CancellationToken) -> RunFuture> {
+pub fn run() -> anyhow::Result<()> {
     let matches = Args::command().get_matches();
     let mut args = Args::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     args.validate().map_err(anyhow::Error::msg)?;
     // Logging starts with the runtime, after parsing, so `run` logs these.
     let parsed_values = args.parsed_values(&matches);
     for (name, value) in args.endpoint_env() {
-        // SAFETY: `main` calls `from_cli` before the Tokio runtime starts, while the process has one thread.
+        // SAFETY: `main` calls `run` first, and this runs before `run_with_drt` starts the Tokio runtime, while the process has one thread.
         unsafe { std::env::set_var(name, value) };
     }
-    Ok(move |runtime, shutdown| -> RunFuture {
-        Box::pin(run(args, parsed_values, runtime, shutdown))
-    })
+    // The shared runner races `bootstrap` against SIGTERM and SIGINT, so a signal stops the sidecar while it is still connecting to Triton.
+    dynamo_sidecar_common::run_with_drt(args.runtime.clone(), bootstrap(args, parsed_values), serve)
 }
 
-async fn run(
+/// Triton connection and model configurations found during startup.
+struct Bootstrap {
+    args: Args,
+    client: TritonClient,
+    configs: Vec<(String, inference::ModelConfig)>,
+}
+
+/// Connect to Triton and fetch the configuration of every model to register.
+async fn bootstrap(
     args: Args,
     parsed_values: Vec<(&'static str, String)>,
-    runtime: Runtime,
-    shutdown: CancellationToken,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Bootstrap> {
     for (option, value) in parsed_values {
         tracing::debug!(option, value, "Parsed");
     }
@@ -63,13 +64,6 @@ async fn run(
             .map_or("disabled", |endpoint| endpoint.as_str()),
         "Registered Triton Server endpoints: "
     );
-    let distributed = args.runtime.to_distributed_config()?;
-    let drt = dynamo_runtime::DistributedRuntime::new_with_probe_policy(
-        runtime,
-        distributed,
-        SystemProbePolicy::RuntimeOnly,
-    )
-    .await?;
     let transport = args.grpc.config();
     let client = TritonClient::connect(
         args.grpc_endpoint.as_ref(),
@@ -86,7 +80,23 @@ async fn run(
         let config = client.model_config(&model).await?;
         configs.push((model, config));
     }
+    Ok(Bootstrap {
+        args,
+        client,
+        configs,
+    })
+}
 
+/// Serve every model in `bootstrap` until one model worker stops or `shutdown` is cancelled.
+async fn serve(
+    drt: DistributedRuntime,
+    Bootstrap {
+        args,
+        client,
+        configs,
+    }: Bootstrap,
+    shutdown: CancellationToken,
+) -> anyhow::Result<()> {
     let mut workers = JoinSet::new();
     let (mut tensor_models, mut classify_models, mut embeddings_models) = (0usize, 0usize, 0usize);
     for (model, config) in configs {
@@ -190,7 +200,7 @@ fn text_engine<T: TextTask>(
     Ok(Arc::new(TextEngine::new(task, model)))
 }
 
-/// Models to register: the explicit `--model-name` list plus every `--classify` and `--embeddings` model, or else every ready model in Triton.
+/// Models to register: the explicit `--export` list plus every `--classify` and `--embeddings` model, or else every ready model in Triton.
 async fn discover_models(args: &Args, client: &TritonClient) -> anyhow::Result<Vec<String>> {
     if !args.model_names.is_empty() {
         let models: Vec<String> = args
@@ -203,7 +213,7 @@ async fn discover_models(args: &Args, client: &TritonClient) -> anyhow::Result<V
             .collect();
         tracing::info!(
             ?models,
-            "Using Triton models from --model-name, --classify, and --embeddings"
+            "Using Triton models from --export, --classify, and --embeddings"
         );
         return Ok(models);
     }

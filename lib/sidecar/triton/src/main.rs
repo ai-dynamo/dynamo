@@ -2,5 +2,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
 fn main() -> anyhow::Result<()> {
-    dynamo_sidecar_common::run_task(dynamo_triton_sidecar::from_cli()?)
+    dynamo_triton_sidecar::run()
 }

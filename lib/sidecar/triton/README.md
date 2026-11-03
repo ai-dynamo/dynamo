@@ -56,8 +56,8 @@ Triton's JSON model configuration is converted to the same protobuf `ModelConfig
 The `--grpc-connect-attempt-timeout-secs`, `--grpc-retry-interval-secs`, and `--grpc-startup-deadline-secs` flags also govern the HTTP transport; `--grpc-connections` applies only to gRPC.
 
 Ready models are discovered through Triton's `RepositoryIndex` API.
-Use one or more `--model-name <name>` options to skip repository auto-discovery.
-Repeat `--model-name`, or pass a comma-separated list, to serve several models.
+Use `--export <model>` to restrict which models hosted by Triton Server are available via the sidecar's interface.
+Repeat `--export`, or pass a comma-separated list, to serve several models.
 
 ## OpenAI classify and embeddings
 
@@ -65,18 +65,18 @@ Each model is served through one endpoint, chosen by the flags that name it:
 
 | Flag                                                         | Frontend Endpoint            | Registration                        |
 | :----------------------------------------------------------- | :--------------------------- | :---------------------------------- |
-| (none, the default) or `--model-name <model>`                | KServe gRPC Tensor Inference | `Tensor` input, `TensorBased` model |
+| (none, the default) or `--export <model>`                    | KServe gRPC Tensor Inference | `Tensor` input, `TensorBased` model |
 | `--classify <model>` (`DYN_TRITON_CLASSIFY_MODELS`)          | `POST /v1/classify`          | `Text` input, `Classify` model      |
 | `--embeddings <model>` (`DYN_TRITON_EMBEDDINGS_MODELS`)      | `POST /v1/embeddings`        | `Text` input, `Embedding` model     |
 
 Repeat `--classify` and `--embeddings`, or pass a comma-separated list, to serve several models; one Triton server can serve tensor, classify, and embeddings models side by side.
 A model cannot be passed to both flags.
-The named models are served in addition to any `--model-name` models; when auto-discovering, each named model must be ready in Triton.
+The named models are served in addition to any `--export` models; when auto-discovering, each named model must be ready in Triton.
 
 ```bash
 dynamo-triton-sidecar --grpc \
   --classify text_classifier \
-  --embeddings text_embedder \
+  --embeddings embeddings_model \
   --discovery-backend file
 ```
 
@@ -84,7 +84,7 @@ A classify or embeddings model must declare exactly one `TYPE_STRING` input with
 A named model that does not fit fails startup with its name in the error.
 
 - Each request's text prompts are sent to Triton as one `BYTES` tensor, shaped `[N, 1]` for a batching model and `[N]` otherwise, and Triton returns one `FP32` row per prompt.
-- Ensemble steps (tokenizer, encoder, and so on) that are not named are served as tensor models like any other model; pass `--model-name` to register only the models you want.
+- Ensemble steps (tokenizer, encoder, and so on) that are not named are served as tensor models like any other model; pass `--export` to register only the models you want.
 - Token-ID input is rejected, as are request controls owned by the Triton model: `use_activation`, `add_special_tokens`, `truncate_prompt_tokens`, `truncation_side`, `mm_processor_kwargs`, `cache_salt`, and non-zero `priority` for classify; `dimensions`, `add_special_tokens`, and `truncate_prompt_tokens` for embeddings.
 - Classify labels come from the output's `label_filename`.
   Triton exposes labels only through its classification extension, which rounds scores, so the sidecar reads probabilities from the raw output and fetches the labels once per model with one extra classification request.

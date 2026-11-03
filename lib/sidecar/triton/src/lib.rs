@@ -12,4 +12,4 @@ mod http;
 mod pooling;
 mod run;
 
-pub use run::from_cli;
+pub use run::run;

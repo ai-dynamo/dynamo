@@ -169,9 +169,9 @@ pub(crate) struct Args {
     ///
     /// With no explicit model names, the sidecar registers every READY model returned by Triton's RepositoryIndex API.
     #[arg(
-        long = "model-name",
+        long = "export",
         value_name = "MODEL",
-        env = "DYN_TRITON_MODEL_NAMES",
+        env = "DYN_TRITON_MODELS",
         value_delimiter = ','
     )]
     pub model_names: Vec<String>,
@@ -340,8 +340,8 @@ impl Args {
         let models = [
             (
                 "model_names",
-                "--model-name",
-                "DYN_TRITON_MODEL_NAMES",
+                "--export",
+                "DYN_TRITON_MODELS",
                 &self.model_names,
             ),
             (
@@ -401,9 +401,9 @@ mod tests {
             "dynamo-triton-sidecar",
             "--grpc",
             "localhost:8001",
-            "--model-name",
+            "--export",
             "a",
-            "--model-name",
+            "--export",
             "b",
         ])
         .unwrap();
@@ -674,7 +674,7 @@ mod tests {
                     "--grpc-endpoint",
                     "triton:8001",
                     "--http",
-                    "--model-name",
+                    "--export",
                     "a",
                     "--classify",
                     " b ,c",
@@ -686,7 +686,7 @@ mod tests {
             [
                 ("--grpc-endpoint", "http://triton:8001".to_string()),
                 ("--http", "http://localhost:8000/".to_string()),
-                ("--model-name", "a".to_string()),
+                ("--export", "a".to_string()),
                 ("--classify", "b".to_string()),
                 ("--classify", "c".to_string()),
                 ("--embeddings", "d".to_string()),

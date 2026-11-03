@@ -29,8 +29,8 @@ fn executable_exposes_triton_configuration() {
         "--http-endpoint <ENDPOINT>",
         "--classify <MODEL>",
         "--embeddings <MODEL>",
-        "--model-name <MODEL>",
-        "DYN_TRITON_MODEL_NAMES",
+        "--export <MODEL>",
+        "DYN_TRITON_MODELS",
         "DYN_TRITON_CLASSIFY_MODELS",
         "DYN_TRITON_EMBEDDINGS_MODELS",
     ] {
