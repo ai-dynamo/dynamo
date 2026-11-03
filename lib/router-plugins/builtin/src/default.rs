@@ -6,11 +6,9 @@
 mod parameters;
 mod picker;
 mod scorer;
-mod selector;
 
 use parameters::PolicyParameters;
 pub(super) use parameters::register;
-pub use selector::{DefaultWorkerSelector, DefaultWorkerSelectorControl};
 
 use dynamo_kv_router::plugins::prelude::*;
 use parking_lot::Mutex;
@@ -22,8 +20,19 @@ pub fn default_policy(
     config: SelectionConfig,
     worker_label: &'static str,
 ) -> WorkerSelectionPolicy {
+    default_policy_with_rng(config, worker_label, None)
+}
+
+/// [`default_policy`] on an explicit random stream. `None` draws from entropy; `Some` shares the
+/// stream with every policy built from the same handle, so a seeded selection is reproducible and
+/// a runtime rebuild keeps drawing from it.
+pub fn default_policy_with_rng(
+    config: SelectionConfig,
+    worker_label: &'static str,
+    rng: Option<Arc<Mutex<fastrand::Rng>>>,
+) -> WorkerSelectionPolicy {
     let parameters = PolicyParameters::from(&config);
-    runtime_policy(config, parameters, worker_label, None)
+    runtime_policy(config, parameters, worker_label, rng)
 }
 
 /// Resolved runtime parameters a default policy starts with for `role`.

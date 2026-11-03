@@ -3,13 +3,12 @@
 
 //! Synchronous adapter for direct selection and deterministic replay.
 
+use dynamo_custom_policy_builtin::default_policy_with_rng;
 use dynamo_kv_router::plugins::prelude::*;
 use dynamo_scheduler::host::WorkerSelectionInput;
 use dynamo_scheduler::host::WorkerSelector;
 use parking_lot::Mutex;
 use std::sync::Arc;
-
-use super::runtime_policy;
 
 /// Synchronous adapter for direct callers and replay. Scheduler actors use `default_policy`
 /// directly and do not acquire this adapter's mutex.
@@ -45,9 +44,8 @@ impl DefaultWorkerSelector {
         rng: Option<Arc<Mutex<fastrand::Rng>>>,
     ) -> Self {
         Self {
-            policy: Arc::new(Mutex::new(runtime_policy(
+            policy: Arc::new(Mutex::new(default_policy_with_rng(
                 config.clone(),
-                super::PolicyParameters::from(&config),
                 worker_type,
                 rng.clone(),
             ))),

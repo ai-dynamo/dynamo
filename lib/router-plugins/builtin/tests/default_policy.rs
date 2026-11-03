@@ -1,12 +1,23 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 mod support;
-use dynamo_custom_policy_builtin::{DefaultWorkerSelector, default_policy, default_registry};
+use dynamo_custom_policy_builtin::{default_policy, default_policy_with_rng, default_registry};
 use dynamo_kv_router::plugins::prelude::*;
 use dynamo_scheduler::host::WorkerSelectionInput;
 use dynamo_scheduler::host::WorkerSelector;
+use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use support::*;
+
+/// The default policy on a seeded random stream, driven as a `WorkerSelector`.
+fn seeded(config: &KvRouterConfig, worker_label: &'static str, seed: u64) -> WorkerSelectionPolicy {
+    default_policy_with_rng(
+        SelectionConfig::from(config),
+        worker_label,
+        Some(Arc::new(Mutex::new(fastrand::Rng::with_seed(seed)))),
+    )
+}
 
 #[test]
 fn runtime_parameters_change_selection_and_reset_to_resolved_startup_values() {
@@ -286,11 +297,7 @@ fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
                     "test",
                     42,
                 );
-                let plugin = DefaultWorkerSelector::new_seeded(
-                    Some(SelectionConfig::from(&config)),
-                    "test",
-                    42,
-                );
+                let plugin = seeded(&config, "test", 42);
                 for _ in 0..64 {
                     let input = support::selection_input(&workers, &request, 16);
                     let expected = reference.select_worker(input).unwrap();
@@ -345,11 +352,7 @@ fn sparse_eligibility_preserves_seeded_scoring_and_sampling() {
                     "prefill",
                     42,
                 );
-                let plugin = DefaultWorkerSelector::new_seeded(
-                    Some(SelectionConfig::from(&config)),
-                    "prefill",
-                    42,
-                );
+                let plugin = seeded(&config, "prefill", 42);
                 for _ in 0..32 {
                     let eligibility = request.eligibility().with_available_workers(available);
                     let expected = reference
@@ -400,8 +403,7 @@ fn empty_prompt_routes_by_load() {
             overlap_score_credit_decay,
             ..Default::default()
         };
-        let plugin =
-            DefaultWorkerSelector::new_seeded(Some(SelectionConfig::from(&config)), "test", 42);
+        let plugin = seeded(&config, "test", 42);
         let result = plugin
             .select_worker(support::selection_input(&workers, &request, 16))
             .unwrap();
@@ -505,8 +507,7 @@ fn prepared_values_follow_each_request_when_reusing_a_policy() {
                 label,
                 42,
             );
-            let plugin =
-                DefaultWorkerSelector::new_seeded(Some(SelectionConfig::from(&config)), label, 42);
+            let plugin = seeded(&config, label, 42);
             for round in 0..64 {
                 let prompt = [1, 17, 127, 2048][round % 4];
                 let block_size = [8, 16, 32, 17, 3][round % 5];
@@ -700,8 +701,7 @@ fn pin_does_not_advance_seeded_random_stream() {
         "prefill",
         42,
     );
-    let plugin =
-        DefaultWorkerSelector::new_seeded(Some(SelectionConfig::from(&config)), "prefill", 42);
+    let plugin = seeded(&config, "prefill", 42);
     for pinned in [true, false, true, false, false] {
         request.pinned_worker = pinned.then_some(WorkerWithDpRank::new(3, 1));
         let input = support::selection_input(&workers, &request, 16);
@@ -851,14 +851,11 @@ fn selector_runtime_update_keeps_the_seeded_random_stream() {
         overlap_score_credit_decay: 0.6,
         ..Default::default()
     };
-    let fixed =
-        DefaultWorkerSelector::new_seeded(Some(SelectionConfig::from(&config)), "prefill", 42);
-    let updated =
-        DefaultWorkerSelector::new_seeded(Some(SelectionConfig::from(&config)), "prefill", 42);
+    let fixed = seeded(&config, "prefill", 42);
+    let mut updated = seeded(&config, "prefill", 42);
     // Sampling at a nonzero temperature draws from the seeded stream on every selection, so the
     // rebuilt policy must keep drawing from the same stream to stay in lockstep.
     let applied = updated
-        .runtime_control()
         .update_runtime_config(RuntimePolicyUpdate::patch(
             0,
             patch(serde_json::json!({"router_temperature": 0.7})),
@@ -873,35 +870,6 @@ fn selector_runtime_update_keeps_the_seeded_random_stream() {
             "round={round}"
         );
     }
-}
-
-#[test]
-fn selector_controls_share_runtime_state_and_clones_start_fresh() {
-    use dynamo_kv_router::plugins::prelude::*;
-
-    let config = KvRouterConfig {
-        router_temperature: 0.5,
-        ..Default::default()
-    };
-    let selector = DefaultWorkerSelector::new(Some(SelectionConfig::from(&config)), "replay");
-    let control = selector.runtime_control();
-    let initial = control.runtime_config().unwrap();
-    assert_eq!(initial.revision(), 0);
-
-    control
-        .update_runtime_config(RuntimePolicyUpdate::patch(
-            0,
-            patch(serde_json::json!({"router_temperature": 1.5})),
-        ))
-        .unwrap();
-    // A handle taken later reads the same policy.
-    let after = selector.runtime_control().runtime_config().unwrap();
-    assert_eq!(after.revision(), 1);
-    assert_eq!(after.parameters()["router_temperature"], 1.5);
-
-    let clone = selector.clone();
-    assert_eq!(clone.runtime_control().runtime_config().unwrap(), initial);
-    assert_eq!(control.runtime_config().unwrap().revision(), 1);
 }
 
 #[test]

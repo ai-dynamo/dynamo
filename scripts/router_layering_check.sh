@@ -267,6 +267,37 @@ else
   bad "$COMPOSITION: direct deps $(show <"$tmp/comp_direct.txt") != required $(show <"$tmp/comp_direct_want.txt")"
 fi
 
+# ---------------------------------------------------------------------------
+# Plugin crates: a statically linked policy or classifier crate depends on
+# dynamo-kv-router alone and imports through plugins::prelude. Each row is the
+# EXACT set of dynamo-* direct normal dependencies (dev-dependencies may name
+# the kernel for tests and benches). The example catalog aggregates its sibling
+# example policies; the EPP example links the catalog into the gateway binary.
+# ---------------------------------------------------------------------------
+PLUGIN_TABLE=(
+  "dynamo-custom-policy-builtin | dynamo-kv-router"
+  "dynamo-worker-selection-policy-catalog | dynamo-kv-router"
+  "dynamo-custom-policy-example-soft-pin-repin | dynamo-kv-router"
+  "dynamo-custom-policy-example-simple-filter-score-pick | dynamo-kv-router"
+  "dynamo-custom-policy-example-disagg-filter-score-pick | dynamo-kv-router"
+  "dynamo-custom-policy-example-simple-stacked-score-pick | dynamo-kv-router"
+  "dynamo-custom-policy-example-catalog | dynamo-kv-router dynamo-custom-policy-example-soft-pin-repin dynamo-custom-policy-example-simple-filter-score-pick dynamo-custom-policy-example-disagg-filter-score-pick dynamo-custom-policy-example-simple-stacked-score-pick"
+  "dynamo-custom-policy-example-epp | dynamo-kv-router dynamo-custom-policy-example-catalog dynamo-ext-proc"
+)
+for row in "${PLUGIN_TABLE[@]}"; do
+  IFS='|' read -r crate allowed <<<"$row"
+  crate="$(trim "$crate")"
+  allowed="$(trim "$allowed")"
+  in_workspace "$crate" || die "$crate is not a workspace package (root Cargo.toml members)"
+  direct_deps "$crate" | grep -E '^dynamo-' | lines >"$tmp/plugin_found.txt" || true
+  words "$allowed" >"$tmp/plugin_want.txt"
+  if cmp -s "$tmp/plugin_found.txt" "$tmp/plugin_want.txt"; then
+    ok "$crate: Dynamo deps == $(show <"$tmp/plugin_want.txt") (plugin rule)"
+  else
+    bad "$crate: Dynamo deps $(show <"$tmp/plugin_found.txt") != allowed $(show <"$tmp/plugin_want.txt") (plugin rule)"
+  fi
+done
+
 words "$table_crates" >"$tmp/table_crates.txt"
 
 # ---------------------------------------------------------------------------

@@ -13,8 +13,7 @@ mod sticky_min_load;
 mod thunderagent;
 mod two_tier_cost_fn;
 pub use default::{
-    DefaultWorkerSelector, DefaultWorkerSelectorControl, default_factory, default_policy,
-    startup_policy_parameters,
+    default_factory, default_policy, default_policy_with_rng, startup_policy_parameters,
 };
 
 /// Registry containing the required default only, without an optional policy catalog.

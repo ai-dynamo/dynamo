@@ -2081,8 +2081,6 @@ version = "1.7.0"
 dependencies = [
  "async-trait",
  "dynamo-kv-router",
- "dynamo-scheduler",
- "dynamo-session-affinity",
  "fastrand",
  "parking_lot",
  "serde",
@@ -2381,6 +2379,7 @@ dependencies = [
  "dynamo-slot-tracker",
  "dynamo-tokens",
  "dynamo-worker-selection",
+ "fastrand",
  "futures",
  "ndarray",
  "ndarray-interp",

@@ -3,6 +3,7 @@
 
 mod agentic;
 mod artifacts;
+mod default_selector;
 mod entrypoints;
 pub(crate) mod offline;
 mod online;

@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dynamo_kv_router::plugins::prelude::*;
-use dynamo_session_affinity::{MAX_SESSION_AFFINITY_ENTRIES, MAX_SESSION_AFFINITY_ID_BYTES};
 
 /// Policy type selected by `worker_selection.instances[].type`.
 pub const POLICY_TYPE: &str = "dynamo-sticky-min-load";

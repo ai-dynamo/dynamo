@@ -54,5 +54,6 @@ pub use dynamo_scheduler::protocols::{
     RoutingConstraints, WorkerConfigLike, WorkerSelectionResult,
 };
 pub use dynamo_scheduler::{KvSchedulerError, ScheduleMode, SchedulingRequest};
+pub use dynamo_session_affinity::{MAX_SESSION_AFFINITY_ENTRIES, MAX_SESSION_AFFINITY_ID_BYTES};
 pub use dynamo_slot_tracker::WorkerLoadProjection;
 pub use dynamo_worker_selection::{SelectionTraceSpec, SharedCacheHits};
