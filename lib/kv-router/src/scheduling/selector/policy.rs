@@ -509,6 +509,9 @@ impl ResidentBlockCountsWriter {
 #[cfg(test)]
 mod tests {
     use crate::plugins::worker_selection::WorkerInputView;
+    use crate::plugins::worker_selection::experimental::resident_blocks::{
+        ResidentBlocks, ResidentBlocksByRow,
+    };
     use crate::protocols::WorkerWithDpRank;
     use crate::scheduling::SessionContext;
     use std::{

@@ -8,6 +8,7 @@ use super::reservations::{
     Reservation, ReservationClaim, ReservationIndexObserver, sweep_reservation_index,
 };
 use super::*;
+use crate::plugins::worker_selection::experimental::resident_blocks::ResidentBlocksByRow;
 use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
 use crate::protocols::{RoutingConstraints, StorageTier};
 use crate::services::common::replica_sync::HostReplicaChannels;

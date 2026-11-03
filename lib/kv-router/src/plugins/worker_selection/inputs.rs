@@ -69,12 +69,9 @@ impl<'a> WorkerCandidate<'a> {
         }
     }
 
-    /// Blocks the router's indexer holds for this worker rank as of the last event it applied, only
-    /// when this component declared RESIDENT_BLOCKS: device blocks from KV events, or the router's
-    /// prediction in approximate modes. Unweighted and not clamped to capacity. None means access
-    /// was not requested, the host has no local indexer, or the indexer has held no blocks for the
-    /// rank while counting or has removed it.
-    pub fn resident_blocks(self) -> Option<u64> {
+    /// Backs `experimental::resident_blocks::ResidentBlocks`, which documents the contract: the
+    /// count only when this component declared RESIDENT_BLOCKS and the host has one for the rank.
+    pub(crate) fn resident_block_count(self) -> Option<u64> {
         if !self.inputs.contains(WorkerInputs::RESIDENT_BLOCKS) {
             return None;
         }
@@ -155,9 +152,9 @@ impl WorkerInputs {
     pub const LOAD: Self = Self(1 << 1);
     /// Request preferred-taint routing metadata.
     pub const PREFERRED_TAINT: Self = Self(1 << 2);
-    /// Request per-rank counts of blocks the router's indexer tracks (routing predictions in
-    /// approximate modes). Requires CACHE.
-    pub const RESIDENT_BLOCKS: Self = Self(1 << 3);
+    /// Request per-rank resident block counts. Public only as
+    /// `experimental::resident_blocks::RESIDENT_BLOCKS`; requires CACHE.
+    pub(crate) const RESIDENT_BLOCKS: Self = Self(1 << 3);
     /// Request host-owned active-request counts.
     pub const OCCUPANCY: Self = Self(1 << 5);
     #[cfg(any(test, feature = "bench"))]
@@ -391,9 +388,9 @@ impl<'a> WorkerInputView<'a> {
         self.load
     }
 
-    /// Return [`WorkerCandidate::resident_blocks`] for candidate `row` when the picker requested
-    /// [`WorkerInputs::RESIDENT_BLOCKS`], or None for an out-of-range row.
-    pub fn resident_blocks(self, row: usize) -> Option<u64> {
+    /// Backs `experimental::resident_blocks::ResidentBlocksByRow`: the count for candidate `row`
+    /// when the picker declared RESIDENT_BLOCKS, or None for an out-of-range row.
+    pub(crate) fn resident_block_count(self, row: usize) -> Option<u64> {
         let counts = self.resident_blocks?;
         self.candidates
             .get(row)

@@ -14,6 +14,9 @@ use dynamo_kv_router::indexer::{
     KvIndexerInterface, ThreadPoolIndexer,
     concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed,
 };
+use dynamo_kv_router::plugins::worker_selection::experimental::resident_blocks::{
+    RESIDENT_BLOCKS, ResidentBlocks,
+};
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash, RouterEvent, RoutingConstraints, WorkerConfigLike,
@@ -137,7 +140,7 @@ struct ResidentBlocksScorer;
 
 impl WorkerScorer for ResidentBlocksScorer {
     fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::CACHE | WorkerInputs::LOAD | WorkerInputs::RESIDENT_BLOCKS
+        WorkerInputs::CACHE | WorkerInputs::LOAD | RESIDENT_BLOCKS
     }
 
     fn score(
