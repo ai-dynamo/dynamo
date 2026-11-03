@@ -66,6 +66,7 @@ from dynamo.planner.retune.domains import (
 from dynamo.planner.retune.sweep import (
     SweepRequest,
     SweepResult,
+    objective_maximized,
     run_sweep,
     with_predictor_fields,
 )
@@ -148,6 +149,7 @@ class RetuneController:
         self._sla_ttft_ms, self._sla_itl_ms = retune.scoring_sla(
             config.ttft_ms, config.itl_ms
         )
+        self._maximize = objective_maximized(retune.objective)
 
         self._startup_router_json: dict[str, Any] = dict(
             inputs.engine.router_config or {}
@@ -201,14 +203,15 @@ class RetuneController:
         )
         logger.info(
             "retune enabled: interval=%ss grace=%ss %d grid points, router keys %s, "
-            "planner keys %s, predictor candidates %s, scoring SLA ttft=%sms itl=%sms, "
-            "advisory=%s",
+            "planner keys %s, predictor candidates %s, objective %s, "
+            "scoring SLA ttft=%sms itl=%sms, advisory=%s",
             retune.interval_seconds,
             retune.grace_seconds,
             len(self._grid),
             list(self._router_keys),
             list(self._planner_keys),
             [label for label, _ in self._predictor_candidates or ()],
+            retune.objective,
             self._sla_ttft_ms,
             self._sla_itl_ms,
             config.advisory,
@@ -527,6 +530,7 @@ class RetuneController:
             predictor_candidates=(
                 self._predictor_candidates if base_planner is not None else None
             ),
+            objective=self._retune.objective,
             sla_ttft_ms=self._sla_ttft_ms,
             sla_itl_ms=self._sla_itl_ms,
             max_parallel=self._retune.max_parallel,
@@ -639,14 +643,20 @@ class RetuneController:
         order = {
             candidate.key(): index for index, candidate in enumerate(request.candidates)
         }
+        sign = 1.0 if self._maximize else -1.0
         ranked = sorted(
             (
                 (score, candidate)
                 for candidate in request.candidates
                 if (score := result.scores.get(candidate.key())) is not None
             ),
-            # Score descending; ties go to the baseline, then canonical order.
-            key=lambda item: (-item[0], item[1] != baseline, order[item[1].key()]),
+            # Best score first (lowest for a minimized objective); ties go to
+            # the baseline, then canonical order.
+            key=lambda item: (
+                -sign * item[0],
+                item[1] != baseline,
+                order[item[1].key()],
+            ),
         )
         top: list[tuple[str, float]] = []
         for score, candidate in ranked:
@@ -660,10 +670,7 @@ class RetuneController:
             "best_score": best_score,
             "top": top,
         }
-        threshold = baseline_score * (
-            1.0 + self._retune.min_improvement_percentage / 100.0
-        )
-        if best == baseline or best_score <= threshold:
+        if best == baseline or not self._improves(best_score, baseline_score):
             return record("kept", **scores)
 
         chosen = with_predictor_fields(best, baseline, presweep_fields)
@@ -726,6 +733,14 @@ class RetuneController:
         self._desired_router = {key: chosen.router[key] for key in self._router_keys}
         self._pending_planner.update(planner_changes)
         return decision
+
+    def _improves(self, score: float, baseline_score: float) -> bool:
+        """Gain in the objective's direction must exceed
+        ``min_improvement_percentage`` of ``baseline_score``."""
+
+        gain = score - baseline_score if self._maximize else baseline_score - score
+        margin = baseline_score * self._retune.min_improvement_percentage / 100.0
+        return gain > margin
 
     def _skipped(
         self, k: int, now_s: float, outcome: RetuneOutcome, reason: str

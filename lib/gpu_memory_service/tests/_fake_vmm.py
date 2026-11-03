@@ -52,6 +52,9 @@ class FakeVMM(VMMDevice):
     def device_memory_info(self, device):
         return (8 * 1024**3, 16 * 1024**3)
 
+    def total_memory(self, device):
+        return 16 * 1024**3
+
     def get_allocation_granularity(self, device):
         return self._granularity
 

@@ -1,0 +1,416 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Mistral Large 4 on GB300: disaggregated 2P2D, TP4 prefill and TP4 decode workers with DSpark3,
+# hybrid KV cache manager off.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: mistral-large-4-vllm-gb300-disagg-agentic
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    type: frontend
+    runtimeVersionOverride: "1.6.0"
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-mistral-large-4-dev.1
+          imagePullPolicy: IfNotPresent
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          args:
+          - --http-port
+          - '8000'
+          - --dyn-chat-processor
+          - dynamo
+          - --router-kv-events
+          - --kv-cache-block-size
+          - '64'
+          - --router-session-affinity-mode
+          - hard
+          - --tokenizer
+          - fastokens
+          - --no-tokenizer-fallback
+          env:
+          - name: FASTOKENS_BPE_THREADS
+            value: '16'
+          - name: DYN_PARSER_VERSION
+            value: '2'
+          - name: DYN_ROUTER_MODE
+            value: kv
+          - name: DYN_ROUTER_SESSION_AFFINITY_TTL_SECS
+            value: '7200'
+          - name: HF_HUB_OFFLINE
+            value: '1'
+          - name: TRANSFORMERS_OFFLINE
+            value: '1'
+          - name: DYN_METRICS_INPUT_SEQUENCE_MAX
+            value: '1048576'
+          resources:
+            requests:
+              cpu: '16'
+              memory: 48Gi
+            limits:
+              memory: 96Gi
+        nodeSelector:
+          kubernetes.io/arch: arm64
+  - name: PrefillWorker
+    type: prefill
+    runtimeVersionOverride: "1.6.0"
+    replicas: 2
+    sharedMemorySize: 640Gi
+    podTemplate:
+      spec:
+        terminationGracePeriodSeconds: 120
+        resourceClaims:
+        - name: compute-domain-channel
+          resourceClaimTemplateName: mistral-large-4-vllm-gb300-disagg-agentic-compute-domain-channel
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-mistral-large-4-dev.1
+          imagePullPolicy: IfNotPresent
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+          - --model
+          - $(MODEL_PATH)
+          - --served-model-name
+          - $(SERVED_MODEL_NAME)
+          - --enable-multimodal
+          - --tokenizer-mode
+          - mistral
+          - --config-format
+          - mistral
+          - --load-format
+          - mistral
+          - --tensor-parallel-size
+          - '4'
+          - --distributed-executor-backend
+          - mp
+          - --max-model-len
+          - '1048576'
+          - --block-size
+          - '64'
+          - --safetensors-load-strategy
+          - lazy
+          - --dyn-reasoning-parser
+          - mistral
+          - --dyn-tool-call-parser
+          - mistral
+          - --disaggregation-mode
+          - prefill
+          - --enable-prefix-caching
+          - --no-async-scheduling
+          - --compilation-config
+          - '{"cudagraph_mode":"NONE"}'
+          - --gpu-memory-utilization
+          - '0.90'
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+          - --kv-transfer-config
+          - '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"],"kv_lease_duration":120}},{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":618475290624,"blocks_per_chunk":4,"offload_prompt_only":true,"self_describing_kv_events":true}}]}}'
+          - --speculative-config
+          - '{"method":"dspark","num_speculative_tokens":3}'
+          # For performance benchmarks only, replace the value above with:
+          # '{"method":"dspark","num_speculative_tokens":3,"rejection_sample_method":"synthetic","synthetic_acceptance_length":2.697}'
+          # Synthetic acceptance length 2.697 at draft length 3, on both workers.
+          - --max-num-seqs
+          - '128'
+          - --prefix-cache-retention-interval
+          - None
+          - --enable-cumem-allocator
+          - --disable-hybrid-kv-cache-manager
+          env:
+          - name: MODEL_PATH
+            value: /shared-model-cache/mistral-large-4-nvfp4
+          - name: SERVED_MODEL_NAME
+            value: mistral-large-4
+          - name: HF_HOME
+            value: /tmp/huggingface
+          - name: HF_HUB_OFFLINE
+            value: '1'
+          - name: TRANSFORMERS_OFFLINE
+            value: '1'
+          - name: DYN_SELF_HOST_METADATA
+            value: '1'
+          - name: VLLM_USE_SIMPLE_KV_OFFLOAD
+            value: '0'
+          - name: VLLM_USE_V2_MODEL_RUNNER
+            value: '1'
+          - name: PYTHONHASHSEED
+            value: '0'
+          - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
+            value: '1'
+          - name: VLLM_ENGINE_READY_TIMEOUT_S
+            value: '7200'
+          - name: VLLM_CACHE_ROOT
+            value: /tmp/vllm
+          - name: VLLM_HOST_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          - name: UCX_PROTO_INFO
+            value: 'yes'
+          - name: UCX_RCACHE_MAX_UNRELEASED
+            value: '1024'
+          - name: UCX_CUDA_IPC_ENABLE_MNNVL
+            value: 'yes'
+          resources:
+            claims:
+            - name: compute-domain-channel
+            requests:
+              cpu: '64'
+              memory: 840Gi
+              ephemeral-storage: 64Gi
+              nvidia.com/gpu: '4'
+            limits:
+              memory: 840Gi
+              nvidia.com/gpu: '4'
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_PTRACE
+              - SYS_RESOURCE
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 30
+            timeoutSeconds: 30
+            failureThreshold: 480
+            successThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 30
+            timeoutSeconds: 30
+            failureThreshold: 30
+            successThreshold: 1
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 30
+            timeoutSeconds: 30
+            failureThreshold: 30
+            successThreshold: 1
+          volumeMounts:
+          - name: shared-model-cache
+            mountPath: /shared-model-cache
+            readOnly: true
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        nodeSelector:
+          kubernetes.io/arch: arm64
+          nvidia.com/gpu.product: NVIDIA-GB300
+  - name: DecodeWorker
+    type: decode
+    runtimeVersionOverride: "1.6.0"
+    replicas: 2
+    sharedMemorySize: 640Gi
+    podTemplate:
+      spec:
+        terminationGracePeriodSeconds: 120
+        resourceClaims:
+        - name: compute-domain-channel
+          resourceClaimTemplateName: mistral-large-4-vllm-gb300-disagg-agentic-compute-domain-channel
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0-mistral-large-4-dev.1
+          imagePullPolicy: IfNotPresent
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+          - --model
+          - $(MODEL_PATH)
+          - --served-model-name
+          - $(SERVED_MODEL_NAME)
+          - --enable-multimodal
+          - --tokenizer-mode
+          - mistral
+          - --config-format
+          - mistral
+          - --load-format
+          - mistral
+          - --tensor-parallel-size
+          - '4'
+          - --distributed-executor-backend
+          - mp
+          - --max-model-len
+          - '1048576'
+          - --block-size
+          - '64'
+          - --safetensors-load-strategy
+          - lazy
+          - --dyn-reasoning-parser
+          - mistral
+          - --dyn-tool-call-parser
+          - mistral
+          - --disaggregation-mode
+          - decode
+          - --enable-expert-parallel
+          - --skip-mm-profiling
+          - --enable-chunked-prefill
+          - --max-num-seqs
+          - '128'
+          - --max-num-batched-tokens
+          - '512'
+          - --gpu-memory-utilization
+          - '0.95'
+          - --watermark
+          - '0.05'
+          - --speculative-config
+          - '{"method":"dspark","num_speculative_tokens":3}'
+          # For performance benchmarks only, replace the value above with:
+          # '{"method":"dspark","num_speculative_tokens":3,"rejection_sample_method":"synthetic","synthetic_acceptance_length":2.697}'
+          # Synthetic acceptance length 2.697 at draft length 3, on both workers.
+          - --kernel-config
+          - '{"enable_flashinfer_autotune":false}'
+          - --kv-transfer-config
+          - '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"],"kv_lease_duration":120}},{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":618475290624,"blocks_per_chunk":4,"offload_prompt_only":true,"self_describing_kv_events":true}}]}}'
+          - --enable-prefix-caching
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+          - --prefix-cache-retention-interval
+          - None
+          - --disable-hybrid-kv-cache-manager
+          env:
+          - name: MODEL_PATH
+            value: /shared-model-cache/mistral-large-4-nvfp4
+          - name: SERVED_MODEL_NAME
+            value: mistral-large-4
+          - name: HF_HOME
+            value: /tmp/huggingface
+          - name: HF_HUB_OFFLINE
+            value: '1'
+          - name: TRANSFORMERS_OFFLINE
+            value: '1'
+          - name: DYN_SELF_HOST_METADATA
+            value: '1'
+          - name: VLLM_USE_SIMPLE_KV_OFFLOAD
+            value: '0'
+          - name: VLLM_USE_V2_MODEL_RUNNER
+            value: '1'
+          - name: PYTHONHASHSEED
+            value: '0'
+          - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
+            value: '1'
+          - name: VLLM_ENGINE_READY_TIMEOUT_S
+            value: '7200'
+          - name: VLLM_CACHE_ROOT
+            value: /tmp/vllm
+          - name: VLLM_HOST_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          - name: UCX_PROTO_INFO
+            value: 'yes'
+          - name: UCX_RCACHE_MAX_UNRELEASED
+            value: '1024'
+          - name: UCX_CUDA_IPC_ENABLE_MNNVL
+            value: 'yes'
+          resources:
+            claims:
+            - name: compute-domain-channel
+            requests:
+              cpu: '64'
+              memory: 840Gi
+              ephemeral-storage: 64Gi
+              nvidia.com/gpu: '4'
+            limits:
+              memory: 840Gi
+              nvidia.com/gpu: '4'
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_PTRACE
+              - SYS_RESOURCE
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 30
+            timeoutSeconds: 30
+            failureThreshold: 480
+            successThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 30
+            timeoutSeconds: 30
+            failureThreshold: 30
+            successThreshold: 1
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 30
+            timeoutSeconds: 30
+            failureThreshold: 30
+            successThreshold: 1
+          volumeMounts:
+          - name: shared-model-cache
+            mountPath: /shared-model-cache
+            readOnly: true
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        nodeSelector:
+          kubernetes.io/arch: arm64
+          nvidia.com/gpu.product: NVIDIA-GB300
+---
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# One IMEX ComputeDomain spans the four trays so NIXL moves KV over MNNVL (UCX CUDA IPC).
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: mistral-large-4-vllm-gb300-disagg-agentic-compute-domain
+spec:
+  numNodes: 0
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: mistral-large-4-vllm-gb300-disagg-agentic-compute-domain-channel
