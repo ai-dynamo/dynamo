@@ -2,25 +2,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Prepare the shallow build checkout and run resolve_diff_base.py, appending its
-# outputs to $GITHUB_OUTPUT. Shared by the "Resolve diff baseline" steps in
-# shared-build-image.yml, shared-build-sidecar.yml, and the
-# build-deploy-component action. Run from the repository root.
-#
-# Inputs come from the environment, which the callers set through `env:` so
-# workflow values never reach a script body (zizmor "template-injection"):
-#   DIFF_EVENT_CONTEXT, DIFF_CURRENT_BRANCH, DIFF_BASE_BRANCH,
-#   DIFF_MERGE_BASE_SHA, DIFF_CURRENT_SHA, DIFF_ARTIFACT_PREFIX, DIFF_REPO,
-#   DIFF_RUN_ID, GITHUB_OUTPUT; GH_TOKEN is read by the resolver.
-# Unset inputs expand to empty strings, as they did inline, so no `-u`.
+# Run from the repo root: fetches history, runs resolve_diff_base.py, appends outputs to $GITHUB_OUTPUT.
+# Inputs are DIFF_* env vars set via `env:` (avoids template injection); unset ones expand empty, no `-u`.
 
 set -eo pipefail
 
-# The build checkout is shallow with no tags. Make the refs each baseline rule
-# needs reachable (all best-effort; a miss just yields an empty base_sha and a
-# baseline_unavailable diff). Depth 30 gives the first-parent baseline walks
-# enough history to find an artifact. Fetch HEAD by SHA with an explicit depth;
-# `--deepen` is far slower here.
+# Best-effort fetches into the shallow, tagless checkout; a miss means an empty base_sha.
+# Depth 30 covers the baseline walks; fetching by SHA beats the much slower `--deepen`.
 git fetch --no-tags --depth=31 origin "$(git rev-parse HEAD)" --quiet || true # HEAD~N (main post-merge walk)
 # Only the release rule reads tags. With no refspec, this fetch also downloads
 # every branch on origin, so run it only for release builds.
