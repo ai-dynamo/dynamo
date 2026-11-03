@@ -29,7 +29,13 @@ native gRPC API.
 | Structured output and logprobs | Limited | Limited | Limited: no prompt logprobs |
 | Embedding endpoints | No | No | No |
 | Runtime weight updates and sleep/wake controls | Limited | No | No |
-| Kubernetes multinode deployment | Experimental | Experimental | Experimental |
+
+### Deployment
+
+| Capability | vLLM | SGLang | TensorRT-LLM |
+|---|---|---|---|
+| Kubernetes single-node deployment | Supported | Supported | Supported |
+| Kubernetes multinode deployment | Supported | Supported | Supported |
 
 ### Operations and Recovery
 

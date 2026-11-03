@@ -26,7 +26,7 @@ for the architecture.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
-| Kubernetes multinode tensor parallelism (TP) and attention data parallelism (attention-DP) | Experimental |
+| Kubernetes multinode tensor parallelism (TP) and attention data parallelism (attention-DP) | Yes |
 
 ## Launch Locally
 
