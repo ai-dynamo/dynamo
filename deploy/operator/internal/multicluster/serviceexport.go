@@ -235,8 +235,9 @@ func ClusterPropertyValue(property *unstructured.Unstructured) string {
 // ReadClusterIDProperty returns the About API's ClusterProperty named
 // ClusterIDProperty, whose value is the cluster's ID in its ClusterSet, or nil
 // when the cluster has no such property or does not serve the About API. Any
-// other failure, such as a missing permission, is an error. reader should be the
-// manager's cache, which a watch of ClusterProperties fills.
+// other failure is an error. reader should be the manager's cache, which a watch
+// of ClusterProperties fills; without permission to list and watch them, that
+// watch never syncs, and the controller does not start.
 func ReadClusterIDProperty(ctx context.Context, reader client.Reader) (*unstructured.Unstructured, error) {
 	property := NewClusterProperty()
 	err := reader.Get(ctx, client.ObjectKey{Name: ClusterIDProperty}, property)

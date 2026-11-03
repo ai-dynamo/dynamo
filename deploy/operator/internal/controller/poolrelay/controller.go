@@ -203,7 +203,7 @@ func (r *reconciler) publish(
 	if ready {
 		reason, message = "ListenerAvailable", "All requested Relay listeners are available"
 	}
-	if err := r.setStatus(ctx, relay, ready, reason, message, serviceName(relay.Name), available, true); err != nil {
+	if err := r.setStatus(ctx, relay, ready, reason, message, multicluster.PoolRelayServiceName(relay.Name), available, true); err != nil {
 		return ctrl.Result{}, err
 	}
 	if !ready {
@@ -273,7 +273,7 @@ func supportsPodDiscovery(dgd *v1beta1.DynamoGraphDeployment, defaultBackend con
 
 // withdraw removes the publication endpoint before reporting an unresolved source.
 func (r *reconciler) withdraw(ctx context.Context, relay *v1alpha1.DynamoPoolRelay, reason, message string) (ctrl.Result, error) {
-	name := serviceName(relay.Name)
+	name := multicluster.PoolRelayServiceName(relay.Name)
 	metadata := metav1.ObjectMeta{Name: name, Namespace: relay.Namespace}
 	var cleanupErrors []error
 	for _, object := range []client.Object{
@@ -490,10 +490,8 @@ func sourceJSON(namespaces []string, connectionRevision string) string {
 	return string(encoded)
 }
 
-func serviceName(dgdName string) string { return multicluster.PoolRelayServiceName(dgdName) }
-
 func render(relay *v1alpha1.DynamoPoolRelay, namespaces []string) ([]client.Object, *appsv1.Deployment, error) {
-	name := serviceName(relay.Name)
+	name := multicluster.PoolRelayServiceName(relay.Name)
 	if problems := validation.IsDNS1035Label(name); len(problems) != 0 {
 		return nil, nil, fmt.Errorf("DGD name %q cannot produce a valid <dgd>-pool-relay Service name %q: %s", relay.Name, name, strings.Join(problems, "; "))
 	}

@@ -54,6 +54,10 @@ type DynamoPoolRelayStatus struct {
 	// Its reason is ListenerAvailable, DeploymentProgressing, DGDNotFound,
 	// DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers,
 	// InvalidConfiguration, ReconcileFailed, or ResourceOwnershipConflict.
+	// With multi-cluster export configured, Conditions also includes Exported: True
+	// with reason Exported once the pool's Services are exported, or False with
+	// reason Withdrawn, ServiceNotOwned, InvalidServiceName, ServiceNameTooLong,
+	// NoFrontend, ClusterIDMismatch, or ExportFailed.
 	// +optional
 	// +listType=map
 	// +listMapKey=type

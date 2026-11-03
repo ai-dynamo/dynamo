@@ -42,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/yaml"
@@ -214,7 +215,8 @@ func createNamespace(t *testing.T, c client.Client, name string) {
 }
 
 // createDGD creates the DGD of the Relay's name with a worker and a frontend
-// component named frontend, and returns it.
+// component named frontend, and the frontend's Service, controlled by the DGD as
+// the DGD controller creates it, and returns the DGD.
 func createDGD(t *testing.T, c client.Client, relay *v1alpha1.DynamoPoolRelay, frontend string) *v1beta1.DynamoGraphDeployment {
 	t.Helper()
 	dgd := &v1beta1.DynamoGraphDeployment{
@@ -227,7 +229,30 @@ func createDGD(t *testing.T, c client.Client, relay *v1alpha1.DynamoPoolRelay, f
 	if err := c.Create(context.Background(), dgd); err != nil {
 		t.Fatal(err)
 	}
+	for _, name := range multicluster.FrontendServiceNames(dgd) {
+		service := &corev1.Service{
+			Name: name, Namespace: dgd.Namespace,
+			Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Name: "http", Port: 8000}}},
+		}
+		if err := controllerutil.SetControllerReference(dgd, service, c.Scheme()); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Create(context.Background(), service); err != nil {
+			t.Fatal(err)
+		}
+	}
 	return dgd
+}
+
+// exportVersions returns the resourceVersion of each ServiceExport in namespace,
+// by name.
+func exportVersions(t *testing.T, c client.Client, namespace string) map[string]string {
+	t.Helper()
+	versions := map[string]string{}
+	for name, export := range exportsByName(t, c, namespace) {
+		versions[name] = export.GetResourceVersion()
+	}
+	return versions
 }
 
 // reportTerminalFailure writes the status that the DGD controller writes when a
@@ -286,7 +311,7 @@ func waitForExports(t *testing.T, c client.Client, relay *v1alpha1.DynamoPoolRel
 // or withdraws it.
 func waitForRelayService(t *testing.T, c client.Client, relay *v1alpha1.DynamoPoolRelay, published bool) {
 	t.Helper()
-	key := types.NamespacedName{Namespace: relay.Namespace, Name: serviceName(relay.Name)}
+	key := types.NamespacedName{Namespace: relay.Namespace, Name: multicluster.PoolRelayServiceName(relay.Name)}
 	eventually(t, fmt.Sprintf("the Relay's Service to be published: %v", published), func() (bool, error) {
 		err := c.Get(context.Background(), key, &corev1.Service{})
 		if apierrors.IsNotFound(err) {
@@ -315,7 +340,7 @@ func waitForDeletion(t *testing.T, c client.Client, obj client.Object) {
 func markRelayListenersAvailable(t *testing.T, c client.Client, relay *v1alpha1.DynamoPoolRelay) {
 	t.Helper()
 	ctx := context.Background()
-	key := types.NamespacedName{Namespace: relay.Namespace, Name: serviceName(relay.Name)}
+	key := types.NamespacedName{Namespace: relay.Namespace, Name: multicluster.PoolRelayServiceName(relay.Name)}
 	eventually(t, "the Relay's Deployment", func() (bool, error) {
 		err := c.Get(ctx, key, &appsv1.Deployment{})
 		if apierrors.IsNotFound(err) {
@@ -370,7 +395,7 @@ func TestRelayControllerFollowsAReplacedDGD(t *testing.T) {
 		t.Fatal(err)
 	}
 	relayUID := relay.UID
-	poolRelayExport := serviceName(relay.Name)
+	poolRelayExport := multicluster.PoolRelayServiceName(relay.Name)
 	waitForExports(t, apiClient, relay, poolRelayExport, relay.Name+"-frontend")
 	waitForRelayService(t, apiClient, relay, true)
 
@@ -425,21 +450,39 @@ func TestRelayControllerFollowsAReplacedDGD(t *testing.T) {
 	}
 
 	t.Log("Status updates of the DGD, such as a terminal workload failure, write nothing to the exports")
-	versions := func() map[string]string {
-		byName := map[string]string{}
-		for name, export := range exportsByName(t, apiClient, relay.Namespace) {
-			byName[name] = export.GetResourceVersion()
-		}
-		return byName
-	}
-	before := versions()
+	before := exportVersions(t, apiClient, relay.Namespace)
 	for attempt := range 3 {
 		reportTerminalFailure(t, apiClient, second, fmt.Sprintf("Grove is disabled (report %d)", attempt))
 	}
 	time.Sleep(2 * time.Second)
-	if after := versions(); !maps.Equal(before, after) {
+	if after := exportVersions(t, apiClient, relay.Namespace); !maps.Equal(before, after) {
 		t.Fatalf("DGD status updates changed the exports: %v -> %v", before, after)
 	}
+
+	t.Log("Only the frontend's Service changes, so only the Service watch requeues the Relay, whose listeners are " +
+		"available and which therefore polls nothing: deleting the Service withdraws its export, and creating it " +
+		"again exports it again")
+	markRelayListenersAvailable(t, apiClient, relay)
+	frontendService := &corev1.Service{}
+	frontendKey := client.ObjectKey{Namespace: relay.Namespace, Name: relay.Name + "-web"}
+	if err := apiClient.Get(ctx, frontendKey, frontendService); err != nil {
+		t.Fatal(err)
+	}
+	if err := apiClient.Delete(ctx, frontendService); err != nil {
+		t.Fatal(err)
+	}
+	waitForExports(t, apiClient, relay, poolRelayExport)
+	recreated := &corev1.Service{
+		Name: frontendKey.Name, Namespace: frontendKey.Namespace,
+		Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Name: "http", Port: 8000}}},
+	}
+	if err := controllerutil.SetControllerReference(second, recreated, apiClient.Scheme()); err != nil {
+		t.Fatal(err)
+	}
+	if err := apiClient.Create(ctx, recreated); err != nil {
+		t.Fatal(err)
+	}
+	waitForExports(t, apiClient, relay, poolRelayExport, relay.Name+"-web")
 
 	t.Log("With the controller stopped, replace the DGD at once, so that no cache sees it missing")
 	stop()
@@ -499,7 +542,7 @@ func TestRelayControllerRetriesFailedExports(t *testing.T) {
 		t.Fatal(err)
 	}
 	frontendExport := relay.Name + "-frontend"
-	waitForExports(t, apiClient, relay, serviceName(relay.Name), frontendExport)
+	waitForExports(t, apiClient, relay, multicluster.PoolRelayServiceName(relay.Name), frontendExport)
 	markRelayListenersAvailable(t, apiClient, relay)
 
 	t.Log("The API server refuses the next two ServiceExport creates, and a user deletes the frontend export")
@@ -511,7 +554,7 @@ func TestRelayControllerRetriesFailedExports(t *testing.T) {
 	}
 
 	t.Log("Only the retries of the failed reconciles requeue the Ready Relay: the export is created again, with no other change")
-	waitForExports(t, apiClient, relay, serviceName(relay.Name), frontendExport)
+	waitForExports(t, apiClient, relay, multicluster.PoolRelayServiceName(relay.Name), frontendExport)
 	if exportsByName(t, apiClient, relay.Namespace)[frontendExport].GetUID() == deleted.GetUID() {
 		t.Fatal("the frontend export was not created again")
 	}
@@ -546,7 +589,7 @@ func TestRelayControllerWorksAtTheResolvedVersion(t *testing.T) {
 	poolRelayExport := func() *unstructured.Unstructured {
 		items := listServiceExports(t, apiClient, version, relay.Namespace)
 		for i := range items {
-			if items[i].GetName() == serviceName(relay.Name) && ownedByRelay(&items[i], relay) {
+			if items[i].GetName() == multicluster.PoolRelayServiceName(relay.Name) && ownedByRelay(&items[i], relay) {
 				return &items[i]
 			}
 		}
@@ -591,12 +634,12 @@ func TestNamespaceRestrictedRelayControllerFollowsTheClusterID(t *testing.T) {
 	if err := apiClient.Create(ctx, relay); err != nil {
 		t.Fatal(err)
 	}
-	waitForExports(t, apiClient, relay, serviceName(relay.Name), relay.Name+"-frontend")
+	waitForExports(t, apiClient, relay, multicluster.PoolRelayServiceName(relay.Name), relay.Name+"-frontend")
 
 	t.Log("Each export's creation is an event of its own, though both events regard the Relay at one version")
 	eventually(t, "a CreateServiceExport event for each export", func() (bool, error) {
 		notes := strings.Join(relayEventNotes(t, apiClient, relay, "CreateServiceExport"), "\n")
-		return strings.Contains(notes, "Service "+serviceName(relay.Name)+" ") &&
+		return strings.Contains(notes, "Service "+multicluster.PoolRelayServiceName(relay.Name)+" ") &&
 			strings.Contains(notes, "Service "+relay.Name+"-frontend "), nil
 	})
 	markRelayListenersAvailable(t, apiClient, relay)

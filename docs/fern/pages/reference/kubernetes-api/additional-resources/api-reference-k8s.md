@@ -811,7 +811,7 @@ _Appears in:_
 | `observedGeneration` _integer_ | ObservedGeneration is the Relay resource generation last reconciled by the operator. |  | Optional: \{\} <br /> |
 | `endpoint` _string_ | Endpoint is the cluster-local `<dgd>-pool-relay.<namespace>.svc:5561` address.<br />It is empty after withdrawal or a failed reconciliation. |  | Optional: \{\} <br /> |
 | `availableReplicas` _integer_ | AvailableReplicas is the number of Relay Pods the Deployment reports available. |  | Optional: \{\} <br /> |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions includes Ready for listener availability, not model or KV readiness.<br />Its reason is ListenerAvailable, DeploymentProgressing, DGDNotFound,<br />DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers,<br />InvalidConfiguration, ReconcileFailed, or ResourceOwnershipConflict. |  | Optional: \{\} <br /> |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions includes Ready for listener availability, not model or KV readiness.<br />Its reason is ListenerAvailable, DeploymentProgressing, DGDNotFound,<br />DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers,<br />InvalidConfiguration, ReconcileFailed, or ResourceOwnershipConflict.<br />With multi-cluster export configured, Conditions also includes Exported: True<br />with reason Exported once the pool's Services are exported, or False with<br />reason Withdrawn, ServiceNotOwned, InvalidServiceName, ServiceNameTooLong,<br />NoFrontend, ClusterIDMismatch, or ExportFailed. |  | Optional: \{\} <br /> |
 
 
 #### EPPConfig

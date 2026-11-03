@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -130,6 +131,35 @@ func ownedExport(
 	return export
 }
 
+// poolServices returns the Services that the operator creates for the pool: the
+// PoolRelay Service, which relay controls, and a Service for each frontend, which
+// dgd controls. It leaves out the Services named in skip.
+func poolServices(
+	t *testing.T,
+	scheme *runtime.Scheme,
+	relay *v1alpha1.DynamoPoolRelay,
+	dgd *v1beta1.DynamoGraphDeployment,
+	skip ...string,
+) []client.Object {
+	t.Helper()
+	var services []client.Object
+	for _, name := range multicluster.ServiceNames(dgd) {
+		if slices.Contains(skip, name) {
+			continue
+		}
+		var controller metav1.Object = dgd
+		if name == multicluster.PoolRelayServiceName(dgd.Name) {
+			controller = relay
+		}
+		service := &corev1.Service{Name: name, Namespace: dgd.Namespace}
+		if err := controllerutil.SetControllerReference(controller, service, scheme); err != nil {
+			t.Fatalf("set the controller of Service %s: %v", name, err)
+		}
+		services = append(services, service)
+	}
+	return services
+}
+
 // listServiceExports returns the ServiceExports in namespace, read at version.
 func listServiceExports(t *testing.T, c client.Client, version, namespace string) []unstructured.Unstructured {
 	t.Helper()
@@ -222,10 +252,22 @@ func TestReconcileExports(t *testing.T) {
 		ownedByAnother []string
 		// elsewhere are a user's exports in namespace other.
 		elsewhere []string
-		wantOwned []string
+		// foreignServices are Services of the pool's names that no one controls,
+		// missingServices do not exist, and dcdServices are controlled by a DCD
+		// that the DGD controls.
+		foreignServices []string
+		missingServices []string
+		dcdServices     []string
+		// otherServices are controlled by another DGD, and otherDCDServices by a
+		// DCD of another DGD.
+		otherServices    []string
+		otherDCDServices []string
+		wantOwned        []string
 		// wantReasons are the reasons of the events of the first reconcile. The
-		// second records only its warnings again.
+		// second changes nothing, so it records none.
 		wantReasons []string
+		// wantCondition is the reason of the Relay's Exported condition.
+		wantCondition string
 	}{
 		{
 			name:    "a pool exports its PoolRelay and frontend Services",
@@ -233,6 +275,7 @@ func TestReconcileExports(t *testing.T) {
 			implementation: configv1alpha1.MCSImplementationKarmada,
 			wantOwned:      []string{"green-pool-relay", "green-frontend"},
 			wantReasons:    []string{"CreateServiceExport", "CreateServiceExport"},
+			wantCondition:  reasonExported,
 		},
 		{
 			name:    "each frontend component's Service is exported under its own name",
@@ -240,6 +283,7 @@ func TestReconcileExports(t *testing.T) {
 			implementation: configv1alpha1.MCSImplementationStandard,
 			wantOwned:      []string{"green-pool-relay", "green-frontend", "green-web-v2"},
 			wantReasons:    []string{"CreateServiceExport", "CreateServiceExport", "CreateServiceExport"},
+			wantCondition:  reasonExported,
 		},
 		{
 			name:    "a renamed frontend's export moves to its new Service",
@@ -248,6 +292,7 @@ func TestReconcileExports(t *testing.T) {
 			ownedBefore:    []string{"green-pool-relay", "green-frontend"},
 			wantOwned:      []string{"green-pool-relay", "green-web"},
 			wantReasons:    []string{"CreateServiceExport", "DeleteServiceExport"},
+			wantCondition:  reasonExported,
 		},
 		{
 			name:           "a pool without a frontend exports its PoolRelay Service and warns",
@@ -255,6 +300,7 @@ func TestReconcileExports(t *testing.T) {
 			implementation: configv1alpha1.MCSImplementationStandard,
 			wantOwned:      []string{"green-pool-relay"},
 			wantReasons:    []string{"CreateServiceExport", reasonNoFrontend},
+			wantCondition:  reasonNoFrontend,
 		},
 		{
 			// A Service name has at most 63 characters, and the operator does not
@@ -264,6 +310,7 @@ func TestReconcileExports(t *testing.T) {
 			implementation: configv1alpha1.MCSImplementationKarmada,
 			wantOwned:      []string{"green-pool-relay", "green-frontend"},
 			wantReasons:    []string{"CreateServiceExport", "CreateServiceExport", reasonInvalidServiceName},
+			wantCondition:  reasonInvalidServiceName,
 		},
 		{
 			name:    "an export a user created is neither adopted nor deleted",
@@ -272,6 +319,7 @@ func TestReconcileExports(t *testing.T) {
 			foreign:        []string{"green-frontend"},
 			wantOwned:      []string{"green-pool-relay"},
 			wantReasons:    []string{"CreateServiceExport"},
+			wantCondition:  reasonExported,
 		},
 		{
 			name:    "another Relay's export of a Service the pool no longer has is left alone",
@@ -280,6 +328,7 @@ func TestReconcileExports(t *testing.T) {
 			ownedByAnother: []string{"green-old"},
 			wantOwned:      []string{"green-pool-relay", "green-frontend"},
 			wantReasons:    []string{"CreateServiceExport", "CreateServiceExport"},
+			wantCondition:  reasonExported,
 		},
 		{
 			name:    "Karmada skips a Service name it cannot import",
@@ -287,6 +336,7 @@ func TestReconcileExports(t *testing.T) {
 			implementation: configv1alpha1.MCSImplementationKarmada,
 			wantOwned:      []string{longName + "-frontend"},
 			wantReasons:    []string{"CreateServiceExport", reasonServiceNameTooLong},
+			wantCondition:  reasonServiceNameTooLong,
 		},
 		{
 			name:    "standard MCS exports the same long names",
@@ -294,6 +344,7 @@ func TestReconcileExports(t *testing.T) {
 			implementation: configv1alpha1.MCSImplementationStandard,
 			wantOwned:      []string{longName + "-pool-relay", longName + "-frontend"},
 			wantReasons:    []string{"CreateServiceExport", "CreateServiceExport"},
+			wantCondition:  reasonExported,
 		},
 		{
 			name:    "Karmada withdraws the Relay's export of a Service name it cannot import",
@@ -302,6 +353,62 @@ func TestReconcileExports(t *testing.T) {
 			ownedBefore:    []string{longName + "-pool-relay", longName + "-frontend"},
 			wantOwned:      []string{longName + "-frontend"},
 			wantReasons:    []string{"DeleteServiceExport", reasonServiceNameTooLong},
+			wantCondition:  reasonServiceNameTooLong,
+		},
+		{
+			name:    "a Service that the pool does not control is not exported",
+			dgdName: "green", frontends: []string{"Frontend"},
+			implementation:  configv1alpha1.MCSImplementationStandard,
+			foreignServices: []string{"green-frontend"},
+			wantOwned:       []string{"green-pool-relay"},
+			wantReasons:     []string{"CreateServiceExport", reasonServiceNotOwned},
+			wantCondition:   reasonServiceNotOwned,
+		},
+		{
+			name:    "the Relay withdraws its export of a Service that the pool no longer controls",
+			dgdName: "green", frontends: []string{"Frontend"},
+			implementation:  configv1alpha1.MCSImplementationKarmada,
+			ownedBefore:     []string{"green-pool-relay", "green-frontend"},
+			foreignServices: []string{"green-frontend"},
+			wantOwned:       []string{"green-pool-relay"},
+			wantReasons:     []string{"DeleteServiceExport", reasonServiceNotOwned},
+			wantCondition:   reasonServiceNotOwned,
+		},
+		{
+			name:    "a Service that another DGD controls is not exported",
+			dgdName: "green", frontends: []string{"Frontend"},
+			implementation: configv1alpha1.MCSImplementationStandard,
+			otherServices:  []string{"green-frontend"},
+			wantOwned:      []string{"green-pool-relay"},
+			wantReasons:    []string{"CreateServiceExport", reasonServiceNotOwned},
+			wantCondition:  reasonServiceNotOwned,
+		},
+		{
+			name:    "a Service that a DCD of another DGD controls is not exported",
+			dgdName: "green", frontends: []string{"Frontend"},
+			implementation:   configv1alpha1.MCSImplementationStandard,
+			otherDCDServices: []string{"green-frontend"},
+			wantOwned:        []string{"green-pool-relay"},
+			wantReasons:      []string{"CreateServiceExport", reasonServiceNotOwned},
+			wantCondition:    reasonServiceNotOwned,
+		},
+		{
+			name:    "a Service that does not exist yet is not exported",
+			dgdName: "green", frontends: []string{"Frontend"},
+			implementation:  configv1alpha1.MCSImplementationStandard,
+			missingServices: []string{"green-frontend"},
+			wantOwned:       []string{"green-pool-relay"},
+			wantReasons:     []string{"CreateServiceExport"},
+			wantCondition:   reasonExported,
+		},
+		{
+			name:    "a frontend Service that a DCD of the DGD controls is exported",
+			dgdName: "green", frontends: []string{"Frontend"},
+			implementation: configv1alpha1.MCSImplementationKarmada,
+			dcdServices:    []string{"green-frontend"},
+			wantOwned:      []string{"green-pool-relay", "green-frontend"},
+			wantReasons:    []string{"CreateServiceExport", "CreateServiceExport"},
+			wantCondition:  reasonExported,
 		},
 		{
 			name:    "exports of the same names in another namespace do not count",
@@ -310,6 +417,7 @@ func TestReconcileExports(t *testing.T) {
 			elsewhere:      []string{"green-pool-relay", "green-frontend"},
 			wantOwned:      []string{"green-pool-relay", "green-frontend"},
 			wantReasons:    []string{"CreateServiceExport", "CreateServiceExport"},
+			wantCondition:  reasonExported,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -321,6 +429,28 @@ func TestReconcileExports(t *testing.T) {
 			dgd := newExportTestDGD(tc.dgdName, tc.frontends...)
 			relay := newExportTestRelay(dgd)
 			objects := []client.Object{relay, dgd}
+			skip := slices.Concat(tc.foreignServices, tc.missingServices, tc.dcdServices, tc.otherServices, tc.otherDCDServices)
+			objects = append(objects, poolServices(t, scheme, relay, dgd, skip...)...)
+			for _, name := range tc.foreignServices {
+				objects = append(objects, &corev1.Service{Name: name, Namespace: dgd.Namespace})
+			}
+			other := newExportTestDGD("other")
+			for _, name := range tc.otherServices {
+				service := &corev1.Service{Name: name, Namespace: dgd.Namespace}
+				g.Expect(controllerutil.SetControllerReference(other, service, scheme)).To(gomega.Succeed())
+				objects = append(objects, service)
+			}
+			for _, name := range slices.Concat(tc.dcdServices, tc.otherDCDServices) {
+				parent := dgd
+				if slices.Contains(tc.otherDCDServices, name) {
+					parent = other
+				}
+				dcd := &v1beta1.DynamoComponentDeployment{Name: name, Namespace: dgd.Namespace, UID: uuid.NewUUID()}
+				service := &corev1.Service{Name: name, Namespace: dgd.Namespace}
+				g.Expect(controllerutil.SetControllerReference(parent, dcd, scheme)).To(gomega.Succeed())
+				g.Expect(controllerutil.SetControllerReference(dcd, service, scheme)).To(gomega.Succeed())
+				objects = append(objects, dcd, service)
+			}
 			for _, name := range tc.ownedBefore {
 				objects = append(objects, ownedExport(t, scheme, exportTestVersion, relay, name))
 			}
@@ -343,15 +473,21 @@ func TestReconcileExports(t *testing.T) {
 			first := eventReasons(drainEvents(recorder))
 			g.Expect(first).To(gomega.ConsistOf(tc.wantReasons))
 
-			t.Log("Reconcile again: every export is in place, so only the warnings are recorded again")
+			t.Log("Reconcile again: every export is in place and the condition is unchanged, so nothing is recorded")
 			g.Expect(r.reconcileExports(ctx, relay, dgd)).To(gomega.Succeed())
-			var warnings []string
-			for _, reason := range first {
-				if !strings.HasSuffix(reason, "ServiceExport") {
-					warnings = append(warnings, reason)
-				}
+			g.Expect(drainEvents(recorder)).To(gomega.BeEmpty())
+
+			t.Log("Check the Relay's Exported condition")
+			stored := &v1alpha1.DynamoPoolRelay{}
+			g.Expect(fakeClient.Get(ctx, client.ObjectKeyFromObject(relay), stored)).To(gomega.Succeed())
+			condition := meta.FindStatusCondition(stored.Status.Conditions, conditionExported)
+			g.Expect(condition).NotTo(gomega.BeNil())
+			g.Expect(condition.Reason).To(gomega.Equal(tc.wantCondition))
+			wantStatus := metav1.ConditionFalse
+			if tc.wantCondition == reasonExported {
+				wantStatus = metav1.ConditionTrue
 			}
-			g.Expect(eventReasons(drainEvents(recorder))).To(gomega.ConsistOf(warnings))
+			g.Expect(condition.Status).To(gomega.Equal(wantStatus))
 
 			t.Log("Check which exports the Relay controls, and that other exports are untouched")
 			var owned, others []string
@@ -400,6 +536,14 @@ func TestWithdrawExports(t *testing.T) {
 	g.Expect(eventReasons(drainEvents(recorder))).To(gomega.ConsistOf("DeleteServiceExport", "DeleteServiceExport"))
 	g.Expect(exportNames(listServiceExports(t, fakeClient, exportTestVersion, relay.Namespace))).
 		To(gomega.ConsistOf("green-old", "green-web", "blue-frontend"))
+
+	t.Log("The Relay's Exported condition says that the pool's exports are withdrawn")
+	stored := &v1alpha1.DynamoPoolRelay{}
+	g.Expect(fakeClient.Get(ctx, client.ObjectKeyFromObject(relay), stored)).To(gomega.Succeed())
+	condition := meta.FindStatusCondition(stored.Status.Conditions, conditionExported)
+	g.Expect(condition).NotTo(gomega.BeNil())
+	g.Expect(condition.Status).To(gomega.Equal(metav1.ConditionFalse))
+	g.Expect(condition.Reason).To(gomega.Equal(reasonWithdrawn))
 }
 
 func TestRelayControllerMaintainsThePoolsExports(t *testing.T) {
@@ -410,43 +554,47 @@ func TestRelayControllerMaintainsThePoolsExports(t *testing.T) {
 	scheme := newExportTestScheme(t)
 	first := newExportTestDGD("green", "Frontend")
 	relay := newExportTestRelay(first)
-	fakeClient := newExportTestClient(scheme, exportTestVersion, interceptor.Funcs{}, relay, first)
+	poolRelayService := multicluster.PoolRelayServiceName(relay.Name)
+	fakeClient := newExportTestClient(scheme, exportTestVersion, interceptor.Funcs{},
+		append([]client.Object{relay, first}, poolServices(t, scheme, relay, first, poolRelayService)...)...)
 	r := newExportTestReconciler(fakeClient, events.NewFakeRecorder(50), configv1alpha1.MCSImplementationKarmada, exportTestVersion)
 	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(relay)}
-	serviceKey := client.ObjectKey{Namespace: relay.Namespace, Name: serviceName(relay.Name)}
-	reconcileRelay := func() {
-		_, err := r.Reconcile(ctx, request)
-		g.Expect(err).NotTo(gomega.HaveOccurred())
-	}
-	exports := func() []string {
-		return exportNames(listServiceExports(t, fakeClient, exportTestVersion, relay.Namespace))
-	}
+	serviceKey := client.ObjectKey{Namespace: relay.Namespace, Name: poolRelayService}
 
 	t.Log("Reconcile: the Relay's Service is published, and the pool's exports are created")
-	reconcileRelay()
+	_, err := r.Reconcile(ctx, request)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(fakeClient.Get(ctx, serviceKey, &corev1.Service{})).To(gomega.Succeed())
-	g.Expect(exports()).To(gomega.ConsistOf("green-pool-relay", "green-frontend"))
+	g.Expect(exportNames(listServiceExports(t, fakeClient, exportTestVersion, relay.Namespace))).
+		To(gomega.ConsistOf("green-pool-relay", "green-frontend"))
 
 	t.Log("Delete the DGD: the Relay's Service and the pool's exports are withdrawn, and the Relay stays")
 	g.Expect(fakeClient.Delete(ctx, first)).To(gomega.Succeed())
-	reconcileRelay()
+	_, err = r.Reconcile(ctx, request)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(apierrors.IsNotFound(fakeClient.Get(ctx, serviceKey, &corev1.Service{}))).To(gomega.BeTrue())
-	g.Expect(exports()).To(gomega.BeEmpty())
+	g.Expect(listServiceExports(t, fakeClient, exportTestVersion, relay.Namespace)).To(gomega.BeEmpty())
 
-	t.Log("Create a new DGD of the Relay's name with another frontend: the Relay publishes it, and its exports")
+	t.Log("Create a new DGD of the Relay's name with another frontend and its Service: the Relay publishes it, and its exports")
 	second := newExportTestDGD("green", "Web")
 	g.Expect(fakeClient.Create(ctx, second)).To(gomega.Succeed())
-	reconcileRelay()
+	for _, service := range poolServices(t, scheme, relay, second, poolRelayService) {
+		g.Expect(fakeClient.Create(ctx, service)).To(gomega.Succeed())
+	}
+	_, err = r.Reconcile(ctx, request)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(fakeClient.Get(ctx, serviceKey, &corev1.Service{})).To(gomega.Succeed())
-	g.Expect(exports()).To(gomega.ConsistOf("green-pool-relay", "green-web"))
+	g.Expect(exportNames(listServiceExports(t, fakeClient, exportTestVersion, relay.Namespace))).
+		To(gomega.ConsistOf("green-pool-relay", "green-web"))
 
 	t.Log("Leave the DGD without workers: the Relay withdraws, and the pool's exports with it")
 	g.Expect(fakeClient.Get(ctx, client.ObjectKeyFromObject(second), second)).To(gomega.Succeed())
 	second.Spec.Components = second.Spec.Components[1:]
 	g.Expect(fakeClient.Update(ctx, second)).To(gomega.Succeed())
-	reconcileRelay()
+	_, err = r.Reconcile(ctx, request)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(apierrors.IsNotFound(fakeClient.Get(ctx, serviceKey, &corev1.Service{}))).To(gomega.BeTrue())
-	g.Expect(exports()).To(gomega.BeEmpty())
+	g.Expect(listServiceExports(t, fakeClient, exportTestVersion, relay.Namespace)).To(gomega.BeEmpty())
 }
 
 func TestPoolExportsDoNotWaitForTheRelaysDeployment(t *testing.T) {
@@ -465,7 +613,7 @@ func TestPoolExportsDoNotWaitForTheRelaysDeployment(t *testing.T) {
 			}
 			return c.Create(ctx, obj, opts...)
 		},
-	}, relay, dgd)
+	}, append([]client.Object{relay, dgd}, poolServices(t, scheme, relay, dgd, multicluster.PoolRelayServiceName(relay.Name))...)...)
 	r := newExportTestReconciler(fakeClient, events.NewFakeRecorder(20), configv1alpha1.MCSImplementationKarmada, exportTestVersion)
 
 	t.Log("Reconcile: the Deployment's failure is returned, and the pool's exports are created anyway")
@@ -490,7 +638,7 @@ func TestRelayControllerReturnsAFailedExportWrite(t *testing.T) {
 			}
 			return c.Create(ctx, obj, opts...)
 		},
-	}, relay, dgd)
+	}, append([]client.Object{relay, dgd}, poolServices(t, scheme, relay, dgd, multicluster.PoolRelayServiceName(relay.Name))...)...)
 	recorder := events.NewFakeRecorder(20)
 	r := newExportTestReconciler(fakeClient, recorder, configv1alpha1.MCSImplementationKarmada, exportTestVersion)
 
@@ -498,7 +646,7 @@ func TestRelayControllerReturnsAFailedExportWrite(t *testing.T) {
 	result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(relay)})
 	g.Expect(err).To(gomega.MatchError(gomega.ContainSubstring("restarting")))
 	g.Expect(result).To(gomega.Equal(ctrl.Result{}))
-	key := client.ObjectKey{Namespace: relay.Namespace, Name: serviceName(relay.Name)}
+	key := client.ObjectKey{Namespace: relay.Namespace, Name: multicluster.PoolRelayServiceName(relay.Name)}
 	g.Expect(fakeClient.Get(ctx, key, &appsv1.Deployment{})).To(gomega.Succeed())
 	g.Expect(countReasons(drainEvents(recorder), reasonExportFailed)).To(gomega.Equal(1))
 }
@@ -511,7 +659,7 @@ func TestOwnershipConflictWithdrawsThePoolsExports(t *testing.T) {
 	scheme := newExportTestScheme(t)
 	dgd := newExportTestDGD("green", "Frontend")
 	relay := newExportTestRelay(dgd)
-	foreign := &corev1.Service{Name: serviceName(relay.Name), Namespace: relay.Namespace}
+	foreign := &corev1.Service{Name: multicluster.PoolRelayServiceName(relay.Name), Namespace: relay.Namespace}
 	fakeClient := newExportTestClient(scheme, exportTestVersion, interceptor.Funcs{}, relay, dgd, foreign,
 		ownedExport(t, scheme, exportTestVersion, relay, "green-pool-relay"),
 		ownedExport(t, scheme, exportTestVersion, relay, "green-frontend"))
@@ -531,8 +679,9 @@ func TestReconcileExportsUsesTheResolvedVersion(t *testing.T) {
 	scheme := newExportTestScheme(t)
 	dgd := newExportTestDGD("green", "Web")
 	relay := newExportTestRelay(dgd)
-	fakeClient := newExportTestClient(scheme, version, interceptor.Funcs{},
-		dgd, relay, ownedExport(t, scheme, version, relay, "green-frontend"))
+	fakeClient := newExportTestClient(scheme, version, interceptor.Funcs{}, append([]client.Object{
+		dgd, relay, ownedExport(t, scheme, version, relay, "green-frontend"),
+	}, poolServices(t, scheme, relay, dgd)...)...)
 
 	t.Log("Reconcile with the gates resolved to that version: exports are listed, created and withdrawn at it")
 	recorder := events.NewFakeRecorder(10)
@@ -558,7 +707,7 @@ func TestReconcileExportsToleratesAStaleCache(t *testing.T) {
 			return apierrors.NewAlreadyExists(
 				schema.GroupResource{Group: multicluster.ServiceExportGroupKind.Group, Resource: "serviceexports"}, obj.GetName())
 		},
-	}, dgd, relay)
+	}, append([]client.Object{dgd, relay}, poolServices(t, scheme, relay, dgd)...)...)
 
 	t.Log("Reconcile: AlreadyExists is no error, and nothing is announced")
 	recorder := events.NewFakeRecorder(10)
@@ -575,7 +724,10 @@ func TestPoolExportsRetryFailedWrites(t *testing.T) {
 		failOnce func(failed *bool) interceptor.Funcs
 		// withdraw withdraws the exports instead of reconciling them.
 		withdraw bool
-		want     []string
+		// wantAfterFailure are the exports after the failed write: the failure
+		// does not hold back the other export's write.
+		wantAfterFailure []string
+		want             []string
 	}{
 		{
 			name: "a failed create",
@@ -590,7 +742,8 @@ func TestPoolExportsRetryFailedWrites(t *testing.T) {
 					},
 				}
 			},
-			want: []string{"green-pool-relay", "green-frontend"},
+			wantAfterFailure: []string{"green-frontend"},
+			want:             []string{"green-pool-relay", "green-frontend"},
 		},
 		{
 			name: "a failed delete",
@@ -605,7 +758,8 @@ func TestPoolExportsRetryFailedWrites(t *testing.T) {
 					},
 				}
 			},
-			withdraw: true,
+			withdraw:         true,
+			wantAfterFailure: []string{"green-frontend"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -616,7 +770,7 @@ func TestPoolExportsRetryFailedWrites(t *testing.T) {
 			scheme := newExportTestScheme(t)
 			dgd := newExportTestDGD("green", "Frontend")
 			relay := newExportTestRelay(dgd)
-			objects := []client.Object{relay, dgd}
+			objects := append([]client.Object{relay, dgd}, poolServices(t, scheme, relay, dgd)...)
 			if tc.withdraw {
 				objects = append(objects,
 					ownedExport(t, scheme, exportTestVersion, relay, "green-pool-relay"),
@@ -626,19 +780,25 @@ func TestPoolExportsRetryFailedWrites(t *testing.T) {
 			fakeClient := newExportTestClient(scheme, exportTestVersion, tc.failOnce(&failed), objects...)
 			recorder := events.NewFakeRecorder(10)
 			r := newExportTestReconciler(fakeClient, recorder, configv1alpha1.MCSImplementationKarmada, exportTestVersion)
-			step := func() error {
-				if tc.withdraw {
-					return r.withdrawExports(ctx, relay)
-				}
-				return r.reconcileExports(ctx, relay, dgd)
-			}
 
 			t.Log("The failure is returned, for controller-runtime to retry with backoff, and is announced")
-			g.Expect(step()).To(gomega.MatchError(gomega.ContainSubstring("restarting")))
+			var err error
+			if tc.withdraw {
+				err = r.withdrawExports(ctx, relay)
+			} else {
+				err = r.reconcileExports(ctx, relay, dgd)
+			}
+			g.Expect(err).To(gomega.MatchError(gomega.ContainSubstring("restarting")))
 			g.Expect(drainEvents(recorder)).To(gomega.ContainElement(gomega.HavePrefix(corev1.EventTypeWarning + " " + reasonExportFailed)))
+			g.Expect(exportNames(listServiceExports(t, fakeClient, exportTestVersion, relay.Namespace))).To(gomega.ConsistOf(tc.wantAfterFailure))
 
 			t.Log("The retry runs once the API server answers: the exports converge with no other change")
-			g.Expect(step()).To(gomega.Succeed())
+			if tc.withdraw {
+				err = r.withdrawExports(ctx, relay)
+			} else {
+				err = r.reconcileExports(ctx, relay, dgd)
+			}
+			g.Expect(err).To(gomega.Succeed())
 			g.Expect(exportNames(listServiceExports(t, fakeClient, exportTestVersion, relay.Namespace))).To(gomega.ConsistOf(tc.want))
 		})
 	}
@@ -693,8 +853,9 @@ func TestPoolExportsAreRepaired(t *testing.T) {
 			changed.SetAnnotations(map[string]string{"example.com/note": "kept"})
 			changed.SetLabels(map[string]string{commonconsts.KubeLabelDynamoGraphDeploymentName: dgd.Name, "team": "router"})
 			tc.drift(changed)
-			fakeClient := newExportTestClient(scheme, exportTestVersion, interceptor.Funcs{},
-				dgd, relay, intact.DeepCopy(), changed.DeepCopy())
+			fakeClient := newExportTestClient(scheme, exportTestVersion, interceptor.Funcs{}, append([]client.Object{
+				dgd, relay, intact.DeepCopy(), changed.DeepCopy(),
+			}, poolServices(t, scheme, relay, dgd)...)...)
 
 			t.Log("Reconcile: the export is repaired, and the repair is recorded")
 			recorder := events.NewFakeRecorder(10)
@@ -733,8 +894,9 @@ func TestPoolExportsBeingDeletedAreLeftAlone(t *testing.T) {
 	terminating.SetLabels(nil)
 	terminating.SetFinalizers([]string{"example.com/hold"})
 	terminating.SetDeletionTimestamp(&metav1.Time{Time: time.Now()})
-	fakeClient := newExportTestClient(scheme, exportTestVersion, interceptor.Funcs{}, dgd, relay,
-		ownedExport(t, scheme, exportTestVersion, relay, "green-pool-relay"), terminating.DeepCopy())
+	fakeClient := newExportTestClient(scheme, exportTestVersion, interceptor.Funcs{}, append([]client.Object{
+		dgd, relay, ownedExport(t, scheme, exportTestVersion, relay, "green-pool-relay"), terminating.DeepCopy(),
+	}, poolServices(t, scheme, relay, dgd)...)...)
 
 	t.Log("Reconcile: while its deletion is pending, the export is neither repaired nor created again")
 	recorder := events.NewFakeRecorder(10)
@@ -765,8 +927,9 @@ func staleCacheSetUp(t *testing.T) (
 	frontendExport.SetUID("export-frontend")
 	frontendExport.SetLabels(nil)
 	cache := newExportTestClient(scheme, exportTestVersion, interceptor.Funcs{}, relayExport.DeepCopy(), frontendExport.DeepCopy())
-	apiServer := newExportTestClient(scheme, exportTestVersion, interceptor.Funcs{},
-		relay, dgd, relayExport.DeepCopy(), frontendExport.DeepCopy())
+	apiServer := newExportTestClient(scheme, exportTestVersion, interceptor.Funcs{}, append([]client.Object{
+		relay, dgd, relayExport.DeepCopy(), frontendExport.DeepCopy(),
+	}, poolServices(t, scheme, relay, dgd)...)...)
 	recorder := events.NewFakeRecorder(10)
 	r := newExportTestReconciler(apiServer, recorder, configv1alpha1.MCSImplementationKarmada, exportTestVersion)
 	r.exports.cache = cache
@@ -977,14 +1140,74 @@ func TestPoolsFollowTheClusterIDProperty(t *testing.T) {
 	blue := newExportTestDGD("blue", "Frontend")
 	greenRelay, blueRelay := newExportTestRelay(green), newExportTestRelay(blue)
 	property := newClusterIDProperty("east")
-	fakeClient := newExportTestClient(scheme, exportTestVersion, interceptor.Funcs{}, green, blue, greenRelay, blueRelay, property)
+	objects := []client.Object{green, blue, greenRelay, blueRelay, property}
+	objects = append(objects, poolServices(t, scheme, greenRelay, green)...)
+	objects = append(objects, poolServices(t, scheme, blueRelay, blue)...)
+	fakeClient := newExportTestClient(scheme, exportTestVersion, interceptor.Funcs{}, objects...)
 	recorder := events.NewFakeRecorder(20)
 	r := newExportTestReconciler(fakeClient, recorder, configv1alpha1.MCSImplementationStandard, exportTestVersion)
 	r.exports.clusterPropertyWatched = true
+	pools := []ctrl.Request{
+		{NamespacedName: client.ObjectKeyFromObject(greenRelay)},
+		{NamespacedName: client.ObjectKeyFromObject(blueRelay)},
+	}
 
-	// mismatches reconciles the exports of the Relays of requests, and returns how
-	// many of them report a mismatch.
-	mismatches := func(requests []ctrl.Request) int {
+	for _, step := range []struct {
+		description string
+		// relayClusterID, when set, is the clusterId that users give both Relays,
+		// whose own watch requeues them.
+		relayClusterID string
+		// propertyValue, when set, is the property's new value.
+		propertyValue string
+		// deleteProperty deletes the property, and createProperty, when set,
+		// creates it again with that value.
+		deleteProperty bool
+		createProperty string
+		// wantMismatches is how many Relays record a mismatch.
+		wantMismatches int
+	}{
+		{description: "Reconcile both pools: their IDs match the property"},
+		{
+			description:    "The cluster is renamed west: users correct both Relays first, and their watch requeues them while the cache still says east",
+			relayClusterID: "west", wantMismatches: 2,
+		},
+		{
+			description:   "The cache sees the property's new value: its event requeues both Relays, which no longer report a mismatch",
+			propertyValue: "west",
+		},
+		{description: "The value changes again: both Relays report the mismatch", propertyValue: "south", wantMismatches: 2},
+		{description: "The property is deleted: its event requeues both Relays, which skip the check", deleteProperty: true},
+		{
+			description:    "The property is created again with another value: its event requeues both Relays, which report the mismatch",
+			createProperty: "north", wantMismatches: 2,
+		},
+	} {
+		t.Log(step.description)
+		requests := pools
+		switch {
+		case step.relayClusterID != "":
+			for _, relay := range []*v1alpha1.DynamoPoolRelay{greenRelay, blueRelay} {
+				g.Expect(fakeClient.Get(ctx, client.ObjectKeyFromObject(relay), relay)).To(gomega.Succeed())
+				relay.Spec.ClusterID = step.relayClusterID
+				g.Expect(fakeClient.Update(ctx, relay)).To(gomega.Succeed())
+			}
+		case step.propertyValue != "":
+			g.Expect(fakeClient.Get(ctx, client.ObjectKeyFromObject(property), property)).To(gomega.Succeed())
+			before := property.DeepCopy()
+			property.Object["spec"] = map[string]any{"value": step.propertyValue}
+			g.Expect(fakeClient.Update(ctx, property)).To(gomega.Succeed())
+			g.Expect(clusterIDPropertyEvents.Update(event.UpdateEvent{ObjectOld: before, ObjectNew: property})).To(gomega.BeTrue())
+			requests = r.mapClusterPropertyToRelays(ctx, property)
+		case step.deleteProperty:
+			g.Expect(fakeClient.Delete(ctx, property)).To(gomega.Succeed())
+			g.Expect(clusterIDPropertyEvents.Delete(event.DeleteEvent{Object: property})).To(gomega.BeTrue())
+			requests = r.mapClusterPropertyToRelays(ctx, property)
+		case step.createProperty != "":
+			created := newClusterIDProperty(step.createProperty)
+			g.Expect(fakeClient.Create(ctx, created)).To(gomega.Succeed())
+			g.Expect(clusterIDPropertyEvents.Create(event.CreateEvent{Object: created})).To(gomega.BeTrue())
+			requests = r.mapClusterPropertyToRelays(ctx, created)
+		}
 		for _, request := range requests {
 			relay := &v1alpha1.DynamoPoolRelay{}
 			g.Expect(fakeClient.Get(ctx, request.NamespacedName, relay)).To(gomega.Succeed())
@@ -992,52 +1215,185 @@ func TestPoolsFollowTheClusterIDProperty(t *testing.T) {
 			g.Expect(fakeClient.Get(ctx, request.NamespacedName, dgd)).To(gomega.Succeed())
 			g.Expect(r.reconcileExports(ctx, relay, dgd)).To(gomega.Succeed())
 		}
-		return countReasons(drainEvents(recorder), reasonClusterIDMismatch)
+		g.Expect(countReasons(drainEvents(recorder), reasonClusterIDMismatch)).To(gomega.Equal(step.wantMismatches))
 	}
-	pools := []ctrl.Request{
-		{NamespacedName: client.ObjectKeyFromObject(greenRelay)},
-		{NamespacedName: client.ObjectKeyFromObject(blueRelay)},
+}
+
+func TestPoolExportsConvergePastAFailedWrite(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	ctx := context.Background()
+
+	t.Log("Create a pool whose frontend was renamed from Frontend to Web, in a cluster whose ID differs from the " +
+		"Relay's, while a quota refuses every new export")
+	scheme := newExportTestScheme(t)
+	dgd := newExportTestDGD("green", "Web")
+	relay := newExportTestRelay(dgd)
+	quota := apierrors.NewForbidden(schema.GroupResource{Group: multicluster.ServiceExportGroupKind.Group, Resource: "serviceexports"},
+		"green-web", errors.New("exceeded quota"))
+	fakeClient := newExportTestClient(scheme, exportTestVersion, interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if obj.GetObjectKind().GroupVersionKind().GroupKind() == multicluster.ServiceExportGroupKind {
+				return quota
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	}, append([]client.Object{
+		relay, dgd, newClusterIDProperty("west"),
+		ownedExport(t, scheme, exportTestVersion, relay, "green-pool-relay"),
+		ownedExport(t, scheme, exportTestVersion, relay, "green-frontend"),
+	}, poolServices(t, scheme, relay, dgd)...)...)
+	recorder := events.NewFakeRecorder(10)
+	r := newExportTestReconciler(fakeClient, recorder, configv1alpha1.MCSImplementationStandard, exportTestVersion)
+	r.exports.clusterPropertyWatched = true
+
+	t.Log("Reconcile: the refused create is returned, but the stale export is withdrawn, which frees the quota, " +
+		"and the mismatch is still reported")
+	g.Expect(r.reconcileExports(ctx, relay, dgd)).To(gomega.MatchError(gomega.ContainSubstring("exceeded quota")))
+	g.Expect(exportNames(listServiceExports(t, fakeClient, exportTestVersion, relay.Namespace))).To(gomega.ConsistOf("green-pool-relay"))
+	g.Expect(eventReasons(drainEvents(recorder))).To(gomega.ConsistOf("DeleteServiceExport", reasonExportFailed, reasonClusterIDMismatch))
+	condition := meta.FindStatusCondition(relay.Status.Conditions, conditionExported)
+	g.Expect(condition).NotTo(gomega.BeNil())
+	g.Expect(condition.Reason).To(gomega.Equal(reasonExportFailed))
+	g.Expect(condition.Message).To(gomega.And(gomega.ContainSubstring("exceeded quota"), gomega.ContainSubstring(`clusterId "east"`)))
+}
+
+func TestPoolExportProblemsAreReportedPastAFailedWithdrawal(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	ctx := context.Background()
+
+	t.Log("Create a pool whose frontend was renamed from Frontend to Web, in a cluster whose ID differs from the " +
+		"Relay's, while the API server refuses deletes")
+	scheme := newExportTestScheme(t)
+	dgd := newExportTestDGD("green", "Web")
+	relay := newExportTestRelay(dgd)
+	fakeClient := newExportTestClient(scheme, exportTestVersion, interceptor.Funcs{
+		Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
+			return apierrors.NewServiceUnavailable("the API server is restarting")
+		},
+	}, append([]client.Object{
+		relay, dgd, newClusterIDProperty("west"),
+		ownedExport(t, scheme, exportTestVersion, relay, "green-frontend"),
+	}, poolServices(t, scheme, relay, dgd)...)...)
+	recorder := events.NewFakeRecorder(10)
+	r := newExportTestReconciler(fakeClient, recorder, configv1alpha1.MCSImplementationStandard, exportTestVersion)
+	r.exports.clusterPropertyWatched = true
+
+	t.Log("Reconcile: the refused delete is returned, the new exports are created, and the mismatch is still reported")
+	g.Expect(r.reconcileExports(ctx, relay, dgd)).To(gomega.MatchError(gomega.ContainSubstring("restarting")))
+	g.Expect(exportNames(listServiceExports(t, fakeClient, exportTestVersion, relay.Namespace))).
+		To(gomega.ConsistOf("green-pool-relay", "green-web", "green-frontend"))
+	g.Expect(eventReasons(drainEvents(recorder))).To(gomega.ConsistOf(
+		"CreateServiceExport", "CreateServiceExport", reasonExportFailed, reasonClusterIDMismatch))
+}
+
+func TestPoolExportsSurviveAFailedServiceRead(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	ctx := context.Background()
+
+	t.Log("Create a pool with both exports while reading its Services fails")
+	scheme := newExportTestScheme(t)
+	dgd := newExportTestDGD("green", "Frontend")
+	relay := newExportTestRelay(dgd)
+	fakeClient := newExportTestClient(scheme, exportTestVersion, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*corev1.Service); ok {
+				return apierrors.NewServiceUnavailable("the API server is restarting")
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	}, append([]client.Object{
+		relay, dgd,
+		ownedExport(t, scheme, exportTestVersion, relay, "green-pool-relay"),
+		ownedExport(t, scheme, exportTestVersion, relay, "green-frontend"),
+	}, poolServices(t, scheme, relay, dgd)...)...)
+	r := newExportTestReconciler(fakeClient, events.NewFakeRecorder(10), configv1alpha1.MCSImplementationStandard, exportTestVersion)
+
+	t.Log("Reconcile: the failure is returned, and the exports stay until the Services can be read again")
+	g.Expect(r.reconcileExports(ctx, relay, dgd)).To(gomega.MatchError(gomega.ContainSubstring("restarting")))
+	g.Expect(exportNames(listServiceExports(t, fakeClient, exportTestVersion, relay.Namespace))).
+		To(gomega.ConsistOf("green-pool-relay", "green-frontend"))
+}
+
+func TestPoolExportWarningsFollowTheExportedCondition(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	ctx := context.Background()
+
+	t.Log("Create a pool without a frontend")
+	scheme := newExportTestScheme(t)
+	dgd := newExportTestDGD("green")
+	relay := newExportTestRelay(dgd)
+	fakeClient := newExportTestClient(scheme, exportTestVersion, interceptor.Funcs{},
+		append([]client.Object{relay, dgd}, poolServices(t, scheme, relay, dgd)...)...)
+	recorder := events.NewFakeRecorder(10)
+	r := newExportTestReconciler(fakeClient, recorder, configv1alpha1.MCSImplementationStandard, exportTestVersion)
+
+	t.Log("Reconcile: the condition reports the problem, and its Warning is recorded once")
+	g.Expect(r.reconcileExports(ctx, relay, dgd)).To(gomega.Succeed())
+	g.Expect(eventReasons(drainEvents(recorder))).To(gomega.ConsistOf("CreateServiceExport", reasonNoFrontend))
+
+	t.Log("A DGD status write changes only the DGD's resourceVersion, so the condition is unchanged and nothing is recorded")
+	g.Expect(fakeClient.Get(ctx, client.ObjectKeyFromObject(dgd), dgd)).To(gomega.Succeed())
+	dgd.Status.State = "pending"
+	g.Expect(fakeClient.Status().Update(ctx, dgd)).To(gomega.Succeed())
+	g.Expect(r.reconcileExports(ctx, relay, dgd)).To(gomega.Succeed())
+	g.Expect(drainEvents(recorder)).To(gomega.BeEmpty())
+
+	t.Log("A frontend is added: the condition turns True, and only the new export is recorded")
+	dgd.Spec.Components = append(dgd.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName: "Frontend", ComponentType: v1beta1.ComponentTypeFrontend,
+	})
+	g.Expect(fakeClient.Update(ctx, dgd)).To(gomega.Succeed())
+	for _, service := range poolServices(t, scheme, relay, dgd, multicluster.PoolRelayServiceName(dgd.Name)) {
+		g.Expect(fakeClient.Create(ctx, service)).To(gomega.Succeed())
 	}
-	g.Expect(mismatches(pools)).To(gomega.BeZero())
+	g.Expect(r.reconcileExports(ctx, relay, dgd)).To(gomega.Succeed())
+	g.Expect(eventReasons(drainEvents(recorder))).To(gomega.ConsistOf("CreateServiceExport"))
+	condition := meta.FindStatusCondition(relay.Status.Conditions, conditionExported)
+	g.Expect(condition).NotTo(gomega.BeNil())
+	g.Expect(condition.Status).To(gomega.Equal(metav1.ConditionTrue))
+	g.Expect(condition.Message).To(gomega.Equal("Exported Services green-pool-relay, green-frontend through MCS implementation mcs"))
+}
 
-	t.Log("The cluster is renamed west: users correct both Relays first, and their watch requeues them while the cache still says east")
-	for _, relay := range []*v1alpha1.DynamoPoolRelay{greenRelay, blueRelay} {
-		g.Expect(fakeClient.Get(ctx, client.ObjectKeyFromObject(relay), relay)).To(gomega.Succeed())
-		relay.Spec.ClusterID = "west"
-		g.Expect(fakeClient.Update(ctx, relay)).To(gomega.Succeed())
-	}
-	g.Expect(mismatches(pools)).To(gomega.Equal(2))
+func TestMapServiceToRelays(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	ctx := context.Background()
 
-	// change applies update to the property in the cache, and returns the Relays
-	// that the resulting event requeues.
-	change := func(update func(property *unstructured.Unstructured)) []ctrl.Request {
-		g.Expect(fakeClient.Get(ctx, client.ObjectKeyFromObject(property), property)).To(gomega.Succeed())
-		before := property.DeepCopy()
-		update(property)
-		g.Expect(fakeClient.Update(ctx, property)).To(gomega.Succeed())
-		g.Expect(clusterIDPropertyEvents.Update(event.UpdateEvent{ObjectOld: before, ObjectNew: property})).To(gomega.BeTrue())
-		return r.mapClusterPropertyToRelays(ctx, property)
-	}
-	setValue := func(value string) func(*unstructured.Unstructured) {
-		return func(property *unstructured.Unstructured) { property.Object["spec"] = map[string]any{"value": value} }
-	}
+	t.Log("Create two pools in namespace inference, one with a frontend named Frontend")
+	scheme := newExportTestScheme(t)
+	green := newExportTestDGD("green", "Frontend")
+	blue := newExportTestDGD("blue")
+	fakeClient := newExportTestClient(scheme, exportTestVersion, interceptor.Funcs{},
+		green, blue, newExportTestRelay(green), newExportTestRelay(blue))
+	r := newExportTestReconciler(fakeClient, events.NewFakeRecorder(1), configv1alpha1.MCSImplementationStandard, exportTestVersion)
 
-	t.Log("The cache sees the property's new value: its event requeues both Relays, which no longer report a mismatch")
-	g.Expect(mismatches(change(setValue("west")))).To(gomega.BeZero())
+	t.Log("A Service requeues the Relays whose DGD exports a Service of its name")
+	g.Expect(r.mapServiceToRelays(ctx, &corev1.Service{Name: "green-frontend", Namespace: "inference"})).
+		To(gomega.ConsistOf(ctrl.Request{Namespace: "inference", Name: "green"}))
+	g.Expect(r.mapServiceToRelays(ctx, &corev1.Service{Name: "blue-pool-relay", Namespace: "inference"})).
+		To(gomega.ConsistOf(ctrl.Request{Namespace: "inference", Name: "blue"}))
+	g.Expect(r.mapServiceToRelays(ctx, &corev1.Service{Name: "blue-frontend", Namespace: "inference"})).To(gomega.BeEmpty())
+	g.Expect(r.mapServiceToRelays(ctx, &corev1.Service{Name: "green-frontend", Namespace: "other"})).To(gomega.BeEmpty())
 
-	t.Log("The value changes again: both Relays report the mismatch")
-	g.Expect(mismatches(change(setValue("south")))).To(gomega.Equal(2))
+	t.Log("A Service's creation and deletion count, and an update only when it changes the Service's controller")
+	scheme = newExportTestScheme(t)
+	service := &corev1.Service{Name: "green-frontend", Namespace: "inference"}
+	g.Expect(serviceControllerChanged.Create(event.CreateEvent{Object: service})).To(gomega.BeTrue())
+	g.Expect(serviceControllerChanged.Delete(event.DeleteEvent{Object: service})).To(gomega.BeTrue())
+	relabeled := service.DeepCopy()
+	relabeled.Labels = map[string]string{"team": "router"}
+	g.Expect(serviceControllerChanged.Update(event.UpdateEvent{ObjectOld: service, ObjectNew: relabeled})).To(gomega.BeFalse())
+	controlled := service.DeepCopy()
+	g.Expect(controllerutil.SetControllerReference(green, controlled, scheme)).To(gomega.Succeed())
+	g.Expect(serviceControllerChanged.Update(event.UpdateEvent{ObjectOld: service, ObjectNew: controlled})).To(gomega.BeTrue())
+	g.Expect(serviceControllerChanged.Update(event.UpdateEvent{ObjectOld: controlled, ObjectNew: service})).To(gomega.BeTrue())
+}
 
-	t.Log("The property is deleted: its event requeues both Relays, which skip the check")
-	g.Expect(fakeClient.Delete(ctx, property)).To(gomega.Succeed())
-	g.Expect(clusterIDPropertyEvents.Delete(event.DeleteEvent{Object: property})).To(gomega.BeTrue())
-	g.Expect(mismatches(r.mapClusterPropertyToRelays(ctx, property))).To(gomega.BeZero())
-
-	t.Log("The property is created again with another value: its event requeues both Relays, which report the mismatch")
-	created := newClusterIDProperty("north")
-	g.Expect(fakeClient.Create(ctx, created)).To(gomega.Succeed())
-	g.Expect(clusterIDPropertyEvents.Create(event.CreateEvent{Object: created})).To(gomega.BeTrue())
-	g.Expect(mismatches(r.mapClusterPropertyToRelays(ctx, created))).To(gomega.Equal(2))
+func TestTruncateKeepsWholeCharacters(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	g.Expect(truncate("short", 10)).To(gomega.Equal("short"))
+	g.Expect(truncate("ab€cd", 4)).To(gomega.Equal("ab"))
+	g.Expect(truncate("ab€cd", 5)).To(gomega.Equal("ab€"))
+	g.Expect(truncate(strings.Repeat("x", 2000), maxEventNote)).To(gomega.HaveLen(maxEventNote))
 }
 
 func TestMapServiceExportToRelays(t *testing.T) {
@@ -1304,8 +1660,9 @@ func TestPoolExportEventsNameTheirObjects(t *testing.T) {
 	relay := newExportTestRelay(dgd)
 	unlabeled := ownedExport(t, scheme, exportTestVersion, relay, "green-frontend")
 	unlabeled.SetLabels(nil)
-	fakeClient := newExportTestClient(scheme, exportTestVersion, interceptor.Funcs{}, relay, dgd, unlabeled,
-		ownedExport(t, scheme, exportTestVersion, relay, "green-old"), newClusterIDProperty("west"))
+	fakeClient := newExportTestClient(scheme, exportTestVersion, interceptor.Funcs{}, append([]client.Object{
+		relay, dgd, unlabeled, ownedExport(t, scheme, exportTestVersion, relay, "green-old"), newClusterIDProperty("west"),
+	}, poolServices(t, scheme, relay, dgd)...)...)
 	recorder := &relatedRecorder{}
 	r := newExportTestReconciler(fakeClient, recorder, configv1alpha1.MCSImplementationStandard, exportTestVersion)
 	r.exports.clusterPropertyWatched = true

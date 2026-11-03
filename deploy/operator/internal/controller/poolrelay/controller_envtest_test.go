@@ -18,6 +18,7 @@ import (
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/multicluster"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -65,7 +66,7 @@ func TestDeploymentAPIDefaultsDoNotCauseRolloutLoop(t *testing.T) {
 		Spec:       relaySpec("east"),
 	}
 	r := &reconciler{Client: apiClient, scheme: scheme, defaultBackend: configv1alpha1.DiscoveryBackendKubernetes}
-	key := types.NamespacedName{Namespace: relay.Namespace, Name: serviceName(relay.Name)}
+	key := types.NamespacedName{Namespace: relay.Namespace, Name: multicluster.PoolRelayServiceName(relay.Name)}
 	var firstResourceVersion string
 	for attempt := range 2 {
 		_, wanted, err := render(relay, []string{"green-runtime"})
@@ -230,7 +231,7 @@ func TestControllerPublishesAndWithdrawsOneDGDService(t *testing.T) {
 	if err := apiClient.Create(ctx, &relay); err != nil {
 		t.Fatal(err)
 	}
-	serviceKey := types.NamespacedName{Namespace: key.Namespace, Name: serviceName(key.Name)}
+	serviceKey := types.NamespacedName{Namespace: key.Namespace, Name: multicluster.PoolRelayServiceName(key.Name)}
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		var service corev1.Service

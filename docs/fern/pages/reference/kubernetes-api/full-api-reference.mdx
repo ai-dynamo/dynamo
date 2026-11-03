@@ -1378,7 +1378,7 @@ AvailableReplicas is the number of Relay Pods the Deployment reports available.
 </ParamField>
 
 <ParamField path="conditions" type="Condition array">
-Conditions includes Ready for listener availability, not model or KV readiness. Its reason is ListenerAvailable, DeploymentProgressing, DGDNotFound, DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers, InvalidConfiguration, ReconcileFailed, or ResourceOwnershipConflict.
+Conditions includes Ready for listener availability, not model or KV readiness. Its reason is ListenerAvailable, DeploymentProgressing, DGDNotFound, DGDTerminating, UnsupportedDiscovery, UnsupportedSourceScope, NoWorkers, InvalidConfiguration, ReconcileFailed, or ResourceOwnershipConflict. With multi-cluster export configured, Conditions also includes Exported: True with reason Exported once the pool's Services are exported, or False with reason Withdrawn, ServiceNotOwned, InvalidServiceName, ServiceNameTooLong, NoFrontend, ClusterIDMismatch, or ExportFailed.
 See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
