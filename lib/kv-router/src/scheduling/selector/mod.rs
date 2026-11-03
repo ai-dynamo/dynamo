@@ -6,9 +6,12 @@ use std::{
     collections::HashMap,
 };
 
+mod hosted;
 mod policy;
 #[cfg(any(test, feature = "bench"))]
 mod reference;
+
+pub use hosted::{HostedSelectionRequest, HostedWorkerPicker};
 
 #[cfg(any(test, feature = "bench"))]
 pub use reference::DefaultWorkerSelector;
@@ -211,7 +214,14 @@ impl<'a> MaterializedSelectionInput<'a> {
             request,
             cache_snapshot: cache_snapshot(request),
             context: WorkerSelectionContext {
-                request,
+                #[cfg(any(test, feature = "bench"))]
+                request: Some(request),
+                isl_tokens: request.isl_tokens,
+                session_context: request.session_context.as_ref(),
+                affinity_target: request.affinity_target,
+                expected_output_tokens: request.expected_output_tokens,
+                priority_jump: request.priority_jump,
+                strict_priority: request.strict_priority,
                 request_blocks: request.request_blocks(block_size),
                 block_size,
                 track_prefill_tokens: request.track_prefill_tokens,
@@ -696,19 +706,31 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                 );
                 let candidates: &[ScoredWorkerCandidate] = candidates;
                 let info = |row: usize| worker_info(workers, candidates[row].worker);
-                let picker_input = WorkerInputView {
+                // The same projection and fallback as the row's LOAD input, so the two agree.
+                let active_requests = |row: usize| {
+                    WorkerLoadInput::for_worker(
+                        &request.worker_loads,
+                        candidates[row].worker,
+                        || request.unobserved_worker_load(),
+                    )
+                    .active_requests() as u64
+                };
+                let picker_input = WorkerInputView::materialized(
                     candidates,
-                    cache: picker_inputs.contains(WorkerInputs::CACHE).then_some(
-                        WorkerCacheInputs {
+                    picker_inputs
+                        .contains(WorkerInputs::CACHE)
+                        .then_some(WorkerCacheInputs {
                             rows: cache_inputs,
                             snapshot: &input.cache_snapshot,
-                        },
-                    ),
-                    load: picker_inputs
+                        }),
+                    picker_inputs
                         .contains(WorkerInputs::LOAD)
                         .then_some(load_inputs.as_slice()),
-                    info: &info,
-                };
+                    picker_inputs
+                        .contains(WorkerInputs::ACTIVE_REQUESTS)
+                        .then_some(&active_requests),
+                    &info,
+                );
                 let row = picker.pick(&input.context, picker_input)?;
                 let Some(candidate) = candidates.get(row) else {
                     return Err(WorkerSelectionPolicyError::InvalidPickerRow {

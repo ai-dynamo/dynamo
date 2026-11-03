@@ -3927,7 +3927,7 @@ policy_classes:
         }
 
         fn pick(
-            &mut self,
+            &self,
             _context: &crate::WorkerSelectionContext<'_>,
             input: crate::WorkerInputView<'_>,
         ) -> Result<usize, crate::WorkerSelectionPolicyError> {
