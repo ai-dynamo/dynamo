@@ -34,7 +34,11 @@ pub fn router_plugin_registry() -> RouterPluginRegistry {
 /// its own state, such as its round-robin rotation.
 pub fn mode_selectors() -> ModeSelectors {
     Arc::new(|mode| {
-        let picker = super::routing_host::hosted_picker(mode).ok()?;
+        let picker = super::routing_host::hosted_picker(mode)
+            .inspect_err(|error| {
+                tracing::warn!(?mode, %error, "router-mode plugin unavailable");
+            })
+            .ok()?;
         Some(Arc::new(picker) as Arc<dyn InstanceSelector>)
     })
 }

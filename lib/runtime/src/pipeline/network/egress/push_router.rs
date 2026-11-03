@@ -240,7 +240,7 @@ where
     /// Applied only when fault detection is enabled.
     establish_timeout: Option<std::time::Duration>,
 
-    /// Shared request occupancy state for tracked routing modes.
+    /// Shared request occupancy state, present when the mode or a selector reads in-flight counts.
     occupancy_state: Option<Arc<RoutingOccupancyState>>,
 
     /// Optional cache index for direct multimodal embedding cache lookups.
@@ -765,7 +765,11 @@ where
             monitor.start_monitoring().await?;
         }
 
-        let occupancy_state = if router_mode.requires_occupancy() {
+        let occupancy_state = if router_mode.requires_occupancy()
+            || selectors
+                .iter()
+                .any(|(_, selector)| selector.reads_active_requests())
+        {
             Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
         } else {
             None
@@ -1543,14 +1547,10 @@ where
                     self.client.endpoint.id()
                 ));
             }
-            let permit = if self.router_mode.requires_occupancy() {
-                Some(OccupancyPermit::acquire(
-                    self.occupancy_state()?,
-                    instance_id,
-                ))
-            } else {
-                None
-            };
+            let permit = self
+                .occupancy_state
+                .clone()
+                .map(|state| OccupancyPermit::acquire(state, instance_id));
             return Ok((instance_id, permit));
         }
 
