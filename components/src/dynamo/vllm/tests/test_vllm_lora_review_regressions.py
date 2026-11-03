@@ -25,7 +25,7 @@ pytestmark = [
 @pytest.mark.asyncio
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("max_cpu_loras", [None, 2])
-async def test_standard_handler_initializes_administrative_lora_capacity(
+async def test_standard_handler_preserves_administrative_registration_capacity(
     monkeypatch, enabled, max_cpu_loras
 ):
     monkeypatch.delenv("DYN_LORA_RUNTIME_LOAD_ENABLED", raising=False)
@@ -53,15 +53,18 @@ async def test_standard_handler_initializes_administrative_lora_capacity(
         runtime=Mock(), config=config, engine=engine, default_sampling_params=None
     )
 
-    capacity = max_cpu_loras if max_cpu_loras is not None else 1
-    assert handler._lora_capacity == (capacity if enabled else None)
+    assert handler._lora_capacity is None
     if enabled:
-        handler._lora_state.uncertain_engine_lora_ids.update(range(capacity))
-        assert (
-            await handler._reserve_admin_lora_slot("adapter", handler._lora_capacity)
-            is None
+        handler._lora_state.loaded_loras = {
+            "first": LoRAInfo(id=1, path="/cache/first"),
+            "second": LoRAInfo(id=2, path="/cache/second"),
+        }
+        reserved_id = await handler._reserve_admin_lora_slot(
+            "third", handler._lora_capacity
         )
-        assert handler._lora_state.loaded_loras == {}
+        assert reserved_id is not None
+        assert reserved_id not in (1, 2)
+        assert handler._lora_state.loaded_loras["third"].id == -1
 
 
 @pytest.mark.asyncio

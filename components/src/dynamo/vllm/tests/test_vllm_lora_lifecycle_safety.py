@@ -605,6 +605,50 @@ async def test_legacy_unload_unregister_failure_preserves_engine_state(monkeypat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["list", "missing_unload"])
+async def test_administrative_views_hide_private_runtime_residents(operation):
+    handler = _make_prefill_handler()
+    runtime_key = "dyn-lora-runtime"
+    public_key = "dyn-lora-explicit-admin"
+    handler._lora_state.loaded_loras = {
+        "adapterA": LoRAInfo(id=1, path="/cache/admin"),
+        public_key: LoRAInfo(id=2, path="/cache/explicit"),
+        runtime_key: LoRAInfo(id=3, path="/cache/runtime"),
+        "loading": LoRAInfo(id=-1, path=""),
+    }
+    handler._lora_state.runtime_loras[runtime_key] = RuntimeLoRAInfo(
+        adapter_key=runtime_key,
+        full_identity_digest=bytes(32),
+        base_model_name="base",
+        source_revision="revision",
+        id=3,
+        path="/cache/runtime",
+    )
+
+    if operation == "list":
+        results = [result async for result in handler.list_loras()]
+        assert results == [
+            {
+                "status": "success",
+                "loras": {"adapterA": 1, public_key: 2},
+                "count": 2,
+            }
+        ]
+    else:
+        results = [
+            result async for result in handler.unload_lora({"lora_name": "missing"})
+        ]
+        assert results[-1]["status"] == "error"
+        message = results[-1]["message"]
+        assert "adapterA" in message
+        assert public_key in message
+        assert runtime_key not in message
+        assert "loading" not in message
+    assert runtime_key in handler._lora_state.runtime_loras
+    handler.engine_client.remove_lora.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_admin_load_rejects_runtime_owned_adapter(monkeypatch):
     handler = _make_prefill_handler()
     adapter_key = "dyn-lora-runtime"
