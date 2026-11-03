@@ -731,11 +731,11 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
         for mut request in waiting {
             if self.router.acquire_affinity(&mut request)? {
                 if let Some(hashes) = &request.block_hashes {
-                    let mut tiered = self.router.indexer.find_matches_for_hashes(hashes.clone());
+                    let tiered = self.router.indexer.find_matches_for_hashes(hashes.clone());
                     request.overlap =
                         OverlapAnalysis::new(&self.router.config, self.router.block_size, &tiered)
                             .signals();
-                    request.kv_transfer_candidates = tiered.take_kv_transfer_candidates();
+                    request.kv_transfer_candidates = tiered.into_kv_transfer_candidates();
                 }
                 let effects = self.router.enqueue_or_admit(request, now_ms)?;
                 admissions.extend(effects.admissions);
@@ -1324,7 +1324,7 @@ impl OfflineReplayRouter {
         let retain_hashes = self.affinity.is_some()
             || (self.indexer.session_prefix_index.is_some() && session_id.is_some());
         let mut block_hashes = None;
-        let (mut tiered, token_seq) = match replay_hashes {
+        let (tiered, token_seq) = match replay_hashes {
             Some(replay_hashes) => {
                 let local_hashes =
                     crate::loadgen::local_block_hashes(replay_hashes.local_block_hashes);
@@ -1380,7 +1380,7 @@ impl OfflineReplayRouter {
         };
         let overlap = OverlapAnalysis::new(&self.config, self.block_size, &tiered).signals();
         // Lookups retain candidates only while hints are on.
-        let kv_transfer_candidates = tiered.take_kv_transfer_candidates();
+        let kv_transfer_candidates = tiered.into_kv_transfer_candidates();
 
         Ok(PendingRequest {
             uuid,

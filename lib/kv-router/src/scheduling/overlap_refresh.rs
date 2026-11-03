@@ -92,7 +92,7 @@ impl<P: TieredMatchProvider> OverlapScoresRefresh for TieredOverlapRefresher<P> 
         if block_hashes.is_empty() {
             return None;
         }
-        let mut tiered = match self
+        let tiered = match self
             .provider
             .find_tiered_matches_with_options(
                 block_hashes,
@@ -110,7 +110,7 @@ impl<P: TieredMatchProvider> OverlapScoresRefresh for TieredOverlapRefresher<P> 
         };
         let overlap = OverlapAnalysis::new(&self.config, self.block_size, &tiered).signals();
         let kv_transfer_candidates = retain_kv_transfer_chain
-            .then(|| tiered.take_kv_transfer_candidates())
+            .then(|| tiered.into_kv_transfer_candidates())
             .flatten();
         Some(RefreshedOverlap {
             overlap,
