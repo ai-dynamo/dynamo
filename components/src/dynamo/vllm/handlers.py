@@ -4093,9 +4093,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                                     "top_logprobs": [[] for _ in tok["token_ids"]],
                                 }
                         if prefill_result is not None and "completion_usage" in tok:
-                            tok["completion_usage"]["prompt_tokens_details"] = (
-                                prefill_prompt_tokens_details
-                            )
+                            tok["completion_usage"][
+                                "prompt_tokens_details"
+                            ] = prefill_prompt_tokens_details
 
                         if want_engine_data:
                             _accumulate_engine_data(
