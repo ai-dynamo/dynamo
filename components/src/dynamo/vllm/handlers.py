@@ -1324,10 +1324,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         )
         self._lora_state = LoRAState()
         self._lora_capacity: int | None = None
-        if getattr(self.engine_args, "enable_lora", False):
-            self._lora_capacity = getattr(self.engine_args, "max_cpu_loras", None)
-            if self._lora_capacity is None:
-                self._lora_capacity = getattr(self.engine_args, "max_loras", None)
         # Adapters known to have been handed to vLLM. Prefill registration is
         # metadata-only, but vLLM activates a prefill adapter lazily when an
         # inference request supplies its LoRARequest.
