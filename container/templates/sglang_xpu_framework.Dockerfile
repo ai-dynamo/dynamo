@@ -143,30 +143,15 @@ RUN git clone ${SGLANG_GIT_URL} sglang && \
     pip3 install "xgrammar==0.1.33" --no-deps && \
     pip3 install msgspec blake3 py-cpuinfo compressed_tensors gguf partial_json_parser einops tabulate ftfy
 
-# Install torch_memory_saver for the GPU Memory Service (GMS) SGLang integration.
-# pyproject_xpu.toml does not list it, and SGLang's
-# TorchMemorySaverAdapter.create(enable=True) raises ImportError without it.
-# Follows upstream sgl-project/sglang/docker/xpu.Dockerfile.
-#
-# XPU ships no prebuilt wheel (PyPI has CUDA wheels only), so it is built from
-# source against the local oneAPI + torch-XPU runtime: the .so links
-# libsycl.so.<N>, which must match the installed torch. TMS_PLATFORM=xpu forces
-# the XPU backend, which builds only torch_memory_saver_hook_mode_torch.
-# --no-build-isolation lets the build import the installed torch so it can match
-# the libsycl major; under build isolation torch is absent and the match is
-# skipped. --no-deps: the package declares no requirements.
-# Pinned to v0.0.10 (the version the CUDA image gets from PyPI) so image builds
-# are reproducible; bump via --build-arg.
+# torch_memory_saver for GMS; no XPU wheel on PyPI, so build from source (TMS_PLATFORM=xpu).
+# --no-build-isolation lets it match the installed torch's libsycl. Ref is v0.0.10.
 ARG TORCH_MEMORY_SAVER_REF=9026084a4ea65b75fd6126a6a0665a88a810d172
 RUN source /opt/intel/oneapi/setvars.sh --force && \
     TMS_PLATFORM=xpu pip3 install --no-build-isolation --no-deps \
         "torch_memory_saver @ git+https://github.com/fzyzcjy/torch_memory_saver.git@${TORCH_MEMORY_SAVER_REF}"
 
-# Fail the build unless the XPU variant of the saver was built and loads. Runs
-# without a GPU: torch is imported first so its libsycl is the one loaded, and
-# the .so is looked up where torch_memory_saver.utils.get_binary_path_from_package
-# looks (the package dir, then site-packages). Whether GMS claims the saver
-# depends on the live device type and is not checked here.
+# Fail the build unless only the XPU hook .so was built and it loads. Needs no GPU;
+# torch is imported first so its libsycl is the one loaded.
 RUN source /opt/intel/oneapi/setvars.sh --force && python3 - <<'PY'
 import ctypes
 from pathlib import Path
