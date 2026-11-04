@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Requires both local encoder-handoff branches; published runtimes lack this contract.
+# Requires matching encoder-handoff TRT-LLM and native sidecar builds.
 set -euo pipefail
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 # shellcheck disable=SC1091
@@ -12,7 +12,7 @@ source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh"
 
 if [[ "${1:-}" == "--help" ]]; then
     echo "Usage: MODEL=Qwen/Qwen3-VL-2B-Instruct $0"
-    echo "Requires the local TRT-LLM encoder-handoff build and matching native sidecar."
+    echo "Requires the TRT-LLM encoder-handoff build and matching native sidecar."
     echo "MODEL_REVISION: required immutable checkpoint revision; NIXL/UCX must be available."
     echo "TRTLLM_PYTHON: engine Python; ENCODER_GPU/PD_GPU: device indices (both default 0)."
     echo "DYN_HTTP_PORT: frontend port; ENCODER_GRPC_PORT/PD_GRPC_PORT: engine ports."
@@ -45,7 +45,7 @@ max_batch_size: 1
 dtype: bfloat16
 YAML
 build_trtllm_override_args_with_mem --merge-with-json '{"disable_mm_encoder":true,"guided_decoding_backend":"xgrammar","max_batch_size":1,"dtype":"bfloat16"}' > "$RUN_DIR/pd.yaml"
-print_launch_banner --multimodal "TensorRT-LLM sidecar image E+PD (local draft)" "$MODEL" "${DYN_HTTP_PORT:-8000}"
+print_launch_banner --multimodal "TensorRT-LLM sidecar image E+PD" "$MODEL" "${DYN_HTTP_PORT:-8000}"
 python3 -m dynamo.frontend &
 TRTLLM_OPENENGINE_ENCODER_ENDPOINT="${ENCODER_ADVERTISE_HOST:-127.0.0.1}:$ENCODER_GRPC_PORT" \
 CUDA_VISIBLE_DEVICES="${ENCODER_GPU:-0}" "$TRTLLM_PYTHON" -m tensorrt_llm.commands.serve "$MODEL" \

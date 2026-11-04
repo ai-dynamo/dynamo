@@ -5,12 +5,12 @@ SPDX-License-Identifier: Apache-2.0
 
 # Vendored OpenEngine protocol
 
-These files are exact copies of the local encoder-handoff protocol proposal.
-The revision is not published yet. Publish and pin the canonical schema before
-opening the dependent Dynamo PR; this local pin is for review preparation.
+These files are exact copies of the canonical OpenEngine encoder-handoff
+proposal at the immutable revision below. The proposal is available for review;
+using its encoder fields requires a matching engine implementation.
 
-- Source: [`proto/openengine/v1`](https://github.com/ai-dynamo/openengine/tree/438098068bb0e1bf49a97f37c485f99310339a36/proto/openengine/v1)
-- Commit: `438098068bb0e1bf49a97f37c485f99310339a36` (local branch `krish/openengine-image-epd-protocol`)
+- Source: [`proto/openengine/v1`](https://github.com/ai-dynamo/openengine/tree/9b6f34f9efb17aa2c6b7e0ad737b78106a8ecca3/proto/openengine/v1)
+- Commit: `9b6f34f9efb17aa2c6b7e0ad737b78106a8ecca3`
 
 TensorRT-LLM's matching transport branch vendors the same revision. The schema
 adds encoder roles, cache references and an engine-to-engine transfer RPC. Its
@@ -21,7 +21,7 @@ SHA-256:
 | File | SHA-256 |
 |------|---------|
 | `openengine/v1/error.proto` | `b1c559a3b7847c55a247145f1493805b56b58491a320fb26e6ebcd7072b62fb3` |
-| `openengine/v1/generation.proto` | `af2485fcdb4c2d49a91ac168ac5bcc520b87c4062e971e0c4052c4a18145dfc3` |
+| `openengine/v1/generation.proto` | `ffe30cacfb9e42e00c70ea9bc29a83b65865ee67a6ceb46ce3f5d3b9a8cb36cd` |
 | `openengine/v1/kv.proto` | `4f5c46a65a7998ecf34ea37117b325b0f0a5a70149702d6bca919726b40526cd` |
 | `openengine/v1/lifecycle.proto` | `a0ce097480a929c6acf5e0e145bfdb1bb8998e4c7ee95ec316ce481e2558a379` |
 | `openengine/v1/lora.proto` | `c1aa58fca3ab1b40f7c75dbbd17280b2b52ee295256479b6b0fc74f924047ef9` |
