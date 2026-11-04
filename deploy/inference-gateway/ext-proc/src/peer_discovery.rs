@@ -783,7 +783,7 @@ mod tests {
             SelectionServiceBuilder::new(
                 KvRouterConfig::default(),
                 WorkerType::Aggregated,
-                dynamo_custom_policy_builtin::default_registry(),
+                dynamo_router_policies::default_registry(),
             )
             .indexer_threads(1)
             .build()
@@ -1231,7 +1231,7 @@ mod tests {
         let service = SelectionServiceBuilder::new(
             KvRouterConfig::default(),
             WorkerType::Aggregated,
-            dynamo_custom_policy_builtin::default_registry(),
+            dynamo_router_policies::default_registry(),
         )
         .indexer_threads(1)
         .replica_sync(free_tcp_port(), Vec::new())
@@ -1307,7 +1307,7 @@ mod tests {
             SelectionServiceBuilder::new(
                 kv_router_config_from_dynamo_env(),
                 WorkerType::Aggregated,
-                dynamo_custom_policy_builtin::default_registry(),
+                dynamo_router_policies::default_registry(),
             )
             .indexer_threads(1)
             .replica_sync(free_tcp_port(), Vec::new())

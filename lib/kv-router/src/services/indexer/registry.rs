@@ -1090,6 +1090,7 @@ mod tests {
                 "default".to_string(),
                 1,
                 None,
+                false,
             )
             .await
             .unwrap();
@@ -1166,6 +1167,7 @@ mod tests {
                 "default".to_string(),
                 1,
                 None,
+                false,
             )
             .await
             .unwrap();

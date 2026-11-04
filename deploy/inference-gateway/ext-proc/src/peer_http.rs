@@ -117,7 +117,7 @@ mod tests {
             SelectionServiceBuilder::new(
                 KvRouterConfig::default(),
                 WorkerType::Aggregated,
-                dynamo_custom_policy_builtin::default_registry(),
+                dynamo_router_policies::default_registry(),
             )
             .indexer_threads(1)
             .build()

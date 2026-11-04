@@ -803,6 +803,7 @@ async fn peer_dump_is_applied_before_buffered_zmq_removal() {
             ROUTING_GROUP.to_string(),
             BLOCK_SIZE,
             None,
+            false,
         )
         .await
         .expect("register deferred listener");

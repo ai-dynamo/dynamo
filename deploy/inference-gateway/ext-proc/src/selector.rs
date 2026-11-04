@@ -112,7 +112,7 @@ impl Selector {
 
     pub async fn new(
         cfg: &EppStandaloneConfig,
-        policy_registry: WorkerSelectionPolicyRegistry,
+        policy_registry: RouterPluginRegistry,
     ) -> Result<Self> {
         let kv_router_config =
             try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
@@ -122,7 +122,7 @@ impl Selector {
     async fn new_with_kv_router_config(
         cfg: &EppStandaloneConfig,
         kv_router_config: KvRouterConfig,
-        policy_registry: WorkerSelectionPolicyRegistry,
+        policy_registry: RouterPluginRegistry,
     ) -> Result<Self> {
         Self::validate_queueing_worker_capacity(cfg, &kv_router_config)?;
         warn_for_unserved_worker_selection_policies(&kv_router_config, &[WorkerType::Aggregated])?;
@@ -131,7 +131,7 @@ impl Selector {
         let mut builder = SelectionServiceBuilder::new(
             kv_router_config,
             WorkerType::Aggregated,
-            policy_registry.with_default_factory(dynamo_custom_policy_builtin::default_factory()),
+            dynamo_router_policies::with_defaults(policy_registry),
         )
         .indexer_threads(cfg.selector_threads);
 
@@ -639,7 +639,7 @@ worker_selection:
         let service = SelectionServiceBuilder::new(
             KvRouterConfig::default(),
             WorkerType::Aggregated,
-            dynamo_custom_policy_builtin::default_registry(),
+            dynamo_router_policies::default_registry(),
         )
         .indexer_threads(1)
         .defer_indexer_for_bootstrap()
@@ -659,7 +659,7 @@ worker_selection:
             SelectionServiceBuilder::new(
                 KvRouterConfig::default(),
                 WorkerType::Aggregated,
-                dynamo_custom_policy_builtin::default_registry(),
+                dynamo_router_policies::default_registry(),
             )
             .indexer_threads(1)
             .defer_indexer_for_bootstrap()
