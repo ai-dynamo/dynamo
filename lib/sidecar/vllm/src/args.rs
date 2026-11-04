@@ -32,3 +32,44 @@ pub(crate) struct Args {
     #[arg(long, env = "DYN_VLLM_RL_WORLD_SIZE")]
     pub vllm_rl_world_size: Option<NonZeroU32>,
 }
+
+/// Match the shared media policy's enabled default, rejecting invalid startup configuration.
+pub(crate) fn allow_remote_media_urls(
+    value: Option<&str>,
+) -> Result<bool, dynamo_backend_common::DynamoError> {
+    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+        return Ok(true);
+    };
+    dynamo_runtime::config::parse_bool(value).map_err(|error| {
+        crate::client::invalid_argument(format!("DYN_MM_ALLOW_REMOTE_URLS: {error}"))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::allow_remote_media_urls;
+
+    #[test]
+    fn remote_url_policy_defaults_and_boolean_vocabulary() {
+        for value in [
+            None,
+            Some(""),
+            Some("  "),
+            Some("1"),
+            Some("TRUE"),
+            Some(" on "),
+            Some("yes"),
+        ] {
+            assert!(allow_remote_media_urls(value).unwrap(), "{value:?}");
+        }
+        for value in ["0", "FALSE", " off ", "no"] {
+            assert!(!allow_remote_media_urls(Some(value)).unwrap(), "{value}");
+        }
+        assert!(
+            allow_remote_media_urls(Some("invalid"))
+                .unwrap_err()
+                .to_string()
+                .contains("DYN_MM_ALLOW_REMOTE_URLS")
+        );
+    }
+}

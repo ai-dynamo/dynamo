@@ -37,6 +37,60 @@ fn media_strings_move_into_generate_request() {
     }
 }
 
+#[test]
+fn remote_media_urls_follow_dyn_mm_allow_remote_urls() {
+    for key in [IMAGE_URL_KEY, AUDIO_URL_KEY, VIDEO_URL_KEY] {
+        for url in [
+            "http://example.com/media",
+            "https://example.com/media",
+            "HTTPS://example.com/media",
+        ] {
+            for media in [
+                MultimodalData::Url(url.parse().unwrap()),
+                MultimodalData::RawUrl(url.to_string()),
+            ] {
+                // A remote source is blocked even after an allowed inline one.
+                let request = epd_request(vec![(
+                    key,
+                    vec![
+                        MultimodalData::RawUrl("data:application/octet-stream;base64,AA==".into()),
+                        media,
+                    ],
+                )]);
+                validate_remote_media_urls(&request, true).unwrap();
+                let error = validate_remote_media_urls(&request, false).unwrap_err();
+                assert!(
+                    error.to_string().contains("DYN_MM_ALLOW_REMOTE_URLS=0"),
+                    "{key} {url}: {error}"
+                );
+                assert_invalid(error);
+            }
+        }
+        let inline = epd_request(vec![(
+            key,
+            vec![MultimodalData::RawUrl(
+                "data:application/octet-stream;base64,AA==".into(),
+            )],
+        )]);
+        validate_remote_media_urls(&inline, false).unwrap();
+    }
+
+    // The enabled policy leaves remote URLs to vLLM's own downloader.
+    let request = epd_request(vec![(
+        IMAGE_URL_KEY,
+        vec![MultimodalData::Url(
+            "https://example.com/image.jpg".parse().unwrap(),
+        )],
+    )]);
+    validate_remote_media_urls(&request, true).unwrap();
+    let wire =
+        build_generate_request(request, "remote".into(), DisaggregationMode::Aggregated).unwrap();
+    assert!(matches!(
+        wire.media[0].source,
+        Some(pb::media_item::Source::Url(_))
+    ));
+}
+
 // Exercise the real frontend projection before lowering to the engine protocol.
 fn plugin_request(body: serde_json::Value) -> PreprocessedRequest {
     use dynamo_llm::generate_format::{ClientRequest, GenerateFormat, Worker};

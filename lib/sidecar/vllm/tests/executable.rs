@@ -210,3 +210,23 @@ fn invalid_arguments_fail_before_runtime_configuration() {
         assert!(stderr.contains(message), "{args:?}: {stderr}");
     }
 }
+
+#[test]
+fn invalid_remote_url_policy_fails_before_runtime_configuration() {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_dynamo-vllm-sidecar"));
+    for (key, _) in std::env::vars().filter(|(key, _)| {
+        key.starts_with("DYN_") || key.starts_with("ETCD_") || key.starts_with("NATS_")
+    }) {
+        command.env_remove(key);
+    }
+    let output = command
+        .args(["--grpc-endpoint", "http://127.0.0.1:0"])
+        .env("DYN_MM_ALLOW_REMOTE_URLS", "invalid")
+        .env("ETCD_ENDPOINTS", "://invalid")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("DYN_MM_ALLOW_REMOTE_URLS"), "{stderr}");
+    assert!(stderr.contains("Invalid boolean value"), "{stderr}");
+}
