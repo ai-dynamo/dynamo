@@ -459,6 +459,17 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
+    - name: Verify pinned external parser conformance consumer
+      if: matrix.dir == '.'
+      env:
+        CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      run: |
+        cargo fmt --manifest-path tests/parity/unified/Cargo.toml -- --check
+        cargo deny --locked --manifest-path tests/parity/unified/Cargo.toml -L error check licenses bans --config deny.toml
+        cargo clippy --locked --manifest-path tests/parity/unified/Cargo.toml --all-targets --no-deps -- -D warnings
+        cargo test --locked --manifest-path tests/parity/unified/Cargo.toml --all-targets
+        tests/parity/unified/run.sh list-v2-parsers
+        cargo run --release --locked --manifest-path tests/parity/unified/Cargo.toml --bin dynamo-conformance -- all
     - name: Generate frontend OpenAPI specification
       if: matrix.dir == '.'
       # The preceding integration-test build also builds the normal binary.

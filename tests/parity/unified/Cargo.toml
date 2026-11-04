@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-external-parser-check"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+# Keep this a real external consumer, separate from Dynamo's serving dependencies.
+[workspace]
+
+[dependencies]
+anyhow = "1"
+dynamo-conformance-fixtures-v2 = { version = "=0.1.0", git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "7c3d6ec100a778d406b1f85f57c0348106567883" }
+dynamo-parsers-v2 = { version = "=0.9.10", git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "7c3d6ec100a778d406b1f85f57c0348106567883" }
+
+[[bin]]
+name = "dynamo-conformance"
+path = "conformance.rs"
+
+[[test]]
+name = "native_parser"
+path = "native_parser.rs"
+
+[[test]]
+name = "vendor_override"
+path = "vendor_override.rs"
