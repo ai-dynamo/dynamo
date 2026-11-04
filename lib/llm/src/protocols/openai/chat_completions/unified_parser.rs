@@ -161,48 +161,45 @@ pub(crate) fn selected_family(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
 ) -> Option<&'static str> {
-    let configured = configured_family(tool_call_parser, reasoning_parser);
     let selection = super::tool_parser_v2::selected_version()
         .unwrap_or_else(|error| panic!("invalid parser routing configuration: {error:#}"));
-    // Keep MiniMax M3 on the legacy Auto route until explicit guided output from its
-    // unified parser is emitted in content instead of reasoning_content.
-    // Qwen3 thinking models also use this reasoning name with Hermes tool syntax, and a
-    // reasoning-only Nemotron 3 card does not say which tool grammar it serves; those
-    // cases also require V2.
-    let selected = if tool_call_parser.is_none()
-        && matches!(
-            reasoning_parser,
-            Some("qwen3" | "nemotron_v3" | "nemotron3")
-        )
-        && selection == dynamo_runtime::config::ParserVersion::Auto
-        || configured == Some(MINIMAX_M3_UNIFIED_FAMILY)
-            && selection == dynamo_runtime::config::ParserVersion::Auto
-    {
-        None
-    } else {
-        selected_family_for_selection(configured, selection)
-    };
+    let selected = selected_family_for_selection(tool_call_parser, reasoning_parser, selection);
     tracing::debug!(
         target: "dynamo_unified",
         ?tool_call_parser,
         ?reasoning_parser,
-        ?configured,
         ?selection,
+        ?selected,
         "unified parser path decision"
     );
     selected
 }
 
-fn selected_family_for_selection(
-    configured: Option<&'static str>,
+pub(crate) fn selected_family_for_selection(
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
     selection: dynamo_runtime::config::ParserVersion,
 ) -> Option<&'static str> {
-    match selection {
-        dynamo_runtime::config::ParserVersion::Auto | dynamo_runtime::config::ParserVersion::V2 => {
-            configured
-        }
-        dynamo_runtime::config::ParserVersion::V1 => None,
+    // Qwen3 thinking models can use Hermes syntax; reasoning-only Nemotron cards
+    // do not identify their tool grammar. Auto keeps both on the legacy path.
+    if selection == dynamo_runtime::config::ParserVersion::V1
+        || (selection == dynamo_runtime::config::ParserVersion::Auto
+            && tool_call_parser.is_none()
+            && matches!(
+                reasoning_parser,
+                Some("qwen3" | "nemotron_v3" | "nemotron3")
+            ))
+    {
+        return None;
     }
+    let configured = configured_family(tool_call_parser, reasoning_parser);
+    // MiniMax M3 stays legacy in Auto until Unified guided output uses content.
+    if selection == dynamo_runtime::config::ParserVersion::Auto
+        && configured == Some(MINIMAX_M3_UNIFIED_FAMILY)
+    {
+        return None;
+    }
+    configured
 }
 
 pub(crate) fn selected_content_decoder_family(
@@ -4773,7 +4770,10 @@ pub(crate) mod tests {
                 (ParserVersion::V1, None),
                 (ParserVersion::V2, Some("gpt_oss")),
             ] {
-                assert_eq!(selected_family_for_selection(family, version), expected);
+                assert_eq!(
+                    selected_family_for_selection(tool, reasoning, version),
+                    expected
+                );
             }
         }
     }
@@ -14323,18 +14323,30 @@ mod beam_routing_tests {
             Some(BEAM_UNIFIED_FAMILY)
         );
         assert_eq!(
-            selected_family_for_selection(Some(BEAM_UNIFIED_FAMILY), ParserVersion::Auto),
+            selected_family_for_selection(
+                Some(BEAM_UNIFIED_FAMILY),
+                Some(BEAM_UNIFIED_FAMILY),
+                ParserVersion::Auto,
+            ),
             Some(BEAM_UNIFIED_FAMILY)
         );
         assert_eq!(
-            selected_family_for_selection(Some(BEAM_UNIFIED_FAMILY), ParserVersion::V2),
+            selected_family_for_selection(
+                Some(BEAM_UNIFIED_FAMILY),
+                Some(BEAM_UNIFIED_FAMILY),
+                ParserVersion::V2,
+            ),
             Some(BEAM_UNIFIED_FAMILY)
         );
         // There is no v1 Beam parser to fall back to: an explicit `1` selects nothing
         // here (and `validate_parser_version` rejects it), and half a pair under `auto`
         // is rejected by the same validation before this choice is made.
         assert_eq!(
-            selected_family_for_selection(Some(BEAM_UNIFIED_FAMILY), ParserVersion::V1),
+            selected_family_for_selection(
+                Some(BEAM_UNIFIED_FAMILY),
+                Some(BEAM_UNIFIED_FAMILY),
+                ParserVersion::V1,
+            ),
             None
         );
         assert!(FAMILY_NAMES.contains(&BEAM_UNIFIED_FAMILY));
