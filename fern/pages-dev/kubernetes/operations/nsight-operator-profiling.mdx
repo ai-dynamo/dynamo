@@ -221,6 +221,45 @@ the key off that machine:
   [Configuring Storage Access for Downloads](https://docs.nvidia.com/nsight-operator/UserGuide/index.html#configuring-storage-access-for-downloads).
 </Note>
 
+## Profile One Replica of a Component
+
+A rule selects every replica of a component: the injector decides when a pod is created, before the pod has its final
+name, so a rule cannot pick one replica by name. To profile one replica, give each pod its own tag and start the window
+on one pod's tag. This uploads to the namespace's in-cluster storage, which Nsight creates with auto-provisioning; it
+was not tested with an S3 storage config such as `team-s3`, so leave out `cloudStorageConfigRef` on this rule. Change
+the profile config above in two places:
+
+```yaml
+  nsightToolConfigs:
+  - name: my-dgd-gpu
+    nsightToolArgs: "-t cuda,nvtx,osrt --cuda-graph-trace=node --python-sampling=true"
+    opentelemetryTrace: true
+    containerEnv:              # per-pod tags have no storage of their own; upload to the namespace's default storage
+    - name: NSIGHT_CLOUD_STORAGE_CONFIG_FILE
+      value: /mnt/nv/secrets/nsight-cloud-storage/default.yaml
+  injectionRules:
+  - name: my-dgd-decode
+    nsightToolConfigRef: my-dgd-gpu
+    nsightTags: ['${HOSTNAME}']  # each pod's tag is its own pod name
+    podObjectSelector:
+      matchLabels:
+        nvidia.com/dynamo-graph-deployment-name: my-dgd
+        nvidia.com/dynamo-component-type: decode
+    processIncludePatterns: ['^(.*/)?python(3([.][0-9]+)?)? -m dynamo[.](vllm|sglang|trtllm)( .*)?$']
+```
+
+Then run the commands in [Capture](#capture) with one pod's name as the tag. Set `T` to that pod name instead of
+`my-dgd`, and do not rerun the `T=my-dgd` line:
+
+```bash
+kubectl get pods -n $NS -l nvidia.com/dynamo-graph-deployment-name=my-dgd,nvidia.com/dynamo-component-type=decode
+T=<pod name>
+python3 nsight_operator.py --tag $T status    # only this pod
+```
+
+The window records only that pod, and its report goes to Nsight's in-cluster storage. Other pods selected by the rule
+stay idle until you start a window on their own tags.
+
 ## Profile One Pod with kubectl exec
 
 To profile a single pod, you can also run `nsys` inside it with `kubectl exec`, without `nsight_operator.py`. The pod
@@ -249,8 +288,8 @@ kubectl exec -n $NS $POD -c main -- cat /tmp/tmpkro1yevt/<report>.nsys-rep > ./r
 
 - **Apply the profile config before the pods start.** Only pods created after the config exists are profiled. After
   you change rules or arguments, recreate the pods.
-- **Use literal tags.** A tag with a placeholder, such as `{NVDT_POD_NAME}`, silently puts the pod on the `default`
-  tag.
+- **Use literal tags, or `${HOSTNAME}` for one tag per pod.** Other placeholders, such as `{NVDT_POD_NAME}` or
+  `${NVDT_POD_FULLNAME}`, silently put the pod on the `default` tag.
 - **Leave out `--pytorch=autograd-nvtx`.** Nsight's helper adds it by default. It can create a CUDA context on GPU 0
   for every rank, which can shrink the KV cache.
 - **Leave `DYN_NVTX` unset on workers.** On Dynamo 1.6.0, `DYN_NVTX=1` makes `python -m dynamo.vllm` fail at import
