@@ -29,7 +29,8 @@ const LEASE_END_MARGIN: Duration = Duration::from_secs(1);
 /// last status.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RegistrationStatus {
-    /// No call has finished yet.
+    /// Nothing is registered: no call has finished yet, or there is no
+    /// registration to send.
     Unregistered,
     /// The last call succeeded, and the service granted this lease.
     Registered(Lease),
@@ -56,6 +57,9 @@ impl PoolHeartbeat {
     /// heartbeat interval, sending the latest `registration` each time. If
     /// the sender is dropped, it keeps sending the last value.
     ///
+    /// While `registration` is `None` it sends nothing, so the service drops
+    /// the pool once its lease passes. The next registration is sent at once.
+    ///
     /// A failed call is retried after 1 s, doubling up to the heartbeat
     /// interval (5 s before the first lease), and once more 1 s before the
     /// lease ends, so an outage that ends in time does not lapse it. Waits
@@ -66,7 +70,7 @@ impl PoolHeartbeat {
     /// Tokio runtime.
     pub fn spawn(
         client: GlobalDiscoveryClient,
-        registration: watch::Receiver<PoolRegistration>,
+        registration: watch::Receiver<Option<PoolRegistration>>,
         cancel: CancellationToken,
     ) -> Self {
         Self::spawn_from(client, registration, cancel)
@@ -74,13 +78,13 @@ impl PoolHeartbeat {
 
     fn spawn_from(
         registrar: impl Registrar + 'static,
-        registration: watch::Receiver<PoolRegistration>,
+        registration: watch::Receiver<Option<PoolRegistration>>,
         cancel: CancellationToken,
     ) -> Self {
         let (status, status_rx) = watch::channel(RegistrationStatus::Unregistered);
         let task = tokio::spawn(async move {
             cancel
-                .run_until_cancelled(keep_registered(&registrar, &registration, &status))
+                .run_until_cancelled(keep_registered(&registrar, registration, &status))
                 .await;
         });
         Self {
@@ -115,7 +119,7 @@ impl Registrar for GlobalDiscoveryClient {
 /// Never returns: it stops when cancelled or aborted.
 async fn keep_registered(
     registrar: &impl Registrar,
-    registration: &watch::Receiver<PoolRegistration>,
+    mut registration: watch::Receiver<Option<PoolRegistration>>,
     status: &watch::Sender<RegistrationStatus>,
 ) {
     // The last lease granted, and when the call that got it started.
@@ -123,9 +127,18 @@ async fn keep_registered(
     let mut retry = FIRST_RETRY;
     let mut lapse_logged = false;
     loop {
-        let started = Instant::now();
         // Cloned so the channel is not locked across the call.
-        let current = registration.borrow().clone();
+        let Some(current) = registration.borrow_and_update().clone() else {
+            // Nothing to renew, so the next registration starts over.
+            update(status, RegistrationStatus::Unregistered);
+            (renewed, retry, lapse_logged) = (None, FIRST_RETRY, false);
+            if registration.changed().await.is_err() {
+                // The sender is gone and left nothing to register.
+                std::future::pending::<()>().await;
+            }
+            continue;
+        };
+        let started = Instant::now();
         let wait = match registrar.register_pool(&current).await {
             Ok(lease) => {
                 renewed = Some((lease, started));
@@ -280,7 +293,7 @@ mod tests {
     }
 
     fn spawn(registrar: &FakeRegistrar, cancel: CancellationToken) -> PoolHeartbeat {
-        let (_, registration) = watch::channel(pool(8));
+        let (_, registration) = watch::channel(Some(pool(8)));
         PoolHeartbeat::spawn_from(registrar.clone(), registration, cancel)
     }
 
@@ -291,7 +304,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn renews_on_each_leases_heartbeat_interval() {
         let registrar = FakeRegistrar::answering(Ok(lease(5, 15)));
-        let (registration, registration_rx) = watch::channel(pool(8));
+        let (registration, registration_rx) = watch::channel(Some(pool(8)));
         let heartbeat =
             PoolHeartbeat::spawn_from(registrar.clone(), registration_rx, CancellationToken::new());
         assert_eq!(heartbeat.status(), RegistrationStatus::Unregistered);
@@ -304,7 +317,7 @@ mod tests {
 
         // The next call sends the latest registration, and the one after it
         // follows the new lease.
-        registration.send_replace(pool(16));
+        registration.send_replace(Some(pool(16)));
         registrar.answer(Ok(lease(3, 9)));
         sleep_s(8).await;
         assert_eq!(registrar.calls(), [0, 5, 10, 15, 18]);
@@ -313,6 +326,36 @@ mod tests {
             heartbeat.status(),
             RegistrationStatus::Registered(lease(3, 9))
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn registers_only_while_there_is_a_registration() {
+        let registrar = FakeRegistrar::answering(Ok(lease(5, 15)));
+        let (registration, registration_rx) = watch::channel(None);
+        let heartbeat =
+            PoolHeartbeat::spawn_from(registrar.clone(), registration_rx, CancellationToken::new());
+        sleep_s(3).await;
+        assert!(registrar.calls().is_empty());
+        assert_eq!(heartbeat.status(), RegistrationStatus::Unregistered);
+
+        // The first registration is sent at once.
+        registration.send_replace(Some(pool(8)));
+        sleep_s(6).await;
+        assert_eq!(registrar.calls(), [3, 8]);
+        assert_eq!(
+            heartbeat.status(),
+            RegistrationStatus::Registered(lease(5, 15))
+        );
+
+        // Withdrawn, it is not renewed at 13 s, and the next one is sent at once.
+        registration.send_replace(None);
+        sleep_s(10).await;
+        assert_eq!(registrar.calls(), [3, 8]);
+        assert_eq!(heartbeat.status(), RegistrationStatus::Unregistered);
+        registration.send_replace(Some(pool(16)));
+        sleep_s(1).await;
+        assert_eq!(registrar.calls(), [3, 8, 19]);
+        assert_eq!(registrar.workers(), [8, 8, 16]);
     }
 
     #[tokio::test(start_paused = true)]
