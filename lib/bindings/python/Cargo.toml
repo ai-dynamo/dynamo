@@ -99,7 +99,7 @@ uuid = { version = "1.18.1" }
 
 # kv-indexer / slot-tracker / shared kv-router types
 dynamo-kv-router = { path = "../../kv-router" }
-dynamo-custom-policy-builtin = { path = "../../router-plugins/builtin" }
+dynamo-router-policies = { path = "../../router-plugins/builtin" }
 dynamo-worker-selection-policy-catalog = { path = "../../router-plugins/catalog", optional = true }
 # The replaceable /generate format catalog; custom images point this name at their own.
 dynamo-generate-format-catalog = { path = "../../generate-format-catalog" }

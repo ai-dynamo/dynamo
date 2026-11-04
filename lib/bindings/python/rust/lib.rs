@@ -492,10 +492,10 @@ pub(crate) fn linked_worker_selection_policy_registry() -> RouterPluginRegistry 
 
 #[cfg(feature = "custom-policy")]
 fn register_core_with_router_plugins(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    let mut registry = dynamo_kv_router::plugins::RouterPluginRegistry::default();
+    let mut registry = dynamo_router_policies::default_registry();
     // The policies Dynamo ships register first, so a replaced catalog that reuses one of their
     // type names fails here instead of silently overriding it.
-    dynamo_custom_policy_builtin::register(&mut registry)
+    dynamo_router_policies::register(&mut registry)
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
     dynamo_worker_selection_policy_catalog::register(&mut registry)
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
@@ -1934,9 +1934,10 @@ impl Endpoint {
         crate::future_into_py(py, async move {
             let client = inner.client().await.map_err(to_pyerr)?;
             let push_router =
-                rs::pipeline::PushRouter::<rmpv::Value, RsAnnotated<rmpv::Value>>::from_client(
+                rs::pipeline::PushRouter::<rmpv::Value, RsAnnotated<rmpv::Value>>::from_client_with_options(
                     client,
                     router_mode.into(),
+                    dynamo_llm::kv_router::plugins::push_router_options(),
                 )
                 .await
                 .map_err(to_pyerr)?;
