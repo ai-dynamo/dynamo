@@ -113,20 +113,32 @@ vllm:
   xpu:
     base_image: vllm/vllm-openai-xpu
     runtime_image: vllm/vllm-openai-xpu
-    base_image_tag: v0.32.0
-    runtime_image_tag: v0.32.0
-    baseline_sbom: vllm-openai-xpu@20509fab
+    base_image_tag: v0.33.0
+    runtime_image_tag: v0.33.0
+    # vLLM 0.33 requires Transformers >=5.16.1,<5.21 and tokenizers >=0.23.2;
+    # Omni fe886bbb still requires Transformers <5.20, and the v0.33.0 image
+    # ships 5.20.2. 5.19.0 is the newest in both.
+    transformers_version: "5.19.0"
+    tokenizers_version: "0.23.2"
+    baseline_sbom: vllm-openai-xpu@be3a9aea
+    # vLLM 0.33's NIXL connector requires NIXL >= 1.5.0 (check_nixl_version).
     nixl_ref: v1.5.0
     nixl_ucx_ref: v1.23.0-rc1
   cpu:
     base_image: ubuntu
     runtime_image: vllm/vllm-openai-cpu
     base_image_tag: 22.04
-    runtime_image_tag: v0.32.0
+    runtime_image_tag: v0.33.0
+    # vLLM 0.33 requires Transformers >=5.16.1,<5.21 and tokenizers >=0.23.2;
+    # Omni fe886bbb still requires Transformers <5.20. 5.19.0 is the newest in both.
+    transformers_version: "5.19.0"
+    tokenizers_version: "0.23.2"
     # No baseline_sbom: cpu images are unshipped and skip the compliance stages.
     nixl_ref: v1.5.0
     nixl_ucx_ref: v1.23.0-rc1
-  vllm_omni_ref: "v0.32.0rc1"
+  # Unreleased vllm-omni#9648 head for vLLM 0.33, as upstream's CUDA image uses
+  # (PR #17862); replace with the Omni release.
+  vllm_omni_ref: "0.33.0.dev0+gfe886bbb379396a2947c99ae041f7c35006c1900"
   nixl_ref: v1.4.1
   max_jobs: "10"
   enable_media_ffmpeg: "true"
