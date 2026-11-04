@@ -176,21 +176,33 @@ async fn anthropic_error_middleware(mut request: Request<Body>, next: Next) -> R
                 })
             }
         };
-        body["request_id"] = serde_json::Value::String(request_id.clone());
+        stamp_request_id(&mut body, &mut parts.headers, &request_id);
         parts.headers.insert(
             header::CONTENT_TYPE,
             header::HeaderValue::from_static("application/json"),
         );
         parts.headers.remove(header::CONTENT_LENGTH);
-        response = Response::from_parts(parts, Body::from(body.to_string()));
+        Response::from_parts(parts, Body::from(body.to_string()))
+    } else {
+        insert_request_id_header(response.headers_mut(), &request_id);
+        response
     }
-    response.headers_mut().insert(
+}
+
+/// Sets the `request-id` header that Anthropic clients read.
+fn insert_request_id_header(headers: &mut HeaderMap, request_id: &str) {
+    headers.insert(
         "request-id",
         request_id
             .parse()
             .expect("assigned request ID is a valid header"),
     );
-    response
+}
+
+/// Adds the request ID to an Anthropic error body and its response headers.
+fn stamp_request_id(body: &mut serde_json::Value, headers: &mut HeaderMap, request_id: &str) {
+    body["request_id"] = serde_json::Value::String(request_id.to_owned());
+    insert_request_id_header(headers, request_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -1501,6 +1513,29 @@ fn anthropic_error_unrecorded(status: StatusCode, error_type: &str, message: &st
         }),
     )
         .into_response()
+}
+
+/// Returns the Anthropic error for a request the readiness gate rejects.
+///
+/// The gate runs outside `anthropic_error_middleware`, so this adds the same
+/// `request-id` header and body field. The caller has already recorded the failure.
+pub(crate) fn readiness_rejection_response(
+    headers: &HeaderMap,
+    status: StatusCode,
+    message: &str,
+) -> Response {
+    let request_id = get_or_create_request_id(headers);
+    let mut body = serde_json::to_value(AnthropicErrorResponse {
+        object_type: "error".to_string(),
+        error: AnthropicErrorBody {
+            error_type: anthropic_error_type_for_status(status, "api_error").to_string(),
+            message: message.to_string(),
+        },
+    })
+    .expect("Anthropic error is serializable");
+    let mut response_headers = HeaderMap::new();
+    stamp_request_id(&mut body, &mut response_headers, &request_id);
+    (status, response_headers, Json(body)).into_response()
 }
 
 /// Returns an Anthropic-compatible JSON `404` error response for an unmatched route.
