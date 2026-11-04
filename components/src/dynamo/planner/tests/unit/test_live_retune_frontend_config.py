@@ -908,9 +908,12 @@ def test_decode_to_prefill_frontend_roundtrip_remains_unmodeled(monkeypatch, sou
     deployment = with_frontend(args=args, env=trace_env(**env))
     startup = parse(deployment)
     assert startup.router_config == D2P_ROUTER_VALUES
-    assert json.loads(
-        KvRouterConfig.from_json(json.dumps(startup.router_config)).to_json()
-    ) == expected
+    assert (
+        json.loads(
+            KvRouterConfig.from_json(json.dumps(startup.router_config)).to_json()
+        )
+        == expected
+    )
 
     report = evaluate(deployment)
     assert not report.p4_ok and not report.spec_ok
