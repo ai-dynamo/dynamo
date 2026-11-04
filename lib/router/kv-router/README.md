@@ -133,5 +133,5 @@ owner's `host` module; plugins import `plugins::prelude`.
 - Router guide: <https://docs.nvidia.com/dynamo/components/router>
 - Indexer internals:
   <https://github.com/ai-dynamo/dynamo/blob/main/lib/router/kv-indexer/src/README.md>
-- Benchmarking the sharded KV indexer: [INDEXER_BENCH.md](../bench/kv_router/INDEXER_BENCH.md)
+- Benchmarking the sharded KV indexer: [INDEXER_BENCH.md](../../bench/kv_router/INDEXER_BENCH.md)
 - Dynamo repository: <https://github.com/ai-dynamo/dynamo>
