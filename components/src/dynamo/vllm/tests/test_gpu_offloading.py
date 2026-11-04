@@ -19,11 +19,12 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-from kvbm.vllm_integration import gpu_memory, gpu_mnnvl, gpu_offloading
+from kvbm.vllm_integration import gpu_layout, gpu_memory, gpu_mnnvl, gpu_offloading
 from kvbm.vllm_integration.gpu_memory import GPUCacheRegion, GPUCacheWorker, import_ipc
 from kvbm.vllm_integration.gpu_offloading import (
     GPUKVCRSecondaryTierManager,
     GPUOffloadingConnector,
+    GPUOffloadingSpec,
     GPUPrimaryManager,
     GPURetainedLoadStoreSpec,
     GPUTieringManager,
@@ -65,6 +66,60 @@ pytestmark = [
 ]
 
 
+def make_config(**changes):
+    extra = {
+        "gpu_bytes_to_use": 8 * 384,
+        "offload_prompt_only": False,
+        "self_describing_kv_events": True,
+        "router_hint_transfer_domain": "test-gpu-layout-v1",
+        "secondary_tiers": [{"type": "GPUKVCRSecondaryTierManager"}],
+    }
+    extra.update(changes)
+    return SimpleNamespace(
+        extra_config=extra,
+        engine_id=f"gpu-cache-test-{uuid.uuid4()}",
+        groups=(SimpleNamespace(tokens_per_block=64),),
+        cache=SimpleNamespace(tokens_per_hash=64, blocks_per_chunk=1),
+        parallel=SimpleNamespace(
+            rank=0, world_size=1, tp_size=1, pp_size=1, pcp_size=1, dcp_size=1
+        ),
+        canonical_layout=False,
+        replicated_layout=False,
+        worker_kv_bytes_per_block=384,
+        enable_kv_cache_events=True,
+    )
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"gpu_bytes_to_use": 0},
+        {"gpu_bytes_to_use": True},
+        {"gpu_bytes_to_use": 383},
+        {"cpu_bytes_to_use": 4096},
+        {"canonical_layout": True},
+        {"router_hint_transfer_domain": ""},
+        {"secondary_tiers": [{"type": "kvcr"}]},
+        {"secondary_tiers": []},
+        {"self_describing_kv_events": False},
+    ],
+)
+def test_gpu_spec_rejects_cpu_or_uncertified_configuration(changes):
+    with pytest.raises(ValueError):
+        GPUOffloadingSpec(make_config(**changes))
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_gpu_spec_rejects_uncertified_parallelism():
+    config = make_config()
+    config.parallel.world_size = 2
+    with pytest.raises(ValueError, match="raw-layout"):
+        GPUOffloadingSpec(config)
+
+
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.parametrize("tp_size", [1, 2, 3, 4, 8])
@@ -72,15 +127,13 @@ pytestmark = [
 def test_gpu_kvcr_rank_registration_and_failed_start_preserve_bank_owners(
     monkeypatch, tp_size, native_failure
 ):
-    spec = SimpleNamespace(
-        config=SimpleNamespace(parallel=SimpleNamespace(world_size=tp_size)),
-        gpu_transport="cuda_ipc",
-        num_chunks=8,
-        row_bytes=384,
-        logical_row_bytes=384 * tp_size,
-        base_domain="test-gpu-layout-v1",
-        extra_config={"router_hint_transfer_domain": "test-gpu-layout-v1"},
+    config = (
+        make_config()
+        if tp_size == 1
+        else make_tp_config(tp_size, gpu_rank_devices=list(reversed(range(tp_size))))
     )
+    spec = GPUOffloadingSpec(config)
+    spec._resolve_gpu_transport()
     banks = [
         SimpleNamespace(
             shape=(spec.num_chunks, spec.row_bytes),
@@ -396,16 +449,8 @@ del region
 
 @pytest.mark.gpu_1
 def test_mixed_bank_d2d_roundtrip_preserves_permuted_slots_and_guards():
-    config = SimpleNamespace(
-        engine_id=f"mixed-bank-{uuid.uuid4()}", parallel=SimpleNamespace(world_size=1)
-    )
-    spec = SimpleNamespace(
-        config=config,
-        num_chunks=8,
-        row_bytes=384,
-        blocks_per_chunk=1,
-        gpu_transport="cuda_ipc",
-    )
+    config = make_config()
+    spec = GPUOffloadingSpec(config)
     region = GPUCacheRegion(config.engine_id, spec.num_chunks, spec.row_bytes)
     originals = [
         (torch.arange(6 * width, device="cuda", dtype=torch.int64) % 113)
@@ -456,6 +501,78 @@ def test_mixed_bank_d2d_roundtrip_preserves_permuted_slots_and_guards():
     finally:
         worker.shutdown()
         region.cleanup()
+
+
+def _mnnvl_tier(**changes):
+    return {
+        "type": "GPUKVCRSecondaryTierManager",
+        "gpu_transport": "mnnvl",
+        "ucx_tls": ["cuda_ipc", "tcp", "self"],
+        "compatibility_domain": "test-gpu-layout-v1",
+        **changes,
+    }
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"gpu_transport": "invalid"},
+        {"gpu_transport": "mnnvl"},
+        {
+            "gpu_transport": "mnnvl",
+            "secondary_tiers": [_mnnvl_tier(gpu_transport="cuda_ipc")],
+        },
+        {
+            "gpu_transport": "mnnvl",
+            "secondary_tiers": [_mnnvl_tier(compatibility_domain="other-layout")],
+        },
+        {
+            "gpu_transport": "mnnvl",
+            "router_hint_transfer_domain": "bad\x00layout",
+            "secondary_tiers": [_mnnvl_tier(compatibility_domain="bad\x00layout")],
+        },
+        {"gpu_transport": "mnnvl", "secondary_tiers": [_mnnvl_tier(ucx_tls=None)]},
+        {"gpu_transport": "mnnvl", "secondary_tiers": [_mnnvl_tier(ucx_tls=True)]},
+        {
+            "gpu_transport": "mnnvl",
+            "secondary_tiers": [_mnnvl_tier(ucx_tls=["tcp", "cuda_copy", "self"])],
+        },
+    ],
+)
+def test_mnnvl_spec_requires_matching_explicit_gpu_only_transport(changes):
+    with pytest.raises(ValueError):
+        GPUOffloadingSpec(make_config(**changes))
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_mnnvl_spec_resolves_actual_fabric_without_rewriting_original_model_config(
+    monkeypatch,
+):
+    config = make_config(gpu_transport="mnnvl", secondary_tiers=[_mnnvl_tier()])
+    spec = GPUOffloadingSpec(config)
+    observed = SimpleNamespace(domain="mnnvl:" + "1" * 32 + ":0")
+    helper = SimpleNamespace(
+        observe_fabric=lambda: observed,
+        effective_domain=lambda base, fabric: base + "@" + fabric,
+    )
+    monkeypatch.setattr(
+        gpu_offloading, "importlib", SimpleNamespace(import_module=lambda name: helper)
+    )
+    assert not spec._transport_resolved
+    spec._resolve_gpu_transport()
+    expected = "test-gpu-layout-v1@" + observed.domain
+    assert spec.fabric_domain == observed.domain
+    assert spec.extra_config["router_hint_transfer_domain"] == expected
+    assert spec.tiers[0]["compatibility_domain"] == expected
+    assert config.extra_config["router_hint_transfer_domain"] == "test-gpu-layout-v1"
+    assert (
+        config.extra_config["secondary_tiers"][0]["compatibility_domain"]
+        == "test-gpu-layout-v1"
+    )
+    assert spec.base_domain == "test-gpu-layout-v1"
 
 
 @pytest.mark.pre_merge
@@ -514,6 +631,143 @@ def test_local_fabric_descriptor_mismatch_fails_before_importing_any_gpu_handle(
             gpu_memory.import_fabric(
                 {**original, **change}, "fixture", (2, 8), base, domain, identity.domain
             )
+
+
+def make_tp_config(tp_size=2, **changes):
+    defaults = {
+        "gpu_rank_devices": list(range(tp_size)),
+        "secondary_tiers": [
+            {
+                "type": "GPUKVCRSecondaryTierManager",
+                "compatibility_domain": "test-gpu-layout-v1",
+            }
+        ],
+    }
+    defaults.update(changes)
+    config = make_config(**defaults)
+    config.parallel.world_size = config.parallel.tp_size = tp_size
+    return config
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+def test_tp_budget_counts_all_rank_shards_and_isolates_raw_layout_domain(tp_size):
+    logical_width = tp_size * 384
+    capacity = 3 * logical_width + logical_width - 1
+    config = make_tp_config(tp_size, gpu_bytes_to_use=capacity)
+    spec = GPUOffloadingSpec(config)
+    assert spec.row_bytes == 384
+    assert spec.logical_row_bytes == logical_width
+    assert spec.num_chunks == 3
+    assert spec.num_chunks * spec.logical_row_bytes <= capacity
+    spec._resolve_gpu_transport()
+    assert spec.base_domain == f"test-gpu-layout-v1|gpu-raw-tp-v1:tp={tp_size}"
+    assert spec.extra_config["router_hint_transfer_domain"] == spec.base_domain
+    assert spec.tiers[0]["compatibility_domain"] == spec.base_domain
+    assert config.extra_config["router_hint_transfer_domain"] == "test-gpu-layout-v1"
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+@pytest.mark.parametrize(
+    "invalid", ["missing", "short", "duplicate", "bool", "negative", "float", "tuple"]
+)
+def test_tp_requires_an_explicit_unique_rank_device_mapping(tp_size, invalid):
+    devices = list(range(tp_size))
+    if invalid == "missing":
+        devices = None
+    elif invalid == "short":
+        devices.pop()
+    elif invalid == "duplicate":
+        devices[-1] = devices[0]
+    elif invalid == "bool":
+        devices[-1] = True
+    elif invalid == "negative":
+        devices[-1] = -1
+    elif invalid == "float":
+        devices[-1] = 1.0
+    else:
+        devices = tuple(devices)
+    with pytest.raises(ValueError, match="gpu_rank_devices"):
+        GPUOffloadingSpec(make_tp_config(tp_size, gpu_rank_devices=devices))
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parametrize("field", ["pp_size", "pcp_size", "dcp_size"])
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+def test_tp_rejects_other_parallel_dimensions(field, tp_size):
+    config = make_tp_config(tp_size)
+    setattr(config.parallel, field, 2)
+    with pytest.raises(ValueError, match="without PP/CP"):
+        GPUOffloadingSpec(config)
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+def test_tp_rejects_a_budget_short_of_one_complete_logical_row(tp_size):
+    with pytest.raises(ValueError, match="one full KV row"):
+        GPUOffloadingSpec(make_tp_config(tp_size, gpu_bytes_to_use=tp_size * 384 - 1))
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_parallel_layout_domains_separate_every_tp_count_and_preserve_tp1():
+    base = "same-certified-layout"
+    counts = [1, 2, 3, 4, 8]
+    domains = [gpu_layout.parallel_layout_domain(base, count) for count in counts]
+    assert domains[0] == base
+    assert domains[1:] == [f"{base}|gpu-raw-tp-v1:tp={count}" for count in counts[1:]]
+    assert len(set(domains)) == len(counts)
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parametrize("tp_size", [True, False, 0, -1, 3.0, "3", None])
+def test_parallel_layout_domain_rejects_nonpositive_or_inexact_tp_count(tp_size):
+    with pytest.raises(ValueError):
+        gpu_layout.parallel_layout_domain("certified-layout", tp_size)
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parametrize(
+    "world_size,tp_size",
+    [
+        (True, True),
+        (False, False),
+        (0, 0),
+        (-1, -1),
+        (3.0, 3.0),
+        ("3", "3"),
+        (None, None),
+        (1, True),
+        (1, 1.0),
+        (3, True),
+        (3, 3.0),
+        (3, 2),
+    ],
+)
+def test_gpu_spec_rejects_invalid_or_mismatched_parallel_counts(world_size, tp_size):
+    config = make_tp_config(3)
+    config.parallel.world_size = world_size
+    config.parallel.tp_size = tp_size
+    with pytest.raises(ValueError):
+        GPUOffloadingSpec(config)
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parametrize("tp_size", [3, 4, 8])
+@pytest.mark.parametrize("layout", ["canonical_layout", "replicated_layout"])
+def test_tp_spec_rejects_nonraw_layouts(tp_size, layout):
+    config = make_tp_config(tp_size)
+    setattr(config, layout, True)
+    with pytest.raises(ValueError, match="raw-layout"):
+        GPUOffloadingSpec(config)
 
 
 def _multipart_tier(tp_size=2):
@@ -737,3 +991,13 @@ def test_tp_retained_inventory_waits_for_every_worker_completion(tp_size):
     assert primary.lookup(key, context) is LookupResult.HIT
     assert [event.keys for event in primary.take_events()] == [[key]]
     assert scheduler._jobs == {}
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+def test_tp_spec_rejects_multiple_data_parallel_replicas(tp_size):
+    config = make_tp_config(tp_size)
+    config.parallel.data_parallel_size = 2
+    with pytest.raises(ValueError, match="data parallel size one"):
+        GPUOffloadingSpec(config)

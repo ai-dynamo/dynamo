@@ -9,12 +9,14 @@ layout requires an explicit identical model/layout compatibility domain.
 """
 
 import functools
+import importlib
 import logging
 import socket
 import threading
 import time
 import types
 import uuid
+from dataclasses import replace
 
 import msgspec
 from kvcr import KVCR, KVCRBindings, ZmqPeerControlChannel
@@ -30,6 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_offload.base import (
     OffloadingEvent,
+    OffloadingSpec,
     OffloadKey,
     RequestOffloadingContext,
     get_offload_block_hash,
@@ -40,16 +43,24 @@ from vllm.v1.kv_offload.tiering.base import JobResult, SecondaryTierManager
 from vllm.v1.kv_offload.tiering.kvcr.manager import (
     KVCRSecondaryTierManager,
     _FrameworkPinAdapter,
+    _kvcr_metric_definitions,
 )
 from vllm.v1.kv_offload.tiering.manager import (
     TieringOffloadingManager,
     _SecondaryTierFacingParent,
 )
+from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
+from .gpu_layout import parallel_layout_domain
+from .gpu_memory import (
+    GPUCacheRegion,
+    GPUCacheWorker,
+    GPUFabricCacheRegion,
+    GPUMultiRankCacheRegion,
+)
+
 logger = logging.getLogger(__name__)
-
-
 _RETAINED_FAILED_GPU_MANAGERS = []
 
 
@@ -443,6 +454,184 @@ class GPUTieringManager(TieringOffloadingManager):
             raise RuntimeError("GPU peer progress did not stop; retaining GPU buffers")
         with self._gpu_lock:
             super().shutdown()
+
+
+class GPUOffloadingSpec(OffloadingSpec):
+    """Out-of-tree offloading spec; no CPU KV storage or disk tier exists."""
+
+    @classmethod
+    def build_metric_definitions(cls, extra_config):
+        definitions = {
+            _gpu_metric(name): replace(
+                value, documentation=value.documentation.replace("CPU", "GPU cache")
+            )
+            for name, value in TieringOffloadingSpec.build_metric_definitions(
+                extra_config
+            ).items()
+        }
+        definitions.update(_kvcr_metric_definitions())
+        return definitions
+
+    def __init__(self, config):
+        super().__init__(config)
+        parallel = config.parallel
+        world_size = parallel.world_size
+        tp_size = getattr(parallel, "tp_size", 1)
+        if (
+            type(world_size) is not int
+            or world_size <= 0
+            or type(tp_size) is not int
+            or tp_size != world_size
+            or any(
+                getattr(parallel, name, 1) != 1
+                for name in ("pp_size", "pcp_size", "dcp_size")
+            )
+            or config.canonical_layout
+            or config.replicated_layout
+        ):
+            raise ValueError("Direct GPU KV cache requires raw-layout TP without PP/CP")
+        self.gpu_rank_devices = self.extra_config.get("gpu_rank_devices")
+        if world_size > 1 and (
+            not isinstance(self.gpu_rank_devices, list)
+            or len(self.gpu_rank_devices) != world_size
+            or any(
+                type(device) is not int or device < 0
+                for device in self.gpu_rank_devices
+            )
+            or len(set(self.gpu_rank_devices)) != world_size
+        ):
+            raise ValueError(
+                "TP greater than one requires an explicit unique gpu_rank_devices mapping"
+            )
+        if world_size > 1 and getattr(parallel, "data_parallel_size", 1) != 1:
+            raise ValueError("Retained GPU TP requires data parallel size one")
+        if (
+            not self.kv_events_config.enable_kv_cache_events
+            or not self.kv_events_config.self_describing_kv_events
+        ):
+            raise ValueError(
+                "Direct GPU KV reuse requires self-describing ready inventory"
+            )
+        capacity = self.extra_config.get("gpu_bytes_to_use")
+        if type(capacity) is not int or capacity <= 0:
+            raise ValueError("gpu_bytes_to_use must be a positive integer")
+        if self.extra_config.get("cpu_bytes_to_use") or self.extra_config.get(
+            "canonical_layout"
+        ):
+            raise ValueError(
+                "GPU KV cache forbids CPU staging and canonical CPU layouts"
+            )
+        domain = self.extra_config.get("router_hint_transfer_domain")
+        if not isinstance(domain, str) or not domain or domain != domain.strip():
+            raise ValueError(
+                "GPU KV cache requires an explicit certified layout domain"
+            )
+        self.base_domain = domain
+        self.gpu_transport = self.extra_config.get("gpu_transport", "cuda_ipc")
+        if self.gpu_transport not in ("cuda_ipc", "mnnvl"):
+            raise ValueError("GPU transport must be cuda_ipc or mnnvl")
+        if self.gpu_transport == "mnnvl" and "\x00" in self.base_domain:
+            raise ValueError("MNNVL base layout domain must not contain NUL")
+        self.fabric_domain = None
+        self._transport_resolved = False
+        self.row_bytes = config.worker_kv_bytes_per_block * self.blocks_per_chunk
+        if self.row_bytes <= 0:
+            raise ValueError("GPU KV row geometry must be known at startup")
+        self.logical_row_bytes = world_size * self.row_bytes
+        self.num_chunks = capacity // self.logical_row_bytes
+        if self.num_chunks <= 0:
+            raise ValueError("GPU cache budget cannot hold one full KV row")
+        self.tiers = self.extra_config.get("secondary_tiers")
+        if not isinstance(self.tiers, list) or len(self.tiers) != 1:
+            raise ValueError("GPU cache requires exactly one GPU-only KVCR tier")
+        if self.tiers[0].get("type") != "GPUKVCRSecondaryTierManager":
+            raise ValueError("GPU cache permits only the GPU-only KVCR tier")
+        if self.tiers[0].get("gpu_transport", "cuda_ipc") != self.gpu_transport:
+            raise ValueError("GPU spec and secondary tier transport profiles differ")
+        if (
+            self.gpu_transport == "mnnvl"
+            and self.tiers[0].get("compatibility_domain") != self.base_domain
+        ):
+            raise ValueError(
+                "MNNVL tier must match its original certified layout domain"
+            )
+        tls = self.tiers[0].get("ucx_tls")
+        if self.gpu_transport == "mnnvl" and (
+            not isinstance(tls, (list, tuple))
+            or tuple(tls) != ("cuda_ipc", "tcp", "self")
+        ):
+            raise ValueError("MNNVL requires explicit cuda_ipc,tcp,self context TLS")
+        if world_size > 1:
+            # Raw TP shards are not interchangeable with a TP1 row. KVCR also
+            # validates each labeled part's byte geometry before starting DMA.
+            if self.tiers[0].get("compatibility_domain") != domain:
+                raise ValueError("TP tier must match its certified layout domain")
+            self.base_domain = parallel_layout_domain(domain, world_size)
+        self._manager = self._worker = None
+
+    def _resolve_gpu_transport(self):
+        if self._transport_resolved:
+            return
+        domain = self.base_domain
+        if self.gpu_transport == "mnnvl":
+            # This optional GPU profile is the only path that initializes the
+            # fabric helper. Default/CPU capability publication stays untouched.
+            fabric = importlib.import_module("kvbm.vllm_integration.gpu_mnnvl")
+            identity = fabric.observe_fabric()
+            expected_fabric = self.tiers[0].get("fabric_domain")
+            if expected_fabric is not None and expected_fabric != identity.domain:
+                raise ValueError(
+                    "Configured fabric constraint differs from actual assigned GPU"
+                )
+            self.fabric_domain = identity.domain
+            domain = fabric.effective_domain(self.base_domain, identity.domain)
+        self.extra_config = dict(self.extra_config, router_hint_transfer_domain=domain)
+        self.tiers = [dict(self.tiers[0], compatibility_domain=domain)]
+        self._transport_resolved = True
+
+    def get_manager(self):
+        if self._manager is None:
+            self._resolve_gpu_transport()
+            if self.config.parallel.world_size > 1:
+                region = GPUMultiRankCacheRegion(
+                    self.config.engine_id,
+                    self.num_chunks,
+                    self.row_bytes,
+                    self.base_domain,
+                    gpu_rank_devices=self.gpu_rank_devices,
+                    gpu_transport=self.gpu_transport,
+                )
+            elif self.gpu_transport == "mnnvl":
+                region = GPUFabricCacheRegion(
+                    self.config.engine_id,
+                    self.num_chunks,
+                    self.row_bytes,
+                    self.base_domain,
+                )
+            else:
+                region = GPUCacheRegion(
+                    self.config.engine_id, self.num_chunks, self.row_bytes
+                )
+            if self.gpu_transport == "mnnvl":
+                if (
+                    region.fabric_domain != self.fabric_domain
+                    or region.compatibility_domain
+                    != self.extra_config["router_hint_transfer_domain"]
+                ):
+                    _RETAINED_FAILED_GPU_MANAGERS.append(region)
+                    raise RuntimeError(
+                        "Observed GPU fabric changed before KVCR registration"
+                    )
+            primary = GPUPrimaryManager(self, region)
+            tier = GPUKVCRSecondaryTierManager(self, region, self.tiers[0])
+            self._manager = GPUTieringManager(primary, tier)
+        return self._manager
+
+    def get_worker(self, kv_caches):
+        if self._worker is None:
+            self._resolve_gpu_transport()
+            self._worker = GPUCacheWorker(self, kv_caches)
+        return self._worker
 
 
 class GPUOffloadingConnector(OffloadingConnector):
