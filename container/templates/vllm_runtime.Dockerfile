@@ -106,6 +106,7 @@ RUN apt-get update && \
         gpgsm \
         gpgv \
         keyboxd \
+        libbrotli1 \
         libssl3t64 \
         openssl && \
     rm -rf /var/lib/apt/lists/*
@@ -468,7 +469,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
 # Assert what the removal and install left. The pin is repeated from the
 # requirements file on purpose; a test asserts the two agree.
 RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compliance \
-    PYTHONPATH=/tmp/compliance python3 -m compliance.check_pynvvideocodec --pinned 2.2.3
+    PYTHONPATH=/tmp/compliance python3 -m compliance.check_pynvvideocodec --pinned 2.2.4
 {% else %}
 # PyNvVideoCodec decodes on NVDEC through libnvcuvid, so it is inert on a
 # non-NVIDIA device. Drop it from the shared requirements rather than ship an
@@ -561,9 +562,9 @@ RUN set -eux; \
     ! ls -d "${SITE_PACKAGES}"/opencv_python*.libs 2>/dev/null; \
     python3 -c "import cv2,re,sys; enabled=[name for name,value in re.findall(r'^\s*(FFMPEG|GSTREAMER):\s*(\S+)', cv2.getBuildInformation(), re.M|re.I) if value.upper()=='YES']; sys.exit('ERROR: cv2 was built with video backends: '+', '.join(enabled) if enabled else 0)"
 
-# PyNvVideoCodec is KEPT (removed from the purge above) but REPLACED with 2.2.3 by
+# PyNvVideoCodec is KEPT (removed from the purge above) but REPLACED with 2.2.4 by
 # the removal and requirements install above: the base image's 2.0.4 bundles a
-# full FFmpeg 8.1.1 (incl. libavcodec) that the codec gate rejects, while 2.2.3
+# full FFmpeg 8.1.1 (incl. libavcodec) that the codec gate rejects, while 2.2.4
 # bundles only libavutil.so.61 + libavformat.so.63 (FFmpeg 9.0.1, container
 # demux, no software codec). It provides the built-in H.264/H.265 video-input
 # path (NVDEC hardware decode via libnvcuvid;
@@ -572,18 +573,17 @@ RUN set -eux; \
 # pod/runtimeClass does not drop it.
 #
 # This deliberately overrides a dependency of vLLM's: `importlib.metadata.requires
-# ("vllm")` lists `PyNvVideoCodec==2.0.4`, an exact pin, and the image ships 2.2.3
-# against it. Unlike the equivalent override in trtllm_runtime.Dockerfile, do not
-# expect a resolver complaint in the build log to confirm it -- that stage runs
-# real `pip`, which prints one; this one runs `uv pip install --no-deps`, which
-# does not. `uv pip check` on the finished image is what surfaces it.
+# ("vllm")` lists `PyNvVideoCodec==2.0.4`, an exact pin, and the image ships 2.2.4
+# against it. Do not expect a resolver complaint in the build log to confirm it:
+# this stage runs `uv pip install --no-deps`, which prints none. `uv pip check`
+# on the finished image is what surfaces it.
 #
 # The override is deliberate: 2.0.4 is the version whose bundled libavcodec the
 # codec gate rejects, so the override is the point. vLLM's own consumer is
 # vllm/multimodal/video_decoders/pynvvideocodec.py
 # (PyNvVideoCodecVideoBackendMixin), and everything it touches -- SimpleDecoder,
 # OutputColorType, get_batch_frames_by_index, get_stream_metadata,
-# reconfigure_decoder -- still exists in 2.2.3. The one API 2.2.3 drops is
+# reconfigure_decoder -- still exists in 2.2.4. The one API 2.2.x drops is
 # SimpleDecoder.stop(), which neither vLLM nor Dynamo calls. Re-check that list
 # when the base image moves.
 ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility

@@ -37,6 +37,7 @@ var (
 	optimizerMaxTrials         = []string{"optimizer", "max_trials"}
 
 	trafficPath                  = []string{"traffic"}
+	trafficSource                = []string{"traffic", "source"}
 	trafficSourceType            = []string{"traffic", "source", "type"}
 	trafficSourceInputTokens     = []string{"traffic", "source", "input_tokens"}
 	trafficSourceOutputTokens    = []string{"traffic", "source", "output_tokens"}
@@ -44,6 +45,7 @@ var (
 	trafficLoadConcurrency       = []string{"traffic", "load", "concurrency"}
 	trafficLoadRequestsPerSecond = []string{"traffic", "load", "requests_per_second"}
 	trafficLoadFraction          = []string{"traffic", "load", "fraction"}
+	trafficLoadSpeedup           = []string{"traffic", "load", "speedup"}
 	trafficStopRequests          = []string{"traffic", "stop", "requests"}
 )
 
@@ -51,7 +53,7 @@ var (
 const TargetPareto = "pareto"
 
 // has reports whether obj contains the path, even with a null value. Applied to
-// spec.aisimulate.inputOverrides it tells whether the caller named a key, including to delete
+// spec.aisim.inputOverrides it tells whether the caller named a key, including to delete
 // it.
 func has(obj map[string]any, path ...string) bool {
 	_, found, _ := unstructured.NestedFieldNoCopy(obj, path...)

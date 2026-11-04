@@ -14,10 +14,12 @@ pub mod controller;
 mod downloader;
 pub mod filter;
 pub mod load_estimator;
+pub mod metrics;
 pub mod predictor;
 pub mod routing;
 mod source;
 pub mod state_tracker;
+mod subscription;
 
 pub use cache::LoRACache;
 pub use config::{LoraAllocationConfig, McfConfig};
@@ -32,6 +34,33 @@ pub use routing::{
 };
 pub use source::{HuggingFaceLoRASource, LoRASource, LocalLoRASource, S3LoRASource};
 pub use state_tracker::LoraStateTracker;
+pub use subscription::LoadEstimatorSubscription;
+
+#[cfg(test)]
+mod metrics_tests;
+
+/// Adapter metadata advertised by a worker model card.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct LoraInfo {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_gpu_lora_count: Option<u32>,
+}
+
+/// Inject the frontend registry's existing series into the allocation controller.
+pub fn controller_metrics() -> metrics::ControllerMetrics {
+    use crate::http::service::metrics::*;
+    metrics::ControllerMetrics {
+        replica_factor: LORA_REPLICA_FACTOR_GAUGE.clone(),
+        is_active: LORA_IS_ACTIVE_GAUGE.clone(),
+        raw_arrival_count: LORA_RAW_ARRIVAL_COUNT_GAUGE.clone(),
+        estimated_load: LORA_ESTIMATED_LOAD_GAUGE.clone(),
+        active_requests: LORA_ACTIVE_REQUESTS_GAUGE.clone(),
+        churn_loads: LORA_CHURN_LOADS_GAUGE.clone(),
+        churn_unloads: LORA_CHURN_UNLOADS_GAUGE.clone(),
+        overflow_count: LORA_OVERFLOW_COUNT_GAUGE.clone(),
+    }
+}
 
 /// Worker runtime flag requiring an adapter registration before request routing.
 pub const LORA_REQUIRES_REGISTRATION: &str = "lora_requires_registration";

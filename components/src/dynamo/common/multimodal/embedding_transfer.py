@@ -900,6 +900,27 @@ class NixlReadEmbeddingReceiver(AbstractEmbeddingReceiver):
         readable_metadata = self._nixl_connect.RdmaMetadata.model_validate(
             request.serialized_request
         )
+        tensor_size_bytes = embeddings_dtype.itemsize * math.prod(embeddings_shape)
+        # Schema validation alone accepts non-READ kinds, empty descriptors and
+        # defaults. Check the READ contract before borrowing a pooled buffer.
+        if (
+            readable_metadata.operation_kind
+            != self._nixl_connect.OperationKind.READ.value
+        ):
+            raise ValueError("Embedding transfer metadata must be of kind READ")
+        remote_desc = readable_metadata.to_descriptors()
+        if isinstance(remote_desc, list):
+            raise ValueError("Embedding READ requires exactly one remote descriptor")
+        if remote_desc.ptr == 0:
+            raise ValueError("Remote descriptor pointer cannot be zero")
+        if remote_desc.size != tensor_size_bytes:
+            raise ValueError("Local and remote descriptors must be the same size")
+        if not readable_metadata.notification_key:
+            raise ValueError("READ notification_key must not be empty")
+        if not self._nixl_connect.Remote.decode_metadata(
+            readable_metadata.nixl_metadata
+        ):
+            raise ValueError("Decoded NIXL agent metadata cannot be empty")
 
         original_descriptor_size = None
         if self.warmedup_descriptors.empty():
@@ -913,14 +934,20 @@ class NixlReadEmbeddingReceiver(AbstractEmbeddingReceiver):
             descriptor = self.warmedup_descriptors.get()
             # Slide view of pre-allocated tensor
             original_descriptor_size = descriptor._data_size
-            tensor_size_bytes = embeddings_dtype.itemsize * math.prod(embeddings_shape)
-            descriptor._data_size = tensor_size_bytes
-            assert descriptor._data_ref is not None
-            encodings_tensor = (
-                descriptor._data_ref[:tensor_size_bytes]
-                .view(dtype=embeddings_dtype)
-                .view(embeddings_shape)
-            )
+            # Return the descriptor only on failures before begin_read: once a
+            # read exists, NIXL may still write into the buffer.
+            try:
+                descriptor._data_size = tensor_size_bytes
+                assert descriptor._data_ref is not None
+                encodings_tensor = (
+                    descriptor._data_ref[:tensor_size_bytes]
+                    .view(dtype=embeddings_dtype)
+                    .view(embeddings_shape)
+                )
+            except BaseException:
+                descriptor._data_size = original_descriptor_size
+                self.warmedup_descriptors.put(descriptor)
+                raise
             dynamic_descriptor = False
 
         with _nvtx.annotate("mm:nixl:begin_read", color="pink"):

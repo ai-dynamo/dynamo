@@ -91,13 +91,17 @@ SGLang supports EPD, EP/D, E/PD, and E/P/D patterns. See [Multimodal Model Servi
 
 Multimodal KV routing works with SGLang's aggregated worker topology. It is independent of the E/PD and E/P/D encoder-disaggregation patterns described later in this guide.
 
-On SGLang 0.5.22, which Dynamo currently pins, RadixAttention includes a per-media `pad_value` token in its prefix-cache key. Dynamo uses the same token in the routing view:
+SGLang builds before [sgl-project/sglang#43043](https://github.com/sgl-project/sglang/pull/43043) include a per-media `pad_value` token in the RadixAttention prefix-cache key. Dynamo uses the same token in the routing view:
 
 1. The Rust frontend hashes each image or sampled video and calculates its expanded token count.
 2. It derives `pad_value = MM_PAD_SHIFT_VALUE + (mm_hash % 2^30)`.
 3. It substitutes that value for the media placeholder in the routing-only token view.
 4. It forwards the original hash list through `GenerateReqInput.mm_hashes`.
-5. SGLang uses the supplied hash when constructing its own `pad_value`, keeping the router and RadixAttention cache keys aligned.
+5. SGLang builds before that change derive their own `pad_value` from the
+   supplied hash, so the router and RadixAttention cache keys match. Later
+   builds, including the pinned 0.5.23, use wide pads, and the router matches
+   only the text before the first media block. See
+   [Wide-Token SGLang Builds](#wide-token-sglang-builds).
 
 The frontend selects this behavior automatically when the worker's `ModelDeploymentCard` reports `backend_framework="sglang"`.
 
@@ -108,7 +112,10 @@ discovery cohort publishes the same compatible contract. Unsupported models,
 legacy workers, mixed contracts, or a processor override fall back to
 text-prefix routing without failing the request.
 
-Step 4 needs an SGLang build that accepts `mm_hashes`. Dynamo's SGLang image carries the upstream patch that adds it; a custom build without it is still supported, but Dynamo detects the missing argument when the worker starts and routes on the text prefix alone, so media identity no longer contributes to cache overlap.
+Step 4 needs an SGLang build that accepts `mm_hashes` (0.5.13 or later). A build
+without it is still supported: Dynamo detects the missing argument when the
+worker starts and routes on the text prefix alone. On wide-token builds, media
+identity does not contribute to routing overlap either.
 
 ### Wide-Token SGLang Builds
 
@@ -158,7 +165,7 @@ and sets `--router-mode kv` with a matching frontend and worker block size.
 The pinned Dynamo SGLang image includes these routing prerequisites:
 
 - Dynamo is built with the `mm-routing` Rust feature.
-- SGLang 0.5.13 or later includes `GenerateReqInput.mm_hashes` support. Dynamo currently pins 0.5.22.
+- SGLang 0.5.13 or later includes `GenerateReqInput.mm_hashes` support.
 - The CUDA image includes the codec-limited VP8/VP9 frontend decoder.
 
 Custom installations on SGLang 0.5.12 or earlier need the `mm_hashes` change
@@ -588,7 +595,7 @@ Controls how many threads the encoder uses to fetch and load images concurrently
 export SGLANG_ENCODER_MM_LOAD_WORKERS=16
 ```
 
-Only applies to the EPD encode worker (which uses [SGLang's MMEncoder](https://github.com/sgl-project/sglang/blob/release/v0.5.22/python/sglang/srt/disaggregation/encoder/server.py) internally).
+Only applies to the EPD encode worker (which uses [SGLang's MMEncoder](https://github.com/sgl-project/sglang/blob/release/v0.5.23/python/sglang/srt/disaggregation/encoder/server.py) internally).
 
 ## Profiling
 

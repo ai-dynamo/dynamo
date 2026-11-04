@@ -414,6 +414,20 @@ func groveNativeMinimumPath(component *nvidiacomv1beta1.DynamoComponentDeploymen
 	return fldPath.Child("providerOverride", "value", "spec", "minAvailable")
 }
 
+// traceClaimPathHasOnlyNamedSegments reports whether subPath is relative to the claim root and
+// every segment names an entry: none is empty, "." or "..".
+func traceClaimPathHasOnlyNamedSegments(subPath string) bool {
+	if subPath == "" {
+		return false
+	}
+	for segment := range strings.SplitSeq(subPath, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
+}
+
 // hasRoleSidecarV1Alpha1 resolves component-wide mode from the authored leader.
 // spec must not be nil.
 func hasRoleSidecarV1Alpha1(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) bool {

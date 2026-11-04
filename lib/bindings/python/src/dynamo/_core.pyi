@@ -1760,7 +1760,8 @@ class ModelType:
     """OpenAI-style surfaces supported by a model.
 
     Values are Chat, Completions, Embedding, Classify, Pooling, Rerank,
-    TensorBased, Images, Audios, Videos, Realtime, and Empty (no OpenAI surface).
+    TensorBased, Images, Audios, Transcriptions, Videos, Realtime, and Empty
+    (no OpenAI surface).
     """
     # No OpenAI surface — used by prefill / encode workers whose role is
     # carried by WorkerType. Symmetric with the other ModelType.Foo members.
@@ -1775,6 +1776,7 @@ class ModelType:
     Prefill: ModelType
     Images: ModelType
     Audios: ModelType
+    Transcriptions: ModelType
     Videos: ModelType
     Realtime: ModelType
     # Sequence-classification / cross-encoder pooling models served on /v1/classify.
@@ -1812,7 +1814,6 @@ class RouterMode:
     """Router mode for load balancing requests across workers"""
     RoundRobin: "RouterMode"
     Random: "RouterMode"
-    PowerOfTwoChoices: "RouterMode"
     KV: "RouterMode"
     Direct: "RouterMode"
     LeastLoaded: "RouterMode"
@@ -2833,6 +2834,8 @@ class PoolRelay:
         tuning: Optional[Dict[str, int]] = None,
         sources_file: Optional[str] = None,
         connection_revision: Optional[str] = None,
+        global_discovery_url: Optional[str] = None,
+        routing_pool: Optional[str] = None,
     ) -> None:
         ...
 
@@ -3191,6 +3194,9 @@ class EntrypointArgs:
         tokenizer_backend: Optional[str] = None,
         tokenizer_fallback: Optional[bool] = None,
         batch_gateway_url: Optional[str] = None,
+        reject_media: Optional[bool] = None,
+        reject_media_status_code: Optional[int] = None,
+        default_chat_template_kwargs: Optional[Mapping[str, Any]] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3230,6 +3236,10 @@ class EntrypointArgs:
             tokenizer_backend: Optional tokenizer backend override ("default", "fastokens", or "basetenkenizer")
             tokenizer_fallback: Whether alternate tokenizer load failures fall back to HuggingFace
             batch_gateway_url: Internal Batch Gateway URL for the files and batch APIs.
+            reject_media: Optional override: refuse chat requests carrying image, video, or audio content before routing
+            reject_media_status_code: Optional 4xx/5xx status for a request refused by reject_media (default 415)
+            default_chat_template_kwargs: Chat template kwargs that the frontend applies
+                under each request's own kwargs, for every discovered model
         """
         ...
 
