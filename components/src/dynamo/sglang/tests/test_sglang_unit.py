@@ -136,6 +136,22 @@ def test_freeze_gc_after_init_is_opt_in(monkeypatch):
     ).freeze_gc_after_init
 
 
+def test_systemone_serial_is_opt_in(monkeypatch):
+    monkeypatch.delenv("DYN_SGL_SYSTEMONE_SERIAL", raising=False)
+    parser = argparse.ArgumentParser()
+    DynamoSGLangArgGroup().add_arguments(parser)
+
+    assert not DynamoSGLangConfig.from_cli_args(parser.parse_args([])).systemone_serial
+    assert DynamoSGLangConfig.from_cli_args(
+        parser.parse_args(["--systemone-serial"])
+    ).systemone_serial
+
+    monkeypatch.setenv("DYN_SGL_SYSTEMONE_SERIAL", "1")
+    env_parser = argparse.ArgumentParser()
+    DynamoSGLangArgGroup().add_arguments(env_parser)
+    assert DynamoSGLangConfig.from_cli_args(env_parser.parse_args([])).systemone_serial
+
+
 @pytest.mark.parametrize(
     "mode, role_flags, supported",
     [
@@ -2141,16 +2157,18 @@ def test_systemone_serial_profile_covers_pinned_sglang_version(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("serial", "installed"),
+    ("serial", "opt_in", "installed"),
     [
-        (False, "0.5.19"),
-        (True, "0.5.19"),
-        (True, "0.5.22+cu130"),
-        (True, "0.5.23"),
+        (False, False, "0.5.19"),
+        (False, True, "0.5.19"),
+        (True, False, "0.5.19"),
+        (True, True, "0.5.19"),
+        (True, True, "0.5.22+cu130"),
+        (True, True, "0.5.23"),
     ],
 )
 async def test_systemone_serial_capability_published_only_when_isolated(
-    monkeypatch, caplog, serial, installed
+    monkeypatch, caplog, serial, opt_in, installed
 ):
     if sglang_register is None:
         pytest.skip("dynamo.sglang.register is unavailable")
@@ -2178,7 +2196,10 @@ async def test_systemone_serial_capability_published_only_when_isolated(
         speculative_algorithm=None,
     )
     dynamo_args = SimpleNamespace(
-        use_sglang_tokenizer=False, custom_jinja_template=None, model_source_uri=None
+        use_sglang_tokenizer=False,
+        custom_jinja_template=None,
+        model_source_uri=None,
+        systemone_serial=opt_in,
     )
     with caplog.at_level(logging.INFO):
         assert await sglang_register._register_model_with_runtime_config(
@@ -2188,10 +2209,15 @@ async def test_systemone_serial_capability_published_only_when_isolated(
             dynamo_args=dynamo_args,
             worker_type=sglang_register.WorkerType.Aggregated,
         )
+    # An eligible worker keeps its legacy checksum cohort unless it opts in.
+    published_serial = serial and opt_in
     assert published["sglang_generate"] == "true"
-    assert published.get("sglang_systemone_serial_v1") == ("true" if serial else None)
-    assert ("including chat and completions" in caplog.text) is serial
-    if serial:
+    assert published.get("sglang_systemone_serial_v1") == (
+        "true" if published_serial else None
+    )
+    assert ("including chat and completions" in caplog.text) is published_serial
+    assert ("--systemone-serial is ignored" in caplog.text) is (opt_in and not serial)
+    if published_serial:
         assert f"Published SGLang {installed} System One capability" in caplog.text
         assert "separate served-model name or namespace-scoped frontend" in caplog.text
 

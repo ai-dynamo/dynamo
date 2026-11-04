@@ -142,6 +142,9 @@ def _supports_systemone_serial(
     Serialization and disabled overlap apply to the entire worker, including
     chat and completions. Isolate decision workers with a separate served-model
     name or namespace-scoped frontend; other versions require qualification.
+
+    The caller publishes the profile only when the worker also opts in with
+    `--systemone-serial`.
     """
     # Relax the validated pin only after mixed scoring/decode GPU validation.
     priority_preemption = getattr(
@@ -281,19 +284,30 @@ async def _register_model_with_runtime_config(
             json.dumps(True),
         )
         logging.info("Published SGLang engine-native generate capability")
-        if _supports_systemone_serial(
-            server_args, input_type, output_type, worker_type
-        ):
-            runtime_config.set_engine_specific(
-                SGLANG_SYSTEMONE_SERIAL_V1, json.dumps(True)
-            )
-            logging.info(
-                "Published SGLang %s System One capability: the entire worker, "
-                "including chat and completions, is serialized with overlap disabled; "
-                "isolate decision workers with a separate served-model name or "
-                "namespace-scoped frontend for this low-throughput profile",
-                version("sglang"),
-            )
+        # The capability is hashed into the model checksum, so publish it only
+        # on explicit opt-in; otherwise an eligible chat worker would leave its
+        # checksum cohort even when the frontend Decisions API is disabled.
+        if getattr(dynamo_args, "systemone_serial", False):
+            if _supports_systemone_serial(
+                server_args, input_type, output_type, worker_type
+            ):
+                runtime_config.set_engine_specific(
+                    SGLANG_SYSTEMONE_SERIAL_V1, json.dumps(True)
+                )
+                logging.info(
+                    "Published SGLang %s System One capability: the entire worker, "
+                    "including chat and completions, is serialized with overlap "
+                    "disabled; isolate decision workers with a separate served-model "
+                    "name or namespace-scoped frontend for this low-throughput profile",
+                    version("sglang"),
+                )
+            else:
+                logging.warning(
+                    "--systemone-serial is ignored: decision scoring requires an "
+                    "aggregated worker with --max-running-requests 1, "
+                    "--disable-overlap-schedule, DP1, PP1, no speculative or dLLM "
+                    "decoding, no priority preemption, and a qualified SGLang version"
+                )
     # Configure the Rust frontend's media decoder so it ships pre-decoded
     # media via NIXL RDMA instead of forwarding raw URLs / base64 to us.
     media_decoder = None

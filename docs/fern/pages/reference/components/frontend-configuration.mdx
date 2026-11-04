@@ -15,7 +15,7 @@ Every CLI argument has a corresponding environment variable. The CLI argument ta
 
 ## Decision APIs
 
-**Experimental.** `--enable-systemone-api` (environment variable `DYN_ENABLE_SYSTEMONE_API`, default `false`) enables both OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone`. The qualified backend is an aggregated, single-rank SGLang CUDA worker using the serialized scoring profile. See [Start a Decision Worker](../../cli/model-deployment/introduction.mdx#decision-api-workers) for launch commands and smoke requests.
+**Experimental.** `--enable-systemone-api` (environment variable `DYN_ENABLE_SYSTEMONE_API`, default `false`) enables both OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone`. The qualified backend is an aggregated, single-rank SGLang CUDA worker that opts in to the serialized scoring profile with `--systemone-serial`. See [Start a Decision Worker](../../cli/model-deployment/introduction.mdx#decision-api-workers) for launch commands and smoke requests.
 
 | Environment variable | Default | Maximum | Meaning |
 | --- | --- | --- | --- |

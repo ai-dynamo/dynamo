@@ -89,6 +89,7 @@ def systemone_sglang_server(
                 "1",
                 "--pp-size",
                 "1",
+                "--systemone-serial",
             ],
             env=env,
             health_check_urls=[
