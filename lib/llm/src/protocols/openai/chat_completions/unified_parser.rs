@@ -45,9 +45,10 @@ use dynamo_parsers_v2::{
     UnifiedParserStartingState, UnifiedToolOutputMode, create_unified_parser_for_family,
 };
 use dynamo_protocols::types::{
-    ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCall,
-    ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta, FinishReason,
-    FunctionCall, FunctionCallStream, FunctionType,
+    ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionMessageContent,
+    ChatCompletionMessageToolCall, ChatCompletionMessageToolCallChunk,
+    ChatCompletionStreamResponseDelta, FinishReason, FunctionCall, FunctionCallStream,
+    FunctionType,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
@@ -1435,9 +1436,8 @@ pub(crate) fn fanout_llm_metrics_position(choices: &[ChatChoiceStream]) -> Optio
 /// An empty streaming choice for `index`, used as the base every emitted chunk is
 /// filled in from.
 ///
-/// `logprobs` is dropped on purpose: once parsing rewrites a choice, the emitted text
-/// no longer lines up token-for-token with the backend's raw stream, so per-token
-/// logprobs would be attached to the wrong characters.
+/// It carries no `logprobs`: `choices_for` moves a source chunk's raw-token logprobs
+/// onto exactly one of the choices parsed from it.
 pub(crate) fn empty_choice(index: u32) -> ChatChoiceStream {
     #[allow(deprecated)]
     ChatChoiceStream {
@@ -1478,6 +1478,9 @@ struct QwenXmlStreamState {
     pending_opener: String,
     /// Must follow recovered opener text on mismatch and precede completed call events.
     deferred_reasoning: Vec<String>,
+    /// Logprobs of chunks generated after the latest deferred reasoning, held until it
+    /// is released.
+    deferred_logprobs: Option<ChatChoiceLogprobs>,
     /// Entries in event/output lists, not XML character offsets: these preserve
     /// deferred reasoning's original response metadata through projection.
     deferred_reasoning_event_indices: HashSet<usize>,
@@ -2140,11 +2143,23 @@ impl ChoiceState {
         }
     }
 
-    fn queue_qwen_opener_reasoning(&mut self, reasoning: String) {
+    /// Scores held since the previous queued reasoning were generated before this
+    /// one, so they lead its source envelope's `logprobs`.
+    fn queue_qwen_opener_reasoning(
+        &mut self,
+        reasoning: String,
+        source_logprobs: &mut Option<ChatChoiceLogprobs>,
+    ) {
         let NativeGrammarState::QwenXml(qwen) = &mut self.native_grammar_state else {
             return;
         };
         qwen.deferred_reasoning.push(reasoning);
+        if let Some(mut held) = qwen.deferred_logprobs.take() {
+            if let Some(source) = source_logprobs.take() {
+                extend_logprobs(&mut held, source);
+            }
+            *source_logprobs = Some(held);
+        }
     }
 
     fn prepend_pending_qwen_reasoning(&mut self, events: &mut Vec<UnifiedParserEvent>) {
@@ -2364,7 +2379,9 @@ impl ChoiceState {
     ///
     /// `role` / `refusal` ride on the first choice owned by the current source
     /// response; queued reasoning keeps its earlier source envelope. The terminating
-    /// `finish_reason` stays after every emitted delta.
+    /// `finish_reason` stays after every emitted delta. The source chunk's `logprobs`
+    /// move once to its last choice, waiting for any queued reasoning to go first:
+    /// they score generated tokens, not parsed text.
     pub(crate) fn choices_for(
         &mut self,
         original: &ChatChoiceStream,
@@ -2515,6 +2532,33 @@ impl ChoiceState {
             }
             choice.finish_reason = self.normalize_finish_reason(finish_reason);
             choices.push(choice);
+        }
+
+        // Queued reasoning arrived before this chunk, so this chunk's logprobs must
+        // not ride ahead of it: hold them while it is queued, then follow it.
+        let mut logprobs = original.logprobs.take();
+        if let NativeGrammarState::QwenXml(qwen) = &mut self.native_grammar_state {
+            if let Some(mut held) = qwen.deferred_logprobs.take() {
+                if let Some(source) = logprobs.take() {
+                    extend_logprobs(&mut held, source);
+                }
+                logprobs = Some(held);
+            }
+            if !qwen.deferred_reasoning.is_empty() {
+                qwen.deferred_logprobs = logprobs.take();
+            }
+        }
+        if let Some(logprobs) = logprobs {
+            let last_is_queued = choices
+                .len()
+                .checked_sub(1)
+                .is_some_and(|last| self.is_deferred_qwen_xml_reasoning_choice(last));
+            if choices.is_empty() || last_is_queued {
+                choices.push(empty_choice(index));
+            }
+            if let Some(choice) = choices.last_mut() {
+                choice.logprobs = Some(logprobs);
+            }
         }
 
         choices
@@ -2929,6 +2973,15 @@ enum FinishedStreamChunk {
     Choice(ChatChoiceStream),
     Boundary(ChatChoiceStream, super::MessageBoundary),
     Source(Annotated<Box<NvCreateChatCompletionStreamResponse>>),
+}
+
+fn extend_logprobs(held: &mut ChatChoiceLogprobs, later: ChatChoiceLogprobs) {
+    if let Some(content) = later.content {
+        held.content.get_or_insert_default().extend(content);
+    }
+    if let Some(refusal) = later.refusal {
+        held.refusal.get_or_insert_default().extend(refusal);
+    }
 }
 
 fn take_qwen_reasoning_response(
@@ -3597,7 +3650,10 @@ where
                             states
                                 .get_mut(&original.index)
                                 .expect("preserved parser state must still exist")
-                                .queue_qwen_opener_reasoning(reasoning.clone());
+                                .queue_qwen_opener_reasoning(
+                                    reasoning.clone(),
+                                    &mut original.logprobs,
+                                );
                             let mut source_data = chat.clone();
                             source_data.inner.choices.clear();
                             let keep_source_metadata = !qwen_source_metadata_deferred;
@@ -10977,6 +11033,63 @@ pub(crate) mod tests {
             }
         }
     }
+
+    /// Scores stay in generation order while raw text and reasoning alternate behind a
+    /// split Qwen opener.
+    #[tokio::test]
+    async fn qwen_queued_reasoning_keeps_source_logprob_order() {
+        fn scored(
+            mut response: Annotated<NvCreateChatCompletionStreamResponse>,
+            token: &str,
+        ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+            response.data.as_mut().unwrap().inner.choices[0].logprobs = Some(
+                serde_json::from_value(serde_json::json!({
+                    "content": [{"token": token, "logprob": -0.5, "bytes": [], "top_logprobs": []}],
+                    "refusal": null
+                }))
+                .unwrap(),
+            );
+            response
+        }
+
+        fn reasoning(text: &str, token: &str) -> Annotated<NvCreateChatCompletionStreamResponse> {
+            let mut source = scored(chunk("", false), token);
+            let choice = &mut source.data.as_mut().unwrap().inner.choices[0];
+            choice.delta.content = None;
+            choice.delta.reasoning_content = Some(text.to_string());
+            source
+        }
+
+        let completed_call = concat!(
+            "ll><function=get_weather><parameter=city>Paris</parameter>",
+            "</function></tool_call>"
+        );
+        let responses = apply_stream(
+            stream::iter(vec![
+                scored(chunk("<tool_", false), "A"),
+                reasoning("first", "B"),
+                scored(chunk("ca", false), "C"),
+                reasoning("second", "D"),
+                scored(chunk(completed_call, true), "E"),
+            ]),
+            Some(weather_tools()),
+            None,
+            false,
+            UnifiedParserStartingState::None,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let tokens: Vec<_> = collect_choices(&responses)
+            .into_iter()
+            .filter_map(|choice| choice.logprobs.as_ref()?.content.as_ref())
+            .flatten()
+            .map(|entry| entry.token.as_str())
+            .collect();
+        assert_eq!(tokens, ["A", "B", "C", "D", "E"]);
+    }
+
     #[tokio::test]
     #[ignore = "Parser 0.7.17 missing-parameter-close recovery delays text across external reasoning; run explicitly to measure ordering"]
     async fn qwen_recovered_parameter_close_restores_opener_ordering_at_every_split() {

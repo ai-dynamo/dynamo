@@ -13,8 +13,8 @@
 use std::sync::Arc;
 
 use dynamo_kv_router::{
-    KvRouterConfig, RoutingPartitionRef, WorkerType,
-    selector::{HostedWorkerPicker, WorkerInputs},
+    KvRouterConfig, RoutingPartitionRef, WorkerType, plugins::worker_selection::WorkerInputs,
+    selector::HostedWorkerPicker,
 };
 use dynamo_router_policies::router_modes;
 use dynamo_runtime::{
@@ -239,7 +239,10 @@ pub(crate) fn hosted_picker(mode: RouterMode) -> anyhow::Result<HostedWorkerPick
     let policy_type = match mode {
         RouterMode::RoundRobin => router_modes::ROUND_ROBIN,
         RouterMode::Random => router_modes::RANDOM,
-        RouterMode::PowerOfTwoChoices => router_modes::POWER_OF_TWO,
+        // TODO(v1.9): Remove with the `PowerOfTwoChoices` wire value.
+        RouterMode::PowerOfTwoChoices => anyhow::bail!(
+            "the power-of-two router mode was removed in Dynamo v1.7; use another router mode"
+        ),
         RouterMode::LeastLoaded => router_modes::LEAST_LOADED,
         mode => anyhow::bail!("{mode:?} routing is not a routing-mode policy"),
     };

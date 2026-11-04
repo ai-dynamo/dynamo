@@ -3,9 +3,10 @@
 
 //! Pickers for prefill and decode routing partitions.
 
-use dynamo_kv_router::{
-    WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError, WorkerType,
+use dynamo_kv_router::plugins::worker_selection::{
+    WorkerInputView, WorkerPicker, WorkerSelectionContext,
 };
+use dynamo_kv_router::{WorkerSelectionPolicyError, WorkerType};
 
 /// Finds the candidate row with the lowest accumulated scorer cost.
 fn lowest_cost_row(input: WorkerInputView<'_>) -> Result<usize, WorkerSelectionPolicyError> {

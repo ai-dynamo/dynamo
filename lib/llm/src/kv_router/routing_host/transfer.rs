@@ -559,8 +559,8 @@ mod integration_tests {
                 execution_inputs,
                 "GPU advisory inventory must not change execution selection inputs",
             );
-            assert!(execution_inputs.contains(dynamo_kv_router::selector::WorkerInputs::LOAD));
-            assert!(!execution_inputs.contains(dynamo_kv_router::selector::WorkerInputs::CACHE));
+            assert!(execution_inputs.contains(WorkerInputs::LOAD));
+            assert!(!execution_inputs.contains(WorkerInputs::CACHE));
             assert!(
                 !matches!(chooser.indexer(), crate::kv_router::Indexer::None),
                 "GPU source and target need actual retained inventory",

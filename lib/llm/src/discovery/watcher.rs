@@ -2356,10 +2356,10 @@ mod tests {
             crate::test_utils::assert_isolated_success(&output);
             return;
         }
-        use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
-        use dynamo_kv_router::scheduling::{
+        use dynamo_kv_router::plugins::request_classifier::{
             ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
         };
+        use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         struct RejectingClassifier {
@@ -2414,17 +2414,18 @@ request_classifier:
         );
         let instances = Arc::new(AtomicUsize::new(0));
         let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
-        let factory: dynamo_kv_router::scheduling::RequestClassifierFactory = Arc::new({
-            let instances = instances.clone();
-            move |context| {
-                assert_eq!(context.block_size(), 16);
-                Box::new(RejectingClassifier {
-                    instance: instances.fetch_add(1, Ordering::Relaxed),
-                    calls: 0,
-                    events: events.clone(),
-                })
-            }
-        });
+        let factory: dynamo_kv_router::plugins::request_classifier::RequestClassifierFactory =
+            Arc::new({
+                let instances = instances.clone();
+                move |context| {
+                    assert_eq!(context.block_size(), 16);
+                    Box::new(RejectingClassifier {
+                        instance: instances.fetch_add(1, Ordering::Relaxed),
+                        calls: 0,
+                        events: events.clone(),
+                    })
+                }
+            });
         let selectors = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let mut registry = dynamo_router_policies::default_registry();
         registry

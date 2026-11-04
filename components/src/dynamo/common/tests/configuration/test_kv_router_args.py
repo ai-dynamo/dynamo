@@ -17,6 +17,7 @@ from dynamo.common.configuration.groups.kv_router_args import (
     KvRouterConfigBase,
 )
 from dynamo.common.configuration.groups.router_args import build_router_config
+from dynamo.common.configuration.utils import ArgEnv
 from dynamo.frontend.frontend_args import FrontendArgGroup, FrontendConfig
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
@@ -78,6 +79,41 @@ def test_decode_to_prefill_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     kwargs = KvRouterConfigBase.from_cli_args(parser.parse_args([])).kv_router_kwargs()
     assert kwargs["enable_decode_to_prefill_reuse"] is True
     assert kwargs["transfer_source_lookup_budget_ms"] == 12
+
+
+def test_decode_to_prefill_captured_environment_overrides_process_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fields = {
+        "DECODE_TO_PREFILL_REUSE": ("enable_decode_to_prefill_reuse", True),
+        "DECODE_TO_PREFILL_GPU_REUSE": ("enable_decode_to_prefill_gpu_reuse", True),
+        "TRANSFER_SOURCE_LOOKUP_BUDGET_MS": ("transfer_source_lookup_budget_ms", 12),
+        "MINIMUM_TRANSFER_PREFIX_BLOCKS": ("minimum_transfer_prefix_blocks", 4),
+        "MINIMUM_ESTIMATED_TTFT_SAVING_MS": ("minimum_estimated_ttft_saving_ms", 2.5),
+        "TRANSFER_SOURCE_ESTIMATED_BLOCK_US": ("transfer_source_estimated_block_us", 20.0),
+        "TRANSFER_SOURCE_GPU_ESTIMATED_BLOCK_US": (
+            "transfer_source_gpu_estimated_block_us",
+            8.0,
+        ),
+        "TRANSFER_SOURCE_PREFILL_TOKEN_US": ("transfer_source_prefill_token_us", 3.0),
+    }
+    for name, (_, value) in fields.items():
+        monkeypatch.setenv("DYN_ROUTER_" + name, "false" if value is True else "99")
+    env = ArgEnv(
+        environ={
+            "DYN_ROUTER_" + name: str(value).lower()
+            for name, (_, value) in fields.items()
+        }
+    )
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup(env=env).add_arguments(parser)
+    kwargs = KvRouterConfigBase.from_cli_args(parser.parse_args([])).kv_router_kwargs()
+
+    assert {dest: kwargs[dest] for dest, _ in fields.values()} == {
+        dest: value for dest, value in fields.values()
+    }
+    expected_dests = {"DYN_ROUTER_" + name: dest for name, (dest, _) in fields.items()}
+    assert {name: env.env_dests.get(name) for name in expected_dests} == expected_dests
 
 
 def test_ais_perf_moe_cli_flows_to_binding_kwargs() -> None:

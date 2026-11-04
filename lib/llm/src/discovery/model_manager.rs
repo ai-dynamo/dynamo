@@ -16,8 +16,8 @@ use dashmap::{DashMap, mapref::entry::Entry};
 use dynamo_kv_router::{
     PrefillLoadEstimator,
     config::KvRouterConfig,
+    plugins::worker_selection::WorkerInputs,
     protocols::{KvTransferEnforcement, RoutingConstraints, WorkerId, WorkerWithDpRank},
-    selector::WorkerInputs,
 };
 use tokio_util::sync::CancellationToken;
 

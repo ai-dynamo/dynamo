@@ -171,7 +171,6 @@ worker_selection:
             router_modes::RANDOM,
             router_modes::ROUND_ROBIN,
             router_modes::LEAST_LOADED,
-            router_modes::POWER_OF_TWO,
         ] {
             let (_config, resolved) = resolve(&format!(
                 r#"

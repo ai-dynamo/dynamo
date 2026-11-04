@@ -21,13 +21,10 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-// TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
-pub use crate::plugins::worker_selection::WorkerSelectionPolicyFactory;
 pub use crate::plugins::{
     DYN_ROUTER_DECODE_POLICY, DYN_ROUTER_PREFILL_POLICY, DYN_ROUTER_WORKER_SELECTION_POLICY,
     RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
-    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
-    WorkerSelectionPolicyRegistryError,
+    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
 };
 pub use crate::services::common::replica_sync::{
     AffinityBindingEvent, HostReplicaChannels, HostReplicaSyncFactory, ReplicaIngressObserver,
