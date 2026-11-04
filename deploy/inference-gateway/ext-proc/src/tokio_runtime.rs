@@ -152,17 +152,33 @@ where
 /// request is not left waiting for it. Runs inline on the current-thread
 /// runtime, where `block_in_place` is not available.
 pub(crate) fn off_runtime<T>(f: impl FnOnce() -> T) -> T {
-    match tokio::runtime::Handle::try_current().map(|handle| handle.runtime_flavor()) {
-        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => {
-            // The thread rarely gets the queue back, so the poll hooks count
-            // this poll only up to here.
-            if TASK_METRICS_MIN.get().is_some() && HANDED_OFF_AT.get().is_none() {
-                HANDED_OFF_AT.set(Some(Instant::now()));
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            if TASK_METRICS_MIN.get().is_none() || HANDED_OFF_AT.get().is_some() {
+                return tokio::task::block_in_place(f);
             }
-            tokio::task::block_in_place(f)
+            let entered = Instant::now();
+            let out = tokio::task::block_in_place(f);
+            // When `f` ends before another thread takes the worker over, this
+            // thread takes it back and the rest of the poll holds it.
+            if runs_a_worker(&handle) {
+                OFF_WORKER.set(OFF_WORKER.get() + entered.elapsed());
+            } else {
+                HANDED_OFF_AT.set(Some(entered));
+            }
+            out
         }
         _ => f(),
     }
+}
+
+/// Whether this thread runs one of the runtime's workers. Tokio records the
+/// thread that takes a worker, including a thread that takes its worker back
+/// when `block_in_place` returns.
+fn runs_a_worker(handle: &tokio::runtime::Handle) -> bool {
+    let me = std::thread::current().id();
+    let metrics = handle.metrics();
+    (0..metrics.num_workers()).any(|worker| metrics.worker_thread_id(worker) == Some(me))
 }
 
 /// Build the multi-thread runtime the EPP runs on: the runtime
@@ -170,7 +186,7 @@ pub(crate) fn off_runtime<T>(f: impl FnOnce() -> T) -> T {
 /// asks for them. A binary that wraps [`crate::run`] can build its runtime
 /// here to get the task metrics too.
 pub fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
-    build_runtime_with(task_metrics_min_from_env())
+    runtime_builder(task_metrics_min_from_env()).build()
 }
 
 fn task_metrics_min_from_env() -> Option<Duration> {
@@ -194,9 +210,7 @@ static TASK_METRICS_MIN: OnceLock<Duration> = OnceLock::new();
 /// Stall events from the hooks, until the event-loop watcher takes them.
 static STALL_EVENTS: Mutex<Option<Receiver<Stall>>> = Mutex::new(None);
 
-fn build_runtime_with(
-    task_metrics_min: Option<Duration>,
-) -> std::io::Result<tokio::runtime::Runtime> {
+fn runtime_builder(task_metrics_min: Option<Duration>) -> tokio::runtime::Builder {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
     if let Some(min) = task_metrics_min {
@@ -210,14 +224,18 @@ fn build_runtime_with(
             .on_before_task_poll(move |meta| before.before_poll(meta))
             .on_after_task_poll(move |meta| hooks.after_poll(meta));
     }
-    builder.build()
+    builder
 }
 
 thread_local! {
     /// When the task on this worker thread started its current poll.
     static POLL_STARTED: Cell<Option<Instant>> = const { Cell::new(None) };
-    /// When the current poll first handed its worker's queue to another
-    /// thread in [`off_runtime`]. The task holds no worker after that.
+    /// Time the current poll spent in [`off_runtime`] calls after which this
+    /// thread took its worker back.
+    static OFF_WORKER: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    /// When the current poll entered the [`off_runtime`] call during which
+    /// another thread took its worker over. The task holds no worker after
+    /// that.
     static HANDED_OFF_AT: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
@@ -235,6 +253,7 @@ impl TaskHooks {
             metrics::observe_task_schedule_delay(kind, delay);
             self.report(StallKind::ScheduleDelay, kind, meta, delay);
         }
+        OFF_WORKER.set(Duration::ZERO);
         HANDED_OFF_AT.set(None);
         POLL_STARTED.set(Some(Instant::now()));
     }
@@ -243,10 +262,10 @@ impl TaskHooks {
         let Some(started) = POLL_STARTED.take() else {
             return;
         };
-        let poll = HANDED_OFF_AT.take().map_or_else(
-            || started.elapsed(),
-            |at| at.saturating_duration_since(started),
-        );
+        let held_until = HANDED_OFF_AT.take().unwrap_or_else(Instant::now);
+        let poll = held_until
+            .saturating_duration_since(started)
+            .saturating_sub(OFF_WORKER.take());
         if poll >= self.min {
             let kind = TaskKind::of(meta.spawned_at());
             metrics::observe_task_poll(kind, poll);
@@ -380,7 +399,9 @@ mod tests {
     #[test]
     fn hooks_record_slow_polls_by_task_kind() {
         let _recording = RECORDING.lock().unwrap_or_else(PoisonError::into_inner);
-        let runtime = build_runtime_with(Some(Duration::from_millis(1))).expect("runtime builds");
+        let runtime = runtime_builder(Some(Duration::from_millis(1)))
+            .build()
+            .expect("runtime builds");
         let watcher_before = metrics::task_polls_recorded(TaskKind::PrefillWatcher);
         let other_before = metrics::task_polls_recorded(TaskKind::Other);
 
@@ -404,18 +425,31 @@ mod tests {
         assert!(metrics::task_polls_recorded(TaskKind::Other) > other_before);
     }
 
-    /// A poll counts only until `off_runtime` hands the worker's queue to
-    /// another thread: neither the work in `off_runtime` nor the rest of the
+    /// A poll counts only until another thread takes its worker over in
+    /// `off_runtime`: neither the work in `off_runtime` nor the rest of the
     /// poll holds a worker.
     #[test]
-    fn time_after_handing_off_the_worker_is_not_a_slow_poll() {
+    fn time_after_another_thread_takes_the_worker_is_not_a_slow_poll() {
         let _recording = RECORDING.lock().unwrap_or_else(PoisonError::into_inner);
-        let runtime = build_runtime_with(Some(Duration::from_millis(10))).expect("runtime builds");
+        // With one worker, a task spawned in `off_runtime` runs only after
+        // another thread has taken the worker over.
+        let runtime = runtime_builder(Some(Duration::from_millis(10)))
+            .worker_threads(1)
+            .build()
+            .expect("runtime builds");
         let before = metrics::task_polls_recorded(TaskKind::PrefillWatcher);
 
         runtime.block_on(async {
             spawn_watcher(async {
-                off_runtime(|| std::thread::sleep(Duration::from_millis(30)));
+                off_runtime(|| {
+                    let (taken_tx, taken_rx) = std::sync::mpsc::channel();
+                    tokio::spawn(async move {
+                        let _ = taken_tx.send(());
+                    });
+                    taken_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("another thread runs the worker");
+                });
                 std::thread::sleep(Duration::from_millis(30));
             })
             .await
@@ -429,9 +463,48 @@ mod tests {
         );
     }
 
+    /// When the work in `off_runtime` ends before another thread takes the
+    /// worker over, the thread takes its worker back, and the rest of the
+    /// poll counts.
+    #[test]
+    fn work_after_taking_the_worker_back_is_a_slow_poll() {
+        let _recording = RECORDING.lock().unwrap_or_else(PoisonError::into_inner);
+        // One worker and one spare blocking thread. The test holds the spare,
+        // so the thread that would take the worker over stays queued.
+        let runtime = runtime_builder(Some(Duration::from_millis(10)))
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .build()
+            .expect("runtime builds");
+        let before = metrics::task_polls_recorded(TaskKind::PrefillWatcher);
+
+        runtime.block_on(async {
+            let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let spare = tokio::task::spawn_blocking(move || {
+                let _ = held_tx.send(());
+                let _ = release_rx.recv();
+            });
+            held_rx.await.expect("the spare blocking thread is held");
+
+            spawn_watcher(async {
+                off_runtime(|| {});
+                std::thread::sleep(Duration::from_millis(30));
+            })
+            .await
+            .expect("task runs");
+
+            release_tx.send(()).expect("the spare thread waits");
+            spare.await.expect("the spare thread ends");
+        });
+        drop(runtime);
+
+        assert!(metrics::task_polls_recorded(TaskKind::PrefillWatcher) > before);
+    }
+
     #[test]
     fn task_kinds_come_from_the_remembered_spawn_site() {
-        let runtime = build_runtime_with(None).expect("runtime builds");
+        let runtime = runtime_builder(None).build().expect("runtime builds");
         runtime.block_on(async {
             spawn_watcher(async {}).await.expect("task runs");
         });

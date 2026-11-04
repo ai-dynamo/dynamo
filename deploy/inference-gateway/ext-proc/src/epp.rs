@@ -145,13 +145,40 @@ async fn render_and_tokenize(
         encoding.map(|encoding| (into_token_ids(encoding), timings))
     })
     .await
-    .map_err(|e| match e.try_into_panic() {
-        // A tokenizer panic is a bug, not a bad request: re-raise it rather
-        // than answer the client 400.
+    .map_err(tokenization_join_error)?
+}
+
+/// Tokenize a completion request's prompt with
+/// [`OpenAIPreprocessor::gather_tokens`], holding one of `slots` until the
+/// tokenizer finishes. `gather_tokens` tokenizes on the blocking pool, where
+/// a cancelled pick cannot stop it, so the slot goes to a task that waits for
+/// the tokenizer. As for chat, a pick cancelled while it waits for a slot
+/// never starts; one cancelled later lets the work finish and drops the
+/// result.
+async fn gather_completion_tokens(
+    preprocessor: Arc<OpenAIPreprocessor>,
+    request: NvCreateCompletionRequest,
+    slots: &Arc<Semaphore>,
+) -> Result<Vec<u32>> {
+    let slot = Arc::clone(slots)
+        .acquire_owned()
+        .await
+        .map_err(|_| TokenizationCancelled)?;
+    let tokenized = tokio::spawn(async move {
+        let _slot = slot;
+        preprocessor.gather_tokens(&request, None, None).await
+    });
+    let (tokens, _annotations) = tokenized.await.map_err(tokenization_join_error)??;
+    Ok(tokens)
+}
+
+/// A tokenizer panic is a bug, not a bad request: re-raise it rather than
+/// answer the client 400. Only a runtime shutting down cancels the task.
+fn tokenization_join_error(e: tokio::task::JoinError) -> anyhow::Error {
+    match e.try_into_panic() {
         Ok(panic) => std::panic::resume_unwind(panic),
-        // Only a runtime shutting down cancels a blocking task.
         Err(_) => anyhow::Error::new(TokenizationCancelled),
-    })?
+    }
 }
 
 /// Validate `DYN_KUBE_DISCOVERY_MODE` and report whether *container* discovery
@@ -519,18 +546,7 @@ impl Router {
     ) -> Result<Vec<u32>> {
         let prompt = std::mem::replace(&mut request.inner.prompt, Prompt::String(String::new()));
         request.inner.prompt = Prompt::String(completion_prompt_routing_text(prompt));
-        // `gather_tokens` tokenizes on the blocking pool; the slot bounds it
-        // with chat tokenization. A pick cancelled meanwhile frees its slot
-        // before the tokenizer ends.
-        let _slot = TOKENIZE_SLOTS
-            .acquire()
-            .await
-            .map_err(|_| TokenizationCancelled)?;
-        let (tokens, _annotations) = self
-            .preprocessor
-            .gather_tokens(&request, None, None)
-            .await?;
-        Ok(tokens)
+        gather_completion_tokens(Arc::clone(&self.preprocessor), request, &TOKENIZE_SLOTS).await
     }
 
     /// Resolve a worker_id to a pod endpoint address (ip:port).
@@ -3013,10 +3029,7 @@ mod tests {
         assert_eq!(components, ["prefill-a", "prefill-b"]);
     }
 
-    /// Chat tokenization on the blocking pool gives the tokens that rendering
-    /// and tokenizing inline gives, and times each step.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn chat_tokens_from_the_blocking_pool_match_inline_tokenization() {
+    fn tinyllama_preprocessor() -> Arc<OpenAIPreprocessor> {
         let mdc = ModelDeploymentCard::load_from_disk(
             concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -3025,8 +3038,14 @@ mod tests {
             None,
         )
         .expect("load fixture model card");
-        let preprocessor =
-            OpenAIPreprocessor::new(mdc).expect("build preprocessor from fixture card");
+        OpenAIPreprocessor::new(mdc).expect("build preprocessor from fixture card")
+    }
+
+    /// Chat tokenization on the blocking pool gives the tokens that rendering
+    /// and tokenizing inline gives, and times each step.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chat_tokens_from_the_blocking_pool_match_inline_tokenization() {
+        let preprocessor = tinyllama_preprocessor();
         let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
             serde_json::from_value(serde_json::json!({
                 "model": "test-model",
@@ -3052,5 +3071,64 @@ mod tests {
         assert!(timings.blocking_wait.is_some());
         assert!(timings.template.is_some());
         assert!(timings.tokenize.is_some());
+    }
+
+    /// A completion pick cancelled while its tokenizer waits for a blocking
+    /// thread keeps its slot until the tokenizer finishes, so cancelled picks
+    /// cannot run more tokenizations than there are slots.
+    #[test]
+    fn a_cancelled_completion_pick_keeps_its_slot_until_the_tokenizer_ends() {
+        // One worker and one spare blocking thread. The test holds the spare,
+        // so the tokenizer stays queued until the test releases it.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("runtime builds");
+        let slots = Arc::new(Semaphore::new(1));
+
+        runtime.block_on(async {
+            let preprocessor = tinyllama_preprocessor();
+            let request: NvCreateCompletionRequest = serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "prompt": "The capital of France is",
+            }))
+            .expect("completion request parses");
+            let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let spare = tokio::task::spawn_blocking(move || {
+                let _ = held_tx.send(());
+                let _ = release_rx.recv();
+            });
+            held_rx.await.expect("the spare blocking thread is held");
+
+            let pick = tokio::spawn({
+                let slots = Arc::clone(&slots);
+                async move { gather_completion_tokens(preprocessor, request, &slots).await }
+            });
+            wait_until(|| slots.available_permits() == 0).await;
+            pick.abort();
+            assert!(
+                pick.await
+                    .expect_err("the pick is cancelled")
+                    .is_cancelled()
+            );
+            assert_eq!(slots.available_permits(), 0, "the tokenizer keeps the slot");
+
+            release_tx.send(()).expect("the spare thread waits");
+            spare.await.expect("the spare thread ends");
+            wait_until(|| slots.available_permits() == 1).await;
+        });
+    }
+
+    async fn wait_until(condition: impl Fn() -> bool) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the condition holds within 5 s");
     }
 }
