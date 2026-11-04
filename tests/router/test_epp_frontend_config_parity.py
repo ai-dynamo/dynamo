@@ -11,23 +11,26 @@ selector together with runtime_epp, not generic runtime-image coverage.
 This is a staged partial configuration suite. Explicit pending rows and
 their reasons are the unmeasured list. Inventory, identifier-ownership,
 and collected-Item binding checks remain ordinary hard failures, not
-skip/xfail. The two measured profile gaps and the decode-threshold consumer gap
-are strict xfails of their dedicated mismatch subclasses.
-Setup, warning, FE sentinel, parse, and other mismatches stay ordinary
-hard failures. Other profiles stay ordinary tests. Admission/enforce
-ignored-compatibility cases, the five conditional scalar probes, and the
-positional-search probe are ordinary tests, not xfail. Remote-indexer and
-session TTL rows bind existing collected Items rather than new tests.
-Overlap refresh is an ordinary owned-process queue-INFO plus plain-chat
-token-parity test, not xfail. Keyed tracking and approximate-policy
-core-metrics rows are ordinary unverified-candidate tests, not xfail.
-The 31-byte size control is parameterized over independent frontend/epp
-arms. active_decode_blocks_threshold is a measured strict xfail of
-ActiveDecodeThresholdConfigMismatch after default-None and configured
-0.25 remote-load observation. shared_cache_type is an ordinary owned
-HiCache client-construction test, not xfail. Dynamic block-size
-cross-input cases bind kv_cache_block_size as not-FE-honored Dynamic
-worker-card geometry, not CLI support.
+skip/xfail. The two measured profile gaps, the decode-threshold consumer gap, and the
+session-prefix config gap are strict xfails of their dedicated mismatch
+subclasses. Setup, warning, FE sentinel, parse, and other mismatches stay
+ordinary hard failures. Other profiles stay ordinary tests.
+Admission/enforce ignored-compatibility cases, the five conditional scalar
+probes, and the positional-search probe are ordinary tests, not xfail.
+Remote-indexer and session TTL rows bind existing collected Items rather
+than new tests. Overlap refresh is an ordinary owned-process queue-INFO
+plus plain-chat token-parity test, not xfail. Keyed tracking and
+approximate-policy core-metrics rows are ordinary unverified-candidate
+tests, not xfail. The 31-byte size control is parameterized over
+independent frontend/epp arms. active_decode_blocks_threshold is a
+measured strict xfail of ActiveDecodeThresholdConfigMismatch after
+default-None and configured 0.25 remote-load observation.
+enable_session_prefix_index is a measured strict xfail of
+SessionPrefixIndexConfigMismatch after omitted/false/true and dual-invalid
+YAML controls on env-true/kv-false FE reject vs EPP accept. shared_cache_type
+is an ordinary owned HiCache client-construction test, not xfail. Dynamic
+block-size cross-input cases bind kv_cache_block_size as not-FE-honored
+Dynamic worker-card geometry, not CLI support.
 """
 
 import pytest
@@ -43,6 +46,7 @@ from tests.router.epp_config_contract import (
     ActiveDecodeThresholdConfigMismatch,
     ConditionalJsonConfigMismatch,
     LoadAwarePresetConfigMismatch,
+    SessionPrefixIndexConfigMismatch,
     assert_inventory_matches_manifest,
     assert_manifest_bindings_match_collected_tests,
     assert_required_sources_exist,
@@ -281,10 +285,18 @@ def test_shared_cache_type_consumer(
     )
 
 
+@pytest.mark.xfail(
+    strict=True,
+    raises=SessionPrefixIndexConfigMismatch,
+    reason=(
+        "issue #16592: measured env-true/kv-false FE validation rejection vs "
+        "EPP accept-and-route; YAML dual-reject control; input/config scope only"
+    ),
+)
 def test_session_prefix_index_config_parity(
     request, predownload_tokenizers, tmp_path, monkeypatch
 ):
-    """Compare FE/EPP session-prefix input validation without xfail markers."""
+    """Measure FE session-prefix env validation reject vs EPP accept-and-route."""
     from tests.router.common import run_session_prefix_index_config_parity
     from tests.router.epp_parity import EppFrontendParityStack
 

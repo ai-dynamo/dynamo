@@ -5094,12 +5094,12 @@ def run_session_prefix_index_config_parity(
     model_name: str,
     stack_cls,
 ) -> None:
-    """Owned FE/EPP session-prefix input/config validation parity candidate.
+    """Owned FE/EPP session-prefix input/config validation parity.
 
     Controls cover omitted/false success, enabled+kv-events success, YAML
     validation on each arm, and env-true/kv-false terminal outcomes. Raises
     SessionPrefixIndexConfigMismatch only for FE exact diagnostic rejection
-    with EPP acceptance and routes. No xfail in this candidate.
+    with EPP acceptance and routes.
     """
     # epp_parity pulls gRPC tooling; keep selected-test-only like sibling runners.
     from tests.router.epp_config_contract import (

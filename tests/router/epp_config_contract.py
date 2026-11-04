@@ -28,7 +28,10 @@ binds the owned core-metrics LRU and default-TTL Items. These four rows
 are unverified candidates until fixed-SHA Linux execution.
 ``active_decode_blocks_threshold`` is a measured known gap: FE configured
 0.25 vs EPP monitor None after the default-None control, on one owned
-worker-monitor remote-load Item. ``shared_cache_type`` binds one ordinary
+worker-monitor remote-load Item. ``enable_session_prefix_index`` is a
+measured known gap: env-true/kv-false FE validation rejection vs EPP
+accept-and-route after omitted/false/true and dual-invalid-YAML controls,
+on one owned config-parity Item. ``shared_cache_type`` binds one ordinary
 owned HiCache client-construction Item. ``shared_cache_multiplier`` is a
 supported_candidate profile pending runtime evidence. ``kv_cache_block_size``
 is not-FE-honored Dynamic worker-card geometry: independent CLI 8/64 did
@@ -257,6 +260,14 @@ SESSION_PREFIX_INDEX_DIAGNOSTIC = (
 )
 SESSION_PREFIX_INDEX_DEADLINE_S = 60.0
 SESSION_PREFIX_INDEX_FIELDS = (SESSION_PREFIX_INDEX_ROW,)
+SESSION_PREFIX_INDEX_OBSERVER = (
+    "owned_fe_epp_session_prefix_config_validation+omitted_false_true_controls+"
+    "yaml_dual_reject+env_true_kv_false_fe_reject_epp_accept"
+)
+SESSION_PREFIX_INDEX_TEST = "test_session_prefix_index_config_parity"
+SESSION_PREFIX_INDEX_ITEM = (
+    f"tests/router/test_epp_frontend_config_parity.py::{SESSION_PREFIX_INDEX_TEST}"
+)
 TRACKING_RUNTIME_FIELDS = ("router_tracking_hash", "router_tracking_key_id")
 APPROXIMATE_CONFIGURED_METRIC = "router_approximate_cache_configured_policy"
 APPROXIMATE_EFFECTIVE_METRIC = "router_approximate_cache_effective_policy"
@@ -1136,16 +1147,19 @@ SETTING_DECISIONS: tuple[SettingDecision, ...] = (
         "enforce_disagg false.",
     ),
     SettingDecision(
-        "enable_session_prefix_index",
+        SESSION_PREFIX_INDEX_ROW,
         ("--enable-session-prefix-index", "--no-enable-session-prefix-index"),
-        ("DYN_ENABLE_SESSION_PREFIX_INDEX",),
-        ("enable_session_prefix_index",),
-        STATUS_PENDING,
-        None,
+        (SESSION_PREFIX_INDEX_ENV,),
+        (SESSION_PREFIX_INDEX_ROW,),
+        STATUS_KNOWN_GAP,
+        SESSION_PREFIX_INDEX_OBSERVER,
         (),
-        (),
-        "FE/EPP field exists. No profile exercises it. No live observer in "
-        "this increment.",
+        (SESSION_PREFIX_INDEX_ROW,),
+        "Measured env-true/kv-false gap: FE rejects "
+        "enable_session_prefix_index requires use_kv_events=true while EPP "
+        "accepts plain-chat tokens/routes. Policy YAML is consumed; the same "
+        "invalid YAML rejects on both arms. Input/config validation only, not "
+        "CLI matrix or lineage/scoring/affinity.",
     ),
     SettingDecision(
         "min_initial_workers",
@@ -1718,6 +1732,14 @@ def assert_decision_identifier_ownership() -> None:
                 f"{DECODE_THRESHOLD_ROW} may"
             )
         if (
+            row.observer == SESSION_PREFIX_INDEX_OBSERVER
+            and row.name != SESSION_PREFIX_INDEX_ROW
+        ):
+            raise AssertionError(
+                f"{row.name} may not use {SESSION_PREFIX_INDEX_OBSERVER}; only "
+                f"{SESSION_PREFIX_INDEX_ROW} may"
+            )
+        if (
             row.observer == SHARED_CACHE_TYPE_OBSERVER
             and row.name != SHARED_CACHE_TYPE_ROW
         ):
@@ -2220,6 +2242,58 @@ def _assert_decode_threshold_binding(
     _assert_decode_threshold_xfail_marker(marks[0])
 
 
+def _assert_session_prefix_index_binding(
+    row: SettingDecision, items: Iterable[Any]
+) -> None:
+    if row.name != SESSION_PREFIX_INDEX_ROW:
+        raise AssertionError(
+            f"{row.name} is not the fixed {SESSION_PREFIX_INDEX_ROW} contract"
+        )
+    if row.status != STATUS_KNOWN_GAP:
+        raise AssertionError(
+            f"{row.name} status {row.status!r} != {STATUS_KNOWN_GAP!r}"
+        )
+    if row.observer != SESSION_PREFIX_INDEX_OBSERVER:
+        raise AssertionError(
+            f"{row.name} observer={row.observer!r} != "
+            f"{SESSION_PREFIX_INDEX_OBSERVER!r}"
+        )
+    if row.flags != (
+        "--enable-session-prefix-index",
+        "--no-enable-session-prefix-index",
+    ):
+        raise AssertionError(f"{row.name} flags {row.flags} are not the closed tuple")
+    if row.env != (SESSION_PREFIX_INDEX_ENV,):
+        raise AssertionError(
+            f"{row.name} env {row.env} != {(SESSION_PREFIX_INDEX_ENV,)!r}"
+        )
+    if row.schema_fields != (SESSION_PREFIX_INDEX_ROW,):
+        raise AssertionError(
+            f"{row.name} schema_fields {row.schema_fields} != "
+            f"{(SESSION_PREFIX_INDEX_ROW,)!r}"
+        )
+    if row.affected_fields != (SESSION_PREFIX_INDEX_ROW,):
+        raise AssertionError(
+            f"{row.name} affected_fields {row.affected_fields} != "
+            f"{(SESSION_PREFIX_INDEX_ROW,)!r}"
+        )
+    if row.profiles != ():
+        raise AssertionError(f"{row.name} profiles {row.profiles} != ()")
+    item = _require_unique_nodeid_item(items, SESSION_PREFIX_INDEX_ITEM)
+    skips = list(item.iter_markers(name="skip")) + list(
+        item.iter_markers(name="skipif")
+    )
+    marks = list(item.iter_markers(name="xfail"))
+    if skips or len(marks) != 1:
+        raise AssertionError(
+            f"{SESSION_PREFIX_INDEX_ITEM} must collect exactly one xfail and "
+            f"no skip, found xfail={len(marks)} skip={len(skips)}"
+        )
+    _assert_strict_xfail_marker(
+        SESSION_PREFIX_INDEX_ROW, marks[0], SessionPrefixIndexConfigMismatch
+    )
+
+
 def _assert_shared_cache_type_binding(
     row: SettingDecision, items: Iterable[Any]
 ) -> None:
@@ -2265,10 +2339,12 @@ def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None
     router_approximate_cache_policy binds the ordinary LRU and omitted-env
     default-TTL core-metrics Items. active_decode_blocks_threshold binds
     only its owned worker-monitor remote-load Item with one unconditional
-    strict xfail of ActiveDecodeThresholdConfigMismatch. shared_cache_type
-    binds only its ordinary owned HiCache client-construction Item.
-    kv_cache_block_size binds the three ordinary Dynamic worker-card
-    cross-input Items.
+    strict xfail of ActiveDecodeThresholdConfigMismatch.
+    enable_session_prefix_index binds only its owned config-parity Item with
+    one unconditional strict xfail of SessionPrefixIndexConfigMismatch.
+    shared_cache_type binds only its ordinary owned HiCache
+    client-construction Item. kv_cache_block_size binds the three ordinary
+    Dynamic worker-card cross-input Items.
     """
     item_list = [_require_collected_item(item) for item in items]
     collected: dict[str, list[Any]] = {}
@@ -2353,6 +2429,9 @@ def assert_manifest_bindings_match_collected_tests(items: Iterable[Any]) -> None
             continue
         if row.name == DECODE_THRESHOLD_ROW:
             _assert_decode_threshold_binding(row, item_list)
+            continue
+        if row.name == SESSION_PREFIX_INDEX_ROW:
+            _assert_session_prefix_index_binding(row, item_list)
             continue
         if row.name == SHARED_CACHE_TYPE_ROW:
             _assert_shared_cache_type_binding(row, item_list)
