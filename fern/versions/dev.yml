@@ -825,6 +825,9 @@ navigation:
             skip-slug: true
             collapsed: true
             contents:
+              - page: Kimi-K3.1-Pro
+                path: ../pages-dev/recipes/model-recipes/kimi-k3-1-pro.mdx
+                slug: kimi-k3-1-pro
               - page: Kimi-K3
                 path: ../pages-dev/recipes/model-recipes/kimi-k3.mdx
                 slug: kimi-k3
