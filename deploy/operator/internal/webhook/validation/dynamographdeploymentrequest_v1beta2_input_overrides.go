@@ -23,13 +23,13 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
-// validateAISimulateSpec validates the Request's native AISimulate overrides.
-func validateAISimulateSpec(
-	input *nvidiacomv1beta2.AISimulateSpec,
+// validateAISimSpec validates the Request's native AISimulate overrides.
+func validateAISimSpec(
+	input *nvidiacomv1beta2.AISimSpec,
 	fldPath *field.Path,
 ) field.ErrorList {
 	// Use the lowering package's decoder as the single interpretation of RawExtension.
-	overrides, err := aisimulate.InputOverrides(&nvidiacomv1beta2.NativeSearchInput{AISimulate: input})
+	overrides, err := aisimulate.InputOverrides(&nvidiacomv1beta2.NativeSearchInput{AISim: input})
 	if err != nil || overrides == nil {
 		// The lowering validation reports malformed override documents once.
 		return nil
