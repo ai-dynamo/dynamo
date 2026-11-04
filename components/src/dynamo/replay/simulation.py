@@ -143,6 +143,7 @@ class DynamoReplayRunner:
             router_mode,
             router_config,
             ais_perf_config,
+            conversation_affinity,
         ) = self._resolve_hooks(spec.runtime_hooks)
         common: dict[str, Any] = {
             "router_mode": router_mode,
@@ -169,6 +170,10 @@ class DynamoReplayRunner:
             **self._goodput_sla_kwargs(spec),
         }
 
+        if conversation_affinity is not None:
+            if not self._is_trace(spec):
+                raise ValueError("conversation_affinity requires an agentic trace")
+            common["conversation_affinity"] = conversation_affinity
         if self._is_trace(spec):
             report = self._run_trace(spec, common, execution_model=execution_model)
         else:
@@ -206,11 +211,13 @@ class DynamoReplayRunner:
         str,
         KvRouterConfig | None,
         AisPerfConfig | None,
+        dict[str, JSONValue] | None,
     ]:
         planner_config: dict[str, JSONValue] | None = None
         router_mode = "round_robin"
         router_config: KvRouterConfig | None = None
         ais_perf_config: AisPerfConfig | None = None
+        conversation_affinity = None
         planner_seen = False
         router_seen = False
         for hook in hooks:
@@ -233,6 +240,7 @@ class DynamoReplayRunner:
                         "ReplaySpec contains multiple Router placement hooks"
                     )
                 router_seen = True
+                conversation_affinity = hook.config.get("conversation_affinity")
                 router_mode = str(hook.config.get("router_mode", "kv_router"))
                 raw_config = hook.config.get("router_config")
                 if not isinstance(raw_config, dict):
@@ -252,7 +260,13 @@ class DynamoReplayRunner:
                 f"unsupported Dynamo runtime hook "
                 f"{hook.provider}:{hook.kind}@{hook.api_version}"
             )
-        return planner_config, router_mode, router_config, ais_perf_config
+        return (
+            planner_config,
+            router_mode,
+            router_config,
+            ais_perf_config,
+            conversation_affinity,
+        )
 
     @staticmethod
     def _is_trace(spec: ReplaySpec) -> bool:
@@ -395,6 +409,9 @@ class DynamoReplayRunner:
         # embedded value instead of imposing the synthetic-workload default.
         if trace_format not in {"weka", "dynamo"} and trace_block_size is None:
             trace_block_size = self.trace_block_size
+        # Trace replays use ordinal request ids and the canonical router seed,
+        # so a candidate's score depends only on its configuration and the
+        # trace.
         if deployment.deployment_mode == "agg":
             return run_trace_replay(
                 trace_files=trace_files,
@@ -409,6 +426,7 @@ class DynamoReplayRunner:
                 execution_model=execution_model,
                 extra_engine_args=self._engine_args(deployment, "aggregated"),
                 num_workers=deployment.num_workers,
+                _deterministic=True,
                 **common,
             )
         return run_trace_replay(
@@ -426,6 +444,7 @@ class DynamoReplayRunner:
             decode_engine_args=self._engine_args(deployment, "decode"),
             num_prefill_workers=deployment.num_prefill_workers,
             num_decode_workers=deployment.num_decode_workers,
+            _deterministic=True,
             **common,
         )
 

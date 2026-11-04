@@ -83,8 +83,8 @@ use super::types::{
     SelectResponse, SelectionWorkerConfig, SelectionWorkerLoad, WorkerCatalogRecord,
     WorkerLifecycle, WorkerPatchRequest, WorkerRequest,
 };
-use crate::WorkerSelectionPolicyFactory;
 use crate::WorkerType;
+use crate::plugins::worker_selection::WorkerSelectionPolicyFactory;
 use crate::services::common::replica_sync::AffinityBindingEvent;
 
 pub type SelectionScheduler = LocalScheduler<

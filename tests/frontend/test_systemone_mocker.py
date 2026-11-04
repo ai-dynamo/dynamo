@@ -9,16 +9,20 @@ from threading import Barrier
 
 import pytest
 import requests
+from transformers import AutoTokenizer
 
+from dynamo import prometheus_names
 from tests.frontend.conftest import MockerWorkerProcess, wait_for_http_completions_ready
 from tests.utils.constants import QWEN
 from tests.utils.decision_api import (
     assert_decision_body,
+    assert_mocker_probabilities,
     assert_request_headers,
     decision_payload,
     post_with_capacity_retry,
 )
 from tests.utils.managed_process import DynamoFrontendProcess
+from tests.utils.prometheus import find_metric_samples
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -141,12 +145,50 @@ def test_systemone_mixed_results_and_existing_apis(systemone_server):
     assert unknown.status_code == 404, unknown.text
 
 
-def test_systemone_validation_and_body_limit(systemone_server):
+@pytest.fixture
+def worker_request_count(dynamo_dynamic_ports):
+    def read():
+        response = requests.get(
+            f"http://localhost:{dynamo_dynamic_ports.system_ports[0]}/metrics",
+            timeout=30,
+        )
+        response.raise_for_status()
+        samples = find_metric_samples(
+            response.text,
+            f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.work_handler.REQUESTS_TOTAL}",
+        )
+        assert samples, "Worker ingress request counter must be registered"
+        return sum(samples)
+
+    return read
+
+
+def test_systemone_validation_and_body_limit(systemone_server, worker_request_count):
     url = f"{systemone_server}/v1/systemone"
     malformed = requests.post(
         url, data='{"model":', headers={"Content-Type": "application/json"}, timeout=30
     )
     assert malformed.status_code == 400, malformed.text
+    before = worker_request_count()
+    for route, dialect in [("decisions", "oai"), ("systemone", "systemone")]:
+        response = requests.post(
+            f"{systemone_server}/v1/{route}",
+            data='{"model":',
+            headers={"Content-Type": "text/plain"},
+            timeout=30,
+        )
+        assert response.status_code == 415, response.text
+        assert_request_headers(response)
+        assert ("error" if dialect == "oai" else "detail") in response.json()
+        payload = {
+            **decision_payload(QWEN, dialect),
+            "questions": [] if dialect == "oai" else {},
+        }
+        response = requests.post(
+            f"{systemone_server}/v1/{route}", json=payload, timeout=30
+        )
+        assert response.status_code == (400 if dialect == "oai" else 422), response.text
+    assert worker_request_count() == before
     nested = _payload()
     nested["questions"]["urgent"]["unknown"] = True
     temperature = {**_payload(), "temperature": 0}
@@ -223,6 +265,18 @@ def test_decision_capacity_errors_and_recovery(systemone_server, request):
 
 
 def test_decisions_and_systemone_preserve_their_contracts(systemone_server):
+    tokenizer = AutoTokenizer.from_pretrained(QWEN, local_files_only=True)
+    label_token_ids = {}
+    for question, labels in (
+        ("route", ("A", "B")),
+        ("urgent", ("yes", "no")),
+        ("severity", ("0", "1", "2")),
+    ):
+        encoded = [
+            tokenizer.encode(label, add_special_tokens=False) for label in labels
+        ]
+        assert all(len(tokens) == 1 for tokens in encoded), encoded
+        label_token_ids[question] = [tokens[0] for tokens in encoded]
     results = {}
     for dialect in ("oai", "systemone"):
         route = "systemone" if dialect == "systemone" else "decisions"
@@ -235,6 +289,7 @@ def test_decisions_and_systemone_preserve_their_contracts(systemone_server):
         assert_request_headers(response)
         results[dialect] = response.json()
         assert_decision_body(results[dialect], QWEN, dialect)
+        assert_mocker_probabilities(results[dialect], dialect, label_token_ids)
     oai, jev = (results[k] for k in ("oai", "systemone"))
     for index, key in ((0, "route"), (2, "severity")):
         expected = list(jev["answers"][key]["probabilities"].values())

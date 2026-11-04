@@ -21,6 +21,15 @@
 //!   contract and its clients share.
 
 mod discovery;
+/// Relay-to-router receiving transport. Identity fields name routing state;
+/// deployment policy decides whether the network needs authentication.
+#[cfg(feature = "grpc")]
+pub mod grpc {
+    tonic::include_proto!("dynamo.globalview.v1");
+
+    /// Four subscription payloads of up to 4 MiB each, plus protobuf framing.
+    pub const MAX_POOL_VIEW_FRAME_BYTES: usize = 4 * 4 * 1024 * 1024 + 64;
+}
 mod pool;
 mod replicas;
 mod watch;

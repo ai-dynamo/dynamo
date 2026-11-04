@@ -23,11 +23,12 @@ use crate::{
 };
 use dynamo_kv_router::{
     indexer::{ApproximateAcquireMode, ApproximateLruBlock, RoutingDecisionHashes},
+    plugins::request_classifier::AbortCause,
     protocols::{
         BlockExtraInfo, BlockHashOptions, WorkerWithDpRank, compute_block_hash_for_seq,
         compute_next_seq_hash,
     },
-    scheduling::{AbortCause, RequestLifecycle, queue::BookingHandle},
+    scheduling::{RequestLifecycle, queue::BookingHandle},
     services::selection::affinity::AffinityLease,
 };
 use dynamo_runtime::{

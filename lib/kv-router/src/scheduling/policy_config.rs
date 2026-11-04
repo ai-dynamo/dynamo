@@ -12,14 +12,11 @@ use thiserror::Error;
 
 use super::config::RouterQueuePolicy;
 use crate::plugins::request_classifier::RawRequestClassifierConfig;
+use crate::plugins::request_classifier::RequestClassifierConfig;
+use crate::plugins::worker_selection::{RawWorkerSelectionConfig, WorkerSelectionConfig};
 use crate::plugins::worker_selection::{WorkerCapacity, WorkerLoadInput};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::WorkerLoadProjection;
-// TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
-pub use crate::plugins::request_classifier::RequestClassifierConfig;
-use crate::plugins::worker_selection::RawWorkerSelectionConfig;
-// TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
-pub use crate::plugins::worker_selection::{WorkerSelectionConfig, WorkerSelectionInstance};
 
 const SYNTHETIC_POLICY_CLASS: &str = "default";
 
@@ -114,9 +111,19 @@ impl BusyThresholds {
         !(absolute_full || fractional_full || decode_full)
     }
 
-    /// Whether no rank of `worker_id` has room, judged on the `LOAD` rows in `loads`. A rank
-    /// without a projection counts as idle. The policy-class queue and offline replay share
-    /// this loop so they enumerate ranks and read rows the same way.
+    /// Whether this rank's `LOAD` row exceeds any configured limit. A rank without a
+    /// projection counts as idle.
+    pub fn rank_is_full(
+        &self,
+        worker: WorkerWithDpRank,
+        capacity: WorkerCapacity,
+        loads: &FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) -> bool {
+        let load = WorkerLoadInput::for_worker(loads, worker, WorkerLoadProjection::default);
+        !self.has_room(&load, capacity)
+    }
+
+    /// Whether no configured rank of `worker_id` has room, judged on the `LOAD` rows in `loads`.
     pub fn worker_is_full<C: WorkerConfigLike>(
         &self,
         worker_id: WorkerId,
@@ -127,9 +134,7 @@ impl BusyThresholds {
         let start = config.data_parallel_start_rank();
         let end = start.saturating_add(config.data_parallel_size());
         (start..end).all(|dp_rank| {
-            let worker = WorkerWithDpRank::new(worker_id, dp_rank);
-            let load = WorkerLoadInput::for_worker(loads, worker, WorkerLoadProjection::default);
-            !self.has_room(&load, capacity)
+            self.rank_is_full(WorkerWithDpRank::new(worker_id, dp_rank), capacity, loads)
         })
     }
 }
@@ -1492,6 +1497,7 @@ policy_classes:
             data_parallel_size: 2,
             ..Default::default()
         };
+        let capacity = WorkerCapacity::of(&config);
         let busy = WorkerLoadProjection {
             active_prefill_tokens: 11,
             ..Default::default()
@@ -1500,6 +1506,8 @@ policy_classes:
 
         loads.insert(WorkerWithDpRank::new(5, 2), busy);
         // Rank 3 has no projection and counts as idle.
+        assert!(limits.rank_is_full(WorkerWithDpRank::new(5, 2), capacity, &loads));
+        assert!(!limits.rank_is_full(WorkerWithDpRank::new(5, 3), capacity, &loads));
         assert!(!limits.worker_is_full(5, &config, &loads));
 
         loads.insert(WorkerWithDpRank::new(5, 3), busy);

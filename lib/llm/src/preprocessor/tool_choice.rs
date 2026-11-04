@@ -2245,6 +2245,7 @@ mod tests {
             unified: false,
             unified_starting_state: None,
             prefix: None,
+            reasoning_closed_by_prompt: None,
             response: true,
             beam_channel: Some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
         };
@@ -2316,6 +2317,7 @@ mod tests {
             unified: false,
             unified_starting_state: None,
             prefix: None,
+            reasoning_closed_by_prompt: None,
             response: true,
             beam_channel: Some(dynamo_parsers_v2::UnifiedParserStartingState::Response),
         };
@@ -2417,6 +2419,69 @@ mod tests {
                 .and_then(|guided| guided.json.as_ref())
                 .is_some()
         );
+    }
+
+    #[test]
+    fn minimax_m3_native_tags_and_relaxed_schema_fallback() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::minimax_m3_native_tags_and_relaxed_schema_fallback"
+            ),
+            &[(
+                dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                "2",
+            )],
+        ) {
+            return;
+        }
+        let preprocessor = preprocessor("minimax_m3", StructuralTagMode::On);
+        for strict in [None, Some(true), Some(false)] {
+            for named in [false, true] {
+                let mut definitions = tools();
+                definitions[0]["function"]["parameters"]["additionalProperties"] = json!(false);
+                definitions[0]["function"]["parameters"]["properties"]["location"]["enum"] =
+                    json!(["Paris", "Tokyo"]);
+                if let Some(strict) = strict {
+                    definitions[0]["function"]["strict"] = json!(strict);
+                }
+                let choice = if named {
+                    json!({"type": "function", "function": {"name": "get_weather"}})
+                } else {
+                    json!("required")
+                };
+                let request = request(json!({"tools": definitions, "tool_choice": choice}));
+                let mut common = preprocessed_request();
+                let constraint = preprocessor
+                    .apply_tool_choice_guided_decoding(&request, &mut common, false)
+                    .unwrap();
+                let grammar = common.sampling_options.guided_decoding.unwrap();
+                if strict == Some(false) {
+                    assert_eq!(
+                        constraint,
+                        if named {
+                            GuidedToolConstraint::GuidedJsonNamed {
+                                tool_name: "get_weather".into(),
+                            }
+                        } else {
+                            GuidedToolConstraint::GuidedJsonRequired
+                        }
+                    );
+                    assert!(grammar.json.is_some());
+                    assert!(grammar.structural_tag.is_none());
+                } else {
+                    assert_eq!(constraint, GuidedToolConstraint::StructuralTag);
+                    assert!(
+                        grammar
+                            .structural_tag
+                            .unwrap()
+                            .to_string()
+                            .contains("minimax_m3_xml")
+                    );
+                    assert!(grammar.json.is_none());
+                }
+            }
+        }
     }
 
     #[test]
