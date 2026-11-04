@@ -46,6 +46,7 @@ pub struct SglangSidecarEngine {
     bootstrap_host: Option<String>,
     bootstrap_port: Option<u16>,
     native_http_max_event_bytes: usize,
+    policy_taints: Option<crate::policy_taints::PolicyTaints>,
     state: OnceCell<StartedState>,
     cancel: CancellationToken,
     /// Cancelled once SGLang is lost after `start`, with the reason set first.
@@ -182,6 +183,9 @@ impl SglangSidecarEngine {
 
         let native_http_max_event_bytes = args.native_http_max_event_bytes.get();
         let common = args.sidecar.common;
+        let policy_taints = args
+            .policy_version_taints
+            .then(|| crate::policy_taints::PolicyTaints::new(common.namespace.clone()));
         let structural_tag = common.structural_tag(true);
         let config = WorkerConfig {
             runtime: common.runtime,
@@ -219,6 +223,7 @@ impl SglangSidecarEngine {
                 bootstrap_host,
                 bootstrap_port,
                 native_http_max_event_bytes,
+                policy_taints,
                 state: OnceCell::new(),
                 cancel: CancellationToken::new(),
                 lost: CancellationToken::new(),
@@ -275,6 +280,12 @@ impl SglangSidecarEngine {
 
 #[async_trait]
 impl LLMEngine for SglangSidecarEngine {
+    fn model_taints(&self) -> Option<dynamo_backend_common::model_taints::ModelTaints> {
+        self.policy_taints
+            .as_ref()
+            .and_then(|taints| taints.subscription())
+    }
+
     async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
         if self.state.initialized() {
             return Err(client::engine_shutdown("sglang sidecar already started"));
@@ -333,6 +344,16 @@ impl LLMEngine for SglangSidecarEngine {
         let state_client = pool.control_client();
         let kv_event_source_count = kv_event_sources.len();
         let combined_token_limit = combined_token_limit(&discovery);
+        if let Some(taints) = &self.policy_taints {
+            taints
+                .start(
+                    pool.control_client(),
+                    self.transport,
+                    deadline,
+                    &discovery.model_path,
+                )
+                .await?;
+        }
         if combined_token_limit.is_none() {
             tracing::warn!("requests without max_tokens keep SGLang's 128-token default");
         }
@@ -634,6 +655,9 @@ impl LLMEngine for SglangSidecarEngine {
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
+        if let Some(taints) = &self.policy_taints {
+            taints.stop().await;
+        }
         self.cancel.cancel();
         tracing::info!("sglang sidecar shutdown complete");
         Ok(())
@@ -1382,6 +1406,17 @@ mod tests {
             .unwrap();
             assert!(config.reasoning_parser.is_none());
             assert!(config.tool_call_parser.is_none());
+        }
+    }
+
+    #[test]
+    fn policy_taint_observer_is_opt_in() {
+        for enabled in [false, true] {
+            let mut args = args();
+            args.policy_version_taints = enabled;
+            let (engine, _) =
+                SglangSidecarEngine::from_discovered(args, discovery(json!({}))).unwrap();
+            assert_eq!(engine.policy_taints.is_some(), enabled);
         }
     }
 

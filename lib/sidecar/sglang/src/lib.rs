@@ -26,6 +26,7 @@ pub mod client;
 pub mod engine;
 mod headless;
 mod native_http;
+mod policy_taints;
 
 /// Generated SGLang gRPC types, temporarily exposed for the Mocker server
 /// until SGLang publishes its upstream protocol package.
