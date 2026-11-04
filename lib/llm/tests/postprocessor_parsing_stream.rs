@@ -3838,6 +3838,8 @@ async fn all_unified_families_honor_normalized_request_controls_for_all_selector
     }
 }
 
+/// A correct final aggregate can hide buffering; require progress while the
+/// producer withholds later fragments and the finish chunk.
 #[tokio::test]
 async fn glm_immediate_json_streams_before_finish() {
     if test_utils::run_isolated(
@@ -3963,6 +3965,8 @@ async fn glm_immediate_json_streams_before_finish() {
     }
 }
 
+/// JSON syntax does not prove an answer when the native gate delays grammar
+/// activation; JSON-shaped thought must remain in the reasoning channel.
 #[tokio::test]
 async fn glm_deferred_json_preserves_json_shaped_reasoning() {
     if test_utils::run_isolated(
@@ -4001,6 +4005,8 @@ async fn glm_deferred_json_preserves_json_shaped_reasoning() {
     }
 }
 
+/// An immediate JSON grammar must not bypass a required or named tool envelope
+/// when the request also contains a response format.
 #[tokio::test]
 async fn glm_immediate_json_keeps_forced_tool_framing() {
     if test_utils::run_isolated(
