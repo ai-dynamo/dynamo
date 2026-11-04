@@ -209,9 +209,13 @@ impl Worker {
             .await
             .expect("the endpoint is discovered")
             .unwrap();
-        Router::from_client(client, RouterMode::RoundRobin)
-            .await
-            .unwrap()
+        Router::from_client_with_options(
+            client,
+            RouterMode::RoundRobin,
+            dynamo_llm::kv_router::plugins::push_router_options(),
+        )
+        .await
+        .unwrap()
     }
 
     /// Wait for the engine to report one more arrival.
