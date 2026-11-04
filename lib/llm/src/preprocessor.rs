@@ -16381,7 +16381,7 @@ responses_tools: None,
         assert!(result.is_err());
         let dispatched = backend.requests.lock().unwrap();
         assert_eq!(dispatched.len(), 1);
-        assert!(dispatched[0].token_ids.len() > 0);
+        assert!(!dispatched[0].token_ids.is_empty());
         assert!(
             dispatched[0]
                 .extra_args

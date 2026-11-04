@@ -1722,24 +1722,6 @@ def test_build_sampling_params_chat_and_responses_use_remaining_context(
     assert build_sampling_params(request, {"max_tokens": 32}, 100).max_tokens == 32
 
 
-def test_build_sampling_params_rl_max_tokens_uses_engine_default():
-    from dynamo.vllm.handlers import build_sampling_params
-
-    request = {
-        "token_ids": [1, 2, 3],
-        "sampling_options": {},
-        "stop_conditions": {},
-        "output_options": {},
-        "extra_args": {"nvext": {"token_in": True}},
-    }
-    assert (
-        build_sampling_params(
-            request, {"max_tokens": 64}, 100, enable_rl=True
-        ).max_tokens
-        == 16
-    )
-
-
 def _make_dynamo_config(**overrides):
     """Build a minimal fake DynamoConfig for update_engine_config_with_dynamo tests."""
     defaults = {

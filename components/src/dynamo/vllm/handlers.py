@@ -969,7 +969,7 @@ def build_sampling_params(
         use_sampling_default = (
             isinstance(extra_args, dict)
             and extra_args.get("request_type") == "completions"
-        ) or (enable_rl and _is_token_in_request(request))
+        )
         max_tokens = (
             sampling_params.max_tokens if use_sampling_default else provided_max_tokens
         )
