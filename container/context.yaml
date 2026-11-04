@@ -73,8 +73,8 @@ dynamo:
   nixl_gdrcopy_ref: v2.5.2
   nixl_libfabric_repo: https://github.com/ofiwg/libfabric.git
   # >= v2.5 for NIXL 1.5.0 (fi_mr_attr.device.rocr). <= the libfabric of
-  # efa_version (2.6.0): the TRT-LLM EFA image runs NIXL against that copy,
-  # which lacks the FABRIC_1.10 symbols that v2.7.0 links to.
+  # efa_version (2.7.0 in EFA 1.51.0): the TRT-LLM EFA image runs NIXL against
+  # that copy, so a newer ref can link to symbols that copy lacks.
   nixl_libfabric_ref: v2.6.0
   # Keep in sync with upstream NIXL's contrib/Dockerfile.manylinux.
   hwloc_version: 2.12.2
