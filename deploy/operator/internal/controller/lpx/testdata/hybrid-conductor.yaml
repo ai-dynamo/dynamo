@@ -5,6 +5,10 @@ name: conductor
 replicas: 1
 podTemplate:
   spec:
+    initContainers:
+    - name: runtime
+      image: dynamo-sidecar
+      restartPolicy: Always
     containers:
     - name: main
       image: cyborg-runtime

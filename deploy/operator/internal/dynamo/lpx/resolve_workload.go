@@ -182,6 +182,11 @@ func validateWorkloadConductor(
 			return fmt.Errorf("%w: the shared speculative runtime requires LPU-only builds", ErrUnsupportedRuntime)
 		}
 		template := conductor.PodTemplate
+		// The hybrid GPU engine serves only through the LPX sidecar.
+		if common.FindContainerByName(template.Spec.InitContainers, commonconsts.RuntimeContainerName) == nil {
+			return fmt.Errorf("%w: component %q conductor of a hybrid build requires the LPX sidecar; declare the %q init container",
+				ErrUnsupportedRuntime, component.ComponentName, commonconsts.RuntimeContainerName)
+		}
 		container := common.FindContainerByName(template.Spec.Containers, commonconsts.MainContainerName)
 		count, err := dra.ResolveGPUCount(ctx, reader, namespace, &template.Spec, container.Resources)
 		if err != nil {

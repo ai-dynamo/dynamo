@@ -281,9 +281,9 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 		alphaComponent := alphaComponents[component.ComponentName]
 		agent := component.ComponentRole(v1beta1.ComponentRoleLPXAgent)
 		lpuRole := lpxRoleComponent(component, agent.PodTemplate, p.dynamoDeployment, p.discoveryBackend)
-		lpuDefaults := &podTemplateRuntimeDefaults{ComponentDefaults: &BaseComponentDefaults{}, servingHash: servingHash}
+		defaults := &podTemplateRuntimeDefaults{ComponentDefaults: &BaseComponentDefaults{}, servingHash: servingHash}
 		lpuTemplate, err := renderSelectedLPXRole(lpuRole, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
-			p.discoveryContext, lpuDefaults)
+			p.discoveryContext, defaults)
 		if err != nil {
 			return nil, fmt.Errorf("rendering %s.agent: rendering selected LPX base pod: %w", component.ComponentName, err)
 		}
@@ -299,7 +299,7 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 		if workload.Pipeline() != dynamolpx.PipelineHybrid {
 			role := lpxRoleComponent(component, conductor.PodTemplate, p.dynamoDeployment, p.discoveryBackend)
 			input.Conductor, err = renderSelectedLPXRole(role, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
-				p.discoveryContext, lpuDefaults)
+				p.discoveryContext, defaults)
 			if err != nil {
 				return nil, fmt.Errorf("rendering %s.conductor: rendering selected LPX base pod: %w", component.ComponentName, err)
 			}
@@ -314,7 +314,6 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 		template, replicas := conductor.PodTemplate, ptr.Deref(conductor.Replicas, minimumReplicas)
 		role := lpxRoleComponent(component, template, p.dynamoDeployment, p.discoveryBackend)
 		role.ComponentType = v1beta1.ComponentTypeDecode
-		defaults := &podTemplateRuntimeDefaults{ComponentDefaults: NewWorkerDefaults(), servingHash: servingHash}
 		gpu := p
 		gpu.component = role
 		gpu.r = ServiceRole{Name: plan.CyborgTemplate, Role: RoleMain, Replicas: replicas}
