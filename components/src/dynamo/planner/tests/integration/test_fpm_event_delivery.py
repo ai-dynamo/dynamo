@@ -73,7 +73,11 @@ def test_endpoint_fpm_reaches_planner_and_drives_scale_up(tmp_path):
     subprocess.run(
         [sys.executable, __file__],
         check=True,
-        env={**os.environ, "DYN_FILE_KV": str(tmp_path)},
+        env={
+            **os.environ,
+            "DYN_FILE_KV": str(tmp_path),
+            "DYN_EVENT_PLANE_HOST": "127.0.0.1",
+        },
         timeout=30,
     )
 

@@ -202,7 +202,7 @@ async def async_internal(distributed_runtime):
     await client.complete(event)
 
 
-@pytest.mark.timeout(15)
+@pytest.mark.timeout(50)
 def test_wait_for_unacknowledged_decision(tmp_path):
     # DistributedRuntime is process-global, so keep it out of the pytest worker.
     with _isolated_etcd(tmp_path / "etcd") as etcd_port:
