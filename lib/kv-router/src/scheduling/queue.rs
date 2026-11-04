@@ -63,6 +63,8 @@ mod capacity;
 /// backlog past it waits, in order, for a slot.
 const ADMISSION_CHANNEL_CAPACITY: usize = 256;
 
+pub type RouterQueueWaitObserver = Arc<dyn Fn(usize, Duration) + Send + Sync>;
+
 struct ClassQueueCounters {
     pending_count: AtomicUsize,
     pending_isl_tokens: AtomicUsize,
@@ -600,6 +602,7 @@ struct SchedulerQueueActor<
     overlap_refresh_after: Option<Duration>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
     available_worker_provider: Option<WorkerAvailabilityProvider>,
+    queue_wait_observer: Arc<OnceLock<RouterQueueWaitObserver>>,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
     /// Per-candidate cost capture for admitted selections, installed once by the host.
     selection_trace: Arc<OnceLock<SelectionTraceSpec>>,
@@ -638,6 +641,7 @@ pub struct SchedulerQueue<
     available_worker_provider: Option<WorkerAvailabilityProvider>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
     supports_overlap_refresh: bool,
+    queue_wait_observer: Arc<OnceLock<RouterQueueWaitObserver>>,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
     /// Per-candidate cost capture for admitted selections, installed once by the host.
     selection_trace: Arc<OnceLock<SelectionTraceSpec>>,
@@ -747,6 +751,7 @@ impl<
             tx: admission_tx.downgrade(),
         });
         let cleanup = Arc::new(AdmissionCleanup::default());
+        let queue_wait_observer = Arc::new(OnceLock::new());
         let non_max_overlap_selection_observer = Arc::new(OnceLock::new());
         let selection_trace = Arc::new(OnceLock::new());
         let start_time = Instant::now();
@@ -798,6 +803,7 @@ impl<
             overlap_refresh_after,
             overloaded_worker_provider: overloaded_worker_provider.clone(),
             available_worker_provider: available_worker_provider.clone(),
+            queue_wait_observer: Arc::clone(&queue_wait_observer),
             non_max_overlap_selection_observer: Arc::clone(&non_max_overlap_selection_observer),
             selection_trace: Arc::clone(&selection_trace),
             reject_thresholds: reject_thresholds.clone(),
@@ -822,6 +828,7 @@ impl<
             available_worker_provider,
             overloaded_worker_provider,
             supports_overlap_refresh: overlap_refresh_after.is_some(),
+            queue_wait_observer,
             non_max_overlap_selection_observer,
             selection_trace,
             reject_thresholds,
@@ -847,6 +854,13 @@ impl<
         self.non_max_overlap_selection_observer
             .set(observer)
             .is_ok()
+    }
+
+    /// Install the observer for time spent pending in the scheduler queue.
+    ///
+    /// Returns `false` when an observer is already installed.
+    pub fn set_queue_wait_observer(&self, observer: RouterQueueWaitObserver) -> bool {
+        self.queue_wait_observer.set(observer).is_ok()
     }
 
     /// Install per-candidate cost capture for admitted selections.
@@ -1485,6 +1499,9 @@ impl<
                     )
                 });
             if !should_queue {
+                if let Some(observer) = self.queue_wait_observer.get() {
+                    observer(class_index, Duration::ZERO);
+                }
                 return self.admit_one(
                     request,
                     attempt_tx,
@@ -1839,7 +1856,12 @@ impl<
                 };
             }
             let admit_now = Instant::now();
-            let class_index = popped.class_index();
+            if let Some(observer) = self.queue_wait_observer.get() {
+                observer(
+                    class_index,
+                    admit_now.saturating_duration_since(queued.enqueue_at),
+                );
+            }
             let class = self.profile.class(class_index);
             let queued = popped.into_payload();
             tracing::trace!(
@@ -3671,6 +3693,13 @@ policy_classes:
 "#,
         );
         let (queue, slots) = make_queue_with_profile(1, 16, 64, profile);
+        let observations = Arc::new(StdMutex::new(Vec::new()));
+        assert!(queue.set_queue_wait_observer({
+            let observations = Arc::clone(&observations);
+            Arc::new(move |class_index, wait| {
+                observations.lock().unwrap().push((class_index, wait));
+            })
+        }));
 
         // An idle worker admits a zero-limit request directly, bypassing the
         // policy queue.
@@ -3678,6 +3707,7 @@ policy_classes:
         queue.enqueue(admitted).await;
         admitted_rx.await.unwrap().unwrap();
         assert_eq!(queue.pending_count(), 0);
+        assert_eq!(*observations.lock().unwrap(), [(0, Duration::ZERO)]);
 
         // With every worker busy the request would have to queue, so the zero
         // limit rejects it instead of parking it.
@@ -3688,6 +3718,7 @@ policy_classes:
             Err(KvSchedulerError::QueueRejected(_))
         ));
         assert_eq!(queue.pending_count(), 0);
+        assert_eq!(observations.lock().unwrap().len(), 1);
 
         slots
             .mark_prefill_completed(&"admitted-idle".to_string(), decay_now())
@@ -3879,6 +3910,7 @@ policy_classes:
             overlap_refresh_after: None,
             overloaded_worker_provider: None,
             available_worker_provider: None,
+            queue_wait_observer: Arc::clone(&queue.queue_wait_observer),
             non_max_overlap_selection_observer: Arc::clone(
                 &queue.non_max_overlap_selection_observer,
             ),
@@ -5002,6 +5034,13 @@ policy_classes:
         let num_requests = 10;
 
         let (queue, slots) = make_queue(num_workers, block_size, isl, Some(0.0));
+        let observations = Arc::new(StdMutex::new(Vec::new()));
+        assert!(queue.set_queue_wait_observer({
+            let observations = Arc::clone(&observations);
+            Arc::new(move |class_index, wait| {
+                observations.lock().unwrap().push((class_index, wait));
+            })
+        }));
 
         let mut receivers = Vec::new();
         let mut req_ids = Vec::new();
@@ -5033,6 +5072,13 @@ policy_classes:
             }
         }
         assert_eq!(ok_count, num_requests, "not all requests were scheduled");
+        let observations = observations.lock().unwrap();
+        assert_eq!(observations.len(), num_requests);
+        assert!(
+            observations
+                .iter()
+                .all(|(class_index, _)| *class_index == 0)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
