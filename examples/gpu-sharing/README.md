@@ -15,8 +15,8 @@ for many-model serving. It reproduces three experiments on one node with 8x A100
 | KAI + HAMi | [`kai-hami/`](kai-hami/) | 16 | Two models per GPU (`gpu-fraction: "0.5"`) | Memory cap only (HAMi); compute is time-sliced |
 | KAI + GPU fractions | [`kai-gpu-fractions/`](kai-gpu-fractions/) | 16 | Two models per GPU (`gpu-fraction: "0.5"` + `sm-sharing`) | Memory cap (19,968 MiB) and 50% MPS active threads |
 
-Scripts, manifests, and results by @marckarp and
-@scheckerNV.
+Scripts, manifests, and results by [@marckarp](https://github.com/marckarp) and
+[@scheckerNV](https://github.com/scheckerNV).
 
 ## Common Setup
 
