@@ -10,6 +10,9 @@ from pathlib import Path
 
 import pytest
 
+# This helper is stdlib-only. Marker collection must not import the optional
+# KVBM/vLLM packages. Flat component staging resolves the installed package path
+# without executing its __init__; missing or broken source still fails loudly.
 _helper_relative = Path("lib/bindings/kvbm/python/kvbm/vllm_integration/gpu_mnnvl.py")
 _helper_file = next(
     (
@@ -37,6 +40,7 @@ if _helper_spec is None or _helper_spec.loader is None:
 m = importlib.util.module_from_spec(_helper_spec)
 sys.modules[_helper_spec.name] = m
 _helper_spec.loader.exec_module(m)
+
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.post_merge,
@@ -224,6 +228,189 @@ def test_nvml_observation_uses_configured_cached_functions_for_device_handle(
     for name, function, _ in library.calls:
         assert function is library.functions[name]
         assert function.argtypes is not None
+
+
+def test_driver_import_requests_exact_fabric_kind_and_64_handle_bytes(monkeypatch):
+    library = SignatureLibrary()
+    monkeypatch.setattr(m.ctypes, "CDLL", lambda name: library)
+    driver = m._CudaDriver()
+    assert driver.import_handle(b"h" * 64) == library.high_handle
+    imported = [
+        values
+        for name, _, values in library.calls
+        if name == "cuMemImportFromShareableHandle"
+    ]
+    assert len(imported) == 1
+    assert imported[0][2] == 8
+    assert bytes(imported[0][1]._obj) == b"h" * 64
+    for invalid in (b"h" * 63, b"h" * 65, "h" * 64):
+        with pytest.raises(ValueError):
+            driver.import_handle(invalid)
+    assert (
+        sum(name == "cuMemImportFromShareableHandle" for name, _, _ in library.calls)
+        == 1
+    )
+
+
+@pytest.fixture
+def driver(monkeypatch):
+    driver = FakeDriver()
+    monkeypatch.setattr(m, "observe_fabric", lambda *args, **kwargs: driver.identity)
+    monkeypatch.setattr(m, "_RETAINED_FAILED_FABRIC_ALLOCATIONS", [])
+    return driver
+
+
+def test_vmm_allocates_only_device_fabric_and_drains_before_last_release(driver):
+    owner = m.FabricAllocation((3, 3), driver=driver)
+    assert owner.logical_bytes == 9 and owner.allocation_bytes == 16
+    assert ("granularity", 1, 8, 1) in driver.calls
+    assert ("create", 16, 8) in driver.calls
+    assert ("map", 4096, 16, 90) in driver.calls
+    assert ("access", 4096, 16, 0) in driver.calls
+    assert owner.fabric_handle == b"h" * 64
+    interface = owner.__cuda_array_interface__
+    assert interface == {
+        "shape": (3, 3),
+        "strides": (3, 1),
+        "typestr": "|i1",
+        "data": (4096, False),
+        "version": 3,
+    }
+    driver.calls.clear()
+    del owner
+    assert driver.calls == [
+        ("push", 77),
+        ("sync",),
+        ("unmap", 4096, 16),
+        ("free", 4096, 16),
+        ("release", 90),
+        ("pop", 77),
+        ("release-context", 0),
+    ]
+
+
+def test_import_does_not_zero_or_reexport_the_shared_bank(driver):
+    owner = m.FabricAllocation(
+        (3, 3), driver=driver, imported_handle=b"z" * 64, allocation_bytes=16
+    )
+    assert owner.fabric_handle == b"z" * 64
+    names = [r[0] for r in driver.calls]
+    assert "import" in names and "create" not in names
+    assert "zero" not in names and "export" not in names
+    del owner
+
+
+@pytest.mark.parametrize(
+    "shape", [(0, 1), (1, 0), (True, 2), (1 << 63, 2), [1, 2], (1,)]
+)
+def test_bad_extent_fails_before_loading_native_libraries(monkeypatch, shape):
+    monkeypatch.setattr(
+        m, "_CudaDriver", lambda: pytest.fail("No native library may load")
+    )
+    with pytest.raises(ValueError):
+        m.FabricAllocation(shape)
+
+
+@pytest.mark.parametrize(
+    "stage", ["create", "reserve", "map", "access", "zero", "sync", "export"]
+)
+def test_partial_allocation_failure_releases_only_resources_actually_acquired(
+    driver, stage
+):
+    driver.fail = stage
+    with pytest.raises(RuntimeError, match="injected " + stage):
+        m.FabricAllocation((3, 3), driver=driver)
+    names = [r[0] for r in driver.calls]
+    assert names[-1] == "release-context"
+    if stage == "create":
+        assert "release" not in names and "free" not in names
+    elif stage == "reserve":
+        assert "release" in names and "free" not in names
+    elif stage == "map":
+        assert "free" in names and "release" in names and "unmap" not in names
+    else:
+        assert names.index("unmap") < names.index("free") < names.index("release")
+
+
+@pytest.mark.parametrize("kind", ["host", "not-pinned", "bad-import-size"])
+def test_import_admission_rejects_wrong_physical_properties_or_extent(driver, kind):
+    if kind == "host":
+        driver.properties_from_handle.location.type = 2
+    elif kind == "not-pinned":
+        driver.properties_from_handle.type = 0
+    with pytest.raises((ValueError, RuntimeError)):
+        m.FabricAllocation(
+            (3, 3),
+            driver=driver,
+            imported_handle=b"h" * 64,
+            allocation_bytes=8 if kind == "bad-import-size" else 16,
+        )
+    assert "map" not in [r[0] for r in driver.calls]
+
+
+@pytest.mark.parametrize("flags", [0, 1])
+def test_created_bank_without_actual_fabric_capability_rejects_before_mapping(
+    driver, flags
+):
+    driver.properties_from_handle.requestedHandleTypes = flags
+    with pytest.raises(RuntimeError, match="DEVICE/FABRIC"):
+        m.FabricAllocation((3, 3), driver=driver)
+    assert "map" not in [row[0] for row in driver.calls]
+    assert ("release", 90) in driver.calls
+
+
+def test_successful_typed_import_accepts_device_handle_with_cleared_export_flags(
+    driver,
+):
+    driver.properties_from_handle.requestedHandleTypes = 0
+    owner = m.FabricAllocation(
+        (3, 3), driver=driver, imported_handle=b"h" * 64, allocation_bytes=16
+    )
+    assert ("import", b"h" * 64) in driver.calls
+    assert ("map", 4096, 16, 91) in driver.calls
+    assert not {"create", "export", "zero"} & {row[0] for row in driver.calls}
+    del owner
+
+
+def test_failed_typed_import_never_maps_or_falls_back_to_other_storage(driver):
+    driver.properties_from_handle.requestedHandleTypes = 0
+    driver.fail = "import"
+    with pytest.raises(RuntimeError, match="injected import"):
+        m.FabricAllocation(
+            (3, 3), driver=driver, imported_handle=b"h" * 64, allocation_bytes=16
+        )
+    assert not {"map", "create", "export", "zero"} & {row[0] for row in driver.calls}
+
+
+def test_failed_local_quiescence_retains_live_mapping_without_forced_reuse(driver):
+    owner = m.FabricAllocation((1, 8), driver=driver)
+    driver.calls.clear()
+    driver.fail = "sync"
+    del owner
+    assert len(m._RETAINED_FAILED_FABRIC_ALLOCATIONS) == 1
+    retained = m._RETAINED_FAILED_FABRIC_ALLOCATIONS[0]
+    assert retained._mapped and retained.pointer == 4096 and retained.handle == 90
+    assert not {"unmap", "free", "release", "release-context"} & {
+        r[0] for r in driver.calls
+    }
+
+
+def test_interpreter_finalization_does_not_touch_cuda_or_cleared_globals(
+    driver, monkeypatch
+):
+    owner = m.FabricAllocation((1, 8), driver=driver)
+    driver.calls.clear()
+    driver.fail = "sync"
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "is_finalizing", lambda: True)
+        patch.setattr(m, "sys", None, raising=False)
+        patch.setattr(m, "_RETAINED_FAILED_FABRIC_ALLOCATIONS", None)
+        patch.setattr(m, "logger", None)
+        owner.__del__()
+    assert driver.calls == []
+    assert owner._mapped and owner.pointer == 4096 and owner.handle == 90
+    driver.fail = None
+    owner._release()
 
 
 def test_effective_domain_matches_same_clique_not_gpu_uuid_and_separates_other_profiles():

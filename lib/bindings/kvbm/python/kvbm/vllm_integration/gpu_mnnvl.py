@@ -10,26 +10,20 @@ the owner must outlive every local view and all native transfer leases.
 import ctypes
 import hashlib
 import json
+import logging
+import sys
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+logger = logging.getLogger(__name__)
 _FABRIC = 8
-
-
 _DEVICE = 1
-
-
 _PINNED = 1
-
-
 _READ_WRITE = 3
-
-
 _FABRIC_HANDLE_BYTES = 64
-
-
 _MAX_BYTES = min((1 << (ctypes.sizeof(ctypes.c_size_t) * 8)) - 1, (1 << 63) - 1)
+_RETAINED_FAILED_FABRIC_ALLOCATIONS = []
 
 
 class _Location(ctypes.Structure):
@@ -136,6 +130,19 @@ def effective_domain(layout_domain, fabric_domain):
             json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
     )
+
+
+def _shape_bytes(shape):
+    if (
+        not isinstance(shape, tuple)
+        or len(shape) != 2
+        or any(type(n) is not int or n <= 0 for n in shape)
+    ):
+        raise ValueError("Two positive integer GPU bank dimensions required")
+    count = shape[0] * shape[1]
+    if count > _MAX_BYTES:
+        raise ValueError("GPU bank extent overflows the driver/Torch range")
+    return count
 
 
 class _CudaDriver:
@@ -351,3 +358,140 @@ def observe_fabric(device=None, *, driver=None):
     finally:
         if library.nvmlShutdown() != 0:
             raise RuntimeError("NVML shutdown failed after MNNVL fabric observation")
+
+
+class FabricAllocation:
+    """One VMM mapping retained by every CUDA-array-interface tensor/view.
+
+    No public forced-close exists: the final storage reference releases this
+    owner. Native transfer owners must retain it until actual quiescence.
+    """
+
+    def __init__(
+        self,
+        shape,
+        *,
+        device=None,
+        driver=None,
+        imported_handle=None,
+        allocation_bytes=None,
+    ):
+        self.pointer = self.handle = self.context_handle = 0
+        self._mapped = self._released = False
+        self._driver = None
+        self.fabric_handle = None
+        self.allocation_bytes = 0
+        self.device = device
+        self.shape = shape
+        self.logical_bytes = _shape_bytes(shape)
+        self._driver = _CudaDriver() if driver is None else driver
+        self.device = self._driver.device() if device is None else device
+        self.identity = observe_fabric(self.device, driver=self._driver)
+        if self._driver.gpu_uuid(self.device) != self.identity.gpu_uuid:
+            raise ValueError("VMM bank must use its actual observed physical GPU")
+        self.context_handle = self._driver.retain_context(self.device)
+        try:
+            with self._driver.context(self.context_handle):
+                properties = self._driver.properties(self.device)
+                granularity = self._driver.granularity(properties)
+                if type(granularity) is not int or granularity <= 0:
+                    raise RuntimeError(
+                        "Positive CUDA VMM allocation granularity required"
+                    )
+                rounded = (
+                    (self.logical_bytes + granularity - 1) // granularity
+                ) * granularity
+                if rounded > _MAX_BYTES:
+                    raise ValueError(
+                        "Rounded VMM bank overflows the driver/Torch range"
+                    )
+                self.allocation_bytes = rounded
+                if imported_handle is None:
+                    self.handle = self._driver.create(rounded, properties)
+                else:
+                    if type(allocation_bytes) is not int or allocation_bytes != rounded:
+                        raise ValueError("Imported FABRIC bank rounded extent differs")
+                    self.handle = self._driver.import_handle(imported_handle)
+                actual = self._driver.allocation_properties(self.handle)
+                if (
+                    actual.type != _PINNED
+                    or actual.location.type != _DEVICE
+                    or (
+                        imported_handle is None
+                        and not actual.requestedHandleTypes & _FABRIC
+                    )
+                ):
+                    raise RuntimeError(
+                        "MNNVL bank requires actual DEVICE/FABRIC VMM storage"
+                    )
+                # CUDA clears export permissions on imported handles. Their
+                # successful cuMemImport(..., FABRIC) above proves the handle
+                # kind; physical PINNED/DEVICE admission remains mandatory.
+                # New manager banks still require FABRIC and a real export.
+                self.pointer = self._driver.reserve(rounded, granularity)
+                self._driver.map(self.pointer, rounded, self.handle)
+                self._mapped = True
+                self._driver.set_access(self.pointer, rounded, self.device)
+                if imported_handle is None:
+                    self._driver.zero(self.pointer, rounded)
+                self._driver.synchronize()
+                self.fabric_handle = (
+                    self._driver.export(self.handle)
+                    if imported_handle is None
+                    else imported_handle
+                )
+                if len(self.fabric_handle) != _FABRIC_HANDLE_BYTES:
+                    raise RuntimeError("CUDA did not export a complete FABRIC handle")
+        except Exception:
+            self._release_or_retain()
+            raise
+
+    @property
+    def __cuda_array_interface__(self):
+        if self._released or not self._mapped:
+            raise RuntimeError("FABRIC mapping is not live")
+        return {
+            "shape": self.shape,
+            "strides": (self.shape[1], 1),
+            "typestr": "|i1",
+            "data": (self.pointer, False),
+            "version": 3,
+        }
+
+    def _release(self):
+        if self._released or self._driver is None:
+            return
+        if self.context_handle:
+            with self._driver.context(self.context_handle):
+                # Also protect queued local operations issued through a surviving
+                # Tensor view. Remote DMA quiescence is the native owner's duty.
+                self._driver.synchronize()
+                if self._mapped:
+                    self._driver.unmap(self.pointer, self.allocation_bytes)
+                    self._mapped = False
+                if self.pointer:
+                    self._driver.free_address(self.pointer, self.allocation_bytes)
+                    self.pointer = 0
+                if self.handle:
+                    self._driver.release(self.handle)
+                    self.handle = 0
+            self._driver.release_context(self.device)
+            self.context_handle = 0
+        self._released = True
+
+    def _release_or_retain(self):
+        try:
+            self._release()
+        except Exception:
+            # A constructor still re-raises its original error. A finalizer cannot
+            # propagate safely: resurrect the owner instead of losing a live map.
+            _RETAINED_FAILED_FABRIC_ALLOCATIONS.append(self)
+            logger.exception(
+                "FABRIC mapping cleanup failed; retaining it until process exit"
+            )
+
+    def __del__(self, _sys=sys):
+        # CUDA and module globals may already be torn down during finalization.
+        # Process exit reclaims mappings that could not be released earlier.
+        if not _sys.is_finalizing():
+            self._release_or_retain()
