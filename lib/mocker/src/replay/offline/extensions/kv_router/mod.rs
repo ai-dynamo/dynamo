@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_custom_policy_builtin::{DefaultWorkerSelector, DefaultWorkerSelectorControl};
+use dynamo_router_policies::{DefaultWorkerSelector, DefaultWorkerSelectorControl};
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;

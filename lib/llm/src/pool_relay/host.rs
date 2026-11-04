@@ -161,6 +161,8 @@ pub struct PoolRelayConfig {
     /// Root of the Global Discovery Service to read the Global Router
     /// replicas from. `None` reads none.
     pub global_discovery_url: Option<Url>,
+    /// DGD coordinates published to the Global Routers. Requires global discovery and WAN transport.
+    pub routing_pool: Option<dynamo_global_common::PoolKey>,
 }
 
 impl Default for PoolRelayConfig {
@@ -173,6 +175,7 @@ impl Default for PoolRelayConfig {
             producer: PoolRelayProducerConfig::default(),
             transport: None,
             global_discovery_url: None,
+            routing_pool: None,
         }
     }
 }
@@ -684,6 +687,16 @@ impl PoolRelay {
             "Pool Relay recovery_attempt_timeout_ms must be positive"
         );
         let transport_config = config.transport.clone();
+        if let Some(pool) = &config.routing_pool {
+            anyhow::ensure!(
+                pool.cluster_id() == cluster_id,
+                "routing pool cluster must match the Relay cluster"
+            );
+            anyhow::ensure!(
+                config.global_discovery_url.is_some() && transport_config.is_some(),
+                "routing_pool requires global_discovery_url and WAN transport"
+            );
+        }
         if let Some(transport) = transport_config.as_ref() {
             transport.validate()?;
         }
@@ -828,6 +841,13 @@ impl PoolRelay {
                 cancel.child_token(),
             )
         });
+        if let (Some(pool), Some(transport), Some(routers)) = (
+            config.routing_pool,
+            transport.as_ref(),
+            global_routers.as_ref(),
+        ) {
+            transport.broadcast_global_views(pool, routers.subscribe());
+        }
         Ok(Self {
             #[cfg(feature = "ckf-diagnostics")]
             cluster_id,

@@ -71,7 +71,7 @@ jobs:
   # and workflow_dispatch from main, this is just github.sha.
   resolve-source-sha:
     name: Resolve source SHA
-    runs-on: prod-default-v2
+    runs-on: dynamo-cpu-4gi-amd64
     permissions:
       contents: read
     outputs:
@@ -94,7 +94,7 @@ jobs:
   # wheel_builder stage carry the dev version.
   compute-dev-version:
     name: Compute dev version suffix
-    runs-on: prod-default-v2
+    runs-on: dynamo-cpu-4gi-amd64
     permissions:
       contents: read
     outputs:
@@ -116,7 +116,7 @@ jobs:
   # into release.yml.
   compute-release-mode:
     name: Compute release mode
-    runs-on: prod-default-v2
+    runs-on: dynamo-cpu-4gi-amd64
     permissions:
       contents: read
     outputs:
@@ -158,7 +158,7 @@ jobs:
   # block the nightly — downstream jobs skip on empty outputs.
   notify-slack-start:
     name: Notify Slack — nightly started
-    runs-on: prod-default-v2
+    runs-on: dynamo-cpu-4gi-amd64
     needs: [compute-release-mode, resolve-source-sha, compute-dev-version]
     if: ${{ needs.compute-release-mode.outputs.release == 'true' }}
     permissions:
@@ -361,7 +361,7 @@ jobs:
   operator-build:
     name: kubernetes-operator
     needs: [create-fresh-builder, resolve-source-sha]
-    runs-on: prod-default-v2
+    runs-on: dynamo-cpu-4gi-amd64
     outputs:
       operator_default_tag: ${{ steps.build.outputs.image_tag }}
     permissions:
@@ -1033,13 +1033,14 @@ jobs:
       sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
     secrets: inherit
 
-  sidecar-trtllm-nightly-image-test:
+  sidecar-trtllm-nightly-media-test:
     needs: [create-fresh-builder, compute-release-mode]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: $/.github/workflows/shared-test-trtllm-nightly-image.yml
     with:
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
-    secrets: inherit
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
   sidecar-trtllm-test:
     name: sidecar-runtime
@@ -1730,7 +1731,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-build, sglang-build, trtllm-build, dynamo-pipeline, operator-build, planner-build, frontend-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, sidecar-build, sidecar-trtllm-nightly-image-test, create-fresh-builder]
+    needs: [vllm-build, sglang-build, trtllm-build, dynamo-pipeline, operator-build, planner-build, frontend-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, sidecar-build, sidecar-trtllm-nightly-media-test, create-fresh-builder]
     permissions:
       contents: read
     steps:
@@ -1752,12 +1753,12 @@ jobs:
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     if: always()
-    needs: [vllm-test, vllm-multi-gpu-test, vllm-4-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-4-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, sidecar-build, sidecar-vllm-test, sidecar-sglang-test, sidecar-trtllm-test, sidecar-trtllm-nightly-image-test, deploy-cleanup, deepseek-v4-pro-agg-perf, deepseek-v4-pro-disagg-perf, rust-tests, kimi-k25-agg-perf, kimi-k25-disagg-perf]
+    needs: [vllm-test, vllm-multi-gpu-test, vllm-4-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-4-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, sidecar-build, sidecar-vllm-test, sidecar-sglang-test, sidecar-trtllm-test, sidecar-trtllm-nightly-media-test, deploy-cleanup, deepseek-v4-pro-agg-perf, deepseek-v4-pro-disagg-perf, rust-tests, kimi-k25-agg-perf, kimi-k25-disagg-perf]
     permissions:
       contents: read
       actions: read   # grant the reusable notifier read access to list this run's jobs
     uses: $/.github/workflows/notify-slack.yml
     with:
       pipeline_name: Nightly
-      runs_on: prod-default-v2
+      runs_on: dynamo-cpu-4gi-amd64
     secrets: inherit

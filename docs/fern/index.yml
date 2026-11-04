@@ -224,6 +224,8 @@ navigation:
             path: pages/kubernetes/auto-deployment/dynamo-profiler.md
           - page: Dynamo Planner
             path: pages/kubernetes/auto-deployment/dynamo-planner.mdx
+          - page: Planner Live Retune
+            path: pages/kubernetes/auto-deployment/planner-live-retune.md
 
       - section: Operations
         icon: screwdriver-wrench
@@ -792,7 +794,7 @@ navigation:
           - page: Structural Tag
             path: pages/use-cases/tool-calling-and-reasoning/structural-tag.md
           - page: Reasoning Parsing
-            path: pages/use-cases/tool-calling-and-reasoning/reasoning-parsing.md
+            path: pages/use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx
           - page: Troubleshooting Tool Calls
             path: pages/use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md
       - section: Many-Model Serving
@@ -843,6 +845,9 @@ navigation:
             skip-slug: true
             collapsed: true
             contents:
+              - page: Kimi-K3.1-Pro
+                path: pages/recipes/model-recipes/kimi-k3-1-pro.mdx
+                slug: kimi-k3-1-pro
               - page: Kimi-K3
                 path: pages/recipes/model-recipes/kimi-k3.mdx
                 slug: kimi-k3

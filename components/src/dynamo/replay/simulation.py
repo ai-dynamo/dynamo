@@ -409,6 +409,9 @@ class DynamoReplayRunner:
         # embedded value instead of imposing the synthetic-workload default.
         if trace_format not in {"weka", "dynamo"} and trace_block_size is None:
             trace_block_size = self.trace_block_size
+        # Trace replays use ordinal request ids and the canonical router seed,
+        # so a candidate's score depends only on its configuration and the
+        # trace.
         if deployment.deployment_mode == "agg":
             return run_trace_replay(
                 trace_files=trace_files,
@@ -423,6 +426,7 @@ class DynamoReplayRunner:
                 execution_model=execution_model,
                 extra_engine_args=self._engine_args(deployment, "aggregated"),
                 num_workers=deployment.num_workers,
+                _deterministic=True,
                 **common,
             )
         return run_trace_replay(
@@ -440,6 +444,7 @@ class DynamoReplayRunner:
             decode_engine_args=self._engine_args(deployment, "decode"),
             num_prefill_workers=deployment.num_prefill_workers,
             num_decode_workers=deployment.num_decode_workers,
+            _deterministic=True,
             **common,
         )
 

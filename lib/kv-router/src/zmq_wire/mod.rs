@@ -27,6 +27,7 @@ mod mm_exclusion;
 mod mm_exclusion_tests;
 #[cfg(test)]
 mod tests;
+mod trtllm;
 mod types;
 
 pub use convert::{
@@ -38,6 +39,7 @@ pub use extra_keys::{
     mark_mm_hash_for_extra_key, parse_mm_hash_from_extra_key,
 };
 pub use filter::KvCacheSpecKind;
+pub use trtllm::IMAGE_ROUTING_UUID_PREFIX;
 pub use types::{
     BlockHashValue, ExtraKeyItem, KvEventBatch, KvEventOwnership, KvTokenIds, Locality, RawKvEvent,
     WIDE_TOKEN_SENTINEL,

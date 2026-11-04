@@ -154,6 +154,7 @@ type admissionTestCase struct {
 	gates              features.Gate
 	seedGates          *features.Gates
 	seedWithoutWebhook bool
+	statusOnly         bool
 	terminating        bool
 	username           string
 
@@ -214,7 +215,19 @@ func runAdmissionTest(t *testing.T, test admissionTestCase) *unstructured.Unstru
 		oldFixture, _ := admissionObject(t, test.oldObject, env.Namespace(), nil)
 		current = applyAdmissionFixtureChanges(old, oldFixture, current)
 		current.SetResourceVersion(old.GetResourceVersion())
-		result, err = resourceClient.Update(t.Context(), current, metav1.UpdateOptions{})
+		if test.statusOnly {
+			t.Log("Write the status subresource while leaving the immutable spec unchanged")
+			status, found, statusErr := unstructured.NestedMap(mustUnstructured(t, test.object), "status")
+			if statusErr != nil || !found {
+				t.Fatalf("read status update fixture: found=%v, err=%v", found, statusErr)
+			}
+			if statusErr := unstructured.SetNestedMap(current.Object, status, "status"); statusErr != nil {
+				t.Fatalf("set status update fixture: %v", statusErr)
+			}
+			result, err = resourceClient.UpdateStatus(t.Context(), current, metav1.UpdateOptions{})
+		} else {
+			result, err = resourceClient.Update(t.Context(), current, metav1.UpdateOptions{})
+		}
 	}
 
 	t.Log("Compare the API server admission result with the table expectations")
