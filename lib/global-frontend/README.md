@@ -42,7 +42,7 @@ model; every policy then rotates across the pool's frontends.
 | Policy | Picks |
 |---|---|
 | `round-robin` (default) | Each pool in turn. |
-| `least-in-flight` | The nearest pool with the fewest requests in flight, moving only for a pool with much more room. |
+| `least-in-flight` | The nearest pool with the fewest requests in flight (with `--replica-sync`, every replica's), moving only for a pool with much more room. |
 | `affinity` | The session's pool, nearest region first, moving only for a pool with much more room. |
 
 `affinity` keeps each session's turns on one pool, so the pool's KV cache for
@@ -139,7 +139,8 @@ named `dynamo_global_frontend_*`: requests per pool by response status,
 leaves before the pool's response headers arrive; requests answered without a
 pool; time to first byte and duration per pool; requests in flight per
 pool; the time to select a pool; and, with `--use-selection-core`, the
-router core's affinity pin bookings. The `pool` label is the pool's
+router core's affinity pin bookings and, with `--replica-sync`, the
+replica-sync stream's peers, frames and losses. The `pool` label is the pool's
 `<cluster>/<namespace>/<DGD name>` and `region` its region. On requests, `local`
 says whether the pool is in `--region` (`unknown` without it), which gives the
 share of requests kept in the region. Nothing is labelled from the request
@@ -160,7 +161,7 @@ for each family.
   Frontend's hosts, or each idle connection starts over with a small send
   window and a long prompt costs extra round trips.
 
-## Router core
+## Replica sync
 
 With `--use-selection-core`, the Global Frontend selects pools through an
 embedded router core: each pool is a core worker and the policy is a picker
@@ -170,6 +171,76 @@ counted, so concurrent picks see each other. Under `affinity` the core's
 session table holds each session's pin; a session books only to set, move or
 refresh its pin, and the booking is freed at once. Session IDs longer than
 256 bytes are refused with 400.
+
+With `--replica-sync`, replicas share their requests in flight and session
+pins, so every frontend sees every frontend's load and pins. They travel on the
+gRPC `ReplicaSync` stream, served on this frontend's API port (`--port`) beside
+the OpenAI routes, from startup, before any peer is known, so a replica can be
+dialed as soon as it is listed.
+
+| Flag | Meaning |
+|------|---------|
+| `--replica-sync` | Share requests in flight and session pins. Off by default. Needs `--use-selection-core`. |
+| `--global-discovery <URL>` | Global Discovery's base URL. Its `GET /routers` lists every frontend's API URL; every entry but this frontend's becomes a peer, and the list is polled every 30 s and followed as it changes. Needs `--replica-url`. |
+| `--replica-url <URL>` | This frontend's own API URL as Global Discovery lists it, so it does not dial itself. Needs `--global-discovery`. |
+| `--peer <URL>` | A static peer, as its API address `http://host:port`. Repeat the flag for each. Static peers stay whatever discovery lists. |
+
+Rules: every flag here but `--replica-url` needs `--replica-sync`; an
+`https://` peer, on the command line or in discovery's listing, is refused or
+skipped (see TLS below). A failed discovery poll keeps the last listing.
+
+Requests in flight travel on a timer, not per request: every 100 ms each
+replica publishes its count per pool, one small frame whatever the request
+rate, and a receiver counts a peer's last frame for 500 ms, so a peer that
+leaves stops counting within half a second. A peer's count can be up to one
+interval old; a replica's own is exact. Session pins travel when they change.
+The core's pin bookings are not replicated: they are freed as soon as the pin
+is committed.
+
+```bash
+cargo run -p dynamo-global-frontend -- --port 8000 --use-selection-core \
+  --router-policy affinity --region ohio \
+  --pool ohio/dynamo/blue=Qwen/Qwen3-0.6B@http://127.0.0.1:8001 \
+  --pool-relay ohio/dynamo/blue=http://127.0.0.1:50051 \
+  --replica-sync --global-discovery http://discovery.dynamo:8080 \
+  --replica-url http://10.42.0.7:8000
+```
+
+On Kubernetes, a plain Deployment behind a Service is enough: replicas need
+no stable names, since each finds the others through Global Discovery and
+serves the stream on its API port from startup. `--replica-url` is the pod's
+own routable URL, the one the pod publishes to discovery (the pod IP and
+`--port`, from the downward API), not the Service's; a Service address would
+make the frontend skip or dial a random replica. Rolling restarts need
+nothing more: a replaced pod drops out of the listing and its peers stop
+dialing it on the next poll.
+
+The gRPC contract is the `ReplicaSync` service in
+`lib/global-common/proto/replica_sync.proto`, package
+`dynamo.globalrouter.replica.v1`: a subscriber opens `SubscribeReplicaEvents`
+with its process id and `CONTRACT_MARKER` (a mismatch is refused with
+`FAILED_PRECONDITION`), receives a snapshot frame and, at once, the
+publisher's requests in flight per pool (`InflightCount`), then binding
+batches as session pins change and `InflightCount` every 100 ms. Each binding
+names its core partition (`model_name`, `routing_group`) and its publisher
+(`writer_id`), which a receiver uses to drop its own echoes. The snapshot is
+empty for now: the core does not export its live bindings, so a peer that
+joins learns a session's pin when it next changes or is refreshed. A
+subscriber that falls behind
+by more than the publisher's frame buffer loses the oldest frames (counted in
+`ReplicaSyncStats`). The dialer reconnects with a growing delay (0.5 s to
+30 s) as the Relay client does. `dynamo-global-common` generates the code
+behind its `grpc` feature; `dynamo_global_router::replica_sync` holds the
+conversions, the hub, the server routes, the dialer, and the peer-set
+reconciler (`reconcile_peers`) the frontend's discovery poll feeds.
+
+### TLS
+
+Neither the Relay client (`--pool-relay`) nor replica sync carries TLS yet:
+both are built on the workspace's `tonic` without a TLS feature, and both
+reject `https://` with a clear message. They will gain TLS together, behind
+one feature, so the frontend's outbound gRPC is either all plain or all
+encrypted; the listener's TLS is a separate concern (see Limitations).
 
 ## Limitations
 

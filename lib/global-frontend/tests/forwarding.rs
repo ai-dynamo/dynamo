@@ -185,7 +185,7 @@ async fn frontend_with_selection_core_policy(
     in_flight: Arc<InFlightTracker>,
 ) -> GlobalFrontend {
     let selection_core = Arc::new(
-        SelectionCoreSelector::new(policy, in_flight.clone())
+        SelectionCoreSelector::new(policy, in_flight.clone(), None)
             .await
             .unwrap(),
     );
@@ -811,4 +811,82 @@ async fn affinity_on_the_core_counts_pin_bookings() {
         sample(metrics, bookings, &[]) == Some(2.0)
     })
     .await;
+}
+
+#[tokio::test]
+async fn replica_sync_is_served_on_the_api_port() {
+    use dynamo_global_router::GrpcReplicaSync;
+    use dynamo_global_router::replica_sync::CONTRACT_MARKER;
+    use dynamo_global_router::replica_sync::proto::SubscribeRequest;
+    use dynamo_global_router::replica_sync::proto::replica_frame::Frame;
+    use dynamo_global_router::replica_sync::proto::replica_sync_client::ReplicaSyncClient;
+
+    let echo = echo_pool_frontend().await;
+    let blue = pool("blue", MODEL, &echo.url);
+    let in_flight = Arc::new(InFlightTracker::new());
+    let selection_core = SelectionCoreSelector::new(
+        SelectionCorePolicy::RoundRobin,
+        in_flight.clone(),
+        Some(GrpcReplicaSync::default()),
+    )
+    .await
+    .unwrap();
+    let selection_core = Arc::new(selection_core);
+    let routes = selection_core.replica_sync_routes().expect("gRPC routes");
+    let (sender, receiver) = watch::channel(Arc::new(PoolSnapshot::new(vec![blue])));
+    let (first_snapshot, reconcile) =
+        selection_core.reconcile_catalog(receiver.clone(), CancellationToken::new());
+    tokio::spawn(reconcile);
+    first_snapshot
+        .await
+        .expect("the core took the first snapshot");
+    let metrics = Metrics::new(Some(REGION.to_owned()), in_flight.clone());
+    let app = dynamo_global_frontend::app_with_selection_core(
+        receiver,
+        selection_core.clone(),
+        in_flight,
+        client(),
+        metrics,
+    );
+    let global = serve_app(app.merge(routes), sender).await;
+
+    // HTTP/1 still answers, including the fallback for unknown routes.
+    let response = client()
+        .get(global.server.url.join("nowhere").unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let response = post(
+        &global.server.url,
+        "v1/chat/completions",
+        &chat(MODEL, "hi", false),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // And a replica subscribes over h2c on the same port.
+    let channel = tonic::transport::Endpoint::from_shared(global.server.url.to_string())
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut client = ReplicaSyncClient::new(channel);
+    let subscribe = |marker| SubscribeRequest {
+        subscriber_id: 1,
+        routing_group: String::new(),
+        contract_marker: marker,
+    };
+    let rejected = client.subscribe_replica_events(subscribe(0)).await.err();
+    assert_eq!(
+        rejected.map(|status| status.code()),
+        Some(tonic::Code::FailedPrecondition)
+    );
+    let mut frames = client
+        .subscribe_replica_events(subscribe(CONTRACT_MARKER))
+        .await
+        .unwrap()
+        .into_inner();
+    let first = frames.message().await.unwrap().unwrap();
+    assert!(matches!(first.frame, Some(Frame::Snapshot(_))), "{first:?}");
 }
