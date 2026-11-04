@@ -205,11 +205,10 @@ fn token_ids_input(
     }))
 }
 
-// `/v1/chat/completions`, `/v1/responses`, and `/v1/completions` forward
-// omitted max_tokens as None. Derive the text default from the context window.
-// For media, only TensorRT-LLM knows the prompt length after expansion, so leave
-// it unset. Remove this fallback when NVIDIA/TensorRT-LLM#16549 lands;
-// context_length remains necessary for LlmRegistration.
+// Derive omitted text max_tokens from the context window. For media, only
+// TensorRT-LLM knows the prompt length after expansion, so leave it unset.
+// Remove this fallback when NVIDIA/TensorRT-LLM#16549 lands; context_length
+// remains necessary for LlmRegistration.
 fn max_tokens(
     request: &PreprocessedRequest,
     limits: Option<ModelLimits>,

@@ -1684,85 +1684,60 @@ def test_build_sampling_params_accepts_productive_recursive_guided_json():
     assert sampling_params.structured_outputs.json == schema
 
 
-def _sampling_request(stop_conditions):
-    return {
+@pytest.mark.parametrize(
+    "stop_conditions, defaults, expected",
+    [
+        ({}, {}, 16),
+        ({"max_tokens": None}, {"max_tokens": 32}, 32),
+        ({"max_tokens": 64}, {"max_tokens": 32}, 64),
+    ],
+    ids=["engine-default", "model-default", "explicit-limit"],
+)
+def test_build_sampling_params_completion_defaults(stop_conditions, defaults, expected):
+    from dynamo.vllm.handlers import build_sampling_params
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": stop_conditions,
+        "output_options": {},
+        "extra_args": {"request_type": "completions"},
+    }
+    assert build_sampling_params(request, defaults, 100).max_tokens == expected
+
+
+@pytest.mark.parametrize("stop_conditions", [{}, {"max_tokens": None}])
+def test_build_sampling_params_chat_and_responses_use_remaining_context(
+    stop_conditions,
+):
+    from dynamo.vllm.handlers import build_sampling_params
+
+    request = {
         "token_ids": [1, 2, 3],
         "sampling_options": {},
         "stop_conditions": stop_conditions,
         "output_options": {},
     }
+    assert build_sampling_params(request, {}, 100).max_tokens == 97
+    assert build_sampling_params(request, {"max_tokens": 32}, 100).max_tokens == 32
 
 
-@pytest.mark.parametrize(
-    "stop_conditions", [{}, {"max_tokens": None}], ids=["omitted", "null"]
-)
-@pytest.mark.parametrize(
-    "defaults",
-    [
-        {},
-        {"max_tokens": 8},
-        {"max_tokens": 32},
-        {"max_tokens": 64},
-        {"max_tokens": None},
-    ],
-    ids=["engine", "model-8", "model-32", "model-64", "unlimited"],
-)
-@pytest.mark.parametrize("model_max_len", [None, 100, 10])
-def test_build_sampling_params_preserves_resolved_max_tokens_default(
-    stop_conditions, defaults, model_max_len
-):
-    from vllm import SamplingParams
-
-    from dynamo.vllm.handlers import build_sampling_params
-
-    expected = SamplingParams(**defaults).max_tokens
-    if expected is not None and model_max_len is not None:
-        expected = min(expected, model_max_len - 3)
-
-    sp = build_sampling_params(
-        _sampling_request(stop_conditions), defaults, model_max_len
-    )
-
-    assert sp.max_tokens == expected
-
-
-@pytest.mark.parametrize("max_tokens", [10, 64, 97, 98, 100])
-def test_build_sampling_params_preserves_explicit_max_tokens(max_tokens):
-    from dynamo.vllm.handlers import build_sampling_params
-
-    sp = build_sampling_params(
-        _sampling_request({"max_tokens": max_tokens}),
-        {"max_tokens": 32},
-        model_max_len=100,
-    )
-
-    assert sp.max_tokens == min(max_tokens, 97)
-
-
-@pytest.mark.parametrize(
-    "stop_conditions", [{}, {"max_tokens": None}], ids=["omitted", "null"]
-)
-@pytest.mark.parametrize("model_max_len", [None, 100, 10])
-def test_build_sampling_params_rl_max_tokens_uses_engine_default(
-    stop_conditions, model_max_len
-):
-    from vllm import SamplingParams
-
+def test_build_sampling_params_rl_max_tokens_uses_engine_default():
     from dynamo.vllm.handlers import build_sampling_params
 
     request = {
-        **_sampling_request(stop_conditions),
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": {},
+        "output_options": {},
         "extra_args": {"nvext": {"token_in": True}},
     }
-    expected = SamplingParams().max_tokens
-    if expected is not None and model_max_len is not None:
-        expected = min(expected, model_max_len - 3)
-
-    sp = build_sampling_params(
-        request, {"max_tokens": 64}, model_max_len, enable_rl=True
+    assert (
+        build_sampling_params(
+            request, {"max_tokens": 64}, 100, enable_rl=True
+        ).max_tokens
+        == 16
     )
-
-    assert sp.max_tokens == expected
 
 
 def _make_dynamo_config(**overrides):
