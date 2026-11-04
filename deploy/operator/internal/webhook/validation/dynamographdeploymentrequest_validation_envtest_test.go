@@ -889,7 +889,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			gpuDiscovery: true,
 			discovered:   discoveredH200,
 			check: func(t *testing.T, result *unstructured.Unstructured) {
-				if got := v1beta2String(t, result, "spec", "aisimulate", "inputOverrides", "traffic", "source", "format"); got != "mooncake" {
+				if got := v1beta2String(t, result, "spec", "aisim", "inputOverrides", "traffic", "source", "format"); got != "mooncake" {
 					t.Fatalf("inputOverrides.traffic.source.format = %q, want the override kept", got)
 				}
 			},

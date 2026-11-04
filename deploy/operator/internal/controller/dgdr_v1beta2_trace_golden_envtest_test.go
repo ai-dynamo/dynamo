@@ -47,7 +47,7 @@ const liveRetuneShardRequestSpec = `{
     "sla": {"ttftMs": 500.0, "itlMs": 30.0}
   },
   "recommendation": {"maxCandidates": 8},
-  "aisimulate": {
+  "aisim": {
     "inputOverrides": {
       "engine": {
         "mode": "aggregated",
