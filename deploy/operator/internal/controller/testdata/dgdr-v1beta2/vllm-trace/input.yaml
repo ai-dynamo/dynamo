@@ -25,7 +25,7 @@ spec:
     mode: Optimize
     metric: ThroughputPerGPU
     sla: {}
-  aisimulate:
+  aisim:
     inputOverrides:
       engine:
         mode: aggregated

@@ -613,7 +613,7 @@ fn beam_turn_structural_tag(
 /// (the Beam turn-grammar decision runs on chat-like requests, not only the OpenAI
 /// chat request); `get_guided_json` is not consulted because it also derives a schema
 /// from `response_format`.
-fn has_explicit_guided_decoding_ext<R: CommonExtProvider>(request: &R) -> bool {
+pub(super) fn has_explicit_guided_decoding_ext<R: CommonExtProvider>(request: &R) -> bool {
     request
         .common_ext()
         .is_some_and(|common| common.guided_json.is_some() || common.guided_grammar.is_some())
