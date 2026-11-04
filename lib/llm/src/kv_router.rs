@@ -1022,6 +1022,23 @@ impl KvRouter {
         self.selection.scheduler().policy_control()
     }
 
+    pub(crate) async fn query_local_gpu_direct_prefix(
+        &self,
+        query: &dynamo_kv_router::services::selection::TransferSourceQuery<'_>,
+    ) -> Result<Option<usize>, dynamo_kv_router::services::selection::SelectionError> {
+        self.selection.query_local_gpu_direct_prefix(query).await
+    }
+
+    pub(crate) async fn query_transfer_sources(
+        &self,
+        query: dynamo_kv_router::services::selection::TransferSourceQuery<'_>,
+    ) -> Result<
+        Option<dynamo_kv_router::services::selection::TransferSourceResult>,
+        dynamo_kv_router::services::selection::SelectionError,
+    > {
+        self.selection.query_transfer_sources(query).await
+    }
+
     pub fn required_worker_inputs(
         &self,
     ) -> dynamo_kv_router::plugins::worker_selection::WorkerInputs {

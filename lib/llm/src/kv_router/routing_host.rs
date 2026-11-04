@@ -56,6 +56,7 @@ mod kv;
 mod kv_selection;
 mod occupancy;
 mod request_guard;
+mod transfer;
 
 pub(crate) use builder::hosted_picker;
 pub use builder::{LlmDispatch, MultimodalCache, RoutingHostBuilder};
@@ -697,13 +698,17 @@ impl RoutingHost {
     pub(crate) async fn select_and_dispatch_prefill<M, F>(
         &self,
         request: SingleIn<PreprocessedRequest>,
+        transfer_source: Option<&RoutingHost>,
         prepare: F,
     ) -> Result<PrefillDispatch<M>, Error>
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
         match &self.policy {
-            RoutingPolicy::Kv(_) => self.select_and_dispatch_kv_prefill(request, prepare).await,
+            RoutingPolicy::Kv(_) => {
+                self.select_and_dispatch_kv_prefill(request, transfer_source, prepare)
+                    .await
+            }
             RoutingPolicy::Hosted(_)
             | RoutingPolicy::Direct
             | RoutingPolicy::DeviceAwareWeighted => {

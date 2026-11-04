@@ -613,12 +613,13 @@ impl
         let endpoint_id = &binding.endpoint_id;
         let mut prefill_completion = None;
         let prefill_result: Result<(PrefillOutcome, Option<RoutingConstraints>)> = async {
+            let decode_host = self.decode_routing_host.get().map(Arc::as_ref);
             let PrefillDispatch {
                 metadata: prepared,
                 stream: prefill_stream,
                 booking,
             } = router
-                .select_and_dispatch_prefill(prefill_context, |request, target| {
+                .select_and_dispatch_prefill(prefill_context, decode_host, |request, target| {
                     let prepared = self.prepare_prefill_dispatch(request, target, endpoint_id)?;
                     let prefill_supports_cancellation =
                         self.model_manager.worker_supports_runtime_capability(

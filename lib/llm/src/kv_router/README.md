@@ -25,9 +25,11 @@ flowchart LR
 `RoutingHost` is the pipeline's terminal engine. `EncoderRouter` and `PrefillRouter` are
 operators in front of it, not `RoutingHost`s. `PrefillRouter` holds a separate `RoutingHost` for
 the prefill worker set (built in `prefill_router/activation.rs`) and sends the prefill hop
-through it. It also keeps a handle to the decode `RoutingHost`, which it uses only to preview
-decode for conditional disaggregation. `EncoderRouter` sends the encode hop through its own
-round-robin `PushRouter`.
+through it. Its decode `RoutingHost` handle supports conditional-disaggregation previews and
+optional decode-to-prefill prefix hints after prefill admission. These independently default-off
+hints require compatible inventory and calibrated costs; donor lookup never books decode work.
+`routing_host/transfer.rs` owns the bounded lookup and hint attachment without changing target
+booking or cancellation ownership. `EncoderRouter` uses its own round-robin `PushRouter`.
 
 A `RoutingHost` serves one worker set. What it holds (composition, not call order):
 

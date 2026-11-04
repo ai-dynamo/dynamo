@@ -644,12 +644,13 @@ impl RoutingHost {
     pub(super) async fn select_and_dispatch_kv_prefill<M, F>(
         &self,
         mut request: SingleIn<PreprocessedRequest>,
+        transfer_source: Option<&RoutingHost>,
         prepare: F,
     ) -> Result<PrefillDispatch<M>, Error>
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
-        let plan = self
+        let mut plan = self
             .plan_kv_route(
                 &request,
                 RequestPhase::Prefill,
@@ -664,6 +665,10 @@ impl RoutingHost {
                 return Err(error);
             }
         };
+        if request.get_annotation_value("query_instance_id").is_none() {
+            self.enrich_prefill_transfer_hint(&request, &mut plan.selection, transfer_source)
+                .await;
+        }
         let booking = plan.attempt_release();
         let stream = self.dispatch_kv_plan(request, plan).await?;
         Ok(PrefillDispatch {
