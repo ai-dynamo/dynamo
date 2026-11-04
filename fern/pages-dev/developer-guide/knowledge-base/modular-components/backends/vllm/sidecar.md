@@ -28,7 +28,7 @@ which carries the latest gRPC server updates: [`vllm/vllm-openai:nightly`](https
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
-| Kubernetes multinode tensor parallelism (TP) and hybrid load balancing (hybrid-LB) data parallelism (DP) | Experimental |
+| Kubernetes multinode tensor parallelism (TP) and hybrid load balancing (hybrid-LB) data parallelism (DP) | Yes |
 
 ## Launch Locally
 

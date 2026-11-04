@@ -28,7 +28,7 @@ which carries the latest gRPC server updates: [`lmsysorg/sglang:dev`](https://hu
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
-| Kubernetes multinode tensor parallelism (TP) and attention data parallelism (attention-DP) | Experimental |
+| Kubernetes multinode tensor parallelism (TP) and attention data parallelism (attention-DP) | Yes |
 | Image, video, and audio input | Yes; disaggregated serving is untested |
 
 The sidecar sends a media kind only when the SGLang gRPC server lists it in

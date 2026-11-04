@@ -33,7 +33,7 @@ native KVCM2 event streaming and OpenEngine routing load support.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
-| Kubernetes multinode tensor parallelism (TP) and attention data parallelism (DP) | Experimental |
+| Kubernetes multinode tensor parallelism (TP) and attention data parallelism (DP) | Yes |
 
 ## Launch Locally
 
