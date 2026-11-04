@@ -132,7 +132,7 @@ if ! wait_for_ready "http://localhost:${PREFILL_SYSTEM_PORT}/health" 45 \
     PREFILL_RC=0
     wait "$PREFILL_PID" || PREFILL_RC=$?
     echo "Prefill worker exited with code $PREFILL_RC before becoming ready" >&2
-    exit "$PREFILL_RC"
+    dynamo_reap_and_exit "$PREFILL_RC"
 fi
 
 # run decode worker with metrics on port 8082
