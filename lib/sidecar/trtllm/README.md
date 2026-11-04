@@ -30,8 +30,8 @@ supported, even when `--context-length` is supplied.
 > [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/tensorrt-llm/containers/release/-).
 > The standalone launch and deployment examples use
 > `nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610290007`, which includes
-> image URL passthrough, native KVCM2 event streaming, and OpenEngine routing load support.
-> The nightly CI job tests image passthrough against the latest regular upstream nightly;
+> image/video URL passthrough, native KVCM2 event streaming, and OpenEngine routing load support.
+> The nightly CI job tests image, video, and audio passthrough against the latest regular upstream nightly;
 > it also supports manual dispatch. The examples below stay pinned to the validated version.
 
 ## Support matrix
@@ -41,9 +41,11 @@ supported, even when `--context-length` is supplied.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
-| Kubernetes multinode tensor parallelism (TP) and attention data parallelism (DP) | Experimental |
+| Kubernetes multinode tensor parallelism (TP) and attention data parallelism (DP) | Yes |
 
 For child-agent context affinity, enable frontend session affinity and TensorRT-LLM conversation affinity. Set `TRTLLM_SUBAGENT_AFFINITY_AUTH_KEY` on the prefill sidecar and set `internal_request_auth_key` to the same private value in the OpenEngine server YAML configuration. The sidecar requires the server to advertise signed affinity support. It sends the child's own conversation ID and a signed parent hint for context requests; decode requests retain the child's identity. The gateway must authorize client parent-session headers before they reach the router.
+
+See [support notes](../SUPPORT_NOTES.md#tensorrt-llm) for feature restrictions and operational limits.
 
 ## Run locally
 
@@ -64,6 +66,45 @@ curl -s localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
 ```
+
+### Audio (Whisper)
+
+Audio requires a runtime containing upstream audio support, such as the validated
+`nvcr.io/nvidia/tensorrt-llm/release:1.4.0rc3.dev202610300406`; the older image/video
+example pin above predates audio. The nightly audio lane runs real Whisper-tiny
+inference and checks the transcript and authoritative token usage. Full frontend
+HTTP CI is tracked separately from that adapter-to-engine test.
+
+Whisper-tiny has no chat template and accepts text task prefixes rather than
+token-ID input. Supply `--custom-jinja-template` to the sidecar. An empty template
+selects the checkpoint's default transcription task; a template may instead emit
+a complete language/task prefix, for example
+`<|startoftranscript|><|fr|><|translate|><|notimestamps|>`.
+
+Run these processes in separate terminals with the appropriate Dynamo and
+TensorRT-LLM environments, using `DYN_DISCOVERY_BACKEND=file` on a single host:
+
+```bash
+python3 -m dynamo.frontend --migration-limit 0
+
+# In the audio-capable TensorRT-LLM environment, from the repository root:
+python3 -m tensorrt_llm.commands.serve openai/whisper-tiny \
+  --grpc --grpc-protocol openengine --host 127.0.0.1 --port 30001 \
+  --max_seq_len 1500 --extra_llm_api_options lib/sidecar/trtllm/ci/whisper.yaml
+
+# In the Dynamo environment:
+WHISPER_TEMPLATE=$(mktemp --suffix=.jinja)
+dynamo-trtllm-sidecar --grpc-endpoint 127.0.0.1:30001 \
+  --model-path openai/whisper-tiny --custom-jinja-template "$WHISPER_TEMPLATE"
+```
+
+Send audio using a chat content item with `"type":"audio_url"` and
+`"audio_url":{"url":"https://.../speech.wav"}` (or a data URI).
+For text-input models, **keep frontend `--migration-limit 0`**: retry migration
+currently extends token IDs, while these engines receive the original formatted
+text, which can restart a partially delivered transcript. Worker-advertised
+migration restrictions need separate frontend support. The aggregated launcher
+preserves explicit engine settings, including `guided_decoding_backend: null`.
 
 ## Deploy on Kubernetes
 

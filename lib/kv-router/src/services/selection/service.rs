@@ -8,8 +8,8 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::WorkerSelectionPolicyFactory;
 use crate::config::KvRouterConfig;
+use crate::plugins::worker_selection::WorkerSelectionPolicyFactory;
 use crate::protocols::WorkerId;
 use crate::scheduling::PotentialLoad;
 use crate::services::common::replica_sync::{
@@ -416,7 +416,7 @@ impl SelectionService {
                     cancel_token.clone(),
                     SelectionCacheConfig::default(),
                     std::sync::Arc::new(|config, role, _| {
-                        crate::WorkerSelectionPolicy::reference(
+                        crate::plugins::worker_selection::WorkerSelectionPolicy::reference(
                             config.clone(),
                             role.default_selector_label(),
                         )
@@ -632,7 +632,10 @@ mod tests {
 
     fn test_registry() -> RouterPluginRegistry {
         RouterPluginRegistry::default().with_default_factory(Arc::new(|config, role, _| {
-            crate::WorkerSelectionPolicy::reference(config.clone(), role.default_selector_label())
+            crate::plugins::worker_selection::WorkerSelectionPolicy::reference(
+                config.clone(),
+                role.default_selector_label(),
+            )
         }))
     }
 
