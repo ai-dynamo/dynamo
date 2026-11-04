@@ -281,6 +281,23 @@ def test_shared_cache_type_consumer(
     )
 
 
+def test_session_prefix_index_config_parity(
+    request, predownload_tokenizers, tmp_path, monkeypatch
+):
+    """Compare FE/EPP session-prefix input validation without xfail markers."""
+    from tests.router.common import run_session_prefix_index_config_parity
+    from tests.router.epp_parity import EppFrontendParityStack
+
+    _ = predownload_tokenizers
+    run_session_prefix_index_config_parity(
+        request,
+        tmp_path,
+        monkeypatch,
+        ROUTER_MODEL_NAME,
+        EppFrontendParityStack,
+    )
+
+
 @pytest.mark.parametrize(
     "worker_block_size,frontend_cli_block_size",
     [

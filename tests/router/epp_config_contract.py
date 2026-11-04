@@ -53,7 +53,7 @@ import logging
 import re
 import time
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
@@ -250,6 +250,13 @@ TRACKING_KEY_SIZE_DIAGNOSTIC = (
     "raw bytes; found 31"
 )
 TRACKING_KEY_SIZE_DEADLINE_S = 60.0
+SESSION_PREFIX_INDEX_ROW = "enable_session_prefix_index"
+SESSION_PREFIX_INDEX_ENV = "DYN_ENABLE_SESSION_PREFIX_INDEX"
+SESSION_PREFIX_INDEX_DIAGNOSTIC = (
+    "enable_session_prefix_index requires use_kv_events=true"
+)
+SESSION_PREFIX_INDEX_DEADLINE_S = 60.0
+SESSION_PREFIX_INDEX_FIELDS = (SESSION_PREFIX_INDEX_ROW,)
 TRACKING_RUNTIME_FIELDS = ("router_tracking_hash", "router_tracking_key_id")
 APPROXIMATE_CONFIGURED_METRIC = "router_approximate_cache_configured_policy"
 APPROXIMATE_EFFECTIVE_METRIC = "router_approximate_cache_effective_policy"
@@ -548,6 +555,15 @@ class ConditionalJsonConfigMismatch(FrontendEppConfigMismatch):
 
 class ActiveDecodeThresholdConfigMismatch(FrontendEppConfigMismatch):
     """Measured FE configured 0.25 decode threshold vs EPP monitor None."""
+
+
+class SessionPrefixIndexConfigMismatch(FrontendEppConfigMismatch):
+    """FE rejected session-prefix validation while EPP accepted and routed.
+
+    Scope is owned input/config validation only: env/YAML parse, the exact
+    ``enable_session_prefix_index requires use_kv_events=true`` diagnostic,
+    and plain-chat token/route acceptance. Not lineage, scoring, or affinity.
+    """
 
 
 @dataclass(frozen=True)
@@ -2871,6 +2887,7 @@ class FrontendRouterSnapshot:
     router_kwargs: Mapping[str, Any]
     kv_json: Mapping[str, Any]
     router_fields: tuple[str, ...]
+    kv_router_kwargs: Mapping[str, Any]
 
 
 def explicit_manifest_env_names() -> tuple[str, ...]:
@@ -3259,6 +3276,7 @@ def _frontend_router_snapshot(
         dict(config.router_kwargs()),
         json.loads(router.kv_router_config.to_json()),
         tuple(_ROUTER_FIELDS),
+        dict(config.kv_router_kwargs()),
     )
 
 
@@ -3322,16 +3340,24 @@ def _assert_snapshots_match(
             "router_kwargs changed "
             f"{dict(baseline.router_kwargs)} -> {dict(changed.router_kwargs)}"
         )
+    if dict(baseline.kv_router_kwargs) != dict(changed.kv_router_kwargs):
+        raise AssertionError(
+            "kv_router_kwargs changed "
+            f"{dict(baseline.kv_router_kwargs)} -> "
+            f"{dict(changed.kv_router_kwargs)}"
+        )
     if dict(baseline.kv_json) != dict(changed.kv_json):
         raise AssertionError(
             "kv_router_config.to_json changed "
             f"{dict(baseline.kv_json)} -> {dict(changed.kv_json)}"
         )
     LOGGER.info(
-        "ignored-compat snapshots baseline_json=%r changed_json=%r kwargs=%r",
+        "ignored-compat snapshots baseline_json=%r changed_json=%r kwargs=%r "
+        "kv_kwargs=%r",
         dict(baseline.kv_json),
         dict(changed.kv_json),
         dict(changed.router_kwargs),
+        dict(changed.kv_router_kwargs),
     )
 
 
@@ -4232,6 +4258,57 @@ def shared_cache_type_consumer_env(profile_name: str) -> dict[str, str | None]:
     if profile_name == SHARED_CACHE_TYPE_HICACHE:
         env[SHARED_CACHE_TYPE_ENV] = SHARED_CACHE_TYPE_HICACHE
     return env
+
+
+def session_prefix_index_consumer_env(
+    *,
+    session_prefix: str | None,
+    use_kv_events: bool,
+    policy_config: str | None = None,
+) -> dict[str, str | None]:
+    """Owned FE/EPP env for session-prefix input/config validation controls."""
+    return {
+        SESSION_PREFIX_INDEX_ENV: session_prefix,
+        "DYN_ROUTER_USE_KV_EVENTS": "true" if use_kv_events else "false",
+        "DYN_USE_KV_EVENTS": None,
+        "DYN_USE_REMOTE_INDEXER": "false",
+        "DYN_ROUTER_POLICY_CONFIG": policy_config,
+        "DYN_LOG": "info",
+        "RUST_LOG": "info",
+        "DYN_SDK_DISABLE_ANSI_LOGGING": "1",
+        "NO_COLOR": "1",
+    }
+
+
+def assert_frontend_session_prefix_index_false(*, profile: str) -> None:
+    """Require FE config attrs and real kv_router_kwargs false after construction."""
+    # KvRouterConfigBase is frontend-owned; keep collection-safe by importing
+    # only inside this selected-test helper.
+    from dynamo.common.configuration.groups.kv_router_args import KvRouterConfigBase
+
+    field = next(
+        item
+        for item in fields(KvRouterConfigBase)
+        if item.name == SESSION_PREFIX_INDEX_ROW
+    )
+    if field.default is not False:
+        raise AssertionError(
+            f"{profile} authoritative {SESSION_PREFIX_INDEX_ROW} default "
+            f"{field.default!r} is not False"
+        )
+    snapshot = _frontend_router_snapshot()
+    attr = snapshot.config_attrs.get(SESSION_PREFIX_INDEX_ROW)
+    if attr is not False:
+        raise AssertionError(
+            f"{profile} FE config attr {SESSION_PREFIX_INDEX_ROW}={attr!r} "
+            "is not False"
+        )
+    kwargs_value = snapshot.kv_router_kwargs.get(SESSION_PREFIX_INDEX_ROW)
+    if kwargs_value is not False:
+        raise AssertionError(
+            f"{profile} FE kv_router_kwargs {SESSION_PREFIX_INDEX_ROW}="
+            f"{kwargs_value!r} is not False"
+        )
 
 
 def _core_metric_name(suffix: str) -> str:

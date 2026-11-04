@@ -7,9 +7,11 @@ import json
 import logging
 import os
 import random
+import re
 import threading
 import time
 import uuid
+import warnings
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -5083,6 +5085,481 @@ def run_shared_cache_type_consumer(
                 generation.worker_id,
                 generation.dp_rank,
             )
+
+
+def run_session_prefix_index_config_parity(
+    request,
+    tmp_path,
+    monkeypatch,
+    model_name: str,
+    stack_cls,
+) -> None:
+    """Owned FE/EPP session-prefix input/config validation parity candidate.
+
+    Controls cover omitted/false success, enabled+kv-events success, YAML
+    validation on each arm, and env-true/kv-false terminal outcomes. Raises
+    SessionPrefixIndexConfigMismatch only for FE exact diagnostic rejection
+    with EPP acceptance and routes. No xfail in this candidate.
+    """
+    # epp_parity pulls gRPC tooling; keep selected-test-only like sibling runners.
+    from tests.router.epp_config_contract import (
+        ANSI_RE,
+        SESSION_PREFIX_INDEX_DEADLINE_S,
+        SESSION_PREFIX_INDEX_DIAGNOSTIC,
+        SESSION_PREFIX_INDEX_ENV,
+        SESSION_PREFIX_INDEX_FIELDS,
+        SESSION_PREFIX_INDEX_ROW,
+        SessionPrefixIndexConfigMismatch,
+        _plain_chat_token_case,
+        assert_frontend_session_prefix_index_false,
+        clear_known_manifest_router_envs,
+        frontend_native_projection,
+        session_prefix_index_consumer_env,
+    )
+    from tests.router.epp_parity import (
+        EPP_GRPC_PORT,
+        catalog_generate_instances,
+        collect_frontend_generation_route,
+    )
+    from tests.router.router_process import (
+        epp_loopback_tls_ready,
+        observe_owned_initialization_diagnostic,
+    )
+    from tests.utils.router_logs import completed_utf8_log_prefix
+
+    if SESSION_PREFIX_INDEX_DIAGNOSTIC != (
+        "enable_session_prefix_index requires use_kv_events=true"
+    ):
+        raise AssertionError(
+            "session-prefix diagnostic is not the source-derived validation message"
+        )
+
+    def _apply_consumer_env(consumer_env: Mapping[str, str | None]) -> None:
+        clear_known_manifest_router_envs(monkeypatch)
+        monkeypatch.setenv("NO_COLOR", "1")
+        monkeypatch.setenv("RUST_LOG", "info")
+        monkeypatch.setenv("DYN_LOG", "info")
+        for name, value in consumer_env.items():
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+
+    def _unique_generate_worker(stack) -> tuple[int, Mapping[str, Any]]:
+        if stack.kube_api is None:
+            raise AssertionError("owned kube_api was not saved")
+        if stack.mockers is None:
+            raise AssertionError("owned mocker endpoint was not saved")
+        catalog = catalog_generate_instances(
+            stack.kube_api.listed_metadata(),
+            namespace=stack.mockers.namespace,
+            component="mocker",
+        )
+        if len(catalog) != 1:
+            raise AssertionError(
+                f"expected one generate worker for namespace="
+                f"{stack.mockers.namespace!r}, got {sorted(catalog)}"
+            )
+        worker_id, record = next(iter(catalog.items()))
+        owner_uid = record.get("owner_uid")
+        if not isinstance(owner_uid, str) or not owner_uid:
+            raise AssertionError(
+                f"generate worker {worker_id} missing owner_uid: {record!r}"
+            )
+        expected_uid = stack.identity.pod_uid
+        if owner_uid != expected_uid:
+            logger.error(
+                "generate worker owner_uid mismatch actual=%s expected=%s "
+                "worker=%s",
+                owner_uid,
+                expected_uid,
+                worker_id,
+            )
+            raise AssertionError(
+                f"generate worker {worker_id} owner_uid {owner_uid!r} != "
+                f"stack identity pod_uid {expected_uid!r}"
+            )
+        return worker_id, record
+
+    def _assert_routes_match_catalog(
+        *,
+        worker_id: int,
+        generation,
+        epp_route,
+    ) -> None:
+        expected = (worker_id, 0)
+        if (generation.worker_id, generation.dp_rank) != expected:
+            raise AssertionError(
+                "frontend generation worker/rank "
+                f"{generation.worker_id}/{generation.dp_rank} != catalog {expected}"
+            )
+        if (epp_route.worker_id, epp_route.dp_rank) != expected:
+            raise AssertionError(
+                "EPP route worker/rank "
+                f"{epp_route.worker_id}/{epp_route.dp_rank} != catalog {expected}"
+            )
+
+    def _success_plain_chat_routes(
+        *,
+        consumer_env: Mapping[str, str | None],
+        log_label: str,
+    ) -> dict[str, Any]:
+        cases = _plain_chat_token_case(model_name)
+        case = cases[0]
+        with stack_cls(
+            request,
+            tmp_path,
+            model_name,
+            consumer_env=consumer_env,
+            log_label=log_label,
+        ) as stack:
+            run_frontend_epp_token_parity(
+                stack, cases, include_negative_control=False
+            )
+            fe_tokens = stack.collect_frontend_tokens(
+                case.payload,
+                path=case.path,
+                request_id=unique_request_id(f"fe-ref-{log_label}-plain_chat"),
+            )
+            generation = collect_frontend_generation_route(
+                stack.frontend_url,
+                case.payload,
+                path=case.path,
+                request_id=unique_request_id(f"fe-gen-{log_label}-plain_chat"),
+            )
+            if stack.driver is None:
+                raise AssertionError("owned ext_proc driver was not saved")
+            epp_route = stack.driver.collect_route_observation(
+                case.payload,
+                path=case.path,
+                request_id=unique_request_id(f"epp-route-{log_label}-plain_chat"),
+            )
+            worker_id, record = _unique_generate_worker(stack)
+            _assert_routes_match_catalog(
+                worker_id=worker_id,
+                generation=generation,
+                epp_route=epp_route,
+            )
+            assert_ordered_token_ids_match(
+                fe_tokens,
+                epp_route.token_ids,
+                left_label="frontend.nvext.token_ids",
+                right_label="epp.route.token_ids",
+                case_name=f"{log_label}-plain_chat",
+            )
+            frontend_proc = stack.frontend_process
+            epp_proc = stack.epp_process
+            if (
+                frontend_proc is None
+                or frontend_proc.proc is None
+                or epp_proc is None
+                or epp_proc.proc is None
+            ):
+                raise AssertionError("owned frontend or EPP process was not saved")
+            if frontend_proc.proc.poll() is not None or epp_proc.proc.poll() is not None:
+                raise AssertionError("owned frontend or EPP process is not live")
+            if stack.kube_api.failures:
+                raise AssertionError(
+                    "Loopback Kubernetes API recorded unexpected requests: "
+                    + "; ".join(stack.kube_api.failures)
+                )
+            evidence = {
+                "log_label": log_label,
+                "frontend_pid": frontend_proc.proc.pid,
+                "epp_pid": epp_proc.proc.pid,
+                "worker_id": worker_id,
+                "owner_uid": record["owner_uid"],
+                "dp_rank": 0,
+                "fe_tokens": list(fe_tokens),
+            }
+            logger.info(
+                "session-prefix success label=%s session=%s kv_events=%s "
+                "fe_pid=%s epp_pid=%s worker=%s owner=%s tokens=%s",
+                log_label,
+                consumer_env.get(SESSION_PREFIX_INDEX_ENV),
+                consumer_env.get("DYN_ROUTER_USE_KV_EVENTS"),
+                evidence["frontend_pid"],
+                evidence["epp_pid"],
+                worker_id,
+                record["owner_uid"],
+                len(fe_tokens),
+            )
+            return evidence
+
+    def _observe_arm_diagnostic(
+        *,
+        arm: str,
+        consumer_env: Mapping[str, str | None],
+        log_label: str,
+    ) -> tuple[int, Path]:
+        include_frontend = arm == "frontend"
+        include_epp = arm == "epp"
+        with stack_cls(
+            request,
+            tmp_path,
+            model_name,
+            consumer_env=consumer_env,
+            include_frontend=include_frontend,
+            include_epp=include_epp,
+            require_readiness=False,
+            log_label=log_label,
+        ) as stack:
+            process = (
+                stack.frontend_process if include_frontend else stack.epp_process
+            )
+            pid, log = observe_owned_initialization_diagnostic(
+                process,
+                diagnostic=SESSION_PREFIX_INDEX_DIAGNOSTIC,
+                deadline_s=SESSION_PREFIX_INDEX_DEADLINE_S,
+                node_name=request.node.name,
+                label=f"{arm}_process",
+            )
+        logger.info(
+            "session-prefix diagnostic arm=%s pid=%s log=%s policy=%s",
+            arm,
+            pid,
+            log,
+            consumer_env.get("DYN_ROUTER_POLICY_CONFIG"),
+        )
+        return pid, log
+
+    def _remaining_budget(deadline: float, *, label: str) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError(
+                f"{label} exhausted the owned {SESSION_PREFIX_INDEX_DEADLINE_S}s "
+                "deadline before completion"
+            )
+        return remaining
+
+    def _classify_epp_env_conflict_outcome(
+        *,
+        consumer_env: Mapping[str, str | None],
+        log_label: str,
+        fe_token_reference: list[int],
+    ) -> tuple[str, dict[str, Any]]:
+        boundary = re.compile(
+            re.escape(SESSION_PREFIX_INDEX_DIAGNOSTIC) + r"(?![0-9A-Za-z.])"
+        )
+        case = _plain_chat_token_case(model_name)[0]
+        with stack_cls(
+            request,
+            tmp_path,
+            model_name,
+            consumer_env=consumer_env,
+            include_frontend=False,
+            include_epp=True,
+            require_readiness=False,
+            log_label=log_label,
+        ) as stack:
+            process = stack.epp_process
+            if process is None or process.proc is None:
+                raise AssertionError("owned epp_process was not saved")
+            log_path = process.log_path
+            if not log_path:
+                raise AssertionError("epp_process has no log_path")
+            log = Path(log_path)
+            node_name = request.node.name
+            if node_name not in log.as_posix():
+                raise AssertionError(
+                    f"epp_process log_path {log} is not this node {node_name}"
+                )
+            deadline = time.monotonic() + SESSION_PREFIX_INDEX_DEADLINE_S
+            while True:
+                _remaining_budget(deadline, label="epp conflict observation")
+                pid = process.proc.pid
+                process.proc.poll()
+                raw = log.read_bytes() if log.is_file() else b""
+                text = completed_utf8_log_prefix(
+                    raw, label=f"epp_process pid={pid} log={log}"
+                )
+                if boundary.search(ANSI_RE.sub("", text)):
+                    _remaining_budget(deadline, label="epp conflict reject")
+                    evidence = {
+                        "outcome": "reject",
+                        "pid": pid,
+                        "log": str(log),
+                        "diagnostic": SESSION_PREFIX_INDEX_DIAGNOSTIC,
+                    }
+                    logger.info(
+                        "session-prefix env-conflict epp reject pid=%s log=%s",
+                        pid,
+                        log,
+                    )
+                    return "reject", evidence
+                if epp_loopback_tls_ready(EPP_GRPC_PORT, timeout=0.1):
+                    if stack.driver is None:
+                        raise AssertionError("owned ext_proc driver was not saved")
+                    epp_tokens = stack.driver.collect_token_data(
+                        case.payload,
+                        path=case.path,
+                        request_id=unique_request_id(
+                            "epp-token-session-prefix-env-conflict"
+                        ),
+                        timeout_s=_remaining_budget(
+                            deadline, label="epp collect_token_data"
+                        ),
+                    )
+                    epp_route = stack.driver.collect_route_observation(
+                        case.payload,
+                        path=case.path,
+                        request_id=unique_request_id(
+                            "epp-route-session-prefix-env-conflict"
+                        ),
+                        timeout_s=_remaining_budget(
+                            deadline, label="epp collect_route_observation"
+                        ),
+                    )
+                    _remaining_budget(deadline, label="epp acceptance completion")
+                    worker_id, record = _unique_generate_worker(stack)
+                    if (epp_route.worker_id, epp_route.dp_rank) != (worker_id, 0):
+                        raise AssertionError(
+                            "EPP acceptance worker/rank "
+                            f"{epp_route.worker_id}/{epp_route.dp_rank} != "
+                            f"catalog {(worker_id, 0)}"
+                        )
+                    assert_ordered_token_ids_match(
+                        fe_token_reference,
+                        epp_tokens,
+                        left_label="frontend.query_token_ids",
+                        right_label="epp.collect_token_data",
+                        case_name="session-prefix-env-conflict",
+                    )
+                    assert_ordered_token_ids_match(
+                        fe_token_reference,
+                        epp_route.token_ids,
+                        left_label="frontend.query_token_ids",
+                        right_label="epp.route.token_ids",
+                        case_name="session-prefix-env-conflict-route",
+                    )
+                    if process.proc.poll() is not None:
+                        raise AssertionError(
+                            "owned epp_process exited after TLS readiness"
+                        )
+                    if stack.kube_api.failures:
+                        raise AssertionError(
+                            "Loopback Kubernetes API recorded unexpected requests: "
+                            + "; ".join(stack.kube_api.failures)
+                        )
+                    evidence = {
+                        "outcome": "accept",
+                        "pid": pid,
+                        "log": str(log),
+                        "worker_id": worker_id,
+                        "owner_uid": record["owner_uid"],
+                        "dp_rank": 0,
+                        "token_count": len(epp_tokens),
+                    }
+                    logger.info(
+                        "session-prefix env-conflict epp accept pid=%s log=%s "
+                        "worker=%s owner=%s tokens=%s",
+                        pid,
+                        log,
+                        worker_id,
+                        record["owner_uid"],
+                        len(epp_tokens),
+                    )
+                    return "accept", evidence
+                if time.monotonic() >= deadline:
+                    raise AssertionError(
+                        f"epp_process pid={pid} log={log} neither emitted "
+                        f"{SESSION_PREFIX_INDEX_DIAGNOSTIC!r} nor became TLS-ready "
+                        "with tokens/routes before the owned deadline; this is not "
+                        "an expected readiness timeout or setup failure classification"
+                    )
+                time.sleep(min(0.05, max(deadline - time.monotonic(), 0.0)))
+
+    fe_token_reference: list[int] | None = None
+    for log_label, session_prefix, use_kv_events, expect_false in (
+        ("session-prefix-omitted", None, False, True),
+        ("session-prefix-false", "false", False, True),
+        ("session-prefix-true-kv-true", "true", True, False),
+    ):
+        consumer_env = session_prefix_index_consumer_env(
+            session_prefix=session_prefix,
+            use_kv_events=use_kv_events,
+            policy_config=None,
+        )
+        _apply_consumer_env(consumer_env)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            if expect_false:
+                assert_frontend_session_prefix_index_false(profile=log_label)
+            else:
+                frontend_true = frontend_native_projection(SESSION_PREFIX_INDEX_FIELDS)
+                if frontend_true.get(SESSION_PREFIX_INDEX_ROW) is not True:
+                    raise AssertionError(
+                        f"{log_label} FE {SESSION_PREFIX_INDEX_ROW}="
+                        f"{frontend_true.get(SESSION_PREFIX_INDEX_ROW)!r} != True"
+                    )
+        evidence = _success_plain_chat_routes(
+            consumer_env=consumer_env,
+            log_label=log_label,
+        )
+        if fe_token_reference is None:
+            fe_token_reference = evidence["fe_tokens"]
+
+    if fe_token_reference is None:
+        raise AssertionError("no FE plain-chat token reference was captured")
+
+    policy_path = tmp_path / "session-prefix-index-invalid.yaml"
+    policy_path.write_text(
+        "router:\n"
+        "  enable_session_prefix_index: true\n"
+        "  use_kv_events: false\n",
+        encoding="utf-8",
+    )
+    yaml_env = session_prefix_index_consumer_env(
+        session_prefix=None,
+        use_kv_events=True,
+        policy_config=str(policy_path),
+    )
+    _apply_consumer_env(yaml_env)
+    for arm in ("frontend", "epp"):
+        _observe_arm_diagnostic(
+            arm=arm,
+            consumer_env=yaml_env,
+            log_label=f"session-prefix-yaml-{arm}",
+        )
+
+    conflict_env = session_prefix_index_consumer_env(
+        session_prefix="true",
+        use_kv_events=False,
+        policy_config=None,
+    )
+    _apply_consumer_env(conflict_env)
+    fe_pid, fe_log = _observe_arm_diagnostic(
+        arm="frontend",
+        consumer_env=conflict_env,
+        log_label="session-prefix-env-true-kv-false-fe",
+    )
+    epp_outcome, epp_evidence = _classify_epp_env_conflict_outcome(
+        consumer_env=conflict_env,
+        log_label="session-prefix-env-true-kv-false-epp",
+        fe_token_reference=fe_token_reference,
+    )
+    fe_evidence = {
+        "outcome": "reject",
+        "pid": fe_pid,
+        "log": str(fe_log),
+        "diagnostic": SESSION_PREFIX_INDEX_DIAGNOSTIC,
+    }
+    logger.info(
+        "session-prefix env-conflict terminal fe=%s epp=%s",
+        fe_evidence,
+        epp_evidence,
+    )
+    if epp_outcome == "reject":
+        return
+    if epp_outcome == "accept":
+        raise SessionPrefixIndexConfigMismatch(
+            "FE rejected "
+            f"{SESSION_PREFIX_INDEX_DIAGNOSTIC!r} while EPP accepted and routed: "
+            f"fe={fe_evidence!r} epp={epp_evidence!r}"
+        )
+    raise AssertionError(
+        f"unrecognized EPP session-prefix outcome {epp_outcome!r}: {epp_evidence!r}"
+    )
 
 
 def frontend_epp_tools_token_parity_cases(model_name: str) -> list[TokenParityCase]:

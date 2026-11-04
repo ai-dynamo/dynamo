@@ -14,6 +14,7 @@ from pathlib import Path
 
 from tests.utils.http_checks import check_http_ok
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.router_logs import completed_utf8_log_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -324,15 +325,7 @@ def observe_owned_initialization_diagnostic(
         pid = proc.pid
         proc.poll()
         raw = log.read_bytes() if log.is_file() else b""
-        last_nl = raw.rfind(b"\n")
-        completed = raw[: last_nl + 1] if last_nl >= 0 else b""
-        try:
-            text = completed.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise AssertionError(
-                f"{label} pid={pid} log={log} completed log prefix is not "
-                "valid UTF-8"
-            ) from exc
+        text = completed_utf8_log_prefix(raw, label=f"{label} pid={pid} log={log}")
         if boundary.search(_ANSI_RE.sub("", text)):
             logger.info(
                 "%s pid=%s log=%s initialization diagnostic observed",
