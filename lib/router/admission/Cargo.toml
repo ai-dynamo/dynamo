@@ -29,7 +29,6 @@ ordered-float = { workspace = true }
 parking_lot = { workspace = true }
 rustc-hash = "2.1.1"
 serde = { workspace = true }
-serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

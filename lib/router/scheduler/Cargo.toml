@@ -36,12 +36,10 @@ arc-swap = "1.9.1"
 async-trait = { workspace = true }
 blake3 = { workspace = true }
 crossbeam-queue = "0.3"
-dashmap = { workspace = true }
 derive_builder = { workspace = true }
 fastrand = "2"
 futures-util = { workspace = true }
 http = { workspace = true }
-ordered-float = { workspace = true }
 parking_lot = { workspace = true }
 rmp-serde = { workspace = true }
 rustc-hash = "2.1.1"

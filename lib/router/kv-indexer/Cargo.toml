@@ -37,7 +37,6 @@ flume = "0.12.0"
 parking_lot = { workspace = true }
 prometheus = { workspace = true, optional = true }
 rustc-hash = "2.1.1"
-seqlock = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 slotmap = "1"
