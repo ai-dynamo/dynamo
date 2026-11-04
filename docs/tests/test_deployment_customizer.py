@@ -350,3 +350,59 @@ def test_deploy_steps_follow_the_generated_files(results: list[dict]) -> None:
             assert "-f model-cache.yaml" in steps, name
         # Bare placeholders such as <value> would be shell redirections.
         assert not re.search(r"=<[^>\"']+>", steps), name
+
+        graphs = result["info"]["graphs"]
+        dgds = [g for g in graphs if g["kind"] == "DynamoGraphDeployment"]
+        dgdrs = [g for g in graphs if g["kind"] == "DynamoGraphDeploymentRequest"]
+        if len(dgds) == 1 and not dgdrs:
+            frontend = next(
+                (
+                    c
+                    for c in result["info"]["components"]
+                    if c["doc"] == dgds[0]["doc"] and c["type"] == "frontend"
+                ),
+                None,
+            )
+            if frontend:
+                # The operator names the Service <dgd>-<component>, normalized.
+                service = f"{dgds[0]['name']}-{frontend['name']}".lower()
+                assert f'"service/{service.replace(".", "-")}"' in steps, name
+        if len(dgdrs) == 1 and not dgds:
+            (doc,) = [
+                d
+                for d in documents(Path(result["path"]).read_text())
+                if d.get("kind") == "DynamoGraphDeploymentRequest"
+            ]
+            auto_apply = doc["spec"].get("autoApply", True) is not False
+            assert ("=Deployed dgdr/" in steps) == auto_apply, name
+
+
+# Prints analyzeManifest's autoApply for each inline DGDR.
+AUTO_APPLY_PROBE = r"""
+import { pathToFileURL } from "node:url";
+
+const [enginePath, sources] = process.argv.slice(2);
+const engine = await import(pathToFileURL(enginePath).href);
+const values = JSON.parse(sources).map((source) => engine.analyzeManifest(source).graphs[0].autoApply);
+process.stdout.write(JSON.stringify(values));
+"""
+
+
+def test_omitted_auto_apply_defaults_to_enabled(tmp_path: Path) -> None:
+    # The operator's defaulting webhook sets a missing spec.autoApply to true.
+    command = node_command()
+    if command is None:
+        pytest.skip("needs Node with TypeScript type stripping (22.6 or later)")
+    probe = tmp_path / "probe.mjs"
+    probe.write_text(AUTO_APPLY_PROBE)
+    base = "apiVersion: nvidia.com/v1beta1\nkind: DynamoGraphDeploymentRequest\nmetadata:\n  name: probe\nspec:\n  model: Qwen/Qwen3-0.6B\n"
+    sources = [base, base + "  autoApply: true\n", base + "  autoApply: false\n"]
+    completed = subprocess.run(
+        [*command, str(probe), str(ENGINE), json.dumps(sources)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == [True, True, False]

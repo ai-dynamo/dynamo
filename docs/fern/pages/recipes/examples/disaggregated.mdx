@@ -91,8 +91,12 @@ import { ExampleSelector } from "@/components/ExampleSelector";
 
 <div className="dynamo-example-variant" data-example-variant="local-vllm-xpu-disagg-hetero-xpu-prefill-sh">
 
+Run the XPU prefill script, which also starts the frontend, and the CPU decode script in a second
+terminal.
+
 ```bash
 (cd examples/backends/vllm && bash launch/xpu/disagg_hetero_xpu_prefill.sh)
+(cd examples/backends/vllm && bash launch/xpu/disagg_hetero_cpu_decode.sh)
 ```
 
 [Source: `disagg_hetero_xpu_prefill.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/disagg_hetero_xpu_prefill.sh)
