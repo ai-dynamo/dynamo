@@ -3194,6 +3194,8 @@ class EntrypointArgs:
         tokenizer_fallback: Optional[bool] = None,
         batch_gateway_url: Optional[str] = None,
         default_chat_template_kwargs: Optional[Mapping[str, Any]] = None,
+        reject_media: Optional[bool] = None,
+        reject_media_status_code: Optional[int] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3235,6 +3237,8 @@ class EntrypointArgs:
             batch_gateway_url: Internal Batch Gateway URL for the files and batch APIs.
             default_chat_template_kwargs: Chat template kwargs that the frontend applies
                 under each request's own kwargs, for every discovered model
+            reject_media: Optional override: refuse chat requests carrying image, video, or audio content before routing
+            reject_media_status_code: Optional 4xx/5xx status for a request refused by reject_media (default 415)
         """
         ...
 
