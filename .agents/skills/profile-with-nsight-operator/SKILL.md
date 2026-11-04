@@ -36,8 +36,9 @@ not repeat them.
 
 ## Prerequisites
 
-- Nsight Operator installed by a cluster admin, and a test namespace with a coordinator and a gateway (auto-provisioned
-  or created by the namespace admin). For S3 reports, a `NsightCloudStorageConfig` in the namespace.
+- Nsight Operator 26.3 or newer, installed by a cluster admin, and a test namespace with a coordinator and a gateway
+  (auto-provisioned or created by the namespace admin). For S3 reports, a `NsightCloudStorageConfig` in the namespace.
+  Older operators use other profile-config field names and a CLI without timed windows; ask the user to upgrade.
 - `kubectl` rights in the namespace to create `NsightOperatorProfileConfig` and `DynamoGraphDeployment` objects, list
   pods, and port-forward.
 - `nsight_operator.py`, and `nsight_operator_dynamo.py` for the helper path, from the NGC "Nsight Operator Resources"
@@ -62,14 +63,25 @@ not repeat them.
   context. Before each call to either script, check that `kubectl config current-context` prints `<context>`. If it
   does not, stop and ask the user: do not switch the shared kubeconfig's context on your own. With the user's approval,
   run the scripts with `KUBECONFIG` set to a kubeconfig whose current context is `<context>`.
-- Check which profile-config fields the API server accepts:
-  `kubectl --context <context> -n <namespace> explain nsightoperatorprofileconfig.spec.injectionRules`.
-  Nsight Operator 26.3 has `podObjectSelector`, `nsightTags`, and `processIncludePatterns` on each rule; 26.2 has
-  `objectSelector` or `matchConditions` on the rule and `nsightTag` and `injectionIncludePatterns` on the tool config.
-  Use the names the server accepts.
+- Check that the operator is 26.3 or newer:
+  `kubectl --context <context> -n <namespace> explain nsightoperatorprofileconfig.spec.injectionRules.podObjectSelector`
+  must succeed, and `python3 nsight_operator.py profiler-start --help` must list `--delay` and `--duration`. If either
+  fails, stop and ask the user to upgrade Nsight Operator and use the matching CLI.
+- Check the real labels of the DGD's pods, when they exist, before choosing a path in step 2:
+  `kubectl --context <context> -n <namespace> get pods -l nvidia.com/dynamo-graph-deployment-name=<dgd> --show-labels`.
+  Component types are lowercase; `Frontend` is a component name, not a type. If the workers carry
+  `nvidia.com/dynamo-sub-component-type` with type `worker`, use your own profile config (2b): the helper cannot select
+  only prefill or only decode workers on those pods.
+- Point the CLI at this namespace's gateway: the CLI reads the gateway from `~/.nsight-cloud.conf`, not from the kube
+  context. If the namespace already has an Nsight gateway
+  (`kubectl --context <context> -n <namespace> get nsightgateways`), run
+  `python3 nsight_operator.py autoconfigure -n <namespace>`, or `configure` where the user keeps the storage key off
+  this machine, and check that the next `status` succeeds. Otherwise the gateway appears when the first profiled pod is
+  admitted; configure the CLI then, in step 4, before the first `status`.
 - List existing profile configs in the namespace. Do not reuse or overwrite another test's config, tool-config, or rule
   names. `dynamo-profile-config` belongs to Nsight's helper; never write it by hand.
-- Run `python3 nsight_operator.py --tag <tag> status` to see whether the tag already holds a session. A tag holds one
+- If the CLI is configured, run `python3 nsight_operator.py --tag <tag> status` to see whether the tag already holds
+  a session. A tag holds one
   session at a time. `<tag>` is `default` on the helper path and the DGD name on the own-config path.
 
 ### 2. Configure Profiling
@@ -86,7 +98,7 @@ a coordinator tool config, on the `default` tag. A second `configure` in the sam
 python3 nsight_operator_dynamo.py -n <namespace> configure \
     --deployment-name <dgd> \
     --components <type> [<type> ...] \
-    --nsys-profile-args "-t cuda,nvtx,osrt --python-sampling=true"
+    --nsys-profile-args "-t cuda,nvtx,osrt --cuda-graph-trace=node --python-sampling=true"
 ```
 
 - `-n` goes before the subcommand.
@@ -94,7 +106,8 @@ python3 nsight_operator_dynamo.py -n <namespace> configure \
   `nvidia.com/dynamo-component-type`, so `Frontend` or `Backend` selects no pod.
 - Always pass `--deployment-name`. Without it the helper selects every Dynamo pod in the namespace. It matches pods
   whose name contains the string, so check that no other DGD's name contains it.
-- Always pass `--nsys-profile-args`. The default adds `--pytorch=autograd-nvtx`.
+- Always pass `--nsys-profile-args`. The default adds `--pytorch=autograd-nvtx`. Keep `--cuda-graph-trace=node`:
+  without it, kernels launched by CUDA graphs produce no kernel rows, and step 6 would report the capture as incomplete.
 - Never pass `--gpu-metrics`; it applies a DaemonSet whose pods run privileged. Never run the helper's `install` or
   `uninstall`; they install or remove the operator for the whole cluster, which is the cluster admin's job.
 - Read the profile config the helper prints, then continue at step 3 with `<tag>` = `default`.
@@ -104,9 +117,6 @@ python3 nsight_operator_dynamo.py -n <namespace> configure \
 Use your own config for S3 reports, a tag per DGD, process patterns per component, or when the helper's config would
 collide with someone else's. Start from the page's template. Then:
 
-- Check the real labels first, when pods exist:
-  `kubectl --context <context> -n <namespace> get pods -l nvidia.com/dynamo-graph-deployment-name=<dgd> --show-labels`.
-  Component types are lowercase; `Frontend` is a component name, not a type.
 - Add one rule per requested component. Select on `nvidia.com/dynamo-graph-deployment-name: <dgd>` plus the component
   label from the page's table that the observed labels support:
   - a component type, for example `nvidia.com/dynamo-component-type: decode`. It matches every component of that type.
@@ -134,7 +144,8 @@ Only pods created after the config exists are profiled.
 
 - Derive the expected pods from the DGD and the selectors
   (`kubectl --context <context> -n <namespace> get pods -l ...`), never from the agents that happened to register.
-- `python3 nsight_operator.py --tag <tag> status` must list one collection agent per expected pod. Ignore
+- If the CLI is not configured yet, configure it now as in step 1. Then
+  `python3 nsight_operator.py --tag <tag> status` must list one collection agent per expected pod. Ignore
   `otlp-converter-*` entries; they are Nsight's OpenTelemetry converter.
 - If a pod is missing, follow Nsight's sidecar injection checks, check the pod's init containers and its
   `nsight-profile.nvidia.com/profiles` annotation, and set `logOutput` on the rule for the process hook's log. Hand
@@ -198,8 +209,8 @@ Report:
 
 - A tag holds one session at a time, so one test per tag.
 - Selection is per component; all replicas of a component share the tag.
-- Not yet tested: the 26.3 profile config on a live operator, upload to external S3, a coordinator window on a GPU
-  worker, workers with more than one GPU, SGLang and TensorRT-LLM workers, and Dynamo sidecar mode.
+- Tested on Nsight Operator 26.3 with vLLM, SGLang, and TensorRT-LLM, in aggregated and disaggregated DGDs. Not yet
+  tested: upload to external S3, workers with more than one GPU, and Dynamo sidecar mode.
 
 ## References
 

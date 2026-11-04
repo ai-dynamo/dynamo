@@ -7,7 +7,7 @@
       "expected_skill": "profile-with-nsight-operator",
       "ground_truth": "Check the real pod labels first. Write a per-test profile config with only a decode rule that selects the DGD name label plus the decode label the pods carry: nvidia.com/dynamo-component-type decode, or nvidia.com/dynamo-sub-component-type decode for workers that kept type worker across an operator upgrade. Use one literal tag, apply it before the pods are created, confirm one collection agent per decode pod, open one window with profiler-start --delay and --duration 60, and poll ls until every decode pod has a report with kernel rows.",
       "expected_behavior": [
-        "Check which profile-config fields the API server accepts and server-dry-run the config",
+        "Check that the operator is 26.3 or newer and server-dry-run the config",
         "Inspect the real pod labels, then select on nvidia.com/dynamo-graph-deployment-name plus the decode label they carry: the lowercase decode type, or the decode sub-component type on workers that kept type worker",
         "Ask before restarting running pods, because only pods created after the config are profiled",
         "Derive expected pods from the DGD, not from registered agents",
@@ -19,11 +19,11 @@
       "id": "helper-quick-look",
       "question": "Nsight Operator with auto-provisioning is already running on our cluster. I just want a quick nsys look at the frontend and aggregated workers of my DGD qwen-agg in namespace demo, using Nsight's Dynamo helper.",
       "expected_skill": "profile-with-nsight-operator",
-      "ground_truth": "Run nsight_operator_dynamo.py -n demo configure with --deployment-name qwen-agg, --components frontend worker in lowercase, and --nsys-profile-args without --pytorch=autograd-nvtx; do not pass --gpu-metrics or run install. Recreate the pods after asking, confirm one agent per pod on the default tag, capture with nsight_operator.py --tag default, and run unconfigure when done.",
+      "ground_truth": "Run nsight_operator_dynamo.py -n demo configure with --deployment-name qwen-agg, --components frontend worker in lowercase, and --nsys-profile-args that keep --cuda-graph-trace=node and leave out --pytorch=autograd-nvtx; do not pass --gpu-metrics or run install. Recreate the pods after asking, confirm one agent per pod on the default tag, capture with nsight_operator.py --tag default, and run unconfigure when done.",
       "expected_behavior": [
         "Use the helper's configure subcommand with -n before the subcommand",
         "Pass --deployment-name and lowercase component types",
-        "Override --nsys-profile-args to leave out --pytorch=autograd-nvtx",
+        "Override --nsys-profile-args to keep --cuda-graph-trace=node and leave out --pytorch=autograd-nvtx",
         "Do not pass --gpu-metrics and do not run the helper's install or uninstall",
         "Use the default tag with nsight_operator.py and verify every expected pod has a report",
         "Remove the helper's config with unconfigure after the reports are verified"
