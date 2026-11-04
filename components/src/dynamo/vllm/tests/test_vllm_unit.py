@@ -2376,6 +2376,44 @@ def test_build_sampling_params_openai_root_thinking_token_budget_overrides_nvext
     assert sp.thinking_token_budget == 2048
 
 
+@pytest.mark.parametrize(
+    ("vllm_xargs", "default_extra_args", "expected"),
+    [
+        (
+            {"diffusion_seed_canvas": [100, 0], "diffusion_read_only": True},
+            None,
+            {"diffusion_seed_canvas": [100, 0], "diffusion_read_only": True},
+        ),
+        ({"b": 2}, {"a": 1, "b": 1}, {"a": 1, "b": 2}),
+        (
+            {
+                "kv_transfer_params": {"do_remote_prefill": True},
+                "ec_transfer_params": {"x": 1},
+                "keep": 1,
+            },
+            None,
+            {"keep": 1},
+        ),
+    ],
+    ids=["forwarded", "merged-over-defaults", "connector-keys-dropped"],
+)
+def test_build_sampling_params_openai_applies_vllm_xargs(
+    vllm_xargs, default_extra_args, expected
+):
+    from dynamo.vllm.handlers import build_sampling_params_openai
+
+    defaults = {"extra_args": default_extra_args} if default_extra_args else {}
+    request = {
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 8,
+        "vllm_xargs": vllm_xargs,
+    }
+    sp = build_sampling_params_openai(request, default_sampling_params=defaults)
+    assert sp.extra_args == expected
+    assert not hasattr(sp, "vllm_xargs")
+
+
 @pytest.mark.asyncio
 async def test_generate_text_mode_applies_nvext_cache_salt():
     from dynamo.vllm.handlers import DecodeWorkerHandler

@@ -149,10 +149,11 @@ pub struct NvCreateChatCompletionRequest {
     pub return_tokens_as_token_ids: Option<bool>,
 
     /// Catch-all for unsupported fields - checked during validation
+    // Serialization keeps only `vllm_xargs`, so text-input vLLM workers receive it.
     #[serde(
         flatten,
         default,
-        skip_serializing,
+        serialize_with = "validate::serialize_text_worker_fields",
         deserialize_with = "validate::deserialize_extra_fields"
     )]
     pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
@@ -2447,6 +2448,21 @@ mod preserve_thinking_tests {
         ValidateRequest::validate(&request).unwrap();
         let value = serde_json::to_value(&request).unwrap();
         assert_eq!(value["preserve_thinking"], json!(false));
+    }
+
+    #[test]
+    fn serialization_forwards_only_vllm_xargs_to_text_workers() {
+        let xargs = json!({"diffusion_max_steps": 4, "tags": ["a", "b"]});
+        let request = chat_request_with(&json!({"vllm_xargs": xargs, "detokenize": false}));
+        ValidateRequest::validate(&request).unwrap();
+
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["vllm_xargs"], xargs);
+        assert!(value.get("detokenize").is_none());
+
+        let back: NvCreateChatCompletionRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(back.unsupported_fields.get("vllm_xargs"), Some(&xargs));
+        assert_eq!(back.unsupported_fields.len(), 1);
     }
 
     #[test]
