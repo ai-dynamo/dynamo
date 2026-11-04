@@ -13,7 +13,7 @@ use super::registry::Registry;
 
 pub struct Context<T: Data> {
     current: T,
-    controller: Arc<Controller>, //todo: hold this as an arc
+    controller: Arc<Controller>,
     registry: Registry,
     stages: Vec<String>,
     metadata: BTreeMap<String, String>,

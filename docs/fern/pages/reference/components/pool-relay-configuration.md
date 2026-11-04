@@ -23,6 +23,7 @@ see [Pool Relay Concepts](../../developer-guide/knowledge-base/modular-component
 | `--endpoint-prefix` | `DYN_RELAY_ENDPOINT_PREFIXES` | No prefix filter | Repeat the CLI option, or use a comma-separated environment value. Match namespace/component/endpoint segments. |
 | `--expected-unique-blocks` | `DYN_RELAY_EXPECTED_UNIQUE_BLOCKS` | `1048576` | Positive expected number of unique blocks per pool; sizes the CKF, not a global Relay memory limit. |
 | `--bind` | `DYN_RELAY_BIND` | No listener | Plaintext gRPC socket address, such as `127.0.0.1:5561` or `[::1]:5561`. Requires a numeric IP and port. |
+| `--global-discovery-url` | `DYN_RELAY_GLOBAL_DISCOVERY_URL` | Unset | Root of the Global Discovery Service, such as `http://global-discovery:8080/`. The Relay reads the Global Router replica list from it every 5 seconds. When a read fails, it keeps the last list and reports why in the health field `global_routers_stale_reason`. When unset, the Relay reads no list. |
 | `--help` | None | — | Print CLI usage and exit. |
 
 The protocol and gRPC server are included in the standard build. Omitting `--bind` disables only
@@ -163,7 +164,7 @@ of SHA-256 over the UTF-8 cluster ID. These are not HTTP paths or WAN RPCs.
 
 | Endpoint | Availability | Request and response |
 | --- | --- | --- |
-| `health` | Always | Empty request; reports `healthy`, shutdown state, endpoint counts, and WAN state/errors. |
+| `health` | Always | Empty request; reports `healthy`, shutdown state, endpoint counts, WAN state/errors, `global_discovery_enabled`, and `global_routers_stale_reason`. |
 | `stats` | `ckf-diagnostics` build feature | Empty request; returns detailed endpoint/pool statistics. |
 | `snapshot` | `ckf-diagnostics` build feature | Requires `serving_endpoint`; returns that endpoint's diagnostic snapshot. |
 

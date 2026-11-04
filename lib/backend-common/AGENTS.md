@@ -83,6 +83,10 @@ opt-out and lets `run.rs` stay non-generic.
   reliable idle signal); SGLang overrides it by counting in-flight prefill
   streams. The mode-gate, poll loop, and SIGTERM/SIGINT ownership live in the
   `Worker`.
+- `engine_lost(&self) -> DynamoError` — optional, default never resolves.
+  Resolves once the engine can no longer serve. The `Worker` then shuts down
+  as on SIGTERM (withdraw, grace period, drain, `cleanup`) and returns this
+  error, so the process exits and its supervisor restarts it.
 - `cleanup(&self) -> Result<(), DynamoError>` — called exactly once.
   Runs after `start()` returns Ok on shutdown (even if registration /
   serve fails), **and** after `start()` raises — so implementations

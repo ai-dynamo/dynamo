@@ -2072,7 +2072,7 @@ mod tests {
         rt.shutdown();
     }
 
-    /// Test that concurrent select_and_increment distributes load correctly.
+    /// Test that concurrent least-loaded increments distribute load correctly.
     #[tokio::test]
     async fn test_concurrent_select_and_increment() {
         let state = Arc::new(RoutingOccupancyState::default());
@@ -2083,9 +2083,9 @@ mod tests {
         for _ in 0..num_requests {
             let state = state.clone();
             let ids = instance_ids.clone();
-            handles.push(tokio::spawn(async move {
-                state.select_exact_min_and_increment(&ids).await
-            }));
+            handles.push(tokio::spawn(
+                async move { state.increment_least_loaded(&ids) },
+            ));
         }
 
         for handle in handles {
@@ -2095,31 +2095,6 @@ mod tests {
         assert_eq!(state.load(100), 30);
         assert_eq!(state.load(200), 30);
         assert_eq!(state.load(300), 30);
-    }
-
-    #[tokio::test]
-    async fn test_select_exact_min_and_increment_randomizes_ties() {
-        let mut selected = [false; 3];
-
-        for _ in 0..120 {
-            let state = RoutingOccupancyState::default();
-            let picked = state
-                .select_exact_min_and_increment(&[10, 20, 30])
-                .await
-                .unwrap();
-            match picked {
-                10 => selected[0] = true,
-                20 => selected[1] = true,
-                30 => selected[2] = true,
-                _ => panic!("unexpected worker id: {picked}"),
-            }
-        }
-
-        let selected_count = selected.into_iter().filter(|seen| *seen).count();
-        assert!(
-            selected_count > 1,
-            "tie-breaking should not always select the first minimum-load worker"
-        );
     }
 
     #[tokio::test]
@@ -2135,16 +2110,10 @@ mod tests {
         let state1 = get_or_create_routing_occupancy_state(&endpoint).await;
         let state2 = get_or_create_routing_occupancy_state(&endpoint).await;
 
-        let picked1 = state1
-            .select_exact_min_and_increment(&[10, 20, 30])
-            .await
-            .unwrap();
+        let picked1 = state1.increment_least_loaded(&[10, 20, 30]).unwrap();
         assert_eq!(state1.load(picked1), 1);
 
-        let picked2 = state1
-            .select_exact_min_and_increment(&[10, 20, 30])
-            .await
-            .unwrap();
+        let picked2 = state1.increment_least_loaded(&[10, 20, 30]).unwrap();
         assert_ne!(picked1, picked2);
 
         // state2 should see the same counts (same underlying Arc)
@@ -2163,9 +2132,9 @@ mod tests {
         let state = RoutingOccupancyState::default();
 
         // Add some connections
-        state.select_exact_min_and_increment(&[1, 2, 3]).await;
-        state.select_exact_min_and_increment(&[1, 2, 3]).await;
-        state.select_exact_min_and_increment(&[1, 2, 3]).await;
+        state.increment_least_loaded(&[1, 2, 3]);
+        state.increment_least_loaded(&[1, 2, 3]);
+        state.increment_least_loaded(&[1, 2, 3]);
         // Each instance should have 1 connection
         assert_eq!(state.load(1), 1);
         assert_eq!(state.load(2), 1);
