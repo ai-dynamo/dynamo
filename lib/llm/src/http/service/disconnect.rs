@@ -1349,6 +1349,7 @@ mod tests {
             .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
                 limit: 8192,
                 actual: Some(9000),
+                prompt_tokens: Some(4000),
             })
             .build();
 
@@ -1358,7 +1359,18 @@ mod tests {
         assert_eq!(body["error"]["type"], "invalid_request_error");
         assert_eq!(
             body["error"]["message"],
-            "prompt is too long: 9000 tokens > 8192 maximum"
+            "this model's maximum context length is 8192 tokens. However, the request would use \
+             4000 prompt tokens plus 5000 requested output tokens (9000 tokens total). Please \
+             reduce the length of the messages or the requested output."
+        );
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("maximum context length is 8192 tokens"));
+        assert!(message.contains("4000 prompt tokens"));
+        assert!(message.contains("5000 requested output tokens"));
+        assert!(message.contains("9000 tokens total"));
+        assert!(
+            !message.contains("prompt is too long"),
+            "combined-budget errors must not blame the prompt alone, got: {message}"
         );
     }
 
@@ -1369,6 +1381,7 @@ mod tests {
             .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
                 limit: 8192,
                 actual: Some(8192),
+                prompt_tokens: Some(8192),
             })
             .build();
 
@@ -1377,8 +1390,9 @@ mod tests {
 
         let message = body["error"]["message"].as_str().unwrap();
         assert!(message.contains("prompt is too long"));
+        assert!(message.contains("maximum context length is 8192 tokens"));
         assert!(message.contains("leaves no room for output"));
-        assert!(!message.contains("8192 tokens > 8192"));
+        assert!(message.contains("8192 tokens, which leaves no room for output"));
     }
 
     #[test]

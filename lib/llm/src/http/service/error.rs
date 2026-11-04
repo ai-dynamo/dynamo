@@ -98,6 +98,35 @@ pub(crate) fn http_action_for_error(error: &DynamoError) -> ClientErrorAction {
     http_action_for_class(error.class())
 }
 
+/// Decoded context-length bounds shared by protocol renderers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ContextLengthDetails {
+    pub(crate) limit: u64,
+    pub(crate) actual: Option<u64>,
+    pub(crate) prompt_tokens: Option<u64>,
+}
+
+impl ContextLengthDetails {
+    pub(crate) fn from_public_details(details: &PublicDetails) -> Option<Self> {
+        match details {
+            PublicDetails::ContextLength {
+                limit,
+                actual,
+                prompt_tokens,
+            } => Some(Self {
+                limit: *limit,
+                actual: *actual,
+                prompt_tokens: *prompt_tokens,
+            }),
+            _ => None,
+        }
+    }
+}
+
+fn context_length_details(error: &DynamoError) -> Option<ContextLengthDetails> {
+    ContextLengthDetails::from_public_details(error.public_details()?)
+}
+
 /// Render the client-visible message for a context-length rejection.
 ///
 /// The preprocessor producers capture [`PublicDetails::ContextLength`] instead
@@ -115,55 +144,85 @@ pub(crate) fn http_action_for_error(error: &DynamoError) -> ClientErrorAction {
 /// producer did not record the actual count, in which case the caller keeps its
 /// class-level fallback.
 pub(crate) fn context_length_public_message(error: &DynamoError) -> Option<String> {
-    match error.public_details()? {
-        PublicDetails::ContextLength {
-            limit,
-            actual: Some(actual),
-        } => Some(format!(
-            "This model's maximum context length is {limit} tokens. However, your request \
-             resulted in {actual} tokens. Please reduce the length of the messages or the \
-             requested output."
-        )),
-        _ => None,
-    }
+    let details = context_length_details(error)?;
+    let actual = details.actual?;
+    Some(format!(
+        "This model's maximum context length is {limit} tokens. However, your request \
+         resulted in {actual} tokens. Please reduce the length of the messages or the \
+         requested output.",
+        limit = details.limit,
+    ))
 }
 
 /// Anthropic's wording for a streamed context-length rejection.
 ///
-/// Anthropic clients classify overflows by `prompt is too long`, which the
-/// OpenAI-style sentence does not contain. A prompt exactly at the limit is
-/// reported as leaving no room for output rather than as an excess.
+/// Anthropic clients classify prompt overflows by `prompt is too long`, while
+/// LiteLLM's generic classifier looks for `this model's maximum context length
+/// is`. Prompt-only messages carry both. A prompt exactly at the limit is
+/// reported as leaving no room for output rather than as an excess. A request
+/// rejected only because prompt tokens plus the requested output exceed the
+/// limit is described as a request total, without `prompt is too long`, so
+/// clients do not compact history when lowering `max_tokens` is sufficient.
 ///
 /// Returns `None` when the error is not a context-length rejection, the
 /// producer did not record the actual count, or the recorded count is below the
 /// limit (which neither producer should produce), in which case the caller
 /// keeps its class-level fallback.
 pub(crate) fn anthropic_context_length_public_message(error: &DynamoError) -> Option<String> {
-    match error.public_details()? {
-        PublicDetails::ContextLength {
-            limit,
-            actual: Some(actual),
-        } => anthropic_context_length_message(*limit, *actual),
-        _ => None,
-    }
+    anthropic_context_length_message(context_length_details(error)?)
 }
 
 /// Render Anthropic's context-length sentence from structured bounds.
 ///
-/// Returns `None` for a count below the limit, which neither producer should
-/// emit; callers keep their class-level fallback instead of claiming an
-/// overflow that did not happen.
-pub(crate) fn anthropic_context_length_message(limit: u64, actual: u64) -> Option<String> {
-    match actual.cmp(&limit) {
-        std::cmp::Ordering::Greater => Some(format!(
-            "prompt is too long: {actual} tokens > {limit} maximum"
-        )),
-        std::cmp::Ordering::Equal => Some(format!(
-            "prompt is too long: {actual} tokens, which leaves no room for output under the \
-             {limit}-token maximum"
-        )),
-        std::cmp::Ordering::Less => None,
+/// Returns `None` for a count below the limit or a missing actual count, which
+/// neither producer should emit; callers keep their class-level fallback instead
+/// of claiming an overflow that did not happen.
+pub(crate) fn anthropic_context_length_message(details: ContextLengthDetails) -> Option<String> {
+    let actual = details.actual?;
+    if actual < details.limit {
+        return None;
     }
+
+    if let Some(prompt_tokens) = details
+        .prompt_tokens
+        .filter(|count| *count >= details.limit)
+    {
+        return Some(if prompt_tokens == details.limit {
+            format!(
+                "prompt is too long: this model's maximum context length is {limit} tokens and \
+                 the prompt contains {prompt_tokens} tokens, which leaves no room for output. \
+                 Please reduce the length of the messages.",
+                limit = details.limit,
+            )
+        } else {
+            format!(
+                "prompt is too long: this model's maximum context length is {limit} tokens, but \
+                 the prompt contains {prompt_tokens} tokens. Please reduce the length of the \
+                 messages.",
+                limit = details.limit,
+            )
+        });
+    }
+
+    let output_tokens = details
+        .prompt_tokens
+        .map(|prompt_tokens| actual.saturating_sub(prompt_tokens));
+    let budget = match (details.prompt_tokens, output_tokens) {
+        (Some(prompt_tokens), Some(1)) => format!(
+            "the request would use {prompt_tokens} prompt tokens plus 1 requested output token \
+             ({actual} tokens total)"
+        ),
+        (Some(prompt_tokens), Some(output_tokens)) => format!(
+            "the request would use {prompt_tokens} prompt tokens plus {output_tokens} requested \
+             output tokens ({actual} tokens total)"
+        ),
+        _ => format!("the request would use {actual} tokens"),
+    };
+    Some(format!(
+        "this model's maximum context length is {limit} tokens. However, {budget}. Please \
+         reduce the length of the messages or the requested output.",
+        limit = details.limit,
+    ))
 }
 
 /// Return the first classified DynamoError using its fail-closed semantic accessors.

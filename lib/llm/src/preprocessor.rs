@@ -2209,6 +2209,7 @@ impl OpenAIPreprocessor {
                 .public_details(PublicDetails::ContextLength {
                     limit: combined_limit as u64,
                     actual: Some(requested_tokens as u64),
+                    prompt_tokens: Some(prompt_len as u64),
                 })
                 .build()
                 .into());
@@ -5500,6 +5501,7 @@ impl OpenAIPreprocessor {
             .public_details(PublicDetails::ContextLength {
                 limit: combined_limit as u64,
                 actual: Some(token_count as u64),
+                prompt_tokens: Some(token_count as u64),
             })
             .build()
     }

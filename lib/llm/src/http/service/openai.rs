@@ -44,7 +44,7 @@ use super::{
         monitor_for_disconnects_with_activity_and_error_signal,
         monitor_for_disconnects_with_error_signal, monitor_for_responses_disconnects,
     },
-    error::{HttpError, context_length_public_message, invalid_argument},
+    error::{ContextLengthDetails, HttpError, context_length_public_message, invalid_argument},
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
         CancellationLabels, Endpoint, ErrorType, EventConverter,
@@ -255,14 +255,10 @@ impl ErrorMessage {
         &self.message
     }
 
-    pub(crate) fn context_length_bounds(&self) -> Option<(u64, Option<u64>)> {
+    pub(crate) fn context_length_details(&self) -> Option<ContextLengthDetails> {
         let details = self.details.as_deref()?;
-        match dynamo_runtime::error::PublicDetails::deserialize(details).ok()? {
-            dynamo_runtime::error::PublicDetails::ContextLength { limit, actual } => {
-                Some((limit, actual))
-            }
-            _ => None,
-        }
+        let details = dynamo_runtime::error::PublicDetails::deserialize(details).ok()?;
+        ContextLengthDetails::from_public_details(&details)
     }
 
     pub(crate) fn is_overload(&self) -> bool {
@@ -8165,6 +8161,7 @@ mod tests {
             .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
                 limit: 8192,
                 actual: Some(9000),
+                prompt_tokens: Some(4000),
             })
             .build();
         let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
@@ -8197,6 +8194,7 @@ mod tests {
             dynamo_runtime::error::PublicDetails::ContextLength {
                 limit: 8192,
                 actual: Some(9000),
+                prompt_tokens: Some(4000),
             }
         );
     }
@@ -8208,6 +8206,7 @@ mod tests {
             .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
                 limit: 8192,
                 actual: None,
+                prompt_tokens: None,
             })
             .build();
         let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);

@@ -572,9 +572,16 @@ pub enum PublicDetails {
         limit: u64,
         actual: Option<u64>,
     },
+    /// Structured token bounds for a context-length rejection.
     ContextLength {
         limit: u64,
+        /// The token count that exceeded `limit`; for a combined input/output
+        /// budget this includes the requested output.
         actual: Option<u64>,
+        /// Prompt tokens alone, when the producer knows them. Renderers use this
+        /// to distinguish a prompt-only overflow from a combined budget.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_tokens: Option<u64>,
     },
     RateLimit {
         limit: Option<u64>,
@@ -1322,6 +1329,33 @@ mod tests {
             Some(&PublicDetails::RateLimit {
                 limit: Some(100),
                 remaining: Some(0),
+            })
+        );
+    }
+
+    #[test]
+    fn context_length_details_accept_payloads_without_prompt_tokens() {
+        let details: PublicDetails = serde_json::from_value(serde_json::json!({
+            "type": "context_length",
+            "limit": 8192,
+            "actual": 9000
+        }))
+        .expect("older context-length details remain readable");
+
+        assert_eq!(
+            details,
+            PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+                prompt_tokens: None,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(details).unwrap(),
+            serde_json::json!({
+                "type": "context_length",
+                "limit": 8192,
+                "actual": 9000
             })
         );
     }
