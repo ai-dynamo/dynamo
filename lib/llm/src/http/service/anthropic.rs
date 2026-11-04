@@ -1986,6 +1986,29 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_stream_error_prompt_at_limit_reports_missing_output_room() {
+        use dynamo_runtime::error::{ErrorType, PublicDetails};
+
+        let error = DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .public_details(PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(8192),
+            })
+            .build();
+
+        let body = anthropic_stream_error_body(&error);
+
+        assert_eq!(
+            body.message,
+            "prompt is too long: 8192 tokens, which leaves no room for output under the \
+             8192-token maximum"
+        );
+        assert!(body.message.contains("prompt is too long"));
+        assert!(!body.message.contains("8192 tokens > 8192"));
+    }
+
+    #[test]
     fn anthropic_stream_cancellation_uses_a_spec_error_type() {
         let error = dynamo_runtime::error::DynamoError::builder()
             .class(ErrorClass::Cancelled)

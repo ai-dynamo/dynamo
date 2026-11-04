@@ -8173,6 +8173,11 @@ mod tests {
             "message must carry the actual token count, got: {}",
             response.1.message
         );
+        assert!(
+            response.1.message.contains("requested output"),
+            "a combined input and output budget must not blame the messages alone, got: {}",
+            response.1.message
+        );
         assert!(!response.1.message.contains("PRIVATE_DIAGNOSTIC_SENTINEL"));
         let details: dynamo_runtime::error::PublicDetails =
             serde_json::from_value(*response.1.details.clone().expect("details are preserved"))

@@ -120,8 +120,9 @@ pub(crate) fn context_length_public_message(error: &DynamoError) -> Option<Strin
             limit,
             actual: Some(actual),
         } => Some(format!(
-            "This model's maximum context length is {limit} tokens. However, your messages \
-             resulted in {actual} tokens. Please reduce the length of the messages."
+            "This model's maximum context length is {limit} tokens. However, your request \
+             resulted in {actual} tokens. Please reduce the length of the messages or the \
+             requested output."
         )),
         _ => None,
     }
@@ -130,15 +131,27 @@ pub(crate) fn context_length_public_message(error: &DynamoError) -> Option<Strin
 /// Anthropic's wording for a streamed context-length rejection.
 ///
 /// Anthropic clients classify overflows by `prompt is too long`, which the
-/// OpenAI-style sentence does not contain. Returns `None` under the same
-/// conditions as [`context_length_public_message`].
+/// OpenAI-style sentence does not contain. A prompt exactly at the limit is
+/// reported as leaving no room for output rather than as an excess.
+///
+/// Returns `None` when the error is not a context-length rejection, the
+/// producer did not record the actual count, or the recorded count is below the
+/// limit (which neither producer should produce), in which case the caller
+/// keeps its class-level fallback.
 pub(crate) fn anthropic_context_length_public_message(error: &DynamoError) -> Option<String> {
     match error.public_details()? {
         PublicDetails::ContextLength {
             limit,
             actual: Some(actual),
-        } => Some(format!(
+        } if actual > limit => Some(format!(
             "prompt is too long: {actual} tokens > {limit} maximum"
+        )),
+        PublicDetails::ContextLength {
+            limit,
+            actual: Some(actual),
+        } if actual == limit => Some(format!(
+            "prompt is too long: {actual} tokens, which leaves no room for output under the \
+             {limit}-token maximum"
         )),
         _ => None,
     }

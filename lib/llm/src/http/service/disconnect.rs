@@ -1363,6 +1363,25 @@ mod tests {
     }
 
     #[test]
+    fn semantic_stream_error_prompt_at_limit_reports_missing_output_room() {
+        let error = DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(8192),
+            })
+            .build();
+
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("prompt is too long"));
+        assert!(message.contains("leaves no room for output"));
+        assert!(!message.contains("8192 tokens > 8192"));
+    }
+
+    #[test]
     fn semantic_stream_error_keeps_class_message_for_other_invalid_requests() {
         let error = DynamoError::builder()
             .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
