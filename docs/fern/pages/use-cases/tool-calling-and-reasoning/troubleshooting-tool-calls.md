@@ -137,7 +137,7 @@ Set `DYN_PARSER_VERSION` on the frontend running the `dynamo` processor and on w
 
 | `DYN_PARSER_VERSION` | Compatible Unified configuration | Unavailable or incompatible configuration |
 | --- | --- | --- |
-| Unset or `auto` | V2, except reasoning-only Qwen/Nemotron below | V1 if each configured name exists in its V1 registry; otherwise reject |
+| Unset or `auto` | V2 | V1 if each configured name exists in its V1 registry; otherwise reject |
 | `1` | V1 if each configured name exists in its V1 registry | Reject names unavailable in V1 |
 | `2` | V2 | Reject; no V1 configuration fallback |
 
