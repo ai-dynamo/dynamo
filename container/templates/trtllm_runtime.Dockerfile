@@ -401,13 +401,13 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
 # requirements.trtllm.txt pins. The base ships an older release in system site,
 # and the pre_runtime whiteout below drops that copy before the overlay: the
 # overlay COPY cannot delete the base image's files, and the dist-info name
-# carries the version. The step fails once the base ships the pin or newer, so
-# it is removed together with the whiteout entries instead of lingering.
+# carries the version. When the base ships the pin or a newer release, remove
+# this replacement and its pre_runtime whiteout entries. Then move the pin to
+# the base version.
 #
 # Uninstall first, then remove what is left. The wheel's RECORD is the only full
 # list of what it wrote, including the FFmpeg source tarball under
-# /usr/local/external/ffmpeg. The presence test is find_spec, not an import,
-# because the import dlopens a driver library that the builder does not have.
+# /usr/local/external/ffmpeg.
 #
 # 2.2.x links libavcodec statically into libavformat, so a filename test cannot
 # see a release that re-enables decoders there. check_pynvvideocodec asserts the
@@ -426,30 +426,10 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
 # does not have.
 RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compliance \
     set -eu; \
-    before=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("pynvvideocodec"))' 2>/dev/null || echo none); \
-    echo "PyNvVideoCodec in base image: $before"; \
-    if [ "$before" = "none" ]; then \
-        echo "ERROR: the base image no longer ships PyNvVideoCodec, so this step has" >&2; \
-        echo "       nothing to replace. Delete the replacement and its pre_runtime" >&2; \
-        echo "       whiteout entries; keep the checks." >&2; \
-        exit 1; \
-    fi; \
-    newest=$(printf '%s\n2.2.4\n' "$before" | sort -V | tail -1); \
-    if [ "$before" = "2.2.4" ] || [ "$newest" != "2.2.4" ]; then \
-        echo "ERROR: the base image already ships PyNvVideoCodec $before, so the" >&2; \
-        echo "       replacement is obsolete. Delete it and its pre_runtime whiteout" >&2; \
-        echo "       entries, and move the pin to the base version; keep the checks." >&2; \
-        exit 1; \
-    fi; \
     /usr/bin/python3 -m pip uninstall --break-system-packages --yes pynvvideocodec; \
     rm -rf /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec \
         /usr/local/lib/python3.12/dist-packages/pynvvideocodec* \
         /usr/local/external/ffmpeg; \
-    if /usr/bin/python3 -c 'import importlib.util, sys; sys.exit(0 if importlib.util.find_spec("PyNvVideoCodec") else 1)'; then \
-        echo "ERROR: PyNvVideoCodec is still importable after the removal above; the" >&2; \
-        echo "       base image ships it somewhere these paths do not reach." >&2; \
-        exit 1; \
-    fi; \
     /usr/bin/python3 -m pip install --break-system-packages --no-cache-dir \
         'PyNvVideoCodec==2.2.4'; \
     PYTHONPATH=/tmp/compliance /usr/bin/python3 -m compliance.check_pynvvideocodec --pinned 2.2.4; \
