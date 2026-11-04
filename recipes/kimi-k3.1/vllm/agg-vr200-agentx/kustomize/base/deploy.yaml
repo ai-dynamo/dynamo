@@ -1,0 +1,242 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: kimi-k3-1-vllm-agg-vr200-agentx
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --router-kv-events
+          - --router-min-initial-workers
+          - '2'
+          - --kv-cache-block-size
+          - '1024'
+          - --router-session-affinity-mode
+          - hard
+          - --tokenizer
+          - fastokens
+          - --no-tokenizer-fallback
+          - --trust-remote-code
+          - --http-port
+          - '8000'
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          env:
+          - name: FASTOKENS_BPE_THREADS
+            value: '16'
+          - name: DYN_ROUTER_SESSION_AFFINITY_TTL_SECS
+            value: '7200'
+          - name: HF_HUB_OFFLINE
+            value: '1'
+          - name: TRANSFORMERS_OFFLINE
+            value: '1'
+          - name: DYN_ROUTER_MODE
+            value: kv
+          image: nvcr.io/0886876425485018/rainhollow-dev/dynamo-vllm:efdf1a14-scrubbed-v3@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
+          imagePullPolicy: IfNotPresent
+          name: main
+          resources:
+            requests:
+              cpu: '16'
+              memory: 128Gi
+          volumeMounts:
+          - mountPath: /shared-model-cache/moonshotai/Kimi-K3.1-Pro
+            name: model-weights
+            readOnly: true
+        nodeSelector:
+          kubernetes.io/arch: arm64
+          nvidia.com/gpu.machine: VR-NVL72
+        volumes:
+        - name: model-weights
+          hostPath:
+            path: /mnt/vr-nvme/models/moonshotai/Kimi-K3.1-Pro
+            type: Directory
+        securityContext:
+          runAsUser: 0
+          runAsGroup: 0
+    replicas: 1
+    runtimeVersionOverride: 1.7.0
+    type: frontend
+  - multinode:
+      nodeCount: 2
+    name: Worker
+    podTemplate:
+      metadata:
+        annotations:
+          nvidia.com/vllm-distributed-executor-backend: mp
+      spec:
+        containers:
+        - args:
+          - |
+            set -euo pipefail
+            exec python3 -m dynamo.vllm \
+              --model /shared-model-cache/moonshotai/Kimi-K3.1-Pro \
+              --served-model-name moonshotai/Kimi-K3.1-Pro \
+              --trust-remote-code \
+              --enable-multimodal \
+              --frontend-decoding \
+              --mm-encoder-tp-mode data \
+              --skip-mm-profiling \
+              --tensor-parallel-size 8 \
+              --pipeline-parallel-size 1 \
+              --nnodes 2 \
+              --distributed-executor-backend mp \
+              --distributed-timeout-seconds 7200 \
+              --cpu-distributed-timeout-seconds 7200 \
+              --disable-custom-all-reduce \
+              --no-numa-bind \
+              --compilation-config '{"cudagraph_capture_sizes":[7,8,14,16,28,32,56,64,112,128,168,192,224,256,384,512,640,768,896,1024,1280,1536,1792,2048,4096,8192]}' \
+              --stream-interval 20 \
+              --gpu-memory-utilization 0.94 \
+              --max-num-batched-tokens 8192 \
+              --max-num-seqs 32 \
+              --enable-prefix-caching \
+              --no-enable-flashinfer-autotune \
+              --kv-cache-dtype fp8 \
+              --scheduler-cls vllm.v1.core.sched.async_scheduler.AsyncScheduler \
+              --dyn-tool-call-parser kimi_k3 \
+              --dyn-reasoning-parser kimi_k3 \
+              --dyn-enable-structural-tag \
+              --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' \
+              --load-format fastsafetensors \
+              --attention-backend FLASHINFER_MLA_SPARSE \
+              --attention-config '{"indexer_kv_dtype":"mxfp4"}' \
+              --prefix-match-unit 128 \
+              --mamba-ssm-cache-dtype bfloat16 \
+              --decode-context-parallel-size 8 \
+              --block-size 896 \
+              --cp-kv-cache-interleave-size 1 \
+              --enable-cumem-allocator \
+              --dcp-comm-backend a2a \
+              --moe-backend auto \
+              --quantization-config '{"moe":{"activation":"mxfp8"}}' \
+              --speculative-config "${SPECULATIVE_CONFIG}" \
+              --use-replayssm \
+              --max-cudagraph-capture-size 8192 \
+              --long-prefill-token-threshold 8192 \
+              --long-prefill-token-threshold-adaptive \
+              --enable-expert-parallel
+          command:
+          - /bin/bash
+          - -lc
+          env:
+          - name: HF_HUB_OFFLINE
+            value: '1'
+          - name: TRANSFORMERS_OFFLINE
+            value: '1'
+          - name: DYN_SELF_HOST_METADATA
+            value: '1'
+          - name: VLLM_USE_NCCL_SYMM_MEM
+            value: '0'
+          - name: VLLM_ALLREDUCE_USE_SYMM_MEM
+            value: '1'
+          - name: VLLM_ALLREDUCE_USE_FLASHINFER
+            value: '1'
+          - name: NVIDIA_IMEX_CHANNELS
+            value: '0'
+          - name: NCCL_MNNVL_ENABLE
+            value: '1'
+          - name: NCCL_NVLS_ENABLE
+            value: '1'
+          - name: DYN_REQUEST_PLANE
+            value: tcp
+          - name: ETCD_LEASE_TTL
+            value: '120'
+          - name: VLLM_ENGINE_READY_TIMEOUT_S
+            value: '7200'
+          - name: VLLM_RPC_TIMEOUT
+            value: '600000'
+          - name: VLLM_DEEP_GEMM_WARMUP
+            value: skip
+          - name: PYTORCH_ALLOC_CONF
+            value: expandable_segments:True
+          - name: VLLM_USE_V2_MODEL_RUNNER
+            value: '1'
+          - name: VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+            value: '1800'
+          - name: TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC
+            value: '1800'
+          - name: NCCL_TIMEOUT
+            value: '1800'
+          - name: MODEL_PATH
+            value: /shared-model-cache/moonshotai/Kimi-K3.1-Pro
+          - name: VLLM_USE_DIRECT_DCP_A2A
+            value: '1'
+          - name: VLLM_USE_DIRECT_DCP_Q_GATHER
+            value: '1'
+          - name: VLLM_USE_DIRECT_DCP_KV_GATHER
+            value: '1'
+          - name: NCCL_CUMEM_ENABLE
+            value: '1'
+          - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
+            value: '900'
+          - name: SPECULATIVE_CONFIG
+            value: '{"method":"dspark","model":"/draft-model","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'
+          image: nvcr.io/0886876425485018/rainhollow-dev/dynamo-vllm:efdf1a14-scrubbed-v3@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
+          imagePullPolicy: IfNotPresent
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: '4'
+            requests:
+              cpu: '16'
+              ephemeral-storage: 64Gi
+              memory: 700Gi
+              nvidia.com/gpu: '4'
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_PTRACE
+              - SYS_RESOURCE
+            runAsGroup: 0
+            runAsUser: 0
+          volumeMounts:
+          - mountPath: /shared-model-cache/moonshotai/Kimi-K3.1-Pro
+            name: model-weights
+            readOnly: true
+          - mountPath: /draft-model
+            name: dspark-model
+            readOnly: true
+        nodeSelector:
+          kubernetes.io/arch: arm64
+          nvidia.com/gpu.machine: VR-NVL72
+        terminationGracePeriodSeconds: 60
+        volumes:
+        - name: model-weights
+          hostPath:
+            path: /mnt/vr-nvme/models/moonshotai/Kimi-K3.1-Pro
+            type: Directory
+        - name: dspark-model
+          hostPath:
+            path: /mnt/vr-nvme/models/kimi-k3-dspark
+            type: Directory
+        securityContext:
+          runAsUser: 0
+          runAsGroup: 0
+    replicas: 2
+    runtimeVersionOverride: 1.7.0
+    sharedMemorySize: 264Gi
+    type: worker

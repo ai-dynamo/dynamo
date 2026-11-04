@@ -1,0 +1,246 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Generated file. For repository contributors, do not edit this checked-in copy.
+# Regenerate every public overlay and rendered manifest of this matrix (from the repository root):
+#   scripts/kustomize-matrix.py unfold recipes/kimi-k3.1/vllm/agg-b200-agentx/.kustomize-matrix.yaml
+#   scripts/kustomize-matrix.py render recipes/kimi-k3.1/vllm/agg-b200-agentx/.kustomize-matrix.yaml
+# Inspect only this Kustomize overlay (from the repository root):
+#   kustomize build recipes/kimi-k3.1/vllm/agg-b200-agentx/kustomize/overlays/b200-synthetic-al
+# You may edit a copy before applying it.
+
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  labels:
+    app.kubernetes.io/name: kimi-k3-1-pro-vllm-aggregate-b200
+    app.kubernetes.io/part-of: dynamo
+  name: kimi-k3-1-pro-vllm-aggregate-b200
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --dyn-chat-processor
+          - dynamo
+          - --router-kv-events
+          - --router-min-initial-workers
+          - "1"
+          - --tokenizer
+          - fastokens
+          - --no-tokenizer-fallback
+          - --model-name
+          - moonshotai/Kimi-K3.1-Pro
+          - --trust-remote-code
+          - --http-port
+          - "8000"
+          - --router-session-affinity-mode
+          - hard
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          env:
+          - name: FASTOKENS_BPE_THREADS
+            value: "16"
+          - name: DYN_ROUTER_SESSION_AFFINITY_TTL_SECS
+            value: "7200"
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: DYN_ROUTER_MODE
+            value: kv
+          image: nvcr.io/0886876425485018/rainhollow-dev/dynamo-vllm:efdf1a14-scrubbed-v3@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
+          imagePullPolicy: IfNotPresent
+          name: main
+          resources:
+            requests:
+              cpu: "16"
+              memory: 128Gi
+        imagePullSecrets:
+        - name: ngc-pull-secret
+        - name: acr-pull-secret
+        nodeSelector:
+          kubernetes.io/arch: amd64
+          nvidia.com/gpu.product: NVIDIA-B200
+        tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+    replicas: 1
+    runtimeVersionOverride: 1.7.0
+    type: frontend
+  - multinode:
+      nodeCount: 2
+    name: Worker
+    podTemplate:
+      metadata:
+        annotations:
+          nvidia.com/vllm-distributed-executor-backend: mp
+      spec:
+        containers:
+        - args:
+          - |
+            set -euo pipefail
+
+            exec python3 -m dynamo.vllm \
+              --model "${MODEL_PATH}" \
+              --served-model-name moonshotai/Kimi-K3.1-Pro \
+              --trust-remote-code \
+              --tensor-parallel-size 8 \
+              --pipeline-parallel-size 2 \
+              --nnodes 2 \
+              --distributed-executor-backend mp \
+              --distributed-timeout-seconds 7200 \
+              --cpu-distributed-timeout-seconds 7200 \
+              --disable-custom-all-reduce \
+              --compilation-config "${COMPILATION_CONFIG}" \
+              --stream-interval 20 \
+              --gpu-memory-utilization 0.85 \
+              --max-num-batched-tokens 8192 \
+              --max-num-seqs 48 \
+              --enable-prefix-caching \
+              --enable-multimodal \
+              --frontend-decoding \
+              --mm-encoder-tp-mode data \
+              --skip-mm-profiling \
+              --no-enable-flashinfer-autotune \
+              --kv-cache-dtype fp8_ds_mla \
+              --scheduler-cls vllm.v1.core.sched.async_scheduler.AsyncScheduler \
+              --dyn-tool-call-parser kimi_k3 \
+              --dyn-reasoning-parser kimi_k3 \
+              --dyn-enable-structural-tag \
+              --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' \
+              --load-format "${LOAD_FORMAT}" \
+              --attention-backend FLASHMLA_SPARSE \
+              --mamba-ssm-cache-dtype bfloat16 \
+              --decode-context-parallel-size 8 \
+              --block-size 1024 \
+              --cp-kv-cache-interleave-size 1 \
+              --enable-cumem-allocator \
+              --dcp-comm-backend a2a \
+              --enable-expert-parallel \
+              --moe-backend auto \
+              --quantization-config '{"moe":{"activation":"mxfp8"}}' \
+              --speculative-config "${SPECULATIVE_CONFIG}" \
+              --no-numa-bind \
+              --prefix-match-unit 64
+          command:
+          - /bin/bash
+          - -lc
+          env:
+          - name: COMPILATION_CONFIG
+            value: '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":8192,"cudagraph_capture_sizes":[1,2,4,8,12,16,24,32,40,48,56,64,72,80,88,96,128,256,512,1024,2048,3072,4096,5888,7296,8192]}'
+          - name: HF_HOME
+            value: /tmp/hf
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: DYN_SELF_HOST_METADATA
+            value: "1"
+          - name: VLLM_USE_NCCL_SYMM_MEM
+            value: "0"
+          - name: VLLM_ALLREDUCE_USE_SYMM_MEM
+            value: "0"
+          - name: VLLM_ALLREDUCE_USE_FLASHINFER
+            value: "0"
+          - name: NCCL_MNNVL_ENABLE
+            value: "0"
+          - name: NCCL_NVLS_ENABLE
+            value: "0"
+          - name: DYN_REQUEST_PLANE
+            value: tcp
+          - name: ETCD_LEASE_TTL
+            value: "120"
+          - name: VLLM_ENGINE_READY_TIMEOUT_S
+            value: "7200"
+          - name: VLLM_RPC_TIMEOUT
+            value: "600000"
+          - name: VLLM_DEEP_GEMM_WARMUP
+            value: skip
+          - name: PYTORCH_ALLOC_CONF
+            value: expandable_segments:True
+          - name: VLLM_USE_V2_MODEL_RUNNER
+            value: "1"
+          - name: VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+            value: "1800"
+          - name: TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC
+            value: "1800"
+          - name: NCCL_TIMEOUT
+            value: "1800"
+          - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
+            value: "900"
+          - name: MODEL_PATH
+            value: /shared-model-cache/moonshotai/Kimi-K3.1-Pro
+          - name: LOAD_FORMAT
+            value: fastsafetensors
+          - name: SPECULATIVE_CONFIG
+            value: '{"method":"dspark","model":"/shared-model-cache/hub/models--Inferact--Kimi-K3-DSpark/snapshots/cf6b8244620e7ea4b0651d214f28e89eac75bed6","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":3.84,"draft_load_config":{"load_format":"safetensors"}}'
+          - name: HF_MODULES_CACHE
+            value: /tmp/hf-modules
+          - name: XDG_CACHE_HOME
+            value: /tmp/xdg
+          - name: PYTHONDONTWRITEBYTECODE
+            value: "1"
+          image: nvcr.io/0886876425485018/rainhollow-dev/dynamo-vllm:efdf1a14-scrubbed-v3@sha256:d288a996e86281e181b57bbf6de07206f7a7003a26f661684d41185cf1bb3db7
+          imagePullPolicy: IfNotPresent
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "8"
+            requests:
+              cpu: "16"
+              ephemeral-storage: 64Gi
+              memory: 700Gi
+              nvidia.com/gpu: "8"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_PTRACE
+              - SYS_RESOURCE
+            runAsGroup: 0
+            runAsUser: 0
+          volumeMounts:
+          - mountPath: /shared-model-cache
+            name: shared-model-cache
+            readOnly: true
+        imagePullSecrets:
+        - name: ngc-pull-secret
+        - name: acr-pull-secret
+        nodeSelector:
+          kubernetes.io/arch: amd64
+          nvidia.com/gpu.product: NVIDIA-B200
+        terminationGracePeriodSeconds: 60
+        tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+            readOnly: true
+    replicas: 1
+    runtimeVersionOverride: 1.7.0
+    sharedMemorySize: 64Gi
+    type: worker
