@@ -1065,6 +1065,11 @@ impl DynamoErrorBuilder {
     }
 
     /// Set a bounded client-safe rejection message.
+    ///
+    /// This and [`Self::public_details`] assign the same `public` field, so the
+    /// last call wins. Do not call this after `public_details` with a structured
+    /// variant such as [`PublicDetails::ContextLength`]: only this message would
+    /// survive and the structured fields would disappear.
     pub fn public_message(mut self, message: impl Into<String>) -> Self {
         let message = bounded_message(message.into());
         self.public = Some(PublicDetails::Message { message });
@@ -1072,6 +1077,11 @@ impl DynamoErrorBuilder {
     }
 
     /// Set structured client-safe details.
+    ///
+    /// This and [`Self::public_message`] assign the same `public` field, so the
+    /// last call wins. Protocol renderers derive a readable message from
+    /// [`PublicDetails::ContextLength`]; call this last and do not add a public
+    /// message afterwards.
     pub fn public_details(mut self, public: PublicDetails) -> Self {
         self.public = Some(public);
         self

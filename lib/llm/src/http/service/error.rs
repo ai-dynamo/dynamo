@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 
 use axum::http::StatusCode;
 use dynamo_runtime::config::environment_names::llm as env_llm;
-use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
+use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType, PublicDetails};
 use thiserror::Error;
 
 fn parse_overload_status_code(value: Option<&str>) -> StatusCode {
@@ -96,6 +96,52 @@ pub(crate) fn http_action_for_class(class: dynamo_runtime::error::ErrorClass) ->
 
 pub(crate) fn http_action_for_error(error: &DynamoError) -> ClientErrorAction {
     http_action_for_class(error.class())
+}
+
+/// Render the client-visible message for a context-length rejection.
+///
+/// The preprocessor producers capture [`PublicDetails::ContextLength`] instead
+/// of a public message, so the protocol boundary owns the wording. The sentence
+/// must contain `maximum context length is` so clients that classify overflows by
+/// substring (LiteLLM's `is_error_str_context_window_exceeded`) recognize the
+/// rejection; the class-level fallback ("Invalid request") does not.
+///
+/// Do not move this wording into the producers with
+/// [`DynamoError::public_message`]: that setter and `.public_details(...)` assign
+/// the same `public` field (last writer wins), so the structured `limit`/`actual`
+/// would be erased and this helper would no longer see them.
+///
+/// Returns `None` when the error is not a context-length rejection or the
+/// producer did not record the actual count, in which case the caller keeps its
+/// class-level fallback.
+pub(crate) fn context_length_public_message(error: &DynamoError) -> Option<String> {
+    match error.public_details()? {
+        PublicDetails::ContextLength {
+            limit,
+            actual: Some(actual),
+        } => Some(format!(
+            "This model's maximum context length is {limit} tokens. However, your messages \
+             resulted in {actual} tokens. Please reduce the length of the messages."
+        )),
+        _ => None,
+    }
+}
+
+/// Anthropic's wording for a streamed context-length rejection.
+///
+/// Anthropic clients classify overflows by `prompt is too long`, which the
+/// OpenAI-style sentence does not contain. Returns `None` under the same
+/// conditions as [`context_length_public_message`].
+pub(crate) fn anthropic_context_length_public_message(error: &DynamoError) -> Option<String> {
+    match error.public_details()? {
+        PublicDetails::ContextLength {
+            limit,
+            actual: Some(actual),
+        } => Some(format!(
+            "prompt is too long: {actual} tokens > {limit} maximum"
+        )),
+        _ => None,
+    }
 }
 
 /// Return the first classified DynamoError using its fail-closed semantic accessors.

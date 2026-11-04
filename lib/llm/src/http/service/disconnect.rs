@@ -39,7 +39,10 @@ use std::sync::{
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use crate::http::service::error::{ClientErrorAction, SanitizedError, http_action_for_error};
+use crate::http::service::error::{
+    ClientErrorAction, SanitizedError, anthropic_context_length_public_message,
+    http_action_for_error,
+};
 use crate::http::service::metrics::{CancellationLabels, ErrorType, InflightGuard, Metrics};
 use dynamo_runtime::error::{DynamoError, ErrorClass};
 
@@ -398,7 +401,11 @@ fn openai_semantic_stream_error(error: &DynamoError) -> (ErrorType, String) {
             "Request cancelled",
         ),
     };
-    let message = error.public_message().unwrap_or(message);
+    let message = error
+        .public_message()
+        .map(str::to_owned)
+        .or_else(|| anthropic_context_length_public_message(error))
+        .unwrap_or_else(|| message.to_string());
     let error_type = if status == crate::http::service::error::overload_status_code() {
         "service_unavailable"
     } else {
@@ -1333,6 +1340,38 @@ mod tests {
             body["error"]["code"],
             crate::http::service::error::overload_status_code().as_u16()
         );
+    }
+
+    #[test]
+    fn semantic_stream_error_renders_context_length_details() {
+        let error = DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+            })
+            .build();
+
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(
+            body["error"]["message"],
+            "prompt is too long: 9000 tokens > 8192 maximum"
+        );
+    }
+
+    #[test]
+    fn semantic_stream_error_keeps_class_message_for_other_invalid_requests() {
+        let error = DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .build();
+
+        let (_, body) = openai_semantic_stream_error(&error);
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(body["error"]["message"], "Invalid request");
     }
 
     #[tokio::test]

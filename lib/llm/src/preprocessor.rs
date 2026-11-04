@@ -2193,6 +2193,11 @@ impl OpenAIPreprocessor {
                      output token ({requested_tokens} tokens minimum)"
                 ),
             };
+            // Do not add `.public_message(...)` here to make this text client-visible:
+            // `public_message` and `public_details` assign the same `DynamoError`
+            // field (last writer wins), which would erase the `ContextLength`
+            // details. The HTTP renderers derive the public wording from those
+            // details instead.
             return Err(DynamoError::builder()
                 .error_type(ErrorType::InvalidArgument)
                 .message(format!(
@@ -5480,6 +5485,10 @@ impl OpenAIPreprocessor {
     }
 
     fn prompt_overflow_error(token_count: usize, combined_limit: usize) -> DynamoError {
+        // Do not add `.public_message(...)` after `.public_details(...)`:
+        // both builder setters assign the same `DynamoError` field (last writer
+        // wins), which would erase the `ContextLength` limit/actual details that
+        // the HTTP renderers use to produce the client-visible message.
         DynamoError::builder()
             .error_type(ErrorType::InvalidArgument)
             .message(format!(

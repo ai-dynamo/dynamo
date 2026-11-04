@@ -44,7 +44,7 @@ use super::{
         monitor_for_disconnects_with_activity_and_error_signal,
         monitor_for_disconnects_with_error_signal, monitor_for_responses_disconnects,
     },
-    error::{HttpError, invalid_argument},
+    error::{HttpError, context_length_public_message, invalid_argument},
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
         CancellationLabels, Endpoint, ErrorType, EventConverter,
@@ -927,7 +927,11 @@ impl ErrorMessage {
         Some((
             status,
             Json(ErrorMessage {
-                message: error.public_message().unwrap_or(public_message).to_string(),
+                message: error
+                    .public_message()
+                    .map(str::to_owned)
+                    .or_else(|| context_length_public_message(error))
+                    .unwrap_or_else(|| public_message.to_string()),
                 error_type: semantic_error_type(error.class(), status),
                 code: status.as_u16(),
                 details: error
@@ -8141,6 +8145,61 @@ mod tests {
         let body = serde_json::to_string(&response.1.0).expect("error response serializes");
         assert!(!body.contains("PRIVATE_DIAGNOSTIC_SENTINEL"));
         assert!(!body.contains("/srv/frontend.rs"));
+    }
+
+    #[test]
+    fn frontend_context_length_rejection_renders_limit_and_actual() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .diagnostic("PRIVATE_DIAGNOSTIC_SENTINEL=/srv/preprocessor.rs:42")
+            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+            })
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert!(
+            response
+                .1
+                .message
+                .contains("maximum context length is 8192 tokens"),
+            "message must carry LiteLLM's context-overflow substring, got: {}",
+            response.1.message
+        );
+        assert!(
+            response.1.message.contains("9000 tokens"),
+            "message must carry the actual token count, got: {}",
+            response.1.message
+        );
+        assert!(!response.1.message.contains("PRIVATE_DIAGNOSTIC_SENTINEL"));
+        let details: dynamo_runtime::error::PublicDetails =
+            serde_json::from_value(*response.1.details.clone().expect("details are preserved"))
+                .expect("context details deserialize");
+        assert_eq!(
+            details,
+            dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+            }
+        );
+    }
+
+    #[test]
+    fn frontend_context_length_without_actual_falls_back_to_class_message() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::InvalidArgument)
+            .public_details(dynamo_runtime::error::PublicDetails::ContextLength {
+                limit: 8192,
+                actual: None,
+            })
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.message, "Invalid request");
+        assert!(!response.1.message.contains("None tokens"));
     }
 
     #[test]

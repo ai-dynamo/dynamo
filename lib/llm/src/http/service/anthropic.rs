@@ -65,8 +65,8 @@ use crate::types::Annotated;
 
 // Re-use helpers from the openai module (sibling under service/)
 use super::error::{
-    ClientErrorAction, SanitizedError, find_canonical_error_in_chain, http_action_for_error,
-    invalid_argument,
+    ClientErrorAction, SanitizedError, anthropic_context_length_public_message,
+    find_canonical_error_in_chain, http_action_for_error, invalid_argument,
 };
 use super::metadata::{attach_x_request_id, extract_metadata_from_http};
 use super::openai::{get_body_limit, get_or_create_request_id, warn_nvext_disabled};
@@ -1460,7 +1460,11 @@ fn anthropic_stream_error_body(error: &dynamo_runtime::error::DynamoError) -> An
     };
     AnthropicErrorBody {
         error_type: anthropic_error_type_for_class(error.class()).to_string(),
-        message: error.public_message().unwrap_or(message).to_string(),
+        message: error
+            .public_message()
+            .map(str::to_owned)
+            .or_else(|| anthropic_context_length_public_message(error))
+            .unwrap_or_else(|| message.to_string()),
     }
 }
 
@@ -1491,10 +1495,15 @@ fn anthropic_semantic_error(error: &dynamo_runtime::error::DynamoError) -> Optio
     } else {
         tracing::debug!(class = %error.class(), reason = %error.reason(), diagnostic = ?error.diagnostic().map(dynamo_runtime::error::Diagnostic::as_str), "Semantic request failure");
     }
+    let rendered_message = error
+        .public_message()
+        .map(str::to_owned)
+        .or_else(|| anthropic_context_length_public_message(error))
+        .unwrap_or_else(|| public_message.to_string());
     Some(anthropic_error_unrecorded(
         status,
         anthropic_error_type_for_class(error.class()),
-        error.public_message().unwrap_or(public_message),
+        &rendered_message,
     ))
 }
 
@@ -1866,6 +1875,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn anthropic_semantic_error_renders_context_length_details() {
+        use dynamo_runtime::error::{DynamoError, ErrorType, PublicDetails};
+
+        let error = DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .diagnostic("PRIVATE_DIAGNOSTIC_SENTINEL")
+            .public_details(PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+            })
+            .build();
+        let response = anthropic_semantic_error(&error).expect("invalid request response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), get_body_limit())
+            .await
+            .unwrap();
+        let body: AnthropicErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.error.error_type, "invalid_request_error");
+        assert_eq!(
+            body.error.message,
+            "prompt is too long: 9000 tokens > 8192 maximum"
+        );
+        assert!(!body.error.message.contains("PRIVATE_DIAGNOSTIC_SENTINEL"));
+    }
+
+    #[tokio::test]
     async fn anthropic_semantic_conflict_uses_invalid_request_type() {
         let error = dynamo_runtime::error::DynamoError::builder()
             .class(dynamo_runtime::error::ErrorClass::Conflict)
@@ -1926,6 +1962,27 @@ mod tests {
         assert_eq!(body.error_type, "invalid_request_error");
         assert_eq!(body.message, "Invalid request");
         assert!(!body.message.contains("PRIVATE_STREAM_DIAGNOSTIC"));
+    }
+
+    #[test]
+    fn anthropic_stream_error_renders_context_length_details() {
+        use dynamo_runtime::error::{ErrorType, PublicDetails};
+
+        let error = DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .public_details(PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+            })
+            .build();
+
+        let body = anthropic_stream_error_body(&error);
+
+        assert_eq!(body.error_type, "invalid_request_error");
+        assert_eq!(
+            body.message,
+            "prompt is too long: 9000 tokens > 8192 maximum"
+        );
     }
 
     #[test]

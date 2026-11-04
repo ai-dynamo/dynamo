@@ -1036,6 +1036,11 @@ mod context_length_validation {
         };
         assert_eq!(*limit, 5);
         assert!(actual.is_some_and(|actual| actual > *limit));
+        assert_eq!(
+            dynamo_err.public_message(),
+            None,
+            "the producer must not overwrite ContextLength details with a public message"
+        );
     }
 
     #[tokio::test]
@@ -1119,6 +1124,18 @@ mod context_length_validation {
             )),
             "error message should state the requested token budget, got: {}",
             dynamo_err.message()
+        );
+        let Some(dynamo_runtime::error::PublicDetails::ContextLength { limit, actual }) =
+            dynamo_err.public_details()
+        else {
+            panic!("total-overflow rejection must expose structured length details");
+        };
+        assert_eq!(*limit, (prompt_len + 10) as u64);
+        assert_eq!(*actual, Some((prompt_len + 11) as u64));
+        assert_eq!(
+            dynamo_err.public_message(),
+            None,
+            "the producer must not replace ContextLength details with a public message"
         );
     }
 
