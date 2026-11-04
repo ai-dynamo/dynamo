@@ -22,7 +22,7 @@ export interface DynamoEvent {
 }
 
 /** Generation date in Pacific, YYYY-MM-DD. The calendar grid treats this as "today". */
-export const GENERATED_ON = "2026-11-03";
+export const GENERATED_ON = "2026-11-04";
 
 export const UPCOMING_EVENTS: DynamoEvent[] = [
   {
@@ -41,6 +41,19 @@ export const UPCOMING_EVENTS: DynamoEvent[] = [
 ];
 
 export const PAST_EVENTS: DynamoEvent[] = [
+  {
+    "title": "Dynamo SIG Deploy",
+    "start": "2026-11-03T16:00:00.000Z",
+    "month": "Nov",
+    "day": "3",
+    "year": "2026",
+    "dateLabel": "Tue, Nov 3, 2026",
+    "timeLabel": "8:00 AM",
+    "isPast": true,
+    "location": null,
+    "locationUrl": null,
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+SIG+Deploy&dates=20261103T160000Z%2F20261103T170000Z&details=Join+with+Google+Meet%3A+https%3A%2F%2Fmeet.google.com%2Fmer-jrnu-mry%0AOr+dial%3A+%28DE%29+%2B49+40+8081618610+PIN%3A+612378808%23%0AMore+phone+numbers%3A+https%3A%2F%2Ftel.meet%2Fmer-jrnu-mry%3Fpin%3D2635519655187%26hs%3D7%0A%0ALearn+more+about+Meet+at%3A+https%3A%2F%2Fsupport.google.com%2Fa%2Fusers%2Fanswer%2F9282720"
+  },
   {
     "title": "CoreWeave x NVIDIA Dynamo Meetup",
     "start": "2026-10-16T01:00:00.000Z",
@@ -105,18 +118,5 @@ export const PAST_EVENTS: DynamoEvent[] = [
     "location": "Luma",
     "locationUrl": "https://luma.com/r8o604o0",
     "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=vLLM+x+Dynamo+meetup&dates=20260825T010000Z%2F20260825T040000Z&location=https%3A%2F%2Fluma.com%2Fr8o604o0"
-  },
-  {
-    "title": "Dynamo Afterhours",
-    "start": "2026-07-31T01:00:00.000Z",
-    "month": "Jul",
-    "day": "30",
-    "year": "2026",
-    "dateLabel": "Thu, Jul 30, 2026",
-    "timeLabel": "6:00 PM",
-    "isPast": true,
-    "location": "Luma",
-    "locationUrl": "https://luma.com/JulyDynamoAfterHours",
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+Afterhours&dates=20260731T010000Z%2F20260731T040000Z&location=https%3A%2F%2Fluma.com%2FJulyDynamoAfterHours"
   }
 ];
