@@ -238,6 +238,6 @@ inherits = "release"
 debug = true
 strip = false
 
-# Release-only AISim 0.14.0 RC0 source pin for Dynamo 1.7.0.
+# Keep Python and Rust on the same AISim 0.14.0 source revision.
 [patch.crates-io]
 aisim-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "74dcdfcde184070d39e813ba24424b32e9627f00" }

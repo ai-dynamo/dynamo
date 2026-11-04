@@ -8,12 +8,29 @@ so each image only installs what it needs.
 | File | Purpose |
 |------|---------|
 | `requirements.common.txt` | Core deps shared by all containers |
-| `requirements.aisimulate.txt` | Source-built AISim wheel staged into release wheelhouses |
+| `requirements.aisimulate.txt` | Source-built AISim wheel staged into all container wheelhouses |
 | `requirements.planner.txt` | Planner, profiler, and global_planner deps |
 | `requirements.frontend.txt` | Frontend deps |
 | `requirements.benchmark.txt` | Benchmark and profiling tools |
 | `requirements.test.txt` | Test-only deps |
 | `requirements.dev.txt` | Dev-only tools |
+
+## AISim Source Build
+
+Container builds compile `aisim` from the exact `aisim-core` source revision in
+the root `Cargo.toml` and install that wheel explicitly. Python package metadata
+uses `aisim==0.14.0`; it does not encode the source revision. Until that version is
+published, local source builds must build and install the matching wheel before
+installing Dynamo:
+
+```bash
+python container/deps/build_aisimulate.py --root . \
+  --source /tmp/dynamo-aisim-source --output /tmp/dynamo-aisim-wheels
+python -m pip install /tmp/dynamo-aisim-wheels/aisim-*.whl
+```
+
+The helper requires Git, Rust, `maturin`, and Python `packaging`. The source
+directory must not already exist. Imports remain `aisimulate` and `aisimulate_core`.
 
 ## Version Pinning Strategy
 

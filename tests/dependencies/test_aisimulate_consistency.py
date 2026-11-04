@@ -87,12 +87,12 @@ def _locked_cargo_version(path: Path, patch: dict) -> Version:
     package = matches[0]
     assert package.get("source") == (
         f"git+{patch['git']}?rev={patch['rev']}#{patch['rev']}"
-    ), f"aisim-core must resolve from the exact RC source in {path}"
+    ), f"aisim-core must resolve from the exact source revision in {path}"
     assert "checksum" not in package
     return Version(str(package["version"]))
 
 
-def test_dynamo_pins_matching_aisim_rc_sources() -> None:
+def test_dynamo_pins_matching_aisim_sources() -> None:
     pyproject, cargo = _root_configs()
     python_requirement = _python_requirement(pyproject)
     python_version = _exact_version(python_requirement)

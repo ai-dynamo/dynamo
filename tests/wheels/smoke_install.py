@@ -263,7 +263,7 @@ def pip_install(venv_python: Path, wheelhouse: Path, requirements: list[str]) ->
     for path in (wheelhouse, wheelhouse / "nixl"):
         if path.exists():
             find_links.extend(["--find-links", str(path)])
-    # Every release wheelhouse carries AISim built from the pinned RC source.
+    # Every container wheelhouse carries AISim built from the pinned source.
     # Install that exact wheel rather than consulting a public package index.
     ais_wheel = require_one_wheel(wheelhouse, "aisim")
     run(

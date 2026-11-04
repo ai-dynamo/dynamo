@@ -41,7 +41,7 @@ def build(root: Path, source: Path, output: Path) -> None:
     with (project / "pyproject.toml").open("rb") as handle:
         project_metadata = tomllib.load(handle)["project"]
         if project_metadata["name"] != "aisim":
-            raise ValueError("RC source must publish the aisim distribution")
+            raise ValueError("AISim source must publish the aisim distribution")
         version = project_metadata["version"]
     with (root / "pyproject.toml").open("rb") as handle:
         requirements = tomllib.load(handle)["project"]["dependencies"]
