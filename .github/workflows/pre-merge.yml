@@ -439,7 +439,7 @@ jobs:
     - name: Set up Rust CI
       uses: ./.github/actions/setup-rust-ci
       with:
-        components: rustfmt
+        components: rustfmt clippy
     - name: Verify Code Formatting
       working-directory: ${{ matrix.dir }}
       run: cargo fmt -- --check
