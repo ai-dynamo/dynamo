@@ -10,6 +10,9 @@ areas:
   - components/src/dynamo/frontend/tests/
   - examples/chat_templates/
   - lib/bindings/python/rust/parsers.rs
+  - lib/generate-format-catalog/
+  - lib/llm/src/generate_format.rs
+  - lib/llm/src/generate_format/
   - lib/llm/src/entrypoint.rs
   - lib/llm/src/entrypoint/
   - lib/llm/src/entrypoint/input.rs
@@ -19,6 +22,7 @@ areas:
   - lib/llm/src/grpc/protos/
   - lib/llm/src/grpc/service.rs
   - lib/llm/src/grpc/service/
+  - lib/http-server/
   - lib/llm/src/http.rs
   - lib/llm/src/http/
   - lib/llm/src/http/service.rs
@@ -71,16 +75,19 @@ areas:
 - label: global-router
   github_team: '@ai-dynamo/dynamo-global-router-codeowners'
   path_globs:
-  - components/src/dynamo/kv_dc_relay/
+  - lib/global-view-broadcaster/
+  - components/src/dynamo/pool_relay/
+  - container/global-discovery-service.yaml
+  - lib/global-view-receiver/
   - docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
-  - docs/fern/pages/kubernetes/kv-aware-routing/kv-dc-relay.md
-  - docs/fern/pages/reference/components/kv-dc-relay-configuration.md
-  - lib/bindings/python/rust/llm/kv_dc_relay.rs
   - lib/global-*/**
-  - lib/llm/src/kv_dc_relay.rs
-  - lib/llm/src/kv_dc_relay/
+  - docs/fern/pages/kubernetes/kv-aware-routing/pool-relay.md
+  - docs/fern/pages/reference/components/pool-relay-configuration.md
+  - lib/bindings/python/rust/llm/pool_relay.rs
+  - lib/llm/src/pool_relay.rs
+  - lib/llm/src/pool_relay/
   - lib/llm/tests/fixtures/relay-sources-canonical.json
-  - tests/router/test_kv_dc_relay_e2e.py
+  - tests/router/test_pool_relay_e2e.py
 - label: backend-vllm
   github_team: '@ai-dynamo/dynamo-backend-vllm-codeowners'
   path_globs:
@@ -89,6 +96,7 @@ areas:
   - components/src/dynamo/vllm/tests/
   - examples/backends/vllm/
   - lib/sidecar/vllm/
+  - lib/generate-formats/vllm/
 - label: backend-trtllm
   github_team: '@ai-dynamo/dynamo-backend-trtllm-codeowners'
   path_globs:
@@ -112,6 +120,7 @@ areas:
   - examples/backends/sglang/
   - lib/mocker/servers/sglang/
   - lib/sidecar/sglang/
+  - lib/generate-formats/sglang/
 - label: backend-triton
   github_team: '@ai-dynamo/dynamo-backend-triton-codeowners'
   path_globs:
@@ -261,6 +270,7 @@ areas:
   - lib/backend-common/examples/
   - lib/sidecar/dynamo-sidecar
   - lib/sidecar/README.md
+  - lib/sidecar/SUPPORT_NOTES.md
   - lib/sidecar/common/
   - lib/sidecar/testkit/
   - lib/bindings/
@@ -897,6 +907,10 @@ shared:
   owners:
   - planner
   - operator
+- glob: components/src/dynamo/aisimulate/output/dgdr_run/
+  owners:
+  - planner
+  - operator
 - glob: components/src/dynamo/planner/connectors/kubernetes.py
   owners:
   - planner
@@ -1083,6 +1097,10 @@ shared:
   owners:
   - frontend
   - observability
+- glob: lib/http-server/src/metrics.rs
+  owners:
+  - frontend
+  - observability
 - glob: lib/llm/src/kv_router/shared_cache.rs
   owners:
   - router
@@ -1162,6 +1180,10 @@ shared:
   - ops
   - sidecar
 - glob: lib/sidecar/README.md
+  owners:
+  - runtime
+  - sidecar
+- glob: lib/sidecar/SUPPORT_NOTES.md
   owners:
   - runtime
   - sidecar
@@ -1282,6 +1304,10 @@ shared:
   owners:
   - operator
   - backend-vllm
+- glob: container/Dockerfile.global-discovery-service
+  owners:
+  - global-router
+  - ops
 - glob: deploy/operator/Dockerfile
   owners:
   - operator

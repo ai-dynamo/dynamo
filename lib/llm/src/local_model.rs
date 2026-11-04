@@ -15,7 +15,7 @@ use modelexpress_common::providers::{HuggingFaceProvider, ModelProviderTrait as 
 
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
-use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
+use crate::frontend_config::{ChatTemplateDefaults, FrontendApiConfig, MetricsConfig};
 use crate::model_card::{ABSOLUTE_MAX_METADATA_BYTES, ModelDeploymentCard, is_weight_file};
 use crate::model_type::{ModelInput, ModelType};
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
@@ -217,6 +217,15 @@ impl LocalModelBuilder {
         self.frontend_api_config
             .streaming_dispatch_mut()
             .set_reasoning_dispatch(enabled);
+        self
+    }
+
+    pub fn chat_template_defaults(
+        &mut self,
+        chat_template_defaults: ChatTemplateDefaults,
+    ) -> &mut Self {
+        self.frontend_api_config
+            .set_chat_template_defaults(chat_template_defaults);
         self
     }
 

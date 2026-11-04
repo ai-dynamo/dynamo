@@ -271,12 +271,13 @@ def test_candidate_replays_share_common_random_numbers(tmp_path):
             60.0,
             100.0,
             8.0,
+            "GoodputPerGPU",
         )
 
     baseline = evaluate({})
     assert evaluate({}) == baseline
-    # Replay reports no shared cache hits, so this candidate changes no
-    # routing decision: it ties the baseline, and the controller keeps it.
+    # These workers take no KV fetch hints and replay has no shared cache, so
+    # this candidate changes no routing decision: it ties the baseline and is kept.
     assert evaluate({"shared_cache_multiplier": 0.5}) == baseline
     assert evaluate({"router_temperature": 0.0})[0] != baseline[0]
 
@@ -386,18 +387,6 @@ def _planner_candidate_report(traces: list[str]) -> tuple[int, str]:
 
 @pytest.mark.integration
 @pytest.mark.timeout(120)
-@pytest.mark.xfail(
-    strict=True,
-    # Only the report comparison may fail as expected; a crash, a timeout or
-    # a failed precondition below is a real failure.
-    raises=AssertionError,
-    reason=(
-        "the pinned aisimulate keeps the planner's FPM samples in a std "
-        "HashMap (BucketedSamples), so a per-process hasher seed orders every "
-        "regression refit and breaks eviction ties; remove this marker once "
-        "the pin orders the buckets"
-    ),
-)
 def test_planner_candidate_replay_is_identical_across_processes(tmp_path):
     # Each sweep candidate replays in its own spawned worker, so common random
     # numbers need the whole report, inner planner included, to be a function
@@ -437,8 +426,7 @@ def test_planner_candidate_replay_is_identical_across_processes(tmp_path):
             _planner_candidate_report, [traces, traces]
         )
 
-    # Preconditions: pytest.fail is not an AssertionError, so the xfail
-    # marker cannot absorb them.
+    # Verify both independent processes exercised the planner before comparing reports.
     if first_pid == second_pid:
         pytest.fail("both replays ran in one process")
     planner = json.loads(first)["planner"]
@@ -591,6 +579,38 @@ def test_retune_rejects_an_engine_shape_that_differs_from_the_planner_mode(
 
 
 @pytest.mark.unit
+def test_retune_rejects_the_dgdr_executor(tmp_path):
+    # Replay runs local sweeps only; executor 'dgdr' needs a live Planner.
+    preset = dict.fromkeys(
+        ("tensor", "pipeline", "attention_data", "moe_tensor", "moe_expert"), 1
+    )
+    worker = {
+        "parallelism": {"preset": [preset]},
+        "scheduler": {"max_batched_tokens": 8192, "max_sequences": 256},
+    }
+    engine = {"mode": "aggregated", "workers": {"aggregated": worker}}
+    dgdr = {"claim_name": "traces", "model": "m", "sku": "h200_sxm", "engine": engine}
+    config = PlannerConfig.model_validate(
+        _guard_config()
+        | {
+            "retune": {
+                "interval_seconds": 21600,
+                "timeout_seconds": 20400,
+                "router": "default",
+                "executor": "dgdr",
+                "dgdr": dgdr,
+            }
+        }
+    )
+    trace = _write_trace(
+        tmp_path / "trace.jsonl", count=4, gap_ms=100, blocks=1, output_tokens=2
+    )
+
+    with pytest.raises(ValueError, match="executor 'dgdr' is not supported in replay"):
+        api._retune_inputs(config, **_inputs_kwargs(trace))
+
+
+@pytest.mark.unit
 def test_synthetic_replay_rejects_retune():
     with pytest.raises(
         ValueError, match="traffic.source type: trace with format: dynamo"
@@ -700,6 +720,7 @@ _PER_CANDIDATE = {  # set by sweep.evaluate_candidate
     "_deterministic",
 }
 _REJECTED = {  # by _retune_inputs: retune replays complete open-loop windows
+    "conversation_affinity",  # rejected before constructing the Planner
     "replay_concurrency",
     "agentic_lanes",
     "agentic_snapshot",
@@ -754,6 +775,7 @@ def test_every_replay_kwarg_is_classified_for_retune(tmp_path, monkeypatch):
                 100.0,
                 10.0,
                 60.0,
+                "GoodputPerGPU",
             )
     assert set().union(*calls) == _PINNED | _PER_CANDIDATE
     # Common random numbers; an inner planner is warmed from the read task's

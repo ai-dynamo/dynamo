@@ -578,6 +578,9 @@ class Publisher:
         # A set to store the block hash of partial block (i.e. block containing less than kv_block_size tokens) hashes.
         # It is used to prevent sending remove event to kv router since partial blocks are not stored.
         self.partial_block_hashes: set[int] = set()
+        # Hashes of stored blocks that were not published because the router
+        # cannot hash them; their descendants and removals are skipped too.
+        self.suppressed_block_hashes: set[int] = set()
         self.error_queue: Queue = Queue()
         self._stop_event = threading.Event()
         # Track the last engine event_id per attention-DP rank. TRT-LLM emits
@@ -1020,6 +1023,12 @@ class Publisher:
         if self.additional_metrics is not None:
             self.additional_metrics.record_kv_event_drain_batch(batch_size)
 
+    def _suppress_blocks(self, blocks) -> None:
+        for block in blocks:
+            block_hash = _to_signed_i64(block["block_hash"])
+            if block_hash is not None:
+                self.suppressed_block_hashes.add(block_hash)
+
     def _normalize_kv_event(self, event):
         event_id = event["event_id"]
         attention_dp_rank = event.get("attention_dp_rank", 0)
@@ -1063,7 +1072,11 @@ class Publisher:
             block_mm_infos: list[dict | None] = []
             kv_block_size = self.kv_block_size
             partial_block_hashes = self.partial_block_hashes
-            for block in data["blocks"]:
+            if parent_hash is not None and parent_hash in self.suppressed_block_hashes:
+                # The router never saw the parent, so it cannot place these.
+                self._suppress_blocks(data["blocks"])
+                return
+            for block_idx, block in enumerate(data["blocks"]):
                 block_tokens = block["tokens"]
                 token_num_in_block = len(block_tokens)
                 if token_num_in_block > kv_block_size:
@@ -1080,9 +1093,24 @@ class Publisher:
                 if token_num_in_block < kv_block_size:
                     partial_block_hashes.add(block_hash)
                     break
+                block_token_ids = [t["token_id"] for t in block_tokens]
+                if not all(type(t) is int for t in block_token_ids):
+                    # KV cache manager v2 marks multimodal items with digest
+                    # strings the router cannot hash. Publish the prefix before
+                    # this block and suppress the rest of the chain.
+                    self._suppress_blocks(data["blocks"][block_idx:])
+                    logger.warning(
+                        "Suppressing KV event blocks with non-integer token ids "
+                        "(multimodal digests from KV cache manager v2): "
+                        "engine_event_id=%s attention_dp_rank=%s blocks=%s",
+                        event_id,
+                        attention_dp_rank,
+                        len(data["blocks"]) - block_idx,
+                    )
+                    break
                 num_block_tokens.append(token_num_in_block)
                 block_hashes.append(block_hash)
-                token_ids.extend(int(t["token_id"]) for t in block_tokens)
+                token_ids.extend(block_token_ids)
 
                 mm_keys = block.get("mm_keys")
                 if mm_keys:
@@ -1142,24 +1170,28 @@ class Publisher:
         elif data["type"] == "removed":
             self.processing_initial_created_events = False
             removed_block_hashes: list[int] = []
-            skipped_partial_blocks = 0
+            skipped_unpublished_blocks = 0
             for block_hash in data["block_hashes"]:
                 block_hash = _to_signed_i64(block_hash)
                 if block_hash is None:
                     continue
                 if block_hash in self.partial_block_hashes:
                     self.partial_block_hashes.remove(block_hash)
-                    skipped_partial_blocks += 1
+                    skipped_unpublished_blocks += 1
+                    continue
+                if block_hash in self.suppressed_block_hashes:
+                    self.suppressed_block_hashes.remove(block_hash)
+                    skipped_unpublished_blocks += 1
                     continue
                 removed_block_hashes.append(block_hash)
 
             logger.debug(
                 "Publishing removed KV event: engine_event_id=%s "
-                "attention_dp_rank=%s blocks=%s skipped_partial_blocks=%s",
+                "attention_dp_rank=%s blocks=%s skipped_unpublished_blocks=%s",
                 event_id,
                 attention_dp_rank,
                 len(removed_block_hashes),
-                skipped_partial_blocks,
+                skipped_unpublished_blocks,
             )
             if not removed_block_hashes:
                 return

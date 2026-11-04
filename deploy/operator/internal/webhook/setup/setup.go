@@ -10,6 +10,7 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/aisimulate"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
@@ -23,10 +24,10 @@ type Options struct {
 	Config          *configv1alpha1.OperatorConfiguration
 	RuntimeConfig   *commoncontroller.RuntimeConfig
 	OperatorVersion string
-	// DGDRDefaultImage is the default DGDR profiler image, put into
-	// DGDR spec.image when unset; empty derives
-	// dynamo-planner:<OperatorVersion>.
-	DGDRDefaultImage  string
+	// DGDRV1beta1 configures the defaults of v1beta1 Requests.
+	DGDRV1beta1 webhookdefaulting.DGDRV1beta1Options
+	// DGDRV1beta2 configures cluster-derived defaults of v1beta2 Requests.
+	DGDRV1beta2       webhookdefaulting.DGDRV1beta2Options
 	OperatorPrincipal string
 	Gate              features.Gate
 }
@@ -38,6 +39,12 @@ func Setup(mgr ctrl.Manager, opts Options) error {
 	if opts.RuntimeConfig == nil {
 		return fmt.Errorf("runtime configuration is required")
 	}
+
+	// Fail startup before registering webhooks if the bundled input schema cannot compile.
+	if _, err := aisimulate.LoadInputSchema(); err != nil {
+		return fmt.Errorf("unable to compile bundled AISimulate input schema: %w", err)
+	}
+
 	cfg := opts.Config
 	runtimeConfig := opts.RuntimeConfig
 	gate := opts.Gate
@@ -72,6 +79,12 @@ func Setup(mgr ctrl.Manager, opts Options) error {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest webhook: %w", err)
 	}
 
+	// Helm installs the Run admission rule only when the v1beta2 APIs are enabled.
+	dgdrRunHandler := webhookvalidation.NewDynamoGraphDeploymentRunHandler()
+	if err := dgdrRunHandler.RegisterWithManager(mgr, gate); err != nil {
+		return fmt.Errorf("unable to register DynamoGraphDeploymentRun webhook: %w", err)
+	}
+
 	if isClusterWide {
 		if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}).
 			Complete(); err != nil {
@@ -104,7 +117,8 @@ func Setup(mgr ctrl.Manager, opts Options) error {
 		return fmt.Errorf("unable to register DynamoGraphDeployment defaulting webhook: %w", err)
 	}
 
-	dgdrDefaulter := webhookdefaulting.NewDGDRDefaulter(opts.OperatorVersion, opts.DGDRDefaultImage)
+	dgdrDefaulter := webhookdefaulting.NewDGDRDefaulter(opts.OperatorVersion, opts.DGDRV1beta1.DefaultImage).
+		WithV1beta2(opts.DGDRV1beta2)
 	if err := dgdrDefaulter.RegisterWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest defaulting webhook: %w", err)
 	}

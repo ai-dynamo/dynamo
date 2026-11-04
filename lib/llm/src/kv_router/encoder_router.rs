@@ -185,9 +185,12 @@ impl EncoderRouter {
     ) -> Result<EncoderBinding> {
         let target_id = target.id();
         let client = target.client(cancel_token).await?;
-        let router =
-            EncodePushRouter::from_client_with_monitor(client, RouterMode::RoundRobin, None)
-                .await?;
+        let router = EncodePushRouter::from_client_with_options(
+            client,
+            RouterMode::RoundRobin,
+            crate::kv_router::plugins::push_router_options(),
+        )
+        .await?;
         Ok(EncoderBinding {
             target_id,
             router: Arc::new(router),

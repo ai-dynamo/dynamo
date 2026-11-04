@@ -411,7 +411,7 @@ This section describes the validated vLLM path. KV-aware routing with SGLang LoR
 
 > [!IMPORTANT]
 > With `DYN_LORA_ENABLED`, only KV, random, and round-robin routing are LoRA-aware.
-> Direct, power-of-two, least-loaded, and device-aware-weighted modes fail startup.
+> Direct, least-loaded, and device-aware-weighted modes fail startup.
 > Session affinity with LoRA is supported only in KV mode; random and round-robin
 > plus affinity are rejected.
 

@@ -16,6 +16,7 @@ import uuid
 from typing import Any, AsyncGenerator, Optional
 
 from dynamo._core import Context
+from dynamo.common.protocols.request_parsing import parse_media_request
 from dynamo.common.protocols.video_protocol import (
     NvCreateVideoRequest,
     NvVideosResponse,
@@ -189,7 +190,7 @@ class VideoGenerationHandler(BaseGenerativeHandler):
 
         try:
             # Parse request
-            req = NvCreateVideoRequest(**request)
+            req = parse_media_request(NvCreateVideoRequest, request)
             nvext = req.nvext or VideoNvExt()
 
             # Parse parameters

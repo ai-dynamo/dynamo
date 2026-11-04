@@ -30,6 +30,9 @@ from typing import Literal, Optional
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
+from dynamo.global_planner.gpu_cost import GpuCostConfig
+from dynamo.global_planner.priority import PriorityConfig
+
 logger = logging.getLogger(__name__)
 
 
@@ -98,12 +101,31 @@ class GlobalPlannerConfig(BaseModel):
         ),
     )
 
+    gpu_cost: GpuCostConfig = Field(
+        default_factory=GpuCostConfig,
+        description=(
+            "GPU cost per replica for pools whose DGD requests no GPUs, so "
+            "GPU-free deployments such as mocker topologies can take part in "
+            "the budget. A declared cost is a fallback, never an override."
+        ),
+    )
+
+    priority: PriorityConfig = Field(
+        default_factory=PriorityConfig,
+        description=(
+            "Pool priorities used to arbitrate between competing scale "
+            "requests. Higher is more important; pools no selector matches "
+            "take 'priority.default'."
+        ),
+    )
+
     @model_validator(mode="after")
     def _validate_budget_band(self) -> "GlobalPlannerConfig":
         """Reject a budget band no allocation can satisfy.
 
         Both bounds active with ``min > max`` means every request is denied on
-        one edge or the other.
+        one edge or the other. Previously this started cleanly and surfaced only
+        as a stream of rejections at request time.
         """
         if (
             self.min_total_gpus >= 0
@@ -204,3 +226,22 @@ class GlobalPlannerConfig(BaseModel):
         # pairing, so log it whenever either bound is active.
         if self.budget_enforcement_enabled():
             logger.info(f"Intent cache TTL seconds: {self.intent_cache_ttl_seconds}")
+
+        if self.gpu_cost.pools:
+            logger.info(f"Declared GPU costs: {len(self.gpu_cost.pools)}")
+            for entry in self.gpu_cost.pools:
+                logger.info(
+                    f"  {entry.selector} -> {entry.gpu_per_replica} GPU/replica"
+                )
+        else:
+            logger.info("Declared GPU costs: none (all pools priced by their DGD)")
+
+        logger.info(f"Default pool priority: {self.priority.default}")
+        if self.priority.pools:
+            logger.info(f"Pool priority selectors: {len(self.priority.pools)}")
+            for policy in self.priority.pools:
+                assert policy.rules is not None
+                values = ", ".join(str(rule.priority) for rule in policy.rules)
+                logger.info(f"  {policy.selector} -> {values}")
+        else:
+            logger.info("Pool priority selectors: none (every pool takes the default)")

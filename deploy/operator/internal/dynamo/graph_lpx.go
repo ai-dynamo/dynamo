@@ -405,7 +405,7 @@ func renderSelectedLPXRole(
 	if GetDynamoSidecar(component) != nil {
 		ensurePodTemplate(component).Labels[commonconsts.KubeLabelDynamoWorkerHash] = defaults.servingHash
 	}
-	applyDGDTemplateDefaults(component, dgd, nil)
+	applyDGDTemplateDefaults(component, dgd, nil, false)
 	basePodSpec, err := generateBasePodSpecWithDefaults(
 		component,
 		BackendFrameworkNoop,

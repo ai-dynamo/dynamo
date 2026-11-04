@@ -50,7 +50,11 @@ from typing import Any, Literal, NamedTuple
 
 from aisimulate.sweeper import OptimizationTarget, objective_value
 
-from dynamo.planner.config.planner_config import PlannerConfig, RetuneEngineSpec
+from dynamo.planner.config.planner_config import (
+    PlannerConfig,
+    RetuneEngineSpec,
+    RetuneObjective,
+)
 from dynamo.planner.core.types import (
     RetuneParams,
     TrafficObservation,
@@ -90,6 +94,67 @@ _WORKER_TEMP_DIR = "tmp"
 
 
 @dataclass(frozen=True)
+class _Objective:
+    """How ``score_summary`` scores one ``retune.objective``.
+
+    ``target`` is the AISimulate target the DGDR operator lowers the metric
+    to. ``inputs`` are the summary values ``objective_value`` reads, which
+    must be finite numbers; ``positive`` of them must also be above 0.
+    ``per_window`` rescales the value from the replay's duration to the
+    window length.
+    """
+
+    target: OptimizationTarget
+    inputs: tuple[str, ...]
+    positive: tuple[str, ...] = ()
+    per_window: bool = False
+
+
+_OBJECTIVES: dict[RetuneObjective, _Objective] = {
+    "Throughput": _Objective(
+        OptimizationTarget.THROUGHPUT, ("output_throughput_tok_s",)
+    ),
+    "ThroughputPerGPU": _Objective(
+        OptimizationTarget.THROUGHPUT_PER_GPU,
+        ("output_throughput_tok_s", "gpu_hours", "duration_ms"),
+        ("gpu_hours", "duration_ms"),
+    ),
+    "ThroughputPerUser": _Objective(
+        OptimizationTarget.THROUGHPUT_PER_USER,
+        ("mean_output_token_throughput_per_user",),
+    ),
+    "TTFT": _Objective(
+        OptimizationTarget.TTFT,
+        ("mean_ttft_ms", "num_ttft_samples"),
+        ("num_ttft_samples",),
+    ),
+    "E2ELatency": _Objective(
+        OptimizationTarget.E2E_LATENCY,
+        ("mean_e2e_latency_ms", "num_e2e_latency_samples"),
+        ("num_e2e_latency_samples",),
+    ),
+    "Goodput": _Objective(
+        OptimizationTarget.GOODPUT,
+        (GOODPUT_KEY, "duration_ms"),
+        ("duration_ms",),
+        per_window=True,
+    ),
+    "GoodputPerGPU": _Objective(
+        OptimizationTarget.GOODPUT_PER_GPU,
+        (GOODPUT_KEY, "gpu_hours", "duration_ms"),
+        ("gpu_hours", "duration_ms"),
+        per_window=True,
+    ),
+}
+
+
+def objective_maximized(objective: RetuneObjective) -> bool:
+    """Whether a higher score is better; TTFT and E2ELatency are minimized."""
+
+    return _OBJECTIVES[objective].target.maximize
+
+
+@dataclass(frozen=True)
 class SweepRequest:
     """Everything one sweep needs; picklable and independent of the planner.
 
@@ -105,6 +170,18 @@ class SweepRequest:
     predictors the forecast-loss pre-sweep chooses from, as
     ``retune.domains`` expands ``retune.planner.load_predictor``; its
     winner's predictor fields are fixed into every non-baseline candidate.
+    ``objective`` is the metric ``score_summary`` scores each replay on.
+
+    The remaining fields are set only by a live controller (``launch_gate``
+    set) and keep their defaults in replay, where ``run_sweep`` ignores them:
+    ``router_domain`` is the controller's router domain (live knob name ->
+    values), ``deadline_s`` the absolute epoch deadline ``D_k = L_k +
+    timeout``, ``spec_replicas`` the DGD spec replicas by worker type the
+    gate reported, ``replicas_verified`` whether the recorded ready counts
+    cover the whole window (``False`` when the window began before the
+    controller started), and ``generation`` the launching controller's
+    generation. Abort events are passed to the sweep function, never stored
+    here, so the request stays picklable.
     """
 
     window_index: int
@@ -120,11 +197,17 @@ class SweepRequest:
     replicas: dict[str, int]
     base_planner: dict[str, Any] | None
     predictor_candidates: tuple[PredictorCandidate, ...] | None
+    objective: RetuneObjective
     sla_ttft_ms: float
     sla_itl_ms: float
     max_parallel: int
     timeout_s: float
     history_paths: tuple[str, ...] = ()
+    router_domain: dict[str, tuple[float, ...]] | None = None
+    deadline_s: float | None = None
+    spec_replicas: dict[str, int] | None = None
+    replicas_verified: bool = True
+    generation: int = 0
 
     def __post_init__(self) -> None:
         keys = [candidate.key() for candidate in self.candidates]
@@ -140,6 +223,8 @@ class SweepRequest:
             raise ValueError("max_parallel must be at least 1")
         if not self.timeout_s > 0:
             raise ValueError("timeout_s must be positive")
+        if self.deadline_s is not None and not math.isfinite(self.deadline_s):
+            raise ValueError("deadline_s must be finite")
         if self.predictor_candidates:
             labels = [label for label, _ in self.predictor_candidates]
             if len(set(labels)) != len(labels):
@@ -171,7 +256,11 @@ class SweepResult:
     prepares it on ``warmup_observations`` as a host does before a swap;
     ``predictor_warmup_error`` is that preparation's error, if any.
     ``row_counts`` holds the window reader's counts and, when the history
-    was read, ``history_requests``.
+    was read, ``history_requests``. ``failure_reason`` is a stable,
+    machine-readable reason a live executor sets next to the free-text
+    ``error`` (``retune.live.contracts.NON_DECISION_FAILURES`` mean the
+    window was abandoned, not failed); ``details`` carries JSON-shaped
+    executor facts for the decision record. ``run_sweep`` sets neither.
     """
 
     status: SweepStatus
@@ -184,6 +273,8 @@ class SweepResult:
     predictor_warmup_error: str | None = None
     wall_s: float = 0.0
     error: str | None = None
+    failure_reason: str | None = None
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 def with_predictor_fields(
@@ -209,37 +300,58 @@ def with_predictor_fields(
 
 
 def score_summary(
-    summary: Mapping[str, Any], window_s: float
+    summary: Mapping[str, Any],
+    window_s: float,
+    objective: RetuneObjective,
 ) -> tuple[float, dict[str, Any]]:
-    """Score a replay summary as SLA-good output tokens per window-GPU-second.
+    """Score a replay summary on ``objective``, in the objective's own units.
 
-    ``objective_value(summary, GOODPUT_PER_GPU) * duration_ms / (window_s *
-    1000)``: the denominator is the fixed window length, so candidates whose
-    drains differ are compared on the same time base. Fails closed: a missing
-    goodput key or a non-positive ``gpu_hours``/``duration_ms`` raises instead
-    of scoring 0, which would tie every candidate.
+    The score is ``objective_value`` of the AISimulate target the DGDR
+    operator lowers the objective to, unsigned: ``objective_maximized`` says
+    which way is better. A replay drains every request of the window, so its
+    ``duration_ms`` is the window plus a drain that differs by candidate, and
+    each output-token total is the same for every candidate:
+
+    - ``Goodput`` and ``GoodputPerGPU`` are multiplied by ``duration_ms /
+      (window_s * 1000)``: SLA-good tokens per window second (per GPU). The
+      SLA already penalizes a slow candidate, and the fixed window keeps the
+      drain from counting against it a second time. The default score is
+      SLA-good output tokens per window-GPU-second.
+    - ``Throughput`` and ``ThroughputPerGPU`` are not rescaled. Over the
+      window both would equal the offered load for every candidate (per GPU
+      too, with fixed replicas); over the replay they rank a shorter drain,
+      which is how a candidate with more capacity shows when the window
+      backs up.
+    - ``ThroughputPerUser`` (mean tok/s/user over token gaps), ``TTFT`` and
+      ``E2ELatency`` (mean ms) are per-request means that the duration does
+      not enter.
+
+    Fails closed: a missing or non-finite input, a non-positive
+    ``gpu_hours``/``duration_ms``, or a latency with no samples raises
+    instead of scoring, so that candidate is unscored rather than tied at 0
+    or ranked at infinity.
     """
 
-    if summary.get(GOODPUT_KEY) is None:
+    spec = _OBJECTIVES[objective]
+    if GOODPUT_KEY in spec.inputs and summary.get(GOODPUT_KEY) is None:
         raise ValueError(f"replay summary has no {GOODPUT_KEY}; scoring needs an SLA")
-    goodput, gpu_hours, duration_ms = (
-        _finite_number(summary, name)
-        for name in (GOODPUT_KEY, "gpu_hours", "duration_ms")
-    )
-    if gpu_hours <= 0 or duration_ms <= 0:
-        raise ValueError(
-            "replay summary needs positive gpu_hours and duration_ms, got "
-            f"{gpu_hours!r} and {duration_ms!r}"
-        )
+    inputs = {name: _finite_number(summary, name) for name in spec.inputs}
+    for name in spec.positive:
+        if inputs[name] <= 0:
+            raise ValueError(
+                f"replay summary needs a positive {name}, got {inputs[name]!r}"
+            )
     if not window_s > 0:
         raise ValueError(f"window_s must be positive, got {window_s!r}")
-    objective = objective_value(dict(summary), OptimizationTarget.GOODPUT_PER_GPU)
-    score = objective * duration_ms / (window_s * 1000.0)
+    value = objective_value(dict(summary), spec.target)
+    score = value
+    if spec.per_window:
+        score = value * inputs["duration_ms"] / (window_s * 1000.0)
+    if not math.isfinite(score):
+        raise ValueError(f"{objective} score must be finite, got {score!r}")
     return score, {
-        "objective_goodput_per_gpu": objective,
-        GOODPUT_KEY: goodput,
-        "gpu_hours": gpu_hours,
-        "duration_ms": duration_ms,
+        f"objective_{spec.target.value}": value,
+        **inputs,
         "completed_requests": summary.get("completed_requests"),
         "goodput_completed_requests": summary.get("goodput_completed_requests"),
     }
@@ -265,8 +377,9 @@ def evaluate_candidate(
     sla_ttft_ms: float,
     sla_itl_ms: float,
     window_s: float,
+    objective: RetuneObjective,
 ) -> tuple[float, dict[str, Any]]:
-    """Replay the window once with ``params`` and score its summary.
+    """Replay the window once with ``params`` and score its summary on ``objective``.
 
     Without ``base_planner`` the replay keeps ``replicas`` fixed (Scenario 1).
     With it, an inner planner runs from ``base_planner`` with
@@ -274,12 +387,9 @@ def evaluate_candidate(
     predictor is warmed with the observations in ``warmup_path``, when set.
     The replay uses the canonical router seed and ordinal request ids, so the
     baseline and every candidate see common random numbers, and it does not
-    depend on host speed: a candidate that changes no routing or scaling
-    decision scores exactly the baseline. With the pinned AISimulate, an inner
-    planner in SLA mode is not guaranteed to be bitwise reproducible across
-    processes: AISimulate's forward-pass performance model iterates its
-    samples in a per-process hash order, so its refits can differ in the last
-    bits and flip a scaling decision.
+    depend on host speed or on the worker process, inner planner included: a
+    candidate that changes no routing or scaling decision scores exactly the
+    baseline.
     Raises when the replay fails or its summary lacks the score inputs.
     """
 
@@ -310,7 +420,7 @@ def evaluate_candidate(
         capture_planner_details=False,
         **kwargs,
     )
-    return score_summary(report.summary, window_s)
+    return score_summary(report.summary, window_s, objective)
 
 
 def _presweep_summary(
@@ -682,6 +792,7 @@ def _run_sweep(
                     request.sla_ttft_ms,
                     request.sla_itl_ms,
                     request.window_s,
+                    request.objective,
                 ),
             )
             for effective_key, (effective, _) in by_effective.items()
