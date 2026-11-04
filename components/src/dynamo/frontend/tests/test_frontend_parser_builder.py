@@ -31,6 +31,21 @@ def test_reads_only_the_given_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert dict(os.environ) == before
 
 
+def test_media_defaults_use_the_given_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DYN_REJECT_MEDIA", "0")
+    monkeypatch.setenv("DYN_REJECT_MEDIA_STATUS_CODE", "500")
+
+    parser, env_dests = build_frontend_parser(
+        {"DYN_REJECT_MEDIA": "1", "DYN_REJECT_MEDIA_STATUS_CODE": "429"}
+    )
+    namespace = parser.parse_args([])
+
+    assert namespace.reject_media is True
+    assert namespace.reject_media_status_code == 429
+    assert env_dests["DYN_REJECT_MEDIA"] == "reject_media"
+    assert env_dests["DYN_REJECT_MEDIA_STATUS_CODE"] == "reject_media_status_code"
+
+
 def test_no_registered_env_var_is_read_from_os_environ(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
