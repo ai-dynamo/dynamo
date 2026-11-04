@@ -82,7 +82,7 @@ where
         &self,
         request: ScheduleRequest,
         resp_tx: Option<tokio::sync::oneshot::Sender<Result<SchedulingResponse, KvSchedulerError>>>,
-    ) -> (SchedulingRequest, Option<Vec<LocalBlockHash>>, bool) {
+    ) -> (SchedulingRequest, Option<Vec<LocalBlockHash>>) {
         let track_prefill_tokens = request
             .router_config_override
             .as_ref()
@@ -108,7 +108,8 @@ where
             kv_transfer_candidates,
             retain_kv_transfer_chain,
             shared_cache_hits,
-            admitted_upstream,
+            // Read by the admitted path before conversion; advisory selection ignores it.
+            admitted_upstream: _,
         } = request;
         let request = SchedulingRequest {
             mode,
@@ -134,7 +135,7 @@ where
             resp_tx,
         };
 
-        (request, block_hashes, admitted_upstream)
+        (request, block_hashes)
     }
 
     fn worker_dp_ranges(workers: &HashMap<WorkerId, C>) -> Vec<WorkerDpRange> {
@@ -388,8 +389,8 @@ where
     ) -> Result<(AdmittedSchedulingResponse, Option<BookingHandle>), KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let (attempt_tx, attempt_rx) = tokio::sync::oneshot::channel();
-        let (mut request, block_hashes, admitted_upstream) =
-            self.make_scheduling_request(request, Some(resp_tx));
+        let admitted_upstream = request.admitted_upstream;
+        let (mut request, block_hashes) = self.make_scheduling_request(request, Some(resp_tx));
         let tracked = request.mode.is_tracked();
         let request_id = request.mode.request_id().map(str::to_owned);
         let classified_request = self.classify_request(&mut request, ingress_at).await?;
@@ -507,8 +508,7 @@ where
         &self,
         request: ScheduleRequest,
     ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
-        let (request, _block_hashes, _admitted_upstream) =
-            self.make_scheduling_request(request, None);
+        let (request, _block_hashes) = self.make_scheduling_request(request, None);
         let request_id = request.mode.request_id().map(str::to_owned);
         let advisory = self.queue.select_without_admission(request).await?;
         log_selection(request_id.as_deref(), &advisory.response);
