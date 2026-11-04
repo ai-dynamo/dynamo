@@ -33,6 +33,10 @@ pub const CREATED_AT: &str = "created_at";
 /// The DynamoDB TTL attribute, in Unix seconds. Garbage collection only:
 /// leases are decided from [`RENEWED_AT`] and [`LEASE_S`].
 pub const EXPIRES_AT: &str = "expires_at";
+/// The region of the table replica the last registration was written
+/// through. With a Global Table, a reader in another region gets that
+/// registration's renewals late when replication lags.
+pub const WRITTEN_IN: &str = "written_in";
 
 /// The partition every pool is in, so that one `Query` lists them.
 pub const POOLS: &str = "pool";

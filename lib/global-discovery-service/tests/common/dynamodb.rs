@@ -105,6 +105,9 @@ pub fn fresh_table_name() -> String {
 pub const SKEW: Duration = Duration::from_secs(2);
 /// How often a store under test polls for the watch.
 pub const POLL: Duration = Duration::from_millis(200);
+/// How long past its lease a store under test lists a pool written through
+/// another region's replica.
+pub const REPLICATION_GRACE: Duration = Duration::from_secs(60);
 
 pub fn config(table: &str, endpoint: &Url) -> DynamoDbConfig {
     DynamoDbConfig {
@@ -113,6 +116,7 @@ pub fn config(table: &str, endpoint: &Url) -> DynamoDbConfig {
         endpoint: Some(endpoint.clone()),
         poll_interval: POLL,
         lease_skew: SKEW,
+        replication_grace: REPLICATION_GRACE,
         ensure_table: false,
     }
 }

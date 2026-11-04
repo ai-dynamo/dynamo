@@ -20,6 +20,13 @@
 //! fail, watchers are told the view is `Estimated`, and pools drop out of it
 //! as their leases lapse on this replica's clock.
 //!
+//! With a Global Table, another region's writes arrive late when replication
+//! lags. Each item records the region it was written through, and a pool
+//! written through another region stays listed for
+//! [`DynamoDbConfig::replication_grace`] past its lease, while lists are
+//! `Estimated`, rather than being dropped as expired while it still
+//! heartbeats there.
+//!
 //! The store keeps registrations for every kind of pool discovery; router
 //! replicas come from configuration or MCS, not from this store.
 
@@ -79,14 +86,20 @@ pub struct DynamoDbConfig {
     pub poll_interval: Duration,
     /// Clock skew between replicas that a lease allows.
     pub lease_skew: Duration,
+    /// With a Global Table, how long past its lease and the skew a pool
+    /// stays listed when its last registration was written through another
+    /// region's replica: that region's later renewals may still be on their
+    /// way. Lists are `Estimated` while such a pool is listed. Zero drops it
+    /// when its lease lapses.
+    pub replication_grace: Duration,
     /// Create the table in [`DynamoDbPoolStore::connect`] if it does not
     /// exist.
     pub ensure_table: bool,
 }
 
 impl DynamoDbConfig {
-    /// `table`, with the service's defaults: a 2 s poll, 2 s of skew, and no
-    /// table creation.
+    /// `table`, with the service's defaults: a 2 s poll, 2 s of skew, 60 s
+    /// of replication grace, and no table creation.
     pub fn new(table: impl Into<String>) -> Self {
         Self {
             table: table.into(),
@@ -94,6 +107,7 @@ impl DynamoDbConfig {
             endpoint: None,
             poll_interval: Duration::from_secs(2),
             lease_skew: Duration::from_secs(2),
+            replication_grace: Duration::from_secs(60),
             ensure_table: false,
         }
     }
@@ -113,13 +127,28 @@ pub struct DynamoDbPoolStore {
     stop: CancellationToken,
 }
 
+/// What a read of the table lists.
+struct Read {
+    /// Each pool, with the last Unix millisecond at which it is listed
+    /// unless renewed.
+    pools: Vec<(codec::Stored, u64)>,
+    /// A pool past its lease is listed because another region's renewal may
+    /// be late, so the list may be wrong.
+    on_trust: bool,
+}
+
 /// What the store and its poller share. The poller holds this, not the
 /// store, so dropping the store stops it.
 struct Shared {
     client: Client,
     table: String,
+    /// The region of the table replica this store reads and writes, which it
+    /// records in each registration. `None` if the client has none.
+    region: Option<String>,
     clock: Arc<dyn Clock>,
     lease_skew: Duration,
+    /// [`DynamoDbConfig::replication_grace`].
+    replication_grace: Duration,
     /// The lease the store grants, in milliseconds. Lists are `Estimated` for
     /// this long after the store was made, and after reads recover.
     lease_ms: u64,
@@ -331,14 +360,17 @@ impl DynamoDbPoolStore {
             complete_at_ms: clock.now_ms().saturating_add(lease_ms),
             ..Watched::default()
         };
+        let region = client.config().region().map(ToString::to_string);
         Arc::new(Self {
             lease,
             poll_interval: config.poll_interval.max(MIN_POLL_INTERVAL),
             shared: Arc::new(Shared {
                 client,
                 table: config.table,
+                region,
                 clock,
                 lease_skew: config.lease_skew,
+                replication_grace: config.replication_grace,
                 lease_ms,
                 watched: Mutex::new(watched),
                 refreshing: tokio::sync::Mutex::new(()),
@@ -408,7 +440,7 @@ impl Shared {
         now_ms: u64,
         lease_s: u64,
     ) -> Result<(), DiscoveryError> {
-        let update = codec::update(encoded, now_ms, lease_s);
+        let update = codec::update(encoded, now_ms, lease_s, self.region.as_deref());
         self.client
             .update_item()
             .table_name(&self.table)
@@ -457,19 +489,53 @@ impl Shared {
         }
     }
 
-    /// The live pools, on this replica's clock. A failed read is recorded, so
-    /// that lists stay `Estimated` until a lease after reads recover.
-    async fn live(&self) -> Result<Vec<codec::Stored>, DiscoveryError> {
-        let mut stored = match self.query().await {
+    /// The pools to list, on this replica's clock. A failed read is recorded,
+    /// so that lists stay `Estimated` until a lease after reads recover.
+    async fn live(&self) -> Result<Read, DiscoveryError> {
+        let stored = match self.query().await {
             Ok(stored) => stored,
             Err(error) => {
                 self.lock().failed();
                 return Err(error);
             }
         };
-        let now_ms = self.clock.now_ms();
-        stored.retain(|item| item.is_live(self.lease_skew, now_ms));
-        Ok(stored)
+        Ok(self.select(stored, self.clock.now_ms()))
+    }
+
+    /// The pools that items list at `now_ms`: those whose lease and skew
+    /// have not run out, and, on trust, those written through another
+    /// region's replica that are still within the replication grace.
+    fn select(&self, stored: Vec<codec::Stored>, now_ms: u64) -> Read {
+        let mut on_trust = false;
+        let pools = stored
+            .into_iter()
+            .filter_map(|item| {
+                let listed_until_ms = self.listed_until_ms(&item);
+                if listed_until_ms < now_ms {
+                    return None;
+                }
+                on_trust |= !item.is_live(self.lease_skew, now_ms);
+                Some((item, listed_until_ms))
+            })
+            .collect();
+        Read { pools, on_trust }
+    }
+
+    /// The last Unix millisecond at which `item`'s pool is listed unless it
+    /// is renewed: when its lease and the skew run out, or, if it was
+    /// written through another region's replica of a Global Table, the
+    /// replication grace later, since that region's renewals may be late.
+    fn listed_until_ms(&self, item: &codec::Stored) -> u64 {
+        let live_until_ms = item.live_until_ms(self.lease_skew);
+        let from_another_region = matches!(
+            (&item.written_in, &self.region),
+            (Some(writer), Some(reader)) if writer != reader
+        );
+        if from_another_region {
+            live_until_ms.saturating_add(millis(self.replication_grace))
+        } else {
+            live_until_ms
+        }
     }
 
     /// Reads the table and tells watchers what changed since the last read,
@@ -480,14 +546,15 @@ impl Shared {
         // Before the read: a read that began before the lists became complete
         // may miss a PoolRelay that wrote meanwhile.
         let read_at_ms = self.clock.now_ms();
-        let live = self
-            .live()
-            .await?
+        let read = self.live().await?;
+        let on_trust = read.on_trust;
+        let live = read
+            .pools
             .into_iter()
-            .map(|item| {
+            .map(|(item, listed_until_ms)| {
                 let seen = Seen {
                     listing: listing(&item.registration),
-                    live_until_ms: item.live_until_ms(self.lease_skew),
+                    live_until_ms: listed_until_ms,
                     hash: item.hash,
                     written: 0,
                 };
@@ -495,7 +562,10 @@ impl Shared {
             })
             .collect();
         let mut watched = self.lock();
-        let completeness = watched.read(read_at_ms, self.lease_ms);
+        let completeness = match watched.read(read_at_ms, self.lease_ms) {
+            _ if on_trust => Completeness::Estimated,
+            completeness => completeness,
+        };
         let mut events = watched.apply_poll(live, began);
         // After the poll's changes, so a `Resync` holds the new view.
         events.extend(watched.set_completeness(completeness));
@@ -630,12 +700,16 @@ impl Directory<PoolListing, PoolKey> for DynamoDbPoolStore {
     /// the table cannot be read.
     async fn list(&self) -> Result<Snapshot<PoolListing>, DiscoveryError> {
         let read_at_ms = self.shared.clock.now_ms();
-        let live = self.shared.live().await?;
-        let completeness = self.shared.lock().read(read_at_ms, self.shared.lease_ms);
+        let read = self.shared.live().await?;
+        let completeness = match self.shared.lock().read(read_at_ms, self.shared.lease_ms) {
+            _ if read.on_trust => Completeness::Estimated,
+            completeness => completeness,
+        };
         Ok(Snapshot {
-            items: live
+            items: read
+                .pools
                 .iter()
-                .map(|item| listing(&item.registration))
+                .map(|(item, _)| listing(&item.registration))
                 .collect(),
             completeness,
         })
@@ -926,6 +1000,61 @@ mod tests {
         assert_eq!(watched.read(40_000, LEASE_MS), Completeness::Estimated);
         assert_eq!(watched.read(54_999, LEASE_MS), Completeness::Estimated);
         assert_eq!(watched.read(55_000, LEASE_MS), Completeness::Exact);
+    }
+
+    /// With a Global Table, another region's renewals may arrive late, so a
+    /// pool written through another region's replica stays listed, on trust,
+    /// for the replication grace after its lease.
+    #[tokio::test]
+    async fn another_regions_pool_stays_listed_on_trust_for_the_grace() {
+        // This store reads the us-west-2 replica, with a 2 s skew and 60 s of
+        // grace. A pool renewed at 0 with a 15 s lease is live until 17 s.
+        let store = unreachable_store();
+        let stored = |dgd: &str, written_in: Option<&str>| codec::Stored {
+            registration: PoolRegistration {
+                key: key(dgd),
+                location: pool(dgd, "m1").location,
+                model: "m1".to_owned(),
+                capabilities: Vec::new(),
+                frontends: Vec::new(),
+                capacity: Vec::new(),
+            },
+            hash: "m1".to_owned(),
+            renewed_at_ms: 0,
+            lease_s: 15,
+            written_in: written_in.map(str::to_owned),
+        };
+        let items = || {
+            vec![
+                stored("here", Some("us-west-2")),
+                stored("unknown", None),
+                stored("there", Some("eu-west-1")),
+            ]
+        };
+        let listed = |read: &Read| {
+            let mut names: Vec<String> = read
+                .pools
+                .iter()
+                .map(|(item, _)| item.registration.key.dgd_name().to_owned())
+                .collect();
+            names.sort();
+            names
+        };
+
+        let read = store.shared.select(items(), 17_000);
+        assert_eq!(listed(&read), ["here", "there", "unknown"]);
+        assert!(!read.on_trust);
+
+        // Past the lease, only the other region's pool stays, on trust.
+        let read = store.shared.select(items(), 17_001);
+        assert_eq!(listed(&read), ["there"]);
+        assert!(read.on_trust);
+        assert_eq!(read.pools[0].1, 77_000);
+
+        // Past the grace, it goes too.
+        let read = store.shared.select(items(), 77_001);
+        assert!(read.pools.is_empty());
+        assert!(!read.on_trust);
     }
 
     /// A failed read or write is recorded, so lists stay `Estimated` for a

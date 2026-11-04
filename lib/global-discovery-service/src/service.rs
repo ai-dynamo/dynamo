@@ -13,7 +13,9 @@
 //!   while the list may be missing pools: for one lease after the service
 //!   starts, while PoolRelays may not have registered yet; with MCS, also
 //!   while the MCS watch keeps failing; and with DynamoDB, also while the
-//!   table cannot be reached and for one lease after. A caller that keeps
+//!   table cannot be reached and for one lease after, and while a pool from
+//!   another region of a Global Table is listed past its lease, in case
+//!   replication is late. A caller that keeps
 //!   its own list replaces it with a complete list, but merges a partial
 //!   one: it adds new pools and updates changed ones, keeps known pools that
 //!   are missing, and waits for a complete list to remove any. A caller that

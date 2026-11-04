@@ -161,6 +161,12 @@ struct Args {
     /// A pool stays listed this much longer than its lease.
     #[arg(long, default_value_t = 2, help_heading = WITH_DYNAMODB)]
     lease_skew_secs: u64,
+    /// With a DynamoDB Global Table, how long past its lease a pool stays
+    /// listed when its last registration was written through another
+    /// region's replica, since that region's renewals may be late. Lists are
+    /// incomplete meanwhile. 0 drops such a pool when its lease lapses.
+    #[arg(long, default_value_t = 60, help_heading = WITH_DYNAMODB)]
+    dynamodb_replication_grace_secs: u64,
     /// Each PoolRelay Service is named `<DGD name><suffix>`. Give a suffix
     /// that starts with `-` after an `=`: `--pool-service-suffix=-relay`.
     #[arg(
@@ -518,6 +524,7 @@ fn dynamodb_config(args: &Args) -> Result<DynamoDbConfig> {
         endpoint: args.dynamodb_endpoint.clone(),
         poll_interval: Duration::from_secs(args.dynamodb_poll_interval_secs),
         lease_skew: Duration::from_secs(args.lease_skew_secs),
+        replication_grace: Duration::from_secs(args.dynamodb_replication_grace_secs),
         ensure_table: args.dynamodb_ensure_table,
     })
 }
@@ -767,6 +774,7 @@ mod tests {
                 endpoint: None,
                 poll_interval: Duration::from_secs(2),
                 lease_skew: Duration::from_secs(2),
+                replication_grace: Duration::from_secs(60),
                 ensure_table: false,
             }
         );
@@ -792,6 +800,8 @@ mod tests {
             "--dynamodb-ensure-table",
             "--lease-skew-secs",
             "0",
+            "--dynamodb-replication-grace-secs",
+            "30",
         ];
         // With every --pool-discovery value.
         let mut mcs = karmada(&flags);
@@ -808,6 +818,7 @@ mod tests {
                     endpoint: Some(Url::parse("http://localhost:8000").unwrap()),
                     poll_interval: Duration::from_secs(1),
                     lease_skew: Duration::ZERO,
+                    replication_grace: Duration::from_secs(30),
                     ensure_table: true,
                 },
                 "{args:?}"
@@ -880,6 +891,7 @@ mod tests {
             &["--dynamodb-poll-interval-secs", "1"],
             &["--dynamodb-ensure-table"],
             &["--lease-skew-secs", "3"],
+            &["--dynamodb-replication-grace-secs", "30"],
         ] {
             let mut args = vec!["gds"];
             args.extend_from_slice(flag);

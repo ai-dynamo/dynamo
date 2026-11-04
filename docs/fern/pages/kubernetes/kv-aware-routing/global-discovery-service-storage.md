@@ -69,8 +69,15 @@ aws dynamodb update-table \
 Repeat with another `RegionName` for each region. Enable point-in-time recovery in each region
 separately. Replicas in each region point at their regional endpoint with `--dynamodb-region`. A Global
 Table resolves concurrent writes to one item by last writer wins on the whole item, which matches how
-the service treats registrations: whichever copy wins is a complete registration at most one heartbeat
-old.
+the service treats registrations: whichever copy wins is a complete registration.
+
+DynamoDB copies each write to the other regions in the background, usually within a second, but the
+copying can fall behind. A service replica would then see an old renewal for a pool that still
+heartbeats in another region, and drop it as expired. So each item records the region it was written
+through, and a pool written through another region stays listed for `--dynamodb-replication-grace-secs`
+(default 60) after its lease, with `complete: false` in `GET /pools` meanwhile. Raise it if replication
+in your setup can fall behind further than that; the cost is that a pool that really stopped in another
+region stays listed that much longer.
 
 ## Grant access
 
@@ -211,6 +218,10 @@ early. The effect is only a pool appearing or disappearing a moment sooner or la
 
 Each item stores the lease its writer granted, so replicas configured with different
 `--lease-duration-secs` values still judge each pool by the lease it was given.
+
+With a Global Table, a pool written through another region's replica stays listed for
+`--dynamodb-replication-grace-secs` past its lease, as described in
+[Add regions with a Global Table](#add-regions-with-a-global-table).
 
 ## Verify
 

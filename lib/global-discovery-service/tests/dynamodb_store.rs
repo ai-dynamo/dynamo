@@ -19,7 +19,9 @@ use dynamo_global_discovery_service::pool_discovery::{
     WatchEvent,
 };
 use dynamo_global_discovery_service::{DynamoDbPoolStore, SystemClock};
-use dynamodb_support::{Fixture, POLL, SKEW, config, test_client_without_retries};
+use dynamodb_support::{
+    Fixture, POLL, REPLICATION_GRACE, SKEW, config, test_client_without_retries,
+};
 use futures::StreamExt;
 use std::sync::Arc;
 use tokio::time::{Instant, timeout_at};
@@ -86,6 +88,8 @@ async fn an_item_has_the_documented_shape() {
     assert_eq!(number(&item, "renewed_at"), first_ms);
     assert_eq!(number(&item, "created_at"), first_ms);
     assert_eq!(number(&item, "lease_s"), 15);
+    // The region of the table replica the store writes through.
+    assert_eq!(item["written_in"].as_s().unwrap(), "us-east-1");
     // The TTL is garbage collection only: a week after the last renewal, in
     // unix seconds.
     assert_eq!(number(&item, "expires_at"), first_ms / 1000 + 7 * 24 * 3600);
@@ -267,6 +271,42 @@ async fn a_reader_uses_the_lease_its_writer_granted() {
 
     fixture.advance(Duration::from_secs(30));
     assert!(find(&*reader, "mocker").await.is_none());
+}
+
+/// With a Global Table, a renewal written through another region's replica
+/// may arrive late, so a pool written there stays listed past its lease, as
+/// `Estimated`, until the replication grace runs out. One written through
+/// this store's region does not.
+#[tokio::test]
+async fn a_pool_written_in_another_region_stays_listed_until_the_grace() {
+    let endpoint = skip_without_dynamodb!();
+    let fixture = Fixture::new(&endpoint).await;
+    // The fixture's stores read the us-east-1 replica.
+    let store = fixture.store();
+    let there = serde_json::to_string(&mocker("there", "m1")).unwrap();
+    let here = serde_json::to_string(&mocker("here", "m1")).unwrap();
+    put_raw(&fixture, "there", &there, Some(("written_in", "eu-west-1"))).await;
+    put_raw(&fixture, "here", &here, Some(("written_in", "us-east-1"))).await;
+
+    // A lease later both are still live, and the list is complete.
+    fixture.advance(lease().duration());
+    let snapshot = store.list().await.unwrap();
+    assert_eq!(snapshot.items.len(), 2);
+    assert_eq!(snapshot.completeness, Completeness::Exact);
+
+    // Past the lease and the skew, this region's pool is gone. The other
+    // region's stays, and the list may be wrong.
+    fixture.advance(SKEW + Duration::from_secs(1));
+    let snapshot = store.list().await.unwrap();
+    assert_eq!(snapshot.completeness, Completeness::Estimated);
+    assert!(find(&*store, "here").await.is_none());
+    assert!(find(&*store, "there").await.is_some());
+
+    // Past the grace too, it is gone, and the list is complete again.
+    fixture.advance(REPLICATION_GRACE);
+    let snapshot = store.list().await.unwrap();
+    assert!(snapshot.items.is_empty());
+    assert_eq!(snapshot.completeness, Completeness::Exact);
 }
 
 /// An item written outside the store, with the attributes the store reads.

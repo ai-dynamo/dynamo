@@ -49,11 +49,15 @@ One item per `PoolKey`:
 | `lease_s` | N | the lease duration the accepting replica granted, in seconds |
 | `created_at` | N | unix milliseconds of the first store of this key since it was last absent |
 | `expires_at` | N | DynamoDB TTL attribute, unix seconds: `renewed_at + 7 days`. Garbage collection only, never the lease |
+| `written_in` | S | the region of the table replica the last `register` was written through; absent in items written before the store recorded it |
 
 A pool is live when `renewed_at + lease_s * 1000 + skew >= now`, evaluated at
 read time on the reading replica's clock, where `skew` is
-`--lease-skew-secs` (default 2 s). The store never expires anything itself;
-items that nobody renews for a week disappear through TTL.
+`--lease-skew-secs` (default 2 s). A pool whose `written_in` is another region
+than the reader's stays listed for `--dynamodb-replication-grace-secs`
+(default 60 s) more, on trust, and lists are `Estimated` while any pool is
+listed that way (see "Multi-region"). The store never expires anything
+itself; items that nobody renews for a week disappear through TTL.
 
 Item size is a few hundred bytes to a few KB (the `frontends` list dominates).
 
@@ -167,8 +171,23 @@ One Global Table with a replica per region; each region's replicas point at
 their own regional endpoint (`--dynamodb-region`, or `AWS_REGION`). Global
 Tables resolve concurrent writes to one item by last writer wins on the whole
 item, which is exactly the store's single-writer-agnostic semantics: whatever
-copy wins is a complete, valid registration whose `renewed_at` is at most one
-heartbeat old. There are no cross-region conditions to break.
+copy wins is a complete, valid registration. There are no cross-region
+conditions to break.
+
+Replication is asynchronous, though: usually within a second, but a replica
+can fall behind by more than the lease. A reader there would see an old
+`renewed_at` for a pool that still heartbeats in another region, drop it as
+expired, and call the list `Exact`, so a router would drop a live pool. Each
+item therefore records the region of the replica it was written through
+(`written_in`, the region of the writing store's client). A reader in
+another region keeps such a pool listed for `--dynamodb-replication-grace-secs`
+past its lease and the skew, and lists are `Estimated` while it does, so a
+router keeps the pool without being told the list is complete. Past the
+grace the pool is dropped, which bounds how long a pool that really stopped
+in another region stays listed. A pool written through the reader's own
+region, or an item without `written_in`, follows the lease alone. Watching
+`ReplicationLatency`, or a heartbeat item per region, could narrow the grace
+later.
 
 ## Configuration
 
@@ -184,6 +203,7 @@ since they work with every `--pool-discovery` value:
 | `--dynamodb-poll-interval-secs <n>` | 2 | watch poll period; with `karmada` and `mcs`, which watch, must be less than `--heartbeat-interval-secs` |
 | `--dynamodb-ensure-table` | off | create the table if it does not exist, and turn on its TTL if it is off, on every start (development; needs `CreateTable`, and for TTL `DescribeTimeToLive` and `UpdateTimeToLive`, without which it warns and starts) |
 | `--lease-skew-secs <n>` | 2 | clock skew allowed when evaluating leases |
+| `--dynamodb-replication-grace-secs <n>` | 60 | with a Global Table, how long past its lease a pool written through another region's replica stays listed, as `Estimated`; 0 drops it when its lease lapses |
 
 The `--dynamodb-*` flags and `--lease-skew-secs` fail at startup without
 `--registration-storage dynamodb`, as flags of another `--pool-discovery` do.
@@ -248,6 +268,7 @@ pub struct DynamoDbConfig {
     pub endpoint: Option<Url>,
     pub poll_interval: Duration,
     pub lease_skew: Duration,
+    pub replication_grace: Duration,
     pub ensure_table: bool,
 }
 

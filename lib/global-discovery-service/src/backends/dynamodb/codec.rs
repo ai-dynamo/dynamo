@@ -75,9 +75,21 @@ pub(super) struct Update {
 const UPDATE: &str = "SET #registration = :registration, #hash = :hash, #renewed = :renewed, \
                       #lease = :lease, #expires = :expires, \
                       #created = if_not_exists(#created, :renewed)";
+/// [`UPDATE`], recording the writer's region too.
+const UPDATE_WITH_REGION: &str = "SET #registration = :registration, #hash = :hash, \
+                                  #renewed = :renewed, #lease = :lease, #expires = :expires, \
+                                  #written_in = :written_in, \
+                                  #created = if_not_exists(#created, :renewed)";
 
-pub(super) fn update(encoded: &Encoded, renewed_at_ms: u64, lease_s: u64) -> Update {
-    let names = [
+/// `written_in` is the region of the table replica the writer uses, if it
+/// knows it.
+pub(super) fn update(
+    encoded: &Encoded,
+    renewed_at_ms: u64,
+    lease_s: u64,
+    written_in: Option<&str>,
+) -> Update {
+    let mut names = vec![
         ("#registration", keys::REGISTRATION),
         ("#hash", keys::HASH),
         ("#renewed", keys::RENEWED_AT),
@@ -85,7 +97,7 @@ pub(super) fn update(encoded: &Encoded, renewed_at_ms: u64, lease_s: u64) -> Upd
         ("#expires", keys::EXPIRES_AT),
         ("#created", keys::CREATED_AT),
     ];
-    let values = [
+    let mut values = vec![
         (
             ":registration",
             AttributeValue::S(encoded.registration.clone()),
@@ -95,8 +107,16 @@ pub(super) fn update(encoded: &Encoded, renewed_at_ms: u64, lease_s: u64) -> Upd
         (":lease", number(lease_s)),
         (":expires", number(expires_at(renewed_at_ms))),
     ];
+    let expression = match written_in {
+        Some(region) => {
+            names.push(("#written_in", keys::WRITTEN_IN));
+            values.push((":written_in", AttributeValue::S(region.to_owned())));
+            UPDATE_WITH_REGION
+        }
+        None => UPDATE,
+    };
     Update {
-        expression: UPDATE,
+        expression,
         names: names
             .into_iter()
             .map(|(placeholder, name)| (placeholder.to_owned(), name.to_owned()))
@@ -124,6 +144,9 @@ pub(super) struct Stored {
     pub hash: String,
     pub renewed_at_ms: u64,
     pub lease_s: u64,
+    /// The region of the table replica it was last written through. `None`
+    /// for an item written before the store recorded it.
+    pub written_in: Option<String>,
 }
 
 impl Stored {
@@ -155,11 +178,16 @@ pub(super) fn decode(item: &HashMap<String, AttributeValue>) -> anyhow::Result<S
             registration.key
         );
     }
+    let written_in = match item.get(keys::WRITTEN_IN) {
+        None => None,
+        Some(_) => Some(string(item, keys::WRITTEN_IN)?.to_owned()),
+    };
     Ok(Stored {
         registration,
         hash: string(item, keys::HASH)?.to_owned(),
         renewed_at_ms: unsigned(item, keys::RENEWED_AT)?,
         lease_s: unsigned(item, keys::LEASE_S)?,
+        written_in,
     })
 }
 
@@ -213,15 +241,15 @@ mod tests {
         }
     }
 
-    /// The item a registration at `renewed_at_ms` leaves where there was
-    /// none: each `#name = :name` of the update, and `created_at` from
-    /// `:renewed`.
+    /// The item a registration at `renewed_at_ms` through the `us-west-2`
+    /// replica leaves where there was none: each `#name = :name` of the
+    /// update, and `created_at` from `:renewed`.
     fn item(
         encoded: &Encoded,
         renewed_at_ms: u64,
         lease_s: u64,
     ) -> HashMap<String, AttributeValue> {
-        let update = update(encoded, renewed_at_ms, lease_s);
+        let update = update(encoded, renewed_at_ms, lease_s, Some("us-west-2"));
         let mut item: HashMap<String, AttributeValue> = update
             .names
             .iter()
@@ -247,23 +275,34 @@ mod tests {
 
     #[test]
     fn the_update_uses_every_placeholder_it_defines() {
-        // DynamoDB rejects an update with a placeholder it does not use.
-        let update = update(&encode(&registration()).unwrap(), 1_000, 15);
-        let placeholders: Vec<&String> = update.names.keys().chain(update.values.keys()).collect();
-        assert_eq!(placeholders.len(), 11);
-        for placeholder in placeholders {
-            let used = update
+        // DynamoDB rejects an update with a placeholder it does not use, and
+        // one that uses a placeholder it does not define.
+        let encoded = encode(&registration()).unwrap();
+        for (written_in, count) in [(Some("us-west-2"), 13), (None, 11)] {
+            let update = update(&encoded, 1_000, 15, written_in);
+            let placeholders: Vec<&String> =
+                update.names.keys().chain(update.values.keys()).collect();
+            assert_eq!(placeholders.len(), count, "{written_in:?}");
+            for placeholder in placeholders {
+                let used = update
+                    .expression
+                    .split(|c: char| !(c.is_alphanumeric() || c == '#' || c == ':' || c == '_'))
+                    .any(|token| token == placeholder);
+                assert!(used, "{placeholder} in {}", update.expression);
+            }
+            let defined = update
                 .expression
-                .split(|c: char| !(c.is_alphanumeric() || c == '#' || c == ':'))
-                .any(|token| token == placeholder);
-            assert!(used, "{placeholder} in {}", update.expression);
+                .split(|c: char| !(c.is_alphanumeric() || c == '#' || c == ':' || c == '_'))
+                .filter(|token| token.starts_with('#') || token.starts_with(':'))
+                .all(|token| update.names.contains_key(token) || update.values.contains_key(token));
+            assert!(defined, "{}", update.expression);
+            assert_eq!(update.names["#created"], keys::CREATED_AT);
+            assert!(
+                update
+                    .expression
+                    .contains("#created = if_not_exists(#created, :renewed)")
+            );
         }
-        assert_eq!(update.names["#created"], keys::CREATED_AT);
-        assert!(
-            update
-                .expression
-                .contains("#created = if_not_exists(#created, :renewed)")
-        );
     }
 
     #[test]
@@ -279,8 +318,18 @@ mod tests {
                 hash: encoded.hash,
                 renewed_at_ms: 1_767_225_600_123,
                 lease_s: 15,
+                written_in: Some("us-west-2".to_owned()),
             }
         );
+    }
+
+    /// Items written before the store recorded the writer's region decode,
+    /// with no region.
+    #[test]
+    fn an_item_without_a_region_decodes() {
+        let mut item = item(&encode(&registration()).unwrap(), 1_000, 15);
+        item.remove(keys::WRITTEN_IN);
+        assert_eq!(decode(&item).unwrap().written_in, None);
     }
 
     #[test]
@@ -339,7 +388,8 @@ mod tests {
         let good = item(&encoded, 1_000, 15);
         let mut other = registration();
         other.key = PoolKey::new("aws-east", "dynamo", "mocker").unwrap();
-        let damaged: [(&str, Option<AttributeValue>); 9] = [
+        let damaged: [(&str, Option<AttributeValue>); 10] = [
+            (keys::WRITTEN_IN, Some(number(1))),
             (keys::SK, None),
             (keys::SK, Some(AttributeValue::S("a#b".to_owned()))),
             (keys::REGISTRATION, None),
