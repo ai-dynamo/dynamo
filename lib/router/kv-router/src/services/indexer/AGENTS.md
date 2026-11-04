@@ -1,4 +1,4 @@
-# lib/kv-router/src/services/indexer
+# lib/router/kv-router/src/services/indexer
 
 Standalone indexer must remain usable without Dynamo runtime or LLM-layer
 dependencies.

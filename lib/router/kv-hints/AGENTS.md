@@ -1,4 +1,4 @@
-# lib/kv-hints
+# lib/router/kv-hints
 
 `dynamo-kv-hints` owns the KV transfer hint wire (`KvHint`, `KvHintAction`, `KvSourceLocationsPayload`, the `KV_HINT_TRANSFER_*` keys), the transfer source choice, and the worker transfer keys; the transfer candidate vocabulary is re-exported from `dynamo-kv-indexer`, which produces it. Changing a wire shape changes what engines and sidecars receive; keep serde compatibility tests next to the type.
 

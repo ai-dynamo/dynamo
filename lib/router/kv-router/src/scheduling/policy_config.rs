@@ -1117,7 +1117,7 @@ policy_classes:
     #[test]
     fn documented_sample_exercises_root_model_and_unknown_class_semantics() {
         let config = RouterPolicyConfig::from_yaml(include_str!(
-            "../../../../examples/router/policy-class-queues.yaml"
+            "../../../../../examples/router/policy-class-queues.yaml"
         ))
         .unwrap();
 

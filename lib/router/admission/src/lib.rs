@@ -11,7 +11,7 @@
 //! [`RequestClassifier`] trait, [`ClassifyRequest`], [`ClassifyEvent`], the [`WorkerView`] it
 //! reads workers through, and [`RequestProgress`]. The YAML policy file, the plugin registry,
 //! and the gate that judges "all eligible workers full" over the slot projection stay in
-//! `lib/kv-router`, which implements [`WorkerView`] over worker selection's rows.
+//! `lib/router/kv-router`, which implements [`WorkerView`] over worker selection's rows.
 //!
 //! Kernel-facing: the `ClassifyRequest` constructors, `ClassificationOverrides`,
 //! `QueueMetadata`, the `PolicyQueue` scheduling methods, and `RequestClassifierRuntime` are

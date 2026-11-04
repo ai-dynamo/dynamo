@@ -379,7 +379,7 @@ models:
     /// non-zero `block_size`, and a well-formed KV-event endpoint per dp_rank.
     /// The KV-event endpoint is only a `tcp://` address string — the core's ZMQ
     /// SUB listener connects lazily and never needs a live publisher (see the
-    /// `WorkerRegistry` register tests in `lib/kv-router`), so no network infra is
+    /// `WorkerRegistry` register tests in `lib/router/kv-router`), so no network infra is
     /// required. Queueing is disabled under the default router policy, so
     /// `max_num_batched_tokens` is not required here.
     fn schedulable_registration(worker_id: u64) -> WorkerRequest {

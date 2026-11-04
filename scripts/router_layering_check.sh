@@ -301,8 +301,8 @@ fi
 # composition crate is exempt for its one remaining glob: `test_utils` over
 # the kernel's test helpers, compiled for tests and the `bench` feature only.
 # ---------------------------------------------------------------------------
-ROUTER_CRATE_DIRS="lib/multimodal lib/error lib/router/protocol lib/router/kv-indexer lib/router/slot-tracker lib/router/session-affinity lib/router/worker-selection lib/router/admission lib/router/scheduler lib/kv-router lib/kv-events lib/kv-hashing lib/kv-hints"
-GLOB_EXEMPT_DIRS="lib/kv-router"
+ROUTER_CRATE_DIRS="lib/multimodal lib/error lib/router/protocol lib/router/kv-indexer lib/router/slot-tracker lib/router/session-affinity lib/router/worker-selection lib/router/admission lib/router/scheduler lib/router/kv-router lib/kv-events lib/kv-hashing lib/router/kv-hints"
+GLOB_EXEMPT_DIRS="lib/router/kv-router"
 for d in $ROUTER_CRATE_DIRS; do [ -d "$d/src" ] || die "$d/src does not exist"; done
 mapfile -t src_files < <(for d in $ROUTER_CRATE_DIRS; do find "$d/src" -type f -name '*.rs'; done | sort)
 [ "${#src_files[@]}" -gt 0 ] || die "no .rs files under the router crates"

@@ -56,7 +56,7 @@ cd my-worker-policy
 
 # Use the router crate from the same Dynamo checkout as the host process.
 cargo add dynamo-kv-router \
-  --path /work/dynamo/lib/kv-router \
+  --path /work/dynamo/lib/router/kv-router \
   --features http,ingest-zmq,replica-sync-zmq,peer-recovery
 
 # Add YAML parameter deserialization.

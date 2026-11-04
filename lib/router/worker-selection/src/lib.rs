@@ -12,7 +12,7 @@
 //! conditional-disaggregation policies, and the LoRA narrowing filter. The kv-transfer source
 //! summary a policy credits fetches with lives in `dynamo-kv-hints`; the kernel builds the
 //! [`WorkerTransferInput`] column from it. The kernel's `WorkerSelector`, its request-to-row
-//! materialization, and the config- and projection-derived columns stay in `lib/kv-router`.
+//! materialization, and the config- and projection-derived columns stay in `lib/router/kv-router`.
 
 pub mod conditional_disagg;
 mod context;
@@ -26,7 +26,7 @@ mod policy;
 mod reference_picker;
 mod runtime;
 /// The selection slice of the router config, with the defaults and validators the flat
-/// router config in `lib/kv-router` shares.
+/// router config in `lib/router/kv-router` shares.
 pub mod selection_config;
 mod shared_cache;
 mod trace;

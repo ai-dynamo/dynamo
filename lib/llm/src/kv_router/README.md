@@ -1,6 +1,6 @@
 # Router Host Layer
 
-This module is the router's host layer. It embeds the selection core from `lib/kv-router`
+This module is the router's host layer. It embeds the selection core from `lib/router/kv-router`
 (scoring, queues, load tracking) and adds what a running request needs around it: session
 affinity, booking ownership, dispatch, cancellation, and the optional encode and prefill hops.
 For which processes embed it and where their boundaries are, see
@@ -38,7 +38,7 @@ RoutingHost
  │   ├─ Kv(KvRouter)                 KV candidate state; selects and books, never dispatches
  │   │   ├─ Indexer                  which blocks each worker holds
  │   │   ├─ RequestLeaseManager      booking leases, reaper
- │   │   └─ EmbeddedSelection → SelectionService / SelectionCore (lib/kv-router)
+ │   │   └─ EmbeddedSelection → SelectionService / SelectionCore (lib/router/kv-router)
  │   │                               classify, queue, score, admit, account load
  │   ├─ Builtin                      round-robin, random, least-loaded
  │   ├─ Direct                       the worker the request names

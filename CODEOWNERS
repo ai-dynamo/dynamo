@@ -75,24 +75,23 @@
 
 # === router  (@ai-dynamo/dynamo-router-codeowners) ===
 /lib/router/                                                                                            @ai-dynamo/dynamo-router-codeowners
-/lib/kv-hints/                                                                                          @ai-dynamo/dynamo-router-codeowners
 /lib/kv-events/                                                                                         @ai-dynamo/dynamo-router-codeowners
-/lib/kv-router/                                                                                         @ai-dynamo/dynamo-router-codeowners
 /lib/multimodal/                                                                                        @ai-dynamo/dynamo-router-codeowners
 /lib/router-plugins/                                                                                    @ai-dynamo/dynamo-router-codeowners
-/lib/kv-router/tests/                                                                                   @ai-dynamo/dynamo-router-codeowners
+/lib/router/kv-hints/                                                                                   @ai-dynamo/dynamo-router-codeowners
 /lib/router/protocol/                                                                                   @ai-dynamo/dynamo-router-codeowners
 /lib/router/admission/                                                                                  @ai-dynamo/dynamo-router-codeowners
+/lib/router/kv-router/                                                                                  @ai-dynamo/dynamo-router-codeowners
 /lib/router/scheduler/                                                                                  @ai-dynamo/dynamo-router-codeowners
 /lib/router/kv-indexer/                                                                                 @ai-dynamo/dynamo-router-codeowners
 /lib/router/slot-tracker/                                                                               @ai-dynamo/dynamo-router-codeowners
 /lib/kv-events/src/zmq_wire/                                                                            @ai-dynamo/dynamo-router-codeowners
-/lib/kv-router/src/sequences/                                                                           @ai-dynamo/dynamo-router-codeowners
+/lib/router/kv-router/tests/                                                                            @ai-dynamo/dynamo-router-codeowners
 /lib/router/session-affinity/                                                                           @ai-dynamo/dynamo-router-codeowners
 /lib/router/worker-selection/                                                                           @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/router/                                                                          @ai-dynamo/dynamo-router-codeowners
-/lib/kv-router/src/scheduling/                                                                          @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/global_router/                                                                   @ai-dynamo/dynamo-router-codeowners
+/lib/router/kv-router/src/scheduling/                                                                   @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/kv_state_agent/                                                                  @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/squeeze_evolve/                                                                  @ai-dynamo/dynamo-router-codeowners
 /examples/router/custom-policy-example/                                                                 @ai-dynamo/dynamo-router-codeowners

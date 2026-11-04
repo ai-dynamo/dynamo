@@ -13,11 +13,11 @@ members = [
     "lib/kv-hashing",
     "lib/mocker",
     "lib/kv-events",
-    "lib/kv-hints",
     "lib/multimodal",
-    "lib/kv-router",
     "lib/router/admission",
+    "lib/router/kv-hints",
     "lib/router/kv-indexer",
+    "lib/router/kv-router",
     "lib/router/protocol",
     "lib/router/scheduler",
     "lib/router/session-affinity",
@@ -94,7 +94,7 @@ dynamo-data-gen = { path = "lib/data-gen", version = "1.7.0" }
 dynamo-admission = { path = "lib/router/admission", version = "1.7.0" }
 dynamo-kv-events = { path = "lib/kv-events", version = "1.7.0" }
 dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.7.0" }
-dynamo-kv-hints = { path = "lib/kv-hints", version = "1.7.0" }
+dynamo-kv-hints = { path = "lib/router/kv-hints", version = "1.7.0" }
 dynamo-multimodal = { path = "lib/multimodal", version = "1.7.0" }
 dynamo-kv-indexer = { path = "lib/router/kv-indexer", version = "1.7.0" }
 dynamo-global-common = { path = "lib/global-common", version = "1.7.0" }
@@ -102,7 +102,7 @@ dynamo-global-router = { path = "lib/global-router", version = "1.7.0" }
 dynamo-http-server = { path = "lib/http-server", version = "1.7.0" }
 dynamo-memory = { path = "lib/memory", version = "1.7.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.7.0" }
-dynamo-kv-router = { path = "lib/kv-router", version = "1.7.0" }
+dynamo-kv-router = { path = "lib/router/kv-router", version = "1.7.0" }
 dynamo-router-protocol = { path = "lib/router/protocol", version = "1.7.0" }
 dynamo-scheduler = { path = "lib/router/scheduler", version = "1.7.0" }
 dynamo-session-affinity = { path = "lib/router/session-affinity", version = "1.7.0" }

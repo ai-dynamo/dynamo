@@ -11,7 +11,7 @@
 //! the lower-tier continuation index with its per-tier registry, the ingest backend
 //! (`backend`, `lookup`, `recording`, `session_updates`), the session prefix index, the
 //! request-plane DTOs (`api`), explicit identity material (`identity`), and its configuration
-//! slice (`config`). `lib/kv-router` re-exports every item here at its old path and keeps the
+//! slice (`config`). `lib/router/kv-router` re-exports every item here at its old path and keeps the
 //! HTTP, ZMQ, peer-recovery, and Prometheus adapters.
 //!
 //! Depends only on `dynamo-router-protocol`, `dynamo-kv-events`, and `dynamo-kv-hashing`. It

@@ -1,4 +1,4 @@
-# lib/kv-router/src/indexer/concurrent_radix_tree_compressed
+# lib/router/kv-indexer/src/concurrent_radix_tree_compressed
 
 Concurrent Radix Tree Compressed is a hot-path KV indexer. Read `README.md`
 before changing locking, versioning, split, remove, or lookup-repair behavior.

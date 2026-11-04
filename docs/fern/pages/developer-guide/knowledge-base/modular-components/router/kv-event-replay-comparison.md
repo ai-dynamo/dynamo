@@ -53,7 +53,7 @@ The publisher keeps a `deque` of the last `buffer_steps` (default 10,000) serial
 
 ### Dynamo: Buffer + Indexer with Tree Dump Fallback
 
-Dynamo's `LocalKvIndexer` (in `lib/kv-router/src/indexer/local.rs`) wraps a `KvIndexer` (backed by a `RadixTree`) with a circular event buffer:
+Dynamo's `LocalKvIndexer` (in `lib/router/kv-indexer/src/local.rs`) wraps a `KvIndexer` (backed by a `RadixTree`) with a circular event buffer:
 
 ```text
 LocalKvIndexer

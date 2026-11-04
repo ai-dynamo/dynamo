@@ -1,4 +1,4 @@
-# lib/kv-router/src/services/slot_tracker
+# lib/router/kv-router/src/services/slot_tracker
 
 This module is a thin HTTP adapter over the runtime-independent sequence tracker.
 

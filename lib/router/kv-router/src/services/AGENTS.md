@@ -1,4 +1,4 @@
-# lib/kv-router/src/services
+# lib/router/kv-router/src/services
 
 These services must not depend on `dynamo-runtime`.
 

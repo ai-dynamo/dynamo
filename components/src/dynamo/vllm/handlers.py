@@ -608,7 +608,7 @@ def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
     )
 
 
-# Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-router/src/zmq_wire/extra_keys.rs.
+# Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-events/src/zmq_wire/extra_keys.rs.
 _DYNAMO_CACHE_SALT_PREFIX = "dynamo-cache-salt:"
 
 

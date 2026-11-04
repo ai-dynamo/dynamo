@@ -27,7 +27,7 @@ const MM_HASHES_KEY: &str = "mm_hashes";
 const IMAGE_URL_KEY: &str = "image_url";
 const VIDEO_URL_KEY: &str = "video_url";
 const AUDIO_URL_KEY: &str = "audio_url";
-// Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-router/src/zmq_wire/extra_keys.rs.
+// Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-events/src/zmq_wire/extra_keys.rs.
 const DYNAMO_CACHE_SALT_PREFIX: &str = "dynamo-cache-salt:";
 
 const MAX_PREPROCESSED_MM_BYTES: usize = 16 * 1024 * 1024;

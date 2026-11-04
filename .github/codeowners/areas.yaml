@@ -56,16 +56,15 @@ areas:
   - components/src/dynamo/router/
   - components/src/dynamo/thunderagent_router/
   - lib/kv-events/
-  - lib/kv-hints/
   - lib/multimodal/
-  - lib/kv-router/
-  - lib/kv-router/src/scheduling/
-  - lib/kv-router/src/sequences/
   - lib/kv-events/src/zmq_wire/
-  - lib/kv-router/tests/
   - lib/router/
   - lib/router/admission/
+  - lib/router/kv-hints/
   - lib/router/kv-indexer/
+  - lib/router/kv-router/
+  - lib/router/kv-router/src/scheduling/
+  - lib/router/kv-router/tests/
   - lib/router/protocol/
   - lib/router/scheduler/
   - lib/router/session-affinity/

@@ -66,7 +66,7 @@ within `1.10 × replay_window`.
 
 ```bash
 ROOT=$(git rev-parse --show-toplevel)
-TRACE="$ROOT/lib/kv-router/traces/mooncake_trace.jsonl"
+TRACE="$ROOT/lib/router/kv-router/traces/mooncake_trace.jsonl"
 
 mkdir -p "$(dirname "$TRACE")"
 curl -L \

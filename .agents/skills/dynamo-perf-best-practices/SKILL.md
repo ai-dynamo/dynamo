@@ -33,9 +33,9 @@ Trace each changed function's callers and work out how often it runs across the 
 | Rate | Where it usually lives (starting points, not a boundary) |
 |---|---|
 | Per output token or stream chunk: millions/s per frontend | `lib/llm/src/http/service`, `lib/llm/src/protocols/openai`, `lib/llm/src/backend.rs`, `components/src/dynamo/{vllm,sglang,trtllm}`, the response transport |
-| Per KV block: blocks per request × workers; millions of entries held | `lib/kv-router/src/indexer`, `lib/kv-router/src/sequences`, `lib/mocker` |
+| Per KV block: blocks per request × workers; millions of entries held | `lib/router/kv-indexer/src`, `lib/router/slot-tracker/src`, `lib/mocker` |
 | Per KV event: every engine step on every worker | event ingest, `lib/runtime/src/transports` |
-| Per request: thousands/s | `lib/llm/src/preprocessor`, `lib/llm/src/kv_router`, `lib/kv-router/src/scheduling`, request parsing, `lib/bindings/python/rust` |
+| Per request: thousands/s | `lib/llm/src/preprocessor`, `lib/llm/src/kv_router`, `lib/router/kv-router/src/scheduling`, request parsing, `lib/bindings/python/rust` |
 | Per connection: thousands open | HTTP accept and serve, transport clients |
 | Per worker or publisher: N in the thousands, at startup and on every discovery change | discovery, subscriptions, sockets, threads |
 
@@ -82,7 +82,7 @@ When the PR description or commit messages claim a speedup, a memory saving, or 
 - `lib/llm/src/path/file.rs:123` — per output token — <mechanism> — <fix>
 
 ### Consider
-- `lib/kv-router/src/path/file.rs:45` — per request — <mechanism> — <fix>
+- `lib/router/kv-router/src/path/file.rs:45` — per request — <mechanism> — <fix>
 
 ### Not on a hot path
 - `lib/runtime/src/path/config.rs` — runs once at startup

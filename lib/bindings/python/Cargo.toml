@@ -95,7 +95,7 @@ opentelemetry = { version = "0.31.0", features = ["trace"] }
 uuid = { version = "1.18.1" }
 
 # kv-indexer / slot-tracker / shared kv-router types
-dynamo-kv-router = { path = "../../kv-router" }
+dynamo-kv-router = { path = "../../router/kv-router" }
 dynamo-admission = { path = "../../router/admission" }
 dynamo-kv-events = { path = "../../kv-events" }
 dynamo-kv-hashing = { path = "../../kv-hashing" }

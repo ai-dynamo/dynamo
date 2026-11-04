@@ -55,7 +55,7 @@ cargo init --lib --name acme-admission-catalog "$PLUGIN_DIR/catalog"
 Add the classifier's API, error, configuration, and time dependencies:
 
 ```bash
-cargo add --manifest-path "$PLUGIN_DIR/classifier/Cargo.toml" --path "$DYNAMO_DIR/lib/kv-router" dynamo-kv-router
+cargo add --manifest-path "$PLUGIN_DIR/classifier/Cargo.toml" --path "$DYNAMO_DIR/lib/router/kv-router" dynamo-kv-router
 cargo add --manifest-path "$PLUGIN_DIR/classifier/Cargo.toml" --path "$DYNAMO_DIR/lib/runtime" dynamo-runtime
 cargo add --manifest-path "$PLUGIN_DIR/classifier/Cargo.toml" serde --features derive
 cargo add --manifest-path "$PLUGIN_DIR/classifier/Cargo.toml" tokio --features time
@@ -65,7 +65,7 @@ Add the classifier and registry API to the catalog:
 
 ```bash
 cargo add --manifest-path "$PLUGIN_DIR/catalog/Cargo.toml" --path "$PLUGIN_DIR/classifier" acme-admission
-cargo add --manifest-path "$PLUGIN_DIR/catalog/Cargo.toml" --path "$DYNAMO_DIR/lib/kv-router" dynamo-kv-router
+cargo add --manifest-path "$PLUGIN_DIR/catalog/Cargo.toml" --path "$DYNAMO_DIR/lib/router/kv-router" dynamo-kv-router
 ```
 
 ### Classify Requests
