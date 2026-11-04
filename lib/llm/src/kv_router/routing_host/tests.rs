@@ -4974,10 +4974,14 @@ impl SelectedWorkerCapture {
 
 #[tokio::test]
 #[serial_test::serial]
-async fn kv_session_affinity_hit_logs_selected_worker() {
-    let (router, runtime) = router_with_workers(Some(Duration::from_secs(10)), &[7]).await;
+async fn kv_session_affinity_hit_logs_selected_worker_and_records_kv_metrics() {
+    let (mut router, runtime) = router_with_workers(Some(Duration::from_secs(10)), &[7]).await;
+    router.request_metrics = crate::kv_router::metrics::RouterRequestMetrics::for_test(
+        &dynamo_runtime::MetricsRegistry::new(),
+    );
     let session_id = SessionAffinityId::new("kv-affinity-hit-observability");
     bind_affinity_target(&router, &session_id, AffinityTarget::new(7, Some(0))).await;
+    let hit_rate_samples = router.request_metrics.kv_hit_rate.get_sample_count();
 
     let tracker = Arc::new(RequestTracker::new());
     let mut input = request();
@@ -5029,6 +5033,11 @@ async fn kv_session_affinity_hit_logs_selected_worker() {
     assert_eq!(
         fields.get("selection").map(String::as_str),
         Some("session_affinity")
+    );
+
+    assert_eq!(
+        router.request_metrics.kv_hit_rate.get_sample_count(),
+        hit_rate_samples + 1
     );
 
     selection.booking.take();
