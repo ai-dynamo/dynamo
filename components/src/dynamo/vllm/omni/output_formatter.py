@@ -45,7 +45,6 @@ aggregated handlers, disaggregated routers, and tests can share them.
 
 import asyncio
 import base64
-import importlib.util
 import logging
 import struct
 import time
@@ -63,9 +62,6 @@ from PIL import Image
 try:
     from vllm_omni.diffusion.utils.media_utils import mux_video_audio_bytes
 except (ImportError, OSError):
-    mux_video_audio_bytes = None  # type: ignore[assignment]
-# The CUDA image makes media_utils import PyAV lazily, so check for PyAV itself.
-if importlib.util.find_spec("av") is None:
     mux_video_audio_bytes = None  # type: ignore[assignment]
 
 from dynamo.common.protocols.audio_protocol import AudioData, NvAudioSpeechResponse

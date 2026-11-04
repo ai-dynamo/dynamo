@@ -35,7 +35,6 @@ pytestmark = [
     pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
-    pytest.mark.usefixtures("vllm_builtin_kv_cache_specs"),
 ]
 
 

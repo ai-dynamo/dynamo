@@ -67,9 +67,10 @@ else
     "vllm-omni==${VLLM_OMNI_VERSION}"
 fi
 
-# vLLM-Omni 0.33 imports PyAV at startup through media_utils.py, and the CUDA image
-# removes PyAV under the codec policy. Make that import lazy; remove this once
-# vLLM-Omni imports PyAV lazily itself.
+# vLLM-Omni 0.33 registers its experimental Physis pipelines (vllm-omni#9154) eagerly,
+# so every Omni process imports PyAV, which the CUDA image removes under the codec
+# policy, and Qwen3-TTS fails requests when stage 0 uses FlashInfer. Remove those
+# registrations; remove this once vLLM-Omni loads them lazily.
 if [ "${VLLM_OMNI_TARGET_DEVICE}" = "cuda" ]; then
   python3 - <<'PY'
 import importlib.util
@@ -77,21 +78,13 @@ import py_compile
 from pathlib import Path
 
 pkg = Path(importlib.util.find_spec("vllm_omni").submodule_search_locations[0])
-path = pkg / "diffusion" / "utils" / "media_utils.py"
-src = path.read_text()
-old = "\nimport av\n"
-new = (
-    "\n# Modified by NVIDIA Dynamo: import PyAV lazily; Dynamo's image omits it.\n"
-    "try:\n"
-    "    import av\n"
-    "except ImportError:\n"
-    "    from vllm.utils.import_utils import PlaceholderModule\n"
-    "\n"
-    '    av = PlaceholderModule("av")\n'
-)
-if src.count(old) != 1:
-    raise SystemExit(f"{path}: expected one top-level 'import av'; update or remove this patch")
-path.write_text(src.replace(old, new))
+path = pkg / "config" / "pipeline_registry.py"
+lines = path.read_text().splitlines(keepends=True)
+physis = [line for line in lines if "physis" in line.lower()]
+if len(physis) != 6:
+    raise SystemExit(f"{path}: expected 6 Physis lines, found {len(physis)}; update or remove this patch")
+kept = "".join(line for line in lines if "physis" not in line.lower())
+path.write_text("# Modified by NVIDIA Dynamo: experimental Physis pipelines removed.\n" + kept)
 py_compile.compile(str(path), doraise=True)
 PY
   # The image purges PyAV in a later step; check Omni's pipeline registry loads without it.
