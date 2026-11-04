@@ -577,7 +577,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 [[package]]
 name = "dynamo-conformance-fixtures-v2"
 version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=7e9ef9ed36d97d4e1bfab371cbf714aa611e17a7#7e9ef9ed36d97d4e1bfab371cbf714aa611e17a7"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=7c3d6ec100a778d406b1f85f57c0348106567883#7c3d6ec100a778d406b1f85f57c0348106567883"
 dependencies = [
  "anyhow",
  "dynamo-parsers-v2",
@@ -597,8 +597,8 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.9.9"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=7e9ef9ed36d97d4e1bfab371cbf714aa611e17a7#7e9ef9ed36d97d4e1bfab371cbf714aa611e17a7"
+version = "0.9.10"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=7c3d6ec100a778d406b1f85f57c0348106567883#7c3d6ec100a778d406b1f85f57c0348106567883"
 dependencies = [
  "anyhow",
  "dynamo-structural-tag",
@@ -615,8 +615,8 @@ dependencies = [
 
 [[package]]
 name = "dynamo-structural-tag"
-version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=7e9ef9ed36d97d4e1bfab371cbf714aa611e17a7#7e9ef9ed36d97d4e1bfab371cbf714aa611e17a7"
+version = "0.1.1"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=7c3d6ec100a778d406b1f85f57c0348106567883#7c3d6ec100a778d406b1f85f57c0348106567883"
 dependencies = [
  "anyhow",
  "regex",
