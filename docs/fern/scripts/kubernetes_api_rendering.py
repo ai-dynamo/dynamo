@@ -85,7 +85,7 @@ _WARNING = (
 _VALUELESS_MARKER_RE = re.compile(
     r"\b(Optional|Required|EmbeddedResource|Schemaless):\s*(?:\\\{\\\}|\{\s*\})"
 )
-_INLINE_CODE_RE = re.compile(r"(`+)(?:.+?)\1")
+_INLINE_CODE_RE = re.compile(r"(`+)(?:.+?)\1", re.DOTALL)
 
 
 def _drop_valueless_markers(text: str) -> str:

@@ -860,6 +860,14 @@ def test_kubernetes_valueless_marker_strip_skips_inline_code() -> None:
     assert rendered.endswith("Optional")
 
 
+def test_kubernetes_valueless_marker_strip_skips_multiline_inline_code() -> None:
+    """An inline code span wrapped across a newline is still left intact."""
+    raw = "Set `x\nOptional: {}` to opt in. Optional: {}"
+    stripped = kubernetes_api_rendering._drop_valueless_markers(raw)
+    assert "`x\nOptional: {}`" in stripped
+    assert stripped.endswith("Optional")
+
+
 def test_kubernetes_table_parser_preserves_literal_pipes() -> None:
     row = r"| `field` _string_ | uses `a|b` and x \| y |  | Required: {} |"
 

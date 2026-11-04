@@ -4665,13 +4665,13 @@ BranchProgress reports progress for one independently optimized AISimulate branc
 
 <ParamField path="name" type="string" required={true}>
 Name is the executor-defined stable branch identifier.
-**Validation:** Required: \&#123;\&#125;
+**Validation:** Required
 </ParamField>
 
 <ParamField path="rounds" type="RoundProgress" required={true}>
 Rounds reports optimizer progress for this branch.
 See [RoundProgress](#roundprogress).
-**Validation:** Required: \&#123;\&#125;
+**Validation:** Required
 </ParamField>
 </Accordion>
 
@@ -4684,12 +4684,12 @@ CandidateProgress reports bounded Kubernetes publication, not all internal trial
 
 <ParamField path="paretoFront" type="integer">
 ParetoFront is the number of feasible points on the current Pareto front.
-**Validation:** Optional: \&#123;\&#125;
+**Validation:** Optional
 </ParamField>
 
 <ParamField path="published" type="integer">
 Published is the number of Candidate resources currently referenced by this run.
-**Validation:** Optional: \&#123;\&#125;
+**Validation:** Optional
 </ParamField>
 </Accordion>
 
@@ -4753,17 +4753,17 @@ DynamoGraphDeploymentCandidate is one bounded, user-visible search result.
 <ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
 See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
-**Validation:** Optional: \&#123;\&#125;
+**Validation:** Optional
 </ParamField>
 
 <ParamField path="spec" type="DynamoGraphDeploymentCandidateSpec" required={true}>
 See [DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec).
-**Validation:** Required: \&#123;\&#125;
+**Validation:** Required
 </ParamField>
 
 <ParamField path="status" type="DynamoGraphDeploymentCandidateStatus">
 See [DynamoGraphDeploymentCandidateStatus](#dynamographdeploymentcandidatestatus).
-**Validation:** Optional: \&#123;\&#125;
+**Validation:** Optional
 </ParamField>
 </Accordion>
 
@@ -4834,7 +4834,7 @@ See [DynamoGraphDeploymentExperimentalSpec](#dynamographdeploymentexperimentalsp
 <ParamField path="parameters" type="RawExtension" required={true}>
 Parameters are the resolved evaluation parameters for this point.
 See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
-**Validation:** Type: object  Required: \&#123;\&#125;
+**Validation:** Type: object  Required
 </ParamField>
 </Accordion>
 
@@ -4869,17 +4869,17 @@ DynamoGraphDeploymentRequest is the Schema for simulation-backed deployment sear
 <ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
 See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
-**Validation:** Optional: \&#123;\&#125;
+**Validation:** Optional
 </ParamField>
 
 <ParamField path="spec" type="DynamoGraphDeploymentRequestSpec" required={true}>
 See [DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec).
-**Validation:** Required: \&#123;\&#125;
+**Validation:** Required
 </ParamField>
 
 <ParamField path="status" type="DynamoGraphDeploymentRequestStatus">
 See [DynamoGraphDeploymentRequestStatus](#v1beta2-dynamographdeploymentrequeststatus).
-**Validation:** Optional: \&#123;\&#125;
+**Validation:** Optional
 </ParamField>
 </Accordion>
 
@@ -5075,17 +5075,17 @@ DynamoGraphDeploymentRun is one immutable accepted DGDR request and its executio
 <ParamField path="metadata" type="ObjectMeta">
 Refer to Kubernetes API documentation for fields of `metadata`.
 See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
-**Validation:** Optional: \&#123;\&#125;
+**Validation:** Optional
 </ParamField>
 
 <ParamField path="spec" type="DynamoGraphDeploymentRunSpec" required={true}>
 See [DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec).
-**Validation:** Required: \&#123;\&#125;
+**Validation:** Required
 </ParamField>
 
 <ParamField path="status" type="DynamoGraphDeploymentRunStatus">
 See [DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus).
-**Validation:** Optional: \&#123;\&#125;
+**Validation:** Optional
 </ParamField>
 </Accordion>
 
@@ -5215,37 +5215,37 @@ EvaluationProgress reports unique candidate outcomes without creating one resour
 
 <ParamField path="scheduled" type="integer">
 Scheduled is the number of unique evaluations accepted for execution.
-**Validation:** Optional: \&#123;\&#125;
+**Validation:** Optional
 </ParamField>
 
 <ParamField path="running" type="integer">
 Running is the number of evaluations currently executing.
-**Validation:** Optional: \&#123;\&#125;
+**Validation:** Optional
 </ParamField>
 
 <ParamField path="feasible" type="integer">
 Feasible is the number of completed evaluations that satisfy all constraints.
-**Validation:** Optional: \&#123;\&#125;
+**Validation:** Optional
 </ParamField>
 
 <ParamField path="infeasible" type="integer">
 Infeasible is the number of completed evaluations that violate at least one constraint.
-**Validation:** Optional: \&#123;\&#125;
+**Validation:** Optional
 </ParamField>
 
 <ParamField path="failed" type="integer">
 Failed is the number of evaluations that ended in an execution error.
-**Validation:** Optional: \&#123;\&#125;
+**Validation:** Optional
 </ParamField>
 
 <ParamField path="unsupported" type="integer">
 Unsupported is the number of configurations rejected as unsupported before evaluation.
-**Validation:** Optional: \&#123;\&#125;
+**Validation:** Optional
 </ParamField>
 
 <ParamField path="cacheHits" type="integer">
 CacheHits is the number of evaluations satisfied from a prior result.
-**Validation:** Optional: \&#123;\&#125;
+**Validation:** Optional
 </ParamField>
 </Accordion>
 
@@ -5296,12 +5296,12 @@ KVCapacityFractionRange defines the searched fraction of a candidate's KV capaci
 
 <ParamField path="min" type="float" required={true}>
 Min is the lower end of the searched fraction range.
-**Validation:** ExclusiveMinimum: true  Maximum: 1  Minimum: 0  Required: \&#123;\&#125;
+**Validation:** ExclusiveMinimum: true  Maximum: 1  Minimum: 0  Required
 </ParamField>
 
 <ParamField path="max" type="float" required={true}>
 Max is the upper end of the searched fraction range.
-**Validation:** ExclusiveMinimum: true  Maximum: 1  Minimum: 0  Required: \&#123;\&#125;
+**Validation:** ExclusiveMinimum: true  Maximum: 1  Minimum: 0  Required
 </ParamField>
 </Accordion>
 
@@ -5333,7 +5333,7 @@ ModelSpec identifies the model whose deployment configurations are evaluated.
 
 <ParamField path="name" type="string" required={true}>
 Name identifies the model in the syntax accepted by the selected backend.
-**Validation:** MinLength: 1  Required: \&#123;\&#125;
+**Validation:** MinLength: 1  Required
 </ParamField>
 </Accordion>
 
@@ -5492,7 +5492,7 @@ ResourceReference identifies a namespaced resource by name and UID.
 
 <ParamField path="name" type="string" required={true}>
 Name is the resource name.
-**Validation:** Required: \&#123;\&#125;
+**Validation:** Required
 </ParamField>
 
 <ParamField path="uid" type="UID">
@@ -5511,12 +5511,12 @@ RoundProgress reports completed and planned optimizer rounds.
 
 <ParamField path="completed" type="integer" required={true}>
 Completed is the number of finished rounds.
-**Validation:** Required: \&#123;\&#125;
+**Validation:** Required
 </ParamField>
 
 <ParamField path="total" type="integer" required={true}>
 Total is the number of planned rounds.
-**Validation:** Required: \&#123;\&#125;
+**Validation:** Required
 </ParamField>
 </Accordion>
 
@@ -5593,12 +5593,12 @@ TracePVCSource names one trace file on a PersistentVolumeClaim in the Request na
 
 <ParamField path="claimName" type="string" required={true}>
 ClaimName is the PersistentVolumeClaim, in the Request namespace, that holds the trace. The Run Job mounts only the trace file from it, read-only, and only into the AISimulate container. Each Run protects the claim with the finalizer `nvidia.com/dgdr-run-<run-uid>` until the Run completes or, for a Run deleted before it completes, until no Job of the Run is left. Garbage collection deletes the Job of a deleted Run before the Job's pod, so the finalizer of a deleted Run can be released while that pod still stops; Kubernetes PersistentVolumeClaim protection keeps the claim until no pod uses it. Deleting the claim cancels the Runs that read it.
-**Validation:** MaxLength: 253  MinLength: 1  Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`  Required: \&#123;\&#125;
+**Validation:** MaxLength: 253  MinLength: 1  Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`  Required
 </ParamField>
 
 <ParamField path="subPath" type="string" required={true}>
 SubPath names one trace file relative to the root of the claim; the Run Job mounts it as the subPath of the claim volume. It is neither a directory nor a glob. It must not start or end with '/' and must not contain empty, '.' or '..' segments or a NUL character, which no file name can hold. The file must be complete before the Request is created and must never be rewritten: every Run of the Request reads it when its Job starts.
-**Validation:** MaxLength: 1024  MinLength: 1  Required: \&#123;\&#125;
+**Validation:** MaxLength: 1024  MinLength: 1  Required
 </ParamField>
 </Accordion>
 
@@ -5611,7 +5611,7 @@ TraceReplaySpec configures how AISimulate replays a decoded trace.
 
 <ParamField path="arrivalSpeedupRatio" type="float">
 ArrivalSpeedupRatio multiplies the recorded request-arrival rate. 1.0 preserves it. When omitted, the recorded arrival times are replayed unchanged.
-**Validation:** ExclusiveMinimum: true  Minimum: 0  Optional: \&#123;\&#125;
+**Validation:** ExclusiveMinimum: true  Minimum: 0  Optional
 </ParamField>
 </Accordion>
 
@@ -5626,7 +5626,7 @@ source in this release.
 <ParamField path="persistentVolumeClaim" type="TracePVCSource">
 PersistentVolumeClaim reads the trace from a PersistentVolumeClaim in the Request namespace.
 See [TracePVCSource](#tracepvcsource).
-**Validation:** Optional: \&#123;\&#125;
+**Validation:** Optional
 </ParamField>
 </Accordion>
 
@@ -5640,19 +5640,19 @@ TraceWorkloadSpec replays a recorded request trace open loop at its recorded arr
 <ParamField path="format" type="TraceFormat" default="Dynamo">
 Format identifies the trace decoder. Defaults to Dynamo.
 See [TraceFormat](#traceformat).
-**Validation:** Enum: [Dynamo]  Optional: \&#123;\&#125;
+**Validation:** Enum: [Dynamo]  Optional
 </ParamField>
 
 <ParamField path="source" type="TraceSourceSpec" required={true}>
 Source identifies the trace artifact.
 See [TraceSourceSpec](#tracesourcespec).
-**Validation:** Required: \&#123;\&#125;
+**Validation:** Required
 </ParamField>
 
 <ParamField path="replay" type="TraceReplaySpec">
 Replay configures how the decoded trace is replayed.
 See [TraceReplaySpec](#tracereplayspec).
-**Validation:** Optional: \&#123;\&#125;
+**Validation:** Optional
 </ParamField>
 </Accordion>
 
@@ -5673,7 +5673,7 @@ See [StaticWorkloadSpec](#staticworkloadspec).
 <ParamField path="trace" type="TraceWorkloadSpec">
 Trace replays a recorded request trace from a PersistentVolumeClaim in the Request namespace. Admission supplies no static default when it is set. The Run Job mounts only the trace file, read-only through a subPath of the claim, at /var/run/aisimulate/trace/trace.jsonl, or trace.jsonl.gz when subPath ends in .gz. The trace lowers to the default traffic.source and traffic.load, which spec.aisimulate.inputOverrides can replace or delete.
 See [TraceWorkloadSpec](#traceworkloadspec).
-**Validation:** Optional: \&#123;\&#125;
+**Validation:** Optional
 </ParamField>
 </Accordion>
 
