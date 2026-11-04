@@ -86,17 +86,13 @@ func betaDGDWorkersSpecHash(t testing.TB, dgd *v1beta1.DynamoGraphDeployment) st
 	return hash
 }
 
+// legacyDGDWorkersSpecHash returns a stand-in for the retired v1 worker hash:
+// the v1 algorithm was removed after #13450 dropped its production use and
+// Dynamo 1.2 workers fell outside the N-2 upgrade window. The reconciler
+// treats the stored v1 hash opaquely, so any non-sentinel 8-hex value works.
 func legacyDGDWorkersSpecHash(t testing.TB, dgd *v1beta1.DynamoGraphDeployment) string {
 	t.Helper()
-	alpha := &v1alpha1.DynamoGraphDeployment{}
-	if err := alpha.ConvertFrom(dgd); err != nil {
-		t.Fatalf("convert v1beta1 DGD to v1alpha1: %v", err)
-	}
-	hash, err := v1alpha1.ComputeDGDWorkersSpecHash(alpha)
-	if err != nil {
-		t.Fatalf("compute v1alpha1 DGD worker hash: %v", err)
-	}
-	return hash
+	return "1a2b3c4d"
 }
 
 func betaRestartStatus(src *v1alpha1.RestartStatus) *v1beta1.RestartStatus {

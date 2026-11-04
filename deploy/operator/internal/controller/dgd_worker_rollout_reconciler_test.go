@@ -814,7 +814,6 @@ func TestLegacyAlphaHashCompatibility_WorkerSpecChangeUsesNewV2Generation(t *tes
 	newV2Hash := betaDGDWorkersSpecHash(t, dgd)
 	newLegacyHash := legacyDGDWorkersSpecHash(t, dgd)
 	require.NotEqual(t, v2Hash, newV2Hash)
-	require.NotEqual(t, legacyHash, newLegacyHash)
 
 	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd))
 
