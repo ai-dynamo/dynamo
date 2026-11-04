@@ -16,10 +16,12 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdoverride"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	utiljson "k8s.io/apimachinery/pkg/util/json"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 )
@@ -51,7 +53,8 @@ func (w *clientWriter) PrepareCandidate(
 	}
 
 	// The same immutable override applies independently to every selected backend and topology.
-	if run.Spec.Overrides != nil && run.Spec.Overrides.DGD != nil {
+	hasOverride := run.Spec.Overrides != nil && run.Spec.Overrides.DGD != nil
+	if hasOverride {
 		override := &unstructured.Unstructured{}
 		if err := utiljson.Unmarshal(run.Spec.Overrides.DGD.Raw, &override.Object); err != nil {
 			return candidate, fmt.Errorf("decode frozen DGD override: %w", err)
@@ -77,10 +80,28 @@ func (w *clientWriter) PrepareCandidate(
 	if err != nil {
 		return candidate, fmt.Errorf("encode prepared DGD: %w", err)
 	}
+	originalManifest := candidate.Spec
 	candidate.Spec = string(contents)
 	if companions != "" {
 		candidate.Spec += "---\n" + companions
 	}
+
+	// Include publisher metadata in the Kubernetes metadata check before adopting any override.
+	if hasOverride {
+		name := CandidateName(run.Name, w.RunUID, candidate.ID)
+		projected, err := buildCandidateApply(w.Client.Scheme(), w.Namespace, w.RunUID, run, name, candidate)
+		if err != nil {
+			return candidate, fmt.Errorf("project overridden Candidate: %w", err)
+		}
+		if errs := apivalidation.ValidateObjectMetaAccessor(projected, true, apivalidation.NameIsDNSSubdomain, field.NewPath("metadata")); len(errs) > 0 {
+			candidate.Spec = originalManifest
+			candidate.Validity.Status = metav1.ConditionFalse
+			candidate.Validity.Reason = "OverrideFailed"
+			candidate.Validity.Message = boundDiagnostic(errs.ToAggregate().Error())
+			return candidate, nil
+		}
+	}
+
 	probe := dgd.DeepCopy()
 	probe.SetGroupVersionKind(v1beta1.DynamoGraphDeploymentGVK)
 	probe.SetNamespace(run.Namespace)

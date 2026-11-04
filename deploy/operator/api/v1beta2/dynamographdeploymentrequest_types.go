@@ -376,6 +376,8 @@ type OverridesSpec struct {
 	// retains only the original generated metadata; a successful merge followed by failed
 	// dry-run validation retains the merged metadata on the invalid Candidate. Other metadata
 	// and publisher-owned keys cannot be overridden; such attempts fail atomically.
+	// The complete Candidate metadata must satisfy Kubernetes limits, including generated
+	// and reserved annotations. An override that exceeds those limits fails atomically.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:EmbeddedResource

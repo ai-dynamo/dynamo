@@ -38,6 +38,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -320,6 +321,7 @@ func TestEnvtestCandidatePreparation(t *testing.T) {
 		wantSpec   string
 		wantLabel  string
 		absentSpec string
+		admitRun   bool
 	}{
 		{name: "valid DGD keeps its pre-defaulting spec", manifest: validManifest, reason: "ValidationSucceeded"},
 		{name: "optional DGD backend is not synthesized", manifest: strings.Replace(validManifest, "  backendFramework: vllm\n", "", 1), reason: "ValidationSucceeded", absentSpec: `"backendFramework"`},
@@ -334,6 +336,23 @@ func TestEnvtestCandidatePreparation(t *testing.T) {
 		{name: "metadata is copied to Candidate", manifest: validManifest, override: overridePrefix + `"metadata":{"labels":{"custom":"kept"},"annotations":{"custom":"kept"}}}`, reason: "ValidationSucceeded", wantLabel: "kept"},
 		{name: "failed override retains only generated metadata", manifest: strings.Replace(validManifest, "\nspec:", "\nmetadata:\n  labels:\n    custom: generated\n  annotations:\n    custom: generated\nspec:", 1), override: overridePrefix + `"metadata":{"labels":{"custom":"discarded"},"annotations":{"custom":"discarded"}},"spec":{"components":[{"name":"missing","replicas":3}]}}`, reason: "OverrideTargetNotFound", wantLabel: "generated"},
 		{name: "failed dry-run retains successfully merged metadata", manifest: strings.ReplaceAll(validManifest, "runtime:1.6.0", "runtime:custom"), override: overridePrefix + `"metadata":{"labels":{"custom":"kept"},"annotations":{"custom":"kept"}}}`, reason: "ValidationFailed", wantLabel: "kept"},
+		{
+			name:       "merged annotations exceed the metadata limit atomically",
+			manifest:   strings.Replace(validManifest, "\nspec:", "\nmetadata:\n  labels:\n    custom: generated\n  annotations:\n    custom: generated\n    generated: kept\nspec:", 1),
+			override:   overridePrefix + `"metadata":{"labels":{"custom":"discarded"},"annotations":{"custom":"` + strings.Repeat("x", apivalidation.TotalAnnotationSizeLimitB-len("custom")) + `"}},"spec":{"components":[{"name":"worker","replicas":3}]}}`,
+			reason:     "OverrideFailed",
+			wantLabel:  "generated",
+			absentSpec: `"replicas":3`,
+			admitRun:   true,
+		},
+		{
+			name:       "companion annotations consume the Candidate metadata budget",
+			manifest:   validManifest + "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: companion\ndata:\n  payload: " + strings.Repeat("x", 2048) + "\n",
+			override:   overridePrefix + `"metadata":{"labels":{"custom":"discarded"},"annotations":{"custom":"` + strings.Repeat("x", apivalidation.TotalAnnotationSizeLimitB-1024-len("custom")) + `"}},"spec":{"components":[{"name":"worker","replicas":3}]}}`,
+			reason:     "OverrideFailed",
+			absentSpec: `"replicas":3`,
+			admitRun:   true,
+		},
 		{name: "identity override fails atomically", manifest: validManifest, override: overridePrefix + `"metadata":{"namespace":"other"},"spec":{"backendFramework":"sglang"}}`, reason: "OverrideFailed", wantSpec: `"backendFramework":"vllm"`},
 	}
 	for i, test := range tests {
@@ -342,6 +361,15 @@ func TestEnvtestCandidatePreparation(t *testing.T) {
 			run := f.run.DeepCopy()
 			if test.override != "" {
 				run.Spec.Overrides = &v1beta2.OverridesSpec{DGD: &runtime.RawExtension{Raw: []byte(test.override)}}
+			}
+			if test.admitRun {
+				t.Log("Verify the override's own metadata is accepted before it is merged")
+				admitted := run.DeepCopy()
+				admitted.Name = fmt.Sprintf("metadata-run-%d", i)
+				admitted.UID = ""
+				admitted.ResourceVersion = ""
+				admitted.CreationTimestamp = metav1.Time{}
+				require.NoError(t, f.client.Create(f.ctx, admitted))
 			}
 			candidate := envtestCandidate()
 			candidate.ID = fmt.Sprintf("case-%d", i)
@@ -358,6 +386,11 @@ func TestEnvtestCandidatePreparation(t *testing.T) {
 			prepared, err := f.writer.PrepareCandidate(f.ctx, run, candidate)
 			require.NoError(t, err)
 			require.Equal(t, test.reason, prepared.Validity.Reason)
+			wantValidity := metav1.ConditionFalse
+			if test.reason == "ValidationSucceeded" {
+				wantValidity = metav1.ConditionTrue
+			}
+			require.Equal(t, wantValidity, prepared.Validity.Status)
 
 			t.Log("Persist the pre-dry-run payload and its original evaluation facts")
 			name := f.name(candidate.ID)
@@ -367,7 +400,10 @@ func TestEnvtestCandidatePreparation(t *testing.T) {
 			got := f.candidate(name)
 			require.Contains(t, string(got.Status.Parameters.Raw), `"tp":2`)
 			require.Contains(t, string(got.Status.Metrics.Raw), `"throughput":12.5`)
-			require.Equal(t, test.reason, meta.FindStatusCondition(got.Status.Conditions, v1beta2.DGDCConditionValid).Reason)
+			condition := meta.FindStatusCondition(got.Status.Conditions, v1beta2.DGDCConditionValid)
+			require.NotNil(t, condition)
+			require.Equal(t, test.reason, condition.Reason)
+			require.Equal(t, wantValidity, condition.Status)
 			if test.wantSpec != "" {
 				require.Contains(t, string(got.Spec.Raw), test.wantSpec)
 			}

@@ -147,6 +147,9 @@ DGD labels and annotations are copied to Candidate metadata. If an override fail
 apply, only the original generated labels and annotations are copied; metadata from
 the failed override is discarded. If the merge succeeds but dry-run validation fails,
 the override's labels and annotations remain on the invalid Candidate.
+An override that makes the complete Candidate metadata invalid is rejected in full.
+The total annotation-size limit includes generated annotations and the reserved
+annotations added to the Candidate.
 
 Candidate identity, including name, namespace, and owner references, cannot be overridden.
 The following metadata is also reserved; attempts to override it fail atomically:
