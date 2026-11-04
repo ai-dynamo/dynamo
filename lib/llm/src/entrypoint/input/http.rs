@@ -17,9 +17,8 @@ use crate::{
     local_model::runtime_config::TokenizerBackend,
     model_type::ModelType,
     namespace::NamespaceFilter,
-    types::openai::{
-        chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-        completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
+    types::openai::chat_completions::{
+        NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
 };
 use dynamo_kv_router::{
@@ -304,11 +303,8 @@ async fn run_with_router_plugins(
             .await?;
             manager.add_chat_completions_model(model.display_name(), checksum, chat_pipeline)?;
 
-            let cmpl_pipeline = common::build_pipeline::<
-                NvCreateCompletionRequest,
-                NvCreateCompletionResponse,
-            >(model.card(), inner_engine, tokenizer)
-            .await?;
+            let cmpl_pipeline =
+                common::build_completions_pipeline(model.card(), inner_engine, tokenizer)?;
             manager.add_completions_model(model.display_name(), checksum, cmpl_pipeline)?;
             enable_in_process_model_endpoints(&http_service)?;
             http_service
