@@ -12,7 +12,7 @@ spec:
     podTemplate:
       spec:
         containers:
-        - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+        - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0
           name: main
     replicas: 1
     type: frontend
@@ -42,7 +42,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0
           name: main
           resources:
             limits:
@@ -81,7 +81,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0
           name: main
           resources:
             limits:

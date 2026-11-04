@@ -64,7 +64,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.7.0
           imagePullPolicy: IfNotPresent
           # Make EPP schedule away from disk-starved nodes and mitigate its
           # eviction under node DiskPressure: the ephemeral-storage request keeps
@@ -107,7 +107,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0
           imagePullPolicy: IfNotPresent
           resources:
             limits:
@@ -124,7 +124,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0
         tolerations:
         - effect: NoSchedule
           key: nvidia.com/gpu
@@ -163,7 +163,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0
           imagePullPolicy: IfNotPresent
           resources:
             limits:
@@ -180,7 +180,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0
         tolerations:
         - effect: NoSchedule
           key: nvidia.com/gpu

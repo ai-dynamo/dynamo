@@ -30,8 +30,8 @@ crate-type = ["cdylib", "staticlib"]
 cbindgen = "0.27"
 
 [dependencies]
-dynamo-kv-router = { path = "../../kv-router" }
-dynamo-runtime = { path = "../../runtime" }
+dynamo-kv-router = { path = "../../kv-router", version = "1.7.0" }
+dynamo-runtime = { path = "../../runtime", version = "1.7.0" }
 
 anyhow = { workspace = true }
 tokio = { workspace = true }

@@ -35,7 +35,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.7.0
   - name: worker
     type: decode
     replicas: 1
@@ -63,7 +63,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.7.0
           resources:
             limits:
               nvidia.com/gpu: "1"
@@ -79,4 +79,4 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.7.0

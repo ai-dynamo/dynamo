@@ -190,7 +190,7 @@ the manifest, complete Steps 1-4 above to create `hf-token-secret` and
 
 Use Kubernetes v1.34 or newer with DRA API v1 and the Intel resource drivers
 for Kubernetes installed. Replace the Frontend
-`nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag` image and the worker
+`nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0` image and the worker
 `nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag` image with images available
 to the cluster. See the
 [Intel XPU Deployment Examples](../../xpu/README.md) for the XPU image build

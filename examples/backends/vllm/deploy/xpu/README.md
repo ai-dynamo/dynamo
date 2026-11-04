@@ -27,7 +27,7 @@ Hardware-specific deployment templates for Intel XPU GPUs using Kubernetes Dynam
 1. **Kubernetes v1.34+** with DRA API v1 enabled
 2. **[Intel resource drivers for Kubernetes](https://github.com/intel/intel-resource-drivers-for-kubernetes)** installed with DeviceClass `gpu.intel.com`
 3. **Frontend runtime image** available to the cluster. Replace
-   `nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag` in the selected template with
+   `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0` in the selected template with
    a published or custom vLLM runtime image.
 4. **Custom XPU runtime image** built with Intel XPU support:
    ```bash
