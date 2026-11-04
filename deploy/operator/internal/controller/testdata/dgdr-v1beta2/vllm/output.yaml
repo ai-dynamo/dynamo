@@ -10,6 +10,10 @@ metadata:
     $strict: false
     nvidia.com/dgdr-candidate-id: $pattern:^evaluated-point-[0-9a-f]{12}$
     nvidia.com/dgdr-run-uid: $ignore
+    test.dynamo.nvidia.com/dgd-override: label-applied
+  annotations:
+    $strict: false
+    test.dynamo.nvidia.com/dgd-override: annotation-applied
 spec:
   $strict: false
 status:
