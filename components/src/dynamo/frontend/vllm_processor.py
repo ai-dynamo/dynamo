@@ -949,6 +949,11 @@ class VllmProcessor:
     async def _generator_inner(
         self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
+        """Preprocess a chat request and yield responses from the routed engine.
+
+        Local vLLM processing handles tokenization and response assembly, while
+        routing metadata and worker arguments carry request settings to inference.
+        """
         request_id = random_uuid()
 
         _reject_unsupported_chat_logprobs(

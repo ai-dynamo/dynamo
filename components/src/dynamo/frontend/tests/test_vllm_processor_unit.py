@@ -1366,6 +1366,7 @@ def cache_salt_processor(vllm_processor_module, monkeypatch):
     ],
 )
 async def test_generator_preserves_cache_salt(cache_salt_processor, fields, expected):
+    """Preserve public salt precedence across local, router, and worker inputs."""
     processor, routed_engine = cache_salt_processor()
     request = {
         "model": MODEL,
@@ -1400,6 +1401,7 @@ async def test_generator_preserves_cache_salt(cache_salt_processor, fields, expe
 async def test_generator_cache_salt_survives_multimodal_metadata(
     cache_salt_processor, vllm_processor_module, monkeypatch
 ):
+    """Keep salt and multimodal metadata together without mutating the request."""
     feature = SimpleNamespace(
         modality="image",
         mm_hash="a" * 64,
