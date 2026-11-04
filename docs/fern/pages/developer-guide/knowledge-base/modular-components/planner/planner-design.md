@@ -289,18 +289,26 @@ When both modes are enabled, throughput-based scaling (longer interval) sets a l
 
 In aggregated mode (`mode: agg`), engines handle both prefill and decode via chunked prefill. The planner maintains both TTFT and ITL regression models but uses per-worker time-averaged metrics (not instantaneous) for regression training to smooth out chunked prefill noise. Scale up if either prefill or decode signals overload; scale down only if both signal underload.
 
-## Retune (Experimental, Simulation Only)
+<a id="retune-experimental-simulation-only"></a>
+
+## Retune (Experimental)
 
 > [!WARNING]
-> **Experimental.** Retune runs only in planner-in-the-loop offline replay in this release. A live
-> Planner rejects a configuration that sets `retune` at startup.
+> **Experimental.** With `retune.executor: local`, the default, retune runs only in
+> planner-in-the-loop offline replay, and a live Planner rejects it at startup. With
+> `executor: dgdr`, a live Planner on Kubernetes retunes three KV router knobs with fixed replicas
+> through DGDR v1beta2 Requests; it is for development clusters only. See
+> [Planner Live Retune](../../../../kubernetes/auto-deployment/planner-live-retune.md).
 
 Retune periodically replays the last window of recorded traffic against a grid of router and
 Planner parameters and applies the best point. The [Planner Guide](planner-guide.md#periodic-retune-experimental)
 covers the concept, the
-[`retune` reference](../../../../reference/components/planner-configuration.mdx#retune-experimental-simulation-only)
-the fields, and [Simulate Retune](aisimulate-planner-replay.mdx#simulate-retune-experimental) how to
-run it. This section describes the mechanics.
+[`retune` reference](../../../../reference/components/planner-configuration.mdx#retune-experimental)
+the fields, [Simulate Retune](aisimulate-planner-replay.mdx#simulate-retune-experimental) how to
+run it in replay, and
+[Planner Live Retune](../../../../kubernetes/auto-deployment/planner-live-retune.md)
+how to run it on a live deployment. This section describes the mechanics of replay retune,
+executor `local`.
 
 ### Engine Integration
 
@@ -326,10 +334,12 @@ Retune lives in the Planner engine (`OrchestratorEngineAdapter`), not in a plugi
   type, and `PlannerEffects.retune_decisions`, which carry the `planner_changes` for the host to
   apply. Router parameters are level-triggered desired state: the host applies the difference.
 - In retune-only mode, `retune` set with both scaling flags explicitly `false`, the adapter returns
-  no `scale_to`. The [`retune` field](../../../../reference/components/planner-configuration.mdx#retune-experimental-simulation-only)
+  no `scale_to`. The [`retune` field](../../../../reference/components/planner-configuration.mdx#retune-experimental)
   lists what else that mode turns off.
-- The live runtime base, `NativePlannerBase`, raises `planner.retune is replay-only in this release`
-  at construction.
+- The live runtime base, `NativePlannerBase`, raises
+  `planner.retune is replay-only with executor 'local'; use executor: dgdr` at construction when
+  `retune.executor` is `local`. With `dgdr`, it starts the live retune supervisor of
+  [Planner Live Retune](../../../../kubernetes/auto-deployment/planner-live-retune.md) instead.
 
 ### Windows
 
@@ -480,7 +490,7 @@ With `D` = `decision_latency_seconds` and `Δ` = `scheduling.scale_interval_seco
 launched at tick time `t` is ready at `t + max(D, Δ)`, and the decision lands on the first tick at
 or after that time at which the sweep is done, never in the launch tick. With `measured`, `D` is
 the modeled sweep time that the
-[`decision_latency_seconds` field](../../../../reference/components/planner-configuration.mdx#retune-experimental-simulation-only)
+[`decision_latency_seconds` field](../../../../reference/components/planner-configuration.mdx#retune-experimental)
 defines.
 
 Under a `VirtualClock`, the replay host, the controller waits for the sweep inside the launch tick,
@@ -544,15 +554,14 @@ request trace, and its error names the AISimulate setting.
 1. **Adjustment interval vs scaling latency**: If a plugin interval is shorter than the time to scale, later ticks may observe an in-progress transition and hold rather than stacking new replica changes.
 2. **Average-based prediction**: Throughput-based scaling uses average ISL/OSL, which may not represent bimodal or heavy-tailed distributions well.
 3. **Local Planner scope**: Each local Planner instance directly manages one DGD. Use GlobalPlanner for shared GPU budgets and coordination across multiple DGDs.
-4. **Retune is experimental and simulation-only**: See the retune [limitations](aisimulate-planner-replay.mdx#limitations).
+4. **Retune is experimental**: executor `local` runs only in simulation; see the retune [limitations](aisimulate-planner-replay.mdx#limitations). Executor `dgdr` runs on a live Planner with the limitations in [Planner Live Retune](../../../../kubernetes/auto-deployment/planner-live-retune.md#limitations).
 
 ## Future Work
 
 - Distribution-aware interpolation (beyond mean ISL/OSL)
 - Adaptive adjustment interval based on observed scaling latency
-- Retune on a live Planner: reading the frontend request traces as they are written, patching
-  `/router_policy` on the frontends, and restoring the previous point when a deployment rejects an
-  applied change
+- Live retune of Planner parameters, with load or throughput scaling, and of the router knobs
+  that a DGDR v1beta2 Request cannot express
 
 ## File Map
 
@@ -573,6 +582,7 @@ request trace, and its error names the AISimulate setting.
 | `components/src/dynamo/planner/retune/sweep.py` | Sweep worker processes, candidate replays, scoring, and the load-predictor pre-sweep. |
 | `components/src/dynamo/planner/retune/window.py` | Request-trace window and history reader for sweeps. |
 | `components/src/dynamo/planner/retune/domains.py` | Expansion of `retune.router` and `retune.planner` into the candidate grid. |
+| `components/src/dynamo/planner/retune/live/` | Live retune (`executor: dgdr`): deployment rules, window cuts, DGDR v1beta2 sweeps, leadership and state Leases, router actuation, and clean-up. |
 | `components/src/dynamo/planner/offline/replay_adapter.py` | Replay host: tick records, scaling events, router parameter updates, and retune actuation. |
 | `components/src/dynamo/planner/simulation/` | AISimulate Planner adapter: the `planner` section of `aisimulate predict` and `recommend`. |
 | `components/src/dynamo/router/simulation/config.py` | AISimulate router section schemas, including `retune.router`. |

@@ -21,10 +21,10 @@ The Frontend and EPP use the same worker selection behavior. Do not configure th
 
 Use `kv` mode when cache reuse should affect placement. Workers publish KV lifecycle events so the router can measure per-worker prefix overlap. Without worker events, `kv` mode uses load-only scoring; set `--no-router-kv-events` to predict cache state from routing decisions instead.
 
-Use `round-robin`, `random`, `power-of-two`, `least-loaded`, or `device-aware-weighted` when cache state is not part of the decision. Use `direct` when an upstream component has already selected a worker. See [Routing Concepts](routing-concepts.md#basic-routing) for policy behavior and [Configuration and Tuning](configuration-and-tuning.md#kv-event-transport) for event transport.
+Use `round-robin`, `random`, `least-loaded`, or `device-aware-weighted` when cache state is not part of the decision. Use `direct` when an upstream component has already selected a worker. See [Routing Concepts](routing-concepts.md#basic-routing) for policy behavior and [Configuration and Tuning](configuration-and-tuning.md#kv-event-transport) for event transport.
 
 > [!IMPORTANT]
-> With `DYN_LORA_ENABLED`, use KV, random, or round-robin routing. Direct, power-of-two, least-loaded, and device-aware-weighted modes are not LoRA-aware and fail startup. Session affinity with LoRA is supported only in KV mode; random and round-robin plus affinity are rejected.
+> With `DYN_LORA_ENABLED`, use KV, random, or round-robin routing. Direct, least-loaded, and device-aware-weighted modes are not LoRA-aware and fail startup. Session affinity with LoRA is supported only in KV mode; random and round-robin plus affinity are rejected.
 
 ## Configure Worker Sets Consistently
 
