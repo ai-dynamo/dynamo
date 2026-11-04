@@ -66,3 +66,34 @@ else
     "${OVERRIDE_ARGS[@]}" \
     "vllm-omni==${VLLM_OMNI_VERSION}"
 fi
+
+# vLLM-Omni 0.33 imports PyAV at startup through media_utils.py, and the CUDA image
+# removes PyAV under the codec policy. Make that import lazy; remove this once
+# vLLM-Omni imports PyAV lazily itself.
+if [ "${VLLM_OMNI_TARGET_DEVICE}" = "cuda" ]; then
+  python3 - <<'PY'
+import importlib.util
+import py_compile
+from pathlib import Path
+
+pkg = Path(importlib.util.find_spec("vllm_omni").submodule_search_locations[0])
+path = pkg / "diffusion" / "utils" / "media_utils.py"
+src = path.read_text()
+old = "\nimport av\n"
+new = (
+    "\n# Modified by NVIDIA Dynamo: import PyAV lazily; Dynamo's image omits it.\n"
+    "try:\n"
+    "    import av\n"
+    "except ImportError:\n"
+    "    from vllm.utils.import_utils import PlaceholderModule\n"
+    "\n"
+    '    av = PlaceholderModule("av")\n'
+)
+if src.count(old) != 1:
+    raise SystemExit(f"{path}: expected one top-level 'import av'; update or remove this patch")
+path.write_text(src.replace(old, new))
+py_compile.compile(str(path), doraise=True)
+PY
+  # The image purges PyAV in a later step; check Omni's pipeline registry loads without it.
+  python3 -c "import sys; sys.modules['av'] = None; import vllm_omni.config.pipeline_registry"
+fi

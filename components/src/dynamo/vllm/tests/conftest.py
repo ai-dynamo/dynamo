@@ -125,6 +125,18 @@ def vllm_cpu_platform_when_no_accelerator():
             vllm_platforms.current_platform = previous
 
 
+@pytest.fixture
+def vllm_builtin_kv_cache_specs():
+    """Register vLLM's built-in KV cache types, as ``EngineCore`` does at startup.
+
+    vLLM adds them lazily only to an empty registry, and importing vLLM-Omni 0.33
+    registers an Omni type first in the same worker process.
+    """
+    from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+
+    register_all_kvcache_specs(None)
+
+
 def make_cli_args_fixture(module_name: str):
     """Create a pytest fixture for mocking CLI arguments for vllm backend."""
 
