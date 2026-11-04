@@ -125,18 +125,32 @@ Triton Sidecar metrics are available on port `8081` when `DYN_SYSTEM_PORT=8081` 
 
 ```mermaid
 graph LR
-  A(Client) -- GRPC --> B(Dynamo Frontend)
-  B(Dynamo Frontend) -- TCP --> C(Dynamo Triton Sidecar)
-  C(Dynamo Triton Sidecar) -- GRPC --> D(Triton Server)
+  classDef client color:#FFFFFF,fill:#FF4B33
+  classDef dynamo color:#000000,fill:#0076B9
+  classDef triton color:#000000,fill:#76B900
+  A(Client):::client
+  subgraph 1[Dynamo Managed]
+    B(Dynamo Frontend):::dynamo
+    C(Triton Sidecar):::dynamo
+    D(Triton Server):::triton
+  end
+  A <-- GRPC --> B <-- TCP --> C <-- GRPC --> D
 ```
 
 ### OpenAI `v1/classify` and `v1/embeddings`
 
 ```mermaid
 graph LR
-  A(Client) -- HTTP --> B(Dynamo Frontend)
-  B(Dynamo Frontend) -- TCP --> C(Dynamo Triton Sidecar)
-  C(Dynamo Triton Sidecar) -- HTTP --> D(Triton Server)
+  classDef client color:#FFFFFF,fill:#FF4B33
+  classDef dynamo color:#000000,fill:#0076B9
+  classDef triton color:#000000,fill:#76B900
+  A(Client):::client
+  subgraph 1[Dynamo Managed]
+    B(Dynamo Frontend):::dynamo
+    C(Triton Sidecar):::dynamo
+    D(Triton Server):::triton
+  end
+  A <-- HTTP --> B <-- TCP --> C <-- HTTP --> D
 ```
 
 ## Support Matrix
