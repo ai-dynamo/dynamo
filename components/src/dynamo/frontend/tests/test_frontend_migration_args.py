@@ -16,7 +16,6 @@ def clear_migration_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "DYN_MIGRATION_LIMIT",
         "DYN_MIGRATION_LIMIT_DRAINING",
         "DYN_MIGRATION_MAX_SEQ_LEN",
-        "DYN_EXPERIMENTAL_WORKER_WITHDRAWAL",
         "DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD",
         "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
         "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
@@ -32,17 +31,13 @@ def parse_frontend_config(argv: list[str]) -> FrontendConfig:
     return config
 
 
-def test_draining_limit_keeps_omission_distinct_from_zero(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("DYN_EXPERIMENTAL_WORKER_WITHDRAWAL", "1")
-    assert parse_frontend_config([]).migration_limit_draining is None
-    assert (
-        parse_frontend_config(
-            ["--migration-limit-draining", "0"]
-        ).migration_limit_draining
-        == 0
+def test_draining_limit_omission_matches_zero() -> None:
+    omitted = parse_frontend_config(["--migration-limit", "2"])
+    explicit = parse_frontend_config(
+        ["--migration-limit", "2", "--migration-limit-draining", "0"]
     )
+    assert omitted.migration_limit == explicit.migration_limit == 2
+    assert omitted.migration_limit_draining == explicit.migration_limit_draining == 0
 
 
 def test_draining_limit_cli_overrides_environment(

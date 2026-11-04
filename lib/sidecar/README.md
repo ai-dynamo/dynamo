@@ -19,6 +19,8 @@ registers it with Dynamo and serves its requests.
 Engine-specific guides: [vLLM](vllm/README.md), [SGLang](sglang/README.md),
 [TensorRT-LLM](trtllm/README.md).
 
+See [support notes](SUPPORT_NOTES.md) for feature restrictions and operational limits.
+
 ## Installation
 
 ### pip

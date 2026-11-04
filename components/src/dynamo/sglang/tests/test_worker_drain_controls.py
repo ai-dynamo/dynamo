@@ -14,7 +14,6 @@ pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
 @pytest.fixture
 def controls(monkeypatch):
-    monkeypatch.delenv("DYN_EXPERIMENTAL_WORKER_WITHDRAWAL", raising=False)
     monkeypatch.setenv("DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS", "0")
     handler = SimpleNamespace(
         generate_endpoint=SimpleNamespace(
@@ -38,23 +37,6 @@ def controls(monkeypatch):
     ready, terminal = asyncio.Event(), asyncio.Event()
     ready.set()
     return handler, runtime, ready, terminal
-
-
-@pytest.mark.parametrize("frontend_recovery", ["0", "1"])
-def test_controls_depend_only_on_system_listener(
-    controls, monkeypatch, frontend_recovery
-):
-    handler, runtime, ready, terminal = controls
-    monkeypatch.setenv("DYN_EXPERIMENTAL_WORKER_WITHDRAWAL", frontend_recovery)
-    runtime.system_status_server_url.return_value = None
-    assert (
-        configure_worker_drain(handler, runtime, ready, asyncio.Event(), terminal)
-        is None
-    )
-    runtime.register_engine_http_handler.assert_not_called()
-    runtime.system_status_server_url.return_value = "system-listener"
-    assert configure_worker_drain(handler, runtime, ready, asyncio.Event(), terminal)
-    runtime.register_engine_http_handler.assert_called_once()
 
 
 @pytest.mark.asyncio

@@ -14,15 +14,7 @@ from dynamo.sglang.engine_routes import parse_engine_route_descriptors
 def configure_worker_drain(
     handler, runtime, ready_event, shutdown_event, terminal_event
 ):
-    """Enable explicit withdrawal only for the Python LLM serving path."""
-    if runtime.system_status_server_url() is None:
-        return None
-    for descriptor in parse_engine_route_descriptors(
-        handler.config.dynamo_args.engine_routes
-    ):
-        if descriptor.path.split("/", 1)[0] == "worker_lifecycle":
-            raise ValueError("worker_lifecycle is reserved by worker drain controls")
-
+    """Install LLM admission fencing, with optional administrative HTTP controls."""
     controller = WorkerDrain(
         handler.generate_endpoint,
         lock=handler._engine_route_lock,
@@ -32,6 +24,15 @@ def configure_worker_drain(
         is_paused=lambda: bool(handler.engine.tokenizer_manager.is_pause),
         grace_period=get_grace_period_seconds(),
     )
+
+    handler._worker_drain = controller
+    if runtime.system_status_server_url() is None:
+        return controller
+    for descriptor in parse_engine_route_descriptors(
+        handler.config.dynamo_args.engine_routes
+    ):
+        if descriptor.path.split("/", 1)[0] == "worker_lifecycle":
+            raise ValueError("worker_lifecycle is reserved by worker drain controls")
 
     endpoint_started = False
     discovery_client = None
@@ -86,5 +87,4 @@ def configure_worker_drain(
         return {"status": 200, "body": response}
 
     runtime.register_engine_http_handler("worker_lifecycle", control)
-    handler._worker_drain = controller
     return controller

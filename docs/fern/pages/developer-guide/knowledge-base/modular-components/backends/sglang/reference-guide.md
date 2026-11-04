@@ -37,8 +37,8 @@ These arguments are added by Dynamo on top of SGLang's native arguments. For the
 | `--endpoint` | `DYN_ENDPOINT` | Auto-generated | Dynamo endpoint in `dyn://namespace.component.endpoint` format |
 | `--use-sglang-tokenizer` | `DYN_SGL_USE_TOKENIZER` | `false` | **[Deprecated]** Use `--dyn-chat-processor sglang` on the frontend instead. See [SGLang Chat Processor](chat-processor.md). |
 | `--dyn-tool-call-parser` | `DYN_TOOL_CALL_PARSER` | `None` | [Tool call](../../../../../use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx#supported-tool-call-parsers) parser (overrides SGLang's `--tool-call-parser`) |
-| `--dyn-reasoning-parser` | `DYN_REASONING_PARSER` | `None` | [Reasoning](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.md#supported-reasoning-parsers) parser for chain-of-thought models |
-| `--dyn-default-thinking-mode` | `DYN_DEFAULT_THINKING_MODE` | `None` | Deployment-level `enabled` or `disabled` [thinking default](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.md#deployment-level-thinking-default); explicit request controls take precedence |
+| `--dyn-reasoning-parser` | `DYN_REASONING_PARSER` | `None` | [Reasoning](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx#supported-reasoning-parsers) parser for chain-of-thought models |
+| `--dyn-default-thinking-mode` | `DYN_DEFAULT_THINKING_MODE` | `None` | Deployment-level `enabled` or `disabled` [thinking default](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx#deployment-level-thinking-default); explicit request controls take precedence |
 | `--custom-jinja-template` | `DYN_CUSTOM_JINJA_TEMPLATE` | `None` | Custom chat template path (incompatible with `--use-sglang-tokenizer`) |
 | `--embedding-worker` | `DYN_SGL_EMBEDDING_WORKER` | `false` | Run as embedding worker (also sets SGLang's `--is-embedding`) |
 | `--enable-multimodal` | `DYN_SGL_ENABLE_MULTIMODAL` | `false` | Allow [multimodal](multimodal.md) inputs on this worker |
@@ -53,7 +53,7 @@ These arguments are added by Dynamo on top of SGLang's native arguments. For the
 > [!NOTE]
 > `--disagg-config` and `--disagg-config-key` must be provided together. The selected section is written to a temp YAML file and passed to SGLang's `--config` flag.
 
-The current supported parser names for both flags are documented in [Tool Call Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx#supported-tool-call-parsers) and [Reasoning Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.md#supported-reasoning-parsers).
+The current supported parser names for both flags are documented in [Tool Call Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx#supported-tool-call-parsers) and [Reasoning Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx#supported-reasoning-parsers).
 
 ## Tokenizer Behavior
 
@@ -188,7 +188,8 @@ Dynamo parses and resolves the complete route list during worker startup. Startu
 workers to expose reversible, pre-delete withdrawal on the existing system
 listener. No additional worker feature flag is required. This applies to
 aggregated, decode, and prefill handlers. Without a system listener, the worker
-starts normally and does not register these controls.
+still installs admission and shutdown handling, but does not register these HTTP
+controls.
 
 Withdrawal supports TCP and Velo response planes. QUIC workers start normally,
 but an `unpublish` call returns 409 before changing worker state because discovery
@@ -196,27 +197,27 @@ removal currently cancels active QUIC responses. The operation does not use
 SGLang's `pause_generation`, abort requests, or stop the engine.
 
 Configure frontend recovery separately from endpoint availability. Set
-`--migration-limit-draining D` or `DYN_MIGRATION_LIMIT_DRAINING=D` on the frontend
-to select the maximum-limit policy. For a pre-execution `backend.worker_draining`
-rejection, the retry limit is `max(M, D)`, where `M` is `--migration-limit`.
+`--migration-limit-draining D` or `DYN_MIGRATION_LIMIT_DRAINING=D` on the frontend.
+For a pre-execution `backend.worker_draining` rejection before response data starts,
+the retry limit is `max(M, D)`, where `M` is `--migration-limit`.
 Replacement attempts share one count; the initial dispatch does not count.
-Ordinary errors remain limited to `M`. Explicit `D=0` adds no drain allowance
-beyond `M` and overrides `DYN_EXPERIMENTAL_WORKER_WITHDRAWAL`.
+Ordinary errors remain limited to `M`. Omitted and explicit `D=0` both add no drain
+allowance beyond `M`.
 
-Leaving the new setting unset preserves the existing policy:
-`DYN_EXPERIMENTAL_WORKER_WITHDRAWAL=1` allows three additional drain reselections
-without consuming the ordinary migration budget. After those three are exhausted,
-the frontend returns the drain rejection. The flag accepts `1`, `true`, or `yes`
-(case-insensitive) and defaults to disabled. Workers do not read either frontend
-setting. The frontend reads configuration when constructing the model pipeline,
-not on every request. See [Frontend Configuration](../../../../../reference/components/frontend-configuration.mdx#fault-tolerance)
+If an earlier worker produced data and a replacement rejects before producing data,
+continuation recovery can use the remaining ordinary allowance, subject to existing
+replay eligibility checks. The drain-specific extension does not apply after output.
+A worker that has already produced data cannot claim a pre-execution drain rejection.
+Workers do not read these frontend settings. The frontend reads configuration when
+constructing the model pipeline, not on every request. See
+[Frontend Configuration](../../../../../reference/components/frontend-configuration.mdx#fault-tolerance)
 for budget interactions and configuration precedence.
 
 While drain recovery remains possible, the final ordinary attempt retains its
 replay reference to the shared prompt-token buffer until first response data.
 Once neither ordinary migration nor drain recovery can retry, the frontend
-releases that reference. Leaving both drain settings disabled preserves the
-existing release after the final ordinary dispatch.
+releases that reference. With no drain allowance beyond the ordinary limit, that
+reference is released after the final ordinary dispatch.
 
 Environment changes apply to newly created Pods, not running processes. Under
 Grove OnDelete, deploy compatible frontend and worker images and enable frontend
@@ -229,9 +230,10 @@ request state. At a capacity of 128 Ki tokens and 1,024 waiting requests, that i
 512 MiB. This is a sizing example, not measured RSS growth; model limits and actual
 concurrency determine the budget. Other owners may already retain these buffers.
 
-Upgrade frontends and workers to a revision supporting the `backend.worker_draining`
-error reason before enabling this experimental feature. Older frontends may reject
-that reason or lack the independent, bounded reselection behavior.
+Upgrade frontends to a revision supporting `backend.worker_draining` before
+upgrading workers. New workers can return this reason during ordinary SIGTERM
+shutdown even without a system listener or an `unpublish` call. Older frontends,
+including v1.6.0, may reject the reason instead of migrating the request.
 
 Use the selected worker's system listener directly, rather than a load-balanced
 Service. The listener follows the existing engine-control network boundary; keep

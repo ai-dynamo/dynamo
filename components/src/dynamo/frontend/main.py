@@ -391,7 +391,7 @@ async def async_main():
         f"Request migration {'enabled' if config.migration_limit > 0 else 'disabled'} "
         f"(limit: {config.migration_limit}{max_seq_info})"
     )
-    if config.migration_limit_draining is not None:
+    if max(config.migration_limit, config.migration_limit_draining) > 0:
         logger.info(
             "Worker-draining recovery uses a shared replacement ceiling of %d "
             "(ordinary migration limit: %d, draining limit: %d)",
@@ -452,6 +452,8 @@ async def async_main():
         "enable_anthropic_api": config.enable_anthropic_api,
         "enable_systemone_api": config.enable_systemone_api,
         "strip_anthropic_preamble": config.strip_anthropic_preamble,
+        "reject_media": config.reject_media,
+        "reject_media_status_code": config.reject_media_status_code,
         "enable_streaming_tool_dispatch": config.enable_streaming_tool_dispatch,
         "enable_streaming_reasoning_dispatch": config.enable_streaming_reasoning_dispatch,
         "reasoning_field_name": config.reasoning_field_name,

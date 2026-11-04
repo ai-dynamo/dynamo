@@ -326,7 +326,7 @@ _Appears in:_
 | `serviceName` _string_ | The name of the component |  |  |
 | `componentType` _string_ | ComponentType indicates the role of this component (for example, "main").<br />The DGD-only "lpx" type is experimental, requires the operator's<br />lpx.enabled setting, and may change incompatibly. |  |  |
 | `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  |  |
-| `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime version in this component's<br />runtime image. Paths below are relative to the component spec.<br />Use extraPodSpec.initContainers[name=runtime].image when the Dynamo runtime sidecar<br />is present, otherwise extraPodSpec.mainContainer.image, or the main image in each<br />selected role PodTemplate. DGD admission requires it when any selected runtime image has no parseable<br />semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is<br />not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".<br />It does not change the image. Setting or changing an override that resolves to version 1.5.0 or<br />later may trigger a rollout. Keep it consistent with every selected template's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
+| `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime version in this component's<br />runtime image. Paths below are relative to the component spec.<br />Use extraPodSpec.initContainers[name=runtime].image when the Dynamo runtime sidecar<br />is present, otherwise extraPodSpec.mainContainer.image, or the main image in each<br />selected role PodTemplate. For frontend, worker, prefill, decode, planner, and epp components,<br />DGD admission requires it when any selected runtime image has no parseable semantic-version tag;<br />controller-generated DCDs may omit it. Untyped components and custom component types do not require it.<br />Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".<br />It does not change the image. Setting or changing an override that resolves to version 1.5.0 or<br />later may trigger a rollout. Keep it consistent with every selected template's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
 | `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md<br />for migration guidance. This field will be removed in a future API version. |  |  |
@@ -373,7 +373,7 @@ _Appears in:_
 | `serviceName` _string_ | The name of the component |  |  |
 | `componentType` _string_ | ComponentType indicates the role of this component (for example, "main").<br />The DGD-only "lpx" type is experimental, requires the operator's<br />lpx.enabled setting, and may change incompatibly. |  |  |
 | `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  |  |
-| `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime version in this component's<br />runtime image. Paths below are relative to the component spec.<br />Use extraPodSpec.initContainers[name=runtime].image when the Dynamo runtime sidecar<br />is present, otherwise extraPodSpec.mainContainer.image, or the main image in each<br />selected role PodTemplate. DGD admission requires it when any selected runtime image has no parseable<br />semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is<br />not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".<br />It does not change the image. Setting or changing an override that resolves to version 1.5.0 or<br />later may trigger a rollout. Keep it consistent with every selected template's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
+| `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime version in this component's<br />runtime image. Paths below are relative to the component spec.<br />Use extraPodSpec.initContainers[name=runtime].image when the Dynamo runtime sidecar<br />is present, otherwise extraPodSpec.mainContainer.image, or the main image in each<br />selected role PodTemplate. For frontend, worker, prefill, decode, planner, and epp components,<br />DGD admission requires it when any selected runtime image has no parseable semantic-version tag;<br />controller-generated DCDs may omit it. Untyped components and custom component types do not require it.<br />Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".<br />It does not change the image. Setting or changing an override that resolves to version 1.5.0 or<br />later may trigger a rollout. Keep it consistent with every selected template's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
 | `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md<br />for migration guidance. This field will be removed in a future API version. |  |  |
@@ -2023,7 +2023,7 @@ _Appears in:_
 | `providerOverride` _[ProviderOverride](#provideroverride)_ | providerOverride configures the primary Grove unit representing this DGD<br />component. With apiVersion `grove.io/v1alpha1`, target is<br />`PodCliqueTemplateSpec` for a single-node component or<br />`PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set<br />`topologyConstraint` and `rollingUpdate.maxUnavailable`. Standalone DCD<br />OpenAPI omits this field. |  | Optional: \{\} <br /> |
 | `name` _string_ | name is the stable logical identifier for this component within its<br />DynamoGraphDeployment. It must be unique within the parent's<br />`spec.components` list.<br />For standalone DynamoComponentDeployment objects, the defaulting webhook<br />populates `name` from `metadata.name` on admission, so users<br />typically do not need to set it explicitly.<br />`name` is decoupled from the underlying Kubernetes resource name so that<br />the operator can rename child workloads (e.g. suffixing worker DCDs with<br />a hash during rolling updates) without losing the stable identity that<br />downstream consumers (labels, status maps, DGDSA references, planner<br />RBAC, EPP filters) depend on. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$` <br />Required: \{\} <br /> |
 | `type` _[ComponentType](#componenttype)_ | type indicates the role of this component within a Dynamo graph. Drives<br />port mapping, frontend detection, planner RBAC, and the pod label<br />`nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are<br />first-class values, users can set them directly.<br />The DGD-only "lpx" type is experimental, requires the operator's<br />lpx.enabled setting, and may change incompatibly. |  | Enum: [frontend worker prefill decode planner epp lpx] <br />Optional: \{\} <br /> |
-| `runtimeVersionOverride` _string_ | RuntimeVersionOverride overrides the Dynamo runtime compatibility version<br />inferred from podTemplate.spec.containers[name=main].image.<br />In sidecar mode, it instead overrides the version inferred from<br />podTemplate.spec.initContainers[name=runtime].image.<br />The same rules apply to roles[].podTemplate. For non-LPX components in<br />sidecar mode, main container images are not used to infer Dynamo versions,<br />including for roles without a runtime init container.<br />This field does not change container images.<br />For non-LPX components, DGD admission requires this field when any runtime<br />image tag lacks a parseable semantic version. Controller-generated DCDs may<br />omit it. An override is also needed when the parsed tag differs from the<br />Dynamo runtime version.<br />The value must use canonical MAJOR.MINOR.PATCH format, for example "1.4.0",<br />and match the Dynamo version in every affected runtime container.<br />Setting or changing an override of 1.5.0 or later may trigger a rollout. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
+| `runtimeVersionOverride` _string_ | RuntimeVersionOverride overrides the Dynamo runtime compatibility version<br />inferred from podTemplate.spec.containers[name=main].image.<br />In sidecar mode, it instead overrides the version inferred from<br />podTemplate.spec.initContainers[name=runtime].image.<br />The same rules apply to roles[].podTemplate. For non-LPX components in<br />sidecar mode, main container images are not used to infer Dynamo versions,<br />including for roles without a runtime init container.<br />This field does not change container images.<br />For frontend, worker, prefill, decode, planner, and epp components, DGD<br />admission requires this field when any runtime image tag lacks a parseable<br />semantic version. Components without a type and controller-generated DCDs<br />may omit it. An override is also needed when the parsed tag differs from<br />the Dynamo runtime version.<br />The value must use canonical MAJOR.MINOR.PATCH format, for example "1.4.0",<br />and match the Dynamo version in every affected runtime container.<br />Setting or changing an override of 1.5.0 or later may trigger a rollout. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | globalDynamoNamespace places the component in the global Dynamo<br />namespace rather than the per-deployment namespace derived from the<br />DGD name. |  | Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplate supplies the Pod configuration shared by this component's roles.<br />It is mutually exclusive with roles[].podTemplate. New components using this<br />template must include podTemplate.spec.containers[name=main] with a non-empty<br />image. Existing components without a podTemplate may retain that omission<br />on update.<br />By default, the operator merges Dynamo defaults into<br />podTemplate.spec.containers[name=main]. Declaring<br />podTemplate.spec.initContainers[name=runtime] enables Dynamo sidecar mode.<br />The main container runs the inference engine, and the runtime init container<br />receives Dynamo environment, identity, system port, and probe defaults.<br />The operator does not create the runtime init container. Its declaration must<br />include a non-empty image and restartPolicy: Always.<br />Sidecar mode supports worker, prefill, and decode components.<br />Multinode sidecars support backendFramework: sglang, vllm, and trtllm.<br />Multinode sidecars require complete leader and worker roles[].podTemplate<br />definitions instead of this shared template.<br />The leader must declare a runtime init container. The worker may omit it.<br />Each role's template supplies the engine command and topology arguments.<br />Declared runtime init containers still receive Dynamo defaults.<br />Checkpoint, GPU memory service, and failover cannot be enabled in sidecar mode.<br />Graph-level env applies to podTemplate.spec.containers[name=main] and any<br />declared podTemplate.spec.initContainers[name=runtime]. Compilation cache<br />and shared memory apply to the main container. Other containers require<br />their own configuration, including an image.<br />See runtimeVersionOverride for runtime image version requirements. |  | Optional: \{\} <br /> |
 | `replicas` _integer_ | replicas is the desired number of Pods for this component. When<br />`scalingAdapter` is set on this component, this field is managed by<br />the DynamoGraphDeploymentScalingAdapter and should not be modified<br />directly. |  | Minimum: 0 <br />Optional: \{\} <br /> |
@@ -2057,7 +2057,7 @@ _Appears in:_
 | `backendFramework` _string_ | backendFramework specifies the backend framework. |  | Enum: [sglang vllm trtllm] <br /> |
 | `name` _string_ | name is the stable logical identifier for this component within its<br />DynamoGraphDeployment. It must be unique within the parent's<br />`spec.components` list.<br />For standalone DynamoComponentDeployment objects, the defaulting webhook<br />populates `name` from `metadata.name` on admission, so users<br />typically do not need to set it explicitly.<br />`name` is decoupled from the underlying Kubernetes resource name so that<br />the operator can rename child workloads (e.g. suffixing worker DCDs with<br />a hash during rolling updates) without losing the stable identity that<br />downstream consumers (labels, status maps, DGDSA references, planner<br />RBAC, EPP filters) depend on. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$` <br />Required: \{\} <br /> |
 | `type` _[ComponentType](#componenttype)_ | type indicates the role of this component within a Dynamo graph. Drives<br />port mapping, frontend detection, planner RBAC, and the pod label<br />`nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are<br />first-class values, users can set them directly.<br />The DGD-only "lpx" type is experimental, requires the operator's<br />lpx.enabled setting, and may change incompatibly. |  | Enum: [frontend worker prefill decode planner epp lpx] <br />Optional: \{\} <br /> |
-| `runtimeVersionOverride` _string_ | RuntimeVersionOverride overrides the Dynamo runtime compatibility version<br />inferred from podTemplate.spec.containers[name=main].image.<br />In sidecar mode, it instead overrides the version inferred from<br />podTemplate.spec.initContainers[name=runtime].image.<br />The same rules apply to roles[].podTemplate. For non-LPX components in<br />sidecar mode, main container images are not used to infer Dynamo versions,<br />including for roles without a runtime init container.<br />This field does not change container images.<br />For non-LPX components, DGD admission requires this field when any runtime<br />image tag lacks a parseable semantic version. Controller-generated DCDs may<br />omit it. An override is also needed when the parsed tag differs from the<br />Dynamo runtime version.<br />The value must use canonical MAJOR.MINOR.PATCH format, for example "1.4.0",<br />and match the Dynamo version in every affected runtime container.<br />Setting or changing an override of 1.5.0 or later may trigger a rollout. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
+| `runtimeVersionOverride` _string_ | RuntimeVersionOverride overrides the Dynamo runtime compatibility version<br />inferred from podTemplate.spec.containers[name=main].image.<br />In sidecar mode, it instead overrides the version inferred from<br />podTemplate.spec.initContainers[name=runtime].image.<br />The same rules apply to roles[].podTemplate. For non-LPX components in<br />sidecar mode, main container images are not used to infer Dynamo versions,<br />including for roles without a runtime init container.<br />This field does not change container images.<br />For frontend, worker, prefill, decode, planner, and epp components, DGD<br />admission requires this field when any runtime image tag lacks a parseable<br />semantic version. Components without a type and controller-generated DCDs<br />may omit it. An override is also needed when the parsed tag differs from<br />the Dynamo runtime version.<br />The value must use canonical MAJOR.MINOR.PATCH format, for example "1.4.0",<br />and match the Dynamo version in every affected runtime container.<br />Setting or changing an override of 1.5.0 or later may trigger a rollout. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | globalDynamoNamespace places the component in the global Dynamo<br />namespace rather than the per-deployment namespace derived from the<br />DGD name. |  | Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplate supplies the Pod configuration shared by this component's roles.<br />It is mutually exclusive with roles[].podTemplate. New components using this<br />template must include podTemplate.spec.containers[name=main] with a non-empty<br />image. Existing components without a podTemplate may retain that omission<br />on update.<br />By default, the operator merges Dynamo defaults into<br />podTemplate.spec.containers[name=main]. Declaring<br />podTemplate.spec.initContainers[name=runtime] enables Dynamo sidecar mode.<br />The main container runs the inference engine, and the runtime init container<br />receives Dynamo environment, identity, system port, and probe defaults.<br />The operator does not create the runtime init container. Its declaration must<br />include a non-empty image and restartPolicy: Always.<br />Sidecar mode supports worker, prefill, and decode components.<br />Multinode sidecars support backendFramework: sglang, vllm, and trtllm.<br />Multinode sidecars require complete leader and worker roles[].podTemplate<br />definitions instead of this shared template.<br />The leader must declare a runtime init container. The worker may omit it.<br />Each role's template supplies the engine command and topology arguments.<br />Declared runtime init containers still receive Dynamo defaults.<br />Checkpoint, GPU memory service, and failover cannot be enabled in sidecar mode.<br />Graph-level env applies to podTemplate.spec.containers[name=main] and any<br />declared podTemplate.spec.initContainers[name=runtime]. Compilation cache<br />and shared memory apply to the main container. Other containers require<br />their own configuration, including an image.<br />See runtimeVersionOverride for runtime image version requirements. |  | Optional: \{\} <br /> |
 | `replicas` _integer_ | replicas is the desired number of Pods for this component. When<br />`scalingAdapter` is set on this component, this field is managed by<br />the DynamoGraphDeploymentScalingAdapter and should not be modified<br />directly. |  | Minimum: 0 <br />Optional: \{\} <br /> |
@@ -2606,9 +2606,9 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `gpuSku` _[GPUSKUType](#gpuskutype)_ | GPUSKU selects the GPU type to target.<br />When omitted, auto-detected as the GPU type of the node with the most GPUs<br />(ties broken by highest VRAM per GPU). In mixed-GPU clusters, set this to<br />choose which GPU type to use. Discovery and totalGpus are then<br />restricted to nodes matching this SKU.<br />The legacy value gb200_sxm is deprecated; use gb200 instead. |  | Enum: [vr_nvl72 gb200 gb200_sxm gb10 b300_sxm b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie a30 l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300] <br />Optional: \{\} <br /> |
-| `vramMb` _float_ | VRAMMB is the VRAM per GPU in MiB.<br />When omitted, auto-detected from cluster GPU nodes. Nominal values within 10%<br />of the measured value identify the same shape. When this value differs by more<br />than 10% from the auto-selected shape and totalGpus is omitted, the request is rejected. |  | Optional: \{\} <br /> |
-| `totalGpus` _integer_ | TotalGPUs is the GPU budget for profiling and deployment.<br />The profiler uses this to determine parallelism and replica count.<br />When omitted, computed by summing GPUs on nodes matching the selected<br />shape: GPU type, GPUs per node, and VRAM per GPU. The result is temporarily<br />capped at 32 to limit profiler search space. For example, same-type nodes<br />with 8 and 4 GPUs represent 12 GPUs of inventory, while the selected 8-GPU<br />shape yields an automatic budget of 8. This cap may be removed in a future<br />release. Set this field explicitly to override the derived budget or use a<br />numGpusPerNode or vramMb value that differs from the selected shape. A shape<br />override without an explicit totalGpus is rejected. |  | Optional: \{\} <br /> |
-| `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs per node.<br />When omitted, auto-detected as the highest GPU count on any discovered node<br />of the selected GPU type. In clusters whose nodes have different GPU counts,<br />set this explicitly to the node size you intend to schedule on. When this value<br />differs from the auto-selected shape and totalGpus is omitted, the request is rejected. |  | Optional: \{\} <br /> |
+| `vramMb` _float_ | VRAMMB is the VRAM per GPU in MiB.<br />When omitted, auto-detected from cluster GPU nodes. An explicit value within 10%<br />of the auto-selected shape's measured VRAM permits automatic GPU-budget discovery.<br />This tolerance applies only to the requested value; aggregating discovered nodes<br />still requires equal measured VRAM. When this value differs by more than 10%<br />and totalGpus is omitted, automatic GPU-budget discovery fails and the DGDR<br />enters phase Failed before a profiling Job is created; set totalGpus explicitly<br />to use that override. |  | Optional: \{\} <br /> |
+| `totalGpus` _integer_ | TotalGPUs is the GPU budget for profiling and deployment.<br />The profiler uses this to determine parallelism and replica count.<br />When omitted, computed by summing GPUs on nodes matching the auto-selected<br />shape: GPU type, GPUs per node, and VRAM per GPU. The result is temporarily<br />capped at 32 to limit profiler search space. For example, same-type nodes<br />with 8 and 4 GPUs represent 12 GPUs of inventory, while the auto-selected 8-GPU<br />shape yields an automatic budget of 8. This cap may be removed in a future<br />release. Set this field explicitly to override the derived budget, use a<br />different numGpusPerNode, or use a vramMb value more than 10% from the<br />auto-selected shape's measured VRAM. These shape overrides require an explicit<br />totalGpus. |  | Optional: \{\} <br /> |
+| `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs per node.<br />When omitted, auto-detected as the highest GPU count on any discovered node<br />of the selected GPU type. In clusters whose nodes have different GPU counts,<br />set this explicitly to the node size you intend to schedule on. When this value<br />differs from the auto-selected shape and totalGpus is omitted, automatic<br />GPU-budget discovery fails and the DGDR enters phase Failed before a profiling<br />Job is created; set totalGpus explicitly to use that override. |  | Optional: \{\} <br /> |
 | `interconnect` _string_ | Interconnect describes the primary GPU-to-GPU interconnect *within a node*.<br />Semantics / usage:<br />  - This is capability metadata used for profiling, planning, and deployment decisions.<br />  - It does NOT configure or enable any GPU interconnect; it only describes what is available/assumed.<br />  - When omitted, the operator may attempt best-effort discovery (currently distinguishes "nvlink"<br />    vs "pcie" based on DCGM NVLink link count). If discovery is unavailable, it may remain empty.<br />Impact of wrong / missing values:<br />  - If set more optimistically than reality (e.g., "nvlink" when only PCIe is present), performance<br />    models may overestimate intra-node bandwidth and choose overly aggressive parallelism or layouts,<br />    resulting in degraded performance compared to expectations.<br />  - If set more pessimistically than reality (e.g., "pcie" when NVLink is present), the system may<br />    choose conservative plans and leave performance on the table.<br />  - If unset and undiscovered, consumers should treat the interconnect as unknown and fall back to<br />    conservative assumptions.<br />Example values: "pcie", "nvlink". Other values may be accepted but may not be auto-detected. |  | Optional: \{\} <br /> |
 | `rdma` _boolean_ | RDMA indicates whether the cluster has RDMA-capable networking available for Dynamo data movement.<br />Semantics / usage:<br />  - This is capability metadata used for profiling, planning, and deployment decisions.<br />  - It does NOT install, enable, or configure RDMA (e.g., drivers, SR-IOV, NVIDIA network operator,<br />    GPUDirect settings). It only expresses availability/intent.<br />  - When omitted, the operator may attempt best-effort discovery (e.g., via node labels indicating<br />    RDMA/SR-IOV capability and/or presence of NVIDIA network-operator RDMA components). If discovery<br />    is unavailable, it may remain unset.<br />Impact of wrong / missing values:<br />  - False positive (set true when RDMA is not actually usable end-to-end) may cause plans or<br />    deployments to assume RDMA is available; depending on the runtime transport selection and<br />    fallback behavior, this can lead to connection/setup failures or performance regressions.<br />  - False negative (set false when RDMA is available) will typically avoid RDMA-optimized paths and<br />    fall back to non-RDMA transports, usually remaining functional but potentially slower.<br />  - If unset and undiscovered, consumers should treat RDMA availability as unknown and use<br />    conservative defaults / fallback transports. |  | Optional: \{\} <br /> |
 
@@ -3321,7 +3321,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `inputOverrides` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from<br />the typed fields. It uses the upstream AISimulate JSON contract, including<br />snake_case names. Values here take precedence, and null deletes a lowered<br />field. The dgdr_run member must remain an object, and its operator-owned<br />transport, identity, and runtime fields name, max_candidates, snapshot_dir,<br />runtime_image, runtime_version_override, derive_runtime_images,<br />num_gpus_per_node, and namespace are operator-owned. Request admission<br />rejects them, and the Run controller enforces its values while lowering the<br />immutable snapshot. The operator runs the AISimulate version from its<br />configured planner image; Requests and Runs cannot select a different image<br />or version. |  | Type: object <br />Optional: \{\} <br /> |
+| `inputOverrides` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from<br />the typed fields. It uses the upstream AISimulate JSON contract, including<br />snake_case names. Values here take precedence, and null deletes a lowered<br />field. The dgdr_run member must remain an object, and its operator-owned<br />transport, identity, and runtime fields name, max_candidates, snapshot_dir,<br />runtime_image, runtime_version_override, derive_runtime_images,<br />num_gpus_per_node, and namespace are operator-owned. Request admission<br />rejects them, and the Run controller enforces its values while lowering the<br />immutable snapshot. A typed spec.workload.trace is an underlay like the other<br />typed fields: it supplies the default traffic.source (type trace, format<br />dynamo and the mounted trace file in paths) and the recorded-arrival<br />traffic.load. Overrides can replace those values, including<br />traffic.source.type, format, and paths, and null deletes the named field or<br />parent object; the Run controller does not restore it. The typed<br />PersistentVolumeClaim source alone decides the Run Job's trace mount and its<br />claim dependency, so overriding a native path adds no volume mount.<br />AISimulate validates the resulting input when the Run's Job starts; admission<br />does not validate it against the AISimulate schema yet. The operator runs<br />the AISimulate version from its configured planner image; Requests and Runs<br />cannot select a different image or version. |  | Type: object <br />Optional: \{\} <br /> |
 
 
 #### Backend
@@ -3359,8 +3359,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `name` _string_ | Name is the executor-defined stable branch identifier. |  |  |
-| `rounds` _[RoundProgress](#roundprogress)_ | Rounds reports optimizer progress for this branch. |  |  |
+| `name` _string_ | Name is the executor-defined stable branch identifier. |  | Required: \{\} <br /> |
+| `rounds` _[RoundProgress](#roundprogress)_ | Rounds reports optimizer progress for this branch. |  | Required: \{\} <br /> |
 
 
 #### CandidateProgress
@@ -3376,8 +3376,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `paretoFront` _integer_ | ParetoFront is the number of feasible points on the current Pareto front. |  |  |
-| `published` _integer_ | Published is the number of Candidate resources currently referenced by this run. |  |  |
+| `paretoFront` _integer_ | ParetoFront is the number of feasible points on the current Pareto front. |  | Optional: \{\} <br /> |
+| `published` _integer_ | Published is the number of Candidate resources currently referenced by this run. |  | Optional: \{\} <br /> |
 
 
 #### DGDRRunPhase
@@ -3432,9 +3432,9 @@ DynamoGraphDeploymentCandidate is one bounded, user-visible search result.
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `nvidia.com/v1beta2` | | |
 | `kind` _string_ | `DynamoGraphDeploymentCandidate` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
-| `spec` _[DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec)_ |  |  |  |
-| `status` _[DynamoGraphDeploymentCandidateStatus](#dynamographdeploymentcandidatestatus)_ |  |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
+| `spec` _[DynamoGraphDeploymentCandidateSpec](#dynamographdeploymentcandidatespec)_ |  |  | Required: \{\} <br /> |
+| `status` _[DynamoGraphDeploymentCandidateStatus](#dynamographdeploymentcandidatestatus)_ |  |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentCandidateSpec
@@ -3461,7 +3461,7 @@ _Appears in:_
 | `restart` _[Restart](#restart)_ | restart specifies the restart policy for the graph deployment. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[SpecTopologyConstraint](#spectopologyconstraint)_ | topologyConstraint is the deployment-level topology constraint. When<br />set, `spec.topologyConstraint.clusterTopologyName` names the ClusterTopology<br />CR to use. `spec.topologyConstraint.packDomain` is optional at this<br />level and can be omitted when only components carry constraints.<br />Components without their own `topologyConstraint` inherit from this value. |  | Optional: \{\} <br /> |
 | `experimental` _[DynamoGraphDeploymentExperimentalSpec](#dynamographdeploymentexperimentalspec)_ | experimental groups graph-level preview features whose API shape and<br />behavior may change in breaking ways between v1beta1 releases. |  | Optional: \{\} <br /> |
-| `parameters` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Parameters are the resolved evaluation parameters for this point. |  | Type: object <br /> |
+| `parameters` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Parameters are the resolved evaluation parameters for this point. |  | Type: object <br />Required: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentCandidateStatus
@@ -3494,9 +3494,9 @@ DynamoGraphDeploymentRequest is the Schema for simulation-backed deployment sear
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `nvidia.com/v1beta2` | | |
 | `kind` _string_ | `DynamoGraphDeploymentRequest` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
-| `spec` _[DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec)_ |  |  |  |
-| `status` _[DynamoGraphDeploymentRequestStatus](#v1beta2-dynamographdeploymentrequeststatus)_ |  |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
+| `spec` _[DynamoGraphDeploymentRequestSpec](#v1beta2-dynamographdeploymentrequestspec)_ |  |  | Required: \{\} <br /> |
+| `status` _[DynamoGraphDeploymentRequestStatus](#v1beta2-dynamographdeploymentrequeststatus)_ |  |  | Optional: \{\} <br /> |
 
 
 #### v1beta2 DynamoGraphDeploymentRequestNativeSpec
@@ -3515,7 +3515,7 @@ _Appears in:_
 | `model` _[ModelSpec](#modelspec)_ | Model identifies the model whose deployment configurations are evaluated. |  | Optional: \{\} <br /> |
 | `backends` _[Backend](#backend) array_ | Backends lists one or more inference backends searched by AISimulate and used by generated candidates. |  | Enum: [vllm sglang trtllm] <br />MinItems: 1 <br />Optional: \{\} <br /> |
 | `hardware` _[HardwareSpec](#v1beta2-hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search.<br />When omitted, admission discovers SKU, budget and node width. An exactly empty object opts<br />out of operator hardware discovery and typed defaults. Admission completes every nonempty<br />object with any missing hardware values; explicit values remain authoritative. |  | Optional: \{\} <br /> |
-| `workload` _[WorkloadSpec](#v1beta2-workloadspec)_ | Workload defines the synthetic traffic model used for every candidate evaluation.<br />When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10;<br />an explicit empty workload receives the same shape. workload.static: \{\} opts out of all<br />traffic defaults. Any other static object is completed with its missing defaults.<br />spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over<br />every lowered traffic field it names.<br />The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction<br />search. Lowering independently defaults optimizer.max_trials to 320. |  | Optional: \{\} <br /> |
+| `workload` _[WorkloadSpec](#v1beta2-workloadspec)_ | Workload defines the traffic model used for every candidate evaluation: synthetic static<br />traffic or a recorded trace.<br />When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10;<br />an explicit empty workload receives the same shape. workload.static: \{\} opts out of all<br />traffic defaults. Any other static object is completed with its missing defaults, and a<br />trace workload receives no static default.<br />spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over<br />every lowered traffic field it names, including the fields a trace lowers.<br />The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction<br />search. Lowering independently defaults optimizer.max_trials to 320. |  | Optional: \{\} <br /> |
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization. When omitted,<br />admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults<br />to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms. |  | Optional: \{\} <br /> |
 | `aisimulate` _[AISimulateSpec](#aisimulatespec)_ | AISimulate supplies public recommendation input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
@@ -3557,7 +3557,7 @@ _Appears in:_
 | `model` _[ModelSpec](#modelspec)_ | Model identifies the model whose deployment configurations are evaluated. |  | Optional: \{\} <br /> |
 | `backends` _[Backend](#backend) array_ | Backends lists one or more inference backends searched by AISimulate and used by generated candidates. |  | Enum: [vllm sglang trtllm] <br />MinItems: 1 <br />Optional: \{\} <br /> |
 | `hardware` _[HardwareSpec](#v1beta2-hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search.<br />When omitted, admission discovers SKU, budget and node width. An exactly empty object opts<br />out of operator hardware discovery and typed defaults. Admission completes every nonempty<br />object with any missing hardware values; explicit values remain authoritative. |  | Optional: \{\} <br /> |
-| `workload` _[WorkloadSpec](#v1beta2-workloadspec)_ | Workload defines the synthetic traffic model used for every candidate evaluation.<br />When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10;<br />an explicit empty workload receives the same shape. workload.static: \{\} opts out of all<br />traffic defaults. Any other static object is completed with its missing defaults.<br />spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over<br />every lowered traffic field it names.<br />The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction<br />search. Lowering independently defaults optimizer.max_trials to 320. |  | Optional: \{\} <br /> |
+| `workload` _[WorkloadSpec](#v1beta2-workloadspec)_ | Workload defines the traffic model used for every candidate evaluation: synthetic static<br />traffic or a recorded trace.<br />When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10;<br />an explicit empty workload receives the same shape. workload.static: \{\} opts out of all<br />traffic defaults. Any other static object is completed with its missing defaults, and a<br />trace workload receives no static default.<br />spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over<br />every lowered traffic field it names, including the fields a trace lowers.<br />The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction<br />search. Lowering independently defaults optimizer.max_trials to 320. |  | Optional: \{\} <br /> |
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization. When omitted,<br />admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults<br />to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms. |  | Optional: \{\} <br /> |
 | `aisimulate` _[AISimulateSpec](#aisimulatespec)_ | AISimulate supplies public recommendation input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
@@ -3598,9 +3598,9 @@ DynamoGraphDeploymentRun is one immutable accepted DGDR request and its executio
 | --- | --- | --- | --- |
 | `apiVersion` _string_ | `nvidia.com/v1beta2` | | |
 | `kind` _string_ | `DynamoGraphDeploymentRun` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
-| `spec` _[DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec)_ |  |  |  |
-| `status` _[DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus)_ |  |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  | Optional: \{\} <br /> |
+| `spec` _[DynamoGraphDeploymentRunSpec](#dynamographdeploymentrunspec)_ |  |  | Required: \{\} <br /> |
+| `status` _[DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus)_ |  |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentRunSpec
@@ -3624,7 +3624,7 @@ _Appears in:_
 | `model` _[ModelSpec](#modelspec)_ | Model identifies the model whose deployment configurations are evaluated. |  | Optional: \{\} <br /> |
 | `backends` _[Backend](#backend) array_ | Backends lists one or more inference backends searched by AISimulate and used by generated candidates. |  | Enum: [vllm sglang trtllm] <br />MinItems: 1 <br />Optional: \{\} <br /> |
 | `hardware` _[HardwareSpec](#v1beta2-hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search.<br />When omitted, admission discovers SKU, budget and node width. An exactly empty object opts<br />out of operator hardware discovery and typed defaults. Admission completes every nonempty<br />object with any missing hardware values; explicit values remain authoritative. |  | Optional: \{\} <br /> |
-| `workload` _[WorkloadSpec](#v1beta2-workloadspec)_ | Workload defines the synthetic traffic model used for every candidate evaluation.<br />When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10;<br />an explicit empty workload receives the same shape. workload.static: \{\} opts out of all<br />traffic defaults. Any other static object is completed with its missing defaults.<br />spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over<br />every lowered traffic field it names.<br />The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction<br />search. Lowering independently defaults optimizer.max_trials to 320. |  | Optional: \{\} <br /> |
+| `workload` _[WorkloadSpec](#v1beta2-workloadspec)_ | Workload defines the traffic model used for every candidate evaluation: synthetic static<br />traffic or a recorded trace.<br />When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10;<br />an explicit empty workload receives the same shape. workload.static: \{\} opts out of all<br />traffic defaults. Any other static object is completed with its missing defaults, and a<br />trace workload receives no static default.<br />spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over<br />every lowered traffic field it names, including the fields a trace lowers.<br />The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction<br />search. Lowering independently defaults optimizer.max_trials to 320. |  | Optional: \{\} <br /> |
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization. When omitted,<br />admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults<br />to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms. |  | Optional: \{\} <br /> |
 | `aisimulate` _[AISimulateSpec](#aisimulatespec)_ | AISimulate supplies public recommendation input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
@@ -3667,13 +3667,13 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `scheduled` _integer_ | Scheduled is the number of unique evaluations accepted for execution. |  |  |
-| `running` _integer_ | Running is the number of evaluations currently executing. |  |  |
-| `feasible` _integer_ | Feasible is the number of completed evaluations that satisfy all constraints. |  |  |
-| `infeasible` _integer_ | Infeasible is the number of completed evaluations that violate at least one constraint. |  |  |
-| `failed` _integer_ | Failed is the number of evaluations that ended in an execution error. |  |  |
-| `unsupported` _integer_ | Unsupported is the number of configurations rejected as unsupported before evaluation. |  |  |
-| `cacheHits` _integer_ | CacheHits is the number of evaluations satisfied from a prior result. |  |  |
+| `scheduled` _integer_ | Scheduled is the number of unique evaluations accepted for execution. |  | Optional: \{\} <br /> |
+| `running` _integer_ | Running is the number of evaluations currently executing. |  | Optional: \{\} <br /> |
+| `feasible` _integer_ | Feasible is the number of completed evaluations that satisfy all constraints. |  | Optional: \{\} <br /> |
+| `infeasible` _integer_ | Infeasible is the number of completed evaluations that violate at least one constraint. |  | Optional: \{\} <br /> |
+| `failed` _integer_ | Failed is the number of evaluations that ended in an execution error. |  | Optional: \{\} <br /> |
+| `unsupported` _integer_ | Unsupported is the number of configurations rejected as unsupported before evaluation. |  | Optional: \{\} <br /> |
+| `cacheHits` _integer_ | CacheHits is the number of evaluations satisfied from a prior result. |  | Optional: \{\} <br /> |
 
 
 #### GPUHardwareSpec
@@ -3727,8 +3727,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `min` _float_ | Min is the lower end of the searched fraction range. |  | ExclusiveMinimum: true <br />Maximum: 1 <br />Minimum: 0 <br /> |
-| `max` _float_ | Max is the upper end of the searched fraction range. |  | ExclusiveMinimum: true <br />Maximum: 1 <br />Minimum: 0 <br /> |
+| `min` _float_ | Min is the lower end of the searched fraction range. |  | ExclusiveMinimum: true <br />Maximum: 1 <br />Minimum: 0 <br />Required: \{\} <br /> |
+| `max` _float_ | Max is the upper end of the searched fraction range. |  | ExclusiveMinimum: true <br />Maximum: 1 <br />Minimum: 0 <br />Required: \{\} <br /> |
 
 
 #### KVCapacityFractionSpec
@@ -3764,7 +3764,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `name` _string_ | Name identifies the model in the syntax accepted by the selected backend. |  | MinLength: 1 <br /> |
+| `name` _string_ | Name identifies the model in the syntax accepted by the selected backend. |  | MinLength: 1 <br />Required: \{\} <br /> |
 
 
 #### NativeSearchInput
@@ -3786,7 +3786,7 @@ _Appears in:_
 | `model` _[ModelSpec](#modelspec)_ | Model identifies the model whose deployment configurations are evaluated. |  | Optional: \{\} <br /> |
 | `backends` _[Backend](#backend) array_ | Backends lists one or more inference backends searched by AISimulate and used by generated candidates. |  | Enum: [vllm sglang trtllm] <br />MinItems: 1 <br />Optional: \{\} <br /> |
 | `hardware` _[HardwareSpec](#v1beta2-hardwarespec)_ | Hardware bounds the accelerator configurations evaluated by the search.<br />When omitted, admission discovers SKU, budget and node width. An exactly empty object opts<br />out of operator hardware discovery and typed defaults. Admission completes every nonempty<br />object with any missing hardware values; explicit values remain authoritative. |  | Optional: \{\} <br /> |
-| `workload` _[WorkloadSpec](#v1beta2-workloadspec)_ | Workload defines the synthetic traffic model used for every candidate evaluation.<br />When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10;<br />an explicit empty workload receives the same shape. workload.static: \{\} opts out of all<br />traffic defaults. Any other static object is completed with its missing defaults.<br />spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over<br />every lowered traffic field it names.<br />The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction<br />search. Lowering independently defaults optimizer.max_trials to 320. |  | Optional: \{\} <br /> |
+| `workload` _[WorkloadSpec](#v1beta2-workloadspec)_ | Workload defines the traffic model used for every candidate evaluation: synthetic static<br />traffic or a recorded trace.<br />When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10;<br />an explicit empty workload receives the same shape. workload.static: \{\} opts out of all<br />traffic defaults. Any other static object is completed with its missing defaults, and a<br />trace workload receives no static default.<br />spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over<br />every lowered traffic field it names, including the fields a trace lowers.<br />The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction<br />search. Lowering independently defaults optimizer.max_trials to 320. |  | Optional: \{\} <br /> |
 | `objective` _[ObjectiveSpec](#objectivespec)_ | Objective defines scalar optimization. When omitted,<br />admission supplies the object. Its mode defaults to Optimize, its scalar metric defaults<br />to ThroughputPerGPU, and its absent SLA defaults to TTFT 2000 ms and ITL 30 ms. |  | Optional: \{\} <br /> |
 | `aisimulate` _[AISimulateSpec](#aisimulatespec)_ | AISimulate supplies public recommendation input to the operator's AISimulate execution bundle. |  | Optional: \{\} <br /> |
 | `recommendation` _[RecommendationSpec](#recommendationspec)_ | Recommendation controls bounded projection into DGDC resources. |  | Optional: \{\} <br /> |
@@ -3898,7 +3898,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `name` _string_ | Name is the resource name. |  |  |
+| `name` _string_ | Name is the resource name. |  | Required: \{\} <br /> |
 | `uid` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg)_ | UID is the resource UID. |  | Optional: \{\} <br /> |
 
 
@@ -3915,8 +3915,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `completed` _integer_ | Completed is the number of finished rounds. |  |  |
-| `total` _integer_ | Total is the number of planned rounds. |  |  |
+| `completed` _integer_ | Completed is the number of finished rounds. |  | Required: \{\} <br /> |
+| `total` _integer_ | Total is the number of planned rounds. |  | Required: \{\} <br /> |
 
 
 #### StaticLoadSpec
@@ -3956,11 +3956,98 @@ _Appears in:_
 | `load` _[StaticLoadSpec](#staticloadspec)_ | Load selects the synthetic load model. When omitted from a nonempty static<br />workload, admission defaults it to concurrency 10. |  | Optional: \{\} <br /> |
 
 
+#### TraceFormat
+
+_Underlying type:_ _string_
+
+TraceFormat identifies the decoder of a recorded request trace. Lowering translates it to
+AISimulate's native traffic.source.format.
+
+_Validation:_
+- Enum: [Dynamo]
+
+_Appears in:_
+- [TraceWorkloadSpec](#traceworkloadspec)
+
+| Field | Description |
+| --- | --- |
+| `Dynamo` | TraceFormatDynamo is the Dynamo request trace (dynamo.request.trace.v1) that the frontend<br />records, as JSON Lines or gzip-compressed JSON Lines. It lowers to AISimulate's dynamo format.<br /> |
+
+
+#### TracePVCSource
+
+
+
+TracePVCSource names one trace file on a PersistentVolumeClaim in the Request namespace.
+
+
+
+_Appears in:_
+- [TraceSourceSpec](#tracesourcespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `claimName` _string_ | ClaimName is the PersistentVolumeClaim, in the Request namespace, that holds the trace.<br />The Run Job mounts only the trace file from it, read-only, and only into the AISimulate<br />container. Each Run protects the claim with the finalizer `nvidia.com/dgdr-run-<run-uid>`<br />until the Run completes or, for a Run deleted before it completes, until no Job of the Run<br />is left. Garbage collection deletes the Job of a deleted Run before the Job's pod, so the<br />finalizer of a deleted Run can be released while that pod still stops; Kubernetes<br />PersistentVolumeClaim protection keeps the claim until no pod uses it. Deleting the claim<br />cancels the Runs that read it. |  | MaxLength: 253 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` <br />Required: \{\} <br /> |
+| `subPath` _string_ | SubPath names one trace file relative to the root of the claim; the Run Job mounts it as<br />the subPath of the claim volume. It is neither a directory nor a glob. It must not start or<br />end with '/' and must not contain empty, '.' or '..' segments or a NUL character, which no<br />file name can hold. The file must be complete before the Request is created and must never<br />be rewritten: every Run of the Request reads it when its Job starts. |  | MaxLength: 1024 <br />MinLength: 1 <br />Required: \{\} <br /> |
+
+
+#### TraceReplaySpec
+
+
+
+TraceReplaySpec configures how AISimulate replays a decoded trace.
+
+
+
+_Appears in:_
+- [TraceWorkloadSpec](#traceworkloadspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `arrivalSpeedupRatio` _float_ | ArrivalSpeedupRatio multiplies the recorded request-arrival rate. 1.0 preserves it.<br />When omitted, the recorded arrival times are replayed unchanged. |  | ExclusiveMinimum: true <br />Minimum: 0 <br />Optional: \{\} <br /> |
+
+
+#### TraceSourceSpec
+
+
+
+TraceSourceSpec identifies exactly one trace artifact. A PersistentVolumeClaim is the only
+source in this release.
+
+
+
+_Appears in:_
+- [TraceWorkloadSpec](#traceworkloadspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `persistentVolumeClaim` _[TracePVCSource](#tracepvcsource)_ | PersistentVolumeClaim reads the trace from a PersistentVolumeClaim in the Request<br />namespace. |  | Optional: \{\} <br /> |
+
+
+#### TraceWorkloadSpec
+
+
+
+TraceWorkloadSpec replays a recorded request trace open loop at its recorded arrival times.
+
+
+
+_Appears in:_
+- [WorkloadSpec](#v1beta2-workloadspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `format` _[TraceFormat](#traceformat)_ | Format identifies the trace decoder. Defaults to Dynamo. | Dynamo | Enum: [Dynamo] <br />Optional: \{\} <br /> |
+| `source` _[TraceSourceSpec](#tracesourcespec)_ | Source identifies the trace artifact. |  | Required: \{\} <br /> |
+| `replay` _[TraceReplaySpec](#tracereplayspec)_ | Replay configures how the decoded trace is replayed. |  | Optional: \{\} <br /> |
+
+
 #### v1beta2 WorkloadSpec
 
 
 
-WorkloadSpec defines the synthetic traffic model used for every candidate evaluation.
+WorkloadSpec defines the traffic model used for every candidate evaluation. static and
+trace are mutually exclusive.
 
 
 
@@ -3972,7 +4059,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `static` _[StaticWorkloadSpec](#staticworkloadspec)_ | Static defines AISimulate synthetic traffic. When omitted, admission supplies the<br />complete static default. An explicit empty object opts out; any nonempty object is<br />completed with omitted inputTokens, outputTokens and load defaults. |  | Optional: \{\} <br /> |
+| `static` _[StaticWorkloadSpec](#staticworkloadspec)_ | Static defines AISimulate synthetic traffic. When omitted without a trace, admission<br />supplies the complete static default. An explicit empty object opts out; any nonempty<br />object is completed with omitted inputTokens, outputTokens and load defaults. |  | Optional: \{\} <br /> |
+| `trace` _[TraceWorkloadSpec](#traceworkloadspec)_ | Trace replays a recorded request trace from a PersistentVolumeClaim in the Request<br />namespace. Admission supplies no static default when it is set. The Run Job mounts only the<br />trace file, read-only through a subPath of the claim, at /var/run/aisimulate/trace/trace.jsonl,<br />or trace.jsonl.gz when subPath ends in .gz. The trace lowers to the default traffic.source<br />and traffic.load, which spec.aisimulate.inputOverrides can replace or delete. |  | Optional: \{\} <br /> |
 
 
 

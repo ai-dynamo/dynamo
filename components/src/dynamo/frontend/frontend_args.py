@@ -4,6 +4,7 @@
 import argparse
 import os
 import pathlib
+from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
 from dynamo.common.config_dump import register_encoder
@@ -22,6 +23,7 @@ from dynamo.common.configuration.groups.router_args import (
     RouterConfigBase,
 )
 from dynamo.common.configuration.utils import (
+    ArgEnv,
     add_argument,
     add_negatable_bool_argument,
     env_or_default,
@@ -195,7 +197,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     namespace_prefix: Optional[str] = None
 
     migration_limit: int
-    migration_limit_draining: Optional[int]
+    migration_limit_draining: int
     migration_max_seq_len: Optional[int]
     model_name: Optional[str]
     model_path: Optional[str]
@@ -213,6 +215,8 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     enable_anthropic_api: bool
     enable_systemone_api: bool
     strip_anthropic_preamble: bool
+    reject_media: bool
+    reject_media_status_code: int
     debug_perf: bool
     enable_streaming_tool_dispatch: bool
     enable_streaming_reasoning_dispatch: bool
@@ -239,6 +243,12 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
         if self.load_aware:
             self.router_mode = "kv"
         self.apply_router_config()
+
+        # Fail at startup on an invalid DYN_MM_* value, not on every request.
+        # Imported here: dynamo.common.http imports this configuration package.
+        from dynamo.common.http.url_validator import UrlValidationPolicy
+
+        UrlValidationPolicy.from_env()
 
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
             raise ValueError(
@@ -270,7 +280,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
             raise ValueError(
                 f"--migration-limit must be between 0 and {_U32_MAX} (0=disabled)"
             )
-        if self.migration_limit_draining is not None and (
+        if (
             self.migration_limit_draining < 0
             or self.migration_limit_draining > _U32_MAX
         ):
@@ -285,6 +295,8 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
             )
         if self.min_initial_workers < 0:
             raise ValueError("--router-min-initial-workers must be >= 0")
+        if not 400 <= self.reject_media_status_code <= 599:
+            raise ValueError("--reject-media-status-code must be a 4xx or 5xx status")
         if self.session_affinity_ttl_secs is not None and not (
             1 <= self.session_affinity_ttl_secs <= _MAX_SESSION_AFFINITY_TTL_SECS
         ):
@@ -358,7 +370,9 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
         if self.conditional_disagg_enabled and not self.use_kv_events:
             raise ValueError("--router-conditional-disagg requires --router-kv-events")
         self.validate_rejection_thresholds()
-        self.log_rejection_thresholds()
+        # Direct mode ignores the thresholds.
+        if self.router_mode != "direct":
+            self.log_rejection_thresholds()
 
 
 @register_encoder(FrontendConfig)
@@ -368,7 +382,17 @@ def _preprocess_for_encode_config(config: FrontendConfig) -> Dict[str, Any]:
 
 
 class FrontendArgGroup(ArgGroup):
-    """Frontend configuration parameters."""
+    """Frontend configuration parameters.
+
+    Args:
+        env: Another process's env (see ``ArgEnv``). Nothing then reads the
+            local filesystem: ``--model-path`` is not checked, and the
+            AISimulate perf-model arguments, whose values name files, are not
+            registered.
+    """
+
+    def __init__(self, *, env: Optional[ArgEnv] = None) -> None:
+        self.env = env
 
     def add_arguments(self, parser) -> None:
         parser.add_argument(
@@ -383,7 +407,7 @@ class FrontendArgGroup(ArgGroup):
             "--interactive",
             dest="interactive",
             action=argparse.BooleanOptionalAction,
-            default=env_or_default("DYN_INTERACTIVE", False),
+            default=env_or_default("DYN_INTERACTIVE", False, env=self.env),
             help="Interactive text chat.\nenv var: DYN_INTERACTIVE",
         )
 
@@ -396,6 +420,7 @@ class FrontendArgGroup(ArgGroup):
                 "Dynamo namespace for model discovery scoping. Use for exact namespace matching. "
                 "If --namespace-prefix is also specified, prefix takes precedence."
             ),
+            env=self.env,
         )
 
         add_argument(
@@ -405,6 +430,7 @@ class FrontendArgGroup(ArgGroup):
             default=None,
             help="KV cache block size (u32).",
             arg_type=int,
+            env=self.env,
         )
 
         add_argument(
@@ -413,6 +439,7 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_HTTP_HOST",
             default="0.0.0.0",
             help="HTTP host for the engine (str).",
+            env=self.env,
         )
         add_argument(
             g,
@@ -421,6 +448,7 @@ class FrontendArgGroup(ArgGroup):
             default=8000,
             help="HTTP port for the engine (u16).",
             arg_type=int,
+            env=self.env,
         )
         add_argument(
             g,
@@ -428,6 +456,7 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_BATCH_GATEWAY_URL",
             default=None,
             help="Internal Batch Gateway URL for proxying /v1/files and /v1/batches.",
+            env=self.env,
         )
         add_negatable_bool_argument(
             g,
@@ -436,6 +465,7 @@ class FrontendArgGroup(ArgGroup):
             default=False,
             help="Serve this frontend's local KV indexers over the request plane.",
             dest="serve_indexer",
+            env=self.env,
         )
         add_argument(
             g,
@@ -444,6 +474,7 @@ class FrontendArgGroup(ArgGroup):
             default=None,
             help="TLS certificate path, PEM format.",
             arg_type=pathlib.Path,
+            env=self.env,
         )
         add_argument(
             g,
@@ -452,6 +483,7 @@ class FrontendArgGroup(ArgGroup):
             default=None,
             help="TLS certificate key path, PEM format.",
             arg_type=pathlib.Path,
+            env=self.env,
         )
         add_argument(
             g,
@@ -460,6 +492,7 @@ class FrontendArgGroup(ArgGroup):
             default=None,
             help="Client CA certificate path for mutual TLS, PEM format.",
             arg_type=pathlib.Path,
+            env=self.env,
         )
 
         add_argument(
@@ -468,6 +501,7 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_TCP_TLS_CERT_PATH",
             default=None,
             help="Path to PEM certificate for the TCP server.",
+            env=self.env,
         )
 
         add_argument(
@@ -476,6 +510,7 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_TCP_TLS_KEY_PATH",
             default=None,
             help="Path to PEM private key for the TCP server certificate.",
+            env=self.env,
         )
 
         add_argument(
@@ -484,6 +519,7 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_TCP_TLS_CA_CERT_PATH",
             default=None,
             help="Path to PEM CA certificate used to verify the TCP peer's certificate.",
+            env=self.env,
         )
 
         add_argument(
@@ -492,6 +528,7 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_TCP_TLS_CLIENT_CERT_PATH",
             default=None,
             help="Path to PEM client certificate presented to the TCP server for mTLS.",
+            env=self.env,
         )
 
         add_argument(
@@ -500,6 +537,7 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_TCP_TLS_CLIENT_KEY_PATH",
             default=None,
             help="Path to PEM private key for the TCP client certificate (mTLS).",
+            env=self.env,
         )
 
         add_argument(
@@ -509,6 +547,7 @@ class FrontendArgGroup(ArgGroup):
             default=None,
             help="Path to PEM CA certificate the TCP server uses to verify client "
             "certificates. When set, clients must present a trusted certificate (mTLS enforced).",
+            env=self.env,
         )
 
         add_argument(
@@ -517,6 +556,7 @@ class FrontendArgGroup(ArgGroup):
             env_var="NATS_TLS_CA_CERT_PATH",
             default=None,
             help="Path to PEM CA certificate for verifying the NATS server.",
+            env=self.env,
         )
 
         add_negatable_bool_argument(
@@ -525,6 +565,7 @@ class FrontendArgGroup(ArgGroup):
             env_var="NATS_TLS_INSECURE",
             default=False,
             help="Disable NATS TLS certificate verification. For local development only.",
+            env=self.env,
         )
 
         add_argument(
@@ -533,6 +574,7 @@ class FrontendArgGroup(ArgGroup):
             env_var="NATS_TLS_CLIENT_CERT_PATH",
             default=None,
             help="Path to PEM client certificate presented to the NATS server for mTLS.",
+            env=self.env,
         )
 
         add_argument(
@@ -541,16 +583,20 @@ class FrontendArgGroup(ArgGroup):
             env_var="NATS_TLS_CLIENT_KEY_PATH",
             default=None,
             help="Path to PEM private key for the NATS client certificate (mTLS).",
+            env=self.env,
         )
 
         # Router options (shared with dynamo.router)
         RouterArgGroup(
-            default_router_mode="round-robin", include_frontend_only=True
+            default_router_mode="round-robin",
+            include_frontend_only=True,
+            env=self.env,
         ).add_arguments(parser)
 
         # KV router options (shared with dynamo.router)
-        KvRouterArgGroup().add_arguments(parser)
-        AisPerfArgGroup().add_arguments(parser)
+        KvRouterArgGroup(env=self.env).add_arguments(parser)
+        if self.env is None:
+            AisPerfArgGroup().add_arguments(parser)
 
         add_argument(
             g,
@@ -562,6 +608,7 @@ class FrontendArgGroup(ArgGroup):
                 "namespaces starting with this prefix (e.g., 'ns' matches 'ns', 'ns-abc123', "
                 "'ns-def456'). Takes precedence over --namespace if both are specified."
             ),
+            env=self.env,
         )
 
         add_argument(
@@ -577,21 +624,23 @@ class FrontendArgGroup(ArgGroup):
                 "session; unfinished audio is replayed to a compatible warm worker."
             ),
             arg_type=int,
+            env=self.env,
         )
 
         add_argument(
             g,
             flag_name="--migration-limit-draining",
             env_var="DYN_MIGRATION_LIMIT_DRAINING",
-            default=None,
+            default=0,
             help=(
                 "Retry ceiling for pre-execution worker-draining rejections: the greater of "
                 "this value and --migration-limit, with a shared replacement counter. "
-                "Zero adds no drain-specific allowance. When set, overrides "
-                "DYN_EXPERIMENTAL_WORKER_WITHDRAWAL; when omitted, that flag retains "
-                "its existing three additional drain reselections."
+                "Defaults to zero, adding no drain-specific allowance beyond --migration-limit. "
+                "The drain-specific extension applies only before response data starts; "
+                "continuations use the ordinary migration limit."
             ),
             arg_type=int,
+            env=self.env,
         )
 
         add_argument(
@@ -606,6 +655,7 @@ class FrontendArgGroup(ArgGroup):
                 "Default: no limit."
             ),
             arg_type=int,
+            env=self.env,
         )
 
         add_argument(
@@ -615,6 +665,7 @@ class FrontendArgGroup(ArgGroup):
             default=None,
             help="Model name as a string (e.g., 'Llama-3.2-1B-Instruct')",
             arg_type=validate_model_name,
+            env=self.env,
         )
         add_argument(
             g,
@@ -622,7 +673,8 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_MODEL_PATH",
             default=None,
             help="Path to model directory on disk (e.g., /tmp/model_cache/llama3.2_1B/)",
-            arg_type=validate_model_path,
+            arg_type=validate_model_path if self.env is None else str,
+            env=self.env,
         )
         add_argument(
             g,
@@ -633,6 +685,7 @@ class FrontendArgGroup(ArgGroup):
                 "Prefix for Dynamo frontend metrics. If unset, uses DYN_METRICS_PREFIX env var "
                 "or 'dynamo_frontend'."
             ),
+            env=self.env,
         )
         add_negatable_bool_argument(
             g,
@@ -640,6 +693,7 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_KSERVE_GRPC_SERVER",
             default=False,
             help="Start KServe gRPC server.",
+            env=self.env,
         )
         add_argument(
             g,
@@ -651,6 +705,7 @@ class FrontendArgGroup(ArgGroup):
                 "Defaults to 8788."
             ),
             arg_type=int,
+            env=self.env,
         )
 
         add_argument(
@@ -659,6 +714,7 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_DUMP_CONFIG_TO",
             default=None,
             help="Dump config to the specified file path.",
+            env=self.env,
         )
 
         add_argument(
@@ -674,6 +730,7 @@ class FrontendArgGroup(ArgGroup):
                 "path. May be repeated. DYN_FRONTEND_ROUTE_EXTENSIONS accepts "
                 "whitespace-separated values."
             ),
+            env=self.env,
         )
 
         add_argument(
@@ -687,6 +744,7 @@ class FrontendArgGroup(ArgGroup):
                 "File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv."
             ),
             choices=["kubernetes", "etcd", "file", "mem"],
+            env=self.env,
         )
         add_argument(
             g,
@@ -698,6 +756,7 @@ class FrontendArgGroup(ArgGroup):
                 "'tcp' is fastest [nats|tcp]"
             ),
             choices=["nats", "tcp"],
+            env=self.env,
         )
         add_argument(
             g,
@@ -706,6 +765,7 @@ class FrontendArgGroup(ArgGroup):
             default="tcp",
             help="Select the response transport. Frontend and workers must match.",
             choices=["tcp", "quic", "velo"],
+            env=self.env,
         )
         add_argument(
             g,
@@ -716,6 +776,7 @@ class FrontendArgGroup(ArgGroup):
             "defaults to 'zmq' for all discovery backends. Set to 'nats' to use a "
             "NATS-based event plane.",
             choices=["nats", "zmq"],
+            env=self.env,
         )
         add_negatable_bool_argument(
             g,
@@ -726,6 +787,7 @@ class FrontendArgGroup(ArgGroup):
                 "[EXPERIMENTAL] Enable Anthropic Messages API endpoint (/v1/messages). "
                 "This feature is experimental and may change."
             ),
+            env=self.env,
         )
         add_negatable_bool_argument(
             g,
@@ -736,6 +798,7 @@ class FrontendArgGroup(ArgGroup):
                 "[EXPERIMENTAL] Enable typed decision APIs (/v1/decisions and "
                 "/v1/systemone) for qualified aggregate SGLang models."
             ),
+            env=self.env,
         )
         add_negatable_bool_argument(
             g,
@@ -746,6 +809,32 @@ class FrontendArgGroup(ArgGroup):
                 "Strip the Claude Code billing preamble (x-anthropic-billing-header) "
                 "from the system prompt. Saves tokens and improves prompt caching."
             ),
+            env=self.env,
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--reject-media",
+            env_var="DYN_REJECT_MEDIA",
+            default=False,
+            help=(
+                "Refuse chat requests that carry image, video, or audio content in "
+                "any message, including history, before routing. For frontends that "
+                "serve text-only models: a streaming client gets an HTTP error "
+                "instead of a 200 followed by an error event. The status is set by "
+                "--reject-media-status-code."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--reject-media-status-code",
+            env_var="DYN_REJECT_MEDIA_STATUS_CODE",
+            default=415,
+            help=(
+                "HTTP status (4xx or 5xx) for a request refused by --reject-media. "
+                "Set it to a status an upstream gateway fails over on, such as 429, "
+                "to send these requests to a multimodal model."
+            ),
+            arg_type=int,
         )
         add_negatable_bool_argument(
             g,
@@ -758,6 +847,7 @@ class FrontendArgGroup(ArgGroup):
                 "for each complete tool call before finish_reason arrives. "
                 "Can be combined with --enable-streaming-reasoning-dispatch."
             ),
+            env=self.env,
         )
         add_negatable_bool_argument(
             g,
@@ -770,6 +860,7 @@ class FrontendArgGroup(ArgGroup):
                 "with the complete reasoning block once thinking ends. "
                 "Can be combined with --enable-streaming-tool-dispatch."
             ),
+            env=self.env,
         )
         add_argument(
             g,
@@ -780,6 +871,7 @@ class FrontendArgGroup(ArgGroup):
                 "OpenAI-compatible response field used for emitted reasoning content."
             ),
             choices=["reasoning_content", "reasoning"],
+            env=self.env,
         )
         # NOTE: This flag also exists in DynamoRuntimeArgGroup (runtime_args.py).
         # Both definitions are needed: runtime_args controls the Rust-native
@@ -796,6 +888,7 @@ class FrontendArgGroup(ArgGroup):
                 "tool_choice='none'. Prevents models from generating raw XML "
                 "tool calls in the content field."
             ),
+            env=self.env,
         )
         add_argument(
             g,
@@ -810,6 +903,7 @@ class FrontendArgGroup(ArgGroup):
                 "parsing, and reasoning parsing."
             ),
             choices=["dynamo", "vllm", "sglang"],
+            env=self.env,
         )
 
         add_negatable_bool_argument(
@@ -823,13 +917,16 @@ class FrontendArgGroup(ArgGroup):
                 "Logs per-function timing, request concurrency, and hot-path section durations. "
                 "Supported with '--dyn-chat-processor vllm' and '--dyn-chat-processor sglang'."
             ),
+            env=self.env,
         )
 
         g.add_argument(
             "--dyn-preprocess-workers",
             dest="preprocess_workers",
             type=int,
-            default=env_or_default("DYN_PREPROCESS_WORKERS", None, value_type=int),
+            default=env_or_default(
+                "DYN_PREPROCESS_WORKERS", None, value_type=int, env=self.env
+            ),
             help=(
                 "[EXPERIMENTAL] SGLang preprocessing worker processes per model. "
                 "When unset, selects up to 2 workers per model from visible CPU capacity, "
@@ -854,6 +951,7 @@ class FrontendArgGroup(ArgGroup):
                 "Has no effect on TikToken models."
             ),
             choices=["default", "fastokens", "basetenkenizer"],
+            env=self.env,
         )
 
         add_negatable_bool_argument(
@@ -871,6 +969,7 @@ class FrontendArgGroup(ArgGroup):
                 "continues running."
             ),
             env_value_type=parse_bool,
+            env=self.env,
         )
 
         add_negatable_bool_argument(
@@ -882,4 +981,28 @@ class FrontendArgGroup(ArgGroup):
                 "Trust remote code when loading the tokenizer. Required for models "
                 "that ship custom tokenizer code (e.g. Qwen, Falcon)."
             ),
+            env=self.env,
         )
+
+
+def build_frontend_parser(
+    env: Mapping[str, str],
+    parser: Optional[argparse.ArgumentParser] = None,
+) -> tuple[argparse.ArgumentParser, dict[str, str]]:
+    """The argument parser of a frontend that runs with ``env``.
+
+    For a process that parses another frontend's command line (the planner
+    reads one from the DynamoGraphDeployment spec): env defaults come from
+    ``env`` only, never ``os.environ``, and nothing logs, warns or reads the
+    local filesystem (see ``FrontendArgGroup``). Registers the arguments on
+    ``parser`` when given, else on a new ``ArgumentParser(add_help=False)``.
+    Returns the parser and the env var -> dest map of every argument with an
+    env var. Raises what the frontend raises at startup on invalid env
+    (``ValueError``, ``TypeError`` or ``argparse.ArgumentTypeError``).
+    """
+
+    arg_env = ArgEnv(environ=dict(env))
+    if parser is None:
+        parser = argparse.ArgumentParser(add_help=False)
+    FrontendArgGroup(env=arg_env).add_arguments(parser)
+    return parser, arg_env.env_dests

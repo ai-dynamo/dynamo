@@ -84,8 +84,9 @@ class _DiscoveryMirror:
 
 @pytest.mark.timeout(30)
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+@pytest.mark.parametrize("draining_limit", [0, 1])
 def test_withdrawal_survives_stale_discovery_and_healthy_probes(
-    request, tmp_path, dynamo_dynamic_ports
+    request, tmp_path, dynamo_dynamic_ports, draining_limit
 ):
     model_path = (
         Path(__file__).resolve().parents[2]
@@ -108,12 +109,13 @@ def test_withdrawal_survives_stale_discovery_and_healthy_probes(
     env = {
         **os.environ,
         "DYN_FILE_KV": str(live),
-        "DYN_EXPERIMENTAL_WORKER_WITHDRAWAL": "1",
+        "DYN_MIGRATION_LIMIT_DRAINING": str(draining_limit),
         "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS": "5",
         "DYN_HEALTH_CHECK_ENABLED": "true",
         "DYN_CANARY_WAIT_TIME": "1",
         "CUDA_VISIBLE_DEVICES": "",
     }
+    env.pop("DYN_EXPERIMENTAL_WORKER_WITHDRAWAL", None)
     with ExitStack() as stack:
         for index, name in enumerate(("a", "b")):
             stack.enter_context(
@@ -128,7 +130,6 @@ def test_withdrawal_survives_stale_discovery_and_healthy_probes(
                     ],
                     env={
                         **env,
-                        "DYN_EXPERIMENTAL_WORKER_WITHDRAWAL": "0",
                         "DYN_SYSTEM_PORT": str(
                             dynamo_dynamic_ports.system_ports[index]
                         ),
@@ -181,7 +182,7 @@ def test_withdrawal_survives_stale_discovery_and_healthy_probes(
         )
         _until(lambda: control(0, "worker_lifecycle/status")["state"] == "serving")
 
-        def generate(max_tokens=2, stream=False):
+        def generate(max_tokens=2, stream=False, allow_rejection=False):
             response = requests.post(
                 f"{base}/v1/chat/completions",
                 json={
@@ -193,6 +194,9 @@ def test_withdrawal_survives_stale_discovery_and_healthy_probes(
                 stream=stream,
                 timeout=15,
             )
+            if allow_rejection and response.status_code == 503:
+                assert response.json()["code"] == 503, response.text
+                return response
             response.raise_for_status()
             if not stream:
                 body = response.json()
@@ -223,8 +227,11 @@ def test_withdrawal_survives_stale_discovery_and_healthy_probes(
         _until(lambda: state(0)["state"] == "withdrawn")
         before = state(0)
         other = state(1)["business"]
-        for _ in range(2):
-            generate()
+        late_responses = [generate(allow_rejection=True) for _ in range(2)]
+        if draining_limit:
+            assert all(response.status_code == 200 for response in late_responses)
+        else:
+            assert any(response.status_code == 503 for response in late_responses)
         after = state(0)
         assert after["rejected"] > before["rejected"]
         assert after["business"] == before["business"]
