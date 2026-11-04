@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+router:
+  use_kv_events: false
+  router_track_active_blocks: true
+  router_track_prefill_tokens: true
+  router_assume_kv_reuse: false
+  router_prefill_load_model: none
+worker_selection:
+  aggregated: load
+  instances:
+    - name: load
+      type: dynamo-default-cost-fn
+      parameters:
+        overlap_score_credit: 0
+        shared_cache_multiplier: 0
+        router_temperature: 0
+default_policy_class: default
+policy_classes:
+  - name: default
+    queue_policy: fcfs
+    controlled_delay: false
+    quantum: 512
