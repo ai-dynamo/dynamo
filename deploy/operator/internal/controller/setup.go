@@ -156,7 +156,8 @@ func SetupDynamoGraphDeploymentRequestV1beta2(mgr ctrl.Manager, opts SetupOption
 }
 
 // SetupDynamoGraphDeploymentRunV1beta2 registers the controller that executes immutable
-// v1beta2 Runs as AISimulate Jobs and observes their lifecycle.
+// v1beta2 Runs as AISimulate Jobs and observes their lifecycle, and the controller that releases
+// the trace claims of deleted Runs.
 func SetupDynamoGraphDeploymentRunV1beta2(mgr ctrl.Manager, opts DynamoGraphDeploymentRunSetupOptions) error {
 	if err := (&DynamoGraphDeploymentRunV1beta2Reconciler{
 		Client:                  mgr.GetClient(),
@@ -169,6 +170,13 @@ func SetupDynamoGraphDeploymentRunV1beta2(mgr ctrl.Manager, opts DynamoGraphDepl
 		OperatorImagePullPolicy: opts.OperatorImagePullPolicy,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoGraphDeploymentRun v1beta2 controller: %w", err)
+	}
+	if err := (&DynamoGraphDeploymentRunTraceClaimReconciler{
+		Client:        mgr.GetClient(),
+		Config:        opts.Config,
+		RuntimeConfig: opts.RuntimeConfig,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create DynamoGraphDeploymentRun v1beta2 trace claim controller: %w", err)
 	}
 	return nil
 }

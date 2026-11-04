@@ -932,7 +932,7 @@ pub mod response_plane {
     /// service also listens on TCP, so a frontend and worker set differently
     /// still reach each other, and the worker reports the mismatch.
     pub const DYN_VELO_RESPONSE_TRANSPORT: &str = "DYN_VELO_RESPONSE_TRANSPORT";
-    /// Maximum Velo response batching delay in milliseconds (default: 5).
+    /// Maximum Velo response batching delay in milliseconds (default: 2).
     /// Set to 0 for greedy flushing after transport admission. Full batches and
     /// lifecycle records can flush sooner. Read once when the service starts.
     pub const DYN_VELO_RESPONSE_BATCH_MS: &str = "DYN_VELO_RESPONSE_BATCH_MS";

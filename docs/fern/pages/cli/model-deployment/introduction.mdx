@@ -174,7 +174,7 @@ docker exec -it <container_id> bash
 
 ## Decision API Workers
 
-**Experimental.** To serve OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone`, use a dedicated aggregated SGLang CUDA worker on version 0.5.19 or 0.5.22. Other backends and execution modes require separate qualification. These routes are disabled by default.
+**Experimental.** To serve OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone`, use a dedicated aggregated SGLang CUDA worker on version 0.5.19, 0.5.22, or 0.5.23. Other backends and execution modes require separate qualification. These routes are disabled by default.
 
 With the installation and etcd/NATS prerequisites above in place, start the frontend in one terminal:
 

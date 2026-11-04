@@ -25,6 +25,12 @@ certifi==2026.10.23
 # These packages are installed without dependency resolution; keep their runtime
 # support packages explicit and constrain refreshes to supported major lines.
 defusedxml>=0.7.1,<1
+# The upstream SGLang image pins diffusers 0.37.0 through its diffusion extra.
+# Raise it to the release that the vLLM and TensorRT-LLM images ship. 0.40.0
+# needs no dependency that the image lacks, so the --no-deps install is
+# complete. CUDA only: stripped for the XPU image, whose framework stage
+# installs its own diffusion extra.
+diffusers==0.40.0
 distlib>=0.3.7,<1
 filelock>=3.24.2,<5
 imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive above

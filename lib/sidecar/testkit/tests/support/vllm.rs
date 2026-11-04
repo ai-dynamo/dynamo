@@ -46,9 +46,21 @@ pub struct Fixture {
     reasoning_parser: Arc<Mutex<String>>,
     readiness: watch::Sender<Option<bool>>,
     health_received: watch::Receiver<bool>,
+    health: tonic_health::server::HealthReporter,
 }
 
 impl Fixture {
+    /// Sets what `Watch` reports for overall health (`""`); `Check` follows
+    /// `set_health` instead.
+    pub async fn set_overall_serving(&self, is_serving: bool) {
+        let status = if is_serving {
+            tonic_health::ServingStatus::Serving
+        } else {
+            tonic_health::ServingStatus::NotServing
+        };
+        self.health.set_service_status("", status).await;
+    }
+
     pub fn set_reasoning_parser(&self, parser: &str) {
         *self.reasoning_parser.lock().unwrap() = parser.to_owned();
     }
@@ -107,7 +119,7 @@ impl SidecarFixture for Fixture {
         let (readiness, is_healthy) = watch::channel(Some(true));
         let (health_requested, health_received) = watch::channel(false);
         let health_service = HealthServer::new(ControlledHealth {
-            inner: tonic_health::server::HealthService::from_health_reporter(health),
+            inner: tonic_health::server::HealthService::from_health_reporter(health.clone()),
             is_healthy,
             health_requested,
         });
@@ -137,6 +149,7 @@ impl SidecarFixture for Fixture {
             reasoning_parser,
             readiness,
             health_received,
+            health,
         }
     }
 
@@ -160,7 +173,7 @@ impl SidecarFixture for Fixture {
     }
 
     fn eof_error() -> BackendError {
-        BackendError::Unknown
+        BackendError::StreamIncomplete
     }
 
     fn native_model(request: &pb::GenerateRequest) -> Option<&str> {
