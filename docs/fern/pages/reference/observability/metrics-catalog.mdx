@@ -30,7 +30,7 @@ The type of each metric is a [Prometheus metric type](https://prometheus.io/docs
 Every metric table on this page has the same columns:
 
 - **Labels** lists the labels specific to the metric. Labels shared by every metric in a section are listed in the section introduction.
-- **Status** is **Stable** (renamed or removed only after it has been marked Deprecated), **Experimental** (a preview metric whose name or meaning may change), or **Deprecated** (still emitted, but scheduled for removal; the description names the replacement).
+- **Status** is empty for a stable metric, which is renamed or removed only after it has been marked Deprecated. **Experimental** marks a preview metric whose name or meaning may change, and **Deprecated** marks a metric that is still emitted but scheduled for removal; its description names the replacement.
 
 Metrics defined in Python, such as the planner metrics, also expose a `_created` series for each counter and histogram.
 
@@ -63,35 +63,35 @@ For endpoints that canonicalize aliases, the `model` label holds the primary ser
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_frontend_active_requests` | gauge | `model` | Requests currently being handled by the frontend, from HTTP handler entry until the response stream completes. The top-level in-flight count with no stage breakdown. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_stage_requests` | gauge | `stage`, `phase` | Requests currently in a given frontend pipeline stage. See [Stage values](metric-labels.mdx#stage-values) and [Phase values](metric-labels.mdx#phase-values). | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_inflight_requests` | gauge | `model` | In-flight requests, kept for backward compatibility. Same value as `dynamo_frontend_active_requests`; use that instead. | <Badge intent="error" minimal>Deprecated</Badge> |
-| `dynamo_frontend_queued_requests` | gauge | `model` | Requests in the HTTP processing queue. Kept for backward compatibility; the "waiting for first token" window is now the sum of `dynamo_frontend_stage_requests` across the `preprocess`, `route`, and `dispatch` stages. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_frontend_awaiting_first_token_requests` | gauge | `model` | Admitted requests that have not produced an output token yet: being tokenized, queued, routed, or prefilled. Requests to endpoints that never stream tokens (embeddings, images, videos, tensors) stay here until they finish. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `dynamo_frontend_inflight_input_tokens` | gauge | `model`, `state` | Known prompt tokens of in-flight requests. `state` is `awaiting_first_token` (the requests in `dynamo_frontend_awaiting_first_token_requests`) or `generating`; sum over `state` for all in-flight prompt tokens. A request still being tokenized contributes zero. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `dynamo_frontend_input_tokens_total` | counter | `model` | Prompt tokens of admitted requests, counted at tokenization, including requests that fail or are cancelled before producing output. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `dynamo_frontend_requests_started_total` | counter | `model`, `endpoint`, `request_type` | Requests accepted by a frontend handler. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_requests_total` | counter | `model`, `endpoint`, `request_type`, `status`, `error_type` | Requests that finished, by outcome. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_failures_total` | counter | `class`, `reason` | Requests that ended in an error, by error class and reason. Cancellations are not counted. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_disconnected_clients` | gauge | — | Client disconnects since the frontend started. The value only increases. Equals `dynamo_frontend_model_cancellation_total` summed over its labels; use that instead. | <Badge intent="error" minimal>Deprecated</Badge> |
-| `dynamo_frontend_time_to_first_token_seconds` | histogram | `model` | Time to first token in seconds. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_inter_token_latency_seconds` | histogram | `model` | Inter-token latency in seconds. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_request_duration_seconds` | histogram | `model` | End-to-end LLM request duration in seconds. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_embedding_latency_seconds` | histogram | `model` | Latency of successful `/v1/embeddings` requests. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_input_sequence_tokens` | histogram | `model` | Prompt length in tokens per request, recorded at the first output token. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_output_sequence_tokens` | histogram | `model` | Output sequence length in tokens. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_output_tokens_total` | counter | `model` | Total output tokens generated. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_cached_tokens` | histogram | `model` | Prefix-cache hit tokens per request, as reported by the worker. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_stage_duration_seconds` | histogram | `stage` | Time spent in each pipeline stage: `preprocess`, `route`, or `transport_roundtrip`. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_tokenize_seconds` | histogram | — | Prompt tokenization time per request. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_frontend_template_seconds` | histogram | — | Chat template rendering time per request. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_frontend_tokenizer_latency_ms` | histogram | `operation` | Tokenizer latency in milliseconds, for `tokenize` and `detokenize`. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_detokenize_total_us` | counter | — | Total detokenization time in microseconds. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_detokenize_token_count` | counter | — | Tokens detokenized. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_tokenizer_cache_hits_total` | counter | — | L1 tokenizer prefix-cache hits across all models. One outcome is recorded per encode operation or batch item. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_frontend_tokenizer_cache_misses_total` | counter | — | L1 tokenizer prefix-cache misses across all models. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_frontend_tokenizer_cache_cached_tokens_total` | counter | `model` | Tokens returned from the L1 tokenizer prefix cache. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_frontend_tokenizer_cache_uncached_tokens_total` | counter | `model` | Tokens freshly encoded after an L1 tokenizer cache lookup. | <Badge intent="launch" minimal>Check</Badge> |
+| `dynamo_frontend_active_requests` | gauge | `model` | Requests currently being handled by the frontend, from HTTP handler entry until the response stream completes. The top-level in-flight count with no stage breakdown. | |
+| `dynamo_frontend_stage_requests` | gauge | `stage`, `phase` | Requests currently in a given frontend pipeline stage. See [Stage values](metric-labels.mdx#stage-values) and [Phase values](metric-labels.mdx#phase-values). | |
+| `dynamo_frontend_inflight_requests` | gauge | `model` | In-flight requests, kept for backward compatibility. Same value as `dynamo_frontend_active_requests`; use that instead. | Deprecated |
+| `dynamo_frontend_queued_requests` | gauge | `model` | Requests in the HTTP processing queue: counted from when the request passes validation until its first response token, or until it ends without one. Unlike `dynamo_frontend_awaiting_first_token_requests`, it does not count requests during validation or System One requests. | |
+| `dynamo_frontend_awaiting_first_token_requests` | gauge | `model` | Admitted requests that have not produced an output token yet: being tokenized, queued, routed, or prefilled. Requests to endpoints that never stream tokens (embeddings, images, videos, tensors) stay here until they finish. | Experimental |
+| `dynamo_frontend_inflight_input_tokens` | gauge | `model`, `state` | Known prompt tokens of in-flight requests. `state` is `awaiting_first_token` (the requests in `dynamo_frontend_awaiting_first_token_requests`) or `generating`; sum over `state` for all in-flight prompt tokens. A request still being tokenized contributes zero. | Experimental |
+| `dynamo_frontend_input_tokens_total` | counter | `model` | Prompt tokens of admitted requests, counted at tokenization, including requests that fail or are cancelled before producing output. | Experimental |
+| `dynamo_frontend_requests_started_total` | counter | `model`, `endpoint`, `request_type` | Requests accepted by a frontend handler. | |
+| `dynamo_frontend_requests_total` | counter | `model`, `endpoint`, `request_type`, `status`, `error_type` | Requests that finished, by outcome. | |
+| `dynamo_frontend_failures_total` | counter | `class`, `reason` | Requests that ended in an error, by error class and reason. Cancellations are not counted. | |
+| `dynamo_frontend_disconnected_clients` | gauge | — | Client disconnects since the frontend started. The value only increases. Equals `dynamo_frontend_model_cancellation_total` summed over its labels; use that instead. | Deprecated |
+| `dynamo_frontend_time_to_first_token_seconds` | histogram | `model` | Time to first token in seconds. | |
+| `dynamo_frontend_inter_token_latency_seconds` | histogram | `model` | Inter-token latency in seconds. | |
+| `dynamo_frontend_request_duration_seconds` | histogram | `model` | End-to-end LLM request duration in seconds. | |
+| `dynamo_frontend_embedding_latency_seconds` | histogram | `model` | Latency of successful `/v1/embeddings` requests. | |
+| `dynamo_frontend_input_sequence_tokens` | histogram | `model` | Prompt length in tokens per request, recorded at the first output token. | |
+| `dynamo_frontend_output_sequence_tokens` | histogram | `model` | Output sequence length in tokens. | |
+| `dynamo_frontend_output_tokens_total` | counter | `model` | Total output tokens generated. | |
+| `dynamo_frontend_cached_tokens` | histogram | `model` | Prefix-cache hit tokens per request, as reported by the worker. | |
+| `dynamo_frontend_stage_duration_seconds` | histogram | `stage` | Time spent in each pipeline stage: `preprocess`, `route`, or `transport_roundtrip`. | |
+| `dynamo_frontend_tokenize_seconds` | histogram | — | Prompt tokenization time per request. | |
+| `dynamo_frontend_template_seconds` | histogram | — | Chat template rendering time per request. | |
+| `dynamo_frontend_tokenizer_latency_ms` | histogram | `operation` | Tokenizer latency in milliseconds, for `tokenize` and `detokenize`. | |
+| `dynamo_frontend_detokenize_total_us` | counter | — | Total detokenization time in microseconds. | |
+| `dynamo_frontend_detokenize_token_count` | counter | — | Tokens detokenized. | |
+| `dynamo_frontend_tokenizer_cache_hits_total` | counter | — | L1 tokenizer prefix-cache hits across all models. One outcome is recorded per encode operation or batch item. | |
+| `dynamo_frontend_tokenizer_cache_misses_total` | counter | — | L1 tokenizer prefix-cache misses across all models. | |
+| `dynamo_frontend_tokenizer_cache_cached_tokens_total` | counter | `model` | Tokens returned from the L1 tokenizer prefix cache. | |
+| `dynamo_frontend_tokenizer_cache_uncached_tokens_total` | counter | `model` | Tokens freshly encoded after an L1 tokenizer cache lookup. | |
 
 Requests producing output tokens are `clamp_min(dynamo_frontend_active_requests - dynamo_frontend_awaiting_first_token_requests, 0)`; the clamp covers the two gauges being sampled a moment apart. Unlike the sum of `dynamo_frontend_input_sequence_tokens`, which is observed at the first output token, `dynamo_frontend_input_tokens_total` counts every admitted request when it is tokenized.
 
@@ -113,10 +113,10 @@ The ratio is defined only when the model has an active L1 cache and observed tok
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_frontend_images_per_request` | histogram | `model` | `image_url` content parts per request. Text-only requests record 0. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_frontend_videos_per_request` | histogram | `model` | `video_url` content parts per request. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_frontend_audio_per_request` | histogram | `model` | `audio_url` content parts per request. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_frontend_image_tokens_per_request` | histogram | `model` | Image placeholder tokens per request that contains images. | <Badge intent="success" minimal>Stable</Badge> |
+| `dynamo_frontend_images_per_request` | histogram | `model` | `image_url` content parts per request. Text-only requests record 0. | |
+| `dynamo_frontend_videos_per_request` | histogram | `model` | `video_url` content parts per request. | |
+| `dynamo_frontend_audio_per_request` | histogram | `model` | `audio_url` content parts per request. | |
+| `dynamo_frontend_image_tokens_per_request` | histogram | `model` | Image placeholder tokens per request that contains images. | |
 
 ### Migration
 
@@ -124,9 +124,9 @@ Metrics for [request migration](../../kubernetes/fault-tolerance/request-migrati
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_frontend_model_migration_total` | counter | `model`, [`migration_type`](metric-labels.mdx#metric-specific-labels) | Request migrations due to worker unavailability: `new_request` for an initial connection failure, `ongoing_request` for a mid-stream disconnection. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_model_migration_duration_seconds` | histogram | `model`, [`migration_type`](metric-labels.mdx#metric-specific-labels), [`outcome`](metric-labels.mdx#metric-specific-labels) | Time from detecting a migratable worker failure until the replacement response stream is established, migration ends without recovery, or the request is cancelled. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_model_migration_max_seq_len_exceeded_total` | counter | `model` | Times migration was disabled for a request because its sequence length exceeded `--migration-max-seq-len`. A rising value may indicate the limit needs adjustment. | <Badge intent="success" minimal>Stable</Badge> |
+| `dynamo_frontend_model_migration_total` | counter | `model`, [`migration_type`](metric-labels.mdx#metric-specific-labels) | Request migrations due to worker unavailability: `new_request` for an initial connection failure, `ongoing_request` for a mid-stream disconnection. | |
+| `dynamo_frontend_model_migration_duration_seconds` | histogram | `model`, [`migration_type`](metric-labels.mdx#metric-specific-labels), [`outcome`](metric-labels.mdx#metric-specific-labels) | Time from detecting a migratable worker failure until the replacement response stream is established, migration ends without recovery, or the request is cancelled. | |
+| `dynamo_frontend_model_migration_max_seq_len_exceeded_total` | counter | `model` | Times migration was disabled for a request because its sequence length exceeded `--migration-max-seq-len`. A rising value may indicate the limit needs adjustment. | |
 
 Use the `_count` series of `dynamo_frontend_model_migration_duration_seconds` to count completed migration events by outcome. The duration excludes work completed before the failure and generation after the replacement stream is established.
 
@@ -136,8 +136,8 @@ Counters for requests that end early: [cancellations](../../developer-guide/know
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_frontend_model_cancellation_total` | counter | `model`, `endpoint`, [`request_type`](metric-labels.mdx#metric-specific-labels) | Request cancellations detected by the frontend: client disconnect or stream close. `endpoint` is the API route (`chat_completions`, `completions`, `embeddings`, …); `request_type` is `unary` or `stream`. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_model_rejection_total` | counter | `model`, `endpoint` | Overload responses surfaced to the client as HTTP 529 by default, for worker-scoped `WorkerOverloaded` and pool-scoped `ResourceExhausted` errors. | <Badge intent="success" minimal>Stable</Badge> |
+| `dynamo_frontend_model_cancellation_total` | counter | `model`, `endpoint`, [`request_type`](metric-labels.mdx#metric-specific-labels) | Request cancellations detected by the frontend: client disconnect or stream close. `endpoint` is the API route (`chat_completions`, `completions`, `embeddings`, …); `request_type` is `unary` or `stream`. | |
+| `dynamo_frontend_model_rejection_total` | counter | `model`, `endpoint` | Overload responses surfaced to the client as HTTP 529 by default, for worker-scoped `WorkerOverloaded` and pool-scoped `ResourceExhausted` errors. | |
 
 ### Per-Worker Load and Timing Gauges
 
@@ -147,12 +147,12 @@ Only the KV router writes the three `dynamo_frontend_worker_active_*` gauges, so
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_frontend_worker_active_decode_blocks` | gauge | — | Active KV cache decode blocks per worker. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_worker_active_prefill_tokens` | gauge | — | Active prefill tokens queued per worker. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_worker_active_requests` | gauge | [`request_phase`](metric-labels.mdx#metric-specific-labels) | Active requests booked per worker. A request counts as `prefill` from booking until its worker returns the first output token, then as `decode` until it completes; sum both phases for the worker's total concurrency. The count is the router's view, including requests booked by peer routers when router replica sync is enabled. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_worker_last_time_to_first_token_seconds` | gauge | — | Last observed time to first token per worker, in seconds. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_worker_last_input_sequence_tokens` | gauge | — | Last observed input sequence length per worker. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_worker_last_inter_token_latency_seconds` | gauge | — | Last observed inter-token latency per worker, in seconds. | <Badge intent="success" minimal>Stable</Badge> |
+| `dynamo_frontend_worker_active_decode_blocks` | gauge | — | Active KV cache decode blocks per worker. | |
+| `dynamo_frontend_worker_active_prefill_tokens` | gauge | — | Active prefill tokens queued per worker. | |
+| `dynamo_frontend_worker_active_requests` | gauge | [`request_phase`](metric-labels.mdx#metric-specific-labels) | Active requests booked per worker. A request counts as `prefill` from booking until its worker returns the first output token, then as `decode` until it completes; sum both phases for the worker's total concurrency. The count is the router's view, including requests booked by peer routers when router replica sync is enabled. | Experimental |
+| `dynamo_frontend_worker_last_time_to_first_token_seconds` | gauge | — | Last observed time to first token per worker, in seconds. | |
+| `dynamo_frontend_worker_last_input_sequence_tokens` | gauge | — | Last observed input sequence length per worker. | |
+| `dynamo_frontend_worker_last_inter_token_latency_seconds` | gauge | — | Last observed inter-token latency per worker, in seconds. | |
 
 ### Router Worker Inventory
 
@@ -162,8 +162,8 @@ Admission uses first-wins semantics within each Frontend's model and target grou
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_frontend_router_workers` | gauge | `state` | Number of unique physical worker IDs in a model and target group, by state. DP ranks do not increase the count. | <Badge intent="info" minimal>Medium</Badge> |
-| `dynamo_frontend_router_worker_state` | gauge | `router_worker_id`, `state`, `reason` | One sample with value `1` for each discovered worker, labeled with its current state and reason. The sample changes with the worker's state and disappears when discovery removes the ID. | <Badge intent="success" minimal>Stable</Badge> |
+| `dynamo_frontend_router_workers` | gauge | `state` | Number of unique physical worker IDs in a model and target group, by state. DP ranks do not increase the count. | Experimental |
+| `dynamo_frontend_router_worker_state` | gauge | `router_worker_id`, `state`, `reason` | One sample with value `1` for each discovered worker, labeled with its current state and reason. The sample changes with the worker's state and disappears when discovery removes the ID. | Experimental |
 
 The `available`, `pending`, and `excluded` states are disjoint; `discovered`, which only `dynamo_frontend_router_workers` reports, is their sum. `available` requires successfully committed worker-set membership and current hard availability; `pending` means discovery has observed the worker but initialization has not completed; `excluded` means discovered but currently unavailable for routing.
 
@@ -222,13 +222,13 @@ All `dynamo_frontend_model_*` gauges carry a `model` label. The gauges other tha
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_frontend_model_ready` | gauge | — | Whether the frontend can currently route at least one inference request for the model. `1` means at least one complete serving topology with a live worker and serving engine is available; `0` means the model is registered but not currently routable. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_model_total_kv_blocks` | gauge | — | Total KV blocks available for a worker serving the model. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_frontend_model_max_num_seqs` | gauge | — | Maximum number of sequences for a worker serving the model. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_frontend_model_max_num_batched_tokens` | gauge | — | Maximum number of batched tokens for a worker serving the model. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_frontend_model_context_length` | gauge | — | Maximum context length for a worker serving the model, from the Model Deployment Card. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_frontend_model_kv_cache_block_size` | gauge | — | KV cache block size for a worker serving the model, from the Model Deployment Card. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_frontend_model_migration_limit` | gauge | — | Request migration limit for a worker serving the model, from the Model Deployment Card. | <Badge intent="launch" minimal>Check</Badge> |
+| `dynamo_frontend_model_ready` | gauge | — | Whether the frontend can currently route at least one inference request for the model. `1` means at least one complete serving topology with a live worker and serving engine is available; `0` means the model is registered but not currently routable. | |
+| `dynamo_frontend_model_total_kv_blocks` | gauge | — | Total KV blocks available for a worker serving the model. | |
+| `dynamo_frontend_model_max_num_seqs` | gauge | — | Maximum number of sequences for a worker serving the model. | |
+| `dynamo_frontend_model_max_num_batched_tokens` | gauge | — | Maximum number of batched tokens for a worker serving the model. | |
+| `dynamo_frontend_model_context_length` | gauge | — | Maximum context length for a worker serving the model, from the Model Deployment Card. | |
+| `dynamo_frontend_model_kv_cache_block_size` | gauge | — | KV cache block size for a worker serving the model, from the Model Deployment Card. | |
+| `dynamo_frontend_model_migration_limit` | gauge | — | Request migration limit for a worker serving the model, from the Model Deployment Card. | |
 
 The frontend evaluates `dynamo_frontend_model_ready` from its live routing catalog at scrape time, so worker registration and removal are reflected in the next scrape. Unlike request-populated metrics, the series appears when the model registers, without requiring an inference request. The series is absent while the model is not registered, and the entire family is absent when no models are registered. Detect this state with `absent(dynamo_frontend_model_ready{model="<model>"})`; a `== 0` comparison does not match an absent series. Aliases get no series of their own: a deployment served under several names emits one series, labeled with its primary name, so query an alias through its primary. `/v1/models` still lists alias names, but only the primary has a readiness series. A LoRA adapter is a distinct model rather than a second name for one, and keeps its own series.
 
@@ -238,12 +238,12 @@ Recorded for the experimental System One endpoint (`/v1/systemone`), which `DYN_
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_frontend_systemone_questions` | histogram | — | Questions per admitted request. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `dynamo_frontend_systemone_input_tokens` | histogram | — | Prompt tokens per admitted request, summed over its questions. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `dynamo_frontend_systemone_candidate_ids` | histogram | — | Candidate token IDs requested per admitted request. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `dynamo_frontend_systemone_cached_tokens` | histogram | — | Cached prompt tokens per completed question, when the worker reports them. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `dynamo_frontend_systemone_admitted_branches_total` | counter | — | Questions admitted for dispatch. Equals `dynamo_frontend_systemone_questions_sum`; use that instead. | <Badge intent="error" minimal>Deprecated</Badge> |
-| `dynamo_frontend_systemone_phase_seconds` | histogram | `phase` | Time in each phase: `preflight` (validating and tokenizing the request), `first_branch` (running the first question), or `fanout` (running the remaining questions on the same worker). | <Badge intent="warning" minimal>Experimental</Badge> |
+| `dynamo_frontend_systemone_questions` | histogram | — | Questions per admitted request. | Experimental |
+| `dynamo_frontend_systemone_input_tokens` | histogram | — | Prompt tokens per admitted request, summed over its questions. | Experimental |
+| `dynamo_frontend_systemone_candidate_ids` | histogram | — | Candidate token IDs requested per admitted request. | Experimental |
+| `dynamo_frontend_systemone_cached_tokens` | histogram | — | Cached prompt tokens per completed question, when the worker reports them. | Experimental |
+| `dynamo_frontend_systemone_admitted_branches_total` | counter | — | Questions admitted for dispatch. Equals `dynamo_frontend_systemone_questions_sum`; use that instead. | Deprecated |
+| `dynamo_frontend_systemone_phase_seconds` | histogram | `phase` | Time in each phase: `preflight` (validating and tokenizing the request), `first_branch` (running the first question), or `fanout` (running the remaining questions on the same worker). | Experimental |
 
 ### LoRA Allocation
 
@@ -251,14 +251,14 @@ Registered on every frontend and populated only when LoRA serving is enabled wit
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_frontend_lora_active_requests` | gauge | `endpoint`, `lora` | In-flight requests per LoRA adapter. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_lora_estimated_load` | gauge | `endpoint`, `lora` | Estimated load per adapter (windowed request count). | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_lora_raw_arrival_count` | gauge | `endpoint`, `lora` | Windowed arrival count per adapter. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_lora_replica_factor` | gauge | `endpoint`, `lora` | Replicas allocated to each adapter. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_lora_is_active` | gauge | `endpoint`, `lora` | 1 if the adapter is active, 0 if not. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_lora_churn_loads_total` | gauge | `endpoint` | Adapter loads in the latest allocation step. A per-step gauge despite its `_total` suffix; non-zero only with `DYN_LORA_ALLOCATION_ALGORITHM=mcf`. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_frontend_lora_churn_unloads_total` | gauge | `endpoint` | Adapter unloads in the latest allocation step. A per-step gauge despite its `_total` suffix; non-zero only with `DYN_LORA_ALLOCATION_ALGORITHM=mcf`. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_frontend_lora_overflow_count` | gauge | `endpoint` | Replicas the allocator could not place in the latest step. Non-zero only with `DYN_LORA_ALLOCATION_ALGORITHM=mcf`. | <Badge intent="success" minimal>Stable</Badge> |
+| `dynamo_frontend_lora_active_requests` | gauge | `endpoint`, `lora` | In-flight requests per LoRA adapter. | |
+| `dynamo_frontend_lora_estimated_load` | gauge | `endpoint`, `lora` | Estimated load per adapter (windowed request count). | |
+| `dynamo_frontend_lora_raw_arrival_count` | gauge | `endpoint`, `lora` | Windowed arrival count per adapter. | |
+| `dynamo_frontend_lora_replica_factor` | gauge | `endpoint`, `lora` | Replicas allocated to each adapter. | |
+| `dynamo_frontend_lora_is_active` | gauge | `endpoint`, `lora` | 1 if the adapter is active, 0 if not. | |
+| `dynamo_frontend_lora_churn_loads_total` | gauge | `endpoint` | Adapter loads in the latest allocation step. A per-step gauge despite its `_total` suffix; non-zero only with `DYN_LORA_ALLOCATION_ALGORITHM=mcf`. | |
+| `dynamo_frontend_lora_churn_unloads_total` | gauge | `endpoint` | Adapter unloads in the latest allocation step. A per-step gauge despite its `_total` suffix; non-zero only with `DYN_LORA_ALLOCATION_ALGORITHM=mcf`. | |
+| `dynamo_frontend_lora_overflow_count` | gauge | `endpoint` | Replicas the allocator could not place in the latest step. Non-zero only with `DYN_LORA_ALLOCATION_ALGORITHM=mcf`. | |
 
 ### Async Runtime and Request Plane
 
@@ -266,30 +266,30 @@ Health of the frontend's Tokio async runtime and of its request path to workers.
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_frontend_event_loop_delay_seconds` | histogram | — | Delay of a 10 ms timer on the async runtime. Higher values mean the runtime is overloaded. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_event_loop_stall_total` | counter | — | Timer delays longer than 5 ms. Equals `dynamo_frontend_event_loop_delay_seconds_count - ignoring(le) dynamo_frontend_event_loop_delay_seconds_bucket{le="0.005"}`; use that instead. | <Badge intent="error" minimal>Deprecated</Badge> |
-| `dynamo_tokio_alive_tasks` | gauge | — | Live async tasks. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_tokio_global_queue_depth` | gauge | — | Tasks in the runtime's global queue. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_tokio_blocking_threads` | gauge | — | Threads in the blocking pool. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_tokio_blocking_idle_threads` | gauge | — | Idle threads in the blocking pool. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_tokio_blocking_queue_depth` | gauge | — | Tasks waiting for a blocking-pool thread. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_tokio_budget_forced_yield_total` | counter | — | Times a task was forced to yield after using its budget. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_tokio_queue_overload_warnings_total` | counter | — | Warnings logged for sustained runnable-queue pressure. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_tokio_worker_busy_ratio` | gauge | `worker` | Mean task poll time of each runtime thread, rescaled from 0 to 1000, where 1 ms or more reads 1000. Despite its name, it does not measure busy time. Computed from `dynamo_tokio_worker_mean_poll_time_ns` as `floor(clamp_max(dynamo_tokio_worker_mean_poll_time_ns / 1e9 / 0.001, 1) * 1000)`; use that instead. | <Badge intent="error" minimal>Deprecated</Badge> |
-| `dynamo_tokio_worker_mean_poll_time_ns` | gauge | `worker` | Mean task poll time of each runtime thread, in nanoseconds. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_tokio_worker_local_queue_depth` | gauge | `worker` | Tasks in each runtime thread's local queue. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_tokio_worker_park_count_total` | counter | `worker` | Times each runtime thread parked. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_tokio_worker_steal_count_total` | counter | `worker` | Tasks each runtime thread stole from other threads. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_tokio_worker_overflow_count_total` | counter | `worker` | Times each runtime thread's local queue overflowed. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_request_plane_inflight_requests` | gauge | — | Requests sent to workers that have not finished. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_request_plane_queue_seconds` | histogram | — | Time from dispatch until the request is sent to a worker. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_request_plane_send_seconds` | histogram | — | Time to send a request to a worker. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_request_plane_roundtrip_ttft_seconds` | histogram | — | Time from sending a request until its first response arrives. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_transport_tcp_bytes_sent_total` | counter | — | Request bytes sent over TCP. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_transport_tcp_bytes_received_total` | counter | — | Acknowledgement bytes received over TCP. Streamed responses are not counted. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_transport_tcp_errors_total` | counter | — | Failed TCP requests, including send failures and timeouts. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_transport_tcp_accept_backoff_total` | counter | — | Response-server accept failures caused by descriptor or memory exhaustion. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_transport_nats_errors_total` | counter | `error_type` | NATS request errors. Only with the NATS request plane. | <Badge intent="launch" minimal>Check</Badge> |
+| `dynamo_frontend_event_loop_delay_seconds` | histogram | — | Delay of a 10 ms timer on the async runtime. Higher values mean the runtime is overloaded. | |
+| `dynamo_frontend_event_loop_stall_total` | counter | — | Timer delays longer than 5 ms. Equals `dynamo_frontend_event_loop_delay_seconds_count - ignoring(le) dynamo_frontend_event_loop_delay_seconds_bucket{le="0.005"}`; use that instead. | Deprecated |
+| `dynamo_tokio_alive_tasks` | gauge | — | Live async tasks. | |
+| `dynamo_tokio_global_queue_depth` | gauge | — | Tasks in the runtime's global queue. | |
+| `dynamo_tokio_blocking_threads` | gauge | — | Threads in the blocking pool. | |
+| `dynamo_tokio_blocking_idle_threads` | gauge | — | Idle threads in the blocking pool. | |
+| `dynamo_tokio_blocking_queue_depth` | gauge | — | Tasks waiting for a blocking-pool thread. | |
+| `dynamo_tokio_budget_forced_yield_total` | counter | — | Times a task was forced to yield after using its budget. | |
+| `dynamo_tokio_queue_overload_warnings_total` | counter | — | Warnings logged for sustained runnable-queue pressure. | |
+| `dynamo_tokio_worker_busy_ratio` | gauge | `worker` | Mean task poll time of each runtime thread, rescaled from 0 to 1000, where 1 ms or more reads 1000. Despite its name, it does not measure busy time. Computed from `dynamo_tokio_worker_mean_poll_time_ns` as `floor(clamp_max(dynamo_tokio_worker_mean_poll_time_ns / 1e9 / 0.001, 1) * 1000)`; use that instead. | Deprecated |
+| `dynamo_tokio_worker_mean_poll_time_ns` | gauge | `worker` | Mean task poll time of each runtime thread, in nanoseconds. | |
+| `dynamo_tokio_worker_local_queue_depth` | gauge | `worker` | Tasks in each runtime thread's local queue. | |
+| `dynamo_tokio_worker_park_count_total` | counter | `worker` | Times each runtime thread parked. | |
+| `dynamo_tokio_worker_steal_count_total` | counter | `worker` | Tasks each runtime thread stole from other threads. | |
+| `dynamo_tokio_worker_overflow_count_total` | counter | `worker` | Times each runtime thread's local queue overflowed. | |
+| `dynamo_request_plane_inflight_requests` | gauge | — | Requests sent to workers that have not finished. | |
+| `dynamo_request_plane_queue_seconds` | histogram | — | Time from dispatch until the request is sent to a worker. | |
+| `dynamo_request_plane_send_seconds` | histogram | — | Time to send a request to a worker. | |
+| `dynamo_request_plane_roundtrip_ttft_seconds` | histogram | — | Time from sending a request until its first response arrives. | |
+| `dynamo_transport_tcp_bytes_sent_total` | counter | — | Request bytes sent over TCP. | |
+| `dynamo_transport_tcp_bytes_received_total` | counter | — | Acknowledgement bytes received over TCP. Streamed responses are not counted. | |
+| `dynamo_transport_tcp_errors_total` | counter | — | Failed TCP requests, including send failures and timeouts. | |
+| `dynamo_transport_tcp_accept_backoff_total` | counter | — | Response-server accept failures caused by descriptor or memory exhaustion. | |
+| `dynamo_transport_nats_errors_total` | counter | `error_type` | NATS request errors. Only with the NATS request plane. | |
 
 ## Component Metrics
 
@@ -299,13 +299,13 @@ The request metrics below are recorded for every endpoint a process serves. vLLM
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_component_inflight_requests` | gauge | — | Requests currently being processed by the component. | <Badge intent="info" minimal>Medium</Badge> |
-| `dynamo_component_request_bytes_total` | counter | — | Total bytes received in requests. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_request_duration_seconds` | histogram | — | Time to handle a request, until its response stream ends. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_requests_total` | counter | — | Total requests processed. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_errors_total` | counter | `error_type` | Errors encountered while handling a request. See [Component error types](metric-labels.mdx#component-error-types). | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_response_bytes_total` | counter | — | Total bytes sent in responses. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_cancellation_total` | counter | — | Requests cancelled by the work handler. Counts cancellation signals received by the worker, not whether the engine actually aborted, deduplicated so a control message plus a socket close for the same request counts once. See [Request Cancellation Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-cancellation-architecture.md). | <Badge intent="success" minimal>Stable</Badge> |
+| `dynamo_component_inflight_requests` | gauge | — | Requests currently being processed by the component. | |
+| `dynamo_component_request_bytes_total` | counter | — | Total bytes received in requests. | |
+| `dynamo_component_request_duration_seconds` | histogram | — | Time to handle a request, until its response stream ends. | |
+| `dynamo_component_requests_total` | counter | — | Total requests processed. | |
+| `dynamo_component_errors_total` | counter | `error_type` | Errors encountered while handling a request. See [Component error types](metric-labels.mdx#component-error-types). | |
+| `dynamo_component_response_bytes_total` | counter | — | Total bytes sent in responses. | |
+| `dynamo_component_cancellation_total` | counter | — | Requests cancelled by the work handler. Counts cancellation signals received by the worker, not whether the engine actually aborted, deduplicated so a control message plus a socket close for the same request counts once. See [Request Cancellation Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-cancellation-architecture.md). | |
 
 The shared TCP request plane, the default, exposes the following `dynamo_work_handler_*` metrics. They are
 registered once per process and are independent of backend admission; see [Backend Admission Control](../../developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md#backend).
@@ -313,14 +313,14 @@ With the NATS request plane, all except `dynamo_work_handler_time_to_first_respo
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_work_handler_pool_active_tasks` | gauge | — | TCP request handlers currently holding worker-pool permits, from dispatch until downstream handling finishes. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_work_handler_pool_capacity` | gauge | — | Configured capacity of the TCP worker pool, set by `DYN_TCP_WORKER_POOL_SIZE`. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_work_handler_queue_depth` | gauge | — | Requests currently in the bounded TCP work queue awaiting dispatcher pickup. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_work_handler_queue_capacity` | gauge | — | Configured capacity of the bounded TCP work queue, set by `DYN_TCP_WORK_QUEUE_SIZE`. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_work_handler_enqueue_rejected_total` | counter | — | Requests rejected before TCP worker dispatch because the bounded work queue was full or the dispatcher channel was closed. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_work_handler_permit_wait_seconds` | histogram | — | Time a queued request spends waiting for a TCP worker-pool permit after dispatcher pickup. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_work_handler_network_transit_seconds` | histogram | — | Network time from the frontend to the worker, computed from the clocks on both hosts. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_work_handler_time_to_first_response_seconds` | histogram | — | Time from receiving a request until its response stream opens. This is not the time to the first token. | <Badge intent="success" minimal>Stable</Badge> |
+| `dynamo_work_handler_pool_active_tasks` | gauge | — | TCP request handlers currently holding worker-pool permits, from dispatch until downstream handling finishes. | |
+| `dynamo_work_handler_pool_capacity` | gauge | — | Configured capacity of the TCP worker pool, set by `DYN_TCP_WORKER_POOL_SIZE`. | |
+| `dynamo_work_handler_queue_depth` | gauge | — | Requests currently in the bounded TCP work queue awaiting dispatcher pickup. | |
+| `dynamo_work_handler_queue_capacity` | gauge | — | Configured capacity of the bounded TCP work queue, set by `DYN_TCP_WORK_QUEUE_SIZE`. | |
+| `dynamo_work_handler_enqueue_rejected_total` | counter | — | Requests rejected before TCP worker dispatch because the bounded work queue was full or the dispatcher channel was closed. | |
+| `dynamo_work_handler_permit_wait_seconds` | histogram | — | Time a queued request spends waiting for a TCP worker-pool permit after dispatcher pickup. | |
+| `dynamo_work_handler_network_transit_seconds` | histogram | — | Network time from the frontend to the worker, computed from the clocks on both hosts. | |
+| `dynamo_work_handler_time_to_first_response_seconds` | histogram | — | Time from receiving a request until its response stream opens. This is not the time to the first token. | |
 
 The `dynamo_backend_admission_*` metrics track engine occupancy, queueing, and request outcomes.
 These metrics count requests only when at least one engine limit is configured. With both engine limits
@@ -333,13 +333,13 @@ Sum across all `dp_rank` values for worker totals.
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_backend_admission_engine_request_count` | gauge | `dp_rank` | Requests admitted to the engine that have not finished. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_backend_admission_engine_request_waiting_count` | gauge | `dp_rank` | Admitted requests still awaiting their first generated token or completion. Replaces `dynamo_backend_admission_engine_wait_count`. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_backend_admission_request_queue_count` | gauge | `dp_rank` | Requests waiting outside the engine in gate queues. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_backend_admission_request_receive_total` | counter | `dp_rank` | All requests received by the gate, counted once regardless of outcome. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_backend_admission_request_admit_total` | counter | `dp_rank`, `source` | Requests passed into the engine. `source="direct"` means admitted without queueing; `source="queue"` means admitted after queueing. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_backend_admission_rejection_total` | counter | `dp_rank` | Requests the gate could neither admit nor queue. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_backend_admission_cancellation_total` | counter | `dp_rank` | Requests cancelled before engine admission. | <Badge intent="launch" minimal>Check</Badge> |
+| `dynamo_backend_admission_engine_request_count` | gauge | `dp_rank` | Requests admitted to the engine that have not finished. | Experimental |
+| `dynamo_backend_admission_engine_request_waiting_count` | gauge | `dp_rank` | Admitted requests still awaiting their first generated token or completion. Replaces `dynamo_backend_admission_engine_wait_count`. | Experimental |
+| `dynamo_backend_admission_request_queue_count` | gauge | `dp_rank` | Requests waiting outside the engine in gate queues. | Experimental |
+| `dynamo_backend_admission_request_receive_total` | counter | `dp_rank` | All requests received by the gate, counted once regardless of outcome. | Experimental |
+| `dynamo_backend_admission_request_admit_total` | counter | `dp_rank`, `source` | Requests passed into the engine. `source="direct"` means admitted without queueing; `source="queue"` means admitted after queueing. | Experimental |
+| `dynamo_backend_admission_rejection_total` | counter | `dp_rank` | Requests the gate could neither admit nor queue. | Experimental |
+| `dynamo_backend_admission_cancellation_total` | counter | `dp_rank` | Requests cancelled before engine admission. | Experimental |
 
 ### KV Event Publishing
 
@@ -347,12 +347,12 @@ Workers that publish KV cache events to the router: vLLM, SGLang, TensorRT-LLM w
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_component_kv_publisher_engines_dropped_events_total` | counter | — | KV events the engine dropped before publishing, detected from event ID gaps. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_kv_publisher_zmq_events_total` | counter | `stage`, `event_type` | KV events received from the engine over ZMQ, and accepted. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_kv_publisher_zmq_filtered_events_total` | counter | `event_type`, `reason` | KV events filtered out before conversion. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_component_kv_publisher_zmq_conversion_issues_total` | counter | `event_type`, `reason` | KV events dropped because they could not be converted. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_component_kv_publisher_zmq_suspicious_events_total` | counter | `event_type`, `reason` | Suspicious KV events that were still forwarded. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_worker_prefill_completion_enqueue_failures_total` | counter | `reason` | Prefill-completion events dropped because the local publish queue was full or closed. Aggregated and decode workers only. | <Badge intent="success" minimal>Stable</Badge> |
+| `dynamo_component_kv_publisher_engines_dropped_events_total` | counter | — | KV events the engine dropped before publishing, detected from event ID gaps. | |
+| `dynamo_component_kv_publisher_zmq_events_total` | counter | `stage`, `event_type` | KV events received from the engine over ZMQ, and accepted. | |
+| `dynamo_component_kv_publisher_zmq_filtered_events_total` | counter | `event_type`, `reason` | KV events filtered out before conversion. | |
+| `dynamo_component_kv_publisher_zmq_conversion_issues_total` | counter | `event_type`, `reason` | KV events dropped because they could not be converted. | |
+| `dynamo_component_kv_publisher_zmq_suspicious_events_total` | counter | `event_type`, `reason` | Suspicious KV events that were still forwarded. | |
+| `dynamo_component_worker_prefill_completion_enqueue_failures_total` | counter | `reason` | Prefill-completion events dropped because the local publish queue was full or closed. Aggregated and decode workers only. | |
 
 ### Engine State
 
@@ -363,12 +363,12 @@ Label sets depend on the worker type:
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_component_total_blocks` | gauge | `dp_rank` | Total KV cache blocks on the worker. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_gpu_cache_usage_percent` | gauge | `dp_rank` | GPU KV cache usage, from 0.0 to 1.0. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_kv_cache_hit_rate` | gauge | `dp_rank` | Prefix cache hit rate, from 0.0 to 1.0. Registered, but no in-tree engine reports it yet. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_model_load_time_seconds` | gauge | — | Time to load the model and start the engine. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_drain_time_seconds` | gauge | — | Time spent draining in-flight requests at shutdown. Unified backend workers only. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_component_cleanup_time_seconds` | gauge | — | Time spent releasing engine resources at shutdown. Unified backend workers only. | <Badge intent="launch" minimal>Check</Badge> |
+| `dynamo_component_total_blocks` | gauge | `dp_rank` | Total KV cache blocks on the worker. | |
+| `dynamo_component_gpu_cache_usage_percent` | gauge | `dp_rank` | GPU KV cache usage, from 0.0 to 1.0. | |
+| `dynamo_component_kv_cache_hit_rate` | gauge | `dp_rank` | Prefix cache hit rate, from 0.0 to 1.0. Registered, but no in-tree engine reports it yet. | |
+| `dynamo_component_model_load_time_seconds` | gauge | — | Time to load the model and start the engine. | |
+| `dynamo_component_drain_time_seconds` | gauge | — | Time spent draining in-flight requests at shutdown. Unified backend workers only. | |
+| `dynamo_component_cleanup_time_seconds` | gauge | — | Time spent releasing engine resources at shutdown. Unified backend workers only. | |
 
 ### Multimodal and Embedding Caches
 
@@ -382,17 +382,17 @@ The embedding cache metrics require `--multimodal-embedding-cache-capacity-gb` g
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_component_embedding_cache_hits_total` | counter | — | Embedding cache hits. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_component_embedding_cache_misses_total` | counter | — | Embedding cache misses. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_component_embedding_cache_evictions_total` | counter | — | Embedding cache evictions. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_embedding_cache_utilization` | gauge | — | Embedding cache memory use, from 0.0 to 1.0. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_embedding_cache_current_bytes` | gauge | — | Embedding cache memory use in bytes. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_embedding_cache_entries` | gauge | — | Entries in the embedding cache. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_image_cache_entries` | gauge | — | Entries in the in-process image cache. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_image_shared_cache_get_duration_seconds` | histogram | `outcome`, `size_bucket` | Shared image cache read latency, by outcome and payload size. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_component_image_shared_cache_set_duration_seconds` | histogram | `outcome`, `size_bucket` | Shared image cache write latency, by outcome and payload size. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_embedding_batch_size` | histogram | — | Inputs per `/v1/embeddings` request. SGLang embedding workers (`--embedding-worker`) only. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_embedding_input_tokens` | histogram | — | Prompt tokens per `/v1/embeddings` request. SGLang embedding workers only. | <Badge intent="success" minimal>Stable</Badge> |
+| `dynamo_component_embedding_cache_hits_total` | counter | — | Embedding cache hits. | |
+| `dynamo_component_embedding_cache_misses_total` | counter | — | Embedding cache misses. | |
+| `dynamo_component_embedding_cache_evictions_total` | counter | — | Embedding cache evictions. | |
+| `dynamo_component_embedding_cache_utilization` | gauge | — | Embedding cache memory use, from 0.0 to 1.0. | |
+| `dynamo_component_embedding_cache_current_bytes` | gauge | — | Embedding cache memory use in bytes. | |
+| `dynamo_component_embedding_cache_entries` | gauge | — | Entries in the embedding cache. | |
+| `dynamo_component_image_cache_entries` | gauge | — | Entries in the in-process image cache. | |
+| `dynamo_component_image_shared_cache_get_duration_seconds` | histogram | `outcome`, `size_bucket` | Shared image cache read latency, by outcome and payload size. | |
+| `dynamo_component_image_shared_cache_set_duration_seconds` | histogram | `outcome`, `size_bucket` | Shared image cache write latency, by outcome and payload size. | |
+| `dynamo_embedding_batch_size` | histogram | — | Inputs per `/v1/embeddings` request. SGLang embedding workers (`--embedding-worker`) only. | |
+| `dynamo_embedding_input_tokens` | histogram | — | Prompt tokens per `/v1/embeddings` request. SGLang embedding workers only. | |
 
 ### TensorRT-LLM Metrics Computed by Dynamo
 
@@ -400,16 +400,16 @@ TensorRT-LLM workers started with `--publish-metrics` add these to the engine's 
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `trtllm_num_aborted_requests_total` | counter | — | Requests aborted or cancelled. | <Badge intent="success" minimal>Stable</Badge> |
-| `trtllm_request_type_image_total` | counter | — | Requests that contain images. | <Badge intent="launch" minimal>Check</Badge> |
-| `trtllm_request_type_structured_output_total` | counter | — | Requests that use structured (guided) output. | <Badge intent="launch" minimal>Check</Badge> |
-| `trtllm_kv_transfer_success_total` | counter | — | Successful KV cache transfers. Equals `trtllm_kv_transfer_bytes_count`; use that instead. | <Badge intent="error" minimal>Deprecated</Badge> |
-| `trtllm_kv_transfer_latency_seconds` | histogram | — | KV cache transfer time per request. | <Badge intent="success" minimal>Stable</Badge> |
-| `trtllm_kv_transfer_bytes` | histogram | — | KV cache transfer size per request, in bytes. | <Badge intent="success" minimal>Stable</Badge> |
-| `trtllm_kv_transfer_speed_gb_s` | histogram | — | KV cache transfer speed per request, in GB/s. | <Badge intent="success" minimal>Stable</Badge> |
-| `trtllm_kv_event_buffer_capacity` | gauge | — | Configured size of the engine's KV event buffer. | <Badge intent="success" minimal>Stable</Badge> |
-| `trtllm_kv_event_drain_batch_size` | histogram | — | KV events returned per polling drain. Only when KV events are polled. | <Badge intent="success" minimal>Stable</Badge> |
-| `trtllm_kv_event_id_gap_events_total` | counter | — | Missing KV event IDs detected by Dynamo. | <Badge intent="success" minimal>Stable</Badge> |
+| `trtllm_num_aborted_requests_total` | counter | — | Requests aborted or cancelled. | |
+| `trtllm_request_type_image_total` | counter | — | Requests that contain images. | |
+| `trtllm_request_type_structured_output_total` | counter | — | Requests that use structured (guided) output. | |
+| `trtllm_kv_transfer_success_total` | counter | — | Successful KV cache transfers. Equals `trtllm_kv_transfer_bytes_count`; use that instead. | Deprecated |
+| `trtllm_kv_transfer_latency_seconds` | histogram | — | KV cache transfer time per request. | |
+| `trtllm_kv_transfer_bytes` | histogram | — | KV cache transfer size per request, in bytes. | |
+| `trtllm_kv_transfer_speed_gb_s` | histogram | — | KV cache transfer speed per request, in GB/s. | |
+| `trtllm_kv_event_buffer_capacity` | gauge | — | Configured size of the engine's KV event buffer. | |
+| `trtllm_kv_event_drain_batch_size` | histogram | — | KV events returned per polling drain. Only when KV events are polled. | |
+| `trtllm_kv_event_id_gap_events_total` | counter | — | Missing KV event IDs detected by Dynamo. | |
 
 ### Engine Failover
 
@@ -417,12 +417,12 @@ vLLM workers with `--gms-shadow-mode` (GPU Memory Service shadow failover). Thes
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_component_engine_failover_state` | gauge | `state` | 1 for the engine's current failover state: `init`, `standby`, `waking`, or `active`. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_engine_failover_state_entered_timestamp_seconds` | gauge | — | Unix time the engine entered its current state. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_engine_failover_last_state_duration_seconds` | gauge | `state` | Duration of the most recent stay in each state. For `waking`, this is the switch time. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_engine_failover_transitions_total` | counter | `from_state`, `to_state` | Failover state transitions. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_engine_failover_switch_attempts_total` | counter | — | Promotions attempted after winning the failover lock. Kept across restarts. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_engine_failover_switch_success_total` | counter | — | Promotions that completed and began serving. Kept across restarts. | <Badge intent="success" minimal>Stable</Badge> |
+| `dynamo_component_engine_failover_state` | gauge | `state` | 1 for the engine's current failover state: `init`, `standby`, `waking`, or `active`. | |
+| `dynamo_component_engine_failover_state_entered_timestamp_seconds` | gauge | — | Unix time the engine entered its current state. | |
+| `dynamo_component_engine_failover_last_state_duration_seconds` | gauge | `state` | Duration of the most recent stay in each state. For `waking`, this is the switch time. | |
+| `dynamo_component_engine_failover_transitions_total` | counter | `from_state`, `to_state` | Failover state transitions. | |
+| `dynamo_component_engine_failover_switch_attempts_total` | counter | — | Promotions attempted after winning the failover lock. Kept across restarts. | |
+| `dynamo_component_engine_failover_switch_success_total` | counter | — | Promotions that completed and began serving. Kept across restarts. | |
 
 ## Router Metrics
 
@@ -430,7 +430,7 @@ Emitted by every process that routes requests: the frontend, which serves them o
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_component_router_worker_registered` | gauge | `router_worker_id`, `dp_rank`, `worker_type` | A sample with value `1` for each worker and DP rank in the KV router scheduler's current registration and hard-availability view; absent in other router modes. Removed or unavailable workers disappear from the output rather than emitting `0`. | <Badge intent="success" minimal>Stable</Badge> |
+| `dynamo_component_router_worker_registered` | gauge | `router_worker_id`, `dp_rank`, `worker_type` | A sample with value `1` for each worker and DP rank in the KV router scheduler's current registration and hard-availability view; absent in other router modes. Removed or unavailable workers disappear from the output rather than emitting `0`. | |
 
 The `dynamo_component_router_worker_registered` sample can appear during scheduler preparation, before worker-set materialization commits, so it does not indicate committed model readiness. Late request bookkeeping cannot restore a removed worker's series. Prefer the [Router Worker Inventory](#router-worker-inventory) metrics for committed available-worker counts and exclusion reasons on the frontend.
 
@@ -440,16 +440,16 @@ The `dynamo_component_router_worker_registered` sample can appear during schedul
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_component_router_requests_started_total` | counter | — | Requests admitted by the router scheduler. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_router_requests_total` | counter | — | Total requests processed by the router. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_router_time_to_first_token_seconds` | histogram | — | Time to first token in seconds. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_router_inter_token_latency_seconds` | histogram | — | Average inter-token latency in seconds. With `--router-mode kv`, recorded only when `--router-track-output-blocks` is set; otherwise the histogram stays empty. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_router_input_sequence_tokens` | histogram | `phase`, `model` | Input sequence length per routing attempt, excluding query-only lookups. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_router_output_sequence_tokens` | histogram | — | Output sequence length in tokens. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_router_kv_hit_rate` | histogram | — | Predicted KV cache hit rate at routing time, from 0.0 to 1.0. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_router_non_max_overlap_selections_total` | counter | `worker_type` | Admitted prefill scheduler selections routed to a worker with less KV cache overlap than another eligible worker. Pinned requests and equal-overlap ties are excluded. `worker_type` is `prefill`. Equals `dynamo_component_router_overlap_blocks_lost_count`; use that instead. | <Badge intent="error" minimal>Deprecated</Badge> |
-| `dynamo_component_router_overlap_blocks_lost` | histogram | `worker_type` | Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and the selected worker, for each non-max-overlap selection. `worker_type` is `prefill`. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_router_kv_transfer_estimated_latency_seconds` | histogram | — | Upper-bound estimate of the KV cache transfer time from prefill to decode. Recorded only in disaggregated serving. | <Badge intent="success" minimal>Stable</Badge> |
+| `dynamo_component_router_requests_started_total` | counter | — | Requests admitted by the router scheduler. | |
+| `dynamo_component_router_requests_total` | counter | — | Total requests processed by the router. | |
+| `dynamo_component_router_time_to_first_token_seconds` | histogram | — | Time to first token in seconds. | |
+| `dynamo_component_router_inter_token_latency_seconds` | histogram | — | Average inter-token latency in seconds. With `--router-mode kv`, recorded only when `--router-track-output-blocks` is set; otherwise the histogram stays empty. | |
+| `dynamo_component_router_input_sequence_tokens` | histogram | `phase`, `model` | Input sequence length per routing attempt, excluding query-only lookups. | |
+| `dynamo_component_router_output_sequence_tokens` | histogram | — | Output sequence length in tokens. | |
+| `dynamo_component_router_kv_hit_rate` | histogram | — | Predicted KV cache hit rate at routing time, from 0.0 to 1.0. | |
+| `dynamo_component_router_non_max_overlap_selections_total` | counter | `worker_type` | Admitted prefill scheduler selections routed to a worker with less KV cache overlap than another eligible worker. Pinned requests and equal-overlap ties are excluded. `worker_type` is `prefill`. Equals `dynamo_component_router_overlap_blocks_lost_count`; use that instead. | Deprecated |
+| `dynamo_component_router_overlap_blocks_lost` | histogram | `worker_type` | Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and the selected worker, for each non-max-overlap selection. `worker_type` is `prefill`. | |
+| `dynamo_component_router_kv_transfer_estimated_latency_seconds` | histogram | — | Upper-bound estimate of the KV cache transfer time from prefill to decode. Recorded only in disaggregated serving. | |
 
 ### KV-Cache Reuse Telemetry
 
@@ -457,9 +457,9 @@ The cache reuse funnel shows how much of the incoming prompt could be reused, an
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_component_router_kv_best_eligible_cached_prefix_tokens_total` | counter | `router_id`, `model`, `phase` | F2, best available match: prefix tokens the router estimates are cached on the best-matching eligible worker. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_router_kv_selected_cached_prefix_tokens_total` | counter | `router_id`, `model`, `phase` | F3, selected worker's match: prefix tokens the router estimates are cached on the worker it chooses. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_router_kv_worker_reused_tokens_total` | counter | `router_id`, `model`, `phase` | F4, reported reuse: tokens the worker reports reusing. Missing reports count as zero. | <Badge intent="success" minimal>Stable</Badge> |
+| `dynamo_component_router_kv_best_eligible_cached_prefix_tokens_total` | counter | `router_id`, `model`, `phase` | F2, best available match: prefix tokens the router estimates are cached on the best-matching eligible worker. | |
+| `dynamo_component_router_kv_selected_cached_prefix_tokens_total` | counter | `router_id`, `model`, `phase` | F3, selected worker's match: prefix tokens the router estimates are cached on the worker it chooses. | |
+| `dynamo_component_router_kv_worker_reused_tokens_total` | counter | `router_id`, `model`, `phase` | F4, reported reuse: tokens the worker reports reusing. Missing reports count as zero. | |
 
 Compare token increases over the same time window and matching KV-routing traffic. Use a long enough window: the steps are recorded at different times, and F4 depends on worker reports arriving after routing. Short windows may therefore compare different requests. Divide each step by F0 to express it as a percentage of incoming tokens.
 
@@ -478,12 +478,12 @@ vLLM, SGLang, and TensorRT-LLM workers report F4 on the final response chunk of 
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_router_overhead_block_hashing_ms` | histogram | — | Time computing block hashes. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_router_overhead_indexer_find_matches_ms` | histogram | — | Time in indexer `find_matches`. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_router_overhead_seq_hashing_ms` | histogram | — | Time computing sequence hashes. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_router_overhead_scheduling_ms` | histogram | — | Time in scheduler worker selection. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_router_overhead_shared_cache_query_ms` | histogram | — | Time querying the shared KV cache. Recorded only with `--shared-cache-type hicache`. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_router_overhead_total_ms` | histogram | — | Total routing overhead per request. | <Badge intent="success" minimal>Stable</Badge> |
+| `dynamo_router_overhead_block_hashing_ms` | histogram | — | Time computing block hashes. | |
+| `dynamo_router_overhead_indexer_find_matches_ms` | histogram | — | Time in indexer `find_matches`. | |
+| `dynamo_router_overhead_seq_hashing_ms` | histogram | — | Time computing sequence hashes. | |
+| `dynamo_router_overhead_scheduling_ms` | histogram | — | Time in scheduler worker selection. | |
+| `dynamo_router_overhead_shared_cache_query_ms` | histogram | — | Time querying the shared KV cache. Recorded only with `--shared-cache-type hicache`. | |
+| `dynamo_router_overhead_total_ms` | histogram | — | Total routing overhead per request. | |
 
 ### Router Queue Metrics
 
@@ -491,26 +491,26 @@ These metrics have series once a KV router starts, whether or not queueing is en
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_frontend_router_queue_pending_requests` | gauge | — | Requests pending in the router scheduler queue. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_router_queue_pending_isl_tokens` | gauge | — | Raw input-sequence tokens pending in the queue. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_router_queue_pending_cached_tokens` | gauge | — | Cached-token estimate captured when each request enters the queue. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_router_queue_backpressure_total` | counter | `reason` | Queue rejections, by the configured limit that caused them. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_frontend_router_admission_received_total` | counter | — | Attempts received by router admission, including retries. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_frontend_router_admission_rejected_total` | counter | `reason` | Attempts rejected because their deadline passed (`reason="due_time_passed"`). The `predicted_miss` reason is reserved and always 0. | <Badge intent="success" minimal>Stable</Badge> |
+| `dynamo_frontend_router_queue_pending_requests` | gauge | — | Requests pending in the router scheduler queue. | |
+| `dynamo_frontend_router_queue_pending_isl_tokens` | gauge | — | Raw input-sequence tokens pending in the queue. | |
+| `dynamo_frontend_router_queue_pending_cached_tokens` | gauge | — | Cached-token estimate captured when each request enters the queue. | |
+| `dynamo_frontend_router_queue_backpressure_total` | counter | `reason` | Queue rejections, by the configured limit that caused them. | |
+| `dynamo_frontend_router_admission_received_total` | counter | — | Attempts received by router admission, including retries. | |
+| `dynamo_frontend_router_admission_rejected_total` | counter | `reason` | Attempts rejected because their deadline passed (`reason="due_time_passed"`). The `predicted_miss` reason is reserved and always 0. | |
 
 ### KV Indexer Metrics
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_component_kv_cache_events_applied` | counter | `status`, `event_type` | KV cache events applied to the router's radix-tree index, including events for lower tiers such as host-pinned memory and disk. See [Metric-specific labels](metric-labels.mdx#metric-specific-labels). | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_ckf_mutation_total` | counter | `outcome` | CKF block-level mutation outcomes recorded by the router indexer. Always 0: nothing increments it. | <Badge intent="error" minimal>Deprecated</Badge> |
-| `dynamo_component_kv_cache_event_warnings` | counter | `warning_kind` | Suspicious KV cache events seen by the index, such as duplicate stores. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_router_kv_event_source_mismatch_workers` | gauge | `model`, `worker_type`, `target_namespace`, `target_component`, `target_endpoint` | Serving workers whose KV event source is missing, ambiguous, or disabled. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_router_kv_zmq_ingress_sources` | gauge | `state` | KV event sources on the ZMQ event plane, by lifecycle state. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_router_kv_zmq_ingress_batches_total` | counter | — | KV event batches received over ZMQ. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_router_kv_zmq_ingress_lifecycle_total` | counter | `action` | Lifecycle transitions and errors of ZMQ KV event sources. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_router_remote_indexer_query_failures_total` | counter | `router_id` | Failed overlap queries to a remote indexer. Only with `--use-remote-indexer`. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_component_router_remote_indexer_write_failures_total` | counter | `router_id` | Failed routing-decision writes to a remote indexer. Only with `--use-remote-indexer`. | <Badge intent="launch" minimal>Check</Badge> |
+| `dynamo_component_kv_cache_events_applied` | counter | `status`, `event_type` | KV cache events applied to the router's radix-tree index, including events for lower tiers such as host-pinned memory and disk. See [Metric-specific labels](metric-labels.mdx#metric-specific-labels). | |
+| `dynamo_component_ckf_mutation_total` | counter | `outcome` | CKF block-level mutation outcomes recorded by the router indexer. Always 0: nothing increments it. | Deprecated |
+| `dynamo_component_kv_cache_event_warnings` | counter | `warning_kind` | Suspicious KV cache events seen by the index, such as duplicate stores. | |
+| `dynamo_component_router_kv_event_source_mismatch_workers` | gauge | `model`, `worker_type`, `target_namespace`, `target_component`, `target_endpoint` | Serving workers whose KV event source is missing, ambiguous, or disabled. | |
+| `dynamo_component_router_kv_zmq_ingress_sources` | gauge | `state` | KV event sources on the ZMQ event plane, by lifecycle state. | |
+| `dynamo_component_router_kv_zmq_ingress_batches_total` | counter | — | KV event batches received over ZMQ. | |
+| `dynamo_component_router_kv_zmq_ingress_lifecycle_total` | counter | `action` | Lifecycle transitions and errors of ZMQ KV event sources. | |
+| `dynamo_component_router_remote_indexer_query_failures_total` | counter | `router_id` | Failed overlap queries to a remote indexer. Only with `--use-remote-indexer`. | |
+| `dynamo_component_router_remote_indexer_write_failures_total` | counter | `router_id` | Failed routing-decision writes to a remote indexer. Only with `--use-remote-indexer`. | |
 
 `dynamo_component_kv_cache_events_applied` appears when the worker-selection policy requests `WorkerInputs::CACHE`, the router consumes KV events, and workers publish them. The standalone indexer exposes the device-tier-only counter `dynamo_kvrouter_kv_cache_events_applied` and the same CKF counter as `dynamo_kvrouter_ckf_mutation_total`; see [Standalone KV Indexer Metrics](#standalone-kv-indexer-metrics).
 
@@ -520,9 +520,9 @@ Recorded only with `--shared-cache-type hicache`.
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_component_router_shared_cache_hit_rate` | histogram | `router_id` | Fraction of request blocks found in the shared KV cache. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_router_shared_cache_beyond_blocks` | histogram | `router_id` | Shared-cache blocks beyond the selected worker's device overlap. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_router_shared_cache_errors_total` | counter | `router_id` | Failed shared-cache queries and subscriber errors. Frontend only; carries only `router_id`, like the [routing overhead](#per-request-routing-overhead) metrics. | <Badge intent="success" minimal>Stable</Badge> |
+| `dynamo_component_router_shared_cache_hit_rate` | histogram | `router_id` | Fraction of request blocks found in the shared KV cache. | |
+| `dynamo_component_router_shared_cache_beyond_blocks` | histogram | `router_id` | Shared-cache blocks beyond the selected worker's device overlap. | |
+| `dynamo_router_shared_cache_errors_total` | counter | `router_id` | Failed shared-cache queries and subscriber errors. Frontend only; carries only `router_id`, like the [routing overhead](#per-request-routing-overhead) metrics. | |
 
 ### Active Sequence Synchronization
 
@@ -530,19 +530,19 @@ Track the active-request events each KV router applies to its view of worker loa
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_component_router_active_sequence_ingress_queue_depth` | gauge | — | Active-sequence events waiting to be applied. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_router_active_sequence_ingress_events_applied_total` | counter | — | Active-sequence events applied. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_router_active_sequence_ingress_drain_batches_total` | counter | — | Event batches applied. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_router_active_sequence_zmq_ingress_sources` | gauge | — | Tracked ZMQ sources of active-sequence events. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_router_active_sequence_zmq_ingress_sequence_gaps_total` | counter | — | Events missing, inferred from sequence-number gaps. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_component_router_active_sequence_zmq_ingress_out_of_order_total` | counter | — | Events received out of order. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_component_router_active_sequence_zmq_ingress_reconnects_total` | counter | — | Source reconnect attempts. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_component_router_active_sequence_zmq_ingress_replacements_total` | counter | — | Source task replacements. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_component_router_active_sequence_zmq_ingress_envelope_decode_errors_total` | counter | — | Envelope decode errors. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_component_router_active_sequence_zmq_ingress_payload_decode_errors_total` | counter | — | Payload decode errors, including oversized batches. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_component_router_active_sequence_zmq_ingress_identity_errors_total` | counter | — | Frame and envelope identity mismatches. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_component_router_active_sequence_zmq_ingress_forced_aborts_total` | counter | — | Source tasks aborted after a join timeout. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_component_router_active_sequence_zmq_ingress_dropped_events_total` | counter | — | Events dropped because the inbound queue was full or closed. | <Badge intent="launch" minimal>Check</Badge> |
+| `dynamo_component_router_active_sequence_ingress_queue_depth` | gauge | — | Active-sequence events waiting to be applied. | |
+| `dynamo_component_router_active_sequence_ingress_events_applied_total` | counter | — | Active-sequence events applied. | |
+| `dynamo_component_router_active_sequence_ingress_drain_batches_total` | counter | — | Event batches applied. | |
+| `dynamo_component_router_active_sequence_zmq_ingress_sources` | gauge | — | Tracked ZMQ sources of active-sequence events. | |
+| `dynamo_component_router_active_sequence_zmq_ingress_sequence_gaps_total` | counter | — | Events missing, inferred from sequence-number gaps. | |
+| `dynamo_component_router_active_sequence_zmq_ingress_out_of_order_total` | counter | — | Events received out of order. | |
+| `dynamo_component_router_active_sequence_zmq_ingress_reconnects_total` | counter | — | Source reconnect attempts. | |
+| `dynamo_component_router_active_sequence_zmq_ingress_replacements_total` | counter | — | Source task replacements. | |
+| `dynamo_component_router_active_sequence_zmq_ingress_envelope_decode_errors_total` | counter | — | Envelope decode errors. | |
+| `dynamo_component_router_active_sequence_zmq_ingress_payload_decode_errors_total` | counter | — | Payload decode errors, including oversized batches. | |
+| `dynamo_component_router_active_sequence_zmq_ingress_identity_errors_total` | counter | — | Frame and envelope identity mismatches. | |
+| `dynamo_component_router_active_sequence_zmq_ingress_forced_aborts_total` | counter | — | Source tasks aborted after a join timeout. | |
+| `dynamo_component_router_active_sequence_zmq_ingress_dropped_events_total` | counter | — | Events dropped because the inbound queue was full or closed. | |
 
 ### Approximate Cache
 
@@ -550,18 +550,18 @@ The approximate cache tracks likely-cached blocks when the router does not consu
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_component_router_approximate_cache_configured_policy` | gauge | `policy` | 1 for the configured policy: `ttl`, `lru`, or `disabled`. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_component_router_approximate_cache_effective_policy` | gauge | `policy` | 1 for the policy in effect. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_component_router_approximate_lru_ranks` | gauge | `policy` | Index ranks by retention policy: `lru` or `ttl_fallback`. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `dynamo_component_router_approximate_lru_blocks` | gauge | `state` | Blocks tracked by the approximate LRU, by state. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `dynamo_component_router_approximate_lru_leases` | gauge | — | Live request leases. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `dynamo_component_router_approximate_lru_mutation_queue_depth` | gauge | — | Pending LRU mutation commands. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `dynamo_component_router_approximate_lru_fallback_activations_total` | counter | — | Ranks that fell back to TTL because their capacity was unavailable. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `dynamo_component_router_approximate_lru_eviction_batches_total` | counter | — | Mutation batches that evicted blocks. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `dynamo_component_router_approximate_lru_evicted_blocks_total` | counter | — | Blocks evicted. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `dynamo_component_router_approximate_lru_output_batches_total` | counter | — | Output-block batches sent to the LRU. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `dynamo_component_router_approximate_lru_messages_per_request` | histogram | — | LRU queue messages per request, per 1-second interval. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `dynamo_component_router_approximate_lru_mutation_wait_seconds` | histogram | — | Mean LRU queue wait per command, per 1-second interval. | <Badge intent="warning" minimal>Experimental</Badge> |
+| `dynamo_component_router_approximate_cache_configured_policy` | gauge | `policy` | 1 for the configured policy: `ttl`, `lru`, or `disabled`. | |
+| `dynamo_component_router_approximate_cache_effective_policy` | gauge | `policy` | 1 for the policy in effect. | |
+| `dynamo_component_router_approximate_lru_ranks` | gauge | `policy` | Index ranks by retention policy: `lru` or `ttl_fallback`. | Experimental |
+| `dynamo_component_router_approximate_lru_blocks` | gauge | `state` | Blocks tracked by the approximate LRU, by state. | Experimental |
+| `dynamo_component_router_approximate_lru_leases` | gauge | — | Live request leases. | Experimental |
+| `dynamo_component_router_approximate_lru_mutation_queue_depth` | gauge | — | Pending LRU mutation commands. | Experimental |
+| `dynamo_component_router_approximate_lru_fallback_activations_total` | counter | — | Ranks that fell back to TTL because their capacity was unavailable. | Experimental |
+| `dynamo_component_router_approximate_lru_eviction_batches_total` | counter | — | Mutation batches that evicted blocks. | Experimental |
+| `dynamo_component_router_approximate_lru_evicted_blocks_total` | counter | — | Blocks evicted. | Experimental |
+| `dynamo_component_router_approximate_lru_output_batches_total` | counter | — | Output-block batches sent to the LRU. | Experimental |
+| `dynamo_component_router_approximate_lru_messages_per_request` | histogram | — | LRU queue messages per request, per 1-second interval. | Experimental |
+| `dynamo_component_router_approximate_lru_mutation_wait_seconds` | histogram | — | Mean LRU queue wait per command, per 1-second interval. | Experimental |
 
 ### Availability by Configuration
 
@@ -588,15 +588,15 @@ Emitted by every Dynamo process: on the HTTP port for the frontend, and on `DYN_
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_component_uptime_seconds` | gauge | `worker_id` | DistributedRuntime uptime. Updated before each Prometheus scrape on both the frontend and the system-status server. | <Badge intent="success" minimal>Stable</Badge> |
+| `dynamo_component_uptime_seconds` | gauge | `worker_id` | DistributedRuntime uptime. Updated before each Prometheus scrape on both the frontend and the system-status server. | |
 
 With `DYN_RESPONSE_PLANE=quic`, every process also records:
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_quic_response_active_connections` | gauge | — | Open QUIC response connections. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_quic_response_bundle_failures_total` | counter | `side` | QUIC connection bundle failures on the `frontend` or `worker` side. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_quic_response_server_mailbox_resets_total` | counter | `reason` | Responses reset because the frontend's response mailbox was `full` or `closed`. | <Badge intent="success" minimal>Stable</Badge> |
+| `dynamo_quic_response_active_connections` | gauge | — | Open QUIC response connections. | |
+| `dynamo_quic_response_bundle_failures_total` | counter | `side` | QUIC connection bundle failures on the `frontend` or `worker` side. | |
+| `dynamo_quic_response_server_mailbox_resets_total` | counter | `reason` | Responses reset because the frontend's response mailbox was `full` or `closed`. | |
 
 ## Planner Metrics
 
@@ -606,60 +606,60 @@ Exposed by `python -m dynamo.planner` at `/metrics` on its own port, set by `met
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_planner_num_prefill_replicas` | gauge | — | Ready prefill replicas. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_planner_num_decode_replicas` | gauge | — | Ready decode replicas. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_planner_predicted_num_prefill_replicas` | gauge | — | Prefill replicas the planner decided on. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_planner_predicted_num_decode_replicas` | gauge | — | Decode replicas the planner decided on. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_planner_gpu_hours` | gauge | — | GPU hours used since the planner started. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_planner_observed_ttft_ms` | gauge | — | Observed TTFT in milliseconds. | <Badge intent="info" minimal>Medium</Badge> |
-| `dynamo_planner_observed_itl_ms` | gauge | — | Observed ITL in milliseconds. | <Badge intent="info" minimal>Medium</Badge> |
-| `dynamo_planner_observed_requests_per_second` | gauge | — | Observed request rate. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_planner_observed_request_duration_seconds` | gauge | — | Observed average request duration. | <Badge intent="info" minimal>Medium</Badge> |
-| `dynamo_planner_observed_input_sequence_tokens` | gauge | — | Observed average prompt length. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_planner_observed_output_sequence_tokens` | gauge | — | Observed average output length. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_planner_predicted_requests_per_second` | gauge | — | Predicted request rate for the next interval. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_planner_predicted_input_sequence_tokens` | gauge | — | Predicted prompt length for the next interval. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_planner_predicted_output_sequence_tokens` | gauge | — | Predicted output length for the next interval. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_planner_sla_target_ttft_ms` | gauge | — | Configured TTFT target in milliseconds. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_planner_sla_target_itl_ms` | gauge | — | Configured ITL target in milliseconds. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_planner_estimated_ttft_ms` | gauge | — | Highest TTFT estimated across engines, in milliseconds. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_planner_estimated_itl_ms` | gauge | — | Highest ITL estimated across engines, in milliseconds. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_planner_engine_prefill_capacity_requests_per_second` | gauge | — | Request rate one prefill engine can serve within the SLA. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_planner_engine_decode_capacity_requests_per_second` | gauge | — | Request rate one decode engine can serve within the SLA. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_planner_engine_queued_prefill_tokens` | gauge | `worker_id`, `dp_rank` | Queued prefill tokens per prefill engine, from forward-pass metrics. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_planner_engine_queued_decode_kv_tokens` | gauge | `worker_id`, `dp_rank` | Queued decode KV tokens per decode engine, from forward-pass metrics. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_planner_engine_inflight_decode_kv_tokens` | gauge | `worker_id`, `dp_rank` | Scheduled decode KV tokens per decode engine, from forward-pass metrics. | <Badge intent="launch" minimal>Check</Badge> |
+| `dynamo_planner_num_prefill_replicas` | gauge | — | Ready prefill replicas. | |
+| `dynamo_planner_num_decode_replicas` | gauge | — | Ready decode replicas. | |
+| `dynamo_planner_predicted_num_prefill_replicas` | gauge | — | Prefill replicas the planner decided on. | |
+| `dynamo_planner_predicted_num_decode_replicas` | gauge | — | Decode replicas the planner decided on. | |
+| `dynamo_planner_gpu_hours` | gauge | — | GPU hours used since the planner started. | |
+| `dynamo_planner_observed_ttft_ms` | gauge | — | Observed TTFT in milliseconds. | |
+| `dynamo_planner_observed_itl_ms` | gauge | — | Observed ITL in milliseconds. | |
+| `dynamo_planner_observed_requests_per_second` | gauge | — | Observed request rate. | |
+| `dynamo_planner_observed_request_duration_seconds` | gauge | — | Observed average request duration. | |
+| `dynamo_planner_observed_input_sequence_tokens` | gauge | — | Observed average prompt length. | |
+| `dynamo_planner_observed_output_sequence_tokens` | gauge | — | Observed average output length. | |
+| `dynamo_planner_predicted_requests_per_second` | gauge | — | Predicted request rate for the next interval. | |
+| `dynamo_planner_predicted_input_sequence_tokens` | gauge | — | Predicted prompt length for the next interval. | |
+| `dynamo_planner_predicted_output_sequence_tokens` | gauge | — | Predicted output length for the next interval. | |
+| `dynamo_planner_sla_target_ttft_ms` | gauge | — | Configured TTFT target in milliseconds. | |
+| `dynamo_planner_sla_target_itl_ms` | gauge | — | Configured ITL target in milliseconds. | |
+| `dynamo_planner_estimated_ttft_ms` | gauge | — | Highest TTFT estimated across engines, in milliseconds. | |
+| `dynamo_planner_estimated_itl_ms` | gauge | — | Highest ITL estimated across engines, in milliseconds. | |
+| `dynamo_planner_engine_prefill_capacity_requests_per_second` | gauge | — | Request rate one prefill engine can serve within the SLA. | |
+| `dynamo_planner_engine_decode_capacity_requests_per_second` | gauge | — | Request rate one decode engine can serve within the SLA. | |
+| `dynamo_planner_engine_queued_prefill_tokens` | gauge | `worker_id`, `dp_rank` | Queued prefill tokens per prefill engine, from forward-pass metrics. | |
+| `dynamo_planner_engine_queued_decode_kv_tokens` | gauge | `worker_id`, `dp_rank` | Queued decode KV tokens per decode engine, from forward-pass metrics. | |
+| `dynamo_planner_engine_inflight_decode_kv_tokens` | gauge | `worker_id`, `dp_rank` | Scheduled decode KV tokens per decode engine, from forward-pass metrics. | |
 
 ### Scaling Decisions
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_planner_load_scaling_decision` | gauge | `dynamo_planner_load_scaling_decision` | Reason for the latest load-based scaling decision. A Prometheus Enum: the label, named after the metric, holds the reason. One series per reason; the current one is 1. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_planner_throughput_scaling_decision` | gauge | `dynamo_planner_throughput_scaling_decision` | Reason for the latest throughput-based scaling decision. A Prometheus Enum: the label, named after the metric, holds the reason. One series per reason; the current one is 1. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_planner_signal_unavailable` | gauge | `component`, `signal` | 1 if a required planner input was unavailable at its latest observation. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_planner_degraded_signals_total` | counter | `component`, `signal` | Times a required input was unavailable for 3 observations in a row. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_planner_power_budget_total_watts` | gauge | — | Configured total GPU power budget, in watts. Only with power awareness enabled. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_planner_power_projected_watts` | gauge | — | Projected GPU power draw at the current replica counts, in watts. Only with power awareness enabled. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_planner_power_budget_utilization` | gauge | — | Projected power divided by the budget. Only with power awareness enabled. Equals `dynamo_planner_power_projected_watts / dynamo_planner_power_budget_total_watts`; use that instead. | <Badge intent="error" minimal>Deprecated</Badge> |
+| `dynamo_planner_load_scaling_decision` | gauge | `dynamo_planner_load_scaling_decision` | Reason for the latest load-based scaling decision. A Prometheus Enum: the label, named after the metric, holds the reason. One series per reason; the current one is 1. | |
+| `dynamo_planner_throughput_scaling_decision` | gauge | `dynamo_planner_throughput_scaling_decision` | Reason for the latest throughput-based scaling decision. A Prometheus Enum: the label, named after the metric, holds the reason. One series per reason; the current one is 1. | |
+| `dynamo_planner_signal_unavailable` | gauge | `component`, `signal` | 1 if a required planner input was unavailable at its latest observation. | Experimental |
+| `dynamo_planner_degraded_signals_total` | counter | `component`, `signal` | Times a required input was unavailable for 3 observations in a row. | Experimental |
+| `dynamo_planner_power_budget_total_watts` | gauge | — | Configured total GPU power budget, in watts. Only with power awareness enabled. | |
+| `dynamo_planner_power_projected_watts` | gauge | — | Projected GPU power draw at the current replica counts, in watts. Only with power awareness enabled. | |
+| `dynamo_planner_power_budget_utilization` | gauge | — | Projected power divided by the budget. Only with power awareness enabled. Equals `dynamo_planner_power_projected_watts / dynamo_planner_power_budget_total_watts`; use that instead. | Deprecated |
 
 ### Plugin Pipeline
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_planner_plugin_evaluations_total` | counter | `plugin_id`, `stage`, `result` | Plugin evaluations, by outcome. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_planner_plugin_latency_seconds` | histogram | `plugin_id`, `stage` | Latency of successful plugin calls. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_planner_plugin_circuit_state` | gauge | `plugin_id` | Circuit breaker state per plugin: 0 closed, 0.5 half open, 1 open. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_planner_plugin_held_over_total` | counter | `plugin_id`, `stage` | Times a plugin's cached result was reused instead of calling it. Equals `dynamo_planner_plugin_evaluations_total{result="held_over"}`; use that instead. | <Badge intent="error" minimal>Deprecated</Badge> |
-| `dynamo_planner_plugin_cache_age_seconds` | gauge | `plugin_id` | Age of each plugin's cached result. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_planner_plugin_override_active` | gauge | `plugin_id`, `stage`, `override_type` | 1 if the plugin contributed an override to the final proposal in the latest tick. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_planner_reconcile_clamped_total` | counter | `sub_component_type`, `source` | Times the reconcile stage clamped the replica count to a floor or ceiling. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_planner_constrain_capped_total` | counter | `sub_component_type`, `source` | Times the constrain stage capped the final replica count. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_planner_reject_short_circuited_total` | counter | `plugin_id` | Times a plugin's rejection stopped the pipeline and skipped execution. Equals `sum by (plugin_id) (dynamo_planner_plugin_evaluations_total{result="reject"})`; use that instead. | <Badge intent="error" minimal>Deprecated</Badge> |
-| `dynamo_planner_tick_skipped_total` | counter | `plugin_id` | Times a plugin was skipped because its execution interval had not elapsed. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_planner_tick_requires_unsatisfied_total` | counter | `plugin_id`, `missing_field` | Times a plugin was skipped because an input it requires was missing. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_planner_tick_lag_seconds` | gauge | `plugin_id` | Delay between a plugin's scheduled time and its evaluation. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_planner_tick_duration_seconds` | histogram | — | Time spent in each planner tick. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_planner_tick_timeout_total` | counter | — | Ticks aborted for exceeding the tick time limit. | <Badge intent="success" minimal>Stable</Badge> |
+| `dynamo_planner_plugin_evaluations_total` | counter | `plugin_id`, `stage`, `result` | Plugin evaluations, by outcome. | |
+| `dynamo_planner_plugin_latency_seconds` | histogram | `plugin_id`, `stage` | Latency of successful plugin calls. | |
+| `dynamo_planner_plugin_circuit_state` | gauge | `plugin_id` | Circuit breaker state per plugin: 0 closed, 0.5 half open, 1 open. | |
+| `dynamo_planner_plugin_held_over_total` | counter | `plugin_id`, `stage` | Times a plugin's cached result was reused instead of calling it. Equals `dynamo_planner_plugin_evaluations_total{result="held_over"}`; use that instead. | Deprecated |
+| `dynamo_planner_plugin_cache_age_seconds` | gauge | `plugin_id` | Age of each plugin's cached result. | |
+| `dynamo_planner_plugin_override_active` | gauge | `plugin_id`, `stage`, `override_type` | 1 if the plugin contributed an override to the final proposal in the latest tick. | |
+| `dynamo_planner_reconcile_clamped_total` | counter | `sub_component_type`, `source` | Times the reconcile stage clamped the replica count to a floor or ceiling. | |
+| `dynamo_planner_constrain_capped_total` | counter | `sub_component_type`, `source` | Times the constrain stage capped the final replica count. | |
+| `dynamo_planner_reject_short_circuited_total` | counter | `plugin_id` | Times a plugin's rejection stopped the pipeline and skipped execution. Equals `sum by (plugin_id) (dynamo_planner_plugin_evaluations_total{result="reject"})`; use that instead. | Deprecated |
+| `dynamo_planner_tick_skipped_total` | counter | `plugin_id` | Times a plugin was skipped because its execution interval had not elapsed. | |
+| `dynamo_planner_tick_requires_unsatisfied_total` | counter | `plugin_id`, `missing_field` | Times a plugin was skipped because an input it requires was missing. | |
+| `dynamo_planner_tick_lag_seconds` | gauge | `plugin_id` | Delay between a plugin's scheduled time and its evaluation. | |
+| `dynamo_planner_tick_duration_seconds` | histogram | — | Time spent in each planner tick. | |
+| `dynamo_planner_tick_timeout_total` | counter | — | Ticks aborted for exceeding the tick time limit. | |
 
 ## Standalone KV Indexer Metrics
 
@@ -667,15 +667,15 @@ Exposed by `python -m dynamo.planner` at `/metrics` on its own port, set by `met
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_kvindexer_requests_total` | counter | `endpoint`, `method` | HTTP requests handled, excluding `/metrics`. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_kvindexer_request_duration_seconds` | histogram | `endpoint` | HTTP request latency. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_kvindexer_errors_total` | counter | `endpoint`, `status_class` | HTTP error responses, `4xx` or `5xx`. | <Badge intent="launch" minimal>Check</Badge> |
-| `dynamo_kvindexer_models` | gauge | — | Active model and routing-group indexers. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_kvindexer_workers` | gauge | — | Registered worker instances. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_kvindexer_listeners` | gauge | `status` | ZMQ listeners, by status. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_kvrouter_kv_cache_events_applied` | counter | `event_type`, `status` | KV cache events applied to the index. Device tier only. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_kvrouter_kv_cache_event_warnings` | counter | `warning_kind` | Suspicious KV cache events seen by the index. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_kvrouter_ckf_mutation_total` | counter | `outcome` | Block-level index mutation outcomes. Always 0: nothing increments it. | <Badge intent="error" minimal>Deprecated</Badge> |
+| `dynamo_kvindexer_requests_total` | counter | `endpoint`, `method` | HTTP requests handled, excluding `/metrics`. | |
+| `dynamo_kvindexer_request_duration_seconds` | histogram | `endpoint` | HTTP request latency. | |
+| `dynamo_kvindexer_errors_total` | counter | `endpoint`, `status_class` | HTTP error responses, `4xx` or `5xx`. | |
+| `dynamo_kvindexer_models` | gauge | — | Active model and routing-group indexers. | |
+| `dynamo_kvindexer_workers` | gauge | — | Registered worker instances. | |
+| `dynamo_kvindexer_listeners` | gauge | `status` | ZMQ listeners, by status. | |
+| `dynamo_kvrouter_kv_cache_events_applied` | counter | `event_type`, `status` | KV cache events applied to the index. Device tier only. | |
+| `dynamo_kvrouter_kv_cache_event_warnings` | counter | `warning_kind` | Suspicious KV cache events seen by the index. | |
+| `dynamo_kvrouter_ckf_mutation_total` | counter | `outcome` | Block-level index mutation outcomes. Always 0: nothing increments it. | Deprecated |
 
 ## KV State Agent Metrics
 
@@ -683,8 +683,8 @@ Exposed by `python -m dynamo.planner` at `/metrics` on its own port, set by `met
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_component_kv_state_agent_slots` | gauge | `state` | Agent slots, by state: `total`, `active`, `detached`, or `failed`. | <Badge intent="success" minimal>Stable</Badge> |
-| `dynamo_component_kv_state_agent_capacity_rejected_total` | counter | — | Attach requests rejected because `--max-slots` was reached. | <Badge intent="success" minimal>Stable</Badge> |
+| `dynamo_component_kv_state_agent_slots` | gauge | `state` | Agent slots, by state: `total`, `active`, `detached`, or `failed`. | |
+| `dynamo_component_kv_state_agent_capacity_rejected_total` | counter | — | Attach requests rejected because `--max-slots` was reached. | |
 
 ## Endpoint Picker Metrics
 
@@ -692,7 +692,7 @@ Emitted by the endpoint picker (EPP) when routing through the Gateway API Infere
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_epp_cached_tokens` | histogram | `model` | Prompt tokens the model server served from its KV cache per request, read from `usage.prompt_tokens_details.cached_tokens` in the response body. This is the observed cache hit, as opposed to the overlap the KV router estimates at selection time. | <Badge intent="success" minimal>Stable</Badge> |
+| `dynamo_epp_cached_tokens` | histogram | `model` | Prompt tokens the model server served from its KV cache per request, read from `usage.prompt_tokens_details.cached_tokens` in the response body. This is the observed cache hit, as opposed to the overlap the KV router estimates at selection time. | |
 
 Buckets match `dynamo_frontend_cached_tokens`, so the two can share a dashboard. The `model` label is the model the pool serves, resolved once at startup rather than from the request body. Recording requires the client to request usage accounting on streaming calls (`"stream_options": {"include_usage": true}`); without it the response carries no usage block and nothing is recorded.
 
@@ -702,12 +702,12 @@ Emitted by the Global Frontend at `/metrics` on its serving port. It forwards ea
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `dynamo_global_frontend_requests_total` | counter | `pool`, `region`, `local`, `status` | Requests forwarded to each pool. `status` is the pool's HTTP status code, counted when its response headers arrive; `no_response` when the pool could not be reached or sent no response; or `cancelled` when the client left before the pool's response headers arrived. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `dynamo_global_frontend_rejected_requests_total` | counter | `error_type` | Requests the Global Frontend answered without forwarding them: `validation` (the body has no string `model`, or the route is invalid), `not_found` (no pool serves the model), or `unavailable` (no pool can take the request). | <Badge intent="warning" minimal>Experimental</Badge> |
-| `dynamo_global_frontend_time_to_first_byte_seconds` | histogram | `pool`, `region` | Time from the Global Frontend receiving a request to the first body chunk of its pool's successful (2xx) response. For a streamed request this approximates the time to first token as the client sees it, including the round trip to a pool in another region. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `dynamo_global_frontend_request_duration_seconds` | histogram | `pool`, `region` | Time from the Global Frontend receiving a request to the end of its pool's successful (2xx) response, or to the client leaving. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `dynamo_global_frontend_response_errors_total` | counter | `pool`, `region` | Successful responses whose body broke off before it ended, for example because the pool frontend restarted mid-stream. The client's response ends early. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `dynamo_global_frontend_inflight_requests` | gauge | `pool`, `region` | Requests this Global Frontend has sent to each pool and not yet finished. Other replicas count their own. Read at scrape time, so a pool removed from the configuration loses its series. | <Badge intent="warning" minimal>Experimental</Badge> |
+| `dynamo_global_frontend_requests_total` | counter | `pool`, `region`, `local`, `status` | Requests forwarded to each pool. `status` is the pool's HTTP status code, counted when its response headers arrive; `no_response` when the pool could not be reached or sent no response; or `cancelled` when the client left before the pool's response headers arrived. | Experimental |
+| `dynamo_global_frontend_rejected_requests_total` | counter | `error_type` | Requests the Global Frontend answered without forwarding them: `validation` (the body has no string `model`, or the route is invalid), `not_found` (no pool serves the model), or `unavailable` (no pool can take the request). | Experimental |
+| `dynamo_global_frontend_time_to_first_byte_seconds` | histogram | `pool`, `region` | Time from the Global Frontend receiving a request to the first body chunk of its pool's successful (2xx) response. For a streamed request this approximates the time to first token as the client sees it, including the round trip to a pool in another region. | Experimental |
+| `dynamo_global_frontend_request_duration_seconds` | histogram | `pool`, `region` | Time from the Global Frontend receiving a request to the end of its pool's successful (2xx) response, or to the client leaving. | Experimental |
+| `dynamo_global_frontend_response_errors_total` | counter | `pool`, `region` | Successful responses whose body broke off before it ended, for example because the pool frontend restarted mid-stream. The client's response ends early. | Experimental |
+| `dynamo_global_frontend_inflight_requests` | gauge | `pool`, `region` | Requests this Global Frontend has sent to each pool and not yet finished. Other replicas count their own. Read at scrape time, so a pool removed from the configuration loses its series. | Experimental |
 
 A Dynamo pool frontend sends its headers once a worker has the request, so a request the client gives up on while a worker queues it counts under its status in `dynamo_global_frontend_requests_total`, not as `cancelled`. `local` is `true` for a pool in the Global Frontend's `--region`, `false` for one elsewhere, and `unknown` without `--region`; the share of requests kept in the region is the `local="true"` rate over the total. A body over `DYN_HTTP_BODY_LIMIT_MB` gets 413 before it is read and is not counted as a rejection.
 
@@ -719,28 +719,28 @@ The mocker (`python -m dynamo.mocker`) simulates an inference engine. It emits i
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
-| `vllm:num_requests_running` | gauge | — | Simulated; emitted with `--engine-type vllm`, the default. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `vllm:num_requests_waiting` | gauge | — | Simulated; emitted with `--engine-type vllm`. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `vllm:kv_cache_usage_perc` | gauge | — | Simulated; emitted with `--engine-type vllm`. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `vllm:num_preemptions_total` | counter | — | Simulated; emitted with `--engine-type vllm`. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `vllm:time_to_first_token_seconds` | histogram | — | Simulated; emitted with `--engine-type vllm`. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `vllm:inter_token_latency_seconds` | histogram | — | Simulated; emitted with `--engine-type vllm`. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `vllm:request_time_per_output_token_seconds` | histogram | — | Simulated; emitted with `--engine-type vllm`. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `vllm:e2e_request_latency_seconds` | histogram | — | Simulated; emitted with `--engine-type vllm`. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `sglang:num_running_reqs` | gauge | — | Simulated; emitted with `--engine-type sglang`. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `sglang:num_queue_reqs` | gauge | — | Simulated; emitted with `--engine-type sglang`. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `sglang:cache_hit_rate` | gauge | — | Simulated; emitted with `--engine-type sglang`. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `sglang:num_requests_total` | counter | — | Simulated; emitted with `--engine-type sglang`. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `sglang:time_to_first_token_seconds` | histogram | — | Simulated; emitted with `--engine-type sglang`. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `sglang:inter_token_latency_seconds` | histogram | — | Simulated; emitted with `--engine-type sglang`. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `sglang:request_time_per_output_token_seconds` | histogram | — | Simulated; emitted with `--engine-type sglang`. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `sglang:e2e_request_latency_seconds` | histogram | — | Simulated; emitted with `--engine-type sglang`. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `trtllm_num_requests_running` | gauge | — | Simulated; emitted with `--engine-type trtllm`. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `trtllm_num_requests_waiting` | gauge | — | Simulated; emitted with `--engine-type trtllm`. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `trtllm_kv_cache_utilization` | gauge | — | Simulated; emitted with `--engine-type trtllm`. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `trtllm_time_to_first_token_seconds` | histogram | — | Simulated; emitted with `--engine-type trtllm`. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `trtllm_time_per_output_token_seconds` | histogram | — | Simulated; emitted with `--engine-type trtllm`. | <Badge intent="warning" minimal>Experimental</Badge> |
-| `trtllm_e2e_request_latency_seconds` | histogram | — | Simulated; emitted with `--engine-type trtllm`. | <Badge intent="warning" minimal>Experimental</Badge> |
+| `vllm:num_requests_running` | gauge | — | Simulated; emitted with `--engine-type vllm`, the default. | Experimental |
+| `vllm:num_requests_waiting` | gauge | — | Simulated; emitted with `--engine-type vllm`. | Experimental |
+| `vllm:kv_cache_usage_perc` | gauge | — | Simulated; emitted with `--engine-type vllm`. | Experimental |
+| `vllm:num_preemptions_total` | counter | — | Simulated; emitted with `--engine-type vllm`. | Experimental |
+| `vllm:time_to_first_token_seconds` | histogram | — | Simulated; emitted with `--engine-type vllm`. | Experimental |
+| `vllm:inter_token_latency_seconds` | histogram | — | Simulated; emitted with `--engine-type vllm`. | Experimental |
+| `vllm:request_time_per_output_token_seconds` | histogram | — | Simulated; emitted with `--engine-type vllm`. | Experimental |
+| `vllm:e2e_request_latency_seconds` | histogram | — | Simulated; emitted with `--engine-type vllm`. | Experimental |
+| `sglang:num_running_reqs` | gauge | — | Simulated; emitted with `--engine-type sglang`. | Experimental |
+| `sglang:num_queue_reqs` | gauge | — | Simulated; emitted with `--engine-type sglang`. | Experimental |
+| `sglang:cache_hit_rate` | gauge | — | Simulated; emitted with `--engine-type sglang`. | Experimental |
+| `sglang:num_requests_total` | counter | — | Simulated; emitted with `--engine-type sglang`. | Experimental |
+| `sglang:time_to_first_token_seconds` | histogram | — | Simulated; emitted with `--engine-type sglang`. | Experimental |
+| `sglang:inter_token_latency_seconds` | histogram | — | Simulated; emitted with `--engine-type sglang`. | Experimental |
+| `sglang:request_time_per_output_token_seconds` | histogram | — | Simulated; emitted with `--engine-type sglang`. | Experimental |
+| `sglang:e2e_request_latency_seconds` | histogram | — | Simulated; emitted with `--engine-type sglang`. | Experimental |
+| `trtllm_num_requests_running` | gauge | — | Simulated; emitted with `--engine-type trtllm`. | Experimental |
+| `trtllm_num_requests_waiting` | gauge | — | Simulated; emitted with `--engine-type trtllm`. | Experimental |
+| `trtllm_kv_cache_utilization` | gauge | — | Simulated; emitted with `--engine-type trtllm`. | Experimental |
+| `trtllm_time_to_first_token_seconds` | histogram | — | Simulated; emitted with `--engine-type trtllm`. | Experimental |
+| `trtllm_time_per_output_token_seconds` | histogram | — | Simulated; emitted with `--engine-type trtllm`. | Experimental |
+| `trtllm_e2e_request_latency_seconds` | histogram | — | Simulated; emitted with `--engine-type trtllm`. | Experimental |
 
 ## Engine Metrics
 
