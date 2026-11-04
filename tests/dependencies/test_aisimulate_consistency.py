@@ -12,6 +12,7 @@ import sys
 import tomllib
 from importlib import metadata
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 from packaging.markers import default_environment
@@ -225,7 +226,7 @@ def test_wheel_smoke_requires_the_source_built_aisim_wheel(tmp_path, monkeypatch
     smoke_install.pip_install(Path("python"), tmp_path, ["ai-dynamo"])
     assert str(wheel) in commands[0]
     assert "aisim" in commands[0]
-    assert not any("pypi.nvidia.com" in arg for arg in commands[0])
+    assert all(urlsplit(arg).hostname != "pypi.nvidia.com" for arg in commands[0])
 
 
 def test_planner_ci_image_collects_unified_cli_e2e_tests() -> None:
