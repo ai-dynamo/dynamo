@@ -27,6 +27,9 @@ spec:
         - jsonPath: .status.conditions[?(@.type=="Completed")].status
           name: Completed
           type: string
+        - jsonPath: .status.conditions[?(@.type=="Published")].status
+          name: Published
+          type: string
         - jsonPath: .status.progress.candidates.published
           name: Candidates
           type: integer
@@ -234,6 +237,33 @@ spec:
                       rule: '!has(self.metrics)'
                     - message: Goodput and GoodputPerGPU require at least one SLA bound
                       rule: '!(has(self.metric) && self.metric in [''Goodput'', ''GoodputPerGPU'']) || (has(self.sla) && (has(self.sla.ttftMs) || has(self.sla.itlMs) || has(self.sla.e2eMs)))'
+                overrides:
+                  description: Overrides customizes the generated DGD without changing AISimulate execution.
+                  properties:
+                    dgd:
+                      description: |-
+                        DGD is one partial nvidia.com/v1beta1 DynamoGraphDeployment applied by the publisher
+                        using the DGD schema's Server-Side Apply merge rules. Other API versions are not supported.
+                        Components must already exist; named containers may be added. Atomic lists, including
+                        container command and args, replace the generated lists. The supported customization
+                        $patch: {args: append} on a container appends to its explicit generated args list;
+                        both the container and its args must already exist. No other $patch operation is supported.
+                        Application is atomic: a merge failure retains the unchanged generated deployment
+                        with Valid=False. A successful merge is checked by strict server-side dry-run;
+                        the dry-run response and its defaults are discarded. The Candidate retains the
+                        unpruned payload from before the check. Invalid Candidates count toward maxCandidates.
+                        Overrides may change any deployment configuration. Evaluation metrics are not
+                        recomputed and continue to describe the original AISimulate configuration.
+                        DGD labels and annotations become Candidate labels and annotations. A failed merge
+                        retains only the original generated metadata; a successful merge followed by failed
+                        dry-run validation retains the merged metadata on the invalid Candidate. Other metadata
+                        and publisher-owned keys cannot be overridden; such attempts fail atomically.
+                        The complete Candidate metadata must satisfy Kubernetes limits, including generated
+                        and reserved annotations. An override that exceeds those limits fails atomically.
+                      type: object
+                      x-kubernetes-embedded-resource: true
+                      x-kubernetes-preserve-unknown-fields: true
+                  type: object
                 recommendation:
                   description: Recommendation controls bounded projection into DGDC resources.
                   properties:
@@ -454,7 +484,13 @@ spec:
                   format: date-time
                   type: string
                 conditions:
-                  description: Conditions contains standard Kubernetes conditions merged by type.
+                  description: |-
+                    Conditions contains standard Kubernetes conditions merged by type.
+                    Completed is owned by the Run controller. Published is owned by the publisher:
+                    False reports a retryable Candidate preparation error, including a forbidden DGD dry-run;
+                    True means the current Candidate projection is published, including any invalid Candidates.
+                    A preparation error leaves the Run open and is retried until configuration is repaired
+                    or the Run is stopped. Published does not determine the Run's terminal outcome.
                   items:
                     description: Condition contains details for one aspect of the current state of this API Resource.
                     properties:

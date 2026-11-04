@@ -18,6 +18,7 @@
 package validation
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"unicode/utf8"
@@ -42,6 +43,9 @@ func (v *sharedValidation) validateNativeSearchInput(spec *nvidiacomv1beta2.Nati
 	}
 	if spec.AISim != nil {
 		allErrs = append(allErrs, validateAISimSpec(spec.AISim, fldPath.Child("aisim"))...)
+	}
+	if spec.Overrides != nil {
+		allErrs = append(allErrs, v.validateOverridesSpecV1beta2(spec.Overrides, fldPath.Child("overrides"))...)
 	}
 	if !checkInputSchema {
 		return allErrs
@@ -68,6 +72,36 @@ func (v *sharedValidation) validateNativeSearchInput(spec *nvidiacomv1beta2.Nati
 // CRD admission serializes RawExtension objects with canonical JSON map-key ordering.
 func (v *sharedValidation) validateNativeSearchInputUpdate(newSpec, oldSpec *nvidiacomv1beta2.NativeSearchInput, fldPath *field.Path) field.ErrorList {
 	return v.validateNativeSearchInput(newSpec, fldPath, !apiequality.Semantic.DeepEqual(newSpec, oldSpec))
+}
+
+// validateOverridesSpecV1beta2 validates the partial resource envelope. spec and fldPath must not be nil.
+func (v *sharedValidation) validateOverridesSpecV1beta2(
+	spec *nvidiacomv1beta2.OverridesSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if spec.DGD == nil {
+		return nil
+	}
+
+	// Nested DGD values are checked on the complete generated deployment in the publisher.
+	var override map[string]json.RawMessage
+	path := fldPath.Child("dgd")
+	if err := json.Unmarshal(spec.DGD.Raw, &override); err != nil || override == nil {
+		return field.ErrorList{field.Invalid(path, "<redacted>", "must be a partial DGD object")}
+	}
+	allErrs := field.ErrorList{}
+	for _, member := range []struct{ name, expected string }{
+		{"apiVersion", "nvidia.com/v1beta1"}, {"kind", "DynamoGraphDeployment"},
+	} {
+		var value string
+		if err := json.Unmarshal(override[member.name], &value); err != nil || value != member.expected {
+			allErrs = append(allErrs, field.NotSupported(path.Child(member.name), value, []string{member.expected}))
+		}
+	}
+	if _, found := override["status"]; found {
+		allErrs = append(allErrs, field.Forbidden(path.Child("status"), "DGD status cannot be overridden"))
+	}
+	return allErrs
 }
 
 // validateHardwareSpecV1beta2 validates hardware. spec and fldPath must not be nil.
