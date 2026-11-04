@@ -108,7 +108,7 @@ export function DiffusionCatalogControls({ children }: { children: ReactNode }) 
       key: "status", label: "Status", all: "All statuses", options: [
         { value: "non-experimental", label: "Non-experimental" },
         { value: "experimental", label: "Experimental" },
-      ],
+      ].filter(({ value }) => entries.some((card) => card.status === value)),
     },
   ];
   const changed = Boolean(query || Object.values(filters).some(Boolean) || sort !== "default");

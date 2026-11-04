@@ -762,8 +762,6 @@ def test_diffusion_section_matches_catalog_without_changing_existing_slugs() -> 
         (
             "video-generation",
             [
-                "vllm/deploy/experimental/agg_omni_video.yaml",
-                "vllm/deploy/experimental/agg_omni_i2v.yaml",
                 "vllm/launch/agg_omni_cosmos3_video.sh",
                 "vllm/launch/agg_omni_cosmos3_i2v.sh",
                 "vllm/launch/agg_omni_cosmos3.sh",
@@ -776,53 +774,6 @@ def test_diffusion_sources_are_on_the_matching_workload_page(
 ) -> None:
     expected = {ROOT / "examples/backends" / source for source in sources}
     assert expected <= embeds(EXAMPLES / f"{page}.mdx")
-
-
-@pytest.mark.parametrize("filename", ["agg_omni_video.yaml", "agg_omni_i2v.yaml"])
-def test_experimental_diffusion_preserves_image_and_cache_requirements(
-    filename: str,
-) -> None:
-    source = ROOT / "examples/backends/vllm/deploy/experimental" / filename
-    (manifest,) = manifest_documents(source)
-    assert "Experimental" in source.read_text()
-    assert manifest["apiVersion"] == "nvidia.com/v1beta1"
-    assert "namespace" not in manifest["metadata"]
-    assert manifest["spec"]["backendFramework"] == "vllm"
-    components = manifest["spec"]["components"]
-    frontend = next(c for c in components if c["type"] == "frontend")
-    worker = next(c for c in components if c["type"] == "worker")
-    for component in components:
-        pod = component["podTemplate"]["spec"]
-        assert pod["nodeSelector"] == {"kubernetes.io/arch": "amd64"}
-    pod = worker["podTemplate"]["spec"]
-    container = pod["containers"][0]
-    assert container["resources"]["limits"]["nvidia.com/gpu"] == "1"
-    assert "--enforce-eager" in container["args"]
-    env = {item["name"]: item["value"] for item in container["env"]}
-    (cache,) = [
-        v["persistentVolumeClaim"]
-        for v in pod["volumes"]
-        if "persistentVolumeClaim" in v
-    ]
-    assert cache["claimName"] == "model-cache-pvc"
-    for component in components:
-        assert component["runtimeVersionOverride"] == "1.4.2"
-    assert frontend["podTemplate"]["spec"]["containers"][0]["image"] == (
-        "nvcr.io/nvidia/ai-dynamo/dynamo-frontend@sha256:"
-        "4d6435ad3893487e7e5a8751eb2381199464f80248284bb98c5e0998f09a91c0"
-    )
-    assert container["image"] == (
-        "docker.io/jont828/dynamo-ffmpeg-color@sha256:"
-        "1b72cc6dfbbf610ba6e1135832c9cb702f7e6ddca2d57ddfc01e7e67e066980c"
-    )
-    assert env["HF_HUB_OFFLINE"] == "1"
-    assert cache["readOnly"] is True
-    (mount,) = [
-        m for m in container["volumeMounts"] if m["name"] == "shared-model-cache"
-    ]
-    assert mount["readOnly"] is True
-    assert mount["subPath"] == "model-cache"
-    assert env["HF_HUB_CACHE"] == mount["mountPath"] + "/hub"
 
 
 DIFFUSION_MODALITY_LABELS = {
@@ -861,7 +812,7 @@ def test_diffusion_overview_cards_match_the_dgd_models_and_backends() -> None:
         for source in embeds(EXAMPLES / f"{name}.mdx")
         if source.suffix == ".yaml"
     }
-    assert len(source_pages) == 7
+    assert len(source_pages) == 5
     assert not embeds(page)
     assert "<Accordion" not in text
     assert "<CardGroup" not in text
@@ -935,7 +886,7 @@ def test_diffusion_overview_cards_match_the_dgd_models_and_backends() -> None:
         assert "Dynamo 1." not in body
         assert "validated" not in body.lower()
         assert "tested" not in body.lower()
-    assert len(models) == 7
+    assert len(models) == 5
     assert seen == set(source_pages)
 
 
