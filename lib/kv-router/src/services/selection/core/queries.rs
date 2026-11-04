@@ -87,14 +87,7 @@ impl SelectionCore {
         let schedulable_workers = self.schedulable_worker_ranks(&key);
         Ok(
             OverlapAnalysis::new(&self.kv_router_config, entry.block_size, &tiered)
-                .scores_response(
-                    req.router_config_override.as_ref(),
-                    num_blocks,
-                    schedulable_workers,
-                    false,
-                    None,
-                    None,
-                ),
+                .scores_response(num_blocks, schedulable_workers, false, None, None),
         )
     }
 

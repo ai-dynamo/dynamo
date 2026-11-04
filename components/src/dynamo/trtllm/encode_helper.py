@@ -11,11 +11,12 @@ from typing import Any, Dict, Optional, Union
 import torch
 
 import dynamo.nixl_connect as nixl_connect
-from dynamo.common.http import HttpStatusError
+from dynamo.common.http import HttpConfigurationError, HttpStatusError
 from dynamo.common.multimodal.image_loader import (
     ImageLoader,
     image_cache_scope_from_request,
 )
+from dynamo.common.utils.token_ids import token_ids_to_list
 from dynamo.trtllm.multimodal_processor import resolve_mm_processor_kwargs
 from dynamo.trtllm.utils.disagg_utils import DisaggregatedParamsCodec
 
@@ -248,9 +249,16 @@ class EncodeHelper:
             Response with NIXL metadata, shape, dtype, and auxiliary data
         """
         logging.info(f"EncodeHelper: loading embeddings from {embedding_paths[0]}")
-        loaded_data = await multimodal_processor.load_tensor_from_path_or_url(
-            embedding_paths[0]
-        )
+        try:
+            loaded_data = await multimodal_processor.load_tensor_from_path_or_url(
+                embedding_paths[0]
+            )
+        except HttpConfigurationError as e:
+            # A server-side fault. The prefill worker turns an exception from
+            # here into a 400, and an error payload into a 500.
+            logging.error("EncodeHelper: %s", e)
+            yield {"error": str(e)}
+            return
 
         # Handle both tensor and dictionary formats
         if isinstance(loaded_data, dict):
@@ -453,7 +461,7 @@ class EncodeHelper:
             # Use token_ids from request (Rust preprocessor already applied
             # chat template and tokenized; token_ids then include image placeholder tokens
             # if the model's tokenizer_config chat template emits them).
-            token_ids = request.get("token_ids")
+            token_ids = token_ids_to_list(request.get("token_ids"))
             epd_mm_kwargs = resolve_mm_processor_kwargs(request)
             if epd_mm_kwargs is not None and not isinstance(epd_mm_kwargs, dict):
                 # Raise rather than yield an error payload: a yielded dict reads as a

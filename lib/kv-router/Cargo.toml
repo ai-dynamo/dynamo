@@ -52,13 +52,14 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
-zmq = { version = "0.10", optional = true }
+zmq = { workspace = true, optional = true }
 uuid = { workspace = true }
 xxhash-rust = { workspace = true }
 zeroize = { workspace = true }
 
 # dependencies
 crossbeam-queue = "0.3"
+crossbeam-utils = "0.8"
 flume = "0.12.0"
 parking_lot = { workspace = true }
 rmp-serde = { workspace = true }

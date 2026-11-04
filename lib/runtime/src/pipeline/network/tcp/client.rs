@@ -288,7 +288,9 @@ impl TcpClient {
                 .instrument(reader_span),
         );
 
-        Ok(StreamReceiver { rx: bytes_rx })
+        Ok(StreamReceiver {
+            rx: bytes_rx.into(),
+        })
     }
 }
 
@@ -812,6 +814,7 @@ mod tests {
     async fn upstream_cancellation_event_is_parented_to_worker_request_span() {
         let captured = Arc::new(CancellationEventCapture::default());
         // Do not install a global LogTracer: other tests initialize logging.
+        let _interest_guard = crate::test_utils::tracing_interest_guard();
         let _subscriber = tracing::subscriber::set_default(
             tracing_subscriber::registry().with(CancellationEventLayer(captured.clone())),
         );
@@ -2130,6 +2133,13 @@ mod tests {
 
     #[test]
     fn connector_no_env_vars_is_plaintext() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::connector_no_env_vars_is_plaintext"),
+            &[],
+        ) {
+            return;
+        }
+
         // Clear every var the builder reads, incl. the client-identity vars, so
         // ambient mTLS settings can't flip this to "TLS requested".
         temp_env::with_vars_unset(
@@ -2147,6 +2157,13 @@ mod tests {
 
     #[test]
     fn connector_insecure_is_tls() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::connector_insecure_is_tls"),
+            &[],
+        ) {
+            return;
+        }
+
         temp_env::with_vars(
             [
                 ("DYN_TCP_TLS_INSECURE", Some("true")),
@@ -2158,6 +2175,13 @@ mod tests {
 
     #[test]
     fn connector_with_ca_is_tls() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::connector_with_ca_is_tls"),
+            &[],
+        ) {
+            return;
+        }
+
         let (ca, _) = self_signed_pair();
         temp_env::with_vars(
             [(
@@ -2227,6 +2251,13 @@ mod tests {
 
     #[test]
     fn connector_partial_client_identity_errors() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::connector_partial_client_identity_errors"),
+            &[],
+        ) {
+            return;
+        }
+
         // A client cert without its key must fail closed (pair validation).
         let (ca, _) = self_signed_pair();
         let (client_cert, _client_key) = self_signed_pair();
@@ -2248,6 +2279,10 @@ mod tests {
 
     #[test]
     fn sni_parsing() {
+        if crate::test_utils::run_isolated(concat!(module_path!(), "::sni_parsing"), &[]) {
+            return;
+        }
+
         temp_env::with_var_unset("DYN_TCP_TLS_SERVER_NAME", || {
             assert!(matches!(
                 tls_server_name("127.0.0.1:8080").unwrap(),

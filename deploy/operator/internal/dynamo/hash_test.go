@@ -26,20 +26,20 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	runtimefeatures "github.com/ai-dynamo/dynamo/deploy/operator/internal/features/runtime"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 )
 
 func baseDGD(services map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec) *v1alpha1.DynamoGraphDeployment {
 	return &v1alpha1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
-		Spec:       v1alpha1.DynamoGraphDeploymentSpec{Services: services},
+		Name: "test", Namespace: "default",
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{Services: services},
 	}
 }
 
@@ -85,13 +85,16 @@ func betaDGDWithRuntimeVersion(t testing.TB, image, override string) *v1beta1.Dy
 
 func TestComputeBetaDGDWorkersSpecHash_Deterministic(t *testing.T) {
 	dgd := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-		"prefill": {ComponentType: commonconsts.ComponentTypePrefill, Replicas: ptr.To(int32(2))},
-		"decode":  {ComponentType: commonconsts.ComponentTypeDecode, Replicas: ptr.To(int32(3))},
+		"prefill": {ComponentType: commonconsts.ComponentTypePrefill, Replicas: new(int32(2))},
+		"decode":  {ComponentType: commonconsts.ComponentTypeDecode, Replicas: new(int32(3))},
 	})
 	h1 := mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, dgd))
 	h2 := mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, dgd))
 	assert.Equal(t, h1, h2)
 	assert.Len(t, h1, 8)
+	t.Log("Ordinary worker revisions remain stable")
+	ordinary := betaDGDWithRuntimeVersion(t, "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0", "")
+	require.Equal(t, "5a3243f6", mustComputeBetaDGDWorkersSpecHash(t, ordinary))
 }
 
 func TestComputeBetaDGDWorkersSpecHash_CanonicalizesForceScalingGroupFalse(t *testing.T) {
@@ -99,7 +102,7 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesForceScalingGroupFalse(t *te
 	base := betaDGDWithRuntimeVersion(t, "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0", "")
 	base.Spec.Components[0].Experimental = nil
 	omittedHash := mustComputeBetaDGDWorkersSpecHash(t, base)
-	omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), base, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), base, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
 	require.NoError(t, err)
 
 	t.Log("Compare optional outer objects and explicit false with complete omission")
@@ -109,7 +112,7 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesForceScalingGroupFalse(t *te
 	}{
 		{"empty_experimental", &v1beta1.ExperimentalSpec{}},
 		{"empty_grove", &v1beta1.ExperimentalSpec{Grove: &v1beta1.GroveSpec{}}},
-		{"explicit_false", &v1beta1.ExperimentalSpec{Grove: &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(false)}}},
+		{"explicit_false", &v1beta1.ExperimentalSpec{Grove: &v1beta1.GroveSpec{ForceScalingGroup: new(false)}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -117,7 +120,7 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesForceScalingGroupFalse(t *te
 			candidate := base.DeepCopy()
 			candidate.Spec.Components[0].Experimental = tc.experimental
 			original := candidate.DeepCopy()
-			rendered, err := GenerateGrovePodCliqueSet(context.Background(), candidate, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+			rendered, err := GenerateGrovePodCliqueSet(context.Background(), candidate, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
 			require.NoError(t, err)
 			require.Equal(t, omittedRendered.Spec, rendered.Spec, "precondition: effective workload must be identical")
 
@@ -133,7 +136,7 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesForceScalingGroupFalse(t *te
 	t.Log("Verify the effective true opt-in still changes the worker generation")
 	explicitTrue := base.DeepCopy()
 	explicitTrue.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{
-		Grove: &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(true)},
+		Grove: &v1beta1.GroveSpec{ForceScalingGroup: new(true)},
 	}
 	assert.NotEqual(t, omittedHash, mustComputeBetaDGDWorkersSpecHash(t, explicitTrue))
 }
@@ -153,7 +156,7 @@ func TestWorkerHashSpec_PreservesOtherExperimentalFeatures(t *testing.T) {
 			t.Log("Add explicit false alongside another experimental feature")
 			dcd := &v1beta1.DynamoComponentDeployment{}
 			dcd.Spec.Experimental = tc.experimental.DeepCopy()
-			dcd.Spec.Experimental.Grove = &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(false)}
+			dcd.Spec.Experimental.Grove = &v1beta1.GroveSpec{ForceScalingGroup: new(false)}
 			original := dcd.DeepCopy()
 
 			t.Log("Hash normalization removes only Grove and leaves the original input intact")
@@ -216,11 +219,82 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesExplicitRoleOrder(t *testing
 
 	t.Log("Make the same cardinality assertions explicit")
 	explicitReplicas := dgd.DeepCopy()
-	explicitReplicas.Spec.Components[0].Roles[0].Replicas = ptr.To(int32(1))
-	explicitReplicas.Spec.Components[0].Roles[1].Replicas = ptr.To(int32(3))
+	explicitReplicas.Spec.Components[0].Roles[0].Replicas = new(int32(1))
+	explicitReplicas.Spec.Components[0].Roles[1].Replicas = new(int32(3))
 
 	t.Log("Verify optional role cardinality assertions do not create a worker generation")
 	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, dgd), mustComputeBetaDGDWorkersSpecHash(t, explicitReplicas))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_RolePodTemplatesCreateRollout(t *testing.T) {
+	t.Log("Build the same multinode role cardinality with a global template")
+	global := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: commonconsts.ComponentTypeWorker,
+			Multinode:     &v1alpha1.MultinodeSpec{NodeCount: 2},
+		},
+	}))
+	global.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+		Name: commonconsts.MainContainerName, Image: "global:1.5.0",
+	}}}}
+
+	t.Log("Replace the global source with complete role templates")
+	roleTemplates := global.DeepCopy()
+	roleTemplates.Spec.Components[0].PodTemplate = nil
+	roleTemplates.Spec.Components[0].Roles = []v1beta1.ComponentRoleSpec{
+		{
+			Name: v1beta1.ComponentRoleLeader,
+			PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name: commonconsts.MainContainerName, Image: "leader:1.5.0",
+			}}}},
+		},
+		{
+			Name: v1beta1.ComponentRoleWorker,
+			PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name: commonconsts.MainContainerName, Image: "worker:1.5.0",
+			}}}},
+		},
+	}
+
+	t.Log("Verify the template-source transition creates a worker generation")
+	assert.NotEqual(t, mustComputeBetaDGDWorkersSpecHash(t, global), mustComputeBetaDGDWorkersSpecHash(t, roleTemplates))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_RolePodTemplatesAreOrderIndependent(t *testing.T) {
+	dgd := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: commonconsts.ComponentTypeWorker,
+			Multinode:     &v1alpha1.MultinodeSpec{NodeCount: 2},
+		},
+	}))
+	dgd.Spec.Components[0].PodTemplate = nil
+	dgd.Spec.Components[0].Roles = []v1beta1.ComponentRoleSpec{
+		{Name: v1beta1.ComponentRoleLeader, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "leader:1.5.0"}}}}},
+		{Name: v1beta1.ComponentRoleWorker, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "worker:1.5.0"}}}}},
+	}
+	reordered := dgd.DeepCopy()
+	reordered.Spec.Components[0].Roles[0], reordered.Spec.Components[0].Roles[1] = reordered.Spec.Components[0].Roles[1], reordered.Spec.Components[0].Roles[0]
+
+	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, dgd), mustComputeBetaDGDWorkersSpecHash(t, reordered))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_RoleRuntimeVersionOverrideCreatesRollout(t *testing.T) {
+	dgd := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: commonconsts.ComponentTypeWorker,
+			Multinode:     &v1alpha1.MultinodeSpec{NodeCount: 2},
+		},
+	}))
+	dgd.Spec.Components[0].PodTemplate = nil
+	dgd.Spec.Components[0].RuntimeVersionOverride = "1.5.0"
+	dgd.Spec.Components[0].Roles = []v1beta1.ComponentRoleSpec{
+		{Name: v1beta1.ComponentRoleLeader, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "leader:latest"}}}}},
+		{Name: v1beta1.ComponentRoleWorker, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "worker:latest"}}}}},
+	}
+	updated := dgd.DeepCopy()
+	updated.Spec.Components[0].RuntimeVersionOverride = "1.6.0"
+
+	assert.NotEqual(t, mustComputeBetaDGDWorkersSpecHash(t, dgd), mustComputeBetaDGDWorkersSpecHash(t, updated))
 }
 
 func TestComputeBetaDGDWorkersSpecHash_IgnoresNonWorkers(t *testing.T) {
@@ -298,9 +372,7 @@ func TestComputeBetaDGDWorkersSpecHash_ChangesOnPodAffectingFields(t *testing.T)
 	// Native v1beta1 podTemplate metadata is also pod-affecting.
 	dgd6 := betaDGD(t, base())
 	dgd6.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{"rollout": "required"},
-		},
+		Annotations: map[string]string{"rollout": "required"},
 	}
 	assert.NotEqual(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, dgd6), "podTemplate metadata change should change hash")
 }
@@ -327,10 +399,8 @@ func TestComputeBetaDGDWorkersSpecHash_IgnoresOverriddenDGDObjectAnnotations(t *
 		commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
 	}
 	dgd.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{
-				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "component",
-			},
+		Annotations: map[string]string{
+			commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "component",
 		},
 	}
 	baseHash := mustComputeBetaDGDWorkersSpecHash(t, dgd)
@@ -362,12 +432,12 @@ func TestComputeBetaDGDWorkersSpecHash_IgnoresNonRolloutFields(t *testing.T) {
 	baseHash := mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, base()))
 
 	replicas := base()
-	replicas.Spec.Services["worker"].Replicas = ptr.To(int32(99))
+	replicas.Spec.Services["worker"].Replicas = new(int32(99))
 	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, replicas)))
 
 	scaleToZero := betaDGD(t, base())
-	scaleToZero.Spec.Components[0].Replicas = ptr.To(int32(0))
-	scaleToZero.Spec.Components[0].MinAvailable = ptr.To(int32(1))
+	scaleToZero.Spec.Components[0].Replicas = new(int32(0))
+	scaleToZero.Spec.Components[0].MinAvailable = new(int32(1))
 	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, scaleToZero))
 
 	scalingAdapter := betaDGD(t, base())
@@ -445,17 +515,18 @@ func TestComputeBetaDGDWorkersSpecHash_UsesResolvedRuntimeVersion(t *testing.T) 
 
 func TestRuntimeFeatureGatesDoNotPrecedeVersionHashing(t *testing.T) {
 	tests := []struct {
-		name string
-		gate runtimefeatures.Gate
+		name                  string
+		minimumRuntimeVersion runtimeversion.Version
 	}{
-		{name: "canary health checks", gate: runtimefeatures.CanaryHealthChecks},
-		{name: "increased worker failure threshold", gate: runtimefeatures.IncreasedWorkerFailureThreshold},
+		{name: "canary health checks", minimumRuntimeVersion: runtimefeatures.CanaryHealthChecks.MinRuntimeVersion},
+		{name: "frontend startup probe", minimumRuntimeVersion: compatibility.FrontendStartupProbe.MinRuntimeVersion},
+		{name: "increased worker failure threshold", minimumRuntimeVersion: runtimefeatures.IncreasedWorkerFailureThreshold.MinRuntimeVersion},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("ensure runtime-gated rendering cannot change a legacy unhashed worker generation")
-			assert.GreaterOrEqual(t, tt.gate.MinRuntimeVersion.Compare(minimumHashedRuntimeVersion), 0)
+			assert.GreaterOrEqual(t, tt.minimumRuntimeVersion.Compare(minimumHashedRuntimeVersion), 0)
 		})
 	}
 }
@@ -539,12 +610,12 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesDisabledCheckpoint(t *testin
 	}{
 		{name: "disabled", checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: false}},
 		{name: "disabled_with_options", checkpoint: &v1beta1.ComponentCheckpointConfig{
-			Enabled: false, CheckpointRef: ptr.To("existing-snapshot"),
+			Enabled: false, CheckpointRef: new("existing-snapshot"),
 			StartupPolicy:  v1beta1.CheckpointStartupPolicyWaitForCheckpoint,
 			DeletionPolicy: v1beta1.CheckpointDeletionPolicyRetain,
 		}},
 		{name: "disabled_with_grove", checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: false},
-			grove: &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(true)}},
+			grove: &v1beta1.GroveSpec{ForceScalingGroup: new(true)}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -561,9 +632,9 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesDisabledCheckpoint(t *testin
 			original := disabled.DeepCopy()
 
 			t.Log("Verify equal rendered workloads and worker hashes")
-			omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), omitted, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+			omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), omitted, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
 			require.NoError(t, err)
-			disabledRendered, err := GenerateGrovePodCliqueSet(context.Background(), disabled, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+			disabledRendered, err := GenerateGrovePodCliqueSet(context.Background(), disabled, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
 			require.NoError(t, err)
 			require.Equal(t, omittedRendered.Spec, disabledRendered.Spec)
 			assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, omitted), mustComputeBetaDGDWorkersSpecHash(t, disabled))
@@ -589,9 +660,9 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesCompilationCacheMountPath(t 
 	originalOmitted, originalExplicit := omitted.DeepCopy(), explicit.DeepCopy()
 
 	t.Log("Verify equal rendered workloads and worker hashes without mutating either input")
-	omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), omitted, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), omitted, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
 	require.NoError(t, err)
-	explicitRendered, err := GenerateGrovePodCliqueSet(context.Background(), explicit, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	explicitRendered, err := GenerateGrovePodCliqueSet(context.Background(), explicit, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
 	require.NoError(t, err)
 	require.Equal(t, omittedRendered.Spec, explicitRendered.Spec)
 	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, omitted), mustComputeBetaDGDWorkersSpecHash(t, explicit))

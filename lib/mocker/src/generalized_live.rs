@@ -90,6 +90,9 @@ pub enum GroupedLiveEvent {
     },
     /// Start-visible admissions and KV events for a grouped pass.
     PassStarted(EnginePassStarted<PassStartEffects>),
+    /// Admissions and KV events made visible by internal work, such as a
+    /// completed G2-to-G1 host load that restores a prefix into device KV.
+    InternalWorkCompleted(EngineEffects<PassStartEffects>),
     /// Completion-visible outputs, lifecycle events, KV events, and metrics.
     ///
     /// The adapter owns this boundary until it calls
@@ -111,11 +114,19 @@ struct ControlEnvelope {
 enum BoundaryRequest {
     Apply {
         command: SchedulerCommand<Command>,
-        reply: oneshot::Sender<Result<EngineEffects<CommandEffects>>>,
+        reply: oneshot::Sender<BoundaryCommandOutcome>,
     },
     Finish {
         reply: oneshot::Sender<()>,
     },
+}
+
+/// A command applied at a pass boundary, with the internal-work effects the
+/// engine required first. The adapter publishes both before finishing the
+/// boundary, so its completion drain covers them.
+pub(crate) struct BoundaryCommandOutcome {
+    pub(crate) command: Result<EngineEffects<CommandEffects>>,
+    pub(crate) internal: InternalEffects,
 }
 
 /// Adapter-owned handle that keeps a completed pass at its publication
@@ -129,7 +140,7 @@ impl GroupedPassBoundary {
     pub(crate) async fn apply_command(
         &self,
         command: SchedulerCommand<Command>,
-    ) -> Result<EngineEffects<CommandEffects>> {
+    ) -> Result<BoundaryCommandOutcome> {
         let (reply, response) = oneshot::channel();
         self.request_tx
             .send(BoundaryRequest::Apply { command, reply })
@@ -137,7 +148,7 @@ impl GroupedPassBoundary {
             .map_err(|_| anyhow!("grouped live pass boundary is closed"))?;
         response
             .await
-            .context("grouped live engine stopped while applying a boundary command")?
+            .context("grouped live engine stopped while applying a boundary command")
     }
 
     pub(crate) async fn finish(self) -> Result<()> {
@@ -329,6 +340,9 @@ struct GroupedLiveActor {
     next_pass_deadline_ms: Option<f64>,
 }
 
+/// Internal-work effects made visible while applying a command.
+pub(crate) type InternalEffects = Vec<EngineEffects<PassStartEffects>>;
+
 fn select_pass_start(wall_ms: f64, engine_time_ms: f64, next_deadline_ms: Option<f64>) -> f64 {
     let Some(deadline_ms) = next_deadline_ms else {
         return wall_ms.max(engine_time_ms);
@@ -404,6 +418,10 @@ impl GroupedLiveActor {
                 self.next_pass_deadline_ms,
             );
             self.advance_engine_time(started_at_ms);
+            // The start can be later than the last settlement (a catch-up or
+            // wall-clock start), so complete transfers due before it first.
+            let internal = self.settle_internal_work(started_at_ms)?;
+            self.publish_internal_effects(internal).await?;
             let Some(started) = self.engine.execute_pass(started_at_ms)? else {
                 self.next_pass_deadline_ms = None;
                 continue;
@@ -469,6 +487,45 @@ impl GroupedLiveActor {
         }
     }
 
+    /// Apply `command` at one command time. The idle engine rejects a command
+    /// while internal work, such as a G2 transfer, is due by that time, so
+    /// process it at the same time first. Returns the internal-work effects
+    /// for the caller to publish.
+    fn apply_command(
+        &mut self,
+        command: SchedulerCommand<Command>,
+    ) -> Result<(Result<EngineEffects<CommandEffects>>, InternalEffects)> {
+        let now_ms = self.command_time_ms();
+        let internal = self.settle_internal_work(now_ms)?;
+        Ok((self.engine.apply_command_effects(command, now_ms), internal))
+    }
+
+    /// Process all internal work due by `now_ms`. Commands and passes at
+    /// `now_ms` mutate G2 state, which requires earlier transfers to be
+    /// completed first.
+    fn settle_internal_work(&mut self, now_ms: f64) -> Result<InternalEffects> {
+        let mut internal = Vec::new();
+        while self
+            .engine
+            .next_internal_deadline_ms()
+            .is_some_and(|deadline_ms| deadline_ms <= now_ms)
+        {
+            let effects = self.engine.process_internal_work(now_ms)?;
+            if !effects.is_empty() {
+                internal.push(effects);
+            }
+        }
+        Ok(internal)
+    }
+
+    async fn publish_internal_effects(&self, effects: InternalEffects) -> Result<()> {
+        for effects in effects {
+            self.publish(GroupedLiveEvent::InternalWorkCompleted(effects))
+                .await?;
+        }
+        Ok(())
+    }
+
     async fn publish(&self, event: GroupedLiveEvent) -> Result<()> {
         tokio::select! {
             biased;
@@ -500,10 +557,11 @@ impl GroupedLiveActor {
             };
             match request {
                 BoundaryRequest::Apply { command, reply } => {
-                    let now_ms = self.command_time_ms();
-                    let result = self.engine.apply_command_effects(command, now_ms);
+                    // The adapter is blocked on this reply, so it publishes the
+                    // internal-work effects itself rather than via the event lane.
+                    let (command, internal) = self.apply_command(command)?;
                     self.clear_pass_deadline_if_not_ready();
-                    let _ = reply.send(result);
+                    let _ = reply.send(BoundaryCommandOutcome { command, internal });
                 }
                 BoundaryRequest::Finish { reply } => {
                     let _ = reply.send(());
@@ -517,9 +575,12 @@ impl GroupedLiveActor {
         let command_id = envelope.command_id;
         let is_request_cancellation =
             matches!(&envelope.command.command, Command::CancelRequest { .. });
-        let now_ms = self.command_time_ms();
-        let result = self.engine.apply_command_effects(envelope.command, now_ms);
+        let (result, internal) = self.apply_command(envelope.command)?;
         self.clear_pass_deadline_if_not_ready();
+        if let Err(error) = self.publish_internal_effects(internal).await {
+            let _ = envelope.reply.send(Err(anyhow!(error.to_string())));
+            return Err(error);
+        }
         match result {
             Ok(effects) => {
                 let event = GroupedLiveEvent::CommandApplied {
@@ -694,7 +755,11 @@ impl GroupedLiveActor {
             return Ok(());
         };
         let now_ms = self.advance_engine_time(candidate_ms);
-        self.engine.process_internal_work(now_ms)?;
+        let effects = self.engine.process_internal_work(now_ms)?;
+        if !effects.is_empty() {
+            self.publish(GroupedLiveEvent::InternalWorkCompleted(effects))
+                .await?;
+        }
         Ok(())
     }
 }
@@ -726,8 +791,8 @@ mod tests {
 
     use aisimulate_core::engine::generalized::EngineIdentity;
     use aisimulate_core::engine::{
-        CommandResult, EngineConfig, EngineFactory, HandoffId, Request, TimingModel,
-        TimingModelConfig, WorkerType,
+        CommandResult, EngineConfig, EngineFactory, HandoffId, NativeHostOffloadConfig, Request,
+        TimingModel, TimingModelConfig, WorkerType,
     };
 
     use super::*;
@@ -738,6 +803,9 @@ mod tests {
             tokens: (0..prompt_len as u32).collect(),
             max_output_tokens: output_len,
             output_token_ids: Some((0..output_len as u32).map(|token| token + 10_000).collect()),
+            session_id: None,
+            images: Vec::new(),
+            kv_hint: None,
         }
     }
 
@@ -1418,9 +1486,16 @@ mod tests {
         assert!(pass_in_flight);
         assert!(is_request_cancellation);
         assert!(effects.by_rank[0].effects.suppressed_pending_output);
+        // Scheduler retirement and pending-output suppression can both report
+        // the same request. Cleanup is idempotent; check the retired identities.
         assert_eq!(
-            effects.by_rank[0].effects.retired_requests,
-            vec![request_id]
+            effects.by_rank[0]
+                .effects
+                .retired_requests
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>(),
+            std::collections::HashSet::from([request_id])
         );
 
         let completed = actor
@@ -1835,5 +1910,85 @@ mod tests {
             .unwrap()
             .unwrap();
         shutdown.await.unwrap();
+    }
+
+    // Regression: a pass that starts late must first settle every G2 transfer
+    // due by its start, or its own host store trips the private FIFO tier's
+    // "host completions must be ticked before a later mutation" assertion.
+    #[tokio::test(start_paused = true)]
+    async fn late_pass_start_settles_due_host_transfers() {
+        let GroupedLiveRuntime {
+            handle,
+            mut events,
+            actor,
+        } = runtime_with_config(
+            1,
+            EngineConfig {
+                num_gpu_blocks: 128,
+                block_size: 4,
+                max_num_seqs: 8,
+                max_num_batched_tokens: 256,
+                // One 1 MB block at 0.2 GB/s takes 5 ms to copy to G2.
+                kv_cache_bytes_per_token: Some(250_000),
+                native_host_offload: Some(
+                    NativeHostOffloadConfig::new(16).with_bandwidths(0.2, 0.2),
+                ),
+                timing_model: TimingModelConfig::Fixed {
+                    prefill_ms: 10.0,
+                    decode_ms: 10.0,
+                },
+                ..EngineConfig::default()
+            },
+        );
+        let prompt = |id: u128, first_token: u32| Request {
+            request_id: Uuid::from_u128(id),
+            tokens: (first_token..first_token + 4).collect(),
+            max_output_tokens: 3,
+            output_token_ids: Some(vec![10_000, 10_001, 10_002]),
+            session_id: None,
+            images: Vec::new(),
+            kv_hint: None,
+        };
+
+        // One pass stores both prompts; the FIFO D2H lane finishes the copies
+        // 5 ms and 10 ms after its boundary.
+        for (id, first_token) in [(1, 0), (2, 100)] {
+            handle
+                .enqueue_command(SchedulerCommand::new(
+                    0,
+                    Command::Submit(prompt(id, first_token)),
+                ))
+                .await
+                .unwrap();
+        }
+        let first = loop {
+            if let GroupedLiveEvent::PassStarted(started) = next_event(&mut events).await {
+                break started;
+            }
+        };
+        tokio::time::advance(Duration::from_millis(10)).await;
+        let GroupedLiveEvent::PassCompleted { boundary, .. } = next_event(&mut events).await else {
+            panic!("expected first pass completion");
+        };
+        boundary
+            .apply_command(SchedulerCommand::new(0, Command::Submit(prompt(3, 200))))
+            .await
+            .unwrap()
+            .command
+            .unwrap();
+        // Finish late so the next pass starts 15 ms after the boundary, past
+        // both copies.
+        tokio::time::advance(Duration::from_millis(20)).await;
+        boundary.finish().await.unwrap();
+
+        let second = loop {
+            if let GroupedLiveEvent::PassStarted(started) = next_event(&mut events).await {
+                break started;
+            }
+        };
+        assert_eq!(second.started_at_ms, first.end_ms + 15.0);
+
+        handle.shutdown();
+        actor.await.unwrap().unwrap();
     }
 }

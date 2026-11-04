@@ -110,7 +110,7 @@ impl<P: TieredMatchProvider> OverlapScoresRefresh for TieredOverlapRefresher<P> 
         };
         let overlap = OverlapAnalysis::new(&self.config, self.block_size, &tiered).signals();
         let kv_transfer_candidates = retain_kv_transfer_chain
-            .then(|| tiered.kv_transfer_candidates().cloned())
+            .then(|| tiered.into_kv_transfer_candidates())
             .flatten();
         Some(RefreshedOverlap {
             overlap,

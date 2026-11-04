@@ -18,17 +18,16 @@ use super::server::create_router;
 use super::*;
 use crate::identity::RoutingPartitionRef;
 use crate::indexer::{LowerTierMatchDetails, MatchDetails, TieredMatchDetails};
+use crate::plugins::worker_selection::{
+    WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView, WorkerPicker, WorkerScorer,
+    WorkerSelectionContext, WorkerSelectionPolicy,
+};
 use crate::protocols::{
     BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, OverlapScores, StorageTier, WorkerId,
     WorkerWithDpRank, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
 use crate::scheduling::WorkerSelectionPolicyError;
-use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::overlap::build_overlap_scores_response;
-use crate::scheduling::selector::{
-    WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionPolicy,
-};
 use crate::{TrackingHashContext, TrackingHashScope};
 use tempfile::NamedTempFile;
 
@@ -45,11 +44,33 @@ fn app() -> Router {
     create_router(Arc::new(AppState { service }))
 }
 
+#[tokio::test]
+async fn binding_stream_rejects_invalid_config() {
+    let builder = || {
+        SelectionServiceBuilder::new(
+            test_config(),
+            crate::WorkerType::Aggregated,
+            RouterPluginRegistry::default(),
+        )
+        .session_binding_replication(11)
+    };
+    let error = builder().build().await.err().expect("affinity disabled");
+    assert!(error.to_string().contains("requires session affinity"));
+    let error = builder()
+        .session_affinity(Duration::from_secs(10))
+        .replica_sync(0, Vec::new())
+        .build()
+        .await
+        .err()
+        .expect("mesh enabled");
+    assert!(error.to_string().contains("cannot be combined"));
+}
+
 struct WorkerIdScorer;
 
 impl WorkerScorer for WorkerIdScorer {
     fn score(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -65,7 +86,7 @@ struct LowestCostPicker;
 
 impl WorkerPicker for LowestCostPicker {
     fn pick(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -83,7 +104,7 @@ struct NonFiniteScorer;
 
 impl WorkerScorer for NonFiniteScorer {
     fn score(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -99,7 +120,7 @@ struct InvalidRowPicker;
 
 impl WorkerPicker for InvalidRowPicker {
     fn pick(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -111,7 +132,7 @@ struct RejectAllFilter;
 
 impl WorkerFilter for RejectAllFilter {
     fn keep(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         _candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
@@ -123,7 +144,7 @@ struct RejectWorker(WorkerId);
 
 impl WorkerFilter for RejectWorker {
     fn keep(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
@@ -177,6 +198,19 @@ async fn replica_sync_routes_are_mounted() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+
+    // The shared peer routes must be merged before the JSON fallbacks.
+    let wrong_method = app()
+        .oneshot(
+            Request::builder()
+                .uri("/replica_sync/register_peer")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(wrong_method.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert!(response_json(wrong_method).await["error"].is_string());
 }
 
 async fn post(app: Router, uri: &str, body: &str) -> Response {
@@ -276,10 +310,10 @@ where
         router_policy_config: Some(policy_file.path().display().to_string()),
         ..test_config()
     };
-    let factory: crate::WorkerSelectionPolicyFactory = Arc::new(factory);
-    let mut registry = WorkerSelectionPolicyRegistry::default();
+    let factory: crate::plugins::worker_selection::WorkerSelectionPolicyFactory = Arc::new(factory);
+    let mut registry = RouterPluginRegistry::default();
     registry
-        .register(
+        .register_worker_selection(
             "test",
             Arc::new(move |_| -> Result<_, WorkerSelectionPolicyProviderError> {
                 Ok(Arc::clone(&factory))
@@ -565,6 +599,58 @@ fn prompt_request_cache_salt_changes_normalized_hashes() {
 }
 
 #[test]
+fn prompt_carrying_requests_read_top_level_prompt_fields() {
+    let body = serde_json::json!({
+        "selection_id": "sel-1",
+        "worker_id": 7,
+        "token_ids": [1, 2, 3],
+        "cache_salt": "tenant-a",
+        "is_eagle": true,
+    });
+    let assert_prompt = |prompt: &PromptRequest| {
+        assert_eq!(prompt.token_ids.as_deref(), Some(&[1, 2, 3][..]));
+        assert_eq!(prompt.cache_namespace.as_deref(), Some("tenant-a"));
+        assert_eq!(prompt.is_eagle, Some(true));
+    };
+
+    let select: SelectRequest = serde_json::from_value(body.clone()).unwrap();
+    assert_prompt(&select.prompt);
+    assert_eq!(select.selection_id.as_deref(), Some("sel-1"));
+    assert_eq!(select.model_name, DEFAULT_MODEL_NAME);
+    let reserve: SelectAndReserveRequest = serde_json::from_value(body.clone()).unwrap();
+    assert_prompt(&reserve.prompt);
+    let booking: ReservationRequest = serde_json::from_value(body.clone()).unwrap();
+    assert_prompt(&booking.prompt);
+    assert_eq!(booking.worker_id, Some(7));
+    let loads: PotentialLoadsRequest = serde_json::from_value(body.clone()).unwrap();
+    assert_prompt(&loads.prompt);
+    let scores: OverlapScoresRequest = serde_json::from_value(body).unwrap();
+    assert_prompt(&scores.prompt);
+}
+
+#[tokio::test]
+async fn prompt_routes_keep_json_rejection_statuses() {
+    let untyped = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/select")
+                .body(Body::from(r#"{"token_ids":[1]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(untyped.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+    let malformed = post(app(), "/select", "{").await;
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+
+    let wrong_shape = post(app(), "/select", r#"{"token_ids":"oops"}"#).await;
+    assert_eq!(wrong_shape.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(response_json(wrong_shape).await["error"].is_string());
+}
+
+#[test]
 fn keyed_prompt_tracking_leaves_indexer_hashes_public() {
     let mut key_file = NamedTempFile::new().unwrap();
     key_file.write_all(&[0x35; 32]).unwrap();
@@ -752,7 +838,7 @@ fn randomized_reservation_uses_canonical_complete_block_count() {
 }
 
 #[test]
-fn overlap_scores_response_honors_override_and_includes_python_shape_fields() {
+fn overlap_scores_response_includes_raw_tier_fields() {
     let worker = WorkerWithDpRank::new(1, 0);
     let idle_worker = WorkerWithDpRank::new(2, 0);
     let mut device_scores = OverlapScores::new();
@@ -770,23 +856,8 @@ fn overlap_scores_response_honors_override_and_includes_python_shape_fields() {
     };
     tiered.lower_tier.insert(StorageTier::HostPinned, host);
 
-    let mut config = test_config();
-    config.host_cache_hit_weight = 0.75;
-    let override_config = RouterConfigOverride {
-        overlap_score_credit: Some(0.5),
-        ..Default::default()
-    };
-    let response = build_overlap_scores_response(
-        &config,
-        Some(&override_config),
-        &tiered,
-        4,
-        2,
-        [worker, idle_worker],
-        false,
-        None,
-        None,
-    );
+    let response =
+        build_overlap_scores_response(&tiered, 4, 2, [worker, idle_worker], false, None, None);
 
     assert_eq!(response.workers.len(), 2);
     let selected = response
@@ -799,7 +870,6 @@ fn overlap_scores_response_honors_override_and_includes_python_shape_fields() {
     assert_eq!(selected.disk_blocks, 3);
     assert_eq!(selected.host_pinned_extension_blocks, 1);
     assert_eq!(selected.shared_beyond_device_blocks, None);
-    assert_eq!(selected.router_credit_blocks, 1.75);
     assert!(!response.shared_cache.enabled);
 }
 
@@ -1791,9 +1861,9 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
         config_a
             .service_builder(
                 crate::WorkerType::Aggregated,
-                WorkerSelectionPolicyRegistry::default().with_default_factory(Arc::new(
+                RouterPluginRegistry::default().with_default_factory(Arc::new(
                     |config, role, _| {
-                        crate::WorkerSelectionPolicy::reference(
+                        crate::plugins::worker_selection::WorkerSelectionPolicy::reference(
                             config.clone(),
                             role.default_selector_label(),
                         )
@@ -1808,14 +1878,12 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
         SelectionServiceBuilder::new(
             test_config(),
             crate::WorkerType::Aggregated,
-            WorkerSelectionPolicyRegistry::default().with_default_factory(Arc::new(
-                |config, role, _| {
-                    crate::WorkerSelectionPolicy::reference(
-                        config.clone(),
-                        role.default_selector_label(),
-                    )
-                },
-            )),
+            RouterPluginRegistry::default().with_default_factory(Arc::new(|config, role, _| {
+                crate::plugins::worker_selection::WorkerSelectionPolicy::reference(
+                    config.clone(),
+                    role.default_selector_label(),
+                )
+            })),
         )
         .indexer_threads(1)
         .replica_sync(port_b, Vec::new())

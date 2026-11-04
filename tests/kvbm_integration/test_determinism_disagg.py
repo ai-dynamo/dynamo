@@ -29,7 +29,7 @@ import pytest
 import requests
 import yaml
 
-from tests.utils.test_output import resolve_test_output_path
+from tests.utils.output_paths import resolve_test_output_path
 
 from .common import DeterminismTester, ServerType
 from .common import TestDeterminism as BaseTestDeterminism

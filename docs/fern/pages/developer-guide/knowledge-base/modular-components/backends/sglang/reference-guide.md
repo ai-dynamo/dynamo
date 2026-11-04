@@ -37,12 +37,13 @@ These arguments are added by Dynamo on top of SGLang's native arguments. For the
 | `--endpoint` | `DYN_ENDPOINT` | Auto-generated | Dynamo endpoint in `dyn://namespace.component.endpoint` format |
 | `--use-sglang-tokenizer` | `DYN_SGL_USE_TOKENIZER` | `false` | **[Deprecated]** Use `--dyn-chat-processor sglang` on the frontend instead. See [SGLang Chat Processor](chat-processor.md). |
 | `--dyn-tool-call-parser` | `DYN_TOOL_CALL_PARSER` | `None` | [Tool call](../../../../../use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx#supported-tool-call-parsers) parser (overrides SGLang's `--tool-call-parser`) |
-| `--dyn-reasoning-parser` | `DYN_REASONING_PARSER` | `None` | [Reasoning](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.md#supported-reasoning-parsers) parser for chain-of-thought models |
-| `--dyn-default-thinking-mode` | `DYN_DEFAULT_THINKING_MODE` | `None` | Deployment-level `enabled` or `disabled` [thinking default](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.md#deployment-level-thinking-default); explicit request controls take precedence |
+| `--dyn-reasoning-parser` | `DYN_REASONING_PARSER` | `None` | [Reasoning](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx#supported-reasoning-parsers) parser for chain-of-thought models |
+| `--dyn-default-thinking-mode` | `DYN_DEFAULT_THINKING_MODE` | `None` | Deployment-level `enabled` or `disabled` [thinking default](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx#deployment-level-thinking-default); explicit request controls take precedence |
 | `--custom-jinja-template` | `DYN_CUSTOM_JINJA_TEMPLATE` | `None` | Custom chat template path (incompatible with `--use-sglang-tokenizer`) |
 | `--embedding-worker` | `DYN_SGL_EMBEDDING_WORKER` | `false` | Run as embedding worker (also sets SGLang's `--is-embedding`) |
 | `--enable-multimodal` | `DYN_SGL_ENABLE_MULTIMODAL` | `false` | Allow [multimodal](multimodal.md) inputs on this worker |
 | `--dedicated-mm-encoder` | `DYN_SGL_DEDICATED_MM_ENCODER` | `false` | Select the internal encode-worker topology for multimodal PD/P/D workers |
+| `--frontend-decoding` | `DYN_SGL_FRONTEND_DECODING` | `false` | Decode images and supported videos in the Rust frontend and transfer pixels through NIXL. Use it on aggregated/native workers or the frontend-facing encode worker, not internal multimodal workers. |
 | `--image-diffusion-worker` | `DYN_SGL_IMAGE_DIFFUSION_WORKER` | `false` | Run as [image diffusion](../../../../../use-cases/diffusion/workflows/text-to-image.md#sglang) worker |
 | `--video-generation-worker` | `DYN_SGL_VIDEO_GENERATION_WORKER` | `false` | Run as [video generation](../../../../../use-cases/diffusion/workflows/text-to-video.md#sglang) worker |
 | `--disagg-config` | `DYN_SGL_DISAGG_CONFIG` | `None` | Path to YAML disaggregation config file |
@@ -52,7 +53,7 @@ These arguments are added by Dynamo on top of SGLang's native arguments. For the
 > [!NOTE]
 > `--disagg-config` and `--disagg-config-key` must be provided together. The selected section is written to a temp YAML file and passed to SGLang's `--config` flag.
 
-The current supported parser names for both flags are documented in [Tool Call Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx#supported-tool-call-parsers) and [Reasoning Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.md#supported-reasoning-parsers).
+The current supported parser names for both flags are documented in [Tool Call Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx#supported-tool-call-parsers) and [Reasoning Parsing (Dynamo)](../../../../../use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx#supported-reasoning-parsers).
 
 ## Tokenizer Behavior
 

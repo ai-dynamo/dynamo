@@ -48,6 +48,14 @@ The recipe does not pin a complete Dynamo/vLLM image for the native-router path.
 
 > [!IMPORTANT]
 > Build that environment on vLLM `0.26.0`, which is what `ai-dynamo[vllm]==1.4.x` pins. The verl commit selected by this snapshot imports `FusedMoE` from `vllm.model_executor.layers.fused_moe.layer` at import time in `verl/utils/vllm/vllm_fp8_utils.py`. vLLM exports that name up to and including `0.26.0` and renamed it to `FusedMoEFactory` in `0.27.0`, so the import fails from `0.27.0` onward. On `ai-dynamo[vllm]==1.5.0`, which pins `vllm[flashinfer,runai,otel]==0.28.0`, loading the Dynamo rollout backend raises `ImportError: FP8 quantization not available` and the Dynamo stack never starts.
+>
+> The policy update gives a second, independent reason for this bound, and it also covers `ai-dynamo[vllm]==1.6.x`, which pins vLLM `0.31.0`. Starting with vLLM `0.29.0`, the model loader checks tied-embedding aliases separately in each `load_weights` call. The verl core selected by this snapshot loads each CUDA IPC update bucket with its own `load_weights` call. A model with tied embeddings, such as Qwen2.5, therefore fails its first policy update whenever `lm_head.weight` and `model.embed_tokens.weight` arrive in different buckets. With 64 MiB buckets this always happens for Qwen2.5, because each of these tensors is larger than a bucket and is sent alone. The update fails with:
+>
+> ```text
+> ValueError: 'lm_head.weight' was skipped because it is tied to 'model.embed_tokens.weight' in Qwen2ForCausalLM, but 'model.embed_tokens.weight' was not found in the checkpoint, so the tied weight is uninitialized.
+> ```
+>
+> verl drops the redundant tied alias from each bucket starting with [verl-project/verl#7973](https://github.com/verl-project/verl/pull/7973), and in the FP8 path with [verl-project/verl#8064](https://github.com/verl-project/verl/pull/8064). The verl core selected by this snapshot, and the one selected by the current verl-recipe main branch, both predate these changes. Raising the update bucket size is not a supported fix.
 
 ### Install flash-attn
 
@@ -151,6 +159,7 @@ See [Profile and Simulate RL Rollouts](operations-and-simulation.md) for request
 
 - The recipe does not provide one complete native-path Dynamo/vLLM image pin.
 - The documented policy update is the recipe's colocated CUDA IPC path, not public Dynamo worker discovery or ModelExpress.
+- Policy updates for tied-embedding models on vLLM `0.29.0` or later need a verl core that drops the tied alias from each update bucket. No reviewed recipe snapshot selects such a verl core yet.
 - Multi-node and large-model layouts require separate topology and failure validation.
 - Supported status requires an independent run with token correctness, policy refresh, post-update generation, and request, worker, and update recovery.
 

@@ -6,10 +6,16 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
+
+from dynamo._core import ModelInput, ModelType, WorkerType, register_model
+from dynamo.runtime import serve_unary_endpoint
 
 if TYPE_CHECKING:
     from dynamo._core import Context
+    from dynamo.runtime import DistributedRuntime
 
 
 class _RoundRobinClient(Protocol):
@@ -23,11 +29,59 @@ class _RoundRobinClient(Protocol):
         ...
 
 
+class _UnaryHandler(Protocol):
+    async def __call__(self, request: Any, *, context: Context) -> Any:
+        ...
+
+
+@dataclass(frozen=True)
+class UnaryChatModel:
+    """Publish an application-owned unary handler as a public chat model.
+
+    ``service_name`` identifies the internal ``<service>.app.generate`` endpoint.
+    ``public_model_name`` is the name clients send to the OpenAI frontend and
+    defaults to ``service_name``.
+    """
+
+    model_path: str
+    service_name: str
+    public_model_name: str | None = None
+    chat_template: Path | None = None
+
+    async def serve(self, runtime: DistributedRuntime, handler: _UnaryHandler) -> None:
+        """Register the model and serve its handler until shutdown."""
+
+        endpoint = runtime.endpoint(f"{self.service_name}.app.generate")
+        await register_model(
+            ModelInput.Tokens,
+            ModelType.Chat,
+            endpoint,
+            self.model_path,
+            model_name=self.public_model_name or self.service_name,
+            custom_template_path=(
+                str(self.chat_template) if self.chat_template is not None else None
+            ),
+            worker_type=WorkerType.Aggregated,
+            ignore_weights=True,
+        )
+        await serve_unary_endpoint(endpoint, handler)
+
+
 class LLMUnaryClient:
     """Collect one normalized Dynamo Generate stream into a terminal response."""
 
     def __init__(self, client: _RoundRobinClient) -> None:
         self._client = client
+
+    @classmethod
+    async def connect(
+        cls, runtime: DistributedRuntime, endpoint_name: str
+    ) -> LLMUnaryClient:
+        """Connect to an endpoint after a routable instance is available."""
+
+        client = await runtime.endpoint(endpoint_name).client()
+        await client.wait_for_instances()
+        return cls(client)
 
     async def complete(
         self,

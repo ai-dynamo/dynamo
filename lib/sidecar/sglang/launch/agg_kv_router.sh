@@ -33,6 +33,7 @@ while [[ $# -gt 0 ]]; do
             echo "Additional options are passed to both SGLang engines."
             echo
             echo "Environment overrides:"
+            echo "  DYNAMO_SIDECAR_BIN      Require this absolute native binary path (no fallback)"
             echo "  MODEL                         Model to serve (default: Qwen/Qwen3-0.6B)"
             echo "  SGLANG_PYTHON                 Python with SGLang installed (default: python3)"
             echo "  SGLANG_WORKER1_GPU            First GPU assignment (default: 0)"
@@ -59,18 +60,20 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+resolve_sidecar sglang SIDECAR_CMD
+
 trap dynamo_exit_trap EXIT
 
 SGLANG_PYTHON="${SGLANG_PYTHON:-python3}"
 SGLANG_HOST="127.0.0.1"
 SGLANG_WORKER1_GPU="${SGLANG_WORKER1_GPU:-0}"
 SGLANG_WORKER2_GPU="${SGLANG_WORKER2_GPU:-1}"
-SGLANG_WORKER1_HTTP_PORT="${SGLANG_WORKER1_HTTP_PORT:-30000}"
-SGLANG_WORKER1_GRPC_PORT="${SGLANG_WORKER1_GRPC_PORT:-30001}"
-SGLANG_WORKER1_KV_EVENT_PORT="${SGLANG_WORKER1_KV_EVENT_PORT:-5557}"
-SGLANG_WORKER2_HTTP_PORT="${SGLANG_WORKER2_HTTP_PORT:-30010}"
-SGLANG_WORKER2_GRPC_PORT="${SGLANG_WORKER2_GRPC_PORT:-30011}"
-SGLANG_WORKER2_KV_EVENT_PORT="${SGLANG_WORKER2_KV_EVENT_PORT:-5567}"
+SGLANG_WORKER1_HTTP_PORT=$(dyn_port DYN_ENGINE_HTTP_PORT 1 "${SGLANG_WORKER1_HTTP_PORT:-30000}")
+SGLANG_WORKER1_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 1 "${SGLANG_WORKER1_GRPC_PORT:-30001}")
+SGLANG_WORKER1_KV_EVENT_PORT=$(dyn_port DYN_VLLM_KV_EVENT_PORT 1 "${SGLANG_WORKER1_KV_EVENT_PORT:-5557}")
+SGLANG_WORKER2_HTTP_PORT=$(dyn_port DYN_ENGINE_HTTP_PORT 2 "${SGLANG_WORKER2_HTTP_PORT:-30010}")
+SGLANG_WORKER2_GRPC_PORT=$(dyn_port DYN_ENGINE_GRPC_PORT 2 "${SGLANG_WORKER2_GRPC_PORT:-30011}")
+SGLANG_WORKER2_KV_EVENT_PORT=$(dyn_port DYN_VLLM_KV_EVENT_PORT 2 "${SGLANG_WORKER2_KV_EVENT_PORT:-5567}")
 SGLANG_PAGE_SIZE="${SGLANG_PAGE_SIZE:-16}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
@@ -120,11 +123,11 @@ CUDA_VISIBLE_DEVICES="$SGLANG_WORKER2_GPU" \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT="$SYSTEM_PORT1" \
-    dynamo-sglang-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "${SGLANG_HOST}:${SGLANG_WORKER1_GRPC_PORT}" &
 
 DYN_SYSTEM_PORT="$SYSTEM_PORT2" \
-    dynamo-sglang-sidecar \
+    "${SIDECAR_CMD[@]}" \
     --grpc-endpoint "${SGLANG_HOST}:${SGLANG_WORKER2_GRPC_PORT}" &
 
 wait_any_exit

@@ -27,7 +27,6 @@ class Backend(str, enum.Enum):
     """Supported TensorRT-LLM backend types."""
 
     PYTORCH = "pytorch"
-    AUTODEPLOY = "_autodeploy"
 
 
 class TensorRTLLMEngine:
@@ -44,16 +43,11 @@ class TensorRTLLMEngine:
             else DisaggregationMode.AGGREGATED
         )
         # NOTE: `engine_args` may be reused by callers (e.g., for logging or other workers).
-        # Copy it so that our internal `pop()` / pruning doesn't leak side effects.
+        # Copy it so that our internal `pop()` doesn't leak side effects.
         engine_args = dict(engine_args)
         backend = engine_args.pop("backend", Backend.PYTORCH)
         if backend == Backend.PYTORCH:
             self._llm_cls = LLM
-        elif backend == Backend.AUTODEPLOY:
-            from tensorrt_llm._torch.auto_deploy import LLM as AutoDeployLLM
-
-            self._llm_cls = AutoDeployLLM
-            self._prune_engine_args_for_autodeploy(engine_args)
         else:
             raise ValueError(
                 f"Unsupported {backend=}. Available backends: {[b.value for b in Backend]}."
@@ -185,40 +179,6 @@ class TensorRTLLMEngine:
         except AttributeError:
             return {}
         return get_capacity()
-
-    @staticmethod
-    def _prune_engine_args_for_autodeploy(engine_args) -> None:
-        """Remove entries from `self.engine_args` that the autodeploy backend does not support."""
-        # TODO(2ez4bz/lucaslie): consider handling this in AutoDeploy's `LlmArgs` itself.
-        unsupported_fields = [
-            # https://github.com/NVIDIA/TensorRT-LLM/blob/v1.1.0rc5/tensorrt_llm/_torch/auto_deploy/
-            # llm_args.py#L313
-            "build_config",
-            # https://github.com/NVIDIA/TensorRT-LLM/blob/b51258acdd968599b2c3756d5a5326e7d750e7bf/
-            # tensorrt_llm/_torch/auto_deploy/shim/ad_executor.py#L384
-            "scheduler_config",
-            # The below all come from:
-            # https://github.com/NVIDIA/TensorRT-LLM/blob/v1.1.0rc5/tensorrt_llm/_torch/auto_deploy/
-            # llm_args.py#L316
-            "tensor_parallel_size",
-            "pipeline_parallel_size",
-            "context_parallel_size",
-            "moe_cluster_parallel_size",
-            "moe_tensor_parallel_size",
-            "moe_expert_parallel_size",
-            "enable_attention_dp",  # AutoDeploy doesn't support attention DP (only pytorch backend does)
-            "cp_config",
-        ]
-        for field_name in unsupported_fields:
-            if engine_args.pop(field_name, None) is not None:
-                TensorRTLLMEngine._warn_about_unsupported_field(field_name)
-
-    @staticmethod
-    def _warn_about_unsupported_field(field_name: str) -> None:
-        logger.warning(
-            "`%s` cannot be used with the `_autodeploy` backend. Ignoring.",
-            field_name,
-        )
 
     @staticmethod
     def _is_unsupported_encoder_arch(model_path: str) -> bool:

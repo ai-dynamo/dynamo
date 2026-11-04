@@ -48,6 +48,29 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def normalize_speculative_accept_length(
+    accept_length: Optional[float],
+    capabilities: WorkerCapabilities,
+    config: PlannerConfig,
+) -> float:
+    """Clamp a speculative accept length to ``[1.0, nextn + 1]``.
+
+    The decode capability's ``speculative_nextn`` takes precedence over the
+    config fallback. Returns ``1.0`` when speculation is off or the value is
+    missing or not finite.
+    """
+    d_caps = capabilities.decode
+    if d_caps and d_caps.speculative_nextn and d_caps.speculative_nextn > 0:
+        nextn = d_caps.speculative_nextn
+    else:
+        nextn = max(0, int(config.speculative_nextn))
+    if nextn <= 0:
+        return 1.0
+    if accept_length is None or not math.isfinite(accept_length):
+        return 1.0
+    return min(max(float(accept_length), 1.0), float(nextn + 1))
+
+
 class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
     """Shared in-memory scaling state for all planner modes.
 
@@ -131,6 +154,8 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
         self._diag_load_reason_decode: Optional[str] = None
         self._diag_throughput_reason_prefill: Optional[str] = None
         self._diag_throughput_reason_decode: Optional[str] = None
+        self._diag_load_metadata_available: dict[str, bool] = {}
+        self._diag_throughput_metadata_available: dict[str, bool] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -139,7 +164,9 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
     def update_capabilities(self, capabilities: WorkerCapabilities) -> None:
         """Replace the current worker capabilities."""
         self._capabilities = capabilities
-        self._last_accept_length = self._clamp_accept_length(self._last_accept_length)
+        self._last_accept_length = normalize_speculative_accept_length(
+            self._last_accept_length, self._capabilities, self._config
+        )
         if self._is_easy:
             return
         if self._is_agg and hasattr(self, "_agg_regression"):
@@ -386,6 +413,8 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
         self._diag_load_reason_decode = None
         self._diag_throughput_reason_prefill = None
         self._diag_throughput_reason_decode = None
+        self._diag_load_metadata_available = {}
+        self._diag_throughput_metadata_available = {}
 
     def _build_diagnostics(self) -> TickDiagnostics:
         return TickDiagnostics(
@@ -405,6 +434,10 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
             load_decision_reason_decode=self._diag_load_reason_decode,
             throughput_decision_reason_prefill=self._diag_throughput_reason_prefill,
             throughput_decision_reason_decode=self._diag_throughput_reason_decode,
+            load_metadata_available=dict(self._diag_load_metadata_available),
+            throughput_metadata_available=dict(
+                self._diag_throughput_metadata_available
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -462,27 +495,19 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
             self._decode_regression.add_observations(obs.decode)
             logger.info(f"FPM load stats: {len(obs.decode)} decode engines observed")
 
-    def _effective_speculative_nextn(self) -> int:
-        d_caps = self._capabilities.decode
-        if d_caps and d_caps.speculative_nextn and d_caps.speculative_nextn > 0:
-            return d_caps.speculative_nextn
-        return max(0, int(self._config.speculative_nextn))
-
-    def _clamp_accept_length(self, accept_length: Optional[float]) -> float:
-        nextn = self._effective_speculative_nextn()
-        if nextn <= 0:
-            return 1.0
-        if accept_length is None or not math.isfinite(accept_length):
-            return 1.0
-        return min(max(float(accept_length), 1.0), float(nextn + 1))
-
     def _observe_accept_length(self, accept_length: Optional[float]) -> None:
+        """Keep the normalized observation, ignoring missing or non-finite values."""
         if accept_length is None or not math.isfinite(accept_length):
             return
-        self._last_accept_length = self._clamp_accept_length(accept_length)
+        self._last_accept_length = normalize_speculative_accept_length(
+            accept_length, self._capabilities, self._config
+        )
 
     def _current_decode_accept_length(self) -> float:
-        return self._clamp_accept_length(self._last_accept_length)
+        """Return the stored accept length within the current speculation bounds."""
+        return normalize_speculative_accept_length(
+            self._last_accept_length, self._capabilities, self._config
+        )
 
     # ------------------------------------------------------------------
     # Budget

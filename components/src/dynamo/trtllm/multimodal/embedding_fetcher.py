@@ -25,6 +25,7 @@ from dynamo.common.multimodal.image_loader import (
     image_cache_session_scoped_from_env,
     scope_image_cache_key,
 )
+from dynamo.common.utils.token_ids import normalize_request_token_ids
 from dynamo.trtllm.multimodal.cuda_ipc import extract_embeddings_from_handles
 from dynamo.trtllm.multimodal.hasher import MultimodalHasher
 from dynamo.trtllm.multimodal_processor import resolve_mm_processor_kwargs
@@ -104,7 +105,10 @@ async def _remote_encode_full_epd(
         RuntimeError: If encode worker returns invalid response
     """
     encode_response = None
-    async for res in await encode_client.round_robin(request, context=trace_context):
+    # The encode worker may sit behind a JSON codec, which would spell a packed
+    # buffer out one byte per element; forward a list.
+    forwarded = normalize_request_token_ids(dict(request))
+    async for res in await encode_client.round_robin(forwarded, context=trace_context):
         encode_response = res.data()
         break
 

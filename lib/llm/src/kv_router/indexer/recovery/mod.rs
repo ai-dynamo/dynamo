@@ -25,7 +25,8 @@ pub(crate) use worker_query::WorkerQueryClient;
 #[cfg(feature = "ckf-diagnostics")]
 pub(crate) use worker_query::WorkerQueryHealthSnapshot;
 pub(crate) use worker_query_endpoint::{
-    start_worker_kv_query_endpoint, start_worker_kv_query_endpoint_with_status,
+    KvStateAgentStatusCell, start_worker_kv_query_endpoint,
+    start_worker_kv_query_endpoint_with_status,
 };
 pub(crate) use worker_query_transport::RuntimeWorkerQueryTransport;
 #[cfg(test)]

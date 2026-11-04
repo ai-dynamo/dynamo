@@ -38,6 +38,8 @@
 //!
 //! Similar symptoms do not necessarily have the same class. For example, malformed client input is [`ErrorClass::InvalidRequest`], invalid operator configuration is [`ErrorClass::Internal`], caller-specific throttling is [`ErrorClass::RateLimited`], and pool-wide capacity pressure is [`ErrorClass::CapacityExhausted`].
 //!
+//! A worker overload limited to one data-parallel rank is [`ErrorClass::WorkerRankOverloaded`], which carries the rank. Like [`ErrorClass::WorkerOverloaded`], it normalizes to [`ErrorClass::CapacityExhausted`] with the default reason `capacity.worker_overloaded`, and [`match_error_chain`] matches it wherever a set names [`ErrorClass::WorkerOverloaded`]. On the wire, a [`DynamoError`] with it keeps the worker overload's class, legacy type, and reason, and adds the rank as an optional `dp_rank` field, which this reader honors only with that reason. Readers that predate the field decode a whole-worker overload, as this reader does when the field is absent or malformed.
+//!
 //! # Data visibility
 //!
 //! [`Diagnostic`] contains bounded operator-facing context. It may be used in logs and traces, but it must never be copied into a client response or metric label. Do not place secrets, credentials, prompts, generated text, or raw upstream response bodies in a diagnostic.
@@ -120,6 +122,9 @@ pub enum ErrorClass {
     /// Distinct from [`Self::ResourceExhausted`] so a request whose routing
     /// constraints permit reassignment can migrate; both surface as HTTP 529.
     WorkerOverloaded,
+    /// A [`Self::WorkerOverloaded`] limited to one data-parallel rank, by its
+    /// global rank ID: the worker's other ranks may still have capacity.
+    WorkerRankOverloaded(u32),
     /// No backend worker is currently available to handle the request.
     Unavailable,
     /// One addressed worker answered that it does not serve this request's
@@ -165,6 +170,7 @@ pub enum ErrorClass {
 enum ErrorClassWire {
     Named(String),
     Backend { Backend: BackendError },
+    WorkerRankOverloaded { WorkerRankOverloaded: u32 },
 }
 
 impl ErrorClass {
@@ -206,6 +212,9 @@ impl<'de> Deserialize<'de> for ErrorClass {
         Ok(match ErrorClassWire::deserialize(deserializer)? {
             ErrorClassWire::Named(name) => Self::from_wire_name(&name),
             ErrorClassWire::Backend { Backend: error } => Self::Backend(error),
+            ErrorClassWire::WorkerRankOverloaded {
+                WorkerRankOverloaded: rank,
+            } => Self::WorkerRankOverloaded(rank),
         })
     }
 }
@@ -222,6 +231,7 @@ impl fmt::Display for ErrorClass {
             ErrorClass::Cancelled => write!(f, "Cancelled"),
             ErrorClass::ResourceExhausted => write!(f, "ResourceExhausted"),
             ErrorClass::WorkerOverloaded => write!(f, "WorkerOverloaded"),
+            ErrorClass::WorkerRankOverloaded(rank) => write!(f, "WorkerRankOverloaded({rank})"),
             ErrorClass::Unavailable => write!(f, "Unavailable"),
             ErrorClass::WorkerUnavailable => write!(f, "WorkerUnavailable"),
             ErrorClass::Backend(sub) => write!(f, "Backend{sub}"),
@@ -255,6 +265,7 @@ impl ErrorClass {
             Self::Cancelled => "Cancelled",
             Self::ResourceExhausted => "ResourceExhausted",
             Self::WorkerOverloaded => "WorkerOverloaded",
+            Self::WorkerRankOverloaded(_) => "WorkerRankOverloaded",
             Self::Unavailable => "Unavailable",
             Self::WorkerUnavailable => "WorkerUnavailable",
             Self::Backend(BackendError::Unknown) => "BackendUnknown",
@@ -266,6 +277,7 @@ impl ErrorClass {
             Self::Backend(BackendError::Cancelled) => "BackendCancelled",
             Self::Backend(BackendError::EngineShutdown) => "BackendEngineShutdown",
             Self::Backend(BackendError::StreamIncomplete) => "BackendStreamIncomplete",
+            Self::Backend(BackendError::WorkerOverloaded) => "BackendWorkerOverloaded",
             Self::InvalidRequest => "InvalidRequest",
             Self::Unauthenticated => "Unauthenticated",
             Self::PermissionDenied => "PermissionDenied",
@@ -291,7 +303,9 @@ impl ErrorClass {
             Self::InvalidArgument => Self::InvalidRequest,
             Self::CannotConnect | Self::Disconnected | Self::WorkerUnavailable => Self::Unavailable,
             Self::ConnectionTimeout | Self::ResponseTimeout => Self::DeadlineExceeded,
-            Self::ResourceExhausted | Self::WorkerOverloaded => Self::CapacityExhausted,
+            Self::ResourceExhausted | Self::WorkerOverloaded | Self::WorkerRankOverloaded(_) => {
+                Self::CapacityExhausted
+            }
             Self::Backend(error) => match error {
                 BackendError::Unknown => Self::Internal,
                 BackendError::InvalidArgument => Self::InvalidRequest,
@@ -303,6 +317,7 @@ impl ErrorClass {
                     Self::DeadlineExceeded
                 }
                 BackendError::Cancelled => Self::Cancelled,
+                BackendError::WorkerOverloaded => Self::CapacityExhausted,
             },
             canonical @ (Self::Cancelled
             | Self::Unavailable
@@ -351,6 +366,8 @@ pub enum BackendError {
     EngineShutdown,
     /// The response stream was terminated before completion (e.g., engine dropped mid-stream).
     StreamIncomplete,
+    /// The worker's transient admission budget is exhausted.
+    WorkerOverloaded,
 }
 
 impl fmt::Display for BackendError {
@@ -365,6 +382,7 @@ impl fmt::Display for BackendError {
             BackendError::Cancelled => write!(f, "Cancelled"),
             BackendError::EngineShutdown => write!(f, "EngineShutdown"),
             BackendError::StreamIncomplete => write!(f, "StreamIncomplete"),
+            BackendError::WorkerOverloaded => write!(f, "WorkerOverloaded"),
         }
     }
 }
@@ -457,7 +475,9 @@ impl ErrorReason {
             ErrorClass::ResponseTimeout => "backend.response_timeout",
             ErrorClass::Cancelled => "request.cancelled",
             ErrorClass::ResourceExhausted => "capacity.pool_exhausted",
-            ErrorClass::WorkerOverloaded => "capacity.worker_overloaded",
+            ErrorClass::WorkerOverloaded | ErrorClass::WorkerRankOverloaded(_) => {
+                "capacity.worker_overloaded"
+            }
             ErrorClass::Unavailable => "backend.unavailable",
             ErrorClass::WorkerUnavailable => "backend.worker_unavailable",
             ErrorClass::Backend(error) => match error {
@@ -470,6 +490,7 @@ impl ErrorReason {
                 BackendError::Cancelled => "backend.cancelled",
                 BackendError::EngineShutdown => "backend.engine_shutdown",
                 BackendError::StreamIncomplete => "backend.stream_incomplete",
+                BackendError::WorkerOverloaded => "capacity.worker_overloaded",
             },
             ErrorClass::InvalidRequest => "request.invalid",
             ErrorClass::Unauthenticated => "request.unauthenticated",
@@ -569,6 +590,18 @@ impl PublicDetails {
             Self::SizeLimit { .. } | Self::ContextLength { .. } | Self::RateLimit { .. } => None,
         }
     }
+}
+
+/// Decode the optional `dp_rank` of a [`ErrorClass::WorkerRankOverloaded`],
+/// treating one that is not a rank ID as absent rather than failing the whole
+/// error.
+fn deserialize_dp_rank<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<serde_json::Value>::deserialize(deserializer)?
+        .and_then(|rank| rank.as_u64())
+        .and_then(|rank| u32::try_from(rank).ok()))
 }
 
 fn bounded_message(mut message: String) -> String {
@@ -682,6 +715,10 @@ impl Serialize for DynamoError {
         use serde::ser::SerializeStruct;
 
         let public = self.public_details();
+        let dp_rank = match self.error_type() {
+            ErrorClass::WorkerRankOverloaded(rank) => Some(rank),
+            _ => None,
+        };
         let caused_by = self
             .diagnostic
             .as_ref()
@@ -691,6 +728,7 @@ impl Serialize for DynamoError {
             "DynamoError",
             4 + usize::from(self.diagnostic.is_some())
                 + usize::from(public.is_some())
+                + usize::from(dp_rank.is_some())
                 + usize::from(caused_by.is_some()),
         )?;
         state.serialize_field("error_type", &self.legacy_wire_error_type())?;
@@ -702,6 +740,9 @@ impl Serialize for DynamoError {
         }
         if let Some(public) = public {
             state.serialize_field("public", public)?;
+        }
+        if let Some(dp_rank) = dp_rank {
+            state.serialize_field("dp_rank", &dp_rank)?;
         }
         if let Some(caused_by) = caused_by {
             state.serialize_field("caused_by", caused_by)?;
@@ -729,6 +770,8 @@ impl<'de> Deserialize<'de> for DynamoError {
             message: Option<Diagnostic>,
             #[serde(default, rename = "public", alias = "public_details")]
             public: Option<PublicDetails>,
+            #[serde(default, deserialize_with = "deserialize_dp_rank")]
+            dp_rank: Option<u32>,
             #[serde(default)]
             caused_by: Option<Box<DynamoError>>,
         }
@@ -760,7 +803,18 @@ impl<'de> Deserialize<'de> for DynamoError {
             .unwrap_or(canonical_class);
 
         let (class, reason, public) = match reason {
-            Some(reason) if valid_reason => (stored_class, reason, representation.public),
+            Some(reason) if valid_reason => (
+                // Only a worker overload is limited to a rank. Its legacy type
+                // on the wire is the whole-worker one, so the reason names it.
+                match representation.dp_rank {
+                    Some(rank) if reason.as_str() == "capacity.worker_overloaded" => {
+                        ErrorClass::WorkerRankOverloaded(rank)
+                    }
+                    _ => stored_class,
+                },
+                reason,
+                representation.public,
+            ),
             _ => (
                 ErrorClass::Internal,
                 ErrorReason::from_static("runtime.invalid_error"),
@@ -850,10 +904,12 @@ impl DynamoError {
             ErrorClass::Cancelled => ErrorClass::Cancelled,
             ErrorClass::ResourceExhausted
             | ErrorClass::WorkerOverloaded
+            | ErrorClass::WorkerRankOverloaded(_)
             | ErrorClass::CapacityExhausted
             | ErrorClass::RateLimited => ErrorClass::ResourceExhausted,
             ErrorClass::Unavailable => ErrorClass::Unavailable,
             ErrorClass::WorkerUnavailable => ErrorClass::WorkerUnavailable,
+            ErrorClass::Backend(BackendError::WorkerOverloaded) => ErrorClass::ResourceExhausted,
             ErrorClass::Backend(error) => ErrorClass::Backend(error),
         }
     }
@@ -1070,7 +1126,9 @@ impl DynamoErrorBuilder {
 /// Walks the chain via `source()`, inspecting each error that can be downcast
 /// to `DynamoError`. Returns `false` immediately if any error's type is in
 /// `exclude_set`. Otherwise, returns `true` if at least one error's type is
-/// in `match_set`. Errors that are not `DynamoError` are skipped.
+/// in `match_set`. Errors that are not `DynamoError` are skipped. A
+/// [`ErrorClass::WorkerRankOverloaded`] is in a set that names its own rank or
+/// [`ErrorClass::WorkerOverloaded`].
 pub fn match_error_chain(
     err: &(dyn std::error::Error + 'static),
     match_set: &[ErrorClass],
@@ -1081,10 +1139,16 @@ pub fn match_error_chain(
 
     while let Some(e) = current {
         if let Some(dynamo_err) = e.downcast_ref::<DynamoError>() {
-            if exclude_set.contains(&dynamo_err.error_type()) {
+            let error_type = dynamo_err.error_type();
+            let in_set = |set: &[ErrorClass]| {
+                set.contains(&error_type)
+                    || (matches!(error_type, ErrorClass::WorkerRankOverloaded(_))
+                        && set.contains(&ErrorClass::WorkerOverloaded))
+            };
+            if in_set(exclude_set) {
                 return false;
             }
-            if match_set.contains(&dynamo_err.error_type()) {
+            if in_set(match_set) {
                 found = true;
             }
         }
@@ -1341,6 +1405,182 @@ mod tests {
         );
     }
 
+    fn worker_overload(error_type: ErrorClass) -> DynamoError {
+        DynamoError::builder()
+            .error_type(error_type)
+            .message("Server overloaded")
+            .build()
+    }
+
+    /// A rank's overload is the worker overload on the wire, with the same
+    /// class, legacy type and reason, plus its rank as one additive field.
+    /// Without the field, which is all a reader that predates it decodes since
+    /// no `DynamoError` reader rejects unknown fields, the payload is exactly
+    /// the whole-worker overload. This reader decodes the rank back.
+    #[test]
+    fn a_rank_overload_is_the_worker_overload_on_the_wire_plus_its_rank() {
+        let whole = serde_json::to_value(worker_overload(ErrorClass::WorkerOverloaded)).unwrap();
+        assert_eq!(whole["error_type"], "ResourceExhausted");
+        assert_eq!(whole["class"], "CapacityExhausted");
+        assert_eq!(whole["reason"], "capacity.worker_overloaded");
+
+        for rank in [0, 4, u32::MAX] {
+            let mut wire =
+                serde_json::to_value(worker_overload(ErrorClass::WorkerRankOverloaded(rank)))
+                    .unwrap();
+            assert_eq!(wire["dp_rank"], rank);
+
+            let decoded: DynamoError = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(decoded.error_type(), ErrorClass::WorkerRankOverloaded(rank));
+            assert_eq!(decoded.class(), ErrorClass::CapacityExhausted);
+            assert_eq!(decoded.reason().as_str(), "capacity.worker_overloaded");
+
+            wire.as_object_mut().unwrap().remove("dp_rank");
+            assert_eq!(wire, whole, "{rank}");
+        }
+    }
+
+    /// An older writer's overload has no rank, and a malformed rank, one on an
+    /// error that is not a worker overload, or one on an invalid identity
+    /// decodes as absent: never a rank the writer did not mean, and never a
+    /// failure to decode the error.
+    #[test]
+    fn an_absent_malformed_or_misplaced_rank_is_no_rank() {
+        let decode = |wire: &serde_json::Value, rank: Option<&serde_json::Value>| {
+            let mut wire = wire.clone();
+            if let Some(rank) = rank {
+                wire["dp_rank"] = rank.clone();
+            }
+            serde_json::from_value::<DynamoError>(wire).unwrap()
+        };
+
+        let older =
+            serde_json::json!({"error_type": "WorkerOverloaded", "message": "Server overloaded"});
+        assert_eq!(
+            decode(&older, None).error_type(),
+            ErrorClass::WorkerOverloaded
+        );
+
+        let whole = serde_json::to_value(worker_overload(ErrorClass::WorkerOverloaded)).unwrap();
+        assert_eq!(
+            decode(&whole, None).error_type(),
+            ErrorClass::ResourceExhausted
+        );
+        for rank in [
+            serde_json::json!(-1),
+            serde_json::json!(u64::from(u32::MAX) + 1),
+            serde_json::json!(4.5),
+            serde_json::json!("4"),
+            serde_json::json!({"dp_rank": 4}),
+            serde_json::json!(null),
+        ] {
+            assert_eq!(decode(&whole, Some(&rank)), decode(&whole, None), "{rank}");
+        }
+
+        let rank = serde_json::json!(4);
+        for error_type in [ErrorClass::ResourceExhausted, ErrorClass::InvalidRequest] {
+            let wire = serde_json::to_value(DynamoError::builder().error_type(error_type).build())
+                .unwrap();
+            assert_eq!(decode(&wire, Some(&rank)), decode(&wire, None), "{wire}");
+        }
+
+        let mismatched = serde_json::json!({
+            "class": "InvalidRequest",
+            "reason": "capacity.worker_overloaded",
+            "dp_rank": 4
+        });
+        let decoded = decode(&mismatched, None);
+        assert_eq!(decoded.error_type(), ErrorClass::Internal);
+        assert_eq!(decoded.reason().as_str(), "runtime.invalid_error");
+        assert!(
+            serde_json::to_value(decoded)
+                .unwrap()
+                .get("dp_rank")
+                .is_none()
+        );
+
+        // In memory, a mismatched identity fails closed, rank and all.
+        let mismatched = DynamoError {
+            class: ErrorClass::WorkerRankOverloaded(4),
+            reason: ErrorReason::new("request.rate_limited").unwrap(),
+            diagnostic: None,
+            public: None,
+        };
+        assert_eq!(mismatched.error_type(), ErrorClass::Internal);
+        assert!(!match_error_chain(
+            &mismatched,
+            &[ErrorClass::WorkerOverloaded],
+            &[]
+        ));
+        assert!(
+            serde_json::to_value(mismatched)
+                .unwrap()
+                .get("dp_rank")
+                .is_none()
+        );
+    }
+
+    /// Every set that names the worker overload matches a rank's, as a match
+    /// or an exclusion, while a set naming one rank matches only that rank's.
+    /// Wrapping keeps the rank, in memory and across the wire.
+    #[test]
+    fn a_rank_overload_matches_as_a_worker_overload_and_wrapping_keeps_its_rank() {
+        let rank = worker_overload(ErrorClass::WorkerRankOverloaded(4));
+        let whole = worker_overload(ErrorClass::WorkerOverloaded);
+        assert!(match_error_chain(
+            &rank,
+            &[ErrorClass::WorkerOverloaded],
+            &[]
+        ));
+        assert!(match_error_chain(
+            &rank,
+            &[ErrorClass::WorkerRankOverloaded(4)],
+            &[]
+        ));
+        assert!(!match_error_chain(
+            &rank,
+            &[ErrorClass::WorkerRankOverloaded(5)],
+            &[]
+        ));
+        assert!(!match_error_chain(
+            &rank,
+            &[ErrorClass::ResourceExhausted],
+            &[]
+        ));
+        assert!(!match_error_chain(
+            &whole,
+            &[ErrorClass::WorkerRankOverloaded(4)],
+            &[]
+        ));
+
+        let connection = DynamoError::builder()
+            .error_type(ErrorClass::CannotConnect)
+            .cause(rank.clone())
+            .build();
+        assert!(match_error_chain(
+            &connection,
+            &[ErrorClass::WorkerOverloaded],
+            &[ErrorClass::ResourceExhausted]
+        ));
+        assert!(!match_error_chain(
+            &connection,
+            &[ErrorClass::CannotConnect],
+            &[ErrorClass::WorkerOverloaded]
+        ));
+
+        let wrapped = anyhow::Error::from(rank).context("dispatch failed");
+        let converted = DynamoError::from(wrapped.as_ref() as &(dyn std::error::Error + 'static));
+        assert_eq!(converted.error_type(), ErrorClass::WorkerRankOverloaded(4));
+        let decoded: DynamoError =
+            serde_json::from_value(serde_json::to_value(&converted).unwrap()).unwrap();
+        assert_eq!(decoded.error_type(), ErrorClass::WorkerRankOverloaded(4));
+        let cause = decoded.source().unwrap().downcast_ref::<DynamoError>();
+        assert_eq!(
+            cause.map(DynamoError::error_type),
+            Some(ErrorClass::WorkerRankOverloaded(4))
+        );
+    }
+
     #[test]
     fn diagnostic_is_bounded_at_utf8_boundary() {
         let truncation_index = Diagnostic::MAX_BYTES - Diagnostic::TRUNCATION_SUFFIX.len();
@@ -1500,6 +1740,15 @@ mod tests {
 
         let unknown: ErrorClass = serde_json::from_str(r#""FutureErrorClass""#).unwrap();
         assert_eq!(unknown, ErrorClass::Unknown);
+
+        for class in [0, u32::MAX].map(ErrorClass::WorkerRankOverloaded) {
+            let wire = serde_json::to_string(&class).unwrap();
+            assert_eq!(
+                serde_json::from_str::<ErrorClass>(&wire).unwrap(),
+                class,
+                "{wire}"
+            );
+        }
     }
 
     #[test]
@@ -1570,6 +1819,10 @@ mod tests {
             "ResourceExhausted"
         );
         assert_eq!(ErrorClass::WorkerOverloaded.to_string(), "WorkerOverloaded");
+        assert_eq!(
+            ErrorClass::WorkerRankOverloaded(4).to_string(),
+            "WorkerRankOverloaded(4)"
+        );
         assert_eq!(ErrorClass::Unavailable.to_string(), "Unavailable");
         assert_eq!(
             ErrorClass::WorkerUnavailable.to_string(),
@@ -1606,6 +1859,14 @@ mod tests {
         assert_eq!(
             ErrorClass::Backend(BackendError::StreamIncomplete).to_string(),
             "BackendStreamIncomplete"
+        );
+        assert_eq!(
+            ErrorClass::Backend(BackendError::WorkerOverloaded).normalized(),
+            ErrorClass::CapacityExhausted
+        );
+        assert_eq!(
+            ErrorReason::for_class(ErrorClass::Backend(BackendError::WorkerOverloaded)).as_str(),
+            "capacity.worker_overloaded"
         );
         assert_eq!(
             ErrorClass::Backend(BackendError::ResponseTimeout).to_string(),

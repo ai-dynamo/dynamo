@@ -28,6 +28,12 @@ func (d *LWSMultinodeDeployer) GetNodeRank() (string, bool) {
 	return "$(LWS_WORKER_INDEX)", false
 }
 
+// GetPodRank returns the absolute rank injected by LeaderWorkerSet for every
+// pod in a group, including rank zero for the leader.
+func (d *LWSMultinodeDeployer) GetPodRank() string {
+	return "$(LWS_WORKER_INDEX)"
+}
+
 func (d *LWSMultinodeDeployer) NeedsDNSWait() bool {
 	// LWS needs DNS wait because pods start simultaneously and DNS may not be ready
 	return true

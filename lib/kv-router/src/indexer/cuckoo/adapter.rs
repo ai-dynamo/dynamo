@@ -363,7 +363,7 @@ fn map_publish_error(error: DcCkfPublishError<LocalCkfDeltaSinkError>) -> LocalC
 #[cfg(test)]
 mod tests {
     use crate::identity::{
-        CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
+        CacheSemanticsId, ClusterId, IdentitySource, IndexerDomainId, PoolId, RoutingScopeId,
     };
     use crate::protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData,
@@ -383,8 +383,8 @@ mod tests {
             CacheSemanticsId::new([7; 16], IdentitySource::Explicit),
             RoutingScopeId::new([13; 16], IdentitySource::Explicit),
         );
-        let dc = DcId::new(11);
-        let pool_id = PoolId::new(domain, dc);
+        let cluster = ClusterId::new(11);
+        let pool_id = PoolId::new(domain, cluster);
         let consumer = ConsumerInstanceId::new(17);
         let identity = ProducerIdentity::new(pool_id, 19, 1, format);
         let lease = LaneLease::new(consumer, LANE, 1);

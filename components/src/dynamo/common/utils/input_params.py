@@ -3,6 +3,8 @@
 
 from typing import Any, Optional
 
+from dynamo.common.utils.token_ids import token_ids_to_list
+
 
 def resolve_thinking_token_budget(request: dict) -> Optional[Any]:
     """Resolve the thinking-token budget from an OpenAI-compatible request.
@@ -105,4 +107,4 @@ class InputParamManager:
                 return self.tokenizer.encode(request["text"])
             else:
                 raise ValueError("No input parameter found in request")
-        return request.get("token_ids")
+        return token_ids_to_list(request.get("token_ids"))

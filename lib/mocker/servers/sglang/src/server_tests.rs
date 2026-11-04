@@ -5,16 +5,18 @@ use super::*;
 use dynamo_sglang_sidecar::proto::sglang_service_server::SglangService;
 use futures::StreamExt;
 
-fn engine_args() -> MockEngineArgs {
-    MockEngineArgs::builder()
-        .engine_type(EngineType::Sglang)
-        .block_size(4)
-        .num_gpu_blocks(128)
-        .max_num_seqs(Some(8))
-        .max_num_batched_tokens(Some(64))
-        .speedup_ratio(0.0)
-        .build()
-        .unwrap()
+fn engine_args() -> MockerConfig {
+    MockerConfig::from_value(serde_json::json!({
+        "engine": {
+            "backend": EngineType::Sglang,
+            "block_size": 4,
+            "num_gpu_blocks": 128,
+            "max_num_seqs": 8,
+            "max_num_batched_tokens": 64,
+            "speedup_ratio": 0.0
+        }
+    }))
+    .unwrap()
 }
 
 fn request(request_id: &str) -> pb::GenerateRequest {
@@ -32,6 +34,45 @@ fn request(request_id: &str) -> pb::GenerateRequest {
         rid: Some(request_id.to_string()),
         ..Default::default()
     }
+}
+
+#[tokio::test]
+async fn engine_state_watch_is_explicitly_unsupported() {
+    let service = SglangMockerService::new(MockerServerConfig::default(), engine_args()).unwrap();
+    let error = service
+        .watch_engine_state(Request::new(pb::WatchEngineStateRequest::default()))
+        .await
+        .err()
+        .expect("Mocker does not implement native engine-state watching");
+    assert_eq!(error.code(), tonic::Code::Unimplemented);
+    assert!(error.message().contains("WatchEngineState"));
+}
+
+#[tokio::test]
+async fn service_rejects_normalized_multi_rank_ais_args() {
+    let args = MockerConfig::from_value(json!({
+        "engine": {
+            "backend": "sglang",
+            "timing_model": {
+                "type": "external",
+                "provider": "ais",
+                "config": {
+                    "model": "model",
+                    "system": "h200_sxm",
+                    "backend": "sglang",
+                    "worker_type": "aggregated",
+                    "attention_dp": 2
+                }
+            }
+        }
+    }))
+    .unwrap();
+    assert_eq!(args.dp_size, 2);
+
+    let error = SglangMockerService::new(MockerServerConfig::default(), args)
+        .err()
+        .expect("normalized attention DP must be rejected before engine initialization");
+    assert_eq!(error.to_string(), "Mocker dp_size must be 1");
 }
 
 #[tokio::test]
@@ -111,6 +152,38 @@ async fn generate_rejects_invalid_requests() {
 }
 
 #[tokio::test]
+async fn omitted_max_new_tokens_uses_native_default() {
+    let service = SglangMockerService::new(MockerServerConfig::default(), engine_args()).unwrap();
+    let mut omitted = request("omitted-max-new-tokens");
+    let sampling = omitted.sampling_params.as_mut().unwrap();
+    sampling.max_new_tokens = None;
+    sampling.ignore_eos = Some(true);
+    let responses = service
+        .generate(Request::new(omitted))
+        .await
+        .unwrap()
+        .into_inner()
+        .map(|response| response.unwrap())
+        .collect::<Vec<_>>()
+        .await;
+
+    assert_eq!(
+        responses
+            .iter()
+            .map(|response| response.output_ids.len())
+            .sum::<usize>(),
+        128
+    );
+    let terminal = responses.last().unwrap();
+    assert!(terminal.finished);
+    assert_eq!(terminal.meta_info["completion_tokens"], "128");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&terminal.meta_info["finish_reason"]).unwrap(),
+        json!({"type": "length", "length": 128})
+    );
+}
+
+#[tokio::test]
 async fn zero_top_logprobs_omits_top_logprob_metadata() {
     let service = SglangMockerService::new(MockerServerConfig::default(), engine_args()).unwrap();
     let mut selected_only = request("selected-only-logprobs");
@@ -172,4 +245,90 @@ async fn missing_abort_is_idempotent() {
             .into_inner();
         assert!(response.success);
     }
+}
+
+#[tokio::test]
+async fn kv_event_discovery_follows_regular_mocker_rules() {
+    for (mode, prefix_caching, publishes) in [
+        (ServerMode::Aggregated, true, true),
+        (ServerMode::Prefill, true, true),
+        (ServerMode::Decode, true, false),
+        (ServerMode::Aggregated, false, false),
+    ] {
+        let mut args = engine_args();
+        args.enable_prefix_caching = prefix_caching;
+        let service = SglangMockerService::new(
+            MockerServerConfig {
+                mode,
+                ..Default::default()
+            },
+            args,
+        )
+        .unwrap();
+        let info: serde_json::Value = serde_json::from_str(
+            &service
+                .get_server_info(Request::new(pb::GetServerInfoRequest {}))
+                .await
+                .unwrap()
+                .into_inner()
+                .json_info,
+        )
+        .unwrap();
+        let events = &info["kv_events"];
+        assert_eq!(!events.is_null(), publishes);
+        if publishes {
+            assert_eq!(events["publisher"], "zmq");
+            assert_eq!(events["endpoint_host"], "0.0.0.0");
+            assert!(events["endpoint_port_base"].as_u64().unwrap() > 0);
+            assert_eq!(events["block_size"], 4);
+            assert_eq!(events["dp_size"], 1);
+            assert_eq!(events["topic"], "");
+        }
+    }
+}
+
+#[tokio::test]
+async fn discovery_uses_sglang_prefill_limit_for_unbounded_batches() {
+    for (batch_limit, expected) in [(64, 64), (usize::MAX, 4096)] {
+        let mut args = engine_args();
+        args.enable_prefix_caching = false;
+        args.max_num_batched_tokens = batch_limit;
+        args.sglang.max_prefill_tokens = 4096;
+        let service = SglangMockerService::new(MockerServerConfig::default(), args).unwrap();
+        let info: serde_json::Value = serde_json::from_str(
+            &service
+                .get_server_info(Request::new(pb::GetServerInfoRequest {}))
+                .await
+                .unwrap()
+                .into_inner()
+                .json_info,
+        )
+        .unwrap();
+        assert_eq!(info["max_prefill_tokens"], expected);
+    }
+}
+
+#[tokio::test]
+async fn failed_kv_publisher_is_not_advertised() {
+    let occupied = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let mut args = engine_args();
+    args.enable_prefix_caching = true;
+    args.runtime.zmq_kv_events_port = Some(occupied.local_addr().unwrap().port());
+    let service = SglangMockerService::new(MockerServerConfig::default(), args).unwrap();
+    let info: serde_json::Value = serde_json::from_str(
+        &service
+            .get_server_info(Request::new(pb::GetServerInfoRequest {}))
+            .await
+            .unwrap()
+            .into_inner()
+            .json_info,
+    )
+    .unwrap();
+    assert!(info["kv_events"].is_null());
+    assert!(
+        service
+            .generate(Request::new(request("no-publisher")))
+            .await
+            .is_ok()
+    );
 }

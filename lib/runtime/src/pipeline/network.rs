@@ -14,6 +14,8 @@ pub mod ingress;
 pub mod manager;
 pub mod quic_response;
 pub mod tcp;
+mod tombstones;
+pub mod velo_response;
 
 use crate::SystemHealth;
 use crate::error::{DynamoError, ErrorType};
@@ -59,6 +61,7 @@ pub enum ResponsePlaneMode {
     #[default]
     Tcp,
     Quic,
+    Velo,
 }
 
 impl ResponsePlaneMode {
@@ -77,8 +80,9 @@ impl ResponsePlaneMode {
         match value {
             None | Some("tcp") => Ok(Self::Tcp),
             Some("quic") => Ok(Self::Quic),
+            Some("velo") => Ok(Self::Velo),
             Some(other) => anyhow::bail!(
-                "invalid {} value '{other}'; expected 'tcp' or 'quic'",
+                "invalid {} value '{other}'; expected 'tcp', 'quic', or 'velo'",
                 crate::config::environment_names::response_plane::DYN_RESPONSE_PLANE
             ),
         }
@@ -88,6 +92,7 @@ impl ResponsePlaneMode {
         match transport {
             "tcp_server" => Ok(Self::Tcp),
             quic_response::TRANSPORT_NAME => Ok(Self::Quic),
+            velo_response::TRANSPORT_NAME => Ok(Self::Velo),
             other => anyhow::bail!("unsupported response transport '{other}'"),
         }
     }
@@ -96,6 +101,7 @@ impl ResponsePlaneMode {
         match self {
             Self::Tcp => "tcp",
             Self::Quic => "quic",
+            Self::Velo => "velo",
         }
     }
 }
@@ -386,9 +392,9 @@ impl Drop for Cleanup {
     }
 }
 
-/// Awaitable handle for a stream sender or receiver. Drop without calling
-/// `into_parts()` runs the optional cleanup closure, removing the
-/// registration from the stream server's maps.
+/// Awaitable handle for a stream sender or receiver. Dropping the handle without
+/// a successful `wait()` or a call to `into_parts()` runs the optional cleanup
+/// closure, removing the registration from the stream server's maps.
 pub struct RegisteredStream<T> {
     pub connection_info: ConnectionInfo,
     pub stream_provider: StreamProvider<T>,
@@ -443,6 +449,21 @@ impl<T> RegisteredStream<T> {
         cleanup.0.take();
         (connection_info, stream_provider)
     }
+
+    /// Await the stream provider, keeping registration cleanup armed until success.
+    ///
+    /// An error or a dropped future removes the registration from the transport.
+    /// Once the stream is established, cleanup is disarmed and the transport owns
+    /// the stream's remaining lifecycle.
+    pub async fn wait(
+        mut self,
+    ) -> Result<Result<T, StreamPrologueError>, tokio::sync::oneshot::error::RecvError> {
+        let result = (&mut self.stream_provider).await;
+        if matches!(result, Ok(Ok(_))) {
+            self.cleanup.0.take();
+        }
+        result
+    }
 }
 
 /// After registering a stream, the [`PendingConnections`] object is returned to the caller. This
@@ -468,6 +489,36 @@ impl PendingConnections {
 #[async_trait::async_trait]
 pub trait ResponseService {
     async fn register(&self, options: StreamOptions) -> PendingConnections;
+}
+
+/// A response plane that registers each response stream by id and leaves any
+/// request stream to the TCP callback server. QUIC and Velo work this way.
+#[async_trait]
+pub(crate) trait RegisteredResponsePlane: Send + Sync {
+    /// QUIC ignores `defer_cancellation_until_prologue`.
+    fn register_stream(
+        self: Arc<Self>,
+        context: Arc<dyn AsyncEngineContext>,
+        defer_cancellation_until_prologue: bool,
+    ) -> Result<RegisteredStream<StreamReceiver>>;
+
+    /// Link a registration to its worker. Returns `false` and cancels the
+    /// registration when discovery has just removed that worker.
+    async fn associate_instance(
+        &self,
+        registration_id: uuid::Uuid,
+        instance: &crate::discovery::EndpointInstanceId,
+    ) -> bool;
+
+    async fn cancel_response(&self, registration_id: uuid::Uuid);
+
+    /// Cancel every registration linked to `instance` and tombstone it.
+    async fn cancel_instance_streams(
+        &self,
+        instance: &crate::discovery::EndpointInstanceId,
+    ) -> usize;
+
+    async fn clear_instance_tombstone(&self, instance: &crate::discovery::EndpointInstanceId);
 }
 
 #[cfg(test)]
@@ -520,6 +571,58 @@ mod registered_stream_tests {
         assert!(
             !flag.load(Ordering::SeqCst),
             "into_parts() must disarm the cleanup closure"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_wait_disarms_cleanup() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = flag.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let stream = RegisteredStream::new(dummy_conn_info(), rx).with_cleanup(move || {
+            flag_clone.store(true, Ordering::SeqCst);
+        });
+
+        tx.send(Ok(42)).unwrap();
+        assert_eq!(stream.wait().await.unwrap().unwrap(), 42);
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "successful wait must disarm cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_prologue_wait_runs_cleanup() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = flag.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), StreamPrologueError>>();
+        let stream = RegisteredStream::new(dummy_conn_info(), rx).with_cleanup(move || {
+            flag_clone.store(true, Ordering::SeqCst);
+        });
+        let error = StreamPrologueError::from_message("worker rejected request");
+
+        tx.send(Err(error.clone())).unwrap();
+        assert_eq!(stream.wait().await.unwrap().unwrap_err(), error);
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "failed prologue must run cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_provider_wait_runs_cleanup() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = flag.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), StreamPrologueError>>();
+        let stream = RegisteredStream::new(dummy_conn_info(), rx).with_cleanup(move || {
+            flag_clone.store(true, Ordering::SeqCst);
+        });
+
+        drop(tx);
+        assert!(stream.wait().await.is_err());
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "closed provider must run cleanup"
         );
     }
 
@@ -616,7 +719,40 @@ impl StreamSender {
 }
 
 pub struct StreamReceiver {
-    rx: tokio::sync::mpsc::Receiver<Bytes>,
+    rx: ByteReceiver,
+}
+
+/// Existing socket queues and Velo anchors share the response decoder.
+/// Velo is polled directly; it needs no second data queue.
+enum ByteReceiver {
+    Channel(tokio::sync::mpsc::Receiver<Bytes>),
+    Velo(Box<velo_response::VeloResponseReceiver>),
+}
+
+impl From<tokio::sync::mpsc::Receiver<Bytes>> for ByteReceiver {
+    fn from(rx: tokio::sync::mpsc::Receiver<Bytes>) -> Self {
+        Self::Channel(rx)
+    }
+}
+
+impl ByteReceiver {
+    // TCP request streams and existing socket tests use the byte-only API.
+    async fn recv(&mut self) -> Option<Bytes> {
+        self.next().await.and_then(|result| result.ok())
+    }
+}
+
+impl futures::Stream for ByteReceiver {
+    type Item = Result<Bytes, DynamoError>;
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        match self.get_mut() {
+            Self::Channel(rx) => rx.poll_recv(cx).map(|item| item.map(Ok)),
+            Self::Velo(rx) => std::pin::Pin::new(rx.as_mut()).poll_next(cx),
+        }
+    }
 }
 
 /// Connection Info is encoded as JSON and then again serialized has part of the Transport
@@ -659,6 +795,10 @@ pub struct StreamOptions {
     /// Register with the server that this connection will have a server-side Receiver
     /// that can be picked up by the Response/Reverse pipeline
     pub enable_response_stream: bool,
+
+    /// Preserve guarded dispatch setup until the worker sends its prologue.
+    #[builder(default)]
+    pub defer_cancellation_until_prologue: bool,
 
     /// The number of frames buffered between the data-plane socket task and the
     /// engine consumer/producer before backpressure kicks in. Drives the mpsc
@@ -827,6 +967,10 @@ mod tests {
         assert_eq!(
             ResponsePlaneMode::from_config_value(Some("quic")).unwrap(),
             ResponsePlaneMode::Quic
+        );
+        assert_eq!(
+            ResponsePlaneMode::from_config_value(Some("velo")).unwrap(),
+            ResponsePlaneMode::Velo
         );
         assert!(ResponsePlaneMode::from_config_value(Some("")).is_err());
         assert!(ResponsePlaneMode::from_config_value(Some("invalid")).is_err());
@@ -1191,7 +1335,11 @@ pub struct Ingress<Req: PipelineIO, Resp: PipelineIO, Adapter = SerdeIngressPayl
     metrics: OnceLock<Arc<WorkHandlerMetrics>>,
     /// Endpoint-specific notifier for health check timer resets
     endpoint_health_check_notifier: OnceLock<Arc<tokio::sync::Notify>>,
+    /// Resolved response transport of the bound endpoint's runtime.
+    response_plane: OnceLock<ResponsePlaneMode>,
     quic_response_client_pool: OnceLock<Arc<quic_response::QuicResponseClientPool>>,
+    velo_response_service: tokio::sync::OnceCell<Arc<velo_response::VeloResponseService>>,
+    velo_response_owner: OnceLock<std::sync::Weak<velo_response::RuntimeService>>,
     payload_adapter: Arc<Adapter>,
     lifecycle_operation_role: OnceLock<Arc<OnceLock<LifecycleOperationRole>>>,
 }
@@ -1237,7 +1385,10 @@ where
             segment: OnceLock::new(),
             metrics: OnceLock::new(),
             endpoint_health_check_notifier: OnceLock::new(),
+            response_plane: OnceLock::new(),
             quic_response_client_pool: OnceLock::new(),
+            velo_response_service: tokio::sync::OnceCell::new(),
+            velo_response_owner: OnceLock::new(),
             payload_adapter: Arc::new(payload_adapter),
             lifecycle_operation_role: OnceLock::new(),
         })
@@ -1281,6 +1432,29 @@ where
         }
         let pool = quic_response::process_client_pool_from_env()?;
         Ok(self.quic_response_client_pool.get_or_init(|| pool).clone())
+    }
+
+    async fn velo_response_service(
+        &self,
+    ) -> Result<&Arc<velo_response::VeloResponseService>, PipelineError> {
+        let owner = self
+            .velo_response_owner
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| {
+                PipelineError::Generic(
+                    "Velo ingress must be bound to a live runtime endpoint".into(),
+                )
+            })?;
+        if owner.is_closed() {
+            return Err(PipelineError::Generic(
+                "Velo response runtime is shut down".into(),
+            ));
+        }
+        self.velo_response_service
+            .get_or_try_init(|| owner.service())
+            .await
+            .map_err(|error| PipelineError::Generic(error.to_string()))
     }
 
     pub fn add_metrics(
@@ -1348,7 +1522,13 @@ where
             .copied()
     }
 
-    fn bind_lifecycle_endpoint(&self, endpoint: &crate::component::Endpoint) {
+    fn bind_endpoint_config(&self, endpoint: &crate::component::Endpoint) {
+        let _ = self.response_plane.set(endpoint.drt().response_plane());
+        // Endpoint tasks retain this ingress. Keep a weak back-reference so
+        // those tasks cannot keep their own Tokio runtime alive.
+        let _ = self.velo_response_owner.set(Arc::downgrade(
+            &endpoint.drt().runtime().velo_response_service(),
+        ));
         // Keep an explicitly constructed ingress role; otherwise observe model
         // registration even when it happens after the endpoint starts serving.
         let _ = self

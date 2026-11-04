@@ -540,6 +540,30 @@ async def test_cancelled_native_stream_preserves_cancelled_finish(native_engine)
         await engine.cleanup()
 
 
+async def test_generate_unpacks_packed_token_ids(native_engine):
+    native, _ = native_engine
+    inputs = []
+
+    async def generate(obj):
+        inputs.append(obj)
+        yield {
+            "output_ids": [20],
+            "meta_info": {"completion_tokens": 1, "finish_reason": {"type": "length"}},
+        }
+
+    native.tokenizer_manager.generate_request = generate
+    engine = TokenspeedLLMEngine(server_args())
+    await engine.start(worker_id=1)
+    request = {"token_ids": b"".join(i.to_bytes(4, "little") for i in (10, 11))}
+    context = SimpleNamespace(id=lambda: "packed-1")
+    try:
+        chunks = [chunk async for chunk in engine.generate(request, context)]
+        assert chunks[-1]["token_ids"] == [20]
+        assert inputs[0].input_ids == [10, 11]
+    finally:
+        await engine.cleanup()
+
+
 async def test_kv_replay_rejected_before_native_start(native_engine, tmp_path):
     _, constructor = native_engine
     engine = TokenspeedLLMEngine(

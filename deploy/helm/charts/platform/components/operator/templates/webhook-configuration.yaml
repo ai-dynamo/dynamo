@@ -150,6 +150,7 @@ webhooks:
       namespace: {{ .Release.Namespace }}
       path: /validate-nvidia-com-v1beta1-dynamographdeploymentrequest
   failurePolicy: {{ .Values.webhook.failurePolicy }}
+  matchPolicy: Equivalent
   name: vdynamographdeploymentrequest.kb.io
   {{- if .Values.webhook.namespaceSelector }}
   namespaceSelector:
@@ -274,6 +275,7 @@ webhooks:
       namespace: {{ .Release.Namespace }}
       path: /mutate-nvidia-com-v1beta1-dynamographdeploymentrequest
   failurePolicy: {{ .Values.webhook.failurePolicy }}
+  matchPolicy: Equivalent
   name: mdynamographdeploymentrequestv1beta1.kb.io
   {{- if .Values.webhook.namespaceSelector }}
   namespaceSelector:

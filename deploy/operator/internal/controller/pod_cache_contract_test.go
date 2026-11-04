@@ -32,28 +32,26 @@ import (
 func TestProjectedPodSupportsControllerContract(t *testing.T) {
 	controllerOwner := true
 	pod := podcache.Project(&corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "worker-0",
-			Namespace: "inference",
-			UID:       types.UID("pod-uid"),
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName:       "graph",
-				consts.KubeLabelDynamoComponent:                 "prefill",
-				consts.KubeLabelDynamoNamespace:                 "inference-graph",
-				consts.KubeLabelDynamoSelector:                  "graph-prefill-old",
-				consts.KubeLabelDynamoComponentType:             consts.ComponentTypeWorker,
-				consts.KubeLabelDynamoSubComponentType:          consts.ComponentTypePrefill,
-				consts.KubeLabelDynamoFailoverEngineGroupMember: consts.KubeLabelValueTrue,
-				batchv1.JobNameLabel:                            "profiling-job",
-				"job-name":                                      "profiling-job",
-			},
-			Annotations: map[string]string{
-				consts.KubeAnnotationTopologyLabelKey: "topology.kubernetes.io/zone",
-			},
-			OwnerReferences: []metav1.OwnerReference{{
-				Name: "graph-prefill-old", UID: types.UID("owner-uid"), Controller: &controllerOwner,
-			}},
+		Name:      "worker-0",
+		Namespace: "inference",
+		UID:       types.UID("pod-uid"),
+		Labels: map[string]string{
+			consts.KubeLabelDynamoGraphDeploymentName:       "graph",
+			consts.KubeLabelDynamoComponent:                 "prefill",
+			consts.KubeLabelDynamoNamespace:                 "inference-graph",
+			consts.KubeLabelDynamoSelector:                  "graph-prefill-old",
+			consts.KubeLabelDynamoComponentType:             consts.ComponentTypeWorker,
+			consts.KubeLabelDynamoSubComponentType:          consts.ComponentTypePrefill,
+			consts.KubeLabelDynamoFailoverEngineGroupMember: consts.KubeLabelValueTrue,
+			batchv1.JobNameLabel:                            "profiling-job",
+			"job-name":                                      "profiling-job",
 		},
+		Annotations: map[string]string{
+			consts.KubeAnnotationTopologyLabelKey: "topology.kubernetes.io/zone",
+		},
+		OwnerReferences: []metav1.OwnerReference{{
+			Name: "graph-prefill-old", UID: types.UID("owner-uid"), Controller: &controllerOwner,
+		}},
 		Spec: corev1.PodSpec{
 			NodeName: "node-a",
 			Containers: []corev1.Container{{
@@ -68,11 +66,11 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 			}},
 			Volumes: []corev1.Volume{{
 				Name: "topology",
-				VolumeSource: corev1.VolumeSource{DownwardAPI: &corev1.DownwardAPIVolumeSource{
+				DownwardAPI: &corev1.DownwardAPIVolumeSource{
 					Items: []corev1.DownwardAPIVolumeFile{{
 						FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.labels['nvidia.com/dynamo-topology.zone']"},
 					}},
-				}},
+				},
 			}},
 		},
 		Status: corev1.PodStatus{
@@ -132,12 +130,52 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 			Client:   client,
 			Recorder: events.NewFakeRecorder(1),
 		}
-		dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{ObjectMeta: metav1.ObjectMeta{Namespace: pod.Namespace}}
-		job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "profiling-job", Namespace: pod.Namespace}}
+		dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{Namespace: pod.Namespace}
+		job := &batchv1.Job{Name: "profiling-job", Namespace: pod.Namespace}
 
 		detail := reconciler.getProfilingJobErrorDetails(context.Background(), dgdr, job)
 		assert.Contains(t, detail, "ExitCode: 23")
 		assert.Contains(t, detail, "profiling failed")
+	})
+
+	t.Run("DGDR Run diagnostics", func(t *testing.T) {
+		t.Log("Project a pod of a Run's Job whose sweeper waits on a mount error")
+		job := &batchv1.Job{Name: "search-1-aisimulate", Namespace: pod.Namespace, UID: types.UID("job-uid")}
+		runPod := podcache.Project(&corev1.Pod{
+			Name:            "search-1-aisimulate-abcde",
+			Namespace:       pod.Namespace,
+			Labels:          map[string]string{batchv1.JobNameLabel: job.Name},
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(job, batchv1.SchemeGroupVersion.WithKind("Job"))},
+			Spec: corev1.PodSpec{
+				NodeName:   "node-a",
+				Containers: []corev1.Container{{Name: dgdrRunSweeperContainer}, {Name: dgdrRunPublisherContainer}},
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodPending,
+				ContainerStatuses: []corev1.ContainerStatus{
+					{Name: dgdrRunPublisherContainer, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+					{Name: dgdrRunSweeperContainer, State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+						Reason: "CreateContainerConfigError", Message: `failed to prepare subPath for volumeMount "trace"`,
+					}}},
+				},
+			},
+		})
+
+		t.Log("The Run controller finds the pod of its Job and reports the waiting sweeper verbatim")
+		scheme := runtime.NewScheme()
+		require.NoError(t, corev1.AddToScheme(scheme))
+		reconciler := &DynamoGraphDeploymentRunV1beta2Reconciler{
+			Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(runPod).Build(),
+		}
+		pods, err := reconciler.jobPods(context.Background(), job)
+		require.NoError(t, err)
+		require.Len(t, pods, 1)
+		container, waiting, found := dgdrRunWaitingContainer(pods)
+		assert.True(t, found)
+		assert.Equal(t, dgdrRunSweeperContainer, container)
+		assert.Equal(t, corev1.ContainerStateWaiting{
+			Reason: "CreateContainerConfigError", Message: `failed to prepare subPath for volumeMount "trace"`,
+		}, waiting)
 	})
 
 	t.Run("Recreate", func(t *testing.T) {

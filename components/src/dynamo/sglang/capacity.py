@@ -18,9 +18,47 @@ class RuntimeCapacity:
     data_parallel_size: int
 
 
+def _positive_int(value: Any) -> int:
+    # Older SGLang exposes attn_dp_size as a derived-field descriptor, not an int.
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return 1
+
+
+def sglang_dp_layout(server_args: Any) -> tuple[int, bool]:
+    """Return ``(dp_size, enable_dp_attention)`` in the meaning Dynamo routes by.
+
+    ``dp_size`` is the number of SGLang DP ranks (one scheduler and one KV cache
+    each), and ``enable_dp_attention`` says whether they are attention-DP groups
+    inside one TP group rather than independent replicas.
+
+    Before SGLang #41818 (2026-09-30), ``--dp-size N --enable-dp-attention`` left
+    those two fields as given. Since then the pair is deprecated and resolves to
+    ``attn_dp_size=N`` with ``enable_dp_attention=False``; ``dp_size`` counts
+    replicas only, and SGLang has ``num_dp_ranks = dp_size * attn_dp_size``.
+    Reading only the old fields makes an attention-DP worker look like one rank,
+    so the router subscribes to rank 0's KV events and sends it every request.
+
+    ``attn_dp_size`` is checked first, as SGLang's
+    ``handle_deprecated_dp_attention`` does: the legacy flag decides the layout
+    only while ``attn_dp_size`` is 1. ``ServerArgs.resolved_dict()`` reports
+    ``enable_dp_attention = attn_dp_size > 1`` for older ``/server_info``
+    clients, so a resolved dump carries both fields. An elastic EP scale joiner
+    (``ep_join_mode == "scale"``) runs attention-DP paths with a group one rank
+    wide, as in SGLang's ``attn_dp_enabled_of``; the rank count does not follow
+    later scale-ups.
+    """
+    dp_size = _positive_int(getattr(server_args, "dp_size", 1))
+    attn_dp_size = _positive_int(getattr(server_args, "attn_dp_size", 1))
+    if attn_dp_size > 1:
+        return dp_size * attn_dp_size, True
+    if getattr(server_args, "enable_dp_attention", False):
+        return dp_size, True
+    return dp_size, getattr(server_args, "ep_join_mode", None) == "scale"
+
+
 def local_dp_rank_bounds(server_args: Any) -> tuple[int, int]:
-    dp_size = getattr(server_args, "dp_size", 1) or 1
-    enable_dp_attention = getattr(server_args, "enable_dp_attention", False)
+    dp_size, enable_dp_attention = sglang_dp_layout(server_args)
     nnodes = getattr(server_args, "nnodes", 1) or 1
     node_rank = getattr(server_args, "node_rank", 0) or 0
 
@@ -47,8 +85,7 @@ def publishes_kv_events(server_args: Any) -> bool:
     distinct rank. Only the leader owns the single logical rank in multinode
     TP-only mode.
     """
-    dp_size = getattr(server_args, "dp_size", 1) or 1
-    enable_dp_attention = getattr(server_args, "enable_dp_attention", False)
+    dp_size, enable_dp_attention = sglang_dp_layout(server_args)
     nnodes = getattr(server_args, "nnodes", 1) or 1
     node_rank = getattr(server_args, "node_rank", 0) or 0
 
@@ -59,7 +96,7 @@ def publishes_kv_events(server_args: Any) -> bool:
 
 
 def model_card_dp_rank_bounds(server_args: Any) -> tuple[int, int]:
-    dp_size = getattr(server_args, "dp_size", 1) or 1
+    dp_size, _ = sglang_dp_layout(server_args)
     return 0, dp_size
 
 
@@ -68,8 +105,7 @@ def per_rank_max_running_requests(server_args: Any) -> int | None:
     if max_running_requests is None:
         return None
 
-    dp_size = getattr(server_args, "dp_size", 1) or 1
-    enable_dp_attention = getattr(server_args, "enable_dp_attention", False)
+    dp_size, enable_dp_attention = sglang_dp_layout(server_args)
     if dp_size <= 1 or not enable_dp_attention:
         return max_running_requests
 

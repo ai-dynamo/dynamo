@@ -6,7 +6,7 @@
 from copy import deepcopy
 from datetime import datetime, timezone
 from threading import Lock
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from kubernetes import client
@@ -119,6 +119,31 @@ def test_load_can_cancel_startup_and_drain_serving_workers(mode, ready):
     assert decision.num_prefill is None
 
 
+@pytest.mark.parametrize(
+    ("mode", "target"),
+    [
+        ("prefill", "load"),
+        ("prefill", "latency"),
+        ("prefill", "throughput"),
+        ("decode", "load"),
+        ("agg", "load"),
+    ],
+)
+def test_startup_cancellation_preserves_last_ready_worker_with_zero_floor(mode, target):
+    config = _config(mode, min_endpoint=0)
+    config.optimization_target = target
+    capabilities = _caps()
+    capabilities.prefill.context_length = 4096
+    state = PlannerScalingState(config, capabilities)
+    counts = _counts()
+    if mode == "prefill":
+        counts.pending_num_prefill, counts.pending_num_decode = 1, 0
+    state.observe_worker_counts(counts)
+    decision = state.advance_load(_obs())
+    assert decision is not None
+    assert (decision.num_prefill if mode == "prefill" else decision.num_decode) == 1
+
+
 @pytest.mark.parametrize("kv", [500, 950])
 def test_hold_or_scale_up_signal_does_not_cancel_startup(kv):
     state = PlannerScalingState(_config(), _caps())
@@ -183,11 +208,21 @@ def test_startup_gpu_bounds(floor, ceiling, target, allowed):
 
 def _deployment():
     return {
-        "metadata": {"name": "qwen", "generation": 2},
+        "metadata": {"name": "qwen", "uid": "qwen-uid", "generation": 2},
         "spec": {
             "components": [
-                {"name": "p", "type": "prefill", "replicas": 1},
-                {"name": "d", "type": "decode", "replicas": 2},
+                {
+                    "name": "p",
+                    "type": "prefill",
+                    "replicas": 1,
+                    "scalingAdapter": {},
+                },
+                {
+                    "name": "d",
+                    "type": "decode",
+                    "replicas": 2,
+                    "scalingAdapter": {},
+                },
             ]
         },
         "status": {
@@ -219,6 +254,7 @@ def _pods():
 
 def _connector(deployment, pods):
     api = KubernetesAPI.__new__(KubernetesAPI)
+    api.current_namespace = "default"
     api.get_graph_deployment = Mock(side_effect=lambda _: deepcopy(deployment))
     api.list_pods_for_graph = Mock(return_value=pods)
     # DGDSA writes precede DGD reconciliation; neither depends on Planner's latch.
@@ -226,11 +262,53 @@ def _connector(deployment, pods):
         component["name"]: component.get("replicas", 1)
         for component in deployment["spec"]["components"]
     }
-    api.update_graph_replicas = Mock(
-        side_effect=lambda _, name, target: scale_targets.__setitem__(name, target)
+    legacy_write = Mock()
+    api.update_graph_replicas = legacy_write
+
+    def adapter(name):
+        return {
+            "apiVersion": "nvidia.com/v1beta1",
+            "kind": "DynamoGraphDeploymentScalingAdapter",
+            "metadata": {
+                "name": f"qwen-{name}",
+                "uid": f"adapter-{name}-uid",
+                "resourceVersion": "101",
+                "ownerReferences": [
+                    {
+                        "apiVersion": "nvidia.com/v1beta1",
+                        "kind": "DynamoGraphDeployment",
+                        "name": "qwen",
+                        "uid": "qwen-uid",
+                        "controller": True,
+                    }
+                ],
+            },
+            "spec": {
+                "dgdRef": {"name": "qwen", "componentName": name},
+                "replicas": scale_targets[name],
+            },
+        }
+
+    api.get_service_scaling_adapter = Mock(side_effect=lambda _, name: adapter(name))
+
+    def update_adapter(graph_name, name, target, **_kwargs):
+        scale_targets[name] = target
+        legacy_write(graph_name, name, target)
+
+    api.update_scaling_adapter_replicas = Mock(side_effect=update_adapter)
+    api.update_dgd_replicas_directly = Mock(
+        side_effect=lambda graph_name, name, target: legacy_write(
+            graph_name, name, target
+        )
     )
     api.get_service_replica_target = Mock(
         side_effect=lambda _, name: scale_targets[name]
+    )
+    api._test_scale_targets = scale_targets
+    api.fetch_authoritative_replica_targets = Mock(
+        side_effect=lambda snapshot: KubernetesAPI.fetch_authoritative_replica_targets(
+            api, snapshot
+        )
     )
     connector = KubernetesConnector.__new__(KubernetesConnector)
     connector.graph_deployment_name = "qwen"
@@ -239,6 +317,7 @@ def _connector(deployment, pods):
     connector._startup_scale_down_lock = Lock()
     connector._startup_scale_down_targets = {}
     connector._startup_read_warnings = set()
+    connector._batch_writer_id = None
     return connector
 
 
@@ -305,6 +384,118 @@ async def test_connector_cancels_startup_and_holds_until_drain_finishes():
     pods.pop()
     await connector.set_component_replicas(up, blocking=False)
     assert connector.kube_api.update_graph_replicas.call_count == 2
+
+
+def _frontend_short_deployment(decode_replicas=2):
+    """Workers settled at ``decode_replicas``; one of two Frontend Pods unready."""
+    deployment = _deployment()
+    deployment["spec"]["components"][1]["replicas"] = decode_replicas
+    deployment["spec"]["components"].append(
+        {"name": "fe", "type": "frontend", "replicas": 2}
+    )
+    deployment["status"]["components"]["d"] = {
+        "replicas": decode_replicas,
+        "updatedReplicas": decode_replicas,
+        "readyReplicas": decode_replicas,
+    }
+    deployment["status"]["components"]["fe"] = {
+        "replicas": 2,
+        "updatedReplicas": 2,
+        "readyReplicas": 1,
+    }
+    return deployment
+
+
+def _frontend_short_pods(decode_replicas=2):
+    components = (
+        [("p0", "p")]
+        + [(f"d{index}", "d") for index in range(decode_replicas)]
+        + [("fe0", "fe"), ("fe1", "fe")]
+    )
+    return [
+        client.V1Pod(
+            metadata=client.V1ObjectMeta(
+                name=name, labels={"nvidia.com/dynamo-component": component}
+            ),
+            status=client.V1PodStatus(phase="Running"),
+        )
+        for name, component in components
+    ]
+
+
+def _decode_target(replicas):
+    return [
+        TargetReplica(
+            sub_component_type=SubComponentType.DECODE, desired_replicas=replicas
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_frontend_only_unready_deployment_still_scales_workers():
+    connector = _connector(_frontend_short_deployment(), _frontend_short_pods())
+    connector.kube_api.wait_for_graph_deployment_ready = AsyncMock()
+
+    await connector.set_component_replicas(_decode_target(4), blocking=True)
+
+    connector.kube_api.update_graph_replicas.assert_called_once_with("qwen", "d", 4)
+    # DGD Ready stays False on the Frontend, so wait on worker stability only.
+    connector.kube_api.wait_for_graph_deployment_ready.assert_awaited_once_with(
+        "qwen", include_planner=False
+    )
+
+
+@pytest.mark.asyncio
+async def test_frontend_only_unready_keeps_worker_drain_guard():
+    # Status already reads zero while the old worker Pod still terminates.
+    pods = _frontend_short_pods(decode_replicas=0)
+    pods.append(
+        client.V1Pod(
+            metadata=client.V1ObjectMeta(
+                name="d-old",
+                labels={"nvidia.com/dynamo-component": "d"},
+                deletion_timestamp=datetime.now(timezone.utc),
+            ),
+            status=client.V1PodStatus(phase="Running"),
+        )
+    )
+    connector = _connector(_frontend_short_deployment(decode_replicas=0), pods)
+
+    await connector.set_component_replicas(_decode_target(1), blocking=False)
+
+    connector.kube_api.update_graph_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_frontend_only_unready_ignores_terminating_frontend_pod():
+    pods = _frontend_short_pods()
+    pods[-1].metadata.deletion_timestamp = datetime.now(timezone.utc)
+    connector = _connector(_frontend_short_deployment(), pods)
+
+    await connector.set_component_replicas(_decode_target(3), blocking=False)
+
+    connector.kube_api.update_graph_replicas.assert_called_once_with("qwen", "d", 3)
+
+
+@pytest.mark.asyncio
+async def test_frontend_only_unready_requires_pod_snapshot():
+    connector = _connector(_frontend_short_deployment(), _frontend_short_pods())
+    connector.kube_api.list_pods_for_graph.side_effect = client.ApiException(status=403)
+
+    await connector.set_component_replicas(_decode_target(4), blocking=False)
+
+    connector.kube_api.update_graph_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_frontend_only_unready_checks_dgdsa_target_before_dgd_propagation():
+    connector = _connector(_frontend_short_deployment(), _frontend_short_pods())
+    # An earlier DGDSA write to 8 has not reached the DGD spec or status yet.
+    connector.kube_api._test_scale_targets["d"] = 8
+
+    await connector.set_component_replicas(_decode_target(10), blocking=False)
+
+    connector.kube_api.update_graph_replicas.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -387,8 +578,8 @@ def test_sla_one_ready_worker_can_cancel_startup_without_division_by_zero(role):
     regression.query_groups.return_value = [
         ("worker", list((obs.prefill if role == "prefill" else obs.decode).values()))
     ]
-    regression.estimate_queued_prefill_time.side_effect = (
-        lambda *args, **kwargs: 0.005 if kwargs.get("queue_scale") == 0 else 0.01
+    regression.estimate_queued_prefill_time.side_effect = lambda *args, **kwargs: (
+        0.005 if kwargs.get("queue_scale") == 0 else 0.01
     )
     regression.estimate_scheduled_decode_itl.return_value = 0.001
     if role == "prefill":

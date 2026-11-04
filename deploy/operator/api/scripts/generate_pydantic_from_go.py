@@ -151,6 +151,7 @@ class GoStruct:
 
     name: str
     fields: List[GoField]
+    embedded_types: List[str]
     comment: str
 
 
@@ -323,17 +324,21 @@ class GoToPydanticConverter:
                 # kubebuilder markers and empty lines: skip, keep scanning
 
             # Parse fields
-            fields = self._parse_struct_fields(struct_body)
+            fields, embedded_types = self._parse_struct_fields(struct_body)
 
             self.structs.append(
                 GoStruct(
-                    name=struct_name, fields=fields, comment=" ".join(comment_lines)
+                    name=struct_name,
+                    fields=fields,
+                    embedded_types=embedded_types,
+                    comment=" ".join(comment_lines),
                 )
             )
 
-    def _parse_struct_fields(self, struct_body: str) -> List[GoField]:
+    def _parse_struct_fields(self, struct_body: str) -> Tuple[List[GoField], List[str]]:
         """Parse fields from struct body"""
         fields = []
+        embedded_types = []
 
         lines = struct_body.strip().split("\n")
 
@@ -374,6 +379,19 @@ class GoToPydanticConverter:
                 i += 1
                 continue
 
+            # Preserve inline API embeddings as Pydantic base classes. Kubernetes
+            # metadata embeddings are implementation details and remain omitted.
+            embedded_match = re.match(
+                r'([\w\.]+)\s+`json:",inline"`',
+                line,
+            )
+            if embedded_match:
+                embedded_type = embedded_match.group(1)
+                if "." not in embedded_type:
+                    embedded_types.append(embedded_type)
+                i += 1
+                continue
+
             # Pattern: FieldName type `json:"jsonName,omitempty"`
             field_pattern = r'(\w+)\s+([\w\.\*\[\]]+)\s+`json:"([^"]+)"`'
             match = re.match(field_pattern, line)
@@ -390,7 +408,7 @@ class GoToPydanticConverter:
                 if is_pointer:
                     field_type = field_type[1:]
 
-                # Skip inline fields (metav1.TypeMeta, metav1.ObjectMeta)
+                # Ignore named inline fields that are not anonymous API embeddings.
                 if ",inline" in json_tag_full:
                     i += 1
                     continue
@@ -409,7 +427,7 @@ class GoToPydanticConverter:
 
             i += 1
 
-        return fields
+        return fields, embedded_types
 
     def _go_type_to_python(
         self, go_type: str, is_pointer: bool, is_optional: bool
@@ -514,7 +532,8 @@ class GoToPydanticConverter:
         for struct in self.structs:
             lines.append("")
             lines.append("")
-            lines.append(f"class {struct.name}(BaseModel):")
+            bases = struct.embedded_types or ["BaseModel"]
+            lines.append(f"class {struct.name}({', '.join(bases)}):")
 
             # Add docstring — prefer an explicit override, fall back to Go comment
             docstring = _STRUCT_DOCSTRINGS.get(struct.name) or struct.comment

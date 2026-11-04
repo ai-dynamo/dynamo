@@ -13,10 +13,31 @@ Every CLI argument has a corresponding environment variable. The CLI argument ta
   These are the frontend-specific flags. The frontend also parses the shared Dynamo runtime flags (namespace, discovery, planes, parsing) — see [Runtime Configuration](runtime-configuration.mdx). For the router cost model and tuning guidance behind the router flags below, see [Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md).
 </Note>
 
+## Decision APIs
+
+**Experimental.** `--enable-systemone-api` (environment variable `DYN_ENABLE_SYSTEMONE_API`, default `false`) enables both OpenAI `POST /v1/decisions` and Jev `POST /v1/systemone`. The qualified backend is an aggregated, single-rank SGLang CUDA worker using the serialized scoring profile. See [Start a Decision Worker](../../cli/model-deployment/introduction.mdx#decision-api-workers) for launch commands and smoke requests.
+
+| Environment variable | Default | Maximum | Meaning |
+| --- | --- | --- | --- |
+| `DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES` | 256 | 4,096 | Concurrent admitted question branches across requests |
+| `DYN_SYSTEMONE_MAX_INPUT_TOKENS` | 65,536 | 1,048,576 | Cumulative rendered input tokens across all questions in one request |
+| `DYN_SYSTEMONE_REQUEST_TIMEOUT_SECS` | 300 | 3,600 | End-to-end request deadline in seconds |
+
+Positive values above a default log a warning. Values above the maximum are clamped with a warning; invalid values fall back to the default. Admission rejects excess work immediately rather than placing it in a frontend queue. Capacity responses use `DYN_HTTP_OVERLOAD_STATUS_CODE`.
+
+Decision capacity rejections carry `Retry-After: 1` and the `rate_limit_exceeded` error code regardless of the configured HTTP status. OpenAI responses expose this code at `error.code`; Jev responses expose it at `code`. An unavailable worker returns `server_error`, not a capacity rejection. A native worker-abort HTTP 503 can also carry `Retry-After`, so the status and header alone do not identify capacity exhaustion.
+
+Raising the input-token limit does not raise every execution limit. Model context capacity, input bytes, tokenization work, and the fixed **16 MiB cumulative encoded-text budget** remain independent. Each question charges its rendered prompt bytes once for initial encoding, once for round-trip validation, and once per candidate label. For 26 labels, this budget permits approximately `16 MiB / 28` rendered bytes summed across questions, regardless of the configured token limit. Higher-byte-per-token text reaches this budget sooner. Rejections identify the encoded-text budget; they use HTTP 422 for Jev and HTTP 400 for OpenAI.
+
+The protocol ceiling of 255 candidates is not a guarantee that every tokenizer supports that many choices. Scoring requires distinct single-token labels at the answer position; the effective limit depends on the tokenizer and rendered prompt. Reduce the candidate count or select another model if label validation fails. Request shape and context checks run before scoring inference.
+
+Question branches in one request share a cache namespace and are pinned to the first branch's worker. Separate API calls receive different random cache namespaces, so repeated inputs do not reuse another request's cached prefixes. Trusted tenant-scoped cross-request reuse is not supported by this profile.
+
 ## HTTP and networking
 
 <ParamField path="--http-host" type="string" default="0.0.0.0">
-  HTTP listen address.
+  HTTP listen address: an IPv4 or IPv6 address, with optional brackets around IPv6. `0.0.0.0`
+  accepts IPv4 connections only; on IPv6-only hosts, set `::`.
 
   Environment variable: `DYN_HTTP_HOST`
 </ParamField>
@@ -55,7 +76,7 @@ see the [TLS reference](tls-configuration.mdx#http-tls-and-mtls).
 
 The Rust HTTP server also reads these environment variables, which are not exposed as CLI arguments:
 
-<ParamField path="DYN_HTTP_BODY_LIMIT_MB" type="integer" default="192">
+<ParamField path="DYN_HTTP_BODY_LIMIT_MB" type="integer" default="45">
   Maximum HTTP request body size in MB. This is the client-facing ingress cap.
   After preprocessing, the frontend sends the worker-bound frame over the request
   plane. On the default TCP plane that frame is independently limited by
@@ -103,11 +124,10 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 ### Routing and readiness
 
 <ParamField path="--router-mode" type="string" default="round-robin">
-  Routing strategy. `power-of-two` samples two workers and selects the worker with fewer in-flight
-  requests. In disaggregated prefill mode, `power-of-two` and `least-loaded` use the synchronous
-  prefill fallback path.
+  Routing strategy. In disaggregated prefill mode, `least-loaded` uses the synchronous prefill
+  fallback path.
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>round-robin</Badge> <Badge intent="note" minimal>random</Badge> <Badge intent="note" minimal>power-of-two</Badge> <Badge intent="note" minimal>kv</Badge> <Badge intent="note" minimal>direct</Badge> <Badge intent="note" minimal>least-loaded</Badge> <Badge intent="note" minimal>device-aware-weighted</Badge></span>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>round-robin</Badge> <Badge intent="note" minimal>random</Badge> <Badge intent="note" minimal>kv</Badge> <Badge intent="note" minimal>direct</Badge> <Badge intent="note" minimal>least-loaded</Badge> <Badge intent="note" minimal>device-aware-weighted</Badge></span>
 
   Environment variable: `DYN_ROUTER_MODE`
 </ParamField>
@@ -134,14 +154,20 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 
 ### KV scoring and cache locality
 
+Configure scoring through [default policy parameters](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#configure-the-default-policy) in `--router-policy-config`. Deprecated flags and their environment variables remain accepted until removal in v1.7.
+
 <ParamField path="--load-aware / --no-load-aware" type="boolean" default="false">
+  **Deprecated.** Use [policy parameters and explicit tracking settings](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#replace-the-load-aware-preset).
+
   Preset for KV load-aware routing; implies `--router-mode kv`. Disables device-cache credit, KV event consumption, and remote/shared cache indexers. The worker-selection policy's `CACHE` declaration still controls local approximate indexing.
 
   Environment variable: `DYN_ROUTER_LOAD_AWARE`
 </ParamField>
 
 <ParamField path="--router-kv-overlap-score-credit" type="float" default="1.0">
-  Credit multiplier for device-local prefix overlap. The value must be finite and nonnegative. Setting it to zero does not disable indexing; cache setup follows the worker-selection policy's `WorkerInputs::CACHE` declaration.
+  **Deprecated.** Set `overlap_score_credit` in the default policy parameters.
+
+  Credit multiplier for device-local prefix overlap. The value must be finite and nonnegative. Cache setup follows the policy’s input requirements; the default policy skips cache inputs at zero overlap credit.
   Values greater than `1.0` give device overlap extra credit, but adjusted prefill cost is
   clamped at zero. See [Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#tuning-guidelines).
 
@@ -149,6 +175,8 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-kv-overlap-score-credit-decay" type="float" default="0.0">
+  **Deprecated.** Set `overlap_score_credit_decay` in the default policy parameters.
+
   Decay rate for device-local overlap credit as active prefill load rises above the least-loaded
   eligible worker. `0` disables decay; `1` halves the credit at one request-equivalent of excess
   active prefill load.
@@ -157,6 +185,8 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-prefill-load-scale" type="float" default="1.0">
+  **Deprecated.** Set `prefill_load_scale` in the default policy parameters.
+
   Scale applied to adjusted prompt-side prefill load after overlap and lower-tier cache-hit credits
   are subtracted. The minimum is `0.0`; there is no hard maximum.
 
@@ -175,7 +205,9 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
   Environment variable: `DYN_ROUTER_DISK_CACHE_HIT_WEIGHT`
 </ParamField>
 
-<ParamField path="--shared-cache-multiplier" type="float" default="0.5">
+<ParamField path="--shared-cache-multiplier" type="float">
+  **Deprecated.** Set `shared_cache_multiplier` in the default policy parameters. The policy defaults to `0.5` when shared cache is enabled.
+
   **Experimental.** Credit multiplier from `0.0` through `1.0` for external shared-cache hits.
 
   Environment variable: `DYN_SHARED_CACHE_MULTIPLIER`
@@ -190,6 +222,8 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-temperature" type="float" default="0.0">
+  **Deprecated.** Set `router_temperature` in the default policy parameters.
+
   Softmax temperature for normalized worker sampling. `0` selects the lowest-cost worker
   deterministically; higher values add randomness.
 
@@ -288,6 +322,8 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-decode-active-request-weight" type="float" default="0.0">
+  **Deprecated.** Set `decode_active_request_weight` in the default policy parameters.
+
   **Experimental.** Finite, nonnegative block-equivalent decode cost added for each active request on
   a candidate worker. Tune this value only when decode step latency depends materially on active batch
   size.
@@ -311,6 +347,8 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-queue-threshold" type="float" default="null">
+  **Deprecated; removal in v1.7.** Set `policy_classes[].prefill_busy_threshold_frac` in `--router-policy-config`.
+
   Queue threshold fraction of prefill capacity. Setting a nonnegative numeric value enables queueing;
   priority hints affect only requests waiting in this queue.
 
@@ -318,6 +356,8 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-queue-policy" type="string" default="fcfs">
+  **Deprecated; removal in v1.7.** Set `policy_classes[].queue_policy` in `--router-policy-config`.
+
   Queue scheduling policy. `fcfs` optimizes tail Time To First Token (TTFT); `wspt` optimizes average
   TTFT.
 
@@ -327,14 +367,16 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-policy-config" type="string" default="null">
-  Startup-only YAML for policy-class queues and custom worker-selection instances. When omitted,
+  Startup-only YAML for shared `router` settings, policy-class queues, and worker-selection instances. When omitted,
   `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class.
-  Queueing remains disabled until a threshold is configured. See [Policy-class queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) and [Write Custom Routing Strategies](../../developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx).
+  Queueing remains disabled until a threshold is configured. See [Shared Router Settings](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#shared-router-settings), [Policy-class queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) and [Write Custom Routing Strategies](../../developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx).
 
   Environment variable: `DYN_ROUTER_POLICY_CONFIG`
 </ParamField>
 
 <ParamField path="--router-prefill-policy" type="string" default="null">
+  **Deprecated; removal in v1.7.** Set `worker_selection.prefill` in `--router-policy-config`.
+
   Worker-selection instance for disaggregated prefill workers in the current router process. This
   option overrides `worker_selection.prefill` from `--router-policy-config`. It is not included in
   worker model cards. Set it to `default` to use Dynamo's built-in worker selector.
@@ -343,6 +385,8 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-decode-policy" type="string" default="null">
+  **Deprecated; removal in v1.7.** Set `worker_selection.decode` in `--router-policy-config`.
+
   Worker-selection instance for decode workers in the current router process. This option
   overrides `worker_selection.decode` from `--router-policy-config`. It is not included in worker
   model cards. Set it to `default` to use Dynamo's built-in worker selector. Configure an aggregated
@@ -420,7 +464,24 @@ For MoE models, AIS requires `ais_tp_size * ais_attention_dp_size == ais_moe_tp_
 ## Fault tolerance
 
 <ParamField path="--migration-limit" type="integer" default="0">
-  Maximum request migrations per worker disconnect. `0` disables migration.
+  Maximum replacement worker attempts per request. `0` disables migration.
+
+  For `/v1/realtime`, this is a lifetime budget for one client WebSocket. Recovery is
+  experimental and supports acknowledged transcription sessions with PCM input,
+  `audio.input.turn_detection: null`, and explicit client commits. The frontend replays
+  unfinished audio to a compatible warm replica in the original worker group while keeping
+  the client connection open. Completed turns are not replayed. Other realtime modes,
+  server-side voice activity detection, and frontend failure are outside this scope.
+
+  Each recovery has a five-second deadline covering connection, session acknowledgement,
+  and replay submission. Normal transcription completion has no recovery deadline.
+  A subsequent session update, unsupported event, application error, or retention limit
+  disables further recovery for that socket. Retention is bounded to 16 MiB of accounted
+  session, event, and transcript data and 4,096 events per eligible socket. Exceeding a
+  limit leaves a healthy stream working. Replayed deltas that differ from text already
+  delivered terminate the session with an error; final transcripts may still revise
+  interim text. Recovery requires another warm worker and adds inference work and an
+  output gap.
 
   Environment variable: `DYN_MIGRATION_LIMIT`
 </ParamField>
@@ -429,6 +490,8 @@ For MoE models, AIS requires `ais_tp_size * ais_attention_dp_size == ais_moe_tp_
   Maximum prompt-plus-output sequence length that remains eligible for migration. When a request
   strictly exceeds the limit, migration and token tracking stop for that request. Must be from `1`
   through `4294967295`. Unset means no sequence-length limit.
+
+  This token limit does not control realtime audio retention.
 
   Environment variable: `DYN_MIGRATION_MAX_SEQ_LEN`
 </ParamField>
@@ -442,6 +505,8 @@ For MoE models, AIS requires `ais_tp_size * ais_attention_dp_size == ais_moe_tp_
 </ParamField>
 
 <ParamField path="--active-prefill-tokens-threshold" type="integer" default="null">
+  Deprecated; will be removed in v1.7. Use `--active-prefill-tokens-threshold-frac`.
+
   Absolute active-prefill-token threshold. A numeric value greater than or equal to `0` independently
   enables this check. Uses OR logic with the fractional prefill threshold.
 
@@ -507,8 +572,10 @@ For guidance on choosing thresholds, see [Request Rejection](../../kubernetes/fa
   Environment variable: `DYN_REQUEST_PLANE`
 </ParamField>
 
-<ParamField path="--event-plane" type="string" default="auto">
-  Event publishing transport. Defaults to `zmq` for `file`/`mem` discovery and `nats` for `etcd`/`kubernetes`.
+<ParamField path="--event-plane" type="string" default="zmq">
+  Event publishing transport. ZMQ is the default for every discovery backend, including `etcd`
+  and `kubernetes`, when neither `--event-plane` nor `DYN_EVENT_PLANE` is set. Set
+  `--event-plane nats` or `DYN_EVENT_PLANE=nats` to use NATS instead.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>nats</Badge> <Badge intent="note" minimal>zmq</Badge></span>
 
@@ -557,7 +624,7 @@ See the [KServe gRPC Frontend](../../developer-guide/knowledge-base/modular-comp
 
 ### Histogram buckets
 
-The frontend's six latency and size histograms use log-spaced buckets, rounded to two significant figures, always starting with a `0` edge. Each histogram is tuned by three environment variables that share a prefix: `_MIN` and `_MAX` bound the range, and `_COUNT` is the total number of bucket edges **including** that leading `0`, so `COUNT - 1` edges are spread across the range. The inter-token latency default of `20` therefore means `0` plus nineteen log-spaced edges. Every edge, including the top one, is rounded to two significant figures, so the highest exported edge is `MAX` rounded rather than `MAX` itself — see the `Top le` column below. These have no CLI equivalent, and they are read once while the frontend builds its metrics, so changing one requires a restart.
+Most frontend latency and size histograms use log-spaced buckets, rounded to two significant figures, always starting with a `0` edge. Each histogram is tuned by three environment variables that share a prefix: `_MIN` and `_MAX` bound the range, and `_COUNT` is the total number of bucket edges **including** that leading `0`, so `COUNT - 1` edges are spread across the range. Every edge, including the top one, is rounded to two significant figures, so the highest exported edge is `MAX` rounded rather than `MAX` itself. These variables have no CLI equivalent, and the frontend reads them once while building its metrics, so changing one requires a restart.
 
 | Histogram | Variable prefix | Min | Max | Count | Top `le` |
 |---|---|---|---|---|---|
@@ -578,6 +645,18 @@ export DYN_METRICS_OUTPUT_SEQUENCE_COUNT=12
 Rounding can move the top edge either way, so pick a `MAX` that is already two significant figures if you need an exact ceiling. Prometheus buckets are inclusive, so `MAX=123` exports `le=120` and only observations *greater than* 120 and up to 123 fall into `+Inf` — a value of exactly 120 still lands in the `le=120` bucket. `MAX=131072` exports `le=130000`. Two of the defaults above are affected: request duration is set to `512` but exports `510`, and input sequence is set to `128000` but exports `130000`.
 
 `dynamo_frontend_cached_tokens` shares the input sequence buckets, so `DYN_METRICS_INPUT_SEQUENCE_*` changes both histograms.
+
+Set `DYN_METRICS_ITL_BUCKETS` to an explicit, comma-separated list of ITL boundaries in seconds. The list must contain 1 to 512 finite, non-negative, strictly increasing values and be at most 16,384 bytes long. Boundaries are used as supplied, without logarithmic spacing or rounding.
+
+For example, to use explicit boundaries for an SGLang deployment:
+
+```bash
+export DYN_METRICS_ITL_BUCKETS=0.002,0.004,0.006,0.008,0.010,0.015,0.020,0.025,0.030,0.035,0.040,0.060,0.080,0.100,0.200,0.400,0.600,0.800,1.000,2.000,4.000,6.000,8.000
+```
+
+The explicit list takes precedence over `DYN_METRICS_ITL_MIN`, `DYN_METRICS_ITL_MAX`, and `DYN_METRICS_ITL_COUNT`, including their deprecated names. If the list is invalid, the frontend warns and uses the default log-spaced ITL boundaries, ignoring the older settings. When `DYN_METRICS_ITL_BUCKETS` is unset, the existing log-spaced configuration and defaults remain unchanged, including the 80-second upper boundary.
+
+Matching frontend and backend bucket boundaries reduces differences in quantile interpolation. It does not make their ITL measurement boundaries or observed samples identical.
 
 A histogram's configuration is validated as a set: `MIN` must be above zero, below `MAX`, and `COUNT` must be between 1 and 512. If any part fails, the frontend warns and reverts **all three** values for that histogram together — setting `DYN_METRICS_ITL_MIN=100` against the default `MAX` of `80.0` also discards a perfectly valid `DYN_METRICS_ITL_COUNT=20`.
 
@@ -664,8 +743,17 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
 <ParamField path="--enable-anthropic-api" type="boolean" default="false">
   Enable `/v1/messages` (the Anthropic Messages API).
 
+  With a V2 unified parser that provides per-call completion evidence, streaming responses release
+  completed tool blocks in call order once the identity is available and the arguments form a valid
+  JSON object. This lets clients receive a completed call while later calls are still generating.
+  V1 parsers, including those selected with `DYN_PARSER_VERSION=1`, retain the finish-reason or
+  end-of-stream fallback. Calls whose argument string remains empty wait until end of stream,
+  even if the parser reports completion.
+
   Environment variable: `DYN_ENABLE_ANTHROPIC_API`
 </ParamField>
+
+The `dynamo` chat processor runs Rust parsing in the frontend; workers publish parser choices through `--dyn-tool-call-parser` and `--dyn-reasoning-parser`. See [Parser Generation Routing](../../use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md#parser-generation-routing) for `DYN_PARSER_VERSION`, aliases, fallback, and migration settings.
 
 <ParamField path="--dyn-chat-processor" type="string" default="dynamo">
   Chat processor. See [Chat Processors](../../use-cases/tool-calling-and-reasoning/chat-processors.mdx) for how this combines with the parser flags.
@@ -681,8 +769,13 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
   Environment variable: `DYN_DEBUG_PERF`
 </ParamField>
 
-<ParamField path="--dyn-preprocess-workers" type="integer" default="0">
-  Worker processes for CPU-bound preprocessing. `0` uses the main event loop (vllm processor only).
+<ParamField path="--dyn-preprocess-workers" type="integer" default="auto for SGLang; 0 otherwise">
+  Experimental. For the SGLang processor, the default is `min(2, max(0, available CPUs - 1))`,
+  where available CPUs account for process affinity and visible cgroup CPU quotas. The automatic
+  count applies to each model's preprocessing pool, just like an explicit value. With multiple
+  models, the total number of workers grows with the model count and can exceed the available CPU
+  count. Set `0` to run preprocessing on the main event loop. Nonzero values are supported only
+  with the SGLang processor.
 
   Environment variable: `DYN_PREPROCESS_WORKERS`
 </ParamField>
@@ -771,10 +864,35 @@ The frontend exposes the following HTTP endpoints.
 | `POST` | `/v1/embeddings` | Text embeddings |
 | `POST` | `/v1/responses` | Responses API |
 | `POST` | `/v1/responses/input_tokens` | Estimated input token count for the Responses API |
-| `POST` | `/v1/images/generations` | Image generation |
+| `POST` | `/v1/images/generations` | Image generation; the response carries [image accounting](../../developer-guide/additional-resources/nvidia-request-extensions-nvext.md#image-accounting) |
+| `POST` | `/v1/images/edits` | Image editing; see [Image API Compatibility](#image-api-compatibility) |
 | `POST` | `/v1/videos/generations` | Video generation |
 | `POST` | `/v1/videos/generations/stream` | Video generation (streaming) |
 | `GET` | `/v1/models` | List available models |
+
+### Image API Compatibility
+
+**Experimental.** Image editing requires a backend and model that support
+reference-image conditioning.
+
+| Endpoint | Request contract | Support |
+|---|---|---|
+| `POST /v1/images/generations` | JSON with a text `prompt`; optional `input_reference` | Supported |
+| `POST /v1/images/edits` | Multipart files or JSON references, with a required `prompt` | Supported |
+| `POST /v1/images/variations` | Legacy image-variation API | Unsupported |
+
+Reference-capable models can also perform edits through the generations JSON
+endpoint. The variations endpoint returns HTTP 404; OpenAI has
+[deprecated it](https://developers.openai.com/api/reference/resources/images/methods/create_variation).
+Use `/v1/images/edits` for prompt-guided variations.
+
+- Multipart: upload PNG, JPEG, or WebP using `image`, or repeat `image` or
+  `image[]` for multiple files. Choose one name per request; preserve part order.
+- JSON: `input_reference` accepts an HTTP(S) URL, a base64 data URL, or an ordered
+  array of those strings.
+
+See the [Image Edits API](../api/image-edits.mdx) for build requirements,
+accepted fields, limits, errors, and rolling upgrades.
 
 ### Anthropic (Experimental)
 
@@ -782,6 +900,29 @@ The frontend exposes the following HTTP endpoints.
 |--------|------|-------------|
 | `POST` | `/v1/messages` | Anthropic Messages API (requires `--enable-anthropic-api`) |
 | `POST` | `/v1/messages/count_tokens` | Token counting for the Anthropic API |
+
+Responses from the Messages handlers, including request parsing and validation errors, return
+the assigned request ID in the `request-id` response header. HTTP errors from these handlers
+use the [Anthropic error envelope](https://platform.claude.com/docs/en/api/errors), including
+the same ID in `request_id`. Malformed JSON, invalid request shapes, and missing or incorrect
+JSON content types return HTTP 400. Requests exceeding `DYN_HTTP_BODY_LIMIT_MB` return HTTP
+413 with `request_too_large`; the default is 45 MiB.
+
+Before conversion, the frontend validates these
+[Messages request fields](https://platform.claude.com/docs/en/api/http/messages/create):
+
+- `tool_choice.type` selects `auto`, `any`, `none`, or `tool`. Only `tool` accepts and requires
+  a nonempty `name`. `disable_parallel_tool_use` must be a boolean and is unavailable with `none`.
+- `system` accepts a string or text blocks, each with `type: "text"` and nonempty string `text`.
+- `metadata` accepts an object; `user_id`, when supplied, accepts a string of at most 512
+  characters or `null`.
+- `thinking.type: "enabled"` requires an integer `budget_tokens` of at least 1,024 and less
+  than `max_tokens`, except when `anthropic-beta` includes
+  `interleaved-thinking-2025-05-14`. Budgets are invalid with `disabled`, `adaptive`,
+  or `between_tools`. `between_tools` is accepted without enabling thinking before the first tool.
+- `top_k` must fit the backend's signed 32-bit field (at most 2,147,483,647).
+
+For `system`, `metadata`, `tool_choice`, and `thinking`, `null` is treated as omission.
 
 ### Infrastructure
 
@@ -792,19 +933,69 @@ The frontend exposes the following HTTP endpoints.
 | `GET` | `/metrics` | Prometheus metrics |
 | `GET` | `/openapi.json` | OpenAPI specification |
 | `GET` | `/docs` | Swagger UI |
-| `POST` | `/busy_threshold` | Set independently enabled busy thresholds for a discovered model (disabled when `DYN_DISABLE_FRONTEND_ADMIN_API` is truthy) |
-| `GET` | `/busy_threshold` | Get stored busy thresholds (disabled when `DYN_DISABLE_FRONTEND_ADMIN_API` is truthy) |
+
+### Admin
+
+Admin routes are off by default and are served on a separate listener (`127.0.0.1:8002` by
+default), never on the inference port. They have no authentication; see
+[Secure Deployment Guidelines](../../developer-guide/security/secure-deployment-guidelines.md#frontend-extensions-and-admin-api).
+When frontend TLS is configured, the admin listener uses the same certificate and client CA
+settings, so call it with `https://`. The inference port's `/openapi.json` does not list these
+routes; `generate-frontend-openapi` does.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET`, `PATCH` | `/router_policy` | Get or update worker-selection parameters of a router instance |
+| `GET`, `POST` | `/router_policy/busy_threshold` | Get or set busy thresholds for a discovered model |
+| `POST` | `/busy_threshold` | Set independently enabled busy thresholds for a discovered model |
+| `GET` | `/busy_threshold` | Get stored busy thresholds |
+
+<ParamField path="DYN_ENABLE_FRONTEND_ADMIN_API" type="boolean" default="false">
+  When truthy (`1`, `true`, `yes`, or `on`), the frontend starts the admin listener and serves the
+  routes above.
+</ParamField>
+
+<ParamField path="DYN_FRONTEND_ADMIN_HOST" type="string" default="127.0.0.1">
+  Address the admin listener binds to. If you widen it, restrict the admin port at the network
+  boundary.
+</ParamField>
+
+<ParamField path="DYN_FRONTEND_ADMIN_PORT" type="integer" default="8002">
+  Port of the admin listener. When the admin API is enabled and the port cannot be bound, the
+  frontend fails to start. A value that is not a valid port number falls back to `8002`.
+</ParamField>
 
 `POST /busy_threshold` accepts `model` plus any of `active_decode_blocks_threshold`,
 `active_prefill_tokens_threshold`, and `active_prefill_tokens_threshold_frac`. A numeric field enables
 only that check. The router reevaluates workers on the next worker-load or runtime-configuration
-update; the call does not synchronously recompute the busy set and does not change startup-only router
-options such as `--router-mode kv` or `--router-track-output-blocks`.
+update, or with `--router-mode kv` at the next worker selection; the call does not synchronously
+recompute the busy set and does not change startup-only router options such as `--router-mode kv` or
+`--router-track-output-blocks`.
 
 ### Frontend feature switches
 
-Environment variables controlling frontend extensions. Extensions are enabled by default. Set a
-truthy value (`1`, `true`, `yes`, or `on`, case-insensitive) to disable the corresponding surface.
+Environment variables controlling frontend extensions and protocol admission. The variables below
+are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-insensitive.
+
+<ParamField path="DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS" type="boolean" default="false">
+  When truthy, `/v1/chat/completions` and `/v1/completions` ignore and drop unknown top-level
+  request fields instead of rejecting the request. This does not forward arbitrary fields to a
+  backend. Named passthrough fields remain subject to their normal validation and handling.
+</ParamField>
+
+<ParamField path="DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION" type="boolean" default="false">
+  When truthy, the frontend skips Dynamo's preflight validation of function parameter schemas
+  with explicit `strict: true`. This applies to `/v1/chat/completions`, `/v1/responses` (including
+  namespace tools), and strict tools converted from `/v1/messages`. The setting affects all
+  models served by the frontend process. The value is captured during HTTP frontend startup;
+  restart the process after changing it. Use this compatibility mode for legacy requests
+  accepted before strict-schema preflight was introduced, including schemas with optional
+  properties, open objects, or `oneOf`. Submitted schemas and `strict` declarations remain
+  unchanged. The preflight's schema structure, reference, depth, and size checks are skipped;
+  basic tool validation and HTTP body limits remain active. This does not disable
+  structured-output guidance or downstream
+  processor and backend checks, so a schema can still fail later in the request pipeline.
+</ParamField>
 
 <ParamField path="DYN_DISABLE_FRONTEND_NVEXT" type="boolean" default="false">
   When truthy, the frontend drops all request NvExt fields except `cache_salt` on
@@ -819,9 +1010,26 @@ truthy value (`1`, `true`, `yes`, or `on`, case-insensitive) to disable the corr
   these endpoints do not use `x-tenant-id` or `x-dynamo-*` routing headers in either mode.
 </ParamField>
 
-<ParamField path="DYN_DISABLE_FRONTEND_ADMIN_API" type="boolean" default="false">
-  When truthy, `GET /busy_threshold` and `POST /busy_threshold` are not registered and return 404.
-  Inference, metrics, models, health, and liveness routes are unaffected.
+### Media refusal for text-only models
+
+A frontend that serves text-only models can refuse media before routing. A refused request never reaches a worker, and a streaming client receives the HTTP status instead of a `200` followed by an error event. Readiness checks on the OpenAI endpoints still take precedence.
+
+<ParamField path="--reject-media" type="boolean" default="false">
+  Refuse media in any message, including earlier turns, before conversion or routing:
+
+  - `/v1/chat/completions`: image, video, and audio URL parts, plus inline `input_audio`.
+  - `/v1/responses`: `input_image` parts, including `file_id` references, system/developer messages, assistant history, and function-call outputs. Audio and video input parts are not accepted by the Responses request schema.
+  - `/v1/messages`: image blocks with base64 or URL sources, including images inside `tool_result` content.
+
+  Refusals are counted with `error_type="unsupported_modality"` on `dynamo_frontend_requests_total`, apart from validation and overload errors.
+
+  Environment variable: `DYN_REJECT_MEDIA`
+</ParamField>
+
+<ParamField path="--reject-media-status-code" type="integer" default="415">
+  HTTP status for a request refused by `--reject-media`. Only 4xx and 5xx values are accepted. Set it to a status an upstream gateway fails over on, for example `429`, to have that gateway send media requests to a multimodal model.
+
+  Environment variable: `DYN_REJECT_MEDIA_STATUS_CODE`
 </ParamField>
 
 ### Endpoint path customization

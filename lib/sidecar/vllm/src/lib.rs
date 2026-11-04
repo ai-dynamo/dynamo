@@ -7,7 +7,6 @@ mod args;
 mod client;
 mod convert;
 mod engine;
-mod json;
 mod lora;
 mod model;
 
@@ -18,3 +17,6 @@ pub use engine::VllmSidecarEngine;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod test_fixtures;

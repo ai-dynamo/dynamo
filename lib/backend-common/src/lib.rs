@@ -38,9 +38,10 @@ pub use engine::{
     FinishReason, FirstTokenNotifier, GenerateContext, GuidedDecodingOptions, HEALTH_CHECK_KEY,
     KV_HINT_TRANSFER_CAPABILITY_KEY, KvEventPublisher, KvEventSource, KvHint, KvHintAction,
     KvSourceLocationsPayload, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration,
-    LogProbs, Metrics, MetricsBindings, MetricsCtx, MultimodalData, OnPublisherReady,
-    OnSnapshotPublisherReady, OutputOptions, PrefillResult, PreprocessedRequest, RawEngine,
-    SamplingOptions, StopConditions, StopReason, TopLogprob, TopLogprobs, chunk, usage,
+    LogProbs, Metrics, MetricsBindings, MetricsCtx, MultimodalData, MultimodalItemRef,
+    OnPublisherReady, OnSnapshotPublisherReady, OutputOptions, PrefillResult, PreprocessedRequest,
+    PromptTokensDetails, RawEngine, SamplingOptions, StopConditions, StopReason, TopLogprob,
+    TopLogprobs, chunk, usage,
 };
 pub use error::{BackendError, DynamoError, ErrorType};
 pub use metrics::{ComponentGauges, EngineMetrics, LifecycleGauges};

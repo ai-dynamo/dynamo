@@ -17,12 +17,15 @@ import json
 import logging
 import math
 import os
+import re
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import asdict
 from enum import Enum
-from pathlib import Path
-from typing import Any, Dict, Literal, Optional, Protocol
-from urllib.parse import parse_qsl
+from functools import lru_cache
+from pathlib import Path, PurePosixPath
+from typing import Annotated, Any, Dict, Literal, Optional, Protocol, cast
+from urllib.parse import parse_qsl, urlsplit
 
 import yaml
 from pydantic import (
@@ -30,16 +33,43 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SecretStr,
+    SerializerFunctionWrapHandler,
+    TypeAdapter,
+    ValidationError,
+    ValidationInfo,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
 from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
+from dynamo.planner.config.batch_policy_config import BatchSchedulingPolicyConfig
 from dynamo.planner.config.defaults import SLAPlannerDefaults
 from dynamo.planner.plugins.registry.config import PluginRegistrationConfig
 from dynamo.planner.plugins.types import HoldPolicy
 
 logger = logging.getLogger(__name__)
+
+_PROMETHEUS_LABEL_NAME = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
+def _validate_http_url(value: str, *, field_name: str) -> str:
+    """Validate a service URL without normalizing its path or trailing slash."""
+
+    parsed = urlsplit(value)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError(f"{field_name} must be an absolute http(s) URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError(
+            f"{field_name} must not contain credentials; use a mounted secret"
+        )
+    return value
+
+
+def _batch_redis_url_default() -> SecretStr | None:
+    value = os.environ.get("DYN_PLANNER_BATCH_REDIS_URL")
+    return SecretStr(value) if value else None
 
 
 class MinimumEndpointConfig(Protocol):
@@ -97,6 +127,22 @@ class PlannerPreDeploymentSweepMode(str, Enum):
     Thorough = "thorough"
 
 
+class AISDatasetProfileSpec(BaseModel):
+    """One execution-profile manifest in an already downloaded local dataset."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    root: str = Field(min_length=1)
+    manifest: str = Field(min_length=1)
+
+    @field_validator("root")
+    @classmethod
+    def absolute_root(cls, value: str) -> str:
+        if not Path(value).is_absolute():
+            raise ValueError("dataset root must be an absolute local path")
+        return value
+
+
 class AISPerfModelSpec(BaseModel):
     """Role-indexed AISimulate canonical configurations.
 
@@ -106,7 +152,18 @@ class AISPerfModelSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    roles: dict[Literal["prefill", "decode", "aggregated"], dict[str, Any]]
+    roles: dict[Literal["prefill", "decode", "aggregated"], dict[str, Any]] = Field(
+        default_factory=dict
+    )
+    dataset_profiles: dict[
+        Literal["prefill", "decode", "aggregated"], AISDatasetProfileSpec
+    ] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def distinct_sources(self):
+        if self.roles.keys() & self.dataset_profiles.keys():
+            raise ValueError("each AIS role must have exactly one configuration source")
+        return self
 
     @field_validator("roles")
     @classmethod
@@ -115,7 +172,9 @@ class AISPerfModelSpec(BaseModel):
     ) -> dict[str, dict[str, Any]]:
         # Operator schema generation imports this module without the optional
         # estimator runtime. Require AIS only when validating an AIS config.
-        from aisimulate_core import RustForwardPassPerfModel
+        # The package root loads native APIs lazily and types them as object;
+        # import the typed native module directly.
+        from aisimulate_core._native import RustForwardPassPerfModel
         from aisimulate_core.sdk import ForwardPassPerfModelConfig
 
         result = {}
@@ -128,7 +187,10 @@ class AISPerfModelSpec(BaseModel):
                 # Use the installed SDK's fields/defaults; never duplicate its
                 # expanding schema or discard an unrecognized input field.
                 request = ForwardPassPerfModelConfig(**config)
-                RustForwardPassPerfModel.normalize_config(json.dumps(request.to_dict()))
+                # AISimulate exposes native APIs lazily through module __getattr__.
+                cast(Any, RustForwardPassPerfModel).normalize_config(
+                    json.dumps(request.to_dict())
+                )
                 # Keep authored roots portable and controls explicit; to_dict()
                 # resolves package/env roots on the machine doing validation.
                 result[role] = asdict(request)
@@ -351,7 +413,11 @@ class SchedulingConfig(BaseModel):
     tick_max_duration_seconds: float = Field(
         default=30.0,
         gt=0,
-        description=("Outermost deadline wrapping the entire 4-stage plugin pipeline."),
+        description=(
+            "Outermost wall-clock deadline wrapping the entire 4-stage plugin "
+            "pipeline. Replay does not apply it: a replay tick runs to "
+            "completion, so its decisions do not depend on host speed."
+        ),
     )
     external_plugins: list[ExternalPluginEntry] = Field(
         default_factory=list,
@@ -381,6 +447,1114 @@ class SchedulingConfig(BaseModel):
             "align to tick boundaries."
         ),
     )
+
+
+class BatchGatewaySourceConfig(BaseModel):
+    """Batch Gateway API settings for native batch-demand observation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    base_url: str = Field(
+        ...,
+        min_length=1,
+        description="Base URL of the OpenAI-compatible Batch Gateway API.",
+    )
+    tenant: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Dedicated Batch Gateway tenant observed by this single-pool POC. "
+            "Sent as the X-MaaS-Username header."
+        ),
+    )
+    request_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Per-request timeout for Batch Gateway API calls.",
+    )
+    page_size: int = Field(
+        default=100,
+        ge=1,
+        le=100,
+        description="Batch list page size accepted by the Gateway API.",
+    )
+    max_pages: int = Field(
+        default=100,
+        ge=1,
+        le=10_000,
+        description=(
+            "Maximum list pages scanned per observation. Reaching the bound "
+            "fails the observation instead of returning a partial job set."
+        ),
+    )
+    max_jobs: int = Field(
+        default=10_000,
+        ge=1,
+        le=10_000,
+        description=(
+            "Maximum listed jobs retained per observation (hard-capped at "
+            "10,000 for bounded in-process memory). Reaching the bound while "
+            "more jobs may exist fails closed."
+        ),
+    )
+    collection_timeout_seconds: float = Field(
+        default=15.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Aggregate deadline for one complete Gateway observation.",
+    )
+    detail_concurrency: int = Field(
+        default=16,
+        ge=1,
+        le=100,
+        description="Maximum concurrent nonterminal batch detail requests.",
+    )
+
+    @field_validator("base_url")
+    @classmethod
+    def _validate_base_url(cls, value: str) -> str:
+        return _validate_http_url(value, field_name="batch gateway base_url")
+
+
+class BatchMetricsConfig(BaseModel):
+    """Direct OpenMetrics scrape endpoints used by batch-aware planning."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    frontend_metrics_url: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Direct /metrics URL for the Dynamo frontend serving the shared pool."
+        ),
+    )
+    dispatcher_metrics_url: str = Field(
+        ...,
+        min_length=1,
+        description="Direct /metrics URL for the llm-d Async dispatcher.",
+    )
+    online_match_labels: dict[str, str] = Field(
+        ...,
+        description=(
+            "Exact frontend metric labels selecting online traffic. The POC "
+            "uses streaming requests for online traffic and unary requests for "
+            "batch traffic. A model label is required so the corresponding "
+            "per-model active-request gauge can be selected safely."
+        ),
+    )
+    request_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Per-scrape timeout for both direct OpenMetrics endpoints.",
+    )
+
+    @field_validator("frontend_metrics_url")
+    @classmethod
+    def _validate_frontend_metrics_url(cls, value: str) -> str:
+        return _validate_http_url(value, field_name="frontend_metrics_url")
+
+    @field_validator("dispatcher_metrics_url")
+    @classmethod
+    def _validate_dispatcher_metrics_url(cls, value: str) -> str:
+        return _validate_http_url(value, field_name="dispatcher_metrics_url")
+
+    @field_validator("online_match_labels")
+    @classmethod
+    def _validate_online_match_labels(cls, value: dict[str, str]) -> dict[str, str]:
+        if not value:
+            raise ValueError(
+                "online_match_labels must explicitly distinguish online traffic"
+            )
+        if "model" not in value:
+            raise ValueError(
+                "online_match_labels must include the frontend model label"
+            )
+        for label_name, label_value in value.items():
+            if not _PROMETHEUS_LABEL_NAME.fullmatch(label_name):
+                raise ValueError(
+                    f"online_match_labels contains invalid label name {label_name!r}"
+                )
+            if not label_value:
+                raise ValueError("online_match_labels values must be non-empty strings")
+        return dict(value)
+
+
+class BatchRedisActuatorConfig(BaseModel):
+    """Redis connection and key used to publish leased drain limits."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: SecretStr | None = Field(
+        default_factory=_batch_redis_url_default,
+        validate_default=True,
+        exclude=True,
+        description=(
+            "Redis URL loaded from DYN_PLANNER_BATCH_REDIS_URL by default. "
+            "Excluded from serialized Planner config."
+        ),
+    )
+    control_key: str = Field(
+        ...,
+        min_length=1,
+        description="Exact llm-d Async Redis hash key for the configured pool.",
+    )
+    connect_timeout_seconds: float = Field(
+        default=2.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Redis connection timeout.",
+    )
+    socket_timeout_seconds: float = Field(
+        default=2.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Redis command read/write timeout.",
+    )
+
+    @field_validator("url")
+    @classmethod
+    def _validate_redis_url(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        raw_url = value.get_secret_value()
+        parsed = urlsplit(raw_url)
+        if parsed.scheme not in ("redis", "rediss") or not parsed.netloc:
+            raise ValueError("batch Redis url must be an absolute redis(s) URL")
+        return value
+
+
+class BatchPoolConfig(BaseModel):
+    """Capacity and deadline assumptions for the aggregate batch pool."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    pool_id: str = Field(..., min_length=1)
+    work_class: str = Field(..., min_length=1)
+    safe_rps_per_ready_replica: float = Field(
+        ...,
+        gt=0,
+        allow_inf_nan=False,
+    )
+    cold_start_margin_seconds: float = Field(
+        default=0.0,
+        ge=0,
+        allow_inf_nan=False,
+    )
+    finalization_margin_seconds: float = Field(
+        default=0.0,
+        ge=0,
+        allow_inf_nan=False,
+    )
+    max_observation_age_seconds: float = Field(
+        default=60.0,
+        ge=0,
+        allow_inf_nan=False,
+    )
+    drain_lease_duration_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        allow_inf_nan=False,
+        description=("Lifetime of each fail-closed llm-d Async drain-limit lease."),
+    )
+    min_replicas: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Minimum replica floor while batch work is active and exact warm "
+            "replica target after all batch, online, and dispatcher work is "
+            "authoritatively idle."
+        ),
+    )
+    max_replicas: int = Field(..., ge=0)
+    scale_from_zero_replicas: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "Replica floor requested when a fresh, valid active batch job is "
+            "observed while the pool has zero ready replicas."
+        ),
+    )
+    max_batch_admission_rps: float | None = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+    )
+
+    @model_validator(mode="after")
+    def _validate_replica_range(self) -> "BatchPoolConfig":
+        if self.max_replicas < self.min_replicas:
+            raise ValueError("max_replicas must be >= min_replicas")
+        if self.scale_from_zero_replicas > self.max_replicas:
+            raise ValueError("scale_from_zero_replicas must be <= max_replicas")
+        return self
+
+
+class BatchSchedulingConfig(BaseModel):
+    """Opt-in native Planner integration for one aggregate batch pool."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    gateway: BatchGatewaySourceConfig | None = None
+    metrics: BatchMetricsConfig | None = None
+    redis: BatchRedisActuatorConfig | None = None
+    pool: BatchPoolConfig | None = None
+
+    @model_validator(mode="after")
+    def _validate_enabled_dependencies(self) -> "BatchSchedulingConfig":
+        if not self.enabled:
+            return self
+
+        missing = [
+            field_name
+            for field_name in ("gateway", "metrics", "pool")
+            if getattr(self, field_name) is None
+        ]
+        if missing:
+            raise ValueError(
+                "batch_scheduling.enabled=True requires: " + ", ".join(missing)
+            )
+        return self
+
+    def to_policy_config(self) -> "BatchSchedulingPolicyConfig":
+        """Translate validated Planner config into the pure policy contract."""
+
+        if not self.enabled or self.pool is None:
+            raise ValueError("batch scheduling must be enabled and configured")
+
+        pool = self.pool
+        return BatchSchedulingPolicyConfig(
+            pool_id=pool.pool_id,
+            work_class=pool.work_class,
+            safe_rps_per_ready_replica=pool.safe_rps_per_ready_replica,
+            cold_start_margin_s=pool.cold_start_margin_seconds,
+            finalization_margin_s=pool.finalization_margin_seconds,
+            max_observation_age_s=pool.max_observation_age_seconds,
+            drain_lease_duration_s=pool.drain_lease_duration_seconds,
+            min_replicas=pool.min_replicas,
+            max_replicas=pool.max_replicas,
+            scale_from_zero_replicas=pool.scale_from_zero_replicas,
+            max_batch_admission_rps=pool.max_batch_admission_rps,
+        )
+
+
+class RetuneEngineSpec(BaseModel):
+    """Pinned engine that every retune candidate replay runs against.
+
+    A typed allowlist of ``dynamo.replay.run_trace_replay`` keyword arguments,
+    derived by the replay host from the outer run. ``router_config`` is the
+    startup ``KvRouterConfig`` snapshot in its JSON (serde) form, so it can
+    cross process boundaries.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    extra_engine_args: dict[str, Any] | None = Field(
+        default=None,
+        description="Aggregated engine args (mode='agg').",
+    )
+    prefill_engine_args: dict[str, Any] | None = Field(
+        default=None,
+        description="Prefill engine args (mode='disagg'); set with decode_engine_args.",
+    )
+    decode_engine_args: dict[str, Any] | None = Field(
+        default=None,
+        description="Decode engine args (mode='disagg'); set with prefill_engine_args.",
+    )
+    router_mode: Literal["round_robin", "kv_router"] = "kv_router"
+    router_config: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Startup KvRouterConfig JSON. Every candidate replay uses this "
+            "snapshot merged with the candidate's router parameters."
+        ),
+    )
+    ais_perf_config: dict[str, Any] | None = Field(
+        default=None,
+        description="AisPerfConfig.to_dict() of the deployed engine, if any.",
+    )
+    performance_model_metadata: dict[str, Any] | None = None
+    model_name: str | None = Field(
+        default=None, min_length=1, description="Served model name."
+    )
+    kv_event_lag_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    benchmark_granularity: int = Field(default=8, gt=0)
+
+    @model_validator(mode="after")
+    def _validate_engine_shape(self) -> "RetuneEngineSpec":
+        if (self.prefill_engine_args is None) != (self.decode_engine_args is None):
+            raise ValueError(
+                "prefill_engine_args and decode_engine_args must be set together"
+            )
+        if self.is_disagg and self.extra_engine_args is not None:
+            raise ValueError(
+                "extra_engine_args (agg) cannot be combined with "
+                "prefill_engine_args/decode_engine_args (disagg)"
+            )
+        return self
+
+    @property
+    def is_disagg(self) -> bool:
+        """True when the spec pins a disaggregated prefill/decode engine."""
+
+        return self.prefill_engine_args is not None
+
+    def replay_kwargs(
+        self, router_overrides: Mapping[str, float] | None = None
+    ) -> dict[str, Any]:
+        """Return ``run_trace_replay`` engine kwargs for one candidate.
+
+        ``router_config`` is ``KvRouterConfig.from_json`` of the startup
+        snapshot merged with ``router_overrides``; ``ais_perf_config`` is
+        rebuilt as ``AisPerfConfig``. Called inside sweep worker processes,
+        because the native objects cannot be pickled.
+        """
+
+        # Planner config validation and schema generation must not load the
+        # native extension; only replay workers construct these objects.
+        from dynamo.llm import AisPerfConfig, KvRouterConfig
+
+        # Every field is a run_trace_replay kwarg; model_dump deep-copies.
+        kwargs = self.model_dump()
+        overrides = dict(router_overrides or {})
+        if self.router_config is not None or overrides:
+            kwargs["router_config"] = KvRouterConfig.from_json(
+                json.dumps({**(self.router_config or {}), **overrides})
+            )
+        if self.ais_perf_config is not None:
+            kwargs["ais_perf_config"] = AisPerfConfig(config=kwargs["ais_perf_config"])
+        return kwargs
+
+
+# Retune scoring metrics: the DGDR v1beta2 ``spec.objective.metric`` values,
+# spelled the same so a Request can carry the metric unchanged.
+RetuneObjective = Literal[
+    "Throughput",
+    "ThroughputPerGPU",
+    "ThroughputPerUser",
+    "TTFT",
+    "E2ELatency",
+    "Goodput",
+    "GoodputPerGPU",
+]
+# The objectives that divide by provisioned GPUs; with scaling, the others
+# favor the candidates that provision the most.
+RETUNE_PER_GPU_OBJECTIVES: tuple[RetuneObjective, ...] = (
+    "GoodputPerGPU",
+    "ThroughputPerGPU",
+)
+
+
+class DgdrRunConfig(BaseModel):
+    """How each DGDR v1beta2 Run of a live retune sweep evaluates its points."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    parallelism: int = Field(
+        default=8,
+        ge=1,
+        description=(
+            "AISimulate optimizer.parallelism of each Run. The Run Job's CPU "
+            "and memory may lower the effective value."
+        ),
+    )
+    candidate_timeout_seconds: float = Field(
+        default=1800.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="AISimulate optimizer.candidate_timeout_seconds of each Run.",
+    )
+    max_shards: int = Field(
+        default=3,
+        ge=1,
+        le=16,
+        description=(
+            "Most grid shards (Requests) per window. A shard is a Cartesian "
+            "sub-grid of at most 100 points; off-grid points and the CRN probe "
+            "are extra single-point Requests and do not count."
+        ),
+    )
+
+
+# Kubernetes request timeout of the live retune supervisor
+# (``SupervisorSettings``).
+LIVE_RETUNE_K8S_TIMEOUT_SECONDS = 5.0
+
+
+def live_retune_lease_margin_seconds(k8s_timeout_s: float) -> float:
+    """How long before the leadership Lease could expire local leadership
+    ends."""
+
+    return 3.0 * k8s_timeout_s
+
+
+def live_retune_io_timeout_seconds(k8s_timeout_s: float) -> float:
+    """I/O budget of one blocking Kubernetes call, such as a whole renewal
+    (a GET and a replace): a backstop, the client applies the request
+    timeout too."""
+
+    return 2.0 * k8s_timeout_s + 1.0
+
+
+def live_retune_min_lease_seconds(k8s_timeout_s: float) -> float:
+    """Shortest leadership Lease the live supervisor can keep renewing.
+
+    Local leadership ends the lease margin before the Lease could expire,
+    counted from the send of the renewal that granted it. That renewal may
+    use a whole I/O budget, and the next one starts at least one I/O budget
+    before local leadership ends, so two budgets must fit. Lease rounds are
+    single renewals: an initialization renews concurrently instead of
+    delaying the next one.
+    """
+
+    margin_s = live_retune_lease_margin_seconds(k8s_timeout_s)
+    return margin_s + 2.0 * live_retune_io_timeout_seconds(k8s_timeout_s)
+
+
+class DgdrExecutorConfig(BaseModel):
+    """Live retune through DGDR v1beta2 (``retune.executor: dgdr``).
+
+    The planner cuts each window from the frontend request traces on a shared
+    RWX claim, creates DGDR v1beta2 Requests that replay it, scores their
+    Candidates and applies the winner to the frontends' routers.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    phase_seconds: float = Field(
+        default=0.0,
+        ge=0,
+        allow_inf_nan=False,
+        description=(
+            "Window phase: windows are [phase + k*interval, phase + (k+1)*interval) "
+            "in epoch seconds, so they survive planner restarts."
+        ),
+    )
+    claim_name: str = Field(
+        min_length=1,
+        description="RWX PersistentVolumeClaim, in the DGD namespace, holding traces.",
+    )
+    mount_path: str = Field(
+        default="/trace",
+        min_length=1,
+        description="Where the planner container mounts claim_name.",
+    )
+    segments_dir: str = Field(
+        default="segments",
+        min_length=1,
+        description="Claim-relative directory of frontend trace segments: <segments_dir>/<dgd>/<pod>/.",
+    )
+    windows_dir: str = Field(
+        default="windows",
+        min_length=1,
+        description=(
+            "Claim-relative directory of window files: "
+            "<windows_dir>/<dgd>/<window_end_ms>-<selection>.jsonl.gz, where "
+            "<selection> is a digest of the window's start, end and cutoff."
+        ),
+    )
+    model: str = Field(
+        min_length=1,
+        description="HF repo id the workers serve (worker --model); AISimulate resolves it.",
+    )
+    sku: str = Field(min_length=1, description="spec.hardware.gpu.sku of each Request.")
+    engine: dict[str, Any] = Field(
+        description=(
+            "AISimulate public engine section with every leaf a scalar "
+            "(mode, backend, backend_version, context_length, "
+            "workers.<role>.parallelism.preset, scheduler, kv_cache). Replicas "
+            "come from the DGD spec at each launch and must not be set here."
+        ),
+    )
+    cut_budget_seconds: float = Field(
+        default=900.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Deadline of the subprocess that cuts a window file.",
+    )
+    job_startup_seconds: float = Field(
+        default=300.0,
+        ge=0,
+        allow_inf_nan=False,
+        description="Run Job start-up time reserved when deciding whether a shard can still finish.",
+    )
+    run: DgdrRunConfig = Field(default_factory=DgdrRunConfig)
+    keep_requests: int = Field(
+        default=5,
+        ge=0,
+        description="Windows whose terminal Requests are kept for audit.",
+    )
+    max_window_rows: int = Field(
+        default=5_000_000,
+        ge=1,
+        description="A window with more requests fails (window_too_large).",
+    )
+    promote_last_advisory: bool = Field(
+        default=False,
+        description=(
+            "When switching from advisory to active, apply the last advisory "
+            "recommendation if it is recent and its fingerprint still matches."
+        ),
+    )
+    lease_duration_seconds: float = Field(
+        default=60.0,
+        allow_inf_nan=False,
+        # Not ge=: it would reject before _lease_fits_two_renewals explains.
+        json_schema_extra={
+            "minimum": live_retune_min_lease_seconds(LIVE_RETUNE_K8S_TIMEOUT_SECONDS)
+        },
+        description=(
+            "Leadership Lease duration. Renewed every third of it, or sooner "
+            "so that a renewal that uses its whole I/O budget ends before "
+            "local leadership does (the duration minus the lease margin). "
+            "At least 37 s: the 15 s lease margin plus two 11 s renewal I/O "
+            "budgets, with the 5 s Kubernetes request timeout."
+        ),
+    )
+    actuator_interval_seconds: float = Field(
+        default=15.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Period of the router actuator and reconciler rounds.",
+    )
+
+    @field_validator("lease_duration_seconds")
+    @classmethod
+    def _lease_fits_two_renewals(cls, value: float) -> float:
+        timeout_s = LIVE_RETUNE_K8S_TIMEOUT_SECONDS
+        minimum_s = live_retune_min_lease_seconds(timeout_s)
+        if value < minimum_s:
+            raise ValueError(
+                "retune.dgdr.lease_duration_seconds must be at least the lease "
+                "margin + 2 x the I/O budget of one renewal "
+                f"({live_retune_lease_margin_seconds(timeout_s):g}s + 2 x "
+                f"{live_retune_io_timeout_seconds(timeout_s):g}s = {minimum_s:g}s "
+                f"with the {timeout_s:g}s Kubernetes request timeout)"
+            )
+        return value
+
+
+# Live retune (``retune.executor: dgdr``) limits. A sweep must end this long
+# before the next window's launch: harvest, the decision write and clean-up
+# run in that margin.
+DGDR_TIMEOUT_MARGIN_SECONDS = 600.0
+# DGDR v1beta2 ``spec.recommendation.maxCandidates`` maximum: one Request (a
+# grid shard) carries at most this many router points.
+DGDR_MAX_SHARD_POINTS = 100
+# Router knobs a DGDR v1beta2 Request can search, by public name
+# (``contracts.DGDR_ROUTER_KNOBS``); the Request's router section has no
+# place for the retune extension knobs.
+_DGDR_ROUTER_SECTION_KEYS = frozenset(
+    {
+        "overlap_score_credit",
+        "prefill_load_scale",
+        "temperature",
+        "policy",
+        "prefill_load_model",
+    }
+)
+_DGDR_ENGINE_MODES = {"agg": "aggregated", "disagg": "disaggregated"}
+_DGDR_ENGINE_ROLES = {"agg": ("aggregated",), "disagg": ("prefill", "decode")}
+# ``parallelism.preset`` entry keys: AISimulate requires all of these plus
+# ``replicas``, which the executor sets from the DGD spec at each launch.
+_DGDR_PRESET_KEYS = ("tensor", "pipeline", "attention_data", "moe_tensor", "moe_expert")
+# The pinned AISimulate recommend runs prefill_context only at 1, and its
+# preset entry schema has no decode_context. When the pin moves, update this
+# tuple together with _validate_dgdr_parallelism (its decode_context branch,
+# the "optionally prefill_context: 1" message and the prefill_context == 1
+# check), test_pinned_aisimulate_rejects_decode_context and the preset rules
+# in docs/fern/pages/kubernetes/auto-deployment/planner-live-retune.md.
+_DGDR_PRESET_OPTIONAL_KEYS = ("prefill_context",)
+# Scheduler knobs AISimulate searches over a default domain when omitted.
+_DGDR_SCHEDULER_KNOBS = ("max_batched_tokens", "max_sequences")
+
+
+def dgdr_rounds(points: int, parallelism: int) -> int:
+    """Evaluation rounds of a DGDR Run that scores ``points`` candidates.
+
+    The AISimulate optimizer evaluates the first candidate alone, then
+    ``parallelism`` candidates at a time.
+    """
+
+    if points < 1:
+        raise ValueError(f"a DGDR shard has at least one point, got {points}")
+    if parallelism < 1:
+        raise ValueError(f"parallelism must be at least 1, got {parallelism}")
+    return 1 + math.ceil((points - 1) / parallelism)
+
+
+def dgdr_need_seconds(
+    points: int, dgdr: DgdrExecutorConfig, *, needs_cut: bool
+) -> float:
+    """Wall-clock seconds one DGDR shard of ``points`` router points needs.
+
+    ``cut_budget`` (when the window file must still be cut) + Run Job
+    start-up + ``dgdr_rounds(points, run.parallelism)`` rounds of
+    ``candidate_timeout``. ``parallelism`` is the configured value; Job
+    resources may lower it, so this is optimistic.
+    """
+
+    rounds = dgdr_rounds(points, dgdr.run.parallelism)
+    cut = dgdr.cut_budget_seconds if needs_cut else 0.0
+    return cut + dgdr.job_startup_seconds + rounds * dgdr.run.candidate_timeout_seconds
+
+
+def balanced_shard_parts(
+    sizes: Sequence[int], max_shards: int, *, parallelism: int
+) -> tuple[int, ...]:
+    """How many chunks to cut each router grid dimension into for DGDR sharding.
+
+    ``sizes`` are the value counts of the grid dimensions. Cutting dimension
+    ``i`` into ``parts[i]`` contiguous chunks whose sizes differ by at most
+    one gives ``prod(parts)`` Cartesian shards, the largest with
+    ``largest_shard_points(sizes, parts)`` points. Of the parts with
+    ``prod(parts) <= max_shards``, returns the one that minimizes, in order:
+
+    1. whether the largest shard exceeds ``DGDR_MAX_SHARD_POINTS``, and when
+       every split does, its points (so the caller reports the smallest);
+    2. the largest shard's wall time, its ``dgdr_rounds`` with
+       ``parallelism``;
+    3. the shard count, the largest shard's points, then the parts.
+
+    P13 calls it with ``parallelism=run.parallelism``; the live executor
+    must plan each window's shards with the same call, so that both see the
+    same largest shard. The default 3 x 9 x 4 grid with ``max_shards=3`` and
+    ``parallelism=8`` gives ``(1, 3, 1)``, three shards of 36 points.
+    """
+
+    if max_shards < 1:
+        raise ValueError(f"max_shards must be at least 1, got {max_shards}")
+    if any(size < 1 for size in sizes):
+        raise ValueError(f"every grid dimension needs a value, got sizes {sizes}")
+    if parallelism < 1:
+        raise ValueError(f"parallelism must be at least 1, got {parallelism}")
+
+    def splits(index: int, budget: int):
+        if index == len(sizes):
+            yield ()
+            return
+        for part in range(1, min(sizes[index], budget) + 1):
+            for rest in splits(index + 1, budget // part):
+                yield (part, *rest)
+
+    def rank(parts: tuple[int, ...]) -> tuple[Any, ...]:
+        largest = largest_shard_points(sizes, parts)
+        if largest > DGDR_MAX_SHARD_POINTS:
+            return (True, largest, math.prod(parts), parts)
+        rounds = dgdr_rounds(largest, parallelism)
+        return (False, rounds, math.prod(parts), largest, parts)
+
+    return min(splits(0, max_shards), key=rank)
+
+
+def largest_shard_points(sizes: Sequence[int], parts: Sequence[int]) -> int:
+    """Points in the largest shard of ``balanced_shard_parts``' split."""
+
+    return math.prod(
+        math.ceil(size / part) for size, part in zip(sizes, parts, strict=True)
+    )
+
+
+def _validate_dgdr_engine(
+    engine: Mapping[str, Any], planner_mode: str, backend: str
+) -> None:
+    """P5: ``retune.dgdr.engine`` pins one engine with scalars only.
+
+    The section is the Request's ``inputOverrides.engine`` merge patch, so
+    any AISimulate search domain left in it (a ``choices`` or ``range``
+    mapping, a parallelism preset list or a default domain) would make the
+    Run search engine settings next to the router knobs. A written
+    ``backend`` must be the deployed one (``PlannerConfig.backend``), which
+    every Request names and which fills an omitted ``backend``.
+    """
+
+    name = "retune.dgdr.engine"
+    _check_dgdr_engine_scalars(engine, (name,))
+    written = engine.get("backend")
+    if written is not None and written != backend:
+        raise ValueError(
+            f"{name}.backend {written!r} differs from the deployed backend "
+            f"{backend!r} (P5); remove it or set it to {backend!r}"
+        )
+    expected_mode = _DGDR_ENGINE_MODES[planner_mode]
+    if engine.get("mode") != expected_mode:
+        raise ValueError(
+            f"{name}.mode must be {expected_mode!r} for planner mode "
+            f"{planner_mode!r} (P5), got {engine.get('mode')!r}; an omitted mode "
+            "searches both aggregated and disaggregated engines"
+        )
+    for key, owner in (("model", "model"), ("hardware", "sku")):
+        if key in engine:
+            raise ValueError(
+                f"{name}.{key} would override the Request's typed field (P5); "
+                f"set retune.dgdr.{owner} instead"
+            )
+    workers = engine.get("workers")
+    if not isinstance(workers, Mapping):
+        raise ValueError(
+            f"{name}.workers must be a mapping that pins every worker role of "
+            f"planner mode {planner_mode!r} (P5)"
+        )
+    used = _DGDR_ENGINE_ROLES[planner_mode]
+    for role, worker in workers.items():
+        if role not in used and worker is not None:
+            raise ValueError(
+                f"{name}.workers.{role} is not a worker role of planner mode "
+                f"{planner_mode!r}; write it as null or remove it (P5)"
+            )
+    for role in used:
+        path = f"{name}.workers.{role}"
+        worker = workers.get(role)
+        if not isinstance(worker, Mapping):
+            raise ValueError(
+                f"{path} is required for planner mode {planner_mode!r} (P5)"
+            )
+        _validate_dgdr_parallelism(worker.get("parallelism"), f"{path}.parallelism")
+        scheduler = worker.get("scheduler")
+        scheduler = scheduler if isinstance(scheduler, Mapping) else {}
+        for knob in _DGDR_SCHEDULER_KNOBS:
+            if not _is_positive_int(scheduler.get(knob)):
+                raise ValueError(
+                    f"{path}.scheduler.{knob} must be a positive integer (P5); "
+                    "omitted, AISimulate searches its default domain"
+                )
+
+
+def _validate_dgdr_parallelism(parallelism: Any, path: str) -> None:
+    preset = parallelism.get("preset") if isinstance(parallelism, Mapping) else None
+    if not (
+        isinstance(preset, list) and len(preset) == 1 and isinstance(preset[0], Mapping)
+    ):
+        raise ValueError(
+            f"{path}.preset must be a list of exactly one mapping with "
+            f"{', '.join(_DGDR_PRESET_KEYS)} (P5); got {preset!r}"
+        )
+    others = sorted(set(parallelism) - {"preset"})
+    if others:
+        raise ValueError(
+            f"{path} sets {others} next to preset; pin the parallelism in the "
+            "single preset entry (P5)"
+        )
+    entry = preset[0]
+    if "decode_context" in entry:
+        raise ValueError(
+            f"{path}.preset[0].decode_context is not accepted (P5); the pinned "
+            "AISimulate preset schema has no decode_context"
+        )
+    missing = [key for key in _DGDR_PRESET_KEYS if key not in entry]
+    unknown = sorted(
+        set(entry) - set(_DGDR_PRESET_KEYS) - set(_DGDR_PRESET_OPTIONAL_KEYS)
+    )
+    if missing or unknown:
+        raise ValueError(
+            f"{path}.preset[0] must set exactly {', '.join(_DGDR_PRESET_KEYS)} "
+            "and optionally prefill_context: 1 "
+            f"(P5); missing={missing}, unknown={unknown}"
+        )
+    for key, value in entry.items():
+        if not _is_positive_int(value):
+            raise ValueError(
+                f"{path}.preset[0].{key} must be a positive integer (P5), got {value!r}"
+            )
+    if entry.get("prefill_context", 1) != 1:
+        raise ValueError(
+            f"{path}.preset[0].prefill_context must be 1 or omitted (P5); "
+            "AISimulate recommend rejects context parallelism above 1, "
+            f"got {entry['prefill_context']!r}"
+        )
+
+
+def _check_dgdr_engine_scalars(value: Any, path: tuple[str, ...]) -> None:
+    dotted = ".".join(path)
+    if isinstance(value, Mapping):
+        domain = sorted({"choices", "range"} & set(value))
+        if domain:
+            raise ValueError(
+                f"{dotted} is a search domain ({domain[0]}); every "
+                "retune.dgdr.engine value must be a scalar (P5)"
+            )
+        for key, item in value.items():
+            if key == "replicas":
+                raise ValueError(
+                    f"{dotted}.replicas must not be set: the DGD spec provides "
+                    "replicas at each launch (P5)"
+                )
+            _check_dgdr_engine_scalars(item, (*path, str(key)))
+    elif isinstance(value, list):
+        # Only workers.<role>.parallelism.preset is a list; its shape is
+        # checked per used role.
+        if not (
+            len(path) == 5
+            and path[1] == "workers"
+            and path[3:] == ("parallelism", "preset")
+        ):
+            raise ValueError(
+                f"{dotted} is a list; every retune.dgdr.engine value except "
+                "workers.<role>.parallelism.preset must be a scalar (P5)"
+            )
+        for index, item in enumerate(value):
+            _check_dgdr_engine_scalars(item, (*path[:-1], f"{path[-1]}[{index}]"))
+    elif value is not None and not isinstance(value, (str, int, float)):
+        raise ValueError(f"{dotted} must be a scalar, got {type(value).__name__} (P5)")
+
+
+def _is_positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+class RetuneConfig(BaseModel):
+    """Periodic replay-based retune of router and planner runtime parameters.
+
+    Every ``interval_seconds`` the planner replays the previous window of
+    recorded traffic against a grid of candidate parameters and applies the
+    best point by ``objective`` (SLA goodput per GPU by default; see
+    ``retune.sweep.score_summary``). ``router`` and ``planner`` are search
+    domains in the AISimulate recommendation syntax of the Dynamo router and
+    planner adapters (``RouterRetuneConfig``, ``PlannerRetuneConfig``), stored
+    as written; ``retune.domains`` expands them into a grid keyed by live
+    names. Either may be the literal ``"default"``; ``None`` searches nothing.
+    Under ``PlannerConfig.advisory`` a decision that would apply is recorded
+    as ``advisory`` and nothing is applied.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    interval_seconds: float = Field(
+        ...,
+        gt=0,
+        allow_inf_nan=False,
+        description=(
+            "Window length and decision cadence. Must be a multiple of "
+            "scheduling.scale_interval_seconds."
+        ),
+    )
+    grace_seconds: float = Field(
+        default=60.0,
+        ge=0,
+        allow_inf_nan=False,
+        description=(
+            "Delay after a window ends before its sweep launches; must cover "
+            "p99 request latency plus the trace flush interval."
+        ),
+    )
+    history_seconds: Optional[float] = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+        description=(
+            "Trace history before each window used to warm planner predictors. "
+            "None resolves to the minimum the planner's predictors need "
+            "(0 when throughput scaling is off)."
+        ),
+    )
+    decision_latency_seconds: (
+        Annotated[float, Field(ge=0, allow_inf_nan=False)] | Literal["measured"]
+    ) = Field(
+        default=0.0,
+        description=(
+            "Delay from sweep launch to decision. A number is a fixed delay; "
+            "'measured' is the sweep's own wall-clock time (at most "
+            "timeout_seconds) times decision_latency_scale. The floor is one "
+            "planner tick."
+        ),
+    )
+    decision_latency_scale: float = Field(
+        default=1.0,
+        gt=0,
+        allow_inf_nan=False,
+        description=(
+            "Multiplier on the measured sweep time. A value other than 1 "
+            "requires decision_latency_seconds: measured; above 1 it also "
+            "needs timeout_seconds <= interval_seconds / scale."
+        ),
+    )
+    timeout_seconds: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        description=(
+            "Wall-clock sweep deadline after which sweep workers are killed. "
+            "None means interval_seconds."
+        ),
+    )
+    objective: RetuneObjective = Field(
+        default="GoodputPerGPU",
+        description=(
+            "Metric each candidate is scored on, named as DGDR v1beta2 "
+            "objective.metric. TTFT and E2ELatency (mean, ms) are minimized; "
+            "the others are maximized. With load or throughput scaling, only "
+            "GoodputPerGPU and ThroughputPerGPU are accepted."
+        ),
+    )
+    sla_ttft_ms: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        description=(
+            "TTFT SLA of the Goodput and GoodputPerGPU objectives. None uses "
+            "the planner's ttft_ms."
+        ),
+    )
+    sla_itl_ms: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        description=(
+            "ITL SLA of the Goodput and GoodputPerGPU objectives. None uses "
+            "the planner's itl_ms."
+        ),
+    )
+    min_improvement_percentage: float = Field(
+        default=3.0,
+        ge=0,
+        lt=100,
+        allow_inf_nan=False,
+        description=(
+            "Apply a candidate only if it beats the current point's score on "
+            "the same window by more than this percentage of that score: "
+            "higher for a maximized objective, lower for TTFT and E2ELatency."
+        ),
+    )
+    max_candidates: int = Field(
+        default=512,
+        ge=1,
+        description="Upper bound on the expanded grid size.",
+    )
+    max_parallel: int = Field(
+        default=2,
+        ge=1,
+        description="Number of sweep worker processes.",
+    )
+    router: Literal["default"] | dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Router search domain in the AISimulate recommend syntax: public "
+            "knobs overlap_score_credit, prefill_load_scale and temperature, "
+            "plus the retune extension knobs, each a scalar, {choices: [...]} "
+            "or {range: {min, max, step}}. An omitted AISimulate knob searches "
+            "its AISimulate default domain; a scalar pins it. 'default' is the "
+            "AISimulate default domain; null does not search the router."
+        ),
+    )
+    executor: Literal["local", "dgdr"] = Field(
+        default="local",
+        description=(
+            "Where sweeps run: local worker processes (replay) or DGDR v1beta2 "
+            "Requests (live; requires dgdr)."
+        ),
+    )
+    dgdr: DgdrExecutorConfig | None = Field(
+        default=None,
+        description="Live DGDR executor settings; required iff executor is dgdr.",
+    )
+    planner: Literal["default"] | dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Planner search domain in the AISimulate recommend syntax, limited "
+            "to what a running planner can change: the load_sensitivity and "
+            "load_predictor groups and the runtime knobs. 'default' searches "
+            "the applicable AISimulate default domain; null does not search "
+            "the planner. ttft_ms and itl_ms are never searched."
+        ),
+    )
+
+    @field_validator("router", "planner")
+    @classmethod
+    def _validate_domain_syntax(
+        cls, value: Literal["default"] | dict[str, Any] | None, info: ValidationInfo
+    ) -> Literal["default"] | dict[str, Any] | None:
+        """Parse a section with its adapter schema; store it as written.
+
+        Catches what needs no planner context: syntax, unknown and live names
+        (with the public name to use), and knobs fixed at startup.
+        """
+
+        if value is None or value == "default":
+            return value
+        section = info.field_name
+        if not value:
+            raise ValueError(
+                f"retune.{section} is empty; write 'default' to search the "
+                f"default domain, or remove it to keep every {section} "
+                "parameter unchanged"
+            )
+        # Imported on use: the adapter schemas import AISimulate and this
+        # module.
+        from dynamo.planner.retune.domains import parse_retune_section
+
+        parse_retune_section(section, value)  # type: ignore[call-overload]
+        return value
+
+    @model_validator(mode="after")
+    def _validate_executor(self) -> "RetuneConfig":
+        if (self.executor == "dgdr") != (self.dgdr is not None):
+            raise ValueError("retune.dgdr is required iff retune.executor is 'dgdr'")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_timing(self) -> "RetuneConfig":
+        timeout = self.effective_timeout_seconds
+        if self.decision_latency_seconds == "measured":
+            # A measured latency is at most timeout * scale; keep it within
+            # the window so a decision lands before the next launch.
+            if not (
+                timeout <= self.interval_seconds
+                and self.decision_latency_scale * timeout <= self.interval_seconds
+            ):
+                raise ValueError(
+                    "retune with decision_latency_seconds: measured requires "
+                    "timeout_seconds <= interval_seconds and "
+                    "decision_latency_scale * timeout_seconds <= interval_seconds "
+                    "(timeout_seconds defaults to interval_seconds); got "
+                    f"timeout_seconds={timeout}, decision_latency_scale * "
+                    f"timeout_seconds={self.decision_latency_scale * timeout}, "
+                    f"interval_seconds={self.interval_seconds}"
+                )
+            return self
+        if self.decision_latency_scale != 1.0:
+            raise ValueError(
+                "decision_latency_scale other than 1.0 requires "
+                "decision_latency_seconds: measured"
+            )
+        if not (self.decision_latency_seconds <= timeout <= self.interval_seconds):
+            raise ValueError(
+                "retune requires decision_latency_seconds <= timeout_seconds "
+                "<= interval_seconds (timeout_seconds defaults to "
+                f"interval_seconds); got {self.decision_latency_seconds}, "
+                f"{timeout}, {self.interval_seconds}"
+            )
+        return self
+
+    @property
+    def effective_timeout_seconds(self) -> float:
+        """Sweep deadline, defaulting to ``interval_seconds``."""
+
+        if self.timeout_seconds is None:
+            return self.interval_seconds
+        return self.timeout_seconds
+
+    def scoring_sla(self, ttft_ms: float, itl_ms: float) -> tuple[float, float]:
+        """Return the scoring ``(ttft_ms, itl_ms)``; unset values use the planner's.
+
+        Only the Goodput objectives score against it.
+        """
+
+        return (
+            ttft_ms if self.sla_ttft_ms is None else self.sla_ttft_ms,
+            itl_ms if self.sla_itl_ms is None else self.sla_itl_ms,
+        )
+
+
+@lru_cache(maxsize=None)
+def _strict_field_adapter(name: str) -> TypeAdapter[Any]:
+    """Validate one value exactly as strict runtime reconfiguration would."""
+
+    field = PlannerConfig.model_fields[name]
+    if not field.metadata:
+        return TypeAdapter(field.annotation)
+    return TypeAdapter(Annotated[(field.annotation, *field.metadata)])
 
 
 class PlannerConfig(BaseModel):
@@ -440,8 +1614,8 @@ class PlannerConfig(BaseModel):
             "may override this limit."
         ),
     )
-    max_gpu_budget: int = SLAPlannerDefaults.max_gpu_budget
-    min_gpu_budget: int = SLAPlannerDefaults.min_gpu_budget
+    max_gpu_budget: int = Field(default=SLAPlannerDefaults.max_gpu_budget, ge=-1)
+    min_gpu_budget: int = Field(default=SLAPlannerDefaults.min_gpu_budget, ge=-1)
     """Per-DGD GPU floor enforced by the local planner. -1 disables (default).
 
     When set alongside ``max_gpu_budget`` with ``min == max``, the local
@@ -494,6 +1668,19 @@ class PlannerConfig(BaseModel):
         ),
     )
 
+    enable_runtime_reconfiguration: bool = Field(
+        default=False,
+        description=(
+            "Expose /engine/planner on DYN_SYSTEM_PORT. Restrict this management "
+            "listener to trusted callers; no application authentication is added."
+        ),
+    )
+    runtime_warmup_trace_dir: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description="Directory containing traces permitted for runtime predictor warmup. Required when using warmup_trace.",
+    )
+
     decode_engine_num_gpu: Optional[int] = None
     prefill_engine_num_gpu: Optional[int] = None
 
@@ -531,23 +1718,37 @@ class PlannerConfig(BaseModel):
     ttft_ms: float = Field(
         default=SLAPlannerDefaults.ttft_ms,
         validation_alias=AliasChoices("ttft_ms", "ttft"),
+        gt=0,
+        allow_inf_nan=False,
     )
     itl_ms: float = Field(
         default=SLAPlannerDefaults.itl_ms,
         validation_alias=AliasChoices("itl_ms", "itl"),
+        gt=0,
+        allow_inf_nan=False,
     )
 
     # Load predictor settings
-    load_predictor: str = SLAPlannerDefaults.load_predictor
+    load_predictor: Literal[
+        "constant", "arima", "prophet", "kalman"
+    ] = SLAPlannerDefaults.load_predictor
     load_predictor_log1p: bool = SLAPlannerDefaults.load_predictor_log1p
-    prophet_window_size: int = SLAPlannerDefaults.prophet_window_size
+    prophet_window_size: int = Field(
+        default=SLAPlannerDefaults.prophet_window_size, gt=0
+    )
     load_predictor_warmup_trace: Optional[str] = None
 
     # Kalman filter settings
-    kalman_q_level: float = SLAPlannerDefaults.kalman_q_level
-    kalman_q_trend: float = SLAPlannerDefaults.kalman_q_trend
-    kalman_r: float = SLAPlannerDefaults.kalman_r
-    kalman_min_points: int = SLAPlannerDefaults.kalman_min_points
+    kalman_q_level: float = Field(
+        default=SLAPlannerDefaults.kalman_q_level, ge=0, allow_inf_nan=False
+    )
+    kalman_q_trend: float = Field(
+        default=SLAPlannerDefaults.kalman_q_trend, ge=0, allow_inf_nan=False
+    )
+    kalman_r: float = Field(
+        default=SLAPlannerDefaults.kalman_r, ge=0, allow_inf_nan=False
+    )
+    kalman_min_points: int = Field(default=SLAPlannerDefaults.kalman_min_points, gt=0)
 
     # Prometheus settings
     metric_pulling_prometheus_endpoint: str = Field(
@@ -670,13 +1871,17 @@ class PlannerConfig(BaseModel):
             "scaling decisions. Even when only throughput-based scaling is enabled, "
             "live FPM observations are fed into the perf model at this interval to "
             "keep the performance model accurate. Must be shorter than "
-            "throughput_adjustment_interval_seconds."
+            "throughput_adjustment_interval_seconds when both scaling modes are enabled."
         ),
     )
-    max_num_fpm_samples: int = SLAPlannerDefaults.max_num_fpm_samples
-    fpm_sample_bucket_size: int = SLAPlannerDefaults.fpm_sample_bucket_size
-    load_scaling_down_sensitivity: int = (
-        SLAPlannerDefaults.load_scaling_down_sensitivity
+    max_num_fpm_samples: int = Field(
+        default=SLAPlannerDefaults.max_num_fpm_samples, gt=0
+    )
+    fpm_sample_bucket_size: int = Field(
+        default=SLAPlannerDefaults.fpm_sample_bucket_size, gt=0
+    )
+    load_scaling_down_sensitivity: int = Field(
+        default=SLAPlannerDefaults.load_scaling_down_sensitivity, ge=0, le=100
     )
     prefill_scale_up_queue_tokens: Optional[int] = Field(
         default=SLAPlannerDefaults.prefill_scale_up_queue_tokens,
@@ -724,7 +1929,9 @@ class PlannerConfig(BaseModel):
         ),
     )
 
-    # Advisory mode: compute and log decisions without executing scaling
+    # Advisory mode: compute, log and report scaling decisions without
+    # executing them, live and in planner-in-the-loop replay; retune records
+    # a decision that would apply as advisory and applies nothing.
     advisory: bool = SLAPlannerDefaults.advisory
 
     # --- Power-aware budget (read-only caps; DGD-owned) ---
@@ -732,16 +1939,16 @@ class PlannerConfig(BaseModel):
     # Per-GPU caps are NOT configured here. They are authored on each worker
     # component's ``podTemplate.metadata.annotations``
     # (``dynamo.nvidia.com/gpu-power-limit``), applied to Pods by the operator,
-    # and enforced by the Power Agent. The planner reads those caps from the DGD
-    # and combines them with ``total_gpu_power_limit`` to project and clamp a
+    # and enforced by the Power Agent. The operator projects those caps into
+    # component status; the Planner combines them with ``total_gpu_power_limit`` to project and clamp a
     # power budget. It never writes per-GPU caps. These inputs are
     # process-static; changing the total budget requires a Planner restart.
     enable_power_awareness: bool = Field(
         default=False,
         description=(
             "Enable power-aware budget projection and budget-gated replica "
-            "scaling. Per-GPU caps are read from DGD worker podTemplate "
-            "annotations; this planner combines them with total_gpu_power_limit "
+            "scaling. Per-GPU caps are read from operator-projected DGD component "
+            "status; this planner combines them with total_gpu_power_limit "
             "to publish power-budget gauges and clamp scale-up. Requires "
             "total_gpu_power_limit, environment='kubernetes', and "
             "mode in ('disagg', 'prefill', 'decode'). Not supported for "
@@ -807,6 +2014,13 @@ class PlannerConfig(BaseModel):
         ),
     )
 
+    batch_scheduling: BatchSchedulingConfig = Field(
+        default_factory=BatchSchedulingConfig,
+        description=(
+            "Opt-in native batch scheduling for one Kubernetes aggregate pool."
+        ),
+    )
+
     plugin_registration: PluginRegistrationConfig = Field(
         default_factory=PluginRegistrationConfig,
         description=(
@@ -820,6 +2034,29 @@ class PlannerConfig(BaseModel):
             "K8s SA / SPIFFE JWT support lands in a follow-up PR."
         ),
     )
+
+    retune: RetuneConfig | None = Field(
+        default=None,
+        description=(
+            "Opt-in periodic replay-based retune of router and planner runtime "
+            "parameters. executor 'local' runs in planner-in-the-loop replay; "
+            "a live Kubernetes planner requires executor 'dgdr' "
+            "(experimental). Setting both enable_load_scaling and "
+            "enable_throughput_scaling explicitly to false with retune set "
+            "runs retune-only with fixed replicas."
+        ),
+    )
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_retune(self, handler: SerializerFunctionWrapHandler):
+        # Keep serialized configs without retune (profiler output, replay
+        # digests) identical to those written before the section existed.
+        # No return annotation: pydantic then keeps the full field-level
+        # serialization JSON schema instead of a generic object.
+        data = handler(self)
+        if self.retune is None:
+            data.pop("retune", None)
+        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -883,9 +2120,6 @@ class PlannerConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_config(self) -> "PlannerConfig":
-        if self.ttft_ms <= 0:
-            raise ValueError(f"ttft_ms must be > 0, got {self.ttft_ms}")
-
         if self.mode == "prefill" and self.decode_min_endpoint is not None:
             raise ValueError("decode_min_endpoint is not supported when mode='prefill'")
         if self.mode == "decode" and self.prefill_min_endpoint is not None:
@@ -898,6 +2132,74 @@ class PlannerConfig(BaseModel):
                 "prefill_min_endpoint and decode_min_endpoint are not supported "
                 "when mode='agg'; use min_endpoint"
             )
+
+        if self.batch_scheduling.enabled:
+            if self.environment != "kubernetes":
+                raise ValueError(
+                    "batch_scheduling.enabled=True requires environment='kubernetes'"
+                )
+            if self.mode != "agg":
+                raise ValueError("batch_scheduling.enabled=True requires mode='agg'")
+
+            pool = self.batch_scheduling.pool
+            if pool is None:
+                raise ValueError("batch_scheduling.enabled=True requires: pool")
+            gateway = self.batch_scheduling.gateway
+            if gateway is None:
+                raise ValueError("batch_scheduling.enabled=True requires: gateway")
+            metrics = self.batch_scheduling.metrics
+            if metrics is None:
+                raise ValueError("batch_scheduling.enabled=True requires: metrics")
+            if not self.advisory:
+                redis_config = self.batch_scheduling.redis
+                if redis_config is None:
+                    raise ValueError(
+                        "batch_scheduling.enabled=True requires: redis unless "
+                        "Planner advisory mode is enabled"
+                    )
+                if redis_config.url is None:
+                    raise ValueError(
+                        "non-advisory batch scheduling requires redis.url or "
+                        "DYN_PLANNER_BATCH_REDIS_URL"
+                    )
+            if pool.max_replicas < self.effective_decode_min_endpoint:
+                raise ValueError(
+                    "batch_scheduling.pool.max_replicas must be >= the effective "
+                    f"aggregate endpoint minimum ({self.effective_decode_min_endpoint})"
+                )
+            if self.advisory:
+                minimum_lease_s = 0.0
+            else:
+                redis_config = self.batch_scheduling.redis
+                if redis_config is None:
+                    raise ValueError(
+                        "non-advisory batch scheduling requires Redis timing config"
+                    )
+                observation_budget_s = max(
+                    gateway.collection_timeout_seconds,
+                    metrics.request_timeout_seconds,
+                )
+                redis_actuation_budget_s = 2.0 * (
+                    redis_config.connect_timeout_seconds
+                    + redis_config.socket_timeout_seconds
+                )
+                minimum_lease_s = (
+                    observation_budget_s
+                    + 2.0 * self.scheduling.tick_max_duration_seconds
+                    + self.scheduling.scale_interval_seconds
+                    + 2.0 * redis_actuation_budget_s
+                )
+            if (
+                not self.advisory
+                and pool.drain_lease_duration_seconds < minimum_lease_s
+            ):
+                raise ValueError(
+                    "batch_scheduling.pool.drain_lease_duration_seconds must be "
+                    "at least max(gateway collection timeout, metrics request "
+                    "timeout) + 2 * tick maximum duration + scale cadence + "
+                    "two bounded Redis applications (two attempts each) "
+                    f"({minimum_lease_s}s)"
+                )
 
         if self.report_interval_hours is not None:
             if (
@@ -915,9 +2217,9 @@ class PlannerConfig(BaseModel):
                 f"got {self.fpm_sample_bucket_size}"
             )
 
-        # Power-awareness validation. Per-GPU caps come from DGD worker
-        # podTemplate annotations, not this config, so the only required knob
-        # is the total budget — and a Kubernetes connector to read the DGD.
+        # Power-awareness validation. Per-GPU caps come from operator-projected
+        # DGD component status, not this config, so the only required knob is
+        # the total budget — and a Kubernetes connector to read the DGD.
         if self.enable_power_awareness:
             if self.total_gpu_power_limit is None:
                 raise ValueError(
@@ -929,8 +2231,8 @@ class PlannerConfig(BaseModel):
             if self.environment != "kubernetes":
                 raise ValueError(
                     "enable_power_awareness=True requires environment='kubernetes'. "
-                    "Per-GPU caps are read from DGD worker podTemplate annotations, "
-                    "which only the Kubernetes connector resolves; virtual/replay and "
+                    "Per-GPU caps are read from DGD component status, which only "
+                    "the Kubernetes connector resolves; virtual/replay and "
                     "global-planner modes have no DGD with authoritative caps."
                 )
             if self.mode == "agg":
@@ -948,7 +2250,19 @@ class PlannerConfig(BaseModel):
                 "Please specify the namespace where GlobalPlanner is running."
             )
 
-        if self.optimization_target == "load":
+        # Retune-only mode needs both flags explicitly false, so a config that
+        # relies on easy-mode forcing keeps autoscaling when retune is added.
+        retune_only = (
+            self.retune is not None
+            and {"enable_load_scaling", "enable_throughput_scaling"}
+            <= self.model_fields_set
+            and not self.enable_load_scaling
+            and not self.enable_throughput_scaling
+        )
+
+        # A retune-only planner never runs load scaling, so its thresholds
+        # are not required.
+        if self.optimization_target == "load" and not retune_only:
             if self.mode in ("disagg", "prefill"):
                 if (
                     self.prefill_scale_up_queue_tokens is None
@@ -984,7 +2298,7 @@ class PlannerConfig(BaseModel):
                     )
 
         # Easy mode: force load scaling on, throughput scaling off
-        if self.optimization_target != "sla":
+        if self.optimization_target != "sla" and not retune_only:
             if self.optimization_target == "load" and self.enable_throughput_scaling:
                 logger.warning(
                     "optimization_target='load' disables throughput-based scaling; "
@@ -1002,12 +2316,22 @@ class PlannerConfig(BaseModel):
                     self.optimization_target,
                 )
 
-        # At least one scaling mode must be enabled
-        if not self.enable_throughput_scaling and not self.enable_load_scaling:
-            raise ValueError(
+        # At least one scaling mode must be enabled, except in retune-only mode
+        if (
+            not self.enable_throughput_scaling
+            and not self.enable_load_scaling
+            and not retune_only
+        ):
+            message = (
                 "At least one scaling mode must be enabled "
                 "(enable_throughput_scaling or enable_load_scaling)"
             )
+            if self.retune is not None:
+                message += (
+                    "; retune-only mode requires both flags to be set "
+                    "explicitly to false"
+                )
+            raise ValueError(message)
 
         if self.enable_throughput_scaling:
             if (
@@ -1040,9 +2364,13 @@ class PlannerConfig(BaseModel):
                 "agg": ("aggregated",),
             }[self.mode]
             for role in required_roles:
-                if role not in self.ais_perf_model.roles:
+                if (
+                    role not in self.ais_perf_model.roles
+                    and role not in self.ais_perf_model.dataset_profiles
+                ):
                     raise ValueError(
-                        f"ais_perf_model.roles.{role} is required for mode={self.mode!r}"
+                        f"ais_perf_model.roles.{role} or dataset_profiles.{role} "
+                        f"is required for mode={self.mode!r}"
                     )
 
         intervals = [float(self.load_adjustment_interval_seconds)]
@@ -1074,7 +2402,313 @@ class PlannerConfig(BaseModel):
                         "slow predictive loop."
                     )
 
+        if self.retune is not None:
+            self._validate_retune(self.retune)
+
         return self
+
+    def _validate_retune(self, retune: RetuneConfig) -> None:
+        """Check ``retune`` against the rest of the planner configuration.
+
+        ``retune`` is never modified: ``history_seconds=None`` is resolved by
+        the retune controller, and the search domains stay as written
+        (``retune.domains`` expands them wherever the grid is needed).
+        """
+
+        # The module imports this one at module scope; import it on use.
+        from dynamo.planner.retune.domains import (
+            describe_grid,
+            expand_planner_domain,
+            expand_router_domain,
+            grid_size,
+            required_history_seconds,
+        )
+
+        if self.mode not in ("agg", "disagg"):
+            raise ValueError(
+                f"retune requires mode='agg' or mode='disagg', got {self.mode!r}"
+            )
+        if retune.executor == "dgdr":
+            # Before the domain expansion, whose errors assume replay.
+            self._validate_live_retune(retune)
+        if self.scaling_enabled() and retune.objective not in RETUNE_PER_GPU_OBJECTIVES:
+            raise ValueError(
+                f"retune.objective {retune.objective!r} does not divide by "
+                "GPUs, so with load or throughput scaling it favors the "
+                "candidates that provision the most GPUs; use "
+                f"{' or '.join(RETUNE_PER_GPU_OBJECTIVES)}, or retune with "
+                "fixed replicas (enable_load_scaling and "
+                "enable_throughput_scaling both false)"
+            )
+        if not _is_multiple_of(
+            retune.interval_seconds, self.scheduling.scale_interval_seconds
+        ):
+            raise ValueError(
+                "retune.interval_seconds must be a multiple of "
+                "scheduling.scale_interval_seconds "
+                f"({self.scheduling.scale_interval_seconds}s)"
+            )
+        planner_domain = expand_planner_domain(self)
+        router_domain = expand_router_domain(retune)
+
+        if self.enable_throughput_scaling and retune.history_seconds is not None:
+            required = required_history_seconds(self, planner_domain)
+            if retune.history_seconds < required:
+                raise ValueError(
+                    f"retune.history_seconds must be >= {required:g}s "
+                    "(throughput_adjustment_interval_seconds x "
+                    "max(prophet_window_size, kalman_min_points) over the "
+                    "current predictor and the load_predictor candidates) to "
+                    "warm throughput predictors"
+                )
+
+        if not router_domain and planner_domain.empty:
+            raise ValueError(
+                "retune requires a non-empty router or planner search domain"
+            )
+        size = grid_size(router_domain, planner_domain.grid)
+        if size > retune.max_candidates:
+            raise ValueError(
+                f"retune grid has {size} candidates, exceeding "
+                f"retune.max_candidates={retune.max_candidates} "
+                f"({describe_grid(router_domain, planner_domain.grid)}); an "
+                "omitted AISimulate knob searches its default domain, so pin "
+                "knobs with a scalar to shrink the grid"
+            )
+        if retune.executor == "dgdr":
+            self._validate_live_retune_budget(retune, router_domain)
+
+    def _validate_live_retune(self, retune: RetuneConfig) -> None:
+        """Configuration premises P1, P2, P3 and P5 of live retune.
+
+        A live planner sweeps through DGDR v1beta2 Requests in the Kubernetes
+        namespace of its DGD, retunes the frontend router only (Scenario 1),
+        and decides when a sweep returns; the frontend-side premises are
+        checked at runtime against the DGD.
+        """
+
+        dgdr = retune.dgdr
+        if dgdr is None:  # RetuneConfig requires it with executor dgdr
+            raise ValueError("retune.dgdr is required iff retune.executor is 'dgdr'")
+        if self.environment != "kubernetes":
+            raise ValueError(
+                "retune.executor 'dgdr' requires environment='kubernetes' (P1), "
+                f"got {self.environment!r}"
+            )
+        latency = retune.decision_latency_seconds
+        if latency == "measured":
+            if retune.decision_latency_scale != 1.0:
+                raise ValueError(
+                    "retune.executor 'dgdr' decides when the sweep returns, so "
+                    "decision_latency_seconds: measured requires "
+                    "decision_latency_scale 1 (P1), got "
+                    f"{retune.decision_latency_scale}"
+                )
+        elif latency != 0:
+            raise ValueError(
+                "retune.executor 'dgdr' decides when the sweep returns, so "
+                "retune.decision_latency_seconds must be 0 or 'measured' (P1), "
+                f"got {latency}"
+            )
+        if retune.timeout_seconds is None:
+            raise ValueError(
+                "retune.executor 'dgdr' requires an explicit "
+                "retune.timeout_seconds (P1): the sweep deadline, window cut "
+                "included"
+            )
+        limit = retune.interval_seconds - DGDR_TIMEOUT_MARGIN_SECONDS
+        if retune.timeout_seconds > limit:
+            raise ValueError(
+                f"retune.timeout_seconds must be <= interval_seconds - "
+                f"{DGDR_TIMEOUT_MARGIN_SECONDS:g} = {limit:g} with executor "
+                f"'dgdr' (P1), got {retune.timeout_seconds:g}"
+            )
+        if self.scaling_enabled():
+            raise ValueError(
+                "retune.executor 'dgdr' supports retune-only mode (P2): set "
+                "enable_load_scaling and enable_throughput_scaling both to false"
+            )
+        if retune.planner is not None:
+            raise ValueError(
+                "retune.executor 'dgdr' retunes the router only (P2); remove "
+                "retune.planner"
+            )
+        self._validate_live_retune_router(retune)
+        _validate_dgdr_engine(dgdr.engine, self.mode, self.backend)
+        # Claim paths: the planner, the frontends and the Run Jobs mount the
+        # same claim, and clean-up deletes under these directories. A DGDR
+        # trace path rejects empty, '.' and '..' segments.
+        dirs: dict[str, list[str]] = {}
+        for name in ("segments_dir", "windows_dir"):
+            value = getattr(dgdr, name)
+            dirs[name] = value.split("/")
+            if any(segment in ("", ".", "..") for segment in dirs[name]):
+                raise ValueError(
+                    f"retune.dgdr.{name} must be a relative directory inside "
+                    "the claim: '/'-separated names without empty, '.' or "
+                    f"'..' segments, got {value!r}"
+                )
+        if not PurePosixPath(dgdr.mount_path).is_absolute():
+            raise ValueError(
+                f"retune.dgdr.mount_path must be absolute, got {dgdr.mount_path!r}"
+            )
+        segments, windows = dirs["segments_dir"], dirs["windows_dir"]
+        shorter = min(len(segments), len(windows))
+        if segments[:shorter] == windows[:shorter]:
+            raise ValueError(
+                "retune.dgdr.segments_dir and retune.dgdr.windows_dir must not "
+                f"contain one another, got {dgdr.segments_dir!r} and "
+                f"{dgdr.windows_dir!r}"
+            )
+
+    @staticmethod
+    def _validate_live_retune_router(retune: RetuneConfig) -> None:
+        """P3: the router domain fits the DGDR v1beta2 router section.
+
+        A Request searches ``overlap_score_credit``, ``prefill_load_scale``
+        and ``temperature`` of a ``kv_router`` with ``prefill_load_model:
+        none``; ``RouterRetuneConfig`` already pins the policy.
+        """
+
+        spec = retune.router
+        if not isinstance(spec, Mapping):
+            return
+        extra = sorted(set(spec) - _DGDR_ROUTER_SECTION_KEYS)
+        if extra:
+            raise ValueError(
+                f"retune.router {extra} cannot be searched with executor 'dgdr' "
+                "(P3): a DGDR Request searches only overlap_score_credit, "
+                "prefill_load_scale and temperature"
+            )
+        if "prefill_load_model" not in spec:
+            return
+        # Imported on use: the adapter schema imports this module.
+        from aisimulate.config.common import Choices
+
+        from dynamo.planner.retune.domains import parse_retune_section
+
+        model = parse_retune_section("router", spec).prefill_load_model
+        if "type" not in model.model_fields_set:
+            return
+        written = (
+            list(model.type.choices)
+            if isinstance(model.type, Choices)
+            else [model.type]
+        )
+        if written != ["none"]:
+            raise ValueError(
+                "retune.router.prefill_load_model.type must be 'none' with "
+                f"executor 'dgdr' (P3), got {written}"
+            )
+
+    @staticmethod
+    def _validate_live_retune_budget(
+        retune: RetuneConfig, router_domain: Mapping[str, Sequence[float]]
+    ) -> None:
+        """P13: the largest grid shard can finish within the sweep deadline.
+
+        The baseline can fall in any grid shard, and a window whose baseline
+        shard cannot finish fails with ``launch_too_late``, so the largest
+        shard must fit. The domain is the widest one: a zero startup credit
+        only narrows it at runtime.
+        """
+
+        dgdr = retune.dgdr
+        if dgdr is None or retune.timeout_seconds is None:
+            # _validate_live_retune rejects both first.
+            raise ValueError("retune.executor 'dgdr' requires dgdr and timeout_seconds")
+        sizes = [len(values) for values in router_domain.values()]
+        parts = balanced_shard_parts(
+            sizes, dgdr.run.max_shards, parallelism=dgdr.run.parallelism
+        )
+        points = largest_shard_points(sizes, parts)
+        if points > DGDR_MAX_SHARD_POINTS:
+            raise ValueError(
+                f"the retune router grid of {math.prod(sizes)} points cannot be "
+                f"split into at most retune.dgdr.run.max_shards="
+                f"{dgdr.run.max_shards} Cartesian shards of at most "
+                f"{DGDR_MAX_SHARD_POINTS} points (P13); the largest would have "
+                f"{points}. Raise max_shards or pin router knobs with a scalar"
+            )
+        need = dgdr_need_seconds(points, dgdr, needs_cut=True)
+        if need > retune.timeout_seconds:
+            rounds = dgdr_rounds(points, dgdr.run.parallelism)
+            raise ValueError(
+                f"the largest retune grid shard ({points} points) needs "
+                f"{need:g}s: cut_budget_seconds {dgdr.cut_budget_seconds:g} + "
+                f"job_startup_seconds {dgdr.job_startup_seconds:g} + {rounds} "
+                f"rounds x candidate_timeout_seconds "
+                f"{dgdr.run.candidate_timeout_seconds:g}, more than "
+                f"retune.timeout_seconds={retune.timeout_seconds:g} (P13), so "
+                "every window would fail launch_too_late. Raise timeout_seconds "
+                "or run.parallelism, add run.max_shards, or shrink the grid"
+            )
+
+    def _validate_retune_planner_grid(
+        self,
+        grid: Mapping[str, Sequence[Any]],
+        public_names: Mapping[str, str],
+    ) -> dict[str, list[Any]]:
+        """Reject planner grid fields that are inert in this configuration.
+
+        ``grid`` is keyed by ``PlannerConfig`` field; ``public_names`` gives
+        the ``retune.planner`` name to report. Each value must pass the
+        field's strict validation, as a runtime reconfiguration would.
+        Returns the grid with validated values (``80`` becomes ``80.0`` for a
+        float field), so candidates compare equal to the live config by key.
+        """
+
+        active_endpoints = (
+            {"min_endpoint"}
+            if self.mode == "agg"
+            else {"prefill_min_endpoint", "decode_min_endpoint"}
+        )
+        validated: dict[str, list[Any]] = {}
+        for key, values in grid.items():
+            name = f"retune.planner.{public_names.get(key, key)}"
+            if key in ("min_endpoint", "prefill_min_endpoint", "decode_min_endpoint"):
+                relevant = key in active_endpoints
+                requirement = (
+                    "mode='agg' (use prefill_min_workers/decode_min_workers in disagg)"
+                    if key == "min_endpoint"
+                    else "mode='disagg' (use min_workers in agg)"
+                )
+            elif key == "max_throughput_scaling_replicas":
+                relevant = self.enable_throughput_scaling
+                requirement = "enable_throughput_scaling"
+            elif key == "load_scaling_down_sensitivity":
+                relevant = self.enable_load_scaling
+                requirement = "enable_load_scaling"
+            elif key in (
+                "prefill_scale_up_queue_tokens",
+                "prefill_scale_down_queue_tokens",
+            ):
+                relevant = self.optimization_target == "load" and self.mode != "agg"
+                requirement = "optimization_target='load' with a prefill role"
+            elif key in ("decode_scale_up_kv_rate", "decode_scale_down_kv_rate"):
+                relevant = self.optimization_target == "load"
+                requirement = "optimization_target='load'"
+            else:
+                # min_gpu_budget / max_gpu_budget apply to any scaling mode.
+                relevant = True
+                requirement = ""
+            if not relevant:
+                raise ValueError(
+                    f"{name} has no effect here; it requires {requirement}"
+                )
+            adapter = _strict_field_adapter(key)
+            validated[key] = []
+            for value in values:
+                try:
+                    validated[key].append(adapter.validate_python(value, strict=True))
+                except ValidationError as error:
+                    message = "; ".join(
+                        item["msg"] for item in error.errors(include_input=False)
+                    )
+                    raise ValueError(
+                        f"{name} value {value!r} is invalid: {message}"
+                    ) from None
+        return validated
 
     @classmethod
     def from_config_arg(cls, config_arg: str) -> "PlannerConfig":

@@ -38,6 +38,7 @@ fn create_mock_response_chunk(
     };
 
     let response = NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
             choices: vec![choice],
@@ -49,7 +50,9 @@ fn create_mock_response_chunk(
             service_tier: None,
         },
         nvext: None,
+        prompt_logprobs: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
     };
 
     Annotated {
