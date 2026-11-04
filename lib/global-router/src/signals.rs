@@ -196,19 +196,7 @@ impl PoolSignals {
     pub fn occupancy(&self, pool: &PoolId) -> Option<PoolOccupancy> {
         let now = Instant::now();
         let sources = self.reports.get(pool)?;
-        let (source, current) = sources
-            .iter()
-            .filter_map(|(source, source_report)| {
-                source_report
-                    .load
-                    .as_ref()
-                    .filter(|current| {
-                        now <= current.expires
-                            && current.report.max_concurrency.is_some_and(|n| n > 0)
-                    })
-                    .map(|current| (source, current))
-            })
-            .max_by_key(|(source, current)| (current.received, **source))?;
+        let (source, current) = freshest(&sources, now)?;
         let capacity = current
             .report
             .max_concurrency
@@ -236,6 +224,13 @@ impl PoolSignals {
         })
     }
 
+    /// Requests the pool's workers can run at once, from the freshest report.
+    pub fn capacity(&self, pool: &PoolId) -> Option<u64> {
+        let sources = self.reports.get(pool)?;
+        let (_, current) = freshest(&sources, Instant::now())?;
+        current.report.max_concurrency
+    }
+
     /// Replaces the measured round trip to each region.
     pub fn set_region_round_trips(&self, round_trips: HashMap<String, Duration>) {
         *self.regions.write() = Arc::new(round_trips);
@@ -252,6 +247,25 @@ fn prune(sources: &mut HashMap<RelaySource, SourceReport>, now: Instant) {
         report.load.as_ref().is_some_and(|load| now <= load.expires)
             || report.kv.as_ref().is_some_and(|kv| now <= kv.expires)
     });
+}
+
+/// The freshest unexpired report that carries a capacity.
+fn freshest(
+    sources: &HashMap<RelaySource, SourceReport>,
+    now: Instant,
+) -> Option<(&RelaySource, &Report)> {
+    sources
+        .iter()
+        .filter_map(|(source, source_report)| {
+            source_report
+                .load
+                .as_ref()
+                .filter(|current| {
+                    now <= current.expires && current.report.max_concurrency.is_some_and(|n| n > 0)
+                })
+                .map(|current| (source, current))
+        })
+        .max_by_key(|(source, current)| (current.received, **source))
 }
 
 #[cfg(test)]

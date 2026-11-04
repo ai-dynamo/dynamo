@@ -12,6 +12,8 @@ use url::Url;
 
 use crate::Pool;
 use crate::load::InFlightTracker;
+use crate::placement::{self, Placed};
+use crate::signals::PoolSignals;
 
 /// What a selector may know about a request. Routing inputs such as the
 /// client's region become fields here.
@@ -86,26 +88,38 @@ impl PoolSelector for RoundRobinSelector {
     }
 }
 
-/// Sends each request to the pool with the fewest of this process's requests
-/// in flight.
+/// Sends each request to the nearest pool with the fewest requests in
+/// flight, by affinity's placement rule with load = requests in flight over
+/// the pool's capacity ([`PoolSignals::capacity`]). Ties rotate.
 ///
 /// A slower pool holds its requests longer, so it shows more in flight and
 /// gets a smaller share. Only this process's requests count: replicas do not
-/// share counts, and the pools' own load reports are not read. Ties rotate
-/// among the tied pools.
+/// share counts.
 #[derive(Debug)]
 pub struct LeastInFlightSelector {
     in_flight: Arc<InFlightTracker>,
+    signals: Arc<PoolSignals>,
+    region: String,
+    headroom_factor: f64,
     ties: AtomicUsize,
     frontends: Cursors<PoolId>,
 }
 
 impl LeastInFlightSelector {
     /// `in_flight` must be the tracker the Global Frontend counts its
-    /// requests in.
-    pub fn new(in_flight: Arc<InFlightTracker>) -> Self {
+    /// requests in; `region` is the region of this process, which every
+    /// request enters.
+    pub fn new(
+        in_flight: Arc<InFlightTracker>,
+        signals: Arc<PoolSignals>,
+        region: String,
+        headroom_factor: f64,
+    ) -> Self {
         Self {
             in_flight,
+            signals,
+            region,
+            headroom_factor,
             ties: AtomicUsize::new(0),
             frontends: Cursors::default(),
         }
@@ -118,19 +132,42 @@ impl PoolSelector for LeastInFlightSelector {
         _request: &RoutingRequest<'_>,
         candidates: &[&'a Pool],
     ) -> Option<PoolTarget<'a>> {
+        let round_trips = self.signals.region_round_trips();
         // Read each count once: requests start and finish while this runs.
-        let counts = candidates
+        let mut placed = candidates
             .iter()
             .copied()
             .filter(|pool| reachable(pool))
-            .map(|pool| (pool, self.in_flight.get(&pool.id)))
+            .map(|pool| {
+                let in_flight = self.in_flight.get(&pool.id);
+                Placed {
+                    item: pool,
+                    load: in_flight_load(in_flight, self.signals.capacity(&pool.id)),
+                    distance: placement::distance(
+                        &pool.location.region,
+                        &self.region,
+                        &round_trips,
+                    ),
+                    in_flight,
+                }
+            })
             .collect::<Vec<_>>();
-        let fewest = counts.iter().map(|(_, count)| *count).min()?;
-        let tied = counts.iter().filter(|(_, count)| *count == fewest);
-        let turn = self.ties.fetch_add(1, Ordering::Relaxed) % tied.clone().count();
-        let (pool, _) = tied.clone().nth(turn)?;
-        target(&self.frontends, pool)
+        placement::order(&mut placed);
+        let tied = placement::leading_ties(&placed);
+        if tied == 0 {
+            return None;
+        }
+        let default = self.ties.fetch_add(1, Ordering::Relaxed) % tied;
+        let choice = placed[placement::headroom(&placed, default, self.headroom_factor)].item;
+        target(&self.frontends, choice)
     }
+}
+
+/// `in_flight` over capacity; `None` without a capacity.
+pub(crate) fn in_flight_load(in_flight: u64, capacity: Option<u64>) -> Option<f64> {
+    capacity
+        .filter(|capacity| *capacity > 0)
+        .map(|capacity| in_flight as f64 / capacity as f64)
 }
 
 /// Whether the pool has a frontend to send to.
@@ -179,12 +216,49 @@ impl<K: Eq + Hash> Cursors<K> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::collections::HashMap;
+    use std::time::Duration;
+
     use dynamo_global_common::PoolKey;
+
+    use crate::signals::{LoadReport, RelaySource};
 
     use super::*;
 
     pub(crate) fn pool(dgd: &str, model: &str, frontends: &[&str]) -> Pool {
         regional_pool("us-east-2", dgd, model, frontends)
+    }
+
+    pub(crate) fn least_in_flight(
+        in_flight: &Arc<InFlightTracker>,
+        signals: &Arc<PoolSignals>,
+    ) -> LeastInFlightSelector {
+        LeastInFlightSelector::new(in_flight.clone(), signals.clone(), "us-east-2".into(), 2.0)
+    }
+
+    /// Ohio and Tokyo, 135 ms apart, each able to run 100 requests at once.
+    pub(crate) fn two_regions(in_flight: &Arc<InFlightTracker>) -> (Pool, Pool, Arc<PoolSignals>) {
+        let ohio = regional_pool("us-east-2", "ohio", "qwen", &["http://ohio:8000"]);
+        let tokyo = regional_pool("ap-northeast-1", "tokyo", "qwen", &["http://tokyo:8000"]);
+        let signals = Arc::new(PoolSignals::new(in_flight.clone()));
+        signals.set_region_round_trips(HashMap::from([(
+            "ap-northeast-1".to_owned(),
+            Duration::from_millis(135),
+        )]));
+        for pool in [&ohio, &tokyo] {
+            let source = RelaySource {
+                runtime_id: 1,
+                incarnation: 1,
+            };
+            let report = LoadReport {
+                in_flight: 0,
+                generating: 0,
+                max_concurrency: Some(100),
+                window: Duration::from_secs(60),
+            };
+            signals.record_load(&pool.id, source, report);
+        }
+        (ohio, tokyo, signals)
     }
 
     pub(crate) fn regional_pool(region: &str, dgd: &str, model: &str, frontends: &[&str]) -> Pool {
@@ -261,7 +335,7 @@ pub(crate) mod tests {
         let blue = pool("blue", "qwen", &["http://blue:8000"]);
         let green = pool("green", "qwen", &["http://green:8000"]);
         let in_flight = Arc::new(InFlightTracker::new());
-        let selector = LeastInFlightSelector::new(in_flight.clone());
+        let selector = least_in_flight(&in_flight, &Arc::new(PoolSignals::new(in_flight.clone())));
         let request = RoutingRequest::new("qwen");
 
         let _busy = [in_flight.start(&blue.id), in_flight.start(&blue.id)];
@@ -277,7 +351,8 @@ pub(crate) mod tests {
         let empty = pool("draining", "qwen", &[]);
         let blue = pool("blue", "qwen", &["http://blue:8000"]);
         let green = pool("green", "qwen", &["http://green:8000"]);
-        let selector = LeastInFlightSelector::new(Arc::new(InFlightTracker::new()));
+        let in_flight = Arc::new(InFlightTracker::new());
+        let selector = least_in_flight(&in_flight, &Arc::new(PoolSignals::new(in_flight.clone())));
         let request = RoutingRequest::new("qwen");
 
         let chosen = (0..4)
@@ -293,5 +368,34 @@ pub(crate) mod tests {
         let (blue, green) = (blue.id.clone(), green.id.clone());
         assert_eq!(chosen, [blue.clone(), green.clone(), blue, green]);
         assert_eq!(selector.select(&request, &[&empty]), None);
+    }
+
+    /// Stays local until another region has twice the room; unknown capacity counts as full.
+    #[test]
+    fn least_in_flight_stays_in_its_region_until_another_has_much_more_room() {
+        let in_flight = Arc::new(InFlightTracker::new());
+        let (ohio, tokyo, signals) = two_regions(&in_flight);
+        let selector = least_in_flight(&in_flight, &signals);
+        let picked = || {
+            let request = RoutingRequest::new("qwen");
+            selector
+                .select(&request, &[&tokyo, &ohio])
+                .unwrap()
+                .pool
+                .id
+                .clone()
+        };
+
+        // Ohio 5 of 100, Tokyo idle: 0.95 spare against 1.0.
+        let mut held = (0..5)
+            .map(|_| in_flight.start(&ohio.id))
+            .collect::<Vec<_>>();
+        assert_eq!(picked(), ohio.id);
+        // Ohio 55 of 100: 0.45 spare, and Tokyo's 1.0 is more than twice it.
+        held.extend((0..50).map(|_| in_flight.start(&ohio.id)));
+        assert_eq!(picked(), tokyo.id);
+        // Tokyo's capacity unknown: it counts as full, so Ohio keeps it.
+        signals.forget(&tokyo.id);
+        assert_eq!(picked(), ohio.id);
     }
 }

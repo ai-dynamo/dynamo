@@ -8,6 +8,7 @@ use dashmap::DashMap;
 use dynamo_global_common::PoolId;
 
 use crate::Pool;
+use crate::placement::{self, Placed};
 use crate::selector::{Cursors, PoolSelector, PoolTarget, RoutingRequest, reachable, target};
 use crate::signals::PoolSignals;
 
@@ -96,6 +97,9 @@ impl PoolSelector for AffinitySelector {
         candidates: &[&'a Pool],
     ) -> Option<PoolTarget<'a>> {
         let placed = place(candidates, &self.region, &self.signals);
+        if placed.is_empty() {
+            return None;
+        }
         let pinned = request.session.and_then(|session| {
             let pin = self.pins.get(session)?;
             if pin.used.elapsed() > self.idle {
@@ -103,83 +107,43 @@ impl PoolSelector for AffinitySelector {
             }
             placed
                 .iter()
-                .find(|candidate| candidate.pool.id == pin.pool)
+                .position(|candidate| candidate.item.id == pin.pool)
         });
-        let choice = headroom(&placed, pinned.or(placed.first()), self.headroom_factor)?;
+        let choice =
+            placed[placement::headroom(&placed, pinned.unwrap_or(0), self.headroom_factor)].item;
         if let Some(session) = request.session {
-            self.pin(session, &choice.pool.id);
+            self.pin(session, &choice.id);
         }
-        target(&self.frontends, choice.pool)
+        target(&self.frontends, choice)
     }
 }
 
-/// A reachable pool, with what the affinity selector weighs.
-#[derive(Debug)]
-struct Candidate<'a> {
-    pool: &'a Pool,
-    /// How full the pool is against its own capacity, 1 being full (see
-    /// [`PoolSignals::occupancy`]). `None` without a fresh report.
-    load: Option<f64>,
-    /// Round trip to the pool's region: zero for the region the request
-    /// entered, otherwise as last measured. `None` until measured.
-    distance: Option<Duration>,
-}
-
 /// The candidates that have a frontend, for a request entering `region`,
-/// from least to most expensive: nearest region first, then less full, then
-/// catalog order. Pools whose distance or load is unknown come after those
-/// whose is known.
-fn place<'a>(candidates: &[&'a Pool], region: &str, signals: &PoolSignals) -> Vec<Candidate<'a>> {
+/// ordered by [`placement::order`] on their occupancy: nearest region first,
+/// then less full, then catalog order.
+fn place<'a>(
+    candidates: &[&'a Pool],
+    region: &str,
+    signals: &PoolSignals,
+) -> Vec<Placed<&'a Pool>> {
     let round_trips = signals.region_round_trips();
     let mut placed = candidates
         .iter()
         .copied()
         .filter(|pool| reachable(pool))
-        .map(|pool| Candidate {
-            pool,
+        .map(|pool| Placed {
+            item: pool,
             load: signals.occupancy(&pool.id).map(|occupancy| occupancy.load),
-            distance: if pool.location.region == region {
-                Some(Duration::ZERO)
-            } else {
-                round_trips.get(&pool.location.region).copied()
-            },
+            distance: placement::distance(&pool.location.region, region, &round_trips),
+            in_flight: 0,
         })
         .collect::<Vec<_>>();
-    // Stable, so ties keep catalog order.
-    placed.sort_by(|left, right| {
-        let distance = |candidate: &Candidate<'_>| candidate.distance.unwrap_or(Duration::MAX);
-        let load = |candidate: &Candidate<'_>| candidate.load.unwrap_or(f64::INFINITY);
-        distance(left)
-            .cmp(&distance(right))
-            .then_with(|| load(left).total_cmp(&load(right)))
-    });
+    placement::order(&mut placed);
     placed
 }
 
-/// `default`, unless another pool has more than `factor` times its spare
-/// capacity (1 minus its load); then the first such pool in `candidates`'
-/// order. A default whose load is unknown counts as full. Without a default,
-/// the first candidate.
-fn headroom<'a, 'b>(
-    candidates: &'b [Candidate<'a>],
-    default: Option<&'b Candidate<'a>>,
-    factor: f64,
-) -> Option<&'b Candidate<'a>> {
-    let Some(default) = default else {
-        return candidates.first();
-    };
-    let need = default
-        .load
-        .map_or(0.0, |load| (factor * (1.0 - load)).max(0.0));
-    candidates
-        .iter()
-        .filter(|candidate| candidate.pool.id != default.pool.id)
-        .find(|candidate| candidate.load.is_some_and(|load| 1.0 - load > need))
-        .or(Some(default))
-}
-
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::HashMap;
 
     use crate::load::InFlightTracker;
@@ -188,13 +152,13 @@ mod tests {
 
     use super::*;
 
-    const OHIO: &str = "us-east-2";
+    pub(crate) const OHIO: &str = "us-east-2";
     const OREGON: &str = "us-west-2";
     const TOKYO: &str = "ap-northeast-1";
 
     /// Two pools in Ohio, one in Oregon and one in Tokyo, with round trips
     /// measured from Ohio.
-    fn fleet() -> (Vec<Pool>, Arc<PoolSignals>) {
+    pub(crate) fn fleet() -> (Vec<Pool>, Arc<PoolSignals>) {
         let pools = vec![
             regional_pool(OHIO, "ohio-a", "qwen", &["http://ohio-a:8000"]),
             regional_pool(OHIO, "ohio-b", "qwen", &["http://ohio-b:8000"]),
@@ -212,7 +176,7 @@ mod tests {
     /// Sets each pool's occupancy, in reports fresh for a minute: requests in
     /// flight, all generating, over 128 slots, with too little KV in use to
     /// bind.
-    fn set_occupancy(pools: &[Pool], signals: &PoolSignals, loads: [f64; 4]) {
+    pub(crate) fn set_occupancy(pools: &[Pool], signals: &PoolSignals, loads: [f64; 4]) {
         let window = Duration::from_secs(20);
         let source = RelaySource {
             runtime_id: 1,
@@ -231,10 +195,10 @@ mod tests {
         }
     }
 
-    fn names(placed: &[Candidate<'_>]) -> Vec<String> {
+    fn names(placed: &[Placed<&Pool>]) -> Vec<String> {
         placed
             .iter()
-            .map(|candidate| candidate.pool.frontends[0].host_str().unwrap().to_owned())
+            .map(|candidate| candidate.item.frontends[0].host_str().unwrap().to_owned())
             .collect()
     }
 

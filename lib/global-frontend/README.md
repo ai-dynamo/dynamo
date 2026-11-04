@@ -42,7 +42,7 @@ model; every policy then rotates across the pool's frontends.
 | Policy | Picks |
 |---|---|
 | `round-robin` (default) | Each pool in turn. |
-| `least-in-flight` | The pool with the fewest of this process's requests in flight. |
+| `least-in-flight` | The nearest pool with the fewest requests in flight, moving only for a pool with much more room. |
 | `affinity` | The session's pool, nearest region first, moving only for a pool with much more room. |
 
 `affinity` keeps each session's turns on one pool, so the pool's KV cache for
@@ -57,10 +57,19 @@ nearest such pool, or when that pool is full, choosing the nearest pool with any
 room. The session's pin moves with it. Pins are per process and expire after
 `--session-idle-secs` (default 1800) without a request.
 
-`affinity` needs `--region`, matching the pool's region (the cluster name for
-explicit pools). It reads each pool's load from the pool's PoolRelay, given per pool
-over plain HTTP. Each pool needs a Relay of its own, since a Relay reports the
-load of everything it watches as one:
+`least-in-flight` places requests by the same rule, with requests in flight
+over each pool's capacity as the load: this process's requests in flight to the
+pool over the requests its workers can run at once, as its Relay reports. Pools
+are ordered nearest region first, then less loaded, then fewer in flight; the
+request goes to the first, rotating among pools that tie with it, unless
+another pool has more than `--headroom-factor` times its spare room. A pool
+without a Relay report counts as full, so without `--pool-relay` requests stay
+on the nearest pools, fewest in flight first.
+
+`affinity` and `least-in-flight` need `--region`, matching the pool's region
+(the cluster name for explicit pools). They read each pool's load from the
+pool's PoolRelay, given per pool over plain HTTP. Each pool needs a Relay of
+its own, since a Relay reports the load of everything it watches as one:
 
 ```bash
 cargo run -p dynamo-global-frontend -- --port 8000 \
