@@ -104,6 +104,32 @@ up to your target version. Each entry describes changes introduced in that relea
 categories without migration notes recorded here are omitted. For supported Grove and KAI Scheduler
 versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration).
 
+### v1.8.0
+
+#### CRD and admission breaking changes
+
+##### nvidia.com/v1alpha1 unserved for the DGD family
+
+**Change:** The `nvidia.com/v1alpha1` versions of `DynamoGraphDeployment`,
+`DynamoComponentDeployment`, `DynamoGraphDeploymentRequest`, and
+`DynamoGraphDeploymentScalingAdapter` are no longer served. Clients submit the served
+`nvidia.com/v1beta1` versions (`v1beta2` remains served for `DynamoGraphDeploymentRequest`).
+Submitting an unserved version fails with `no matches for kind ... in version nvidia.com/v1alpha1`.
+
+**Affected:** Manifests, tooling, and automation that submit these kinds at `nvidia.com/v1alpha1`.
+This includes KEDA `ScaledObject`s whose `scaleTargetRef.apiVersion` is `nvidia.com/v1alpha1`:
+KEDA resolves that exact version and stops reconciling the target after the upgrade.
+
+**Action:** Before upgrading, rewrite affected manifests to the served versions and retarget
+`scaleTargetRef.apiVersion` to `nvidia.com/v1beta1`. The v1beta1 schema replaces the
+`spec.services` map with the `spec.components` list, `extraPodSpec.mainContainer` with
+`podTemplate.spec.containers[name=main]`, and `volumeMounts` with `compilationCache`.
+
+**Existing deployments:** Stored objects are unaffected. Chart v1.5.0 promoted storage to
+`v1beta1` and rewrote stored objects during upgrade, and the upgrade-path preflight rejects
+releases that would skip that migration. The conversion webhook is retained solely to serve
+objects stored by pre-migration operator versions, until the `v1alpha1` API is removed.
+
 ### v1.7.0
 
 #### Deployment Tool Compatibility
