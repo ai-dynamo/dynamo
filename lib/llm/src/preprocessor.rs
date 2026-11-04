@@ -400,6 +400,24 @@ impl<'a> MultimodalContentPart<'a> {
         }
     }
 
+    fn media_content_type(&self) -> Option<&'static str> {
+        match self {
+            Self::User(part) => match part {
+                ChatCompletionRequestUserMessageContentPart::ImageUrl(_) => Some("image_url"),
+                ChatCompletionRequestUserMessageContentPart::VideoUrl(_) => Some("video_url"),
+                ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => Some("audio_url"),
+                ChatCompletionRequestUserMessageContentPart::InputAudio(_) => Some("input_audio"),
+                _ => None,
+            },
+            Self::Tool(part) => match part {
+                ChatCompletionRequestToolMessageContentPart::ImageUrl(_) => Some("image_url"),
+                ChatCompletionRequestToolMessageContentPart::VideoUrl(_) => Some("video_url"),
+                ChatCompletionRequestToolMessageContentPart::AudioUrl(_) => Some("audio_url"),
+                _ => None,
+            },
+        }
+    }
+
     fn media_info(&self) -> Option<(&'static str, Option<url::Url>, Option<String>)> {
         match self {
             Self::User(part) => match *part {
@@ -460,6 +478,20 @@ fn multimodal_content_parts(
         },
         _ => None,
     }
+}
+
+/// Media content types (`audio_url`, `input_audio`, `image_url`, `video_url`) carried by any
+/// message of a chat request, current turn or history, in sorted order. Empty
+/// for a text-only request.
+pub(crate) fn request_media_content_types(
+    messages: &[ChatCompletionRequestMessage],
+) -> std::collections::BTreeSet<&'static str> {
+    messages
+        .iter()
+        .filter_map(multimodal_content_parts)
+        .flatten()
+        .filter_map(|part| part.media_content_type())
+        .collect()
 }
 
 #[cfg(feature = "mm-routing")]

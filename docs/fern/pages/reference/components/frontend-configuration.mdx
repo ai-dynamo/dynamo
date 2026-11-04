@@ -1012,6 +1012,28 @@ are disabled by default. Truthy values are `1`, `true`, `yes`, or `on`, case-ins
   these endpoints do not use `x-tenant-id` or `x-dynamo-*` routing headers in either mode.
 </ParamField>
 
+### Media refusal for text-only models
+
+A frontend that serves text-only models can refuse media before routing. A refused request never reaches a worker, and a streaming client receives the HTTP status instead of a `200` followed by an error event. Readiness checks on the OpenAI endpoints still take precedence.
+
+<ParamField path="--reject-media" type="boolean" default="false">
+  Refuse media in any message, including earlier turns, before conversion or routing:
+
+  - `/v1/chat/completions`: image, video, and audio URL parts, plus inline `input_audio`.
+  - `/v1/responses`: `input_image` parts, including `file_id` references, system/developer messages, assistant history, and function-call outputs. Audio and video input parts are not accepted by the Responses request schema.
+  - `/v1/messages`: image blocks with base64 or URL sources, including images inside `tool_result` content.
+
+  Refusals are counted with `error_type="unsupported_modality"` on `dynamo_frontend_requests_total`, apart from validation and overload errors.
+
+  Environment variable: `DYN_REJECT_MEDIA`
+</ParamField>
+
+<ParamField path="--reject-media-status-code" type="integer" default="415">
+  HTTP status for a request refused by `--reject-media`. Only 4xx and 5xx values are accepted. Set it to a status an upstream gateway fails over on, for example `429`, to have that gateway send media requests to a multimodal model.
+
+  Environment variable: `DYN_REJECT_MEDIA_STATUS_CODE`
+</ParamField>
+
 ### Endpoint path customization
 
 All endpoint paths can be overridden via environment variables:
