@@ -451,6 +451,8 @@ where
     let py_context = if engine.has_context {
         Some(
             Context::new(ctx.clone(), current_trace_context, None, metadata)
+                .with_ttft_from(&context)
+                .map_err(anyhow::Error::msg)?
                 .with_session_affinity_from(&context)
                 .map_err(anyhow::Error::msg)?,
         )

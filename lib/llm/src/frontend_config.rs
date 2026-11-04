@@ -18,6 +18,45 @@ use dynamo_runtime::config::{
 
 use crate::reasoning_field::ReasoningField;
 
+/// Optional exclusive TTFT diagnostics. Parsed at service startup, never per stage.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TtftDetail {
+    Off,
+    #[default]
+    Metrics,
+    Logs,
+    Both,
+}
+
+impl std::str::FromStr for TtftDetail {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "off" => Ok(Self::Off),
+            "metrics" => Ok(Self::Metrics),
+            "logs" => Ok(Self::Logs),
+            "both" => Ok(Self::Both),
+            _ => Err("DYN_FRONTEND_TTFT_DETAIL must be off, metrics, logs, or both"),
+        }
+    }
+}
+
+impl TtftDetail {
+    pub fn from_env() -> Self {
+        std::env::var(env_llm::DYN_FRONTEND_TTFT_DETAIL)
+            .map(|value| value.parse().expect("invalid DYN_FRONTEND_TTFT_DETAIL"))
+            .unwrap_or_default()
+    }
+
+    pub fn metrics(self) -> bool {
+        matches!(self, Self::Metrics | Self::Both)
+    }
+
+    pub fn logs(self) -> bool {
+        matches!(self, Self::Logs | Self::Both)
+    }
+}
 /// Process-wide strict-schema policy, initialized before the HTTP service accepts requests.
 pub(crate) static DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION: LazyLock<bool> =
     LazyLock::new(|| env_is_truthy(env_llm::DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION));
@@ -31,11 +70,23 @@ pub(crate) static DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION: LazyLock<bool> =
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetricsConfig {
     prefix: Option<String>,
+    /// None defers the environment fallback to HTTP metrics initialization.
+    pub ttft_detail: Option<TtftDetail>,
 }
 
 impl MetricsConfig {
     pub fn new(prefix: Option<String>) -> Self {
-        Self { prefix }
+        Self {
+            prefix,
+            ttft_detail: None,
+        }
+    }
+
+    pub fn with_ttft_detail(prefix: Option<String>, ttft_detail: TtftDetail) -> Self {
+        Self {
+            prefix,
+            ttft_detail: Some(ttft_detail),
+        }
     }
 
     pub fn prefix(&self) -> Option<String> {
@@ -51,6 +102,7 @@ impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
             prefix: std::env::var(env_metrics::DYN_METRICS_PREFIX).ok(),
+            ttft_detail: None,
         }
     }
 }

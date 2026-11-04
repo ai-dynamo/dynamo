@@ -63,6 +63,54 @@ For example, keep the default at `info` and enable trace output for the system-s
 export DYN_LOG='info,dynamo_runtime::system_status_server=trace'
 ```
 
+## Per-Request First-Token Log
+
+When enabled, the frontend emits one DEBUG event for each HTTP chat or text completion request when
+it first observes a nonzero output token count. The target is `dynamo_frontend::ttft` and the message is
+`frontend first token`. Requests that end, fail, or are canceled before that observation do not
+emit the event. Later tokens do not emit additional TTFT events.
+
+The event contains the canonical HTTP context `request_id`, `model`, `ttft_ms`, and numeric stage
+durations in milliseconds for every legal stage/phase pair. Field names use `<stage>_ms` for an
+empty phase and `<stage>_<phase>_ms` otherwise, such as `structural_tag_build_ms`,
+`template_render_ms`, `tokenize_ms`, `dispatch_prepare_prefill_ms`, `dispatch_decode_ms`, and
+`backend_overlap_prefill_decode_ms`. All stage/phase combinations are present, including zeros for
+unused stages. In `both` mode these frozen values match the
+[TTFT stage histogram](metrics-catalog.mdx#ttft-stage-durations), and their sum equals `ttft_ms`,
+subject to floating-point rounding.
+
+The event also includes `quality` (`complete`, `coarse`, or `degraded`), `degraded_reason`,
+`coarse_reason`, and `unexpected_overlap`. Reason fields contain fixed diagnostic values or an
+empty value when absent. A degraded result places all time in `unclassified_ms`. The event does
+not contain prompt text, tool schemas, or per-span payloads.
+
+Detail collection defaults to `metrics`, which emits no per-request event even at global DEBUG.
+To enable events alongside metrics while keeping other logs at INFO, set both the detail mode and
+log target before starting the frontend:
+
+```bash
+export DYN_FRONTEND_TTFT_DETAIL=both
+export DYN_LOG='info,dynamo_frontend::ttft=debug'
+```
+
+Use `logs` instead of `both` to emit events without detail histograms. With
+`logs` or `both` selected, a global DEBUG or TRACE level also enables these events. To disable them while retaining other
+DEBUG logs, set:
+
+```bash
+export DYN_LOG='debug,dynamo_frontend::ttft=off'
+```
+
+With `logs` and a disabled target, no detail timeline is collected. With `metrics` or `both`,
+metrics remain independent of the filter. With `off`, no detail metrics or events are emitted,
+even at DEBUG. Existing total TTFT and other metrics remain enabled in every mode.
+
+Set `DYN_LOGGING_CONSOLE_FORMAT=jsonl` for machine-readable records; duration fields remain JSON
+numbers. Readable and JSONL formats use the same filters. TOML `log_filters` entries are applied
+after `DYN_LOG`, so an entry for the same target overrides the environment directive. The file
+selected by `DYN_LOGGING_CONFIG_PATH` overrides matching entries in `/opt/dynamo/etc/logging.toml`.
+More specific target filters take precedence over broader prefixes.
+
 ## OTLP Export
 
 `OTEL_EXPORT_ENABLED=true` is the master switch for runtime trace and log export. Configure a

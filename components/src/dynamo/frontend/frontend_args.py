@@ -201,6 +201,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     model_name: Optional[str]
     model_path: Optional[str]
     metrics_prefix: Optional[str] = None
+    ttft_detail: str = "metrics"
 
     kserve_grpc_server: bool
     grpc_metrics_port: int
@@ -228,6 +229,9 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens", "basetenkenizer"}
 
     def validate(self) -> None:
+        if self.ttft_detail not in {"off", "metrics", "logs", "both"}:
+            raise ValueError("--ttft-detail must be off, metrics, logs, or both")
+
         if self.preprocess_workers is None:
             self.preprocess_workers = (
                 _default_sglang_preprocess_workers()
@@ -647,6 +651,14 @@ class FrontendArgGroup(ArgGroup):
             help="Path to model directory on disk (e.g., /tmp/model_cache/llama3.2_1B/)",
             arg_type=validate_model_path if self.env is None else str,
             env=self.env,
+        )
+        add_argument(
+            g,
+            flag_name="--ttft-detail",
+            env_var="DYN_FRONTEND_TTFT_DETAIL",
+            default="metrics",
+            choices=["off", "metrics", "logs", "both"],
+            help="Exclusive TTFT detail; logs also require dynamo_frontend::ttft=debug in DYN_LOG.",
         )
         add_argument(
             g,

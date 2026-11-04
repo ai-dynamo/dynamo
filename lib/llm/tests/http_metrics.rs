@@ -10,12 +10,14 @@ use dynamo_llm::{
     preprocessor::LLMMetricAnnotation,
     protocols::{
         Annotated,
+        common::ttft::TtftStage,
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
         },
         openai::completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
+use dynamo_runtime::config::environment_names::llm::DYN_FRONTEND_TTFT_DETAIL;
 use dynamo_runtime::metrics::prometheus_names::frontend_service::METRICS_PREFIX_ENV;
 use dynamo_runtime::{
     CancellationToken,
@@ -737,6 +739,89 @@ async fn test_unknown_model_uses_sentinel_label() {
     .await;
 }
 
+/// Read only the fixed test labels; no user-provided strings or escaped label
+/// values are involved. Matching a set avoids depending on exposition order.
+fn metric_sample(body: &str, name: &str, expected_labels: &[(&str, &str)]) -> f64 {
+    let expected_labels: Vec<_> = expected_labels
+        .iter()
+        .map(|(name, value)| format!("{name}=\"{value}\""))
+        .collect();
+    let samples: Vec<f64> = body
+        .lines()
+        .filter_map(|line| {
+            let (labels, value) = line
+                .strip_prefix(name)?
+                .strip_prefix('{')?
+                .split_once("} ")?;
+            let labels: Vec<_> = labels.split(',').collect();
+            (labels.len() == expected_labels.len()
+                && expected_labels
+                    .iter()
+                    .all(|label| labels.contains(&label.as_str())))
+            .then(|| value.parse().expect("metric sample must be numeric"))
+        })
+        .collect();
+    assert_eq!(
+        samples.len(),
+        1,
+        "expected one {name}{expected_labels:?} sample"
+    );
+    assert!(samples[0].is_finite(), "metric sample must be finite");
+    samples[0]
+}
+
+/// The default detail view must use the same first-token cohort as total TTFT,
+/// including stages this mock engine never visits. Return the frozen sums so
+/// the caller also checks that later chunks do not change the observation.
+fn assert_ttft_detail_cohort(body: &str) -> (f64, Vec<f64>) {
+    let model_labels = [("model", "gatedmodel")];
+    assert_eq!(
+        metric_sample(
+            body,
+            "dynamo_frontend_time_to_first_token_seconds_count",
+            &model_labels
+        ),
+        1.0
+    );
+    let total = metric_sample(
+        body,
+        "dynamo_frontend_time_to_first_token_seconds_sum",
+        &model_labels,
+    );
+    let mut contributions = Vec::with_capacity(TtftStage::ALL.len());
+    for stage in TtftStage::ALL {
+        let [stage, phase] = stage.labels();
+        let labels = [("model", "gatedmodel"), ("stage", stage), ("phase", phase)];
+        assert_eq!(
+            metric_sample(body, "dynamo_frontend_ttft_stage_seconds_count", &labels),
+            1.0
+        );
+        contributions.push(metric_sample(
+            body,
+            "dynamo_frontend_ttft_stage_seconds_sum",
+            &labels,
+        ));
+    }
+    let series = body
+        .lines()
+        .filter(|line| {
+            line.starts_with("dynamo_frontend_ttft_stage_seconds_count{")
+                && line.contains("model=\"gatedmodel\"")
+        })
+        .count();
+    assert_eq!(
+        series,
+        TtftStage::ALL.len(),
+        "only canonical stage/phase pairs are exported"
+    );
+    let sum: f64 = contributions.iter().sum();
+    assert!(
+        (sum - total).abs() <= 1e-9 + total.abs() * 1e-12,
+        "exclusive contributions {sum} must sum to total TTFT {total}"
+    );
+    (total, contributions)
+}
+
 /// #11349: a non-streaming handler must observe metrics before the
 /// backend-error preflight. The preflight buffers leading data-less
 /// annotation frames until the first data-bearing event, so an observer
@@ -753,7 +838,11 @@ async fn assert_non_streaming_observes_metrics_before_preflight(
     path: &str,
     request: serde_json::Value,
 ) {
-    temp_env::async_with_vars([(METRICS_PREFIX_ENV, None::<&str>)], async {
+    let vars = [
+        (METRICS_PREFIX_ENV, None::<&str>),
+        (DYN_FRONTEND_TTFT_DETAIL, None::<&str>),
+    ];
+    temp_env::async_with_vars(vars, async {
         let (listener, port) = bind_random_port().await;
         let service = HttpService::builder()
             .port(port)
@@ -822,6 +911,9 @@ async fn assert_non_streaming_observes_metrics_before_preflight(
                 .unwrap();
         }
 
+        // This data-less frame reports a real output token, so both total and
+        // detailed TTFT settle here, before the held content is released.
+        let first_token_details = assert_ttft_detail_cohort(&metrics_body);
         gate.notify_one();
 
         let response = request_task.await.unwrap().unwrap();
@@ -877,6 +969,11 @@ async fn assert_non_streaming_observes_metrics_before_preflight(
                 needle.trim_end()
             );
         }
+
+        assert_eq!(
+            assert_ttft_detail_cohort(&metrics_body),
+            first_token_details
+        );
 
         cancel_token.cancel();
         task.await.unwrap().unwrap();

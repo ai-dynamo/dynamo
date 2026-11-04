@@ -210,8 +210,7 @@ impl RoutingHost {
         }
         self.validate_explicit_worker(request.content(), phase)?;
 
-        let phase_label = phase.to_string();
-        let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
+        let route_guard = start_route(request, phase);
         let (outcome, _) = self
             .select_with_session_affinity(request, phase, true, &budget, |target| {
                 self.select_request_outcome(
@@ -258,8 +257,7 @@ impl RoutingHost {
             self.validate_explicit_worker(request.content(), phase)?;
         }
 
-        let phase_label = phase.to_string();
-        let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
+        let route_guard = start_route(request, phase);
         let select = || {
             self.select_with_session_affinity(request, phase, false, &budget, |target| {
                 let budget = &budget;
@@ -281,8 +279,9 @@ impl RoutingHost {
         let (mut selection, affinity) = self
             .select_with_request_lifecycle(request, phase, select)
             .await?;
-        drop(route_guard);
+        let dispatch_prepare = route_selection_finished(route_guard, request, phase);
         Ok(RoutePlan {
+            dispatch_prepare,
             phase,
             cleanup: KvRequestCleanup::new(
                 Arc::clone(self.kv_router()),
@@ -330,13 +329,28 @@ impl RoutingHost {
             cleanup,
             affinity,
             budget,
+            dispatch_prepare,
             ..
         } = plan;
+        drop(dispatch_prepare);
+        let ttft_route = request
+            .ttft_timings()
+            .map(|timings| timings.start_span(route_stage(phase)));
         let guard = self
             .track_planned_selection(&request, &mut selection, phase, cleanup, &budget)
             .await?;
-        self.dispatch_selection(request, selection, phase, guard, &budget, affinity)
-            .await
+        drop(ttft_route);
+        let dispatch_prepare = start_dispatch_prepare(&request, phase);
+        self.dispatch_selection(
+            request,
+            selection,
+            phase,
+            guard,
+            &budget,
+            affinity,
+            dispatch_prepare,
+        )
+        .await
     }
 
     pub(crate) async fn prefill_worker_busy(
@@ -505,6 +519,7 @@ impl RoutingHost {
     /// guard. On success the session-affinity hold, if any, is committed to the
     /// worker and its lease moves into the guard; a failed send under hard
     /// affinity invalidates a hold whose target is no longer valid.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn dispatch_selection(
         &self,
         request: SingleIn<PreprocessedRequest>,
@@ -513,6 +528,7 @@ impl RoutingHost {
         mut guard: RequestGuard,
         budget: &CleanupBudget,
         affinity: Option<Hold>,
+        dispatch_prepare: Option<TtftSpan>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let context_id = request.context().id().to_string();
         let request_context = request.context().clone();
@@ -526,6 +542,7 @@ impl RoutingHost {
         backend_input.routing_mut().dp_rank = Some(selection.worker.dp_rank);
         backend_input.kv_hint = selection.kv_hint;
         let updated_request = context.map(|_| backend_input);
+        drop(dispatch_prepare);
         guard.begin_dispatch(&phase_label, updated_request.content());
 
         let dispatch = self

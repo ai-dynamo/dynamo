@@ -16,7 +16,6 @@ use dynamo_kv_router::{
 };
 use dynamo_runtime::{
     error::{DynamoError, ErrorType, match_error_chain},
-    metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
     pipeline::{
         AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
         ResponseStream, SingleIn, async_trait,
@@ -40,8 +39,10 @@ use crate::{
         FinishReason,
         extensions::SessionAffinityId,
         llm_backend::LLMEngineOutput,
+        observation::StageObservation,
         preprocessor::owned_abort_error,
         timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
+        ttft::{TtftSpan, TtftStage},
     },
     session_affinity::{
         AffinityCoordinator, AffinityTarget, Hold, SessionAffinityMode, affinity_id,
@@ -331,6 +332,7 @@ pub(crate) struct RoutePlan {
     selection: WorkerSelection,
     cleanup: KvRequestCleanup,
     affinity: Option<Hold>,
+    dispatch_prepare: Option<TtftSpan>,
     /// Carried forward from the [`RoutePreview`] this plan was admitted from, so
     /// preview, admission and dispatch draw on one budget instead of three.
     budget: CleanupBudget,
@@ -389,6 +391,7 @@ impl RoutePlan {
     /// Give the route up before dispatch: abort the classifier lifecycle with
     /// `error` as its cause, release the booking, and drop the affinity hold.
     pub(crate) async fn abort(mut self, error: Option<&Error>) {
+        self.dispatch_prepare.take();
         if let Some(mut lifecycle) = self.selection.request_lifecycle.take() {
             lifecycle.abort(error.map(|error| owned_abort_error(error.as_ref())));
         }
@@ -764,8 +767,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
         let phase = request.phase();
         if is_query_only {
-            let phase_label = phase.to_string();
-            let _route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
+            let _route_guard = start_route(&request, phase);
             let (selection, _) = self
                 .select_with_affinity(&request, phase, true, &budget)
                 .await?;
@@ -813,6 +815,35 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let plan = self.plan_kv_route(&request, phase, None, budget).await?;
         self.dispatch_kv_plan(request, plan).await
     }
+}
+
+/// Observe selection in both the pipeline metrics and the TTFT timeline.
+fn start_route(request: &PreprocessedRequest, phase: RequestPhase) -> StageObservation {
+    StageObservation::new(route_stage(phase), request.ttft_timings())
+}
+
+fn route_stage(phase: RequestPhase) -> TtftStage {
+    match phase {
+        RequestPhase::Prefill => TtftStage::RoutePrefill,
+        RequestPhase::Decode => TtftStage::RouteDecode,
+        RequestPhase::Aggregated => TtftStage::RouteAggregated,
+    }
+}
+
+fn route_selection_finished(
+    route: StageObservation,
+    request: &PreprocessedRequest,
+    phase: RequestPhase,
+) -> Option<TtftSpan> {
+    drop(route);
+    start_dispatch_prepare(request, phase)
+}
+
+fn start_dispatch_prepare(request: &PreprocessedRequest, phase: RequestPhase) -> Option<TtftSpan> {
+    let stage = route_stage(phase).dispatch_prepare()?;
+    request
+        .ttft_timings()
+        .map(|timings| timings.start_span(stage))
 }
 
 enum ResponseItemOutcome {

@@ -167,6 +167,7 @@ async fn builtin_host_constructs_only_declared_capabilities() {
         Some(selection.reservation),
         None,
         &request(),
+        RequestPhase::Aggregated,
     );
     assert_eq!(guard.retarget_worker(1), Some(1));
     guard.abort(None).await;
@@ -2061,6 +2062,7 @@ async fn kv_cancellation_after_admission_still_stops_the_aggregated_dispatch() {
             guard,
             &CleanupBudget::default(),
             None,
+            None,
         )
         .await
         .expect_err("aggregated dispatch must still be cancelled before it is issued");
@@ -2973,6 +2975,7 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
                 failed_dispatch_guard,
                 &CleanupBudget::default(),
                 None,
+                None,
             )
             .await
             .is_err()
@@ -2989,8 +2992,14 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
     assert_eq!(metrics.requests_started_total.get(), 3);
     assert_eq!(metrics.requests_total.get(), 1);
 
-    let mut builtin_guard =
-        RequestGuard::new_builtin(Arc::clone(&metrics), 7, None, None, &request());
+    let mut builtin_guard = RequestGuard::new_builtin(
+        Arc::clone(&metrics),
+        7,
+        None,
+        None,
+        &request(),
+        RequestPhase::Aggregated,
+    );
     assert_eq!(metrics.requests_started_total.get(), 4);
     builtin_guard.abort(None).await;
     drop(builtin_guard);
@@ -4916,6 +4925,33 @@ async fn hard_parent_group_recovers_when_the_bound_worker_leaves() {
     runtime.shutdown();
 }
 
+#[test]
+fn ttft_route_selection_transitions_to_dispatch_preparation() {
+    use crate::protocols::common::ttft::TtftTimings;
+
+    let start = Instant::now();
+    let timeline = Arc::new(TtftTimings::new(start));
+    let mut timed_request = request();
+    timed_request.ttft = Some(timeline.clone());
+    let route_guard = start_route(&timed_request, RequestPhase::Decode);
+    let preparation = route_selection_finished(route_guard, &timed_request, RequestPhase::Decode);
+    let preparation_started = Instant::now();
+    // Preparation wins over a concurrent backend interval in the exclusive view.
+    let _dispatch = timeline.start_span(TtftStage::BackendDecode);
+    let end = preparation_started + Duration::from_secs(1);
+    let stages = timeline.finish(end);
+    assert!(stages[TtftStage::DispatchPrepareDecode as usize] >= Duration::from_secs(1));
+    assert_eq!(stages[TtftStage::BackendDecode as usize], Duration::ZERO);
+    assert!(stages[TtftStage::RouteDecode as usize] <= preparation_started - start);
+    assert_eq!(stages.iter().sum::<Duration>(), end - start);
+    drop(preparation);
+    assert_eq!(timeline.finish(end + Duration::from_secs(1)), stages);
+
+    let untimed_request = request();
+    let route = start_route(&untimed_request, RequestPhase::Decode);
+    assert!(route_selection_finished(route, &untimed_request, RequestPhase::Decode).is_none());
+}
+
 /// A prefill `prepare` failure gives the booking back before a guard exists, so
 /// the request never counts as started and leaves no load behind.
 #[tokio::test]
@@ -5048,6 +5084,52 @@ async fn committed_session_lease_lives_as_long_as_the_response_stream() {
     );
     tokio::time::sleep(ttl + Duration::from_millis(300)).await;
     assert_eq!(affinity.query_target(&session_id, None).unwrap(), None);
+    drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn aborted_prefill_plan_closes_preparation_before_decode_retry() {
+    use crate::protocols::common::ttft::TtftTimings;
+
+    let (router, runtime) = router(None).await;
+    let start = Instant::now();
+    let timeline = Arc::new(TtftTimings::new(start));
+    let mut timed_request = request();
+    assert_ne!(timed_request.phase(), RequestPhase::Prefill);
+    timed_request.ttft = Some(timeline.clone());
+    let request = Context::new(timed_request);
+    let plan = router
+        .plan_kv_route(
+            &request,
+            RequestPhase::Prefill,
+            None,
+            CleanupBudget::default(),
+        )
+        .await
+        .unwrap();
+    plan.abort(None).await;
+
+    let _retry_backend = timeline.start_span(TtftStage::BackendDecode);
+    let end = Instant::now() + Duration::from_secs(1);
+    let stages = timeline.finish(end);
+    assert!(stages[TtftStage::DispatchPreparePrefill as usize] > Duration::ZERO);
+    assert_eq!(
+        stages[TtftStage::DispatchPrepareAggregated as usize],
+        Duration::ZERO
+    );
+    assert_eq!(
+        stages[TtftStage::DispatchPrepareDecode as usize],
+        Duration::ZERO
+    );
+    assert!(stages[TtftStage::BackendDecode as usize] >= Duration::from_secs(1));
+    assert_eq!(stages.iter().sum::<Duration>(), end - start);
+    assert_eq!(
+        active_requests_for(&potential_loads(&router).await, 7, 0),
+        0
+    );
+    assert_eq!(router.request_metrics.requests_started_total.get(), 0);
     drop(router);
     runtime.shutdown();
 }

@@ -222,3 +222,27 @@ def test_cgroup_v1_uses_ancestor_quota(
     )
 
     assert frontend_args._cpu_quota_count() == 1
+
+
+@pytest.mark.parametrize("mode", ["off", "metrics", "logs", "both"])
+def test_ttft_detail_env_and_explicit_cli_precedence(monkeypatch, mode):
+    monkeypatch.setenv("DYN_FRONTEND_TTFT_DETAIL", mode)
+    assert parse_frontend_config([]).ttft_detail == mode
+    assert parse_frontend_config(["--ttft-detail", "off"]).ttft_detail == "off"
+
+
+def test_ttft_detail_defaults_metrics(monkeypatch):
+    monkeypatch.delenv("DYN_FRONTEND_TTFT_DETAIL", raising=False)
+    assert parse_frontend_config([]).ttft_detail == "metrics"
+
+
+def test_ttft_detail_rejects_invalid_mode(monkeypatch):
+    monkeypatch.delenv("DYN_FRONTEND_TTFT_DETAIL", raising=False)
+    with pytest.raises(SystemExit):
+        parse_frontend_config(["--ttft-detail", "invalid"])
+
+
+def test_ttft_detail_rejects_invalid_environment(monkeypatch):
+    monkeypatch.setenv("DYN_FRONTEND_TTFT_DETAIL", "invalid")
+    with pytest.raises(ValueError, match="ttft-detail"):
+        parse_frontend_config([])

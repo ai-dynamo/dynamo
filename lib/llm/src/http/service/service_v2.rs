@@ -677,7 +677,7 @@ impl State {
         );
         Self {
             manager,
-            metrics: Arc::new(Metrics::new_with_prefix(config.metrics_config.prefix())),
+            metrics: Arc::new(Metrics::with_config(&config.metrics_config)),
             discovery_client,
             service_observer: Arc::new(ServiceObserver::default()),
             nvext_enabled: config.nvext_enabled,
