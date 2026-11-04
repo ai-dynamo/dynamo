@@ -27,7 +27,9 @@ you to.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
-| Kubernetes multinode tensor parallelism (TP) and hybrid load balancing (hybrid-LB) data parallelism (DP) | Experimental |
+| Kubernetes multinode tensor parallelism (TP) and hybrid load balancing (hybrid-LB) data parallelism (DP) | Yes |
+
+See [support notes](../SUPPORT_NOTES.md#vllm) for feature restrictions and operational limits.
 
 ## Run locally
 

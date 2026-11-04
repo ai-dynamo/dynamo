@@ -465,6 +465,10 @@ pub(crate) fn find_invalid_argument_in_chain<'a>(
     None
 }
 
+pub(super) fn error_is_invalid_argument(err: &(dyn std::error::Error + 'static)) -> bool {
+    find_invalid_argument_in_chain(err).is_some()
+}
+
 fn find_queue_rejection_in_chain<'a>(
     err: &'a (dyn std::error::Error + 'static),
 ) -> Option<&'a dynamo_kv_router::scheduling::QueueRejection> {
@@ -577,6 +581,23 @@ impl ErrorMessage {
                 code: code.as_u16(),
                 details: None,
                 metric_error_type: Some(ErrorType::Cancelled),
+            }),
+        )
+    }
+
+    /// Invalid request (400). Recorded as an `InvalidRequest` local failure,
+    /// like the other client-error constructors.
+    pub fn bad_request<T: Display>(msg: T) -> ErrorResponse {
+        let code = StatusCode::BAD_REQUEST;
+        record_local_failure(ErrorClass::InvalidRequest);
+        (
+            code,
+            Json(ErrorMessage {
+                message: msg.to_string(),
+                error_type: bad_request_error_type(),
+                code: code.as_u16(),
+                details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -2717,7 +2738,7 @@ fn unsupported_media_type_error() -> ErrorResponse {
 
 /// Returns the standard error response for a request body that exceeds the
 /// configured size limit.
-fn payload_too_large_error() -> ErrorResponse {
+pub(super) fn payload_too_large_error() -> ErrorResponse {
     ErrorMessage::from_http_error(
         ErrorClass::PayloadTooLarge,
         HttpError {
@@ -3834,6 +3855,7 @@ async fn chat_completions(
             stream_handle,
             activity_rx,
             error_signal,
+            true,
         );
         let terminal = terminal.clone();
         // Arm the cancellation fallback before Axum can take ownership of the
@@ -6715,8 +6737,9 @@ mod tests {
         headers.insert("x-dynamo-parent-session-id", "parent-456".parse().unwrap());
         headers.insert("x-dynamo-session-final", "true".parse().unwrap());
         let context =
-            preprocessed_context_from_headers(request(), "request-1".to_string(), &headers)
-                .unwrap();
+            preprocessed_context_from_headers(request(), "request-123".into(), &headers).unwrap();
+
+        assert_eq!(context.id(), "request-123");
 
         // The router reads the request field; the context key must carry the same identity.
         let on_request = context
@@ -6742,12 +6765,10 @@ mod tests {
             "session affinity still keyed from the same headers"
         );
 
-        let context = preprocessed_context_from_headers(
-            request(),
-            "request-2".to_string(),
-            &HeaderMap::new(),
-        )
-        .unwrap();
+        let context =
+            preprocessed_context_from_headers(request(), "request-456".into(), &HeaderMap::new())
+                .unwrap();
+        assert_eq!(context.id(), "request-456");
         assert!(context.content().agent_context.is_none());
     }
 
