@@ -33,7 +33,12 @@ pytest.importorskip(
 )
 
 from dynamo.common.configuration.groups.kv_router_args import _KV_ROUTER_FIELDS
-from dynamo.frontend.frontend_args import FrontendArgGroup, FrontendConfig
+from dynamo.common.configuration.groups.router_args import parse_worker_router_config
+from dynamo.frontend.frontend_args import (
+    FrontendArgGroup,
+    FrontendConfig,
+    build_frontend_parser,
+)
 from dynamo.llm import KvRouterConfig
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.retune.live import frontend_config as fc
@@ -797,6 +802,38 @@ def test_invalid_router_config_is_unparseable(args, env, match):
 # ------------------------------------------------------ parser fidelity
 
 
+D2P_ROUTER_VALUES = {
+    "enable_decode_to_prefill_reuse": True,
+    "enable_decode_to_prefill_gpu_reuse": True,
+    "transfer_source_lookup_budget_ms": 12,
+    "minimum_transfer_prefix_blocks": 4,
+    "minimum_estimated_ttft_saving_ms": 2.5,
+    "transfer_source_estimated_block_us": 20.0,
+    "transfer_source_gpu_estimated_block_us": 8.0,
+    "transfer_source_prefill_token_us": 3.0,
+}
+D2P_ROUTER_ARGS = (
+    "--router-decode-to-prefill-reuse",
+    "--router-decode-to-prefill-gpu-reuse",
+    "--router-transfer-source-lookup-budget-ms=12",
+    "--router-minimum-transfer-prefix-blocks=4",
+    "--router-minimum-estimated-ttft-saving-ms=2.5",
+    "--router-transfer-source-estimated-block-us=20",
+    "--router-transfer-source-gpu-estimated-block-us=8",
+    "--router-transfer-source-prefill-token-us=3",
+)
+D2P_ROUTER_ENV = {
+    "DYN_ROUTER_DECODE_TO_PREFILL_REUSE": "1",
+    "DYN_ROUTER_DECODE_TO_PREFILL_GPU_REUSE": "1",
+    "DYN_ROUTER_TRANSFER_SOURCE_LOOKUP_BUDGET_MS": "12",
+    "DYN_ROUTER_MINIMUM_TRANSFER_PREFIX_BLOCKS": "4",
+    "DYN_ROUTER_MINIMUM_ESTIMATED_TTFT_SAVING_MS": "2.5",
+    "DYN_ROUTER_TRANSFER_SOURCE_ESTIMATED_BLOCK_US": "20",
+    "DYN_ROUTER_TRANSFER_SOURCE_GPU_ESTIMATED_BLOCK_US": "8",
+    "DYN_ROUTER_TRANSFER_SOURCE_PREFILL_TOKEN_US": "3",
+}
+
+
 GOLDEN_CASES = [
     ((*KV_ARGS,), {}),
     ((*KV_ARGS, "--router-temperature", "0.5", "--router-replica-sync"), {}),
@@ -856,6 +893,40 @@ def test_matches_real_frontend_parser(monkeypatch, args, env):
     assert startup.router_mode == fc._router_mode(config.router_mode)
 
 
+@pytest.mark.parametrize("source", ["cli", "env"])
+def test_decode_to_prefill_frontend_roundtrip_remains_unmodeled(monkeypatch, source):
+    for name in list(os.environ):
+        if name.startswith("DYN_"):
+            monkeypatch.delenv(name)
+    for name in D2P_ROUTER_ENV:
+        monkeypatch.setenv(name, "0" if name.endswith("REUSE") else "99")
+    args = (*KV_ARGS, *D2P_ROUTER_ARGS) if source == "cli" else KV_ARGS
+    env = D2P_ROUTER_ENV if source == "env" else {}
+    parser, _ = build_frontend_parser(env)
+    namespace, unknown = parser.parse_known_args(list(args[2:]))
+    assert unknown == []
+    config = FrontendConfig.from_cli_args(namespace)
+    kwargs = config.kv_router_kwargs()
+    assert {name: kwargs[name] for name in D2P_ROUTER_VALUES} == D2P_ROUTER_VALUES
+    expected = json.loads(KvRouterConfig(**kwargs).to_json())
+
+    deployment = with_frontend(args=args, env=trace_env(**env))
+    startup = parse(deployment)
+    assert startup.router_config == D2P_ROUTER_VALUES
+    assert (
+        json.loads(
+            KvRouterConfig.from_json(json.dumps(startup.router_config)).to_json()
+        )
+        == expected
+    )
+
+    report = evaluate(deployment)
+    assert not report.p4_ok and not report.spec_ok
+    rejected = reasons_matching(report, "P4:")
+    for name, value in D2P_ROUTER_VALUES.items():
+        assert any(f"{name}={value!r}" in reason for reason in rejected), report.reasons
+
+
 def test_router_fields_are_all_covered():
     """Every frontend router field is in the JSON or checked on the flags."""
 
@@ -874,14 +945,7 @@ def test_router_fields_are_all_covered():
                 conditional_disagg_eff_isl_ratio_threshold=0.5,
                 conditional_disagg_prefill_busy_threshold=0.5,
                 conditional_disagg_decode_busy_threshold=0.5,
-                enable_decode_to_prefill_reuse=True,
-                enable_decode_to_prefill_gpu_reuse=True,
-                transfer_source_lookup_budget_ms=12,
-                minimum_transfer_prefix_blocks=4,
-                minimum_estimated_ttft_saving_ms=2.5,
-                transfer_source_estimated_block_us=20.0,
-                transfer_source_gpu_estimated_block_us=8.0,
-                transfer_source_prefill_token_us=3.0,
+                **D2P_ROUTER_VALUES,
             ).to_json()
         )
     )
@@ -1969,10 +2033,6 @@ WORKER_GOLDEN_CASES = [
 def test_worker_router_mode_matches_the_real_worker_parser(monkeypatch, args, env):
     """Backends parse their left-over argv with parse_worker_router_config."""
 
-    from dynamo.common.configuration.groups.router_args import (
-        parse_worker_router_config,
-    )
-
     for name in list(os.environ):
         if name.startswith("DYN_"):
             monkeypatch.delenv(name)
@@ -1993,6 +2053,30 @@ def test_worker_router_mode_matches_the_real_worker_parser(monkeypatch, args, en
         assert any(
             f"router mode {config.router_mode!r}" in reason for reason in rejected
         ), rejected
+
+
+@pytest.mark.parametrize(
+    ("args", "diagnostic"),
+    [
+        (("--router-mode", "power-of-two"), "invalid choice: 'power-of-two'"),
+        (("--router-m", "kv"), "ambiguous option: --router-m"),
+    ],
+    ids=["removed-mode", "ambiguous-prefix"],
+)
+def test_invalid_worker_router_mode_fails_closed(monkeypatch, capsys, args, diagnostic):
+    for name in list(os.environ):
+        if name.startswith("DYN_"):
+            monkeypatch.delenv(name)
+    with pytest.raises(SystemExit) as error:
+        parse_worker_router_config([f"--model={MODEL}", *args])
+    assert error.value.code == 2
+    assert diagnostic in capsys.readouterr().err
+
+    report = evaluate(dgd(frontend(), router_worker(*args), planner()))
+    assert report.startup is not None
+    assert not report.p4_ok and not report.spec_ok
+    rejected = reasons_matching(report, "P4: worker component agg ")
+    assert any(diagnostic in reason for reason in rejected), report.reasons
 
 
 def test_worker_env_from_is_warned_once():

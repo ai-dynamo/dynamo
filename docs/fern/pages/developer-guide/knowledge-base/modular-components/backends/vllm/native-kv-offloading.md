@@ -119,6 +119,158 @@ The GPU and CPU copies then evict independently:
 Without this event wiring, offloading still works inside each worker, but the
 router treats CPU-resident prefixes as cache misses.
 
+## Retained GPU Decode-to-Prefill Reuse
+
+**Experimental.** `GPUOffloadingConnector` with `GPUOffloadingSpec` retains sealed
+KV blocks in a dedicated CUDA allocation. Decode-to-prefill reuse copies from
+the decode GPU allocation into a retained allocation on the prefill GPU through
+KVCR and NIXL CUDA IPC, including an opt-in multi-node NVLink (MNNVL) profile.
+Local model-cache stores and loads use device-to-device
+copies. CPU memory carries control messages and pointer/size descriptors; it
+does not hold KV payloads. Budget additional VRAM on both workers.
+
+The implementation requires one engine per role with the same valid tensor
+parallel size and identical raw cache layouts on the source and target. Each
+engine's TP group uses local multiprocessing, with data parallel size one and
+no pipeline or context parallelism. Transfers between different TP sizes and
+TP engines spanning multiple hosts are unsupported.
+The default transport uses same-host GPUs with working CUDA IPC between the
+source and target allocations. The MNNVL profile supports hosts in the same healthy
+NVLink fabric and clique. Canonical or replicated offload layouts, RDMA, CPU/disk payload
+pools and the versioned state-agent ingress are unsupported. Use the native
+worker event publisher and a compatible vLLM offloading/tiering API.
+
+For TP greater than one, set `gpu_rank_devices` to one explicit, distinct local
+CUDA device ordinal per rank, such as `[0, 1, 2, 3]` for TP4, in the connector's
+`kv_connector_extra_config`. Each
+worker imports only its own bank and verifies the physical GPU UUID. The
+`gpu_bytes_to_use` budget counts all rank banks together: a 2-GiB budget with
+TP4 allocates at most 512 MiB on each GPU. KVCR transfers all labeled rank parts
+in one operation, and ready inventory waits for every model worker to complete
+its stores. A TP-size compatibility suffix separates multi-rank inventory from
+TP1 and from other TP sizes;
+the certified base domain must still identify the exact model and raw layout.
+The local device count, VRAM budget and 64-KiB rank-manifest limit also apply.
+
+Use the following same-host TP1 `--kv-transfer-config` example. Replace the
+certified domain with the contract for your model and raw cache layout, and
+reserve a distinct control port for each engine on the host. Enable KV event
+publishing with `--kv-events-config` as in the CPU setup above.
+
+```json
+{
+  "kv_connector": "GPUOffloadingConnector",
+  "kv_connector_module_path": "kvbm.vllm_integration.gpu_offloading",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "spec_name": "GPUOffloadingSpec",
+    "spec_module_path": "kvbm.vllm_integration.gpu_offloading",
+    "gpu_bytes_to_use": 2147483648,
+    "offload_prompt_only": false,
+    "self_describing_kv_events": true,
+    "router_hint_transfer_domain": "certified-raw-layout-v1",
+    "secondary_tiers": [
+      {
+        "type": "GPUKVCRSecondaryTierManager",
+        "module_path": "kvbm.vllm_integration.gpu_offloading",
+        "compatibility_domain": "certified-raw-layout-v1",
+        "control_ports": [25123],
+        "router_capabilities": ["router_hint_gpu_direct"]
+      }
+    ]
+  }
+}
+```
+
+The tier requires exactly one integer control port and the exact GPU capability
+list shown above. Its `compatibility_domain` must match the connector's certified
+base domain. The tier's `module_path` is also required when the factory builds
+Prometheus metric definitions. For TP4, add `"gpu_rank_devices": [0, 1, 2, 3]`
+to the extra configuration and run both engines with tensor parallel size four.
+For another TP size, provide exactly one device ordinal for each rank.
+
+Leave `engine_id` unset so vLLM generates a fresh identity for each engine
+lifetime. If supplying it explicitly, use a fresh value for every process
+incarnation. An abrupt exit can leave retained-bank metadata under `TMPDIR`;
+startup rejects an existing bank directory rather than reclaiming uncertain
+native ownership. Automatic orphan recovery is unsupported. Remove leftover
+metadata only after all native peers have quiesced.
+
+On vLLM versions whose `MultiConnector` reconstructs statistics by connector
+name, register the out-of-tree connector in each application/engine process
+before statistics are reconstructed. A connector's `kv_connector_module_path`
+alone does not populate that process-local registry. Use vLLM's public factory
+API in the application bootstrap:
+
+```python
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+
+KVConnectorFactory.register_connector(
+    "GPUOffloadingConnector",
+    "kvbm.vllm_integration.gpu_offloading",
+    "GPUOffloadingConnector",
+)
+```
+
+Run this once per process. If the name is already registered, verify that
+`get_connector_class_by_name("GPUOffloadingConnector")` resolves to the same
+class; reject a conflicting registration. Spawned processes need the same
+bootstrap registration. Keep statistics enabled during validation.
+
+The retained tier publishes `gpu_direct` events and has an independent lifetime
+from the model's normal GPU cache. Model Device cache-clear events do not
+revoke retained inventory. Resetting the offloading connector removes its retained
+blocks and publishes removals. The router requires
+`router_hint_gpu_direct`, GPU source endpoints and a matching certified
+`router_hint_transfer_domain` before emitting `kv.fetch_gpu@1.0`. The domain is
+an operator-supplied layout contract, not automatic model compatibility proof.
+
+Upgrade event publishers, routers, indexers and other typed event consumers
+together before enabling this profile. Older `StorageTier` readers reject the
+new `gpu_direct` value; enabling the profile does not negotiate a downgrade to
+Device or CPU residency.
+
+With the default same-host profile, both workers require a native NIXL/UCX implementation of the strict
+`NIXL_UCX_CUDA_IPC_ONLY=1` policy with `UCX_TLS=cuda_ipc,posix,self` and actual
+CUDA memory support. A stock installation that rejects this profile is not
+compatible. See the [KVCR GPU endpoint contract](https://github.com/ai-dynamo/kvcr/blob/47671498897ef73d0dd5554b0e4c9ec21d9f3928/README.md#direct-gpu-memory-endpoints)
+for registration, dependency and lifetime requirements.
+
+### MNNVL Profile
+
+**Experimental.** Set `gpu_transport` to `"mnnvl"` in both the connector's
+`kv_connector_extra_config` and its `GPUKVCRSecondaryTierManager` entry under
+`secondary_tiers`. Set the tier's `ucx_tls` to
+`["cuda_ipc", "tcp", "self"]`. Keep `router_hint_transfer_domain` and the tier's
+`compatibility_domain` equal to the same certified base layout domain. Dynamo
+observes the assigned GPU's completed NVML fabric state and incorporates the
+cluster UUID and clique ID into the effective capability and inventory domain.
+Workers in another fabric or transport profile cannot use that inventory.
+
+The retained banks use physical CUDA VMM allocations with
+`CU_MEM_HANDLE_TYPE_FABRIC`. Torch aliases the allocation and retains its owner;
+local rank imports use FABRIC handles. Both endpoints need an accessible IMEX
+channel and a NIXL/UCX build with KVCR's additive MNNVL dependency patches.
+For Slurm sites using `switch/nvidia_imex`, reserve a shared channel for the job's
+segment. Sites supporting the unique-channel option can use
+`--segment=2 --network=unique-channel-per-segment` for a two-host test; propagate
+the job's private IMEX device namespace into every worker container.
+
+Do not set `NIXL_UCX_CUDA_IPC_ONLY=1` for this profile. KVCR applies the transport
+policy to its dedicated backend context: CUDA IPC FABRIC GPU RMA, TCP control
+messages, and no host-payload fallback. This leaves the separate vLLM
+prefill-to-decode backend's context unchanged. Ordinary CUDA malloc and managed
+allocations are rejected as retained MNNVL banks. Validate actual cross-host
+bytes, CUDA copy activity and quiescent teardown before measuring performance.
+
+Enable the separate GPU router option only after measuring its acquisition,
+transfer, onboarding and prefill costs. CPU coefficients do not qualify it.
+See [Decode-to-Prefill Reuse](../../router/configuration-and-tuning.md#decode-to-prefill-reuse)
+for selection behavior. Missing capabilities or inventory leave the normal
+request path available. A deadline does not cancel native DMA: uncertain source
+pins and target allocations remain retained until actual quiescence. The strict
+GPU profiles do not provide native peer-death recovery.
+
 ## Known Limitations
 
 - **Cache-salted requests are not routable through `STORAGE`-tier events.**
