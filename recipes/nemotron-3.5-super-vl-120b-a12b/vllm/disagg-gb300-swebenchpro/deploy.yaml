@@ -61,7 +61,7 @@ spec:
               resources:
                 requests:
                   cpu: '16'
-                  memory: 128Gi
+                  memory: 16Gi
     - name: PrefillWorker
       type: prefill
       replicas: 3

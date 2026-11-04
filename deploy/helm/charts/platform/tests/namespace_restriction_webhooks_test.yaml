@@ -12,6 +12,10 @@ tests:
     asserts:
       - hasDocuments:
           count: 2
+      - lengthEqual:
+          path: webhooks
+          count: 4
+        documentIndex: 0
       - notExists:
           path: webhooks[0].namespaceSelector
         documentIndex: 0
@@ -46,6 +50,10 @@ tests:
     asserts:
       - hasDocuments:
           count: 2
+      - lengthEqual:
+          path: webhooks
+          count: 4
+        documentIndex: 0
       - equal:
           path: webhooks[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
           value: "true"
@@ -78,6 +86,56 @@ tests:
           path: webhooks[3].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
           value: "true"
         documentIndex: 1
+
+  - it: registers Run admission only when the v1beta2 API is enabled
+    template: charts/dynamo-operator/templates/webhook-configuration.yaml
+    set:
+      dynamo-operator.dgdrV1Beta2.enabled: true
+    asserts:
+      - lengthEqual:
+          path: webhooks
+          count: 5
+        documentIndex: 0
+      - equal:
+          path: webhooks[4].name
+          value: vdynamographdeploymentrun.kb.io
+        documentIndex: 0
+      - equal:
+          path: webhooks[4].clientConfig.service.path
+          value: /validate-nvidia-com-v1beta2-dynamographdeploymentrun
+        documentIndex: 0
+      - equal:
+          path: webhooks[4].rules[0].apiVersions
+          value: [v1beta2]
+        documentIndex: 0
+      - equal:
+          path: webhooks[4].rules[0].resources
+          value: [dynamographdeploymentruns]
+        documentIndex: 0
+      - equal:
+          path: webhooks[4].rules[0].operations
+          value: [CREATE, UPDATE]
+        documentIndex: 0
+      - notExists:
+          path: webhooks[4].namespaceSelector
+        documentIndex: 0
+      - lengthEqual:
+          path: webhooks
+          count: 4
+        documentIndex: 1
+
+  - it: scopes Run admission to the configured namespace
+    template: charts/dynamo-operator/templates/webhook-configuration.yaml
+    set:
+      dynamo-operator.dgdrV1Beta2.enabled: true
+      dynamo-operator.namespaceRestriction.enabled: true
+      dynamo-operator.namespaceRestriction.targetNamespace: "true"
+      dynamo-operator.upgradeCRD: false
+    asserts:
+      - equal:
+          path: webhooks[4].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
+          value: "true"
+        documentIndex: 0
 
   - it: renders a webhook service for a namespace-restricted installation
     template: charts/dynamo-operator/templates/webhook-service.yaml
