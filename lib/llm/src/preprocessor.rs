@@ -3105,6 +3105,10 @@ impl OpenAIPreprocessor {
         )
     }
 
+    /// Assemble preprocessing state for the requested OpenAI surface.
+    ///
+    /// Embedding and completion constructors skip chat-parser validation while
+    /// preserving the deployment card's identity and decode defaults.
     fn new_with_parts_inner(
         mdc: ModelDeploymentCard,
         formatter: Arc<dyn OAIPromptFormatter>,
@@ -6118,6 +6122,10 @@ impl OpenAIPreprocessor {
         Ok(ToolProcessingRoute::LegacyJail(effective_tool_call_parser))
     }
 
+    /// Whether the worker contract proves that bare JSON starts in the answer phase.
+    ///
+    /// A request gate defers grammar activation only when `require_reasoning` is set.
+    /// Missing, malformed, or conflicting metadata is unknown and must keep parsing.
     fn json_grammar_is_immediate(
         config: &crate::local_model::runtime_config::ModelRuntimeConfig,
         require_reasoning: bool,
@@ -6145,6 +6153,10 @@ impl OpenAIPreprocessor {
         }
     }
 
+    /// Parse a standalone response stream without final preprocessing context.
+    ///
+    /// Conditional worker gates are treated as active. Discovered pipelines use
+    /// the internal entry point with their effective gate state and request tracker.
     pub fn postprocessor_parsing_stream<S>(
         &self,
         stream: S,
@@ -6179,6 +6191,10 @@ impl OpenAIPreprocessor {
         )
     }
 
+    /// Apply the selected parser route using final request and worker grammar timing.
+    ///
+    /// Resolve the decode worker after its first semantic chunk, then apply shared
+    /// response policies after either native JSON pass-through or parsing.
     fn postprocessor_parsing_stream_with_constraint<S>(
         &self,
         stream: S,
@@ -21636,6 +21652,7 @@ mod tests {
             video(2)
         ]));
     }
+    /// Retain raw metadata types so malformed contracts reach the production validator.
     fn glm_json_timing_config(
         native_gate: Option<serde_json::Value>,
         request_gate: Option<serde_json::Value>,
@@ -21664,6 +21681,7 @@ mod tests {
         config
     }
 
+    /// Build independently releasable payload and terminal chunks for ordering checks.
     fn glm_json_chunk(
         text: &str,
         terminal: bool,
@@ -21676,6 +21694,8 @@ mod tests {
         chunk
     }
 
+    /// Workers sharing a model identity can advertise opposite grammar timing;
+    /// parser initialization must follow the actual decode worker.
     #[tokio::test]
     async fn glm_json_stream_uses_the_selected_worker_contract() {
         use crate::protocols::common::timing::WORKER_TYPE_DECODE;
@@ -21900,6 +21920,8 @@ mod tests {
         }
     }
 
+    /// Prompt-prefilled reasoning can coexist with a disabled native gate when
+    /// only a tool selector is configured; use the final preprocessing decision.
     #[tokio::test]
     async fn glm_tool_only_json_uses_the_preprocessed_sglang_gate() {
         use crate::protocols::openai::GuidedToolConstraint;
@@ -21967,6 +21989,8 @@ mod tests {
         );
     }
 
+    /// Selecting a grammar policy must neither hold metadata behind the first
+    /// token nor expose queued content after a backend error.
     #[tokio::test]
     async fn glm_json_stream_forwards_leading_metadata_and_stops_at_errors() {
         use crate::protocols::openai::GuidedToolConstraint;
