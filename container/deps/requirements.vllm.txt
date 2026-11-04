@@ -61,7 +61,7 @@ pip==26.2.2
 # CUDA only: stripped for the XPU and CPU images in vllm_runtime.Dockerfile.
 pydantic==2.13.5
 pydantic-core==2.46.5
-PyNvVideoCodec==2.2.3
+PyNvVideoCodec==2.2.4
 # Dynamo installs with --no-deps, so declare the shared image-cache client
 # explicitly instead of relying on LMCache's unbounded transitive dependency.
 redis>=6.2.0,<9.0.0
