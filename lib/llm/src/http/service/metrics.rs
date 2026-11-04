@@ -26,7 +26,7 @@ use std::{
         Arc, LazyLock, OnceLock,
         atomic::{AtomicU64, Ordering::Relaxed},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::discovery::{ModelManager, UNKNOWN_METRIC_MODEL};
@@ -158,6 +158,31 @@ const UNSET_DP_RANK_LABEL: &str = "none";
 const LOCAL_FLUSH_TOKENS: u64 = 64;
 
 const MODEL_READY_HELP: &str = "Whether the frontend can route at least one inference request for the model (1 = ready, 0 = not ready)";
+const FRONTEND_METRICS_START_TIME_HELP: &str =
+    "Time when frontend metrics were first initialized in this process, in Unix seconds";
+
+static FRONTEND_METRICS_START_TIME_SECONDS: LazyLock<f64> = LazyLock::new(|| {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("frontend metrics initialization predates the Unix epoch")
+        .as_secs_f64()
+});
+
+/// Register a stable process identity in one frontend-local metrics registry.
+///
+/// The frontend creates a custom registry per service instance, so each
+/// registry receives its own collector while all collectors expose the same
+/// process-global initialization value, not the OS process start time.
+pub fn register_frontend_metrics_start_time_metric(
+    registry: &Registry,
+) -> Result<(), prometheus::Error> {
+    let gauge = prometheus::Gauge::new(
+        "dynamo_frontend_metrics_start_time_seconds",
+        FRONTEND_METRICS_START_TIME_HELP,
+    )?;
+    gauge.set(*FRONTEND_METRICS_START_TIME_SECONDS);
+    registry.register(Box::new(gauge))
+}
 
 fn model_ready_metric_name(metrics_prefix: Option<&str>) -> String {
     let prefix =
@@ -1149,6 +1174,9 @@ pub enum ErrorType {
     Internal,
     /// Feature not implemented (501)
     NotImplemented,
+    /// Media refused by a text-only frontend (`--reject-media`), labeled apart
+    /// from validation and capacity errors whatever status it is sent with
+    UnsupportedModality,
 }
 
 /// Track response-specific metrics
@@ -2377,6 +2405,7 @@ impl Drop for InflightGuard {
                     ErrorType::Overload => "service overloaded or rate limited",
                     ErrorType::Unavailable => "no backend worker available",
                     ErrorType::NotImplemented => "requested feature not implemented",
+                    ErrorType::UnsupportedModality => "unsupported input modality",
                     // `request_completion()` routes `(Error, Cancelled)` to
                     // `RequestCompletion::Cancelled`, so only `None` reaches
                     // here. `Cancelled` is listed to keep the match total
@@ -2505,6 +2534,7 @@ impl ErrorType {
             ErrorType::ResponseTimeout => frontend_service::error_type::RESPONSE_TIMEOUT,
             ErrorType::Internal => frontend_service::error_type::INTERNAL,
             ErrorType::NotImplemented => frontend_service::error_type::NOT_IMPLEMENTED,
+            ErrorType::UnsupportedModality => frontend_service::error_type::UNSUPPORTED_MODALITY,
         }
     }
 }
@@ -3184,6 +3214,37 @@ mod tests {
 
     fn model_ready_value(registry: &Registry, model: &str) -> Option<f64> {
         model_ready_value_with_name(registry, &model_ready_metric_name(None), model)
+    }
+
+    #[test]
+    fn frontend_metrics_start_time_is_stable_across_registries() {
+        let registries = [Registry::new(), Registry::new()];
+        let mut values = Vec::new();
+
+        for registry in &registries {
+            // A standard process collector must be able to coexist with ours.
+            registry
+                .register(Box::new(
+                    prometheus::Gauge::new("process_start_time_seconds", "OS process start time")
+                        .unwrap(),
+                ))
+                .unwrap();
+            register_frontend_metrics_start_time_metric(registry).unwrap();
+            let families: Vec<_> = registry
+                .gather()
+                .into_iter()
+                .filter(|family| family.name() == "dynamo_frontend_metrics_start_time_seconds")
+                .collect();
+            assert_eq!(families.len(), 1);
+            assert_eq!(families[0].get_metric().len(), 1);
+            let metric = &families[0].get_metric()[0];
+            assert!(metric.get_label().is_empty());
+            let value = metric.get_gauge().value();
+            assert!(value.is_finite() && value > 0.0);
+            values.push(value);
+        }
+
+        assert_eq!(values[0], values[1]);
     }
 
     #[test]
@@ -5034,6 +5095,10 @@ mod tests {
         assert_eq!(ErrorType::ResponseTimeout.as_str(), "response_timeout");
         assert_eq!(ErrorType::Internal.as_str(), "internal");
         assert_eq!(ErrorType::NotImplemented.as_str(), "not_implemented");
+        assert_eq!(
+            ErrorType::UnsupportedModality.as_str(),
+            "unsupported_modality"
+        );
     }
 
     #[test]
@@ -5308,6 +5373,7 @@ mod tests {
             ErrorType::ResponseTimeout,
             ErrorType::Internal,
             ErrorType::NotImplemented,
+            ErrorType::UnsupportedModality,
         ];
 
         for error_type in &error_types {
