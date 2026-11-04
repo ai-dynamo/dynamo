@@ -215,6 +215,8 @@ navigation:
             path: ../pages-dev/kubernetes/auto-deployment/dynamo-profiler.md
           - page: Dynamo Planner
             path: ../pages-dev/kubernetes/auto-deployment/dynamo-planner.mdx
+          - page: Planner Live Retune
+            path: ../pages-dev/kubernetes/auto-deployment/planner-live-retune.md
       - section: Operations
         icon: screwdriver-wrench
         collapsed: open-by-default
