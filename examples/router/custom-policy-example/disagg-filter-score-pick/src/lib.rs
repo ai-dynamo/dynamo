@@ -103,9 +103,9 @@ fn provider(
 
 /// Register the `disagg-filter-score-pick` policy type.
 pub fn register(
-    registry: &mut WorkerSelectionPolicyRegistry,
+    registry: &mut RouterPluginRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
-    registry.register("disagg-filter-score-pick", Arc::new(provider))
+    registry.register_worker_selection("disagg-filter-score-pick", Arc::new(provider))
 }
 
 #[cfg(test)]

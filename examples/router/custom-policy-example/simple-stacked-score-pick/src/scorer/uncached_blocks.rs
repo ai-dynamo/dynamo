@@ -13,7 +13,7 @@ impl WorkerScorer for UncachedBlocksScorer {
     }
 
     fn score(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],

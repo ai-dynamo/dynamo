@@ -23,8 +23,14 @@ impl WorkerInputs {
     pub const LOAD: Self = Self(1 << 1);
     /// Request preferred-taint routing metadata.
     pub const PREFERRED_TAINT: Self = Self(1 << 2);
-    /// Request host-owned active-request counts.
-    pub const OCCUPANCY: Self = Self(1 << 5);
+    /// Request each row's active request count, read through the worker-selection stage's
+    /// `WorkerInputView::active_requests`. Picker only: filters and scorers that declare it
+    /// receive nothing.
+    pub const ACTIVE_REQUESTS: Self = Self(1 << 5);
+    /// Previous name of [`Self::ACTIVE_REQUESTS`].
+    // TODO(v1.9): Remove this alias.
+    #[deprecated(since = "1.7.0", note = "use `WorkerInputs::ACTIVE_REQUESTS`")]
+    pub const OCCUPANCY: Self = Self::ACTIVE_REQUESTS;
     /// Request the KV prefix each worker could fetch from another worker or cache.
     pub const KV_TRANSFER: Self = Self(1 << 6);
     /// Every optional column but the fetch column, which only scorers may declare.
@@ -35,8 +41,16 @@ impl WorkerInputs {
         self.0 & other.0 == other.0
     }
 
+    /// Whether a policy reads the KV index: its overlaps (`CACHE`) or the
+    /// prefixes workers could fetch (`KV_TRANSFER`). Each component still reads
+    /// only the inputs it declares.
     #[inline]
+    pub const fn reads_kv_index(self) -> bool {
+        self.contains(Self::CACHE) || self.contains(Self::KV_TRANSFER)
+    }
+
     /// The groups in `self` that are not in `other`.
+    #[inline]
     pub fn without(self, other: Self) -> Self {
         Self(self.0 & !other.0)
     }

@@ -14,7 +14,7 @@ impl WorkerScorer for PrefillLoadScorer {
     }
 
     fn score(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -47,7 +47,7 @@ impl WorkerScorer for DecodeLoadScorer {
 
     /// Returns the projected decode cost as a lower-is-better cost.
     fn score(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],

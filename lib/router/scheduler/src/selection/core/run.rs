@@ -789,9 +789,8 @@ impl SelectionCore {
         )
         .signals();
         let kv_transfer_candidates = retain_kv_transfer_chain
-            .then(|| tiered.kv_transfer_candidates().cloned())
+            .then(|| tiered.into_kv_transfer_candidates())
             .flatten();
-        drop(tiered);
         Ok(PreparedSelectionInputs {
             block_hashes: normalized.block_hashes,
             sequence_hashes: normalized.sequence_hashes,

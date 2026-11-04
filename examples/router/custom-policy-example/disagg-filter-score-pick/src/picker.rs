@@ -22,7 +22,7 @@ pub(crate) struct PrefillPicker;
 impl WorkerPicker for PrefillPicker {
     /// Returns the prefill candidate row with the lowest cost.
     fn pick(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -36,7 +36,7 @@ pub(crate) struct DecodePicker;
 impl WorkerPicker for DecodePicker {
     /// Returns the decode candidate row with the lowest cost.
     fn pick(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -57,7 +57,7 @@ impl UnsupportedWorkerTypePicker {
 
 impl WorkerPicker for UnsupportedWorkerTypePicker {
     fn pick(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         _input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {

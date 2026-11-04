@@ -3,9 +3,9 @@
 
 //! Includes load projection, selection, booking, and release in the shared core.
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use dynamo_custom_policy_builtin::default_factory;
 use dynamo_kv_router::plugins::prelude::*;
 use dynamo_kv_router::services::selection::local_selection_core;
+use dynamo_router_policies::default_factory;
 use dynamo_scheduler::host::{
     PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, WorkerRequest,
 };

@@ -39,10 +39,22 @@ impl From<WorkerWithDpRank> for KvTransferCandidateSource {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One source's contiguous coverage of request blocks `[start, end)`.
+/// A destination can use it only when its actual local prefix reaches `start`.
+/// `start` may be clamped to the first destination frontier that needs the source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KvTransferSourceInterval {
+    pub source: KvTransferCandidateSource,
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KvTransferCandidates {
     pub block_hashes: Vec<ExternalSequenceBlockHash>,
     pub owner_prefix_blocks: Vec<(KvTransferCandidateSource, usize)>,
+    /// Suffix-only coverage that can extend an original device+host prefix.
+    pub source_intervals: Vec<KvTransferSourceInterval>,
     pub routing_snapshot: Option<Arc<ResidencyRoutingSnapshot>>,
 }
 

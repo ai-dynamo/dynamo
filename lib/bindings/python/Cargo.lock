@@ -2126,21 +2126,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-custom-policy-builtin"
-version = "1.7.0"
-dependencies = [
- "async-trait",
- "dynamo-kv-router",
- "fastrand",
- "parking_lot",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "dynamo-decisions"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2168,6 +2153,31 @@ dependencies = [
  "dynamo-llm",
  "dynamo-sglang-generate",
  "dynamo-vllm-generate",
+]
+
+[[package]]
+name = "dynamo-global-common"
+version = "1.7.0"
+dependencies = [
+ "blake3",
+ "serde",
+ "thiserror 2.0.18",
+ "url",
+]
+
+[[package]]
+name = "dynamo-global-discovery-client"
+version = "1.7.0"
+dependencies = [
+ "dynamo-global-common",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -2316,8 +2326,8 @@ dependencies = [
  "derive_builder",
  "dialoguer",
  "dynamo-admission",
- "dynamo-custom-policy-builtin",
  "dynamo-decisions",
+ "dynamo-global-discovery-client",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
  "dynamo-kv-hints",
@@ -2331,6 +2341,7 @@ dependencies = [
  "dynamo-protocols",
  "dynamo-renderer",
  "dynamo-rl",
+ "dynamo-router-policies",
  "dynamo-router-protocol",
  "dynamo-runtime",
  "dynamo-scheduler",
@@ -2438,11 +2449,12 @@ dependencies = [
  "bytes",
  "dashmap",
  "dynamo-admission",
- "dynamo-custom-policy-builtin",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
+ "dynamo-kv-hints",
  "dynamo-kv-indexer",
  "dynamo-kv-router",
+ "dynamo-router-policies",
  "dynamo-router-protocol",
  "dynamo-scheduler",
  "dynamo-session-affinity",
@@ -2504,9 +2516,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.8.9"
+version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e9506bc79d37b8153fb50595df8d719f4c7f29c08b51e9c244388038a56b8fa"
+checksum = "39a2994e0e7238971e992f71da0860165557a5a1e2318d61558190bed49e51ed"
 dependencies = [
  "anyhow",
  "dynamo-structural-tag",
@@ -2552,7 +2564,6 @@ dependencies = [
  "dashmap",
  "dynamo-admission",
  "dynamo-backend-common",
- "dynamo-custom-policy-builtin",
  "dynamo-generate-format-catalog",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
@@ -2562,6 +2573,7 @@ dependencies = [
  "dynamo-mocker",
  "dynamo-multimodal",
  "dynamo-parsers",
+ "dynamo-router-policies",
  "dynamo-router-protocol",
  "dynamo-runtime",
  "dynamo-scheduler",
@@ -2572,6 +2584,7 @@ dependencies = [
  "dynamo-worker-selection",
  "dynamo-worker-selection-policy-catalog",
  "futures",
+ "http 1.4.2",
  "once_cell",
  "opentelemetry",
  "opentelemetry_sdk",
@@ -2625,6 +2638,21 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "dynamo-router-policies"
+version = "1.7.0"
+dependencies = [
+ "async-trait",
+ "dynamo-kv-router",
+ "fastrand",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2930,6 +2958,7 @@ dependencies = [
  "tokio-util",
  "tonic 0.13.1",
  "tonic-build 0.13.1",
+ "tonic-health 0.13.1",
  "tracing",
 ]
 

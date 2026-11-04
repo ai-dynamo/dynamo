@@ -61,7 +61,7 @@ spec:
               resources:
                 requests:
                   cpu: '16'
-                  memory: 128Gi
+                  memory: 16Gi
     - name: PrefillWorker
       type: prefill
       replicas: 3
@@ -307,8 +307,10 @@ spec:
                 - --kv-cache-metrics-sample
                 - '0.01'
               env:
+                # NIXL only on decode: in this image's vLLM, a host tier in a MultiConnector turns off
+                # divergent hybrid prefix hits, so decode would pull the whole prompt's KV on every turn.
                 - name: KV_TRANSFER_CONFIG
-                  value: '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"]}},{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"lazy_offload":false,"cpu_bytes_to_use":214748364800}}]}}'
+                  value: '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"]}}'
                 - name: MODEL_NAME
                   value: nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4
                 - name: SERVED_MODEL_NAME

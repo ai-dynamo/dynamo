@@ -18,8 +18,7 @@ pub mod worker_selection;
 pub use registry::{
     DYN_ROUTER_DECODE_POLICY, DYN_ROUTER_PREFILL_POLICY, DYN_ROUTER_WORKER_SELECTION_POLICY,
     RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
-    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
-    WorkerSelectionPolicyRegistryError,
+    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
 };
 
 use request_classifier::{RequestClassifierFactory, RequestClassifierRegistryError};

@@ -6,7 +6,7 @@ use dynamo_kv_router::plugins::prelude::*;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut registry = WorkerSelectionPolicyRegistry::default();
+    let mut registry = RouterPluginRegistry::default();
     dynamo_custom_policy_example_catalog::register(&mut registry)?;
     run(Some(registry)).await
 }

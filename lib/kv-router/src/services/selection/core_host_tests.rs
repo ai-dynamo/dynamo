@@ -109,6 +109,7 @@ fn worker(worker_id: WorkerId) -> WorkerRequest {
         router_hint_worker_type: None,
         router_hint_source_control_endpoints: HashMap::new(),
         kv_event_source_mode: None,
+        engine_owned_mm_identity: None,
     }
 }
 
@@ -332,6 +333,104 @@ async fn shutdown_cancels_listeners_but_keeps_parent_alive() {
             .listener_cancelled(1, 0),
         Some(true)
     );
+}
+
+#[tokio::test]
+async fn upsert_carries_engine_owned_mm_identity_to_the_listener() {
+    let (core, ingress) = local_core_with_ingress(test_config(true), 1, CancellationToken::new());
+    core.upsert_worker(WorkerRequest {
+        engine_owned_mm_identity: Some(true),
+        ..worker_with_kv_events(1)
+    })
+    .await
+    .expect("worker upsert");
+
+    let listed = serde_json::to_value(ingress.listeners().expect("attached").list()).unwrap();
+    assert_eq!(
+        listed[0]["listeners"]["0"]["engine_owned_mm_identity"],
+        true
+    );
+    core.shutdown();
+}
+
+#[tokio::test]
+async fn equivalent_mm_identity_defaults_preserve_cached_overlap() {
+    let (core, ingress) = local_core_with_ingress(test_config(true), 1, CancellationToken::new());
+    core.upsert_worker(worker_with_kv_events(1)).await.unwrap();
+    let indexer = ingress
+        .listeners()
+        .expect("attached")
+        .get_indexer(&default_key())
+        .unwrap()
+        .indexer
+        .clone();
+    indexer
+        .apply_event_routed(store_event(1, 0, 1, &[], &[11], StorageTier::Device))
+        .await
+        .unwrap();
+    indexer.dump_events().await.expect("flush indexer");
+    for (capability, expected_overlap) in [(Some(false), 4), (None, 4), (Some(true), 0)] {
+        core.upsert_worker(WorkerRequest {
+            engine_owned_mm_identity: capability,
+            ..worker_with_kv_events(1)
+        })
+        .await
+        .unwrap();
+        let mut request = select_request();
+        request.prompt.token_ids = None;
+        request.prompt.block_hashes = Some(vec![11]);
+        request.prompt.sequence_hashes = Some(vec![101]);
+        request.prompt.isl_tokens = Some(4);
+        assert_eq!(
+            core.select(request).await.unwrap().overlap.gpu,
+            expected_overlap
+        );
+    }
+    core.shutdown();
+}
+
+/// Offline replay cannot build this indexer, so it asks the flat config; the two must agree
+/// for every configuration the indexer accepts.
+#[tokio::test]
+async fn config_predicts_kv_transfer_chain_retention() {
+    use dynamo_kv_indexer::backend::create_indexer_with_policy;
+    use dynamo_kv_indexer::config::{ApproximateCachePolicyKind, IndexerConfig};
+    use dynamo_kv_indexer::host::KvIndexerMetrics;
+
+    for use_kv_events in [true, false] {
+        for router_predicted_ttl_secs in [None, Some(1.0)] {
+            for router_approximate_cache_policy in [
+                ApproximateCachePolicyKind::Ttl,
+                ApproximateCachePolicyKind::Lru,
+            ] {
+                let config = KvRouterConfig {
+                    use_kv_events,
+                    router_predicted_ttl_secs,
+                    router_approximate_cache_policy,
+                    ..Default::default()
+                };
+                // Rejected combinations build no indexer.
+                let Ok(policy) = IndexerPolicy::from_config(&IndexerConfig::from(&config)) else {
+                    continue;
+                };
+                for num_threads in [1, 2] {
+                    let indexer = create_indexer_with_policy(
+                        4,
+                        num_threads,
+                        Arc::new(KvIndexerMetrics::new_unregistered()),
+                        &policy,
+                    );
+                    assert_eq!(
+                        indexer.supports_kv_transfer_chain_retention(),
+                        config.supports_kv_transfer_chain_retention(),
+                        "use_kv_events={use_kv_events}, \
+                         router_predicted_ttl_secs={router_predicted_ttl_secs:?}, \
+                         {router_approximate_cache_policy:?}, {num_threads} threads"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[tokio::test]

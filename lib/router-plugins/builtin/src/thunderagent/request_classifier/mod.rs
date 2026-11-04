@@ -727,7 +727,7 @@ mod tests {
         );
     }
 
-    /// Run with `cargo test -p dynamo-custom-policy-builtin --release benchmark_ignored_events -- --ignored --nocapture`.
+    /// Run with `cargo test -p dynamo-router-policies --release benchmark_ignored_events -- --ignored --nocapture`.
     #[test]
     #[ignore = "manual CPU benchmark"]
     fn benchmark_ignored_events() {

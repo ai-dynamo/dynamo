@@ -16,9 +16,7 @@ use tower::ServiceExt;
 use super::server::create_router;
 use super::*;
 use crate::plugins::worker_selection::SelectionConfig;
-use crate::plugins::{
-    RouterPluginRegistry, WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
-};
+use crate::plugins::{RouterPluginRegistry, WorkerSelectionPolicyProviderError};
 use crate::tracking_hash::tracking_hash_context;
 use dynamo_kv_events::residency::StorageTier;
 use dynamo_kv_hashing::routing::{
@@ -84,7 +82,7 @@ struct WorkerIdScorer;
 
 impl WorkerScorer for WorkerIdScorer {
     fn score(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -100,7 +98,7 @@ struct LowestCostPicker;
 
 impl WorkerPicker for LowestCostPicker {
     fn pick(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -118,7 +116,7 @@ struct NonFiniteScorer;
 
 impl WorkerScorer for NonFiniteScorer {
     fn score(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -134,7 +132,7 @@ struct InvalidRowPicker;
 
 impl WorkerPicker for InvalidRowPicker {
     fn pick(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -146,7 +144,7 @@ struct RejectAllFilter;
 
 impl WorkerFilter for RejectAllFilter {
     fn keep(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         _candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
@@ -158,7 +156,7 @@ struct RejectWorker(WorkerId);
 
 impl WorkerFilter for RejectWorker {
     fn keep(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
@@ -325,9 +323,9 @@ where
         ..test_config()
     };
     let factory: dynamo_scheduler::types::WorkerSelectionPolicyFactory = Arc::new(factory);
-    let mut registry = WorkerSelectionPolicyRegistry::default();
+    let mut registry = RouterPluginRegistry::default();
     registry
-        .register(
+        .register_worker_selection(
             "test",
             Arc::new(move |_| -> Result<_, WorkerSelectionPolicyProviderError> {
                 Ok(Arc::clone(&factory))
@@ -1875,7 +1873,7 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
         config_a
             .service_builder(
                 dynamo_router_protocol::WorkerType::Aggregated,
-                WorkerSelectionPolicyRegistry::default().with_default_factory(Arc::new(
+                RouterPluginRegistry::default().with_default_factory(Arc::new(
                     |config, role, _| {
                         dynamo_worker_selection::WorkerSelectionPolicy::reference(
                             config.clone(),
@@ -1892,14 +1890,12 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
         SelectionServiceBuilder::new(
             test_config(),
             dynamo_router_protocol::WorkerType::Aggregated,
-            WorkerSelectionPolicyRegistry::default().with_default_factory(Arc::new(
-                |config, role, _| {
-                    dynamo_worker_selection::WorkerSelectionPolicy::reference(
-                        config.clone(),
-                        role.default_selector_label(),
-                    )
-                },
-            )),
+            RouterPluginRegistry::default().with_default_factory(Arc::new(|config, role, _| {
+                dynamo_worker_selection::WorkerSelectionPolicy::reference(
+                    config.clone(),
+                    role.default_selector_label(),
+                )
+            })),
         )
         .indexer_threads(1)
         .replica_sync(port_b, Vec::new())

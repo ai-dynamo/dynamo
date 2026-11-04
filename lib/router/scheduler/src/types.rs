@@ -531,6 +531,17 @@ impl SchedulingRequest {
     }
 }
 
+impl From<dynamo_worker_selection::SelectionFailure> for KvSchedulerError {
+    fn from(failure: dynamo_worker_selection::SelectionFailure) -> Self {
+        use dynamo_worker_selection::SelectionFailure;
+        match failure {
+            SelectionFailure::NoCandidates => Self::NoEndpoints,
+            SelectionFailure::AllFiltered => Self::AllEligibleWorkersFiltered,
+            SelectionFailure::Policy(error) => Self::WorkerSelectionPolicy(error),
+        }
+    }
+}
+
 impl From<dynamo_admission::classifier::ClassificationError> for KvSchedulerError {
     fn from(error: dynamo_admission::classifier::ClassificationError) -> Self {
         use dynamo_admission::classifier::ClassificationError;

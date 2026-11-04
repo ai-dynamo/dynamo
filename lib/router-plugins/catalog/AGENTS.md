@@ -1,6 +1,6 @@
 # lib/router-plugins/catalog
 
-`dynamo-worker-selection-policy-catalog` is the catalog slot a custom image replaces: its `register` is intentionally empty so `default` always selects Dynamo's built-in worker selector, and the policies Dynamo ships register separately from `dynamo-custom-policy-builtin`. A plugin crate depends on `dynamo-kv-router` alone and imports through `dynamo_kv_router::plugins::prelude`.
+`dynamo-worker-selection-policy-catalog` is the catalog slot a custom image replaces: its `register` is intentionally empty so `default` always selects Dynamo's built-in worker selector, and the policies Dynamo ships register separately from `dynamo-router-policies`. A plugin crate depends on `dynamo-kv-router` alone and imports through `dynamo_kv_router::plugins::prelude`.
 
 - Depends on (Dynamo crates): `dynamo-kv-router`.
 - Must not depend on: any other Dynamo crate.

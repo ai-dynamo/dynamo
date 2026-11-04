@@ -3,7 +3,9 @@
 
 //! Worker input groups, stored snapshots, and component-scoped borrowed views.
 
-use dynamo_router_protocol::worker::WorkerWithDpRank;
+use std::cell::OnceCell;
+
+use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 
 use super::shared_cache::SharedCacheHits;
 
@@ -363,13 +365,37 @@ pub struct WorkerTransferInput {
 }
 
 /// Borrowed, index-aligned view of one custom picker's requested worker inputs.
+///
+/// Rows are the candidates that survived filters and scorers, in unspecified order. When the
+/// router routes without KV state, rows are its selectable workers in ascending worker-ID
+/// order, one per worker at data-parallel rank 0, built only if the picker calls
+/// [`Self::candidates`].
 #[derive(Clone, Copy)]
 pub struct WorkerInputView<'a> {
-    pub(crate) candidates: &'a [ScoredWorkerCandidate],
-    pub(crate) cache: Option<WorkerCacheInputs<'a>>,
-    pub(crate) load: Option<&'a [WorkerLoadInput]>,
-    // Indexed by row in `candidates`.
-    pub(crate) info: WorkerInfoLookup<'a>,
+    rows: PickerRows<'a>,
+    cache: Option<WorkerCacheInputs<'a>>,
+    load: Option<&'a [WorkerLoadInput]>,
+}
+
+/// Where a picker's rows come from.
+#[derive(Clone, Copy)]
+enum PickerRows<'a> {
+    /// KV path: rows the host built for this selection.
+    Materialized {
+        candidates: &'a [ScoredWorkerCandidate],
+        // Indexed by row in `candidates`.
+        info: WorkerInfoLookup<'a>,
+        // Indexed by row in `candidates`; set only for a picker that declared ACTIVE_REQUESTS.
+        active_requests: Option<&'a dyn Fn(usize) -> u64>,
+    },
+    /// Hosted path: ascending, deduplicated worker IDs. Rows are built on the first
+    /// `candidates()` call.
+    Hosted {
+        worker_ids: &'a [WorkerId],
+        rows: &'a OnceCell<Vec<ScoredWorkerCandidate>>,
+        // Keyed by worker ID; set only for a picker that declared ACTIVE_REQUESTS.
+        active_requests: Option<&'a dyn Fn(WorkerId) -> u64>,
+    },
 }
 
 impl CandidateData {
@@ -552,19 +578,89 @@ impl WorkerTransferInput {
 }
 
 impl<'a> WorkerInputView<'a> {
-    /// Return the eligible candidates and their total costs.
-    #[inline]
-    pub fn candidates(self) -> &'a [ScoredWorkerCandidate] {
-        self.candidates
+    /// A view over rows the KV path built for this selection.
+    pub(crate) fn materialized(
+        candidates: &'a [ScoredWorkerCandidate],
+        cache: Option<WorkerCacheInputs<'a>>,
+        load: Option<&'a [WorkerLoadInput]>,
+        active_requests: Option<&'a dyn Fn(usize) -> u64>,
+        info: WorkerInfoLookup<'a>,
+    ) -> Self {
+        Self {
+            rows: PickerRows::Materialized {
+                candidates,
+                info,
+                active_requests,
+            },
+            cache,
+            load,
+        }
     }
 
-    /// Return index-aligned KV-cache inputs when the picker requested them.
+    /// A hosted view over ascending, deduplicated `worker_ids`, building rows into `rows`
+    /// only when the picker asks for them. Hosted selection has no cache or load inputs.
+    pub(crate) fn hosted(
+        worker_ids: &'a [WorkerId],
+        rows: &'a OnceCell<Vec<ScoredWorkerCandidate>>,
+        active_requests: Option<&'a dyn Fn(WorkerId) -> u64>,
+    ) -> Self {
+        Self {
+            rows: PickerRows::Hosted {
+                worker_ids,
+                rows,
+                active_requests,
+            },
+            cache: None,
+            load: None,
+        }
+    }
+
+    /// Number of rows, equal to the length of [`Self::candidates`].
+    #[inline]
+    pub fn len(self) -> usize {
+        match self.rows {
+            PickerRows::Materialized { candidates, .. } => candidates.len(),
+            PickerRows::Hosted { worker_ids, .. } => worker_ids.len(),
+        }
+    }
+
+    /// Whether there are no rows.
+    #[inline]
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    /// Return the eligible candidates and their total costs. When the router routes without
+    /// KV state, it builds these rows on the first call, each with cost 0 and no preferred-taint
+    /// multiplier; a picker that needs only [`Self::len`] and row indexes need not call it.
+    #[inline]
+    pub fn candidates(self) -> &'a [ScoredWorkerCandidate] {
+        match self.rows {
+            PickerRows::Materialized { candidates, .. } => candidates,
+            PickerRows::Hosted {
+                worker_ids, rows, ..
+            } => rows.get_or_init(|| {
+                worker_ids
+                    .iter()
+                    .map(|&worker_id| ScoredWorkerCandidate {
+                        worker: WorkerWithDpRank::from_worker_id(worker_id),
+                        cost: 0.0,
+                        preferred_taint_multiplier: None,
+                    })
+                    .collect()
+            }),
+        }
+    }
+
+    /// Return index-aligned KV-cache inputs when the picker requested them. Always None when
+    /// the router routes without KV state.
     #[inline]
     pub fn cache(self) -> Option<WorkerCacheInputs<'a>> {
         self.cache
     }
 
-    /// Return index-aligned active-load inputs when the picker requested them.
+    /// Return index-aligned active-load inputs when the picker requested them. Always None
+    /// when the router routes without KV state.
     #[inline]
     pub fn load(self) -> Option<&'a [WorkerLoadInput]> {
         self.load
@@ -572,8 +668,46 @@ impl<'a> WorkerInputView<'a> {
 
     /// Return static info for the candidate at `row`, or None for an out-of-range row.
     /// Always available, with no input group to declare; the host looks it up on each call.
+    /// When the router routes without KV state, the capacity is always unreported.
     #[inline]
     pub fn info(self, row: usize) -> Option<WorkerInfo> {
-        (row < self.candidates.len()).then(|| (self.info)(row))
+        match self.rows {
+            PickerRows::Materialized {
+                candidates, info, ..
+            } => (row < candidates.len()).then(|| info(row)),
+            PickerRows::Hosted { worker_ids, .. } => worker_ids.get(row).map(|&worker_id| {
+                WorkerInfo::new(
+                    WorkerWithDpRank::from_worker_id(worker_id),
+                    WorkerCapacity::default(),
+                )
+            }),
+        }
+    }
+
+    /// Return the number of requests active on the worker at `row`, when the picker declared
+    /// [`WorkerInputs::ACTIVE_REQUESTS`]. The host looks the count up on each call, so a
+    /// picker pays only for the rows it reads. A worker with nothing in flight reads `Some(0)`;
+    /// None means the picker did not declare the group or `row` is out of range.
+    pub fn active_requests(self, row: usize) -> Option<u64> {
+        match self.rows {
+            PickerRows::Materialized {
+                candidates,
+                active_requests,
+                ..
+            } => {
+                let active_requests = active_requests?;
+                (row < candidates.len()).then(|| active_requests(row))
+            }
+            PickerRows::Hosted {
+                worker_ids,
+                active_requests,
+                ..
+            } => {
+                let active_requests = active_requests?;
+                worker_ids
+                    .get(row)
+                    .map(|&worker_id| active_requests(worker_id))
+            }
+        }
     }
 }

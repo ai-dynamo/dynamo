@@ -104,7 +104,7 @@ dynamo-multimodal = { path = "../../multimodal" }
 dynamo-router-protocol = { path = "../../router/protocol" }
 dynamo-scheduler = { path = "../../router/scheduler" }
 dynamo-worker-selection = { path = "../../router/worker-selection" }
-dynamo-custom-policy-builtin = { path = "../../router-plugins/builtin" }
+dynamo-router-policies = { path = "../../router-plugins/builtin" }
 dynamo-worker-selection-policy-catalog = { path = "../../router-plugins/catalog", optional = true }
 # The replaceable /generate format catalog; custom images point this name at their own.
 dynamo-generate-format-catalog = { path = "../../generate-format-catalog" }
@@ -139,6 +139,7 @@ dynamo-llm = { path = "../../llm" }
 dynamo-llm = { path = "../../llm", default-features = false }
 
 [dev-dependencies]
+http = "1"
 opentelemetry_sdk = { version = "0.31.0", features = ["trace"] }
 tracing-subscriber = { version = "0.3", features = ["registry"] }
 

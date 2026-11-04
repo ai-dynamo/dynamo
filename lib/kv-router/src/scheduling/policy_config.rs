@@ -10,15 +10,13 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::plugins::request_classifier::RawRequestClassifierConfig;
-use crate::plugins::worker_selection::{WorkerCapacity, WorkerCapacityExt};
+use crate::plugins::request_classifier::RequestClassifierConfig;
+use crate::plugins::worker_selection::{
+    RawWorkerSelectionConfig, WorkerCapacity, WorkerCapacityExt, WorkerSelectionConfig,
+};
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_scheduler::protocols::WorkerConfigLike;
 use dynamo_slot_tracker::WorkerLoadProjection;
-// TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
-pub use crate::plugins::request_classifier::RequestClassifierConfig;
-use crate::plugins::worker_selection::RawWorkerSelectionConfig;
-// TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
-pub use crate::plugins::worker_selection::{WorkerSelectionConfig, WorkerSelectionInstance};
 
 #[derive(Debug, Error)]
 pub enum RouterPolicyConfigError {

@@ -15,7 +15,7 @@ impl WorkerScorer for ThunderAgentScorer {
     }
 
     fn score(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -35,7 +35,7 @@ struct ThunderAgentPicker;
 
 impl WorkerPicker for ThunderAgentPicker {
     fn pick(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {

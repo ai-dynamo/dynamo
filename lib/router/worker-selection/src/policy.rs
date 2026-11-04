@@ -11,7 +11,7 @@ use dynamo_router_protocol::worker::WorkerWithDpRank;
 #[cfg(any(test, feature = "testing", feature = "bench"))]
 use crate::DefaultWorkerPicker;
 use crate::{
-    SelectionConfig, SelectionTrace, SelectionTraceRow, SelectionTraceSpec,
+    HostedWorkerPicker, SelectionConfig, SelectionTrace, SelectionTraceRow, SelectionTraceSpec,
     WorkerSelectionPolicyError,
 };
 
@@ -76,14 +76,18 @@ pub struct RowPick {
     pub trace: Option<SelectionTrace>,
 }
 
-/// Why a policy picked no row.
-#[derive(Debug)]
+/// Why a policy picked no row. The kernel maps it onto its own error; a hosted picker
+/// reports it directly.
+#[derive(Debug, thiserror::Error)]
 pub enum SelectionFailure {
     /// The source yielded no row.
+    #[error("no candidate workers")]
     NoCandidates,
     /// Every row the source yielded was rejected by a policy filter.
+    #[error("every eligible worker was rejected by a policy filter")]
     AllFiltered,
     /// A filter, scorer, or picker failed.
+    #[error(transparent)]
     Policy(WorkerSelectionPolicyError),
 }
 
@@ -107,6 +111,8 @@ struct ComposedPolicyState {
     filter_inputs: WorkerInputs,
     scorer_picker_inputs: WorkerInputs,
     picker_inputs: WorkerInputs,
+    /// The picker's declaration before any stripping, which decides whether it can run hosted.
+    picker_declared_inputs: WorkerInputs,
     unscored_candidates: Vec<CandidateData>,
     score_contributions: Vec<f64>,
     candidates: Vec<ScoredWorkerCandidate>,
@@ -162,25 +168,32 @@ impl WorkerSelectionPolicy {
         scorers: Vec<Box<dyn WorkerScorer>>,
         picker: Box<dyn WorkerPicker>,
     ) -> Self {
+        let picker_declared_inputs = picker.required_worker_inputs();
         // Fetch inputs are filled once every row is built, so only scorers receive them.
-        let picker_inputs = picker
-            .required_worker_inputs()
-            .without(WorkerInputs::KV_TRANSFER);
+        let picker_inputs = picker_declared_inputs.without(WorkerInputs::KV_TRANSFER);
         // Freeze each declaration once; callbacks must not inherit another component's access.
+        // Active-request counts are a picker lookup, so filters and scorers never receive them.
         let filters: Vec<_> = filters
             .into_iter()
             .map(|filter| {
                 (
                     filter
                         .required_worker_inputs()
-                        .without(WorkerInputs::KV_TRANSFER),
+                        .without(WorkerInputs::KV_TRANSFER | WorkerInputs::ACTIVE_REQUESTS),
                     filter,
                 )
             })
             .collect();
         let scorers: Vec<_> = scorers
             .into_iter()
-            .map(|scorer| (scorer.required_worker_inputs(), scorer))
+            .map(|scorer| {
+                (
+                    scorer
+                        .required_worker_inputs()
+                        .without(WorkerInputs::ACTIVE_REQUESTS),
+                    scorer,
+                )
+            })
             .collect();
         let filter_inputs = filters
             .iter()
@@ -201,6 +214,7 @@ impl WorkerSelectionPolicy {
                 filter_inputs,
                 scorer_picker_inputs,
                 picker_inputs,
+                picker_declared_inputs,
                 unscored_candidates: Vec::new(),
                 score_contributions: Vec::new(),
                 candidates: Vec::new(),
@@ -369,6 +383,61 @@ impl WorkerSelectionPolicy {
             has_eligible_worker,
             trace,
         )
+    }
+
+    /// Take out this policy's picker for hosted selection, when the policy can run there:
+    /// it has no filters, no scorers and no runtime config, and its picker declares at
+    /// most [`WorkerInputs::ACTIVE_REQUESTS`]. Any other policy comes back unchanged.
+    ///
+    /// Passing this check doesn't make a policy run hosted: for now the hosts call it only
+    /// for the `--router-mode` types (random, round-robin, least-loaded), in
+    /// the routing host and as `PushRouter`'s instance selectors. A picker-only type named
+    /// in a policy file still runs on the KV path.
+    ///
+    /// The picker then serves every request for its role, so each factory call must build
+    /// a fresh one. Pins and session affinity are applied by the host before selection, so
+    /// [`Self::with_exclusive_affinity`] has no effect there.
+    #[expect(
+        clippy::result_large_err,
+        reason = "called once per role at startup, and the caller reuses the returned policy"
+    )]
+    pub fn into_hosted_picker(self) -> Result<HostedWorkerPicker, Self> {
+        if !self.can_run_hosted() {
+            return Err(self);
+        }
+        #[cfg_attr(
+            not(any(test, feature = "testing", feature = "bench")),
+            allow(clippy::infallible_destructuring_match)
+        )]
+        let state = match self.state {
+            #[cfg(any(test, feature = "testing", feature = "bench"))]
+            WorkerSelectionPolicyState::Reference(..) => {
+                unreachable!("can_run_hosted rejects the reference selector")
+            }
+            WorkerSelectionPolicyState::Composed(state) => state,
+        };
+        let ComposedPolicyState {
+            picker,
+            picker_inputs,
+            ..
+        } = state.into_inner();
+        Ok(HostedWorkerPicker::new(picker, picker_inputs))
+    }
+
+    fn can_run_hosted(&self) -> bool {
+        if self.runtime.is_some() {
+            return false;
+        }
+        match &self.state {
+            #[cfg(any(test, feature = "testing", feature = "bench"))]
+            WorkerSelectionPolicyState::Reference(..) => false,
+            WorkerSelectionPolicyState::Composed(state) => {
+                let state = state.borrow();
+                state.filters.is_empty()
+                    && state.scorers.is_empty()
+                    && WorkerInputs::ACTIVE_REQUESTS.contains(state.picker_declared_inputs)
+            }
+        }
     }
 
     /// Construct the native reference implementation for parity tests and benchmarks.
@@ -571,7 +640,7 @@ impl ComposedPolicyState {
         };
         debug_assert_eq!(unscored_candidates.len(), candidates.len());
         score_contributions.resize(candidates.len(), f64::NAN);
-        for (scorer_index, (inputs, scorer)) in scorers.iter_mut().enumerate() {
+        for (scorer_index, (inputs, scorer)) in scorers.iter().enumerate() {
             score_contributions.fill(f64::NAN);
             scorer.score(
                 context,
@@ -631,19 +700,25 @@ impl ComposedPolicyState {
             let worker = candidates[row].worker;
             WorkerInfo::new(worker, source.capacity(worker))
         };
-        let picker_input = WorkerInputView {
+        // The same projection and fallback as the row's LOAD input, so the two agree.
+        let active_requests =
+            |row: usize| source.load(candidates[row].worker).active_requests() as u64;
+        let picker_input = WorkerInputView::materialized(
             candidates,
-            cache: picker_inputs
+            picker_inputs
                 .contains(WorkerInputs::CACHE)
                 .then_some(WorkerCacheInputs {
                     rows: cache_inputs,
                     snapshot: cache_snapshot,
                 }),
-            load: picker_inputs
+            picker_inputs
                 .contains(WorkerInputs::LOAD)
                 .then_some(load_inputs.as_slice()),
-            info: &info,
-        };
+            picker_inputs
+                .contains(WorkerInputs::ACTIVE_REQUESTS)
+                .then_some(&active_requests),
+            &info,
+        );
         let row = picker.pick(context, picker_input)?;
         let Some(candidate) = candidates.get(row) else {
             return Err(WorkerSelectionPolicyError::InvalidPickerRow {
@@ -699,7 +774,7 @@ impl RankVisitor for FilterRows<'_, '_> {
         self.has_eligible_worker = true;
         let filter_candidate = rank.row(self.filter_inputs);
         let info = |_: usize| WorkerInfo::new(filter_candidate.worker, rank.capacity());
-        for (inputs, filter) in &mut self.state.filters {
+        for (inputs, filter) in &self.state.filters {
             match filter.keep(
                 self.context,
                 WorkerCandidate::new(&filter_candidate, *inputs, self.cache_snapshot, &info),
@@ -1059,7 +1134,7 @@ mod row_source_tests {
 
     impl WorkerFilter for RejectWorker {
         fn keep(
-            &mut self,
+            &self,
             _context: &WorkerSelectionContext<'_>,
             candidate: WorkerCandidate<'_>,
         ) -> Result<bool, WorkerSelectionPolicyError> {
@@ -1078,7 +1153,7 @@ mod row_source_tests {
         }
 
         fn score(
-            &mut self,
+            &self,
             _context: &WorkerSelectionContext<'_>,
             candidates: WorkerCandidates<'_>,
             costs: &mut [f64],
@@ -1094,7 +1169,7 @@ mod row_source_tests {
 
     impl WorkerPicker for LowestCostPicker {
         fn pick(
-            &mut self,
+            &self,
             _context: &WorkerSelectionContext<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -1175,7 +1250,7 @@ mod row_source_tests {
             }
 
             fn pick(
-                &mut self,
+                &self,
                 _context: &WorkerSelectionContext<'_>,
                 input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -1251,7 +1326,7 @@ mod row_source_tests {
 
         impl WorkerPicker for OutOfRange {
             fn pick(
-                &mut self,
+                &self,
                 _context: &WorkerSelectionContext<'_>,
                 input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {

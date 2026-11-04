@@ -45,7 +45,7 @@ impl WorkerPicker for SoftPinRepinPicker {
     }
 
     fn pick(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -104,9 +104,9 @@ fn provider(
 }
 
 pub fn register(
-    registry: &mut WorkerSelectionPolicyRegistry,
+    registry: &mut RouterPluginRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
-    registry.register("soft-pin-repin", Arc::new(provider))
+    registry.register_worker_selection("soft-pin-repin", Arc::new(provider))
 }
 
 #[cfg(test)]

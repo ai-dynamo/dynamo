@@ -17,7 +17,7 @@ impl WorkerFilter for PreludePolicy {
     }
 
     fn keep(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
@@ -35,7 +35,7 @@ impl WorkerScorer for PreludePolicy {
     }
 
     fn score(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -52,7 +52,7 @@ impl WorkerScorer for PreludePolicy {
 
 impl WorkerPicker for PreludePolicy {
     fn pick(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -100,9 +100,9 @@ fn prelude_plugins_resolve_through_the_registry() {
     let _: Box<dyn WorkerPicker> = Box::new(PreludePolicy);
     let _: Box<dyn RequestClassifier> = Box::new(PreludeClassifier);
 
-    let mut registry = WorkerSelectionPolicyRegistry::default();
+    let mut registry = RouterPluginRegistry::default();
     registry
-        .register("prelude", Arc::new(prelude_provider))
+        .register_worker_selection("prelude", Arc::new(prelude_provider))
         .unwrap();
     let registry: RouterPluginRegistry = registry;
     let policy = tempfile::NamedTempFile::new().unwrap();
@@ -120,4 +120,49 @@ fn prelude_plugins_resolve_through_the_registry() {
     );
     let _: RoutingPartitionId = RoutingPartitionId::new("model", "default");
     let _: Result<RouterPlugins, RouterPluginRegistryError> = Ok(RouterPlugins::default());
+}
+
+/// Reads the host's in-flight counts lazily, the way a least-loaded picker does.
+struct ActiveRequestsPicker;
+
+impl WorkerPicker for ActiveRequestsPicker {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::ACTIVE_REQUESTS
+    }
+
+    fn pick(
+        &self,
+        _context: &WorkerSelectionContext<'_>,
+        input: WorkerInputView<'_>,
+    ) -> Result<usize, WorkerSelectionPolicyError> {
+        (0..input.len())
+            .min_by_key(|&row| input.active_requests(row).unwrap_or(u64::MAX))
+            .ok_or_else(|| WorkerSelectionPolicyError::failed("empty candidate table"))
+    }
+}
+
+#[test]
+fn active_requests_pickers_select_through_the_prelude_hosted_api() {
+    #[allow(deprecated)]
+    let alias = WorkerInputs::OCCUPANCY;
+    assert_eq!(alias, WorkerInputs::ACTIVE_REQUESTS);
+
+    let Ok(picker) = WorkerSelectionPolicy::new(
+        SelectionConfig::default(),
+        "decode",
+        Vec::new(),
+        Box::new(ActiveRequestsPicker),
+    )
+    .into_hosted_picker() else {
+        panic!("a picker-only ACTIVE_REQUESTS policy runs hosted");
+    };
+    let picker: HostedWorkerPicker = picker;
+    assert_eq!(picker.inputs(), WorkerInputs::ACTIVE_REQUESTS);
+    let counts = |worker_id: u64| if worker_id == 4 { 0 } else { 3 };
+    let selected = picker
+        .select(&[2, 4, 6], Some(&counts), &HostedSelectionRequest::new(32))
+        .unwrap();
+    assert_eq!(selected, 4);
+    let _: Result<WorkerId, SelectionFailure> =
+        picker.select(&[], None, &HostedSelectionRequest::new(0));
 }

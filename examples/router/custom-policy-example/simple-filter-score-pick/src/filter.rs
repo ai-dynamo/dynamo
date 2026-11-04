@@ -18,7 +18,7 @@ impl WorkerFilter for MinimumDeviceOverlapFilter {
 
     /// Keeps a candidate when its device overlap meets the minimum.
     fn keep(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {

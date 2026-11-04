@@ -11,6 +11,7 @@ pub use crate::conditional_disagg::{
     ConditionalDisaggConfig, ConditionalDisaggDecisionInput, ConditionalDisaggPolicyKind,
 };
 pub use crate::error::WorkerSelectionPolicyError;
+pub use crate::hosted::{HostedSelectionRequest, HostedWorkerPicker};
 pub use crate::lora_filter::LoraWorkerFilter;
 pub use crate::policy::WorkerSelectionPolicy;
 pub use crate::runtime::RuntimePolicyError;

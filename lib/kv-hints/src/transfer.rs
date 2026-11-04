@@ -99,6 +99,8 @@ pub struct KvTransferTarget {
 pub struct KvTransferScope {
     /// The shortest local prefix of any target; shorter sources are skipped.
     min_local_prefix_blocks: usize,
+    /// No target can use a continuation starting beyond this depth.
+    max_local_prefix_blocks: usize,
     /// Whether some target takes a source from any island: it has no
     /// transfer domain, or `preferred` enforcement allows a fallback.
     any_island: bool,
@@ -120,6 +122,7 @@ impl KvTransferScope {
     pub fn all() -> Self {
         Self {
             min_local_prefix_blocks: 0,
+            max_local_prefix_blocks: usize::MAX,
             any_island: true,
             islands: IslandScope::Any,
         }
@@ -138,6 +141,7 @@ impl KvTransferScope {
     pub fn empty() -> Self {
         Self {
             min_local_prefix_blocks: usize::MAX,
+            max_local_prefix_blocks: 0,
             any_island: false,
             islands: IslandScope::Unused,
         }
@@ -146,6 +150,7 @@ impl KvTransferScope {
     /// Include `target`, with its local prefix in blocks.
     pub fn add_target(&mut self, target: KvTransferTarget, local_prefix_blocks: usize) {
         self.min_local_prefix_blocks = self.min_local_prefix_blocks.min(local_prefix_blocks);
+        self.max_local_prefix_blocks = self.max_local_prefix_blocks.max(local_prefix_blocks);
         self.any_island |= target.transfer_domain.is_none() || target.preferred;
         if let (Some(domain), Some(island)) = (target.transfer_domain, target.transfer_island) {
             let one = IslandScope::One(domain, island);
@@ -160,6 +165,12 @@ impl KvTransferScope {
     /// The shortest local prefix of any target in this scope.
     pub fn min_local_prefix_blocks(&self) -> usize {
         self.min_local_prefix_blocks
+    }
+
+    /// The longest local prefix of any target in this scope; no target can use a
+    /// continuation that starts beyond it.
+    pub fn max_local_prefix_blocks(&self) -> usize {
+        self.max_local_prefix_blocks
     }
 
     /// Whether some target fetches within an island, so sources need their topology.
@@ -178,14 +189,18 @@ fn island(topology: &[(u64, u64)], domain: u64) -> Option<u64> {
         .find_map(|&(label, value)| (label == domain).then_some(value))
 }
 
-/// One eligible KV source as the router resolved it for a selection: who holds the prefix,
-/// how long it is, the hashed hint worker type, the worker it is attached to (which never
-/// fetches from it), and its topology labels.
+/// One eligible KV source as the router resolved it for a selection: who holds the blocks,
+/// which request blocks it covers, the hashed hint worker type, the worker it is attached to
+/// (which never fetches from it), and its topology labels.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedTransferSource {
     /// The source.
     pub source: KvTransferCandidateSource,
-    /// Prefix the source holds, in blocks.
+    /// The request block the source's coverage starts at: 0 for a root prefix, the interval
+    /// start for a continuation a destination can use once its local prefix reaches it.
+    pub start: usize,
+    /// The request block the source's coverage ends at (exclusive): the prefix length a
+    /// destination fetching from it ends up with.
     pub prefix_blocks: usize,
     /// Hashed hint worker type the source serves.
     pub worker_type: u64,
@@ -195,16 +210,16 @@ pub struct ResolvedTransferSource {
     pub topology: Vec<(u64, u64)>,
 }
 
-/// The source a target fetches from, and the prefix it holds in blocks.
+/// The source a target fetches from, and the resulting prefix length in blocks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KvTransferSourceChoice {
     /// The source the target fetches from.
     pub source: KvTransferCandidateSource,
-    /// The prefix the source holds, in blocks.
+    /// The prefix the target holds after fetching, in blocks.
     pub prefix_blocks: usize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct RankedSource {
     choice: KvTransferSourceChoice,
     /// The worker this source belongs to, which never fetches from it.
@@ -230,35 +245,25 @@ impl RankedSource {
 
 /// A group's best source and the best one attached to a different worker, so
 /// the best source not attached to any given target is one of the two.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct TopSources {
     best: RankedSource,
     runner_up: Option<RankedSource>,
 }
 
 impl TopSources {
-    fn offer(entry: Entry<'_, impl Hash + Eq, TopSources>, source: RankedSource) {
-        let top = match entry {
-            Entry::Occupied(top) => top.into_mut(),
-            Entry::Vacant(top) => {
-                top.insert(TopSources {
-                    best: source,
-                    runner_up: None,
-                });
-                return;
+    fn offer(&mut self, source: RankedSource) {
+        if source.outranks(&self.best) {
+            if !source.shares_attachment(&self.best) {
+                self.runner_up = Some(self.best);
             }
-        };
-        if source.outranks(&top.best) {
-            if !source.shares_attachment(&top.best) {
-                top.runner_up = Some(top.best);
-            }
-            top.best = source;
-        } else if !source.shares_attachment(&top.best)
-            && top
+            self.best = source;
+        } else if !source.shares_attachment(&self.best)
+            && self
                 .runner_up
                 .is_none_or(|runner_up| source.outranks(&runner_up))
         {
-            top.runner_up = Some(source);
+            self.runner_up = Some(source);
         }
     }
 
@@ -271,18 +276,86 @@ impl TopSources {
     }
 }
 
+/// Root-only queries keep the existing inline top two. Continuations retain
+/// cumulative top two choices at each start depth where the ranking changes.
+/// Expired intervals need no removal: their ends rank below every live interval.
+enum SourceBucket {
+    Root(TopSources),
+    Continuations(Vec<(usize, TopSources)>),
+}
+
+impl SourceBucket {
+    /// Offers must arrive in nondecreasing start order.
+    fn offer(entry: Entry<'_, impl Hash + Eq, Self>, start: usize, source: RankedSource) {
+        let bucket = match entry {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let top = TopSources {
+                    best: source,
+                    runner_up: None,
+                };
+                entry.insert(if start == 0 {
+                    Self::Root(top)
+                } else {
+                    Self::Continuations(vec![(start, top)])
+                });
+                return;
+            }
+        };
+        match bucket {
+            Self::Root(top) if start == 0 => top.offer(source),
+            Self::Root(top) => {
+                let mut next = *top;
+                next.offer(source);
+                if next != *top {
+                    *bucket = Self::Continuations(vec![(0, *top), (start, next)]);
+                }
+            }
+            Self::Continuations(by_start) => {
+                if let Some((last_start, top)) = by_start.last_mut() {
+                    debug_assert!(start >= *last_start);
+                    let mut next = *top;
+                    next.offer(source);
+                    if start == *last_start {
+                        *top = next;
+                    } else if next != *top {
+                        by_start.push((start, next));
+                    }
+                }
+            }
+        }
+    }
+
+    fn best_for(
+        &self,
+        worker: WorkerWithDpRank,
+        local_prefix: usize,
+    ) -> Option<KvTransferSourceChoice> {
+        match self {
+            Self::Root(top) => top.best_for(worker),
+            Self::Continuations(by_start) => {
+                let idx = by_start.partition_point(|(start, _)| *start <= local_prefix);
+                by_start
+                    .get(idx.checked_sub(1)?)
+                    .and_then(|(_, top)| top.best_for(worker))
+            }
+        }
+    }
+}
+
 /// The eligible sources of one request, grouped so the source for any target
-/// in its scope is found in O(1) after one pass over the sources.
+/// in its scope is found without scanning sources. Root-prefix lookup is O(1);
+/// continuation lookup is O(log distinct start depths) per applicable bucket.
 pub struct KvTransferSourceSummary {
-    by_type: FxHashMap<u64, TopSources>,
-    by_island: FxHashMap<(u64, u64, u64), TopSources>,
+    by_type: FxHashMap<u64, SourceBucket>,
+    by_island: FxHashMap<(u64, u64, u64), SourceBucket>,
     scope: KvTransferScope,
 }
 
 impl KvTransferSourceSummary {
     /// Summarize `sources` for the targets in `scope`. The router resolves the request's
-    /// candidates into [`ResolvedTransferSource`]s (skipping any no longer than every target's
-    /// local prefix) before calling this.
+    /// candidates into [`ResolvedTransferSource`]s (skipping any no target in the scope can
+    /// use) before calling this; root prefixes and continuations may arrive in any order.
     pub fn new(
         sources: impl IntoIterator<Item = ResolvedTransferSource>,
         scope: KvTransferScope,
@@ -292,6 +365,9 @@ impl KvTransferSourceSummary {
             by_island: FxHashMap::default(),
             scope,
         };
+        // Buckets take offers in nondecreasing start order: roots first, then continuations.
+        let mut sources: Vec<_> = sources.into_iter().collect();
+        sources.sort_by_key(|source| source.start);
         for source in sources {
             let ranked = RankedSource {
                 choice: KvTransferSourceChoice {
@@ -301,12 +377,17 @@ impl KvTransferSourceSummary {
                 attachment: source.attachment,
             };
             if summary.scope.any_island {
-                TopSources::offer(summary.by_type.entry(source.worker_type), ranked);
+                SourceBucket::offer(
+                    summary.by_type.entry(source.worker_type),
+                    source.start,
+                    ranked,
+                );
             }
             for &(domain, value) in &source.topology {
                 if summary.scope.covers(domain, value) {
-                    TopSources::offer(
+                    SourceBucket::offer(
                         summary.by_island.entry((source.worker_type, domain, value)),
+                        source.start,
                         ranked,
                     );
                 }
@@ -324,8 +405,8 @@ impl KvTransferSourceSummary {
         local_prefix_blocks: usize,
     ) -> Option<KvTransferSourceChoice> {
         debug_assert!(local_prefix_blocks >= self.scope.min_local_prefix_blocks);
-        let pick = |top: Option<&TopSources>| {
-            top?.best_for(worker)
+        let pick = |top: Option<&SourceBucket>| {
+            top?.best_for(worker, local_prefix_blocks)
                 .filter(|choice| choice.prefix_blocks > local_prefix_blocks)
         };
         let worker_type = target.worker_type;

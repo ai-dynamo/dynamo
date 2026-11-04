@@ -13,7 +13,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 
 use dynamo_kv_router::config::{KvRouterConfig, try_kv_router_config_from_dynamo_env};
-use dynamo_kv_router::plugins::WorkerSelectionPolicyRegistry;
+use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_kv_router::services::selection::{
     SelectionService, SelectionServiceBuilder, warn_for_unserved_worker_selection_policies,
 };
@@ -79,7 +79,7 @@ pub struct Selector {
 impl Selector {
     pub async fn new(
         cfg: &EppStandaloneConfig,
-        policy_registry: WorkerSelectionPolicyRegistry,
+        policy_registry: RouterPluginRegistry,
     ) -> Result<Self> {
         let kv_router_config =
             try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
@@ -89,7 +89,7 @@ impl Selector {
     async fn new_with_kv_router_config(
         cfg: &EppStandaloneConfig,
         kv_router_config: KvRouterConfig,
-        policy_registry: WorkerSelectionPolicyRegistry,
+        policy_registry: RouterPluginRegistry,
     ) -> Result<Self> {
         Self::validate_queueing_worker_capacity(cfg, &kv_router_config)?;
 
@@ -116,7 +116,7 @@ impl Selector {
         let mut builder = SelectionServiceBuilder::new(
             kv_router_config,
             WorkerType::Aggregated,
-            policy_registry.with_default_factory(dynamo_custom_policy_builtin::default_factory()),
+            dynamo_router_policies::with_defaults(policy_registry),
         )
         .indexer_threads(cfg.selector_threads);
         if let Some(peer_replication) = peer_replication {
@@ -286,7 +286,7 @@ mod tests {
 
     impl WorkerPicker for ExpectedOutputRecorder {
         fn pick(
-            &mut self,
+            &self,
             context: &WorkerSelectionContext<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -424,7 +424,7 @@ models:
     /// Reconcile a single schedulable worker into a fresh selector, asserting the
     /// core admitted it (so the reserve paths below actually book).
     async fn selector_with_schedulable_worker() -> Selector {
-        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
+        let selector = Selector::new(&test_config(), RouterPluginRegistry::default())
             .await
             .expect("selector should build");
         register(&selector, vec![schedulable_registration(1)]).await;
@@ -439,7 +439,7 @@ models:
     async fn over_long_session_id_is_a_bad_request() {
         let mut cfg = test_config();
         cfg.session_affinity_ttl_secs = Some(60.0);
-        let selector = Selector::new(&cfg, WorkerSelectionPolicyRegistry::default())
+        let selector = Selector::new(&cfg, RouterPluginRegistry::default())
             .await
             .expect("selector should build");
         register(&selector, vec![schedulable_registration(1)]).await;
@@ -457,7 +457,7 @@ models:
 
         impl WorkerPicker for FirstEligiblePicker {
             fn pick(
-                &mut self,
+                &self,
                 _context: &WorkerSelectionContext<'_>,
                 input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -481,9 +481,9 @@ worker_selection:
         .expect("write policy file");
         let provider_calls = Arc::new(AtomicUsize::new(0));
         let factory_calls = Arc::new(AtomicUsize::new(0));
-        let mut registry = WorkerSelectionPolicyRegistry::default();
+        let mut registry = RouterPluginRegistry::default();
         registry
-            .register(
+            .register_worker_selection(
                 "first-eligible",
                 Arc::new({
                     let provider_calls = Arc::clone(&provider_calls);
@@ -651,7 +651,7 @@ worker_selection:
     /// so a worker exists in the catalog but is never schedulable.
     #[tokio::test]
     async fn select_and_reserve_errors_without_a_schedulable_worker() {
-        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
+        let selector = Selector::new(&test_config(), RouterPluginRegistry::default())
             .await
             .expect("selector should build");
         register(&selector, vec![incomplete_registration(1)]).await;
@@ -674,7 +674,7 @@ worker_selection:
     /// `prefill_complete` treat an unknown id as success (NotFound → Ok).
     #[tokio::test]
     async fn free_and_prefill_of_unknown_reservation_are_noops() {
-        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
+        let selector = Selector::new(&test_config(), RouterPluginRegistry::default())
             .await
             .expect("selector should build");
         selector
@@ -689,7 +689,7 @@ worker_selection:
 
     #[tokio::test]
     async fn selector_without_peer_replication_disables_replica_sync() {
-        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
+        let selector = Selector::new(&test_config(), RouterPluginRegistry::default())
             .await
             .expect("selector should build");
 
@@ -711,7 +711,7 @@ worker_selection:
         let error = Selector::new_with_kv_router_config(
             &cfg,
             router_config_with_policy(&policy_file),
-            WorkerSelectionPolicyRegistry::default(),
+            RouterPluginRegistry::default(),
         )
         .await
         .err()
@@ -734,7 +734,7 @@ worker_selection:
         Selector::new_with_kv_router_config(
             &cfg,
             router_config_with_policy(&policy_file),
-            WorkerSelectionPolicyRegistry::default(),
+            RouterPluginRegistry::default(),
         )
         .await
         .expect("threshold-free model should allow missing capacity");
@@ -742,7 +742,7 @@ worker_selection:
 
     #[tokio::test]
     async fn duplicate_worker_ids_are_rejected_before_reconciliation() {
-        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
+        let selector = Selector::new(&test_config(), RouterPluginRegistry::default())
             .await
             .expect("selector should build");
         let duplicate = incomplete_registration(1);
@@ -775,9 +775,9 @@ worker_selection:
         )
         .expect("write policy file");
 
-        let mut registry = WorkerSelectionPolicyRegistry::default();
+        let mut registry = RouterPluginRegistry::default();
         registry
-            .register(
+            .register_worker_selection(
                 "expected-output-recorder",
                 Arc::new({
                     let picker = picker.clone();
@@ -839,7 +839,7 @@ worker_selection:
         let selector = Selector::new_with_kv_router_config(
             &cfg,
             router_config_with_policy(&policy_file),
-            WorkerSelectionPolicyRegistry::default(),
+            RouterPluginRegistry::default(),
         )
         .await
         .expect("selector should build");
@@ -889,7 +889,7 @@ worker_selection:
 
         // Under the synthetic profile (no policy file configured) any value is
         // ignored and the request schedules, matching the integrated router.
-        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
+        let selector = Selector::new(&test_config(), RouterPluginRegistry::default())
             .await
             .expect("selector should build");
         register(&selector, vec![schedulable_registration(1)]).await;
@@ -905,7 +905,7 @@ worker_selection:
         for ttl in [-1.0, 0.0, 0.5, f64::NAN, f64::INFINITY] {
             let mut cfg = test_config();
             cfg.session_affinity_ttl_secs = Some(ttl);
-            let error = Selector::new(&cfg, WorkerSelectionPolicyRegistry::default())
+            let error = Selector::new(&cfg, RouterPluginRegistry::default())
                 .await
                 .err()
                 .unwrap_or_else(|| panic!("TTL={ttl} must be rejected"));

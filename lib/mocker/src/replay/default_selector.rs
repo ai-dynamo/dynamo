@@ -3,8 +3,8 @@
 
 //! Synchronous adapter for direct selection and deterministic replay.
 
-use dynamo_custom_policy_builtin::default_policy_with_rng;
 use dynamo_kv_router::plugins::prelude::*;
+use dynamo_router_policies::default_policy_with_rng;
 use dynamo_scheduler::host::WorkerSelectionInput;
 use dynamo_scheduler::host::WorkerSelector;
 use parking_lot::Mutex;

@@ -17,7 +17,9 @@ pub use dynamo_kv_hints::{
     KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, KvHint, KvHintAction, KvSourceLocationsPayload,
 };
 
-pub use dynamo_kv_indexer::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
+pub use dynamo_kv_indexer::kv_hints::{
+    KvTransferCandidateSource, KvTransferCandidates, KvTransferSourceInterval,
+};
 
 use std::collections::HashMap;
 
@@ -45,25 +47,41 @@ impl WorkerKvTransferKeysExt for WorkerKvTransferKeys {
     }
 }
 
-/// Resolve a request's transfer candidates into the sources a selection can rank: skip any
-/// no longer than every target's local prefix or longer than the retained chain, drop worker
-/// ranks that publish no source endpoint, and look cache owners up in the routing snapshot
-/// (an owner without topology sits in its attached worker's island).
+/// Resolve a request's transfer candidates into the sources a selection can rank: the root
+/// prefixes and the suffix-only intervals, skipping any no target in `scope` can use (ending
+/// at or before every target's local prefix, starting beyond every target's local prefix, or
+/// longer than the retained chain), dropping worker ranks that publish no source endpoint,
+/// and looking cache owners up in the routing snapshot (an owner without topology sits in
+/// its attached worker's island).
 pub fn resolve_transfer_sources<C: WorkerConfigLike>(
     candidates: &KvTransferCandidates,
     workers: &HashMap<WorkerId, C>,
     scope: &KvTransferScope,
 ) -> Vec<ResolvedTransferSource> {
     let min_local_prefix_blocks = scope.min_local_prefix_blocks();
+    let max_local_prefix_blocks = scope.max_local_prefix_blocks();
     let needs_islands = scope.needs_islands();
     let snapshot = candidates.routing_snapshot.as_deref();
     let mut resolved = Vec::new();
-    for &(source, prefix_blocks) in &candidates.owner_prefix_blocks {
-        // A source cannot share more of the prompt than the retained chain.
-        if prefix_blocks <= min_local_prefix_blocks || prefix_blocks > candidates.block_hashes.len()
-        {
-            continue;
-        }
+    // A source cannot share more of the prompt than the retained chain.
+    let usable = |start: usize, end: usize| {
+        start <= max_local_prefix_blocks
+            && end > min_local_prefix_blocks
+            && end <= candidates.block_hashes.len()
+            && start < end
+    };
+    let roots = candidates
+        .owner_prefix_blocks
+        .iter()
+        .map(|&(source, end)| (source, 0, end));
+    let intervals = candidates
+        .source_intervals
+        .iter()
+        .map(|interval| (interval.source, interval.start, interval.end));
+    for (source, start, prefix_blocks) in roots
+        .chain(intervals)
+        .filter(|&(_, start, end)| usable(start, end))
+    {
         let (worker_type, attachment, topology) = match source {
             KvTransferCandidateSource::Worker(worker) => {
                 let Some(config) = workers.get(&worker.worker_id) else {
@@ -102,6 +120,7 @@ pub fn resolve_transfer_sources<C: WorkerConfigLike>(
         };
         resolved.push(ResolvedTransferSource {
             source,
+            start,
             prefix_blocks,
             worker_type,
             attachment,
@@ -252,6 +271,7 @@ mod summary_tests {
         KvTransferCandidates {
             block_hashes: (101..=104).map(ExternalSequenceBlockHash).collect(),
             owner_prefix_blocks: sources,
+            source_intervals: Vec::new(),
             routing_snapshot: None,
         }
     }
@@ -299,6 +319,87 @@ mod summary_tests {
     }
 
     #[test]
+    fn continuation_choices_match_single_source_inventory() {
+        let workers = workers();
+        let mut rng = fastrand::Rng::with_seed(59);
+        for _ in 0..128 {
+            // Independent block inventories, including holes, shared starts and
+            // expired intervals. Query every target frontier against the same summary.
+            let inventories: Vec<_> = (7..=10)
+                .flat_map(|id| (0..2).map(move |rank| WorkerWithDpRank::new(id, rank)))
+                .map(|worker| (worker, (0..12).map(|_| rng.bool()).collect::<Vec<_>>()))
+                .collect();
+            let mut candidates = KvTransferCandidates {
+                block_hashes: (0..12).map(ExternalSequenceBlockHash).collect(),
+                ..Default::default()
+            };
+            for (worker, blocks) in &inventories {
+                let mut pos = 0;
+                while pos < blocks.len() {
+                    if !blocks[pos] {
+                        pos += 1;
+                        continue;
+                    }
+                    let start = pos;
+                    while pos < blocks.len() && blocks[pos] {
+                        pos += 1;
+                    }
+                    if start == 0 {
+                        candidates.owner_prefix_blocks.push(((*worker).into(), pos));
+                    } else {
+                        candidates.source_intervals.push(KvTransferSourceInterval {
+                            source: (*worker).into(),
+                            start,
+                            end: pos,
+                        });
+                    }
+                }
+            }
+            rng.shuffle(&mut candidates.source_intervals);
+            let scope = KvTransferScope::all();
+            let summary = KvTransferSourceSummary::new(
+                resolve_transfer_sources(&candidates, &workers, &scope),
+                scope,
+            );
+            for target in
+                (7..=9).flat_map(|id| (0..2).map(move |rank| WorkerWithDpRank::new(id, rank)))
+            {
+                for local in 0..=12 {
+                    let expected = inventories
+                        .iter()
+                        .filter(|(worker, _)| {
+                            *worker != target && workers.contains_key(&worker.worker_id)
+                        })
+                        .filter_map(|(worker, blocks)| {
+                            let end = local
+                                + blocks[local..]
+                                    .iter()
+                                    .take_while(|&&present| present)
+                                    .count();
+                            (end > local)
+                                .then_some((KvTransferCandidateSource::Worker(*worker), end))
+                        })
+                        .max_by_key(|&(source, end)| (end, std::cmp::Reverse(source)));
+                    let keys = workers[&target.worker_id].kv_transfer_keys();
+                    let actual = summary
+                        .source_for(target, keys.target().unwrap(), local)
+                        .map(|choice| (choice.source, choice.prefix_blocks));
+                    assert_eq!(actual, expected, "target={target:?}, local={local}");
+                    let scope = KvTransferScope::of([(keys.target().unwrap(), local)]);
+                    let scoped = KvTransferSourceSummary::new(
+                        resolve_transfer_sources(&candidates, &workers, &scope),
+                        scope,
+                    );
+                    let actual = scoped
+                        .source_for(target, keys.target().unwrap(), local)
+                        .map(|choice| (choice.source, choice.prefix_blocks));
+                    assert_eq!(actual, expected, "scoped target={target:?}, local={local}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn cache_owners_attached_to_the_target_are_skipped() {
         let owner = |slot: u8| {
             CacheOwnerId::new(
@@ -337,6 +438,25 @@ mod summary_tests {
         assert_eq!(source_for(&candidates, target, 0), Some((other.into(), 2)));
         assert_eq!(
             source_for(&candidates, other, 0),
+            Some((KvTransferCandidateSource::CacheOwner(key(owner(4))), 4))
+        );
+
+        candidates.owner_prefix_blocks.clear();
+        candidates.source_intervals = vec![
+            KvTransferSourceInterval {
+                source: KvTransferCandidateSource::CacheOwner(key(owner(4))),
+                start: 1,
+                end: 4,
+            },
+            KvTransferSourceInterval {
+                source: other.into(),
+                start: 1,
+                end: 3,
+            },
+        ];
+        assert_eq!(source_for(&candidates, target, 1), Some((other.into(), 3)));
+        assert_eq!(
+            source_for(&candidates, other, 1),
             Some((KvTransferCandidateSource::CacheOwner(key(owner(4))), 4))
         );
     }

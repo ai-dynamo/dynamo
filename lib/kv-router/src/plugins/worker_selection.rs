@@ -13,13 +13,14 @@ mod config;
 pub use dynamo_worker_selection::selection_config;
 pub use dynamo_worker_selection::{
     CacheSnapshot, CandidateData, CandidatePreparer, CandidateRank, CandidateRowSource,
-    PreparedRows, RankVisitor, RowPick, RuntimePolicyBuilder, RuntimePolicyConfig,
-    RuntimePolicyError, RuntimePolicyUpdate, ScoredWorkerCandidate, SelectionConfig,
-    SelectionFailure, SelectionTrace, SelectionTraceRow, SelectionTraceSpec, SessionContext,
-    SharedCacheHits, SharedCacheType, WorkerCacheData, WorkerCacheInput, WorkerCacheInputs,
-    WorkerCandidate, WorkerCandidates, WorkerCapacity, WorkerFilter, WorkerInfo, WorkerInputRows,
-    WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerTransferInput,
+    HostedSelectionRequest, HostedWorkerPicker, PreparedRows, RankVisitor, RowPick,
+    RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
+    ScoredWorkerCandidate, SelectionConfig, SelectionFailure, SelectionTrace, SelectionTraceRow,
+    SelectionTraceSpec, SessionContext, SharedCacheHits, SharedCacheType, WorkerCacheData,
+    WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates, WorkerCapacity,
+    WorkerFilter, WorkerInfo, WorkerInputRows, WorkerInputView, WorkerInputs, WorkerLoadInput,
+    WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
+    WorkerSelectionPolicyError, WorkerTransferInput,
 };
 #[cfg(any(test, feature = "bench"))]
 pub use dynamo_worker_selection::{DefaultPick, DefaultWorkerPicker};

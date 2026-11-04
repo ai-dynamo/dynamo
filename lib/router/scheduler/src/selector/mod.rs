@@ -46,9 +46,7 @@ pub use dynamo_worker_selection::{
 use dynamo_worker_selection::{RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate};
 
 use super::filter::{RoutingEligibility, WorkerEligibilityError};
-use super::types::{
-    KvSchedulerError, SchedulingRequest, SchedulingResponse, WorkerSelectionPolicyError,
-};
+use super::types::{KvSchedulerError, SchedulingRequest, SchedulingResponse};
 use crate::protocols::{SelectionLogFields, WorkerConfigLike, WorkerSelectionResult};
 use dynamo_router_protocol::worker::{WorkerId, WorkerWithDpRank};
 use dynamo_worker_selection::{SelectionTrace, SelectionTraceSpec};
@@ -126,10 +124,6 @@ pub enum WorkerSelectionInput<'a, C: WorkerConfigLike> {
         eligibility: RoutingEligibility<'a>,
         block_size: u32,
     },
-    Hosted {
-        worker_ids: &'a [WorkerId],
-        occupancy: Option<&'a dyn Fn(WorkerId) -> u64>,
-    },
 }
 
 pub type ConfiguredSelectionInputs<'a, C> = (
@@ -138,8 +132,6 @@ pub type ConfiguredSelectionInputs<'a, C> = (
     RoutingEligibility<'a>,
     u32,
 );
-
-pub type HostedSelectionInputs<'a> = (&'a [WorkerId], Option<&'a dyn Fn(WorkerId) -> u64>);
 
 impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
     pub fn configured(
@@ -156,42 +148,14 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
         }
     }
 
-    pub fn hosted(
-        worker_ids: &'a [WorkerId],
-        occupancy: Option<&'a dyn Fn(WorkerId) -> u64>,
-    ) -> Self {
-        Self::Hosted {
-            worker_ids,
-            occupancy,
-        }
-    }
-
-    pub fn into_configured(self) -> Result<ConfiguredSelectionInputs<'a, C>, KvSchedulerError> {
-        match self {
-            Self::Configured {
-                workers,
-                request,
-                eligibility,
-                block_size,
-            } => Ok((workers, request, eligibility, block_size)),
-            Self::Hosted { .. } => Err(WorkerSelectionPolicyError::failed(
-                "selector requires configured worker inputs",
-            )
-            .into()),
-        }
-    }
-
-    pub fn into_hosted(self) -> Result<HostedSelectionInputs<'a>, KvSchedulerError> {
-        match self {
-            Self::Hosted {
-                worker_ids,
-                occupancy,
-            } => Ok((worker_ids, occupancy)),
-            Self::Configured { .. } => Err(WorkerSelectionPolicyError::failed(
-                "selector requires hosted worker inputs",
-            )
-            .into()),
-        }
+    pub fn into_configured(self) -> ConfiguredSelectionInputs<'a, C> {
+        let Self::Configured {
+            workers,
+            request,
+            eligibility,
+            block_size,
+        } = self;
+        (workers, request, eligibility, block_size)
     }
 }
 
@@ -217,7 +181,7 @@ impl CandidatePreparerExt for CandidatePreparer {
         &self,
         input: WorkerSelectionInput<'_, C>,
     ) -> Option<PreparedCandidates> {
-        let (workers, request, eligibility, block_size) = input.into_configured().ok()?;
+        let (workers, request, eligibility, block_size) = input.into_configured();
         let source = SelectionRowSource::new(request, workers, eligibility, block_size);
         let rows = self.prepare_with(workers.len(), |inputs, rows| {
             eligibility.for_each_eligible_worker_rank(workers, |worker, config| {
@@ -270,7 +234,7 @@ impl<'a, C: WorkerConfigLike> SelectionRowSource<'a, C> {
 
     /// The source for a host's selection input, once its pinned worker is validated.
     fn from_input(input: WorkerSelectionInput<'a, C>) -> Result<Self, KvSchedulerError> {
-        let (workers, request, eligibility, block_size) = input.into_configured()?;
+        let (workers, request, eligibility, block_size) = input.into_configured();
         eligibility.validate_pinned_worker_allowed()?;
         if let Some(worker) = eligibility.pinned_worker() {
             match eligibility.validate_worker_rank(workers, worker) {

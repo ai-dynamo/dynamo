@@ -2456,7 +2456,7 @@ mod tests {
             &self,
             input: WorkerSelectionInput<'_, SimpleWorkerConfig>,
         ) -> Result<WorkerSelectionResult, KvSchedulerError> {
-            let (workers, request, eligibility, block_size) = input.into_configured()?;
+            let (workers, request, eligibility, block_size) = input.into_configured();
             if let Some(rendezvous) = &self.rendezvous {
                 rendezvous.wait_for_peer();
             }
@@ -3076,7 +3076,7 @@ mod tests {
         }
 
         fn pick(
-            &mut self,
+            &self,
             _context: &dynamo_worker_selection::WorkerSelectionContext<'_>,
             input: dynamo_worker_selection::WorkerInputView<'_>,
         ) -> Result<usize, dynamo_worker_selection::WorkerSelectionPolicyError> {
@@ -5051,6 +5051,7 @@ mod tests {
                         ExternalSequenceBlockHash(102),
                     ],
                     owner_prefix_blocks: vec![(WorkerWithDpRank::new(1, 0).into(), 2)],
+                    source_intervals: Vec::new(),
                     routing_snapshot: None,
                 }),
                 overlap: OverlapSignals {
@@ -5149,6 +5150,7 @@ mod tests {
                 kv_transfer_candidates: Some(KvTransferCandidates {
                     block_hashes: vec![ExternalSequenceBlockHash(101)],
                     owner_prefix_blocks: vec![(worker.into(), 1)],
+                    source_intervals: Vec::new(),
                     routing_snapshot: None,
                 }),
                 overlap: OverlapSignals {

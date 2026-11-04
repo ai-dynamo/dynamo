@@ -3,10 +3,6 @@
 
 use dynamo_kv_router::plugins::RouterPlugins;
 use dynamo_kv_router::plugins::request_classifier::RequestClassifierFactory;
-use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicy;
-use dynamo_router_protocol::identity::RoutingPartitionRef;
-use dynamo_router_protocol::worker_type::WorkerType;
-use dynamo_worker_selection::host::SelectionConfig;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -23,9 +19,8 @@ use crate::{
     local_model::runtime_config::TokenizerBackend,
     model_type::ModelType,
     namespace::NamespaceFilter,
-    types::openai::{
-        chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-        completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
+    types::openai::chat_completions::{
+        NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
 };
 use dynamo_runtime::DistributedRuntime;
@@ -45,8 +40,7 @@ impl HttpFrontend {
     /// Install a resolved plugin bundle for all routers created by this frontend.
     ///
     /// This replaces all previously configured plugins. Call this before
-    /// [`Self::worker_selection_policy_factory`] or [`Self::request_classifier_factory`]
-    /// to retain overrides made by those setters.
+    /// [`Self::request_classifier_factory`] to retain the override made by that setter.
     pub fn plugins(mut self, plugins: RouterPlugins) -> Self {
         self.plugins = plugins;
         self
@@ -58,28 +52,6 @@ impl HttpFrontend {
         frontend_route_extensions: Vec<FrontendRouteExtension>,
     ) -> Self {
         self.frontend_route_extensions = frontend_route_extensions;
-        self
-    }
-
-    /// Replace the registry-resolved worker-selection policy with a statically linked native one.
-    ///
-    /// The factory is called when each decode or prefill worker set is constructed, not per
-    /// request. Workers must advertise an explicit typed role; legacy untyped cards are rejected
-    /// because decode and aggregated workers cannot be distinguished. Dynamo continues to own
-    /// discovery, scheduling, validation, and accounting.
-    // TODO(v1.7): Remove this compatibility setter; use plugins with RouterPlugins::with_worker_selection.
-    pub fn worker_selection_policy_factory<F>(mut self, factory: F) -> Self
-    where
-        F: for<'a> Fn(
-                &SelectionConfig,
-                WorkerType,
-                RoutingPartitionRef<'a>,
-            ) -> WorkerSelectionPolicy
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.plugins = self.plugins.with_worker_selection(Arc::new(factory));
         self
     }
 
@@ -306,11 +278,8 @@ async fn run_with_router_plugins(
             .await?;
             manager.add_chat_completions_model(model.display_name(), checksum, chat_pipeline)?;
 
-            let cmpl_pipeline = common::build_pipeline::<
-                NvCreateCompletionRequest,
-                NvCreateCompletionResponse,
-            >(model.card(), inner_engine, tokenizer)
-            .await?;
+            let cmpl_pipeline =
+                common::build_completions_pipeline(model.card(), inner_engine, tokenizer)?;
             manager.add_completions_model(model.display_name(), checksum, cmpl_pipeline)?;
             enable_in_process_model_endpoints(&http_service)?;
             http_service

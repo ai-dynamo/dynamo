@@ -66,7 +66,7 @@ ROUTER_FAMILY="dynamo-multimodal dynamo-error dynamo-kv-hashing dynamo-router-pr
 # the kernel for tests and benches). The example catalog aggregates its sibling
 # example policies; the EPP example links the catalog into the gateway binary.
 PLUGIN_TABLE=(
-  "dynamo-custom-policy-builtin | dynamo-kv-router"
+  "dynamo-router-policies | dynamo-kv-router"
   "dynamo-worker-selection-policy-catalog | dynamo-kv-router"
   "dynamo-custom-policy-example-soft-pin-repin | dynamo-kv-router"
   "dynamo-custom-policy-example-simple-filter-score-pick | dynamo-kv-router"

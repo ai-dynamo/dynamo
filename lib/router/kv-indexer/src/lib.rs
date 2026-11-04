@@ -71,6 +71,8 @@ pub mod lookup;
 mod lower_tier;
 mod lower_tier_indexers;
 pub mod metrics;
+#[cfg(test)]
+mod mm_exclusion_tests;
 #[cfg(feature = "bench")]
 mod observation;
 pub mod overlap;

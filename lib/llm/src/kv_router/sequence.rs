@@ -1128,7 +1128,7 @@ mod tests {
                     ..Default::default()
                 },
                 dynamo_router_protocol::worker_type::WorkerType::Aggregated,
-                dynamo_custom_policy_builtin::default_registry(),
+                dynamo_router_policies::default_registry(),
             )
             .indexer_threads(1)
             .build()

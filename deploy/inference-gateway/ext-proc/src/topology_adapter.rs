@@ -197,7 +197,7 @@ mod tests {
         let selector = Arc::new(
             Selector::new(
                 &config(),
-                dynamo_kv_router::plugins::WorkerSelectionPolicyRegistry::default(),
+                dynamo_kv_router::plugins::RouterPluginRegistry::default(),
             )
             .await
             .expect("selector should build"),

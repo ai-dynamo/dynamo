@@ -31,8 +31,11 @@ const KV_FETCH_ACTION_VERSION: &str = "1.0";
 pub struct KvSourceLocationsPayload {
     /// The source's control endpoint the target fetches from.
     pub source_control_endpoint: String,
-    /// Root-aligned source-side KV block hashes. `block_hashes[i]`
-    /// corresponds to request block `i`; the target decides which suffix to fetch.
+    /// Root-aligned request hashes through the fetchable end. `block_hashes[i]`
+    /// corresponds to request block `i`; the target fetches its missing suffix.
+    /// With fetch continuation, the source need not hold the target's local prefix.
+    /// If that prefix has been evicted, the receiver must use actual fetch
+    /// results and recompute from any remaining gap; the hint is not a pin.
     pub block_hashes: Vec<ExternalSequenceBlockHash>,
 }
 
@@ -111,7 +114,7 @@ impl KvHint {
 /// Who holds a KV prefix a target could fetch: a worker rank, or a cache owner by its compact
 /// residency key. The indexer produces it with a match and owns it; this crate keeps the
 /// public path because [`crate::transfer`] names it in every source choice.
-pub use dynamo_kv_indexer::kv_hints::KvTransferCandidateSource;
+pub use dynamo_kv_indexer::kv_hints::{KvTransferCandidateSource, KvTransferSourceInterval};
 
 #[cfg(test)]
 mod tests {

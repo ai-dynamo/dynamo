@@ -3,8 +3,8 @@
 #[path = "../tests/support/mod.rs"]
 mod support;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use dynamo_custom_policy_builtin::default_policy;
 use dynamo_kv_router::plugins::prelude::*;
+use dynamo_router_policies::default_policy;
 use dynamo_scheduler::host::{WorkerKvTransferKeysExt, WorkerSelector};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -164,7 +164,7 @@ impl dynamo_kv_router::plugins::prelude::WorkerScorer for LoadScorer {
         dynamo_kv_router::plugins::prelude::WorkerInputs::LOAD
     }
     fn score(
-        &mut self,
+        &self,
         _: &dynamo_kv_router::plugins::prelude::WorkerSelectionContext<'_>,
         candidates: dynamo_kv_router::plugins::prelude::WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -179,7 +179,7 @@ impl dynamo_kv_router::plugins::prelude::WorkerScorer for LoadScorer {
 struct MinimumPicker;
 impl dynamo_kv_router::plugins::prelude::WorkerPicker for MinimumPicker {
     fn pick(
-        &mut self,
+        &self,
         _: &dynamo_kv_router::plugins::prelude::WorkerSelectionContext<'_>,
         input: dynamo_kv_router::plugins::prelude::WorkerInputView<'_>,
     ) -> Result<usize, dynamo_kv_router::plugins::prelude::WorkerSelectionPolicyError> {
@@ -378,6 +378,7 @@ fn kv_transfer(c: &mut Criterion) {
                             .map(dynamo_kv_router::plugins::prelude::ExternalSequenceBlockHash)
                             .collect(),
                         owner_prefix_blocks: sources,
+                        source_intervals: Vec::new(),
                         routing_snapshot: None,
                     });
             }

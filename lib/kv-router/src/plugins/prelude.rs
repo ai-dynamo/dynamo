@@ -11,10 +11,11 @@
 
 // Worker-selection contracts and the candidate rows they read.
 pub use crate::plugins::worker_selection::{
-    RuntimePolicyBuilder, RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
-    ScoredWorkerCandidate, SelectionConfig, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate,
-    WorkerCandidates, WorkerCapacity, WorkerFilter, WorkerInfo, WorkerInputView, WorkerInputs,
-    WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionConfig, WorkerSelectionContext,
+    HostedSelectionRequest, HostedWorkerPicker, RuntimePolicyBuilder, RuntimePolicyConfig,
+    RuntimePolicyError, RuntimePolicyUpdate, ScoredWorkerCandidate, SelectionConfig,
+    SelectionFailure, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates,
+    WorkerCapacity, WorkerFilter, WorkerInfo, WorkerInputView, WorkerInputs, WorkerLoadInput,
+    WorkerPicker, WorkerScorer, WorkerSelectionConfig, WorkerSelectionContext,
     WorkerSelectionInstance, WorkerSelectionPolicy, WorkerSelectionPolicyError,
     WorkerSelectionPolicyFactory, WorkerTransferInput,
 };
@@ -32,8 +33,7 @@ pub use crate::config::{KvRouterConfig, SharedCacheType};
 pub use crate::plugins::{
     RouterPluginRegistry, RouterPluginRegistryError, RouterPlugins,
     WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
-    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
-    WorkerSelectionPolicyRegistryError,
+    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
 };
 
 // Wire vocabulary the signal views carry.

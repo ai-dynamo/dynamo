@@ -38,7 +38,7 @@ fn provider(
 
 /// Register the `simple-stacked-score-pick` policy type.
 pub fn register(
-    registry: &mut WorkerSelectionPolicyRegistry,
+    registry: &mut RouterPluginRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
-    registry.register("simple-stacked-score-pick", Arc::new(provider))
+    registry.register_worker_selection("simple-stacked-score-pick", Arc::new(provider))
 }

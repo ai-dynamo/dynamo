@@ -25,10 +25,10 @@ use dynamo_router_protocol::identity::RoutingPartitionId;
 use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_scheduler::host::{
     HostLoad, PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, SelectionCore,
-    SelectionHost, WorkerRequest, WorkerSelectionPolicyFactory,
+    SelectionHost, WorkerRequest,
 };
 use dynamo_scheduler::protocols::RoutingConstraints;
-use dynamo_scheduler::types::RejectThresholdsProvider;
+use dynamo_scheduler::types::{RejectThresholdsProvider, WorkerSelectionPolicyFactory};
 use dynamo_slot_tracker::busy::BusyThresholds;
 use tokio_util::sync::CancellationToken;
 

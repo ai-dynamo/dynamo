@@ -16,8 +16,8 @@ use dynamo_router_protocol::worker::WorkerWithDpRank;
 use dynamo_runtime::component::{Client, Component};
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery};
 use dynamo_runtime::pipeline::{
-    AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, RouterMode, SingleIn,
-    async_trait, network::Ingress, network::egress::push_router::PushRouter,
+    AsyncEngine, AsyncEngineContextProvider, ManyOut, PushRouterOptions, ResponseStream,
+    RouterMode, SingleIn, async_trait, network::Ingress, network::egress::push_router::PushRouter,
 };
 use dynamo_runtime::stream;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
@@ -53,9 +53,13 @@ impl RemoteIndexer {
             .endpoint(KV_INDEXER_QUERY_ENDPOINT)
             .client()
             .await?;
-        let query_router = PushRouter::from_client_no_fault_detection(
+        let query_router = PushRouter::from_client_with_options(
             query_client.clone(),
             RouterMode::RoundRobin,
+            PushRouterOptions {
+                fault_detection: false,
+                ..crate::kv_router::plugins::push_router_options()
+            },
         )
         .await?;
         let record_client = component
@@ -66,9 +70,13 @@ impl RemoteIndexer {
             None
         } else {
             Some(
-                PushRouter::from_client_no_fault_detection(
+                PushRouter::from_client_with_options(
                     record_client.clone(),
                     RouterMode::RoundRobin,
+                    PushRouterOptions {
+                        fault_detection: false,
+                        ..crate::kv_router::plugins::push_router_options()
+                    },
                 )
                 .await?,
             )

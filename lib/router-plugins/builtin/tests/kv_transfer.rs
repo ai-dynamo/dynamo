@@ -4,8 +4,8 @@
 //! The default policy credits blocks a worker can fetch from a KV transfer source.
 
 mod support;
-use dynamo_custom_policy_builtin::{default_policy, default_policy_with_rng};
 use dynamo_kv_router::plugins::prelude::*;
+use dynamo_router_policies::{default_policy, default_policy_with_rng};
 use dynamo_scheduler::host::WorkerSelector;
 use std::collections::HashMap;
 
@@ -107,6 +107,7 @@ fn request(workers: &[(u64, usize, usize, usize)]) -> SchedulingRequest {
             .filter(|(_, prefix_blocks, ..)| *prefix_blocks > 0)
             .map(|&(id, prefix_blocks, ..)| (worker(id).into(), prefix_blocks))
             .collect(),
+        source_intervals: Vec::new(),
         routing_snapshot: None,
     });
     request

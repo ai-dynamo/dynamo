@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-use dynamo_custom_policy_builtin::default_factory;
 use dynamo_kv_router::plugins::prelude::*;
 use dynamo_kv_router::services::selection::local_selection_core;
+use dynamo_router_policies::default_factory;
 use dynamo_scheduler::host::{
     PromptRequest, SelectAndReserveRequest, SelectionCacheConfig, WorkerRequest,
 };
@@ -139,17 +139,20 @@ async fn runtime_updates_are_conditional_and_cancelled_writes_do_not_apply() {
 #[tokio::test]
 async fn scoring_error_does_not_book_and_allows_retry() {
     use dynamo_kv_router::plugins::prelude::*;
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
 
-    struct FailOnce(bool);
+    struct FailOnce(AtomicBool);
     impl WorkerScorer for FailOnce {
         fn score(
-            &mut self,
+            &self,
             _: &WorkerSelectionContext<'_>,
             _: WorkerCandidates<'_>,
             costs: &mut [f64],
         ) -> Result<(), WorkerSelectionPolicyError> {
-            if std::mem::take(&mut self.0) {
+            if self.0.swap(false, Ordering::Relaxed) {
                 return Err(WorkerSelectionPolicyError::failed("score failed"));
             }
             costs.fill(0.0);
@@ -159,7 +162,7 @@ async fn scoring_error_does_not_book_and_allows_retry() {
     struct First;
     impl WorkerPicker for First {
         fn pick(
-            &mut self,
+            &self,
             _: &WorkerSelectionContext<'_>,
             _: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -179,7 +182,7 @@ async fn scoring_error_does_not_book_and_allows_retry() {
             WorkerSelectionPolicy::new(
                 config.clone(),
                 role.default_selector_label(),
-                vec![Box::new(FailOnce(true))],
+                vec![Box::new(FailOnce(AtomicBool::new(true)))],
                 Box::new(First),
             )
         }),
