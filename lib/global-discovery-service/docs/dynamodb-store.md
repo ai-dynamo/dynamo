@@ -92,6 +92,16 @@ No condition. The memory store's rule is that any caller may overwrite any
 pool and several PoolRelay replicas register the same pool, so the whole
 record is last writer wins, like today.
 
+The PoolRelays of one pool must therefore send the same registration. Lists
+in another order or with repeats are the same registration: `register` sorts
+and deduplicates them before it hashes and stores. If the content differs,
+for example in the frontends each relay sees or in the capacity it counts,
+the item switches between their versions at every heartbeat, and every
+replica's watchers see the pool change at almost every poll. With `karmada`
+or `mcs`, the join takes frontends from MCS, so a difference in frontends
+alone does not reach routers. The store warns, once per pool, when a pool's
+changes go back to the version before twice in a row.
+
 Whether the registration is published to this replica's watchers is decided
 against what those watchers already have (the polled view, below), not
 against the old item, so the write asks for no `ReturnValues`. If the view

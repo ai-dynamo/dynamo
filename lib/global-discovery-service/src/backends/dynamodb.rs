@@ -118,7 +118,9 @@ impl DynamoDbConfig {
 ///
 /// Any caller may register any pool: V1 assumes a trusted network, and
 /// several PoolRelay replicas may register the same pool. The last write
-/// wins.
+/// wins, so they must send the same registration, lists in any order. The
+/// store warns about a pool whose registration keeps switching between two
+/// versions.
 pub struct DynamoDbPoolStore {
     lease: Lease,
     poll_interval: Duration,
@@ -178,6 +180,61 @@ struct Watched {
     complete_at_ms: u64,
     /// A call to the table failed, and no read has succeeded since.
     failing: bool,
+    /// Pools whose registration switches back and forth.
+    flaps: Flaps,
+}
+
+/// Changes in a row back to the version before that make a pool's
+/// registration flap. One is a rollback, as of a model changed and changed
+/// back.
+const FLAPPING_AFTER: u32 = 2;
+
+/// Notices a pool whose registration keeps switching between two versions,
+/// as when its PoolRelays send different registrations and each write
+/// replaces the other's. Watchers then see the pool change at almost every
+/// poll.
+#[derive(Debug, Default)]
+struct Flaps {
+    pools: HashMap<PoolKey, Flap>,
+}
+
+#[derive(Debug)]
+struct Flap {
+    /// The pool's version, by hash, before its last change.
+    before: String,
+    /// Changes in a row that went back to the version before.
+    returns: u32,
+    /// The warning has been logged.
+    warned: bool,
+}
+
+impl Flaps {
+    /// Records that `key` changed from version `from` to `to`. True once per
+    /// pool, when its changes have gone back to the version before
+    /// [`FLAPPING_AFTER`] times in a row.
+    fn changed(&mut self, key: &PoolKey, from: &str, to: &str) -> bool {
+        let flap = self.pools.entry(key.clone()).or_insert_with(|| Flap {
+            before: String::new(),
+            returns: 0,
+            warned: false,
+        });
+        flap.returns = if flap.before == to {
+            flap.returns.saturating_add(1)
+        } else {
+            0
+        };
+        from.clone_into(&mut flap.before);
+        if flap.returns < FLAPPING_AFTER || flap.warned {
+            return false;
+        }
+        flap.warned = true;
+        true
+    }
+
+    /// Forgets a pool that is gone, so it starts over if it comes back.
+    fn forget(&mut self, key: &PoolKey) {
+        self.pools.remove(key);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -299,18 +356,37 @@ impl Watched {
                 live.insert(key.clone(), seen.clone());
             }
         }
-        let mut events: Vec<PoolEvent> = before
-            .keys()
-            .filter(|key| !live.contains_key(*key))
-            .map(|key| WatchEvent::Removed(key.clone()))
-            .collect();
-        events.extend(
-            live.iter()
-                .filter(|(key, seen)| before.get(*key).is_none_or(|old| old.hash != seen.hash))
-                .map(|(_, seen)| WatchEvent::Upserted(seen.listing.clone())),
-        );
+        let mut events = Vec::new();
+        for key in before.keys().filter(|key| !live.contains_key(*key)) {
+            self.flaps.forget(key);
+            events.push(WatchEvent::Removed(key.clone()));
+        }
+        for (key, seen) in &live {
+            match before.get(key) {
+                Some(old) if old.hash == seen.hash => {}
+                Some(old) => {
+                    self.changed(key, &old.hash, &seen.hash);
+                    events.push(WatchEvent::Upserted(seen.listing.clone()));
+                }
+                None => events.push(WatchEvent::Upserted(seen.listing.clone())),
+            }
+        }
         self.pools = Some(live);
         events
+    }
+
+    /// Records that a pool's registration changed, and warns, once, about a
+    /// pool whose registration keeps switching between two versions.
+    fn changed(&mut self, key: &PoolKey, from: &str, to: &str) {
+        if self.flaps.changed(key, from, to) {
+            tracing::warn!(
+                ?key,
+                "this pool's registration keeps switching between two versions, so watchers \
+                 see it change at almost every poll. Its PoolRelays send different registrations, \
+                 and each write replaces the other's: every PoolRelay of a pool must send the same \
+                 model, capabilities, capacity, location and frontends."
+            );
+        }
     }
 
     /// Records a registration this replica stored, live until
@@ -323,9 +399,19 @@ impl Watched {
         live_until_ms: u64,
     ) -> Option<PoolEvent> {
         self.writes += 1;
-        let pools = self.pools.as_mut()?;
-        let changed = pools.get(&listing.key).is_none_or(|seen| seen.hash != hash);
+        let before = self
+            .pools
+            .as_ref()?
+            .get(&listing.key)
+            .map(|seen| seen.hash.clone());
+        if let Some(before) = &before
+            && *before != hash
+        {
+            self.changed(&listing.key, before, &hash);
+        }
+        let changed = before.is_none_or(|before| before != hash);
         let event = changed.then(|| WatchEvent::Upserted(listing.clone()));
+        let pools = self.pools.as_mut()?;
         pools.insert(
             listing.key.clone(),
             Seen {
@@ -1022,6 +1108,47 @@ mod tests {
             panic!("expected the key to be rejected");
         };
         assert!(reason.contains("1025 bytes"), "{reason}");
+    }
+
+    #[test]
+    fn a_pool_that_keeps_switching_versions_is_noticed_once() {
+        let mut flaps = Flaps::default();
+        let a = key("a");
+        // A change and its rollback are not flapping.
+        assert!(!flaps.changed(&a, "m1", "m2"));
+        assert!(!flaps.changed(&a, "m2", "m1"));
+        // Going back to the version before once more is.
+        assert!(flaps.changed(&a, "m1", "m2"));
+        // It is noticed once.
+        assert!(!flaps.changed(&a, "m2", "m1"));
+
+        // Changes through ever new versions are not flapping.
+        let b = key("b");
+        for (from, to) in [("m1", "m2"), ("m2", "m3"), ("m3", "m4")] {
+            assert!(!flaps.changed(&b, from, to));
+        }
+
+        // A pool that goes away and comes back starts over.
+        flaps.forget(&a);
+        assert!(!flaps.changed(&a, "m1", "m2"));
+        assert!(!flaps.changed(&a, "m2", "m1"));
+    }
+
+    /// Two PoolRelays that send different registrations for one pool make
+    /// every poll see a change. Each is still published, and the view notes
+    /// the flapping.
+    #[test]
+    fn polls_that_switch_a_pool_between_two_versions_are_noticed() {
+        let mut watched = Watched::default();
+        let _ = watched.apply_poll(polled(&[("a", "m1")]), 0);
+        for model in ["m2", "m1", "m2"] {
+            let events = watched.apply_poll(polled(&[("a", model)]), 0);
+            assert_eq!(described(&events), set(&[format!("+a/{model}").as_str()]));
+        }
+        assert!(watched.flaps.pools[&key("a")].warned);
+        // It is forgotten once it goes.
+        let _ = watched.apply_poll(polled(&[]), 0);
+        assert!(watched.flaps.pools.is_empty());
     }
 
     /// `list` answers from the view between polls, as a read of the table at

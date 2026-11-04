@@ -112,7 +112,10 @@ Request:
 
 Register again within `heartbeat_interval_s`. If `lease_duration_s` passes with no successful
 registration, the pool drops out of `GET /pools`. The heartbeat interval is above zero and below the lease.
-Any caller may overwrite any pool: the last registration for a key wins.
+Any caller may overwrite any pool: the last registration for a key wins. So the Pool Relays of one
+pool must send the same registration, though lists may come in any order. If they differ, the pool's
+listing switches between their versions at every heartbeat, and the service logs a warning that names
+the pool.
 In `karmada` and `mcs` modes, the listed frontend addresses come from MCS; the registration's
 `frontends` are not used.
 
