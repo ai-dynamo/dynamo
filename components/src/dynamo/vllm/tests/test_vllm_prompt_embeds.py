@@ -12,6 +12,7 @@ import pytest
 import torch
 from vllm.outputs import RequestOutput
 
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.vllm.handlers import BaseWorkerHandler
 
 pytestmark = [
@@ -75,19 +76,19 @@ class TestPromptEmbedsDecode:
         "invalid_input,error_match,description",
         [
             # Invalid base64
-            ("not-valid-base64!!!", r"(Invalid base64|Failed to decode)", "bad base64"),
+            ("not-valid-base64!!!", r"not valid base64", "bad base64"),
             # Empty string
             ("", r".", "empty string"),
             # Raw bytes (not PyTorch format)
             (
                 base64.b64encode(b"not a pytorch tensor").decode("utf-8"),
-                r"Failed to decode.*PyTorch",
+                r"could not be deserialized as a torch tensor",
                 "raw bytes",
             ),
             # Corrupted PyTorch format
             (
                 base64.b64encode(b"PK\x03\x04" + b"invalid_data" * 10).decode("utf-8"),
-                r"Failed to decode.*PyTorch",
+                r"could not be deserialized as a torch tensor",
                 "corrupted zip",
             ),
         ],
@@ -96,8 +97,8 @@ class TestPromptEmbedsDecode:
     def test_decode_invalid_inputs(
         self, mock_handler, invalid_input, error_match, description
     ):
-        """Test that invalid inputs raise ValueError."""
-        with pytest.raises(ValueError, match=error_match):
+        """Test that invalid inputs raise InvalidArgument."""
+        with pytest.raises(InvalidArgument, match=error_match):
             mock_handler._decode_prompt_embeds(invalid_input)
 
     def test_missing_model_config_is_server_error(self, mock_handler):
@@ -130,7 +131,9 @@ class TestPromptEmbedsDecode:
         buffer.seek(0)
         embeddings_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
 
-        with pytest.raises(ValueError, match="Failed to decode.*PyTorch"):
+        with pytest.raises(
+            InvalidArgument, match="could not be deserialized as a torch tensor"
+        ):
             mock_handler._decode_prompt_embeds(embeddings_base64)
 
     def test_decode_non_tensor_object_rejected(self, mock_handler):
@@ -138,7 +141,9 @@ class TestPromptEmbedsDecode:
         non_tensor = {"key": "value"}
         embeddings_base64 = encode_tensor_to_base64_obj(non_tensor)
 
-        with pytest.raises(ValueError, match="Failed to decode"):
+        with pytest.raises(
+            InvalidArgument, match="could not be deserialized as a torch tensor"
+        ):
             mock_handler._decode_prompt_embeds(embeddings_base64)
 
 
