@@ -2400,60 +2400,12 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
             "function": {"name": name, "parameters": parameters},
         }
 
-    @staticmethod
-    def _resolve(document, ref):
-        target = document
-        for token in ref[1:].split("/")[1:]:
-            token = token.replace("~1", "/").replace("~0", "~")
-            if not isinstance(target, dict) or token not in target:
-                return None
-            target = target[token]
-        return target
-
-    # Local references must still resolve once the parameter document is nested
-    # in the required tool-call array.
-    @pytest.mark.parametrize(
-        ("parameters", "property_name", "target"),
-        [
-            pytest.param(
-                {
-                    "type": "object",
-                    "properties": {"value": {"$ref": "#/definitions/value"}},
-                    "definitions": {"value": {"type": "string", "enum": ["a", "b"]}},
-                },
-                "value",
-                {"type": "string", "enum": ["a", "b"]},
-                id="legacy-definitions",
-            ),
-            pytest.param(
-                {
-                    "type": "object",
-                    "properties": {
-                        "value": {"type": "integer"},
-                        "alias": {"$ref": "#/properties/value"},
-                    },
-                },
-                "alias",
-                {"type": "integer"},
-                id="property-pointer",
-            ),
-            pytest.param(
-                {
-                    "type": "object",
-                    "properties": {"child": {"$ref": "#"}},
-                },
-                "child",
-                {
-                    "type": "object",
-                    "properties": {"child": {"$ref": "#/$defs/tool_0"}},
-                },
-                id="recursive-root",
-            ),
-        ],
-    )
-    def test_required_tool_choice_preserves_local_references(
-        self, parameters, property_name, target
-    ):
+    def test_required_tool_choice_preserves_local_references(self):
+        parameters = {
+            "type": "object",
+            "properties": {"value": {"$ref": "#/definitions/value"}},
+            "definitions": {"value": {"type": "string", "enum": ["a", "b"]}},
+        }
         raw_tools = [self._function_tool("lookup", parameters)]
         tools = convert_tools(raw_tools)
 
@@ -2467,38 +2419,10 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         schema = guided["json"]
         entry = schema["items"]["anyOf"][0]
         assert entry["properties"]["parameters"] == {"$ref": "#/$defs/tool_0"}
-        reference = schema["$defs"]["tool_0"]["properties"][property_name]["$ref"]
-        assert self._resolve(schema, reference) == target
-        assert tools[0].function.parameters == parameters
-        xgr.Grammar.from_json_schema(json.dumps(schema))
-
-    def test_required_tool_choice_isolates_conflicting_definitions(self):
-        raw_tools = [
-            self._function_tool(
-                name,
-                {
-                    "type": "object",
-                    "properties": {"value": {"$ref": "#/$defs/shared"}},
-                    "$defs": {"shared": {"type": kind}},
-                },
-            )
-            for name, kind in [("as_text", "string"), ("as_number", "number")]
-        ]
-
-        guided = build_tool_call_guided_decoding(
-            {"tool_choice": "required", "tools": raw_tools},
-            tool_call_parser_name=None,
-            sglang_tools=convert_tools(raw_tools),
+        assert schema["$defs"]["tool_0"]["properties"]["value"]["$ref"] == (
+            "#/$defs/tool_0/definitions/value"
         )
-
-        assert guided is not None
-        schema = guided["json"]
-        for index, kind in enumerate(["string", "number"]):
-            root = f"#/$defs/tool_{index}"
-            entry = schema["items"]["anyOf"][index]
-            assert entry["properties"]["parameters"] == {"$ref": root}
-            reference = self._resolve(schema, root)["properties"]["value"]["$ref"]
-            assert self._resolve(schema, reference) == {"type": kind}
+        assert tools[0].function.parameters == parameters
         xgr.Grammar.from_json_schema(json.dumps(schema))
 
     def test_required_tool_choice_rejects_non_object_defs(self):

@@ -101,6 +101,7 @@ def _rebase_schema_refs(schema: Any, root: str) -> bool:
             rebased |= _rebase_schema_refs(item, root)
     elif isinstance(schema, dict):
         if "$id" in schema:
+            # The engine owns reference resolution within this resource.
             return False
         reference = schema.get("$ref")
         if isinstance(reference, str) and reference.startswith("#"):

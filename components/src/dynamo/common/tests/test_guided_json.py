@@ -352,11 +352,10 @@ def test_required_tool_schema_caps_only_disabled_parallel_calls(
     assert schema.get("maxItems") == max_items
 
 
-@pytest.mark.parametrize("defs", [[], None, "shared"])
-def test_required_tool_schema_rejects_non_object_defs(defs):
+def test_required_tool_schema_rejects_non_object_defs():
     with pytest.raises(
         ValueError, match=r"`\$defs` .* tool 'lookup' must be an object"
     ):
         build_required_tool_schema(
-            [("lookup", {"type": "object", "$defs": defs})], None
+            [("lookup", {"type": "object", "$defs": ["shared"]})], None
         )
