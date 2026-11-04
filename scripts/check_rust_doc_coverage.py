@@ -173,9 +173,14 @@ def check(base=None, all_files=False):
         before = git("show", f"{base or 'HEAD'}:{old_path}") if old_path else b""
         after = git("show", f":{path}")
         try:
+            functions(before)
+        except ValueError:
+            print(f"Rust doc coverage: skipped {display_path(path)}", file=sys.stderr)
+            continue
+        try:
             checked.extend((path, f) for f in changed_functions(before, after))
         except ValueError as error:
-            raise ValueError(f"{path}: {error}") from error
+            raise ValueError(f"{display_path(path)}: {error}") from error
     if not checked:
         print("Rust doc coverage: no added or edited functions in the index.")
         return 0

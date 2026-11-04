@@ -203,13 +203,23 @@ class IndexTests(unittest.TestCase):
         self.assertIn("missing doc comment on added", result.stdout)
 
     def test_non_utf8_path_is_checked(self):
-        path = os.path.join(os.fsencode(self.root), b"nonutf8-\xff.rs")
-        with open(path, "wb") as handle:
-            handle.write(b"fn added() {}\n")
-        self.git("add", ".")
+        (self.root / "blob").write_text("fn added() {}\n")
+        blob = self.git("hash-object", "-w", "blob").strip()
+        path = os.fsdecode(b"nonutf8-\xff.rs")
+        self.git("update-index", "--add", "--cacheinfo", f"100644,{blob},{path}")
         result = self.run_check("--base", self.base)
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("missing doc comment on added", result.stdout)
+
+    def test_unparsed_committed_copy_does_not_block(self):
+        self.path.write_text("fn f(E { a, #[cfg(test)] b }: E) {}\n")
+        self.git("add", ".")
+        base = self.git("write-tree").strip()
+        self.path.write_text("fn f(E { a, #[cfg(test)] b }: E) { work(); }\n")
+        self.git("add", ".")
+        result = self.run_check("--base", base)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("skipped sample.rs", result.stderr)
 
     def test_parse_error_is_actionable(self):
         """Report the path instead of treating invalid Rust as an empty file."""
