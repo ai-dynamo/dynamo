@@ -70,10 +70,26 @@ var (
 	)
 )
 
+// registerRESTClientMetrics is the production seam for opting in to the
+// client-go REST client metrics; tests may override it.
+var registerRESTClientMetrics = ctrlmetrics.RegisterRESTClientMetrics
+
 // InitMetrics registers all custom metrics with the controller-runtime metrics
 // registry. operatorVersion is the value of the --operator-version flag,
 // exposed as the version label on dynamo_operator_build_info.
 func InitMetrics(operatorVersion string) {
+	// Opt in to the client-go REST client metrics (controller-runtime v0.25+).
+	// The adapters are registered by the metrics package init; this only flips
+	// the per-metric gates and adds the collectors to the shared registry.
+	registerRESTClientMetrics(
+		ctrlmetrics.MetricRequestLatency,
+		ctrlmetrics.MetricDNSResolutionLatency,
+		ctrlmetrics.MetricRequestSize,
+		ctrlmetrics.MetricResponseSize,
+		ctrlmetrics.MetricRateLimiterLatency,
+		ctrlmetrics.MetricRequestRetry,
+	)
+
 	ctrlmetrics.Registry.MustRegister(
 		resourcesTotal,
 		webhookDuration,

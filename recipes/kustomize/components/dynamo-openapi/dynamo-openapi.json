@@ -158,6 +158,19 @@
                   "x-kubernetes-patch-merge-key": "name",
                   "x-kubernetes-patch-strategy": "merge"
                 },
+                "evictionResponders": {
+                  "items": {
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "type": "array",
+                  "x-kubernetes-patch-merge-key": "name",
+                  "x-kubernetes-patch-strategy": "merge"
+                },
                 "hostAliases": {
                   "items": {
                     "properties": {
@@ -544,6 +557,19 @@
                             "x-kubernetes-patch-merge-key": "name",
                             "x-kubernetes-patch-strategy": "merge"
                           },
+                          "evictionResponders": {
+                            "items": {
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                }
+                              },
+                              "type": "object"
+                            },
+                            "type": "array",
+                            "x-kubernetes-patch-merge-key": "name",
+                            "x-kubernetes-patch-strategy": "merge"
+                          },
                           "hostAliases": {
                             "items": {
                               "properties": {
@@ -873,6 +899,19 @@
                               "type": "array",
                               "x-kubernetes-patch-merge-key": "mountPath",
                               "x-kubernetes-patch-strategy": "merge"
+                            }
+                          },
+                          "type": "object"
+                        },
+                        "type": "array",
+                        "x-kubernetes-patch-merge-key": "name",
+                        "x-kubernetes-patch-strategy": "merge"
+                      },
+                      "evictionResponders": {
+                        "items": {
+                          "properties": {
+                            "name": {
+                              "type": "string"
                             }
                           },
                           "type": "object"
@@ -1259,6 +1298,19 @@
                                         "type": "array",
                                         "x-kubernetes-patch-merge-key": "mountPath",
                                         "x-kubernetes-patch-strategy": "merge"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "name",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "evictionResponders": {
+                                  "items": {
+                                    "properties": {
+                                      "name": {
+                                        "type": "string"
                                       }
                                     },
                                     "type": "object"
@@ -1699,6 +1751,19 @@
                       "x-kubernetes-patch-merge-key": "name",
                       "x-kubernetes-patch-strategy": "merge"
                     },
+                    "evictionResponders": {
+                      "items": {
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "type": "array",
+                      "x-kubernetes-patch-merge-key": "name",
+                      "x-kubernetes-patch-strategy": "merge"
+                    },
                     "hostAliases": {
                       "items": {
                         "properties": {
@@ -2093,6 +2158,19 @@
                       "x-kubernetes-patch-merge-key": "name",
                       "x-kubernetes-patch-strategy": "merge"
                     },
+                    "evictionResponders": {
+                      "items": {
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "type": "array",
+                      "x-kubernetes-patch-merge-key": "name",
+                      "x-kubernetes-patch-strategy": "merge"
+                    },
                     "hostAliases": {
                       "items": {
                         "properties": {
@@ -2394,6 +2472,19 @@
                                   "type": "array",
                                   "x-kubernetes-patch-merge-key": "mountPath",
                                   "x-kubernetes-patch-strategy": "merge"
+                                }
+                              },
+                              "type": "object"
+                            },
+                            "type": "array",
+                            "x-kubernetes-patch-merge-key": "name",
+                            "x-kubernetes-patch-strategy": "merge"
+                          },
+                          "evictionResponders": {
+                            "items": {
+                              "properties": {
+                                "name": {
+                                  "type": "string"
                                 }
                               },
                               "type": "object"
@@ -2767,6 +2858,19 @@
                             "x-kubernetes-patch-merge-key": "name",
                             "x-kubernetes-patch-strategy": "merge"
                           },
+                          "evictionResponders": {
+                            "items": {
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                }
+                              },
+                              "type": "object"
+                            },
+                            "type": "array",
+                            "x-kubernetes-patch-merge-key": "name",
+                            "x-kubernetes-patch-strategy": "merge"
+                          },
                           "hostAliases": {
                             "items": {
                               "properties": {
@@ -3076,6 +3180,19 @@
                                   "x-kubernetes-patch-merge-key": "name",
                                   "x-kubernetes-patch-strategy": "merge"
                                 },
+                                "evictionResponders": {
+                                  "items": {
+                                    "properties": {
+                                      "name": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "name",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
                                 "hostAliases": {
                                   "items": {
                                     "properties": {
@@ -3292,6 +3409,24 @@
               "properties": {
                 "profilingJob": {
                   "properties": {
+                    "scheduling": {
+                      "properties": {
+                        "resourceClaims": {
+                          "items": {
+                            "properties": {
+                              "name": {
+                                "type": "string"
+                              }
+                            },
+                            "type": "object"
+                          },
+                          "type": "array",
+                          "x-kubernetes-patch-merge-key": "name",
+                          "x-kubernetes-patch-strategy": "merge"
+                        }
+                      },
+                      "type": "object"
+                    },
                     "template": {
                       "properties": {
                         "spec": {
@@ -3428,6 +3563,19 @@
                                     "type": "array",
                                     "x-kubernetes-patch-merge-key": "mountPath",
                                     "x-kubernetes-patch-strategy": "merge"
+                                  }
+                                },
+                                "type": "object"
+                              },
+                              "type": "array",
+                              "x-kubernetes-patch-merge-key": "name",
+                              "x-kubernetes-patch-strategy": "merge"
+                            },
+                            "evictionResponders": {
+                              "items": {
+                                "properties": {
+                                  "name": {
+                                    "type": "string"
                                   }
                                 },
                                 "type": "object"

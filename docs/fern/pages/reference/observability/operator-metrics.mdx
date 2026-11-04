@@ -7,7 +7,7 @@ subtitle: Kubernetes-only controller and Dynamo metrics, plus the annotations an
 
 The Dynamo Operator exposes controller-runtime reconciliation metrics and Dynamo-specific Prometheus metrics for webhook validation and resource inventory. These are **Kubernetes-scoped** — they exist only where the operator runs, and are separate from the application metrics emitted by frontends and workers (see [Metrics Catalog](metrics-catalog.mdx)). For enablement and dashboards (including the operator dashboard), see the [Kubernetes observability guide](../../kubernetes/operations/observability.mdx).
 
-Reconciliation metrics use the controller-runtime `controller_runtime` prefix. Webhook and resource inventory metrics use the `dynamo_operator` prefix. Unlike application metrics (which use a PodMonitor), the operator is scraped via a ServiceMonitor created by the Helm chart.
+Reconciliation metrics use the controller-runtime `controller_runtime` prefix. Webhook and resource inventory metrics use the `dynamo_operator` prefix. Kubernetes API client metrics use the `rest_client` prefix. Unlike application metrics (which use a PodMonitor), the operator is scraped via a ServiceMonitor created by the Helm chart.
 
 ## Reconciliation metrics
 
@@ -47,12 +47,52 @@ Track performance and outcomes of admission webhook requests.
   Current count of managed resources by state. Labeled by `resource_type`, `namespace`, and `status`.
 </ParamField>
 
+## Kubernetes API client metrics
+
+Track the operator's REST calls to the Kubernetes API server. These come from client-go through controller-runtime and share the `rest_client` prefix.
+
+<ParamField path="rest_client_requests_total" type="counter">
+  Number of HTTP requests. Labeled by `code`, `method`, and `host`.
+</ParamField>
+
+<ParamField path="rest_client_request_duration_seconds" type="histogram">
+  Request latency in seconds. Labeled by `verb` and `host`.
+</ParamField>
+
+<ParamField path="rest_client_dns_resolution_duration_seconds" type="histogram">
+  DNS resolver latency in seconds. Labeled by `host`.
+</ParamField>
+
+<ParamField path="rest_client_request_size_bytes" type="histogram">
+  Request size in bytes. Labeled by `verb` and `host`.
+</ParamField>
+
+<ParamField path="rest_client_response_size_bytes" type="histogram">
+  Response size in bytes. Labeled by `verb` and `host`.
+</ParamField>
+
+<ParamField path="rest_client_rate_limiter_duration_seconds" type="histogram">
+  Client-side rate limiter wait time in seconds. Labeled by `verb` and `host`.
+</ParamField>
+
+<ParamField path="rest_client_request_retries_total" type="counter">
+  Number of request retries. Labeled by `code`, `verb`, and `host`.
+</ParamField>
+
 ## Operator metric labels
 
 These labels are specific to operator metrics and are distinct from the application [Metric Labels](metric-labels.mdx).
 
 <ParamField path="controller" type="string">
   The controller name: `DynamoGraphDeployment`, `DynamoComponentDeployment`, `DynamoModel`, `DynamoGraphDeploymentRequest`, or `DynamoGraphDeploymentScalingAdapter`.
+</ParamField>
+
+<ParamField path="host" type="string">
+  On `rest_client_*` metrics — the API server host. Request metrics carry the URL host including its port, e.g. `kubernetes.default.svc:443`, while `rest_client_dns_resolution_duration_seconds` records the resolved hostname without the port, e.g. `kubernetes.default.svc`. The two forms differ, so a PromQL join on `host` across them does not match.
+</ParamField>
+
+<ParamField path="verb" type="string">
+  On `rest_client_*` metrics — the HTTP method: `GET`, `POST`, `PUT`, `PATCH`, or `DELETE`. Kubernetes list and watch requests are issued as `GET`.
 </ParamField>
 
 <ParamField path="resource_type" type="string">
