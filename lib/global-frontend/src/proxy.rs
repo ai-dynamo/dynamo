@@ -18,7 +18,9 @@ use axum::http::{HeaderMap, HeaderName, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use dynamo_global_router::{InFlightTracker, PoolSelector, RoutingRequest, SelectionCoreSelector};
+use dynamo_global_router::{
+    InFlightTracker, MAX_SESSION_ID_BYTES, PoolSelector, RoutingRequest, SelectionCoreSelector,
+};
 use dynamo_llm::protocols::agents::HEADER_DYNAMO_SESSION_ID;
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BODY_LIMIT_MB;
 use dynamo_runtime::metrics::prometheus_names::frontend_service::error_type;
@@ -224,6 +226,15 @@ async fn forward(
     let session = headers
         .get(HEADER_DYNAMO_SESSION_ID)
         .and_then(|session| session.to_str().ok());
+    // A 400, not the 503 the core's refusal would become.
+    if let Selector::SelectionCore(_) = proxy.selector
+        && session.is_some_and(|session| session.len() > MAX_SESSION_ID_BYTES)
+    {
+        metrics.rejected(error_type::VALIDATION);
+        let message =
+            format!("{HEADER_DYNAMO_SESSION_ID} is longer than {MAX_SESSION_ID_BYTES} bytes");
+        return error(StatusCode::BAD_REQUEST, message);
+    }
     let request = RoutingRequest::new(&model).with_session(session);
     let selecting = Instant::now();
     let selected = match &proxy.selector {

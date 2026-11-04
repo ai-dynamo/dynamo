@@ -138,7 +138,8 @@ named `dynamo_global_frontend_*`: requests per pool by response status,
 `no_response` when the pool sends no response, or `cancelled` when the client
 leaves before the pool's response headers arrive; requests answered without a
 pool; time to first byte and duration per pool; requests in flight per
-pool; and the time to select a pool. The `pool` label is the pool's
+pool; the time to select a pool; and, with `--use-selection-core`, the
+router core's affinity pin bookings. The `pool` label is the pool's
 `<cluster>/<namespace>/<DGD name>` and `region` its region. On requests, `local`
 says whether the pool is in `--region` (`unknown` without it), which gives the
 share of requests kept in the region. Nothing is labelled from the request
@@ -163,9 +164,12 @@ for each family.
 
 With `--use-selection-core`, the Global Frontend selects pools through an
 embedded router core: each pool is a core worker and the policy is a picker
-plugin. `round-robin` and `least-in-flight` run on the core, picking as the
-selectors do. A least-in-flight pick counts as pending on its pool until the
-request is counted, so concurrent picks see each other.
+plugin. Every policy runs on the core, picking as the selectors do. A
+least-in-flight pick counts as pending on its pool until the request is
+counted, so concurrent picks see each other. Under `affinity` the core's
+session table holds each session's pin; a session books only to set, move or
+refresh its pin, and the booking is freed at once. Session IDs longer than
+256 bytes are refused with 400.
 
 ## Limitations
 

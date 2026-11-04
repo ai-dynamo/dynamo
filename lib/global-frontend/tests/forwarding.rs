@@ -13,8 +13,8 @@ use axum::http::HeaderMap;
 use dynamo_global_common::PoolKey;
 use dynamo_global_frontend::{Metrics, PoolSnapshot};
 use dynamo_global_router::{
-    InFlightTracker, Pool, PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest,
-    SelectionCorePolicy, SelectionCoreSelector,
+    AffinityConfig, InFlightTracker, Pool, PoolSelector, PoolSignals, PoolTarget,
+    RoundRobinSelector, RoutingRequest, SelectionCorePolicy, SelectionCoreSelector,
 };
 use dynamo_llm::endpoint_type::EndpointType;
 use dynamo_llm::engines::{StreamingEngineAdapter, make_echo_engine};
@@ -175,18 +175,27 @@ async fn global_frontend_with(
 
 /// A Global Frontend that routes round robin through the router core.
 async fn frontend_with_selection_core(pools: Vec<Pool>) -> GlobalFrontend {
-    let in_flight = Arc::new(InFlightTracker::new());
-    let selection_core =
-        SelectionCoreSelector::new(SelectionCorePolicy::RoundRobin, in_flight.clone())
+    frontend_with_selection_core_policy(SelectionCorePolicy::RoundRobin, pools, Arc::default())
+        .await
+}
+
+async fn frontend_with_selection_core_policy(
+    policy: SelectionCorePolicy,
+    pools: Vec<Pool>,
+    in_flight: Arc<InFlightTracker>,
+) -> GlobalFrontend {
+    let selection_core = Arc::new(
+        SelectionCoreSelector::new(policy, in_flight.clone())
             .await
-            .unwrap();
-    let selection_core = Arc::new(selection_core);
+            .unwrap(),
+    );
     let (sender, receiver) = watch::channel(Arc::new(PoolSnapshot::new(pools)));
     let (first_snapshot, reconcile) =
         selection_core.reconcile_catalog(receiver.clone(), CancellationToken::new());
     tokio::spawn(reconcile);
     first_snapshot.await.unwrap();
     let metrics = Metrics::new(Some(REGION.to_owned()), in_flight.clone());
+    metrics.watch_selection_core(selection_core.clone());
     let app = dynamo_global_frontend::app_with_selection_core(
         receiver,
         selection_core,
@@ -766,4 +775,40 @@ async fn shutdown_lets_an_open_stream_finish_then_returns() {
         .unwrap()
         .unwrap();
     drop(client);
+}
+
+/// One booking per new session; over-long session IDs are a 400.
+#[tokio::test]
+async fn affinity_on_the_core_counts_pin_bookings() {
+    let pool_frontend = echo_pool_frontend().await;
+    let in_flight = Arc::new(InFlightTracker::new());
+    let policy = SelectionCorePolicy::Affinity(AffinityConfig {
+        signals: Arc::new(PoolSignals::new(in_flight.clone())),
+        region: REGION.to_owned(),
+        headroom_factor: 2.0,
+        idle: Duration::from_secs(60),
+    });
+    let pools = vec![pool("blue", MODEL, &pool_frontend.url)];
+    let global = frontend_with_selection_core_policy(policy, pools, in_flight).await;
+
+    let send = |session: String| {
+        client()
+            .post(global.server.url.join("v1/chat/completions").unwrap())
+            .header("x-dynamo-session-id", session)
+            .json(&chat(MODEL, "hi", false))
+            .send()
+    };
+    for session in ["a", "a", "b", "b"] {
+        assert_eq!(
+            send(session.to_owned()).await.unwrap().status(),
+            StatusCode::OK
+        );
+    }
+    let response = send("s".repeat(257)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bookings = "dynamo_global_frontend_pin_bookings_total";
+    metrics_when(&global.server.url, |metrics| {
+        sample(metrics, bookings, &[]) == Some(2.0)
+    })
+    .await;
 }

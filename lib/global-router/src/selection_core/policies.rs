@@ -20,7 +20,7 @@ use dynamo_kv_router::{RoutingPartitionRef, WorkerType};
 use dynamo_router_policies::router_modes;
 
 use super::directory::PoolDirectory;
-use super::{LeastInFlightConfig, SelectionCorePolicy};
+use super::{AffinityConfig, LeastInFlightConfig, SelectionCorePolicy};
 use crate::frontend_signals::FrontendSignals;
 use crate::placement::{self, Placed};
 use crate::selector::in_flight_load;
@@ -30,6 +30,7 @@ impl SelectionCorePolicy {
         match self {
             Self::RoundRobin => router_modes::ROUND_ROBIN,
             Self::LeastInFlight(_) => "global-least-in-flight",
+            Self::Affinity(_) => "global-affinity",
         }
     }
 }
@@ -51,6 +52,13 @@ pub(super) fn registry(
                 counts: counts.clone(),
                 directory: directory.clone(),
                 ties: AtomicUsize::new(0),
+            })
+        }
+        SelectionCorePolicy::Affinity(config) => {
+            let config = config.clone();
+            provider(move || HeadroomPicker {
+                config: config.clone(),
+                directory: directory.clone(),
             })
         }
     };
@@ -157,5 +165,58 @@ impl WorkerPicker for LeastInFlightPicker {
             self.counts.add_pending(candidates[row].worker().worker_id);
         }
         Ok(row)
+    }
+}
+
+/// [`crate::AffinitySelector`]'s rule; the default is the session's bound
+/// pool (the core's affinity target), else the cheapest.
+struct HeadroomPicker {
+    config: AffinityConfig,
+    directory: Arc<PoolDirectory>,
+}
+
+impl WorkerPicker for HeadroomPicker {
+    fn pick(
+        &self,
+        context: &WorkerSelectionContext<'_>,
+        input: WorkerInputView<'_>,
+    ) -> Result<usize, WorkerSelectionPolicyError> {
+        let pools = self.directory.snapshot();
+        let signals = &self.config.signals;
+        let round_trips = signals.region_round_trips();
+        let mut placed = input
+            .candidates()
+            .iter()
+            .enumerate()
+            .map(|(row, candidate)| {
+                let worker = candidate.worker().worker_id;
+                let pool = pools.get(&worker);
+                Placed {
+                    item: (row, worker),
+                    load: pool
+                        .and_then(|pool| signals.occupancy(&pool.id))
+                        .map(|occupancy| occupancy.load),
+                    distance: pool.and_then(|pool| {
+                        placement::distance(&pool.region, &self.config.region, &round_trips)
+                    }),
+                    in_flight: 0,
+                }
+            })
+            .collect::<Vec<_>>();
+        if placed.is_empty() {
+            return Err(WorkerSelectionPolicyError::failed("no candidates"));
+        }
+        placed.sort_by_key(|candidate| candidate.item.1);
+        placement::order(&mut placed);
+        let bound = context.affinity_target().map(|target| target.worker_id);
+        let default = bound
+            .and_then(|worker| {
+                placed
+                    .iter()
+                    .position(|candidate| candidate.item.1 == worker)
+            })
+            .unwrap_or(0);
+        let choice = placement::headroom(&placed, default, self.config.headroom_factor);
+        Ok(placed[choice].item.0)
     }
 }

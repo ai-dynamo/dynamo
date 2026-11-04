@@ -15,8 +15,9 @@ use dynamo_global_frontend::{
     follow_relays, measure_round_trips, serve, serve_relay_views,
 };
 use dynamo_global_router::{
-    AffinitySelector, InFlightTracker, LeastInFlightConfig, LeastInFlightSelector, Pool,
-    PoolSelector, PoolSignals, RoundRobinSelector, SelectionCorePolicy, SelectionCoreSelector,
+    AffinityConfig, AffinitySelector, InFlightTracker, LeastInFlightConfig, LeastInFlightSelector,
+    Pool, PoolSelector, PoolSignals, RoundRobinSelector, SelectionCorePolicy,
+    SelectionCoreSelector,
 };
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -68,7 +69,7 @@ struct Args {
     connect_timeout_secs: u64,
     #[arg(long, value_enum, default_value_t = RouterPolicy::RoundRobin)]
     router_policy: RouterPolicy,
-    /// Select pools through the embedded router core (not yet with affinity).
+    /// Select pools through the embedded router core.
     #[arg(long)]
     use_selection_core: bool,
     /// The region this process runs in. `affinity` and `least-in-flight`
@@ -91,6 +92,7 @@ struct Args {
     #[arg(long, default_value_t = 2.0)]
     headroom_factor: f64,
     /// `affinity`: how long a session keeps its pool without a request.
+    /// On the router core, at most 65,536 sessions per model are pinned.
     #[arg(long, default_value_t = 1800)]
     session_idle_secs: u64,
 }
@@ -247,6 +249,7 @@ async fn main() -> Result<()> {
     let app = if args.use_selection_core {
         let policy = selection_core_policy(&args, load_signals)?;
         let selection_core = Arc::new(SelectionCoreSelector::new(policy, in_flight.clone()).await?);
+        metrics.watch_selection_core(selection_core.clone());
         // Wait for the first pool snapshot, or early requests get a 503.
         let (first_snapshot, reconcile) =
             selection_core.reconcile_catalog(pools.clone(), shutdown.child_token());
@@ -318,9 +321,12 @@ fn selection_core_policy(
                 headroom_factor: args.headroom_factor,
             }))
         }
-        RouterPolicy::Affinity => {
-            bail!("--use-selection-core does not support --router-policy affinity yet")
-        }
+        RouterPolicy::Affinity => Ok(SelectionCorePolicy::Affinity(AffinityConfig {
+            signals: signals(),
+            region: args.region.clone().context("--region is required")?,
+            headroom_factor: args.headroom_factor,
+            idle: Duration::from_secs(args.session_idle_secs),
+        })),
     }
 }
 

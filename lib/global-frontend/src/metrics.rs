@@ -8,11 +8,11 @@
 //! and would mint a series per string. Pool frontends report what needs the
 //! stream parsed, such as inter-token latency and token counts.
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
 use axum::http::StatusCode;
-use dynamo_global_router::{InFlightTracker, Pool};
+use dynamo_global_router::{InFlightTracker, Pool, SelectionCoreSelector};
 use dynamo_llm::http::service::metrics::generate_log_buckets;
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
 use prometheus::{
@@ -44,6 +44,9 @@ pub struct Metrics {
     duration: HistogramVec,
     in_flight: IntGaugeVec,
     selection: Histogram,
+    /// Read at each scrape ([`Self::watch_core`]).
+    selection_core: OnceLock<WatchedSelectionCore>,
+    pin_bookings: IntCounter,
     /// A scrape resets and refills the gauges, so scrapes must not overlap.
     scrape: Mutex<()>,
 }
@@ -134,6 +137,13 @@ impl Metrics {
                 .buckets(prometheus::exponential_buckets(0.01, 3.0, 17).expect("valid buckets")),
             ),
         );
+        let pin_bookings = register(
+            &registry,
+            IntCounter::with_opts(Opts::new(
+                name("pin_bookings_total"),
+                "Affinity pin bookings: a session's first request, a move or a refresh",
+            )),
+        );
         Self {
             registry,
             region,
@@ -145,6 +155,8 @@ impl Metrics {
             duration,
             in_flight,
             selection,
+            selection_core: OnceLock::new(),
+            pin_bookings,
             scrape: Mutex::new(()),
         }
     }
@@ -152,6 +164,20 @@ impl Metrics {
     pub(crate) fn selected(&self, started: Instant) {
         self.selection
             .observe(started.elapsed().as_secs_f64() * 1000.0);
+    }
+
+    /// Reads `selection_core`'s counts at each scrape. A second call is ignored.
+    pub fn watch_selection_core(&self, selection_core: Arc<SelectionCoreSelector>) {
+        let _ = self
+            .selection_core
+            .set(WatchedSelectionCore(selection_core));
+    }
+
+    fn read_selection_core(&self) {
+        let Some(WatchedSelectionCore(selection_core)) = self.selection_core.get() else {
+            return;
+        };
+        advance(&self.pin_bookings, selection_core.pin_bookings());
     }
 
     /// Counts a request answered without a pool. `error_type` is one of
@@ -198,6 +224,7 @@ impl Metrics {
     /// read into the gauges now.
     pub(crate) fn render(&self, pools: &PoolSnapshot) -> prometheus::Result<String> {
         let _scrape = self.scrape.lock().unwrap_or_else(PoisonError::into_inner);
+        self.read_selection_core();
         // Pools that left the catalog lose their series.
         self.in_flight.reset();
         for pool in pools.pools() {
@@ -207,6 +234,20 @@ impl Metrics {
         }
         TextEncoder::new().encode_to_string(&self.registry.gather())
     }
+}
+
+/// `SelectionCoreSelector` has no `Debug`.
+struct WatchedSelectionCore(Arc<SelectionCoreSelector>);
+
+impl std::fmt::Debug for WatchedSelectionCore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CoreSelector")
+    }
+}
+
+/// Moves `counter` up to `total`, a monotonic count kept elsewhere.
+fn advance(counter: &IntCounter, total: u64) {
+    counter.inc_by(total.saturating_sub(counter.get()));
 }
 
 fn name(suffix: &str) -> String {
