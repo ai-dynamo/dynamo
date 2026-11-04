@@ -20,6 +20,7 @@ from dynamo.llm import KvStateAttachmentOwner
 from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
     resolved_server_args,
+    sglang_has_wide_mm_pad_values,
 )
 from dynamo.sglang.capacity import kv_event_block_size, model_card_dp_rank_bounds
 from dynamo.sglang.kv_hints import (
@@ -117,6 +118,7 @@ def state_agent_descriptors(engine, config) -> list[dict]:
             raw_sources[rank] = source
     if set(raw_sources) != set(sources):
         raise ValueError("KVCR inventory requires a reported raw event source per rank")
+    engine_owned_mm_identity = sglang_has_wide_mm_pad_values()
     descriptors = []
     owners = set()
     for rank, source in sorted(sources.items()):
@@ -175,6 +177,7 @@ def state_agent_descriptors(engine, config) -> list[dict]:
                 "raw_topic": topic,
                 "image_token_id": None,
                 "video_token_id": None,
+                "engine_owned_mm_identity": engine_owned_mm_identity,
                 "router_hint_source": {
                     "source_control_endpoint": endpoints[str(rank)],
                     "worker_type": role,

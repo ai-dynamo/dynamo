@@ -378,3 +378,121 @@ async fn stalled_router_resnapshots_without_draining_its_old_channel() {
         .unwrap()
         .unwrap();
 }
+
+struct TransportStopped {
+    id: usize,
+    events: mpsc::UnboundedSender<(usize, &'static str)>,
+}
+impl Drop for TransportStopped {
+    fn drop(&mut self) {
+        let _ = self.events.send((self.id, "stopped"));
+    }
+}
+
+async fn stalled_connection(
+    id: usize,
+    events: mpsc::UnboundedSender<(usize, &'static str)>,
+) -> dynamo_global_view_broadcaster::RouterConnection<&'static str, u64> {
+    let (sender, stream) = mpsc::channel(1);
+    let (ready, started) = oneshot::channel();
+    let transport = tokio::spawn(async move {
+        let _closed = TransportStopped {
+            id,
+            events: events.clone(),
+        };
+        events.send((id, "started")).unwrap();
+        ready.send(()).unwrap();
+        // Model an RPC held by a live peer that never drains its request body.
+        std::future::pending::<()>().await;
+        drop(stream);
+    });
+    let connection =
+        dynamo_global_view_broadcaster::RouterConnection::with_transport(sender, transport);
+    timeout(Duration::from_secs(2), started)
+        .await
+        .unwrap()
+        .unwrap();
+    connection
+}
+
+#[tokio::test]
+async fn directory_removal_aborts_a_transport_that_never_drains_frames() {
+    let broadcaster = PoolViewBroadcaster::new();
+    broadcaster.upsert("blue", 1);
+    let (directory, routers) = tokio::sync::watch::channel(HashSet::from(["a"]));
+    let (events, mut observed) = mpsc::unbounded_channel();
+    let running = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+        broadcaster
+            .run(routers, move |_| {
+                let events = events.clone();
+                async move { Ok::<_, &'static str>(stalled_connection(0, events).await) }
+            })
+            .await;
+    }));
+    assert_eq!(
+        timeout(Duration::from_secs(2), observed.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        (0, "started")
+    );
+    directory.send_replace(HashSet::new());
+    assert_eq!(
+        timeout(Duration::from_secs(2), observed.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        (0, "stopped")
+    );
+    drop(running);
+}
+
+#[tokio::test]
+async fn backpressure_aborts_the_old_transport_before_reconnecting() {
+    let broadcaster = PoolViewBroadcaster::new();
+    broadcaster.upsert("blue", 1);
+    let (_directory, routers) = tokio::sync::watch::channel(HashSet::from(["a"]));
+    let (events, mut observed) = mpsc::unbounded_channel();
+    let next = Arc::new(AtomicUsize::new(0));
+    let fanout = broadcaster.clone();
+    let running = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+        fanout
+            .run(routers, move |_| {
+                let id = next.fetch_add(1, Ordering::SeqCst);
+                let events = events.clone();
+                async move { Ok::<_, &'static str>(stalled_connection(id, events).await) }
+            })
+            .await;
+    }));
+    assert_eq!(
+        timeout(Duration::from_secs(2), observed.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        (0, "started")
+    );
+    broadcaster.upsert("blue", 2);
+    broadcaster.upsert("blue", 3);
+    assert_eq!(
+        timeout(Duration::from_secs(3), observed.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        (0, "stopped")
+    );
+    assert_eq!(
+        timeout(Duration::from_secs(2), observed.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        (1, "started")
+    );
+    drop(running);
+    assert_eq!(
+        timeout(Duration::from_secs(2), observed.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        (1, "stopped")
+    );
+}

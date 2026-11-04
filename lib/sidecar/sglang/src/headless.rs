@@ -280,6 +280,9 @@ fn start_publishers(
                     video_token_id: None,
                     liveness: None,
                     expected_rank: None,
+                    // The sidecar cannot inspect the SGLang build. Unflagged
+                    // sources still exclude values that do not fit in u32.
+                    engine_owned_mm_identity: false,
                     recovery: None,
                 }),
                 config.enable_local_indexer,

@@ -21,4 +21,4 @@ pub use pool::Pool;
 pub use selector::{
     LeastInFlightSelector, PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest,
 };
-pub use signals::{LoadReport, PoolOccupancy, PoolSignals, RelaySource};
+pub use signals::{LoadReport, PoolOccupancy, PoolSignals, RelaySource, ReportReceipt};
