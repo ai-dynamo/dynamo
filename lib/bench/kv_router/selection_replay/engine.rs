@@ -29,12 +29,13 @@ use anyhow::{Context, Result, bail, ensure};
 use dynamo_bench::kv_router_common::clock::BenchmarkClock;
 use dynamo_bench::kv_router_common::issuer::pin_current_thread;
 use dynamo_bench::kv_router_common::results::PercentileStats;
+use dynamo_kv_router::KvSchedulerError;
 use dynamo_kv_router::protocols::{
     ActiveSequenceEvent, ActiveSequenceEventData, KvCacheEvent, RouterEvent, StorageTier,
 };
 use dynamo_kv_router::scheduling::queue::SchedulerBookingDescriptor;
 use dynamo_kv_router::services::selection::{
-    SelectionAdmission, SelectionOperation, SelectionOutcome, SessionBinding,
+    SelectionAdmission, SelectionError, SelectionOperation, SelectionOutcome, SessionBinding,
 };
 use futures_util::FutureExt;
 use serde::Serialize;
@@ -103,7 +104,9 @@ pub struct RunResult {
     /// Requests that arrived in the measured window, and those the router booked.
     pub window_requests: usize,
     pub admitted: usize,
-    pub queue_rejected: usize,
+    /// Window requests the router rejected (a full queue, or every eligible worker
+    /// over its busy thresholds): a policy outcome, not a failure to keep up.
+    pub rejected: usize,
     pub failed: usize,
     pub failure_samples: Vec<String>,
     pub achieved_rps: f64,
@@ -118,11 +121,14 @@ pub struct RunResult {
     /// Saturation: the share of the window the request issuer waited on the bench's
     /// own threads, prompt preparation and engine actions, rather than on the router.
     pub harness_wait_share: Option<f64>,
-    /// Saturation: how often trace time moved to the next engine action because every
-    /// admission in the window was waiting on one, as a queueing router's do.
+    /// Saturation: how often every admission in the window waited on an engine
+    /// action, as a queueing router's do, so trace time ran on until one finished.
     pub stall_advances: u64,
     /// Bookings in flight through the window, and at the end of the run.
     pub booked_in_flight: InFlight,
+    /// Admissions waiting in the router through the window: queued, or not yet
+    /// selected.
+    pub admissions_waiting: InFlight,
     pub booked_at_end: u64,
     /// The index's applied events by `type/outcome` at the end of the run.
     pub index_events_applied: BTreeMap<String, u64>,
@@ -170,6 +176,7 @@ struct Slot {
     issued_ns: AtomicU64,
     /// When the router returned a booking; `UNSET` if it did not.
     booked_ns: AtomicU64,
+    rejected: AtomicBool,
     /// Prompt blocks the router predicted cached on its pick, and those the cache held.
     predicted_cached_blocks: AtomicU64,
     cached_blocks: AtomicU64,
@@ -214,7 +221,6 @@ struct Shared {
     outstanding: AtomicUsize,
     booked_in_flight: AtomicU64,
     pending_tasks: AtomicUsize,
-    queue_rejected: AtomicUsize,
     failed: AtomicUsize,
     events_issued: AtomicU64,
     stall_advances: AtomicU64,
@@ -318,7 +324,6 @@ pub fn run(
         outstanding: AtomicUsize::new(0),
         booked_in_flight: AtomicU64::new(0),
         pending_tasks: AtomicUsize::new(0),
-        queue_rejected: AtomicUsize::new(0),
         failed: AtomicUsize::new(0),
         events_issued: AtomicU64::new(0),
         stall_advances: AtomicU64::new(0),
@@ -356,8 +361,10 @@ pub fn run(
         let shared = &shared;
         // However this body exits, every bench thread's wait ends.
         let _stop = OnExit(|| shared.stop.store(true, Ordering::Release));
+        // Named, so profiles tell the bench's threads from the router's.
+        let thread = |name: String| std::thread::Builder::new().name(name);
         for (index, (sender, cpu)) in prep_senders.into_iter().zip(prep_cpus).enumerate() {
-            scope.spawn(move || {
+            thread(format!("bench-prep-{index}")).spawn_scoped(scope, move || {
                 if let Err(error) = pin(cpu) {
                     let _ = sender.send(Err(error));
                     return;
@@ -378,14 +385,14 @@ pub fn run(
                         return;
                     }
                 }
-            });
+            })?;
         }
-        let engines: Vec<_> = engine_cpus
+        let engines = engine_cpus
             .into_iter()
             .zip(admission_receivers)
             .enumerate()
             .map(|(issuer, (cpu, admissions))| {
-                scope.spawn(move || {
+                thread(format!("bench-engine-{issuer}")).spawn_scoped(scope, move || {
                     let _done = OnExit(|| {
                         shared.issuer_next_us[issuer].store(UNSET, Ordering::Release);
                         if std::thread::panicking() {
@@ -396,12 +403,12 @@ pub fn run(
                     Ok::<_, anyhow::Error>(issue_engine(shared, issuer, engine_issuers, admissions))
                 })
             })
-            .collect();
-        let sampler = scope.spawn(move || {
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let sampler = thread("bench-sampler".into()).spawn_scoped(scope, move || {
             pin(sampler_cpu)?;
             sample(shared, config)
-        });
-        let requests = scope.spawn(move || {
+        })?;
+        let requests = thread("bench-requests".into()).spawn_scoped(scope, move || {
             // Let the engine issuers run out the timeline.
             let _done = OnExit(|| {
                 shared.requests_stopped.store(true, Ordering::Release);
@@ -409,7 +416,7 @@ pub fn run(
             });
             pin(request_cpu)?;
             issue_requests(shared, prep_receivers)
-        });
+        })?;
 
         (request_lags, harness_wait_ns) = requests.join().expect("request issuer panicked")?;
         for issuer in engines {
@@ -515,6 +522,7 @@ fn wait_for_admission_slot(shared: &Shared, admission_window: usize) -> Result<(
     let mut spins = 0u32;
     let mut finished = shared.finished.load(Ordering::Acquire);
     let mut idle_since = shared.clock.now_ns();
+    let mut stalled = false;
     while shared.outstanding.load(Ordering::Acquire) >= admission_window {
         if shared.stopped() {
             bail!("the run stopped");
@@ -524,17 +532,22 @@ fn wait_for_admission_slot(shared: &Shared, admission_window: usize) -> Result<(
         if latest != finished {
             finished = latest;
             idle_since = now;
-        } else if now - idle_since > STALL_NS {
+            stalled = false;
+        } else if stalled || now - idle_since > STALL_NS {
+            // Run trace time through engine actions until an admission finishes.
+            if !stalled {
+                stalled = true;
+                shared.stall_advances.fetch_add(1, Ordering::Relaxed);
+            }
             let next = shared
                 .issuer_next_us
                 .iter()
                 .map(|next| next.load(Ordering::Acquire))
                 .min()
                 .unwrap_or(UNSET);
-            if next != UNSET && next > shared.virtual_us.fetch_max(next, Ordering::AcqRel) {
-                shared.stall_advances.fetch_add(1, Ordering::Relaxed);
+            if next != UNSET {
+                shared.virtual_us.fetch_max(next, Ordering::AcqRel);
             }
-            idle_since = now;
         }
         backoff(&mut spins);
     }
@@ -591,7 +604,16 @@ fn issue_engine(
         }
     }
     let mut lags = Vec::new();
+    // Actions past the window run only until every request has its answer: a
+    // queueing router may need them to free capacity.
+    let settled = || {
+        shared.requests_stopped.load(Ordering::Acquire)
+            && shared.outstanding.load(Ordering::Acquire) == 0
+    };
     while let Some(Reverse((at, action, index))) = timeline.pop() {
+        if settled() {
+            break;
+        }
         let Some(lag) = engine.wait_until(at) else {
             return lags;
         };
@@ -795,6 +817,7 @@ fn publish(shared: &Shared, worker_id: u64, events: Vec<KvCacheEvent>) {
 struct Sample {
     trace_us: u64,
     booked_in_flight: u64,
+    outstanding: u64,
     /// KV events handed to the index, and those it has applied: the gap is its backlog.
     events_issued: u64,
     events_applied: u64,
@@ -828,6 +851,7 @@ fn sample(shared: &Shared, config: &RunConfig) -> Result<Vec<Sample>> {
             samples.push(Sample {
                 trace_us,
                 booked_in_flight: shared.booked_in_flight.load(Ordering::Relaxed),
+                outstanding: shared.outstanding.load(Ordering::Relaxed) as u64,
                 events_issued: shared.events_issued.load(Ordering::Relaxed),
                 events_applied: shared.host.index_events_applied().values().sum(),
             });
@@ -947,8 +971,10 @@ async fn admit(shared: Arc<Shared>, index: usize, tokens: Vec<u32>, prompt: Prom
                 "request {index}: lease admission returned no booking"
             )),
         },
-        Ok(SelectionOutcome::QueueRejected { .. }) => {
-            shared.queue_rejected.fetch_add(1, Ordering::Relaxed);
+        // The frontend answers both with a 503.
+        Ok(SelectionOutcome::QueueRejected { .. })
+        | Err(SelectionError::Scheduler(KvSchedulerError::AllEligibleWorkersOverloaded)) => {
+            slot.rejected.store(true, Ordering::Release);
         }
         Err(error) => shared.fail(format!("request {index}: {error}")),
     }
@@ -1016,7 +1042,7 @@ fn analyze(
 ) -> RunResult {
     let limits = &config.limits;
     let mut admission = Vec::new();
-    let (mut window_requests, mut admitted) = (0, 0);
+    let (mut window_requests, mut admitted, mut rejected) = (0, 0, 0);
     let (mut compared, mut predicted_sum, mut cached_sum, mut error_sum) =
         (0usize, 0u64, 0u64, 0u64);
     let (mut first_issued, mut last_booked) = (u64::MAX, 0u64);
@@ -1027,6 +1053,7 @@ fn analyze(
         window_requests += 1;
         let booked = slot.booked_ns.load(Ordering::Acquire);
         if booked == UNSET {
+            rejected += usize::from(slot.rejected.load(Ordering::Acquire));
             continue;
         }
         admitted += 1;
@@ -1072,10 +1099,10 @@ fn analyze(
     if failed > 0 {
         failure_reasons.push(format!("{failed} failures"));
     }
-    if admitted < window_requests {
+    if admitted + rejected < window_requests {
         failure_reasons.push(format!(
-            "{} of {window_requests} window requests not booked",
-            window_requests - admitted
+            "{} of {window_requests} window requests neither booked nor rejected",
+            window_requests - admitted - rejected
         ));
     }
     if let Mode::Fixed { .. } = shared.mode {
@@ -1116,18 +1143,21 @@ fn analyze(
     if !index_kept_up {
         failure_reasons.push(format!("the index fell {max_index_backlog} events behind"));
     }
-    let mut in_flight: Vec<u64> = window_samples
-        .iter()
-        .map(|sample| sample.booked_in_flight)
-        .collect();
-    in_flight.sort_unstable();
+    let spread = |value: fn(&Sample) -> u64| {
+        let mut values: Vec<u64> = window_samples.iter().map(|sample| value(sample)).collect();
+        values.sort_unstable();
+        InFlight {
+            median: values.get(values.len() / 2).copied().unwrap_or(0),
+            max: values.last().copied().unwrap_or(0),
+        }
+    };
 
     let cache = shared.caches.stats();
     RunResult {
         mode: shared.mode,
         window_requests,
         admitted,
-        queue_rejected: shared.queue_rejected.load(Ordering::Relaxed),
+        rejected,
         failed,
         failure_samples: shared.failure_samples.lock().unwrap().clone(),
         achieved_rps,
@@ -1138,10 +1168,8 @@ fn analyze(
         engine_issue_lag_ns,
         harness_wait_share,
         stall_advances: shared.stall_advances.load(Ordering::Relaxed),
-        booked_in_flight: InFlight {
-            median: in_flight.get(in_flight.len() / 2).copied().unwrap_or(0),
-            max: in_flight.last().copied().unwrap_or(0),
-        },
+        booked_in_flight: spread(|sample| sample.booked_in_flight),
+        admissions_waiting: spread(|sample| sample.outstanding),
         booked_at_end: shared.booked_in_flight.load(Ordering::Acquire),
         index_events_applied: shared.host.index_events_applied(),
         max_index_backlog,
