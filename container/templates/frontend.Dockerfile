@@ -175,6 +175,7 @@ RUN --mount=type=bind,source=./container/deps/overrides.frontend.txt,target=/tmp
     uv pip install \
     --overrides /tmp/overrides.frontend.txt \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
+    /opt/dynamo/wheelhouse/aisim-*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
     # The meta package requires both backends unconditionally (its cu12/cu13
     # extras are vestigial), so install the backend first and the meta module
