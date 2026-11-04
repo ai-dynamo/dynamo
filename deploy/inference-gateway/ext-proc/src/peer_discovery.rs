@@ -379,15 +379,19 @@ fn shuffled_peer_urls(eligible: &BTreeSet<String>) -> Vec<String> {
 /// pod is `serving=true, terminating=true` and can vanish mid-transfer. When
 /// the `serving` condition is absent (legacy slices), fall back to `ready`.
 fn is_eligible_recovery_endpoint(endpoint: &Endpoint) -> bool {
-    let Some(conditions) = endpoint.conditions.as_ref() else {
-        return false;
-    };
-    if conditions.terminating == Some(true) {
+    let conditions = endpoint.conditions.as_ref();
+    if conditions.and_then(|conditions| conditions.terminating) == Some(true) {
         return false;
     }
-    match conditions.serving {
+    match conditions.and_then(|conditions| conditions.serving) {
         Some(serving) => serving,
-        None => conditions.ready == Some(true),
+        // Kubernetes defaults an unspecified ready condition to true. If the
+        // serving condition is also absent, including when the whole
+        // conditions object is omitted, preserve that API default for legacy
+        // EndpointSlices.
+        None => conditions
+            .and_then(|conditions| conditions.ready)
+            .unwrap_or(true),
     }
 }
 
@@ -1200,6 +1204,43 @@ mod tests {
         };
         let (store, _writer) = store_and_writer(vec![slice]);
         assert!(recovery_peer_set(&store, "10.0.0.9", 9093).is_empty());
+    }
+
+    #[test]
+    fn recovery_defaults_unspecified_conditions_to_ready() {
+        let slice = EndpointSlice {
+            address_type: "IPv4".to_string(),
+            endpoints: vec![
+                Endpoint {
+                    addresses: vec!["10.0.0.2".to_string()],
+                    conditions: None,
+                    ..Default::default()
+                },
+                Endpoint {
+                    addresses: vec!["10.0.0.3".to_string()],
+                    conditions: Some(EndpointConditions::default()),
+                    ..Default::default()
+                },
+                Endpoint {
+                    addresses: vec!["10.0.0.4".to_string()],
+                    conditions: Some(EndpointConditions {
+                        ready: Some(false),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let (store, _writer) = store_and_writer(vec![slice]);
+
+        assert_eq!(
+            recovery_peer_set(&store, "10.0.0.9", 9093),
+            BTreeSet::from([
+                "http://10.0.0.2:9093".to_string(),
+                "http://10.0.0.3:9093".to_string(),
+            ])
+        );
     }
 
     #[test]
