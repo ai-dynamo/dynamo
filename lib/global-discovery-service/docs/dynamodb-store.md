@@ -176,7 +176,7 @@ since they work with every `--pool-discovery` value:
 | `--dynamodb-region <region>` | SDK default chain (`AWS_REGION`) | region of the table replica this process uses |
 | `--dynamodb-endpoint <url>` | none | endpoint override for dynamodb-local; an `http` or `https` URL |
 | `--dynamodb-poll-interval-secs <n>` | 2 | watch poll period; with `karmada` and `mcs`, which watch, must be less than `--heartbeat-interval-secs` |
-| `--dynamodb-ensure-table` | off | create the table if it does not exist (development; needs `CreateTable`) |
+| `--dynamodb-ensure-table` | off | create the table if it does not exist, and turn on its TTL if it is off, on every start (development; needs `CreateTable`, `DescribeTimeToLive` and `UpdateTimeToLive`) |
 | `--lease-skew-secs <n>` | 2 | clock skew allowed when evaluating leases |
 
 The `--dynamodb-*` flags and `--lease-skew-secs` fail at startup without
@@ -213,7 +213,10 @@ replicas) for development and dynamodb-local.
 
 IAM for the service: `dynamodb:Query`, `dynamodb:UpdateItem`,
 `dynamodb:DescribeTable` on the table ARN; add `dynamodb:CreateTable`,
-`dynamodb:UpdateTimeToLive` only where `--dynamodb-ensure-table` is used.
+`dynamodb:DescribeTimeToLive` and `dynamodb:UpdateTimeToLive` only where
+`--dynamodb-ensure-table` is used. The error for a missing table prints the
+`aws` commands that create it, with the `--region` the service uses and, for
+dynamodb-local, its `--endpoint-url`.
 
 ## Code layout
 

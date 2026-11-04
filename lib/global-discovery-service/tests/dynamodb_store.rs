@@ -404,18 +404,47 @@ async fn a_list_spans_pages() {
     assert_eq!(names.len(), pools);
 }
 
-/// `connect` creates the table, and its TTL, when `ensure_table` is set. It
-/// builds its client from the default credential chain, so it needs
-/// `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (any value works for
-/// dynamodb-local).
-#[tokio::test]
-async fn ensure_table_creates_the_table_and_its_ttl() {
-    let endpoint = skip_without_dynamodb!();
-    if std::env::var_os("AWS_ACCESS_KEY_ID").is_none() {
+/// `connect` builds its client from the default credential chain, so its
+/// tests need `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (any value
+/// works for dynamodb-local). Says why it skips when they are not set.
+fn without_credentials() -> bool {
+    let missing = std::env::var_os("AWS_ACCESS_KEY_ID").is_none();
+    if missing {
         eprintln!(
             "skipping: `connect` reads credentials from the environment; \
              export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test"
         );
+    }
+    missing
+}
+
+/// TTL is on `expires_at`, or being turned on.
+async fn assert_ttl_is_on(client: &aws_sdk_dynamodb::Client, table: &str) {
+    let ttl = client
+        .describe_time_to_live()
+        .table_name(table)
+        .send()
+        .await
+        .unwrap();
+    let ttl = ttl.time_to_live_description().unwrap();
+    assert_eq!(ttl.attribute_name(), Some("expires_at"));
+    assert!(
+        matches!(
+            ttl.time_to_live_status(),
+            Some(
+                aws_sdk_dynamodb::types::TimeToLiveStatus::Enabled
+                    | aws_sdk_dynamodb::types::TimeToLiveStatus::Enabling
+            )
+        ),
+        "{ttl:?}"
+    );
+}
+
+/// `connect` creates the table, and its TTL, when `ensure_table` is set.
+#[tokio::test]
+async fn ensure_table_creates_the_table_and_its_ttl() {
+    let endpoint = skip_without_dynamodb!();
+    if without_credentials() {
         return;
     }
     let client = dynamodb_support::test_client(&endpoint);
@@ -451,29 +480,30 @@ async fn ensure_table_creates_the_table_and_its_ttl() {
             ("sk", aws_sdk_dynamodb::types::KeyType::Range)
         ]
     );
-    let ttl = client
-        .describe_time_to_live()
-        .table_name(&table)
-        .send()
-        .await
-        .unwrap();
-    let ttl = ttl.time_to_live_description().unwrap();
-    assert_eq!(ttl.attribute_name(), Some("expires_at"));
-    assert!(
-        matches!(
-            ttl.time_to_live_status(),
-            Some(
-                aws_sdk_dynamodb::types::TimeToLiveStatus::Enabled
-                    | aws_sdk_dynamodb::types::TimeToLiveStatus::Enabling
-            )
-        ),
-        "{ttl:?}"
-    );
+    assert_ttl_is_on(&client, &table).await;
 
     // It works, and connecting again to the existing table is fine.
     let _ = store.register(mocker("mocker", "m1")).await.unwrap();
     let again = DynamoDbPoolStore::connect(lease(), ensure).await.unwrap();
     assert_eq!(again.list().await.unwrap().items.len(), 1);
+}
+
+/// A run that created the table but stopped before turning on its TTL left
+/// TTL off. The next run with `ensure_table` turns it on.
+#[tokio::test]
+async fn ensure_table_turns_on_a_ttl_left_off() {
+    let endpoint = skip_without_dynamodb!();
+    if without_credentials() {
+        return;
+    }
+    let client = dynamodb_support::test_client(&endpoint);
+    let table = dynamodb_support::fresh_table_name();
+    dynamodb_support::create_table_without_ttl(&client, &table).await;
+
+    let mut ensure = config(&table, &endpoint);
+    ensure.ensure_table = true;
+    let _store = DynamoDbPoolStore::connect(lease(), ensure).await.unwrap();
+    assert_ttl_is_on(&client, &table).await;
 }
 
 /// Needs no dynamodb-local: nothing listens on port 1.

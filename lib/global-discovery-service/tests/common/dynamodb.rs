@@ -119,6 +119,25 @@ pub fn config(table: &str, endpoint: &Url) -> DynamoDbConfig {
 /// Creates the table of the design (`docs/dynamodb-store.md`, "Table
 /// definition") with TTL on `expires_at`, as `ensure_table` does.
 pub async fn create_table(client: &Client, table: &str) {
+    create_table_without_ttl(client, table).await;
+    client
+        .update_time_to_live()
+        .table_name(table)
+        .time_to_live_specification(
+            TimeToLiveSpecification::builder()
+                .enabled(true)
+                .attribute_name("expires_at")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap_or_else(|error| panic!("cannot enable TTL on {table}: {error:?}"));
+}
+
+/// The table of the design with TTL still off, as a run that stopped after
+/// creating it leaves it.
+pub async fn create_table_without_ttl(client: &Client, table: &str) {
     let attribute = |name: &str| {
         AttributeDefinition::builder()
             .attribute_name(name)
@@ -144,19 +163,6 @@ pub async fn create_table(client: &Client, table: &str) {
         .send()
         .await
         .unwrap_or_else(|error| panic!("cannot create {table}: {error:?}"));
-    client
-        .update_time_to_live()
-        .table_name(table)
-        .time_to_live_specification(
-            TimeToLiveSpecification::builder()
-                .enabled(true)
-                .attribute_name("expires_at")
-                .build()
-                .unwrap(),
-        )
-        .send()
-        .await
-        .unwrap_or_else(|error| panic!("cannot enable TTL on {table}: {error:?}"));
 }
 
 /// A fresh table, a clock the tests move, and stores over them.

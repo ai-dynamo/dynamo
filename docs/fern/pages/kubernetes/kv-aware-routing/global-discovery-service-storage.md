@@ -89,8 +89,8 @@ The service needs three actions on the table ARN, and the same in every replica 
 }
 ```
 
-Add `dynamodb:CreateTable` and `dynamodb:UpdateTimeToLive` only for a development deployment that uses
-`--dynamodb-ensure-table`.
+Add `dynamodb:CreateTable`, `dynamodb:DescribeTimeToLive`, and `dynamodb:UpdateTimeToLive` only for a
+development deployment that uses `--dynamodb-ensure-table`.
 
 The service reads credentials from the AWS SDK default chain. On EKS, attach the policy to an IAM
 role and give the Pod's ServiceAccount access to it.
@@ -191,8 +191,8 @@ and let the service create the table:
 With Karmada, keep these DynamoDB flags and use the Karmada flags from the example above in place of
 `--pool-discovery=registrations`.
 
-`--dynamodb-ensure-table` creates the table and enables TTL, without point-in-time recovery or
-replicas. Do not use it in production.
+`--dynamodb-ensure-table` creates the table if it is missing and turns on TTL if it is off, on every
+start, without point-in-time recovery or replicas. Do not use it in production.
 
 ## How leases and expiry work
 

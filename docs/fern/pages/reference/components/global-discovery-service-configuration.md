@@ -64,7 +64,7 @@ These flags work with every `--pool-discovery` value: in each mode the service k
 | `--dynamodb-region <region>` | SDK default chain (`AWS_REGION`) | Region of the table replica this process uses. |
 | `--dynamodb-endpoint <url>` | Unset | Endpoint override, for DynamoDB Local. Must be an `http` or `https` URL. |
 | `--dynamodb-poll-interval-secs <n>` | `2` | How often the store polls the table for changes. Only `--pool-discovery karmada` and `mcs` watch the table, and with them it must be less than `--heartbeat-interval-secs`. |
-| `--dynamodb-ensure-table` | Off | Create the table if it does not exist. For development. Needs `dynamodb:CreateTable` and `dynamodb:UpdateTimeToLive`. |
+| `--dynamodb-ensure-table` | Off | Create the table if it does not exist, and turn on its TTL if it is off. For development. Needs `dynamodb:CreateTable`, `dynamodb:DescribeTimeToLive`, and `dynamodb:UpdateTimeToLive`. |
 
 The `--dynamodb-*` flags and `--lease-skew-secs` apply only with `--registration-storage dynamodb`; giving one with the memory store is a startup error.
 
@@ -173,6 +173,7 @@ without a condition, and `GET /pools` is one paginated `Query` on `pk = "pool"`.
 | `dynamodb:UpdateItem` | `POST /pools`. |
 | `dynamodb:DescribeTable` | The startup check. |
 | `dynamodb:CreateTable` | Only with `--dynamodb-ensure-table`. |
+| `dynamodb:DescribeTimeToLive` | Only with `--dynamodb-ensure-table`. |
 | `dynamodb:UpdateTimeToLive` | Only with `--dynamodb-ensure-table`. |
 
 Grant them on the table ARN, in each region where the service runs a replica of a Global Table.

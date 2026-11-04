@@ -151,8 +151,9 @@ struct Args {
         help_heading = WITH_DYNAMODB
     )]
     dynamodb_poll_interval_secs: u64,
-    /// Create the DynamoDB table if it does not exist. For development: it
-    /// needs `dynamodb:CreateTable` and `dynamodb:UpdateTimeToLive`.
+    /// Create the DynamoDB table if it does not exist, and turn on its TTL if
+    /// it is off. For development: it needs `dynamodb:CreateTable`,
+    /// `dynamodb:DescribeTimeToLive` and `dynamodb:UpdateTimeToLive`.
     #[arg(long, help_heading = WITH_DYNAMODB)]
     dynamodb_ensure_table: bool,
     /// How far the clocks of replicas sharing a DynamoDB table may disagree.

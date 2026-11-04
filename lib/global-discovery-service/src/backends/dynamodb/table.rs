@@ -11,10 +11,12 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use aws_sdk_dynamodb::Client;
+use aws_sdk_dynamodb::config::Region;
 use aws_sdk_dynamodb::types::{
     AttributeDefinition, BillingMode, KeySchemaElement, KeyType, ScalarAttributeType,
-    TableDescription, TableStatus, TimeToLiveSpecification,
+    TableDescription, TableStatus, TimeToLiveSpecification, TimeToLiveStatus,
 };
+use url::Url;
 
 use super::keys;
 
@@ -27,40 +29,47 @@ const FIRST_CHECK_AFTER: Duration = Duration::from_millis(250);
 const MAX_CHECK_EVERY: Duration = Duration::from_secs(5);
 
 /// Creates `table` unless it exists, waits until it is active, and turns on
-/// TTL on `expires_at` if it created it. Needs `dynamodb:CreateTable` and
-/// `dynamodb:UpdateTimeToLive` besides `dynamodb:DescribeTable`. Replicas that
-/// start together may all call it: one creates the table, and the rest wait
-/// for it.
+/// TTL on `expires_at` unless it is on. Needs `dynamodb:CreateTable`,
+/// `dynamodb:DescribeTimeToLive` and `dynamodb:UpdateTimeToLive` besides
+/// `dynamodb:DescribeTable`. Replicas that start together may all call it:
+/// one creates the table, and the rest wait for it.
 pub async fn ensure_table(client: &Client, table: &str) -> anyhow::Result<()> {
-    if read(client, table).await?.is_some() {
-        return wait_until_active(client, table).await.map(drop);
-    }
-    let created = client
-        .create_table()
-        .table_name(table)
-        .attribute_definitions(attribute(keys::PK)?)
-        .attribute_definitions(attribute(keys::SK)?)
-        .key_schema(key(keys::PK, KeyType::Hash)?)
-        .key_schema(key(keys::SK, KeyType::Range)?)
-        .billing_mode(BillingMode::PayPerRequest)
-        .send()
-        .await;
-    match created {
-        Ok(_) => {}
-        // Another replica created it first.
-        Err(error)
-            if error
-                .as_service_error()
-                .is_some_and(|error| error.is_resource_in_use_exception()) =>
-        {
-            return wait_until_active(client, table).await.map(drop);
-        }
-        Err(error) => {
-            return Err(error).with_context(|| format!("create DynamoDB table {table}"));
+    if read(client, table).await?.is_none() {
+        let created = client
+            .create_table()
+            .table_name(table)
+            .attribute_definitions(attribute(keys::PK)?)
+            .attribute_definitions(attribute(keys::SK)?)
+            .key_schema(key(keys::PK, KeyType::Hash)?)
+            .key_schema(key(keys::SK, KeyType::Range)?)
+            .billing_mode(BillingMode::PayPerRequest)
+            .send()
+            .await;
+        match created {
+            Ok(_) => tracing::info!(table, "created the DynamoDB table for registrations"),
+            // Another replica created it first.
+            Err(error)
+                if error
+                    .as_service_error()
+                    .is_some_and(|error| error.is_resource_in_use_exception()) => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("create DynamoDB table {table}"));
+            }
         }
     }
     wait_until_active(client, table).await?;
-    client
+    ensure_ttl(client, table).await
+}
+
+/// Turns on TTL on `expires_at` unless it is on or being turned on. TTL is
+/// checked on every run, not only the one that creates the table: a run that
+/// stops before turning it on would otherwise leave it off, and every Query
+/// would keep reading retired pools' items.
+async fn ensure_ttl(client: &Client, table: &str) -> anyhow::Result<()> {
+    if ttl_is_on(client, table).await? {
+        return Ok(());
+    }
+    let turned_on = client
         .update_time_to_live()
         .table_name(table)
         .time_to_live_specification(
@@ -70,45 +79,103 @@ pub async fn ensure_table(client: &Client, table: &str) -> anyhow::Result<()> {
                 .build()?,
         )
         .send()
+        .await;
+    match turned_on {
+        Ok(_) => {
+            tracing::info!(
+                table,
+                "turned on TTL for the DynamoDB table for registrations"
+            );
+            Ok(())
+        }
+        // Another replica may have turned it on meanwhile, and DynamoDB
+        // refuses a second TTL change for a while.
+        Err(error) => match ttl_is_on(client, table).await {
+            Ok(true) => Ok(()),
+            _ => Err(error).with_context(|| format!("turn on TTL for DynamoDB table {table}")),
+        },
+    }
+}
+
+/// Whether TTL is on `expires_at`, or being turned on. TTL on another
+/// attribute is an error: a table has one TTL attribute, and items would
+/// never expire.
+async fn ttl_is_on(client: &Client, table: &str) -> anyhow::Result<bool> {
+    let output = client
+        .describe_time_to_live()
+        .table_name(table)
+        .send()
         .await
-        .with_context(|| format!("turn on TTL for DynamoDB table {table}"))?;
-    tracing::info!(table, "created the DynamoDB table for registrations");
-    Ok(())
+        .with_context(|| format!("describe the TTL of DynamoDB table {table}"))?;
+    let Some(ttl) = output.time_to_live_description() else {
+        return Ok(false);
+    };
+    match ttl.time_to_live_status() {
+        Some(TimeToLiveStatus::Enabled | TimeToLiveStatus::Enabling) => {
+            if ttl.attribute_name() != Some(keys::EXPIRES_AT) {
+                bail!(
+                    "DynamoDB table {table} has TTL on {}, but registrations expire on {}",
+                    ttl.attribute_name().unwrap_or("another attribute"),
+                    keys::EXPIRES_AT
+                );
+            }
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
 /// Checks that `table` exists with the keys the store writes, and waits for
 /// it if it is still being created. The error for a missing table says how
-/// to create it.
-pub async fn describe(client: &Client, table: &str) -> anyhow::Result<()> {
+/// to create it where the service looks for it: in `client`'s region, and
+/// through `endpoint` if the service uses one.
+pub async fn describe(client: &Client, table: &str, endpoint: Option<&Url>) -> anyhow::Result<()> {
     if read(client, table).await?.is_none() {
+        let options = cli_options(client.config().region(), endpoint);
         bail!(
             "DynamoDB table {table} does not exist. Create it with\n  {}\nand\n  {}\nor start \
              with --dynamodb-ensure-table",
-            create_table_command(table),
-            update_time_to_live_command(table),
+            create_table_command(table, &options),
+            update_time_to_live_command(table, &options),
         );
     }
     let description = wait_until_active(client, table).await?;
     check_keys(table, &description)
 }
 
-/// `aws dynamodb create-table` for `table`.
-pub fn create_table_command(table: &str) -> String {
+/// The `aws` CLI options that reach the table the service uses: its region,
+/// and its endpoint when that is not the region's own, as for
+/// dynamodb-local. Without them, the CLI's own defaults could create the
+/// table somewhere else.
+pub fn cli_options(region: Option<&Region>, endpoint: Option<&Url>) -> String {
+    let mut options = String::new();
+    if let Some(region) = region {
+        options.push_str(&format!(" --region {region}"));
+    }
+    if let Some(endpoint) = endpoint {
+        let endpoint = endpoint.as_str().trim_end_matches('/');
+        options.push_str(&format!(" --endpoint-url {endpoint}"));
+    }
+    options
+}
+
+/// `aws dynamodb create-table` for `table`, then `cli_options`.
+pub fn create_table_command(table: &str, cli_options: &str) -> String {
     format!(
         "aws dynamodb create-table --table-name {table} \
          --attribute-definitions AttributeName={pk},AttributeType=S AttributeName={sk},AttributeType=S \
          --key-schema AttributeName={pk},KeyType=HASH AttributeName={sk},KeyType=RANGE \
-         --billing-mode PAY_PER_REQUEST",
+         --billing-mode PAY_PER_REQUEST{cli_options}",
         pk = keys::PK,
         sk = keys::SK,
     )
 }
 
-/// `aws dynamodb update-time-to-live` for `table`.
-pub fn update_time_to_live_command(table: &str) -> String {
+/// `aws dynamodb update-time-to-live` for `table`, then `cli_options`.
+pub fn update_time_to_live_command(table: &str, cli_options: &str) -> String {
     format!(
         "aws dynamodb update-time-to-live --table-name {table} \
-         --time-to-live-specification Enabled=true,AttributeName={}",
+         --time-to-live-specification Enabled=true,AttributeName={}{cli_options}",
         keys::EXPIRES_AT
     )
 }
@@ -244,11 +311,32 @@ mod tests {
 
     #[test]
     fn the_commands_name_the_table() {
-        let create = create_table_command("pools");
+        let create = create_table_command("pools", "");
         assert!(create.starts_with("aws dynamodb create-table --table-name pools "));
         assert!(create.contains("AttributeName=pk,KeyType=HASH AttributeName=sk,KeyType=RANGE"));
-        assert!(update_time_to_live_command("pools").ends_with(
+        assert!(update_time_to_live_command("pools", "").ends_with(
             "--table-name pools --time-to-live-specification Enabled=true,AttributeName=expires_at"
+        ));
+    }
+
+    /// The commands create the table where the service looks for it, not
+    /// where the CLI's own defaults point.
+    #[test]
+    fn the_commands_name_the_region_and_the_endpoint() {
+        let region = Region::new("us-east-2");
+        let local = Url::parse("http://localhost:8000").unwrap();
+        assert_eq!(cli_options(None, None), "");
+        assert_eq!(cli_options(Some(&region), None), " --region us-east-2");
+        let options = cli_options(Some(&region), Some(&local));
+        assert_eq!(
+            options,
+            " --region us-east-2 --endpoint-url http://localhost:8000"
+        );
+        assert!(create_table_command("pools", &options).ends_with(
+            "--billing-mode PAY_PER_REQUEST --region us-east-2 --endpoint-url http://localhost:8000"
+        ));
+        assert!(update_time_to_live_command("pools", &options).ends_with(
+            "AttributeName=expires_at --region us-east-2 --endpoint-url http://localhost:8000"
         ));
     }
 }

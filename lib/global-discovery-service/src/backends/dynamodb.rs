@@ -239,7 +239,7 @@ impl DynamoDbPoolStore {
                 .await
                 .map_err(ConnectError::Table)?;
         }
-        table::describe(&client, &config.table)
+        table::describe(&client, &config.table, config.endpoint.as_ref())
             .await
             .map_err(ConnectError::Table)?;
         Ok(Self::with_client(
