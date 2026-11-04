@@ -3,7 +3,7 @@
 
 //! Dynamo LLM integration helpers for agent-context request trace records.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -390,15 +390,23 @@ pub(crate) fn request_metrics_from_agent_state(
         client_tool_call_ids,
         metrics.finish_reason_metadata.as_mut(),
     ) {
-        // The same derivation, in the same order, as the endpoint.
+        // The same derivation as the endpoint: every observed call counts
+        // toward a repeated backend ID, whether or not the endpoint emitted it.
         let chat_id = format!("chatcmpl-{}", metrics.request_id);
-        let mut issued = HashSet::new();
-        for id in metadata
+        let backend_ids: Vec<Option<String>> = metadata
             .tool_calls
-            .iter_mut()
-            .filter_map(|call| call.id.as_mut())
-        {
-            *id = derive(&chat_id, id, &mut issued);
+            .iter()
+            .map(|call| call.id.clone())
+            .collect();
+        for (index, call) in metadata.tool_calls.iter_mut().enumerate() {
+            let Some(id) = call.id.as_mut() else {
+                continue;
+            };
+            let occurrence = backend_ids[..index]
+                .iter()
+                .filter(|earlier| earlier.as_deref() == Some(id.as_str()))
+                .count() as u32;
+            *id = derive(&chat_id, id, occurrence);
         }
     }
     (agent_context, metrics)
@@ -570,9 +578,13 @@ mod tests {
     #[test]
     fn request_end_records_client_tool_call_ids() {
         let finish_reason_metadata = SharedFinishReasonMetadata::default();
-        finish_reason_metadata
-            .lock()
-            .record_tool_call_chunk(0, 0, Some("call_1"), Some("shell"));
+        {
+            let mut metadata = finish_reason_metadata.lock();
+            metadata.record_tool_call_chunk(0, 0, Some("call_1"), Some("shell"));
+            // A parser that repeats backend IDs: the second call is a repeat.
+            metadata.record_tool_call_chunk(0, 1, Some("call_1"), Some("shell"));
+            metadata.record_tool_call_chunk(0, 2, Some("call_2"), Some("shell"));
+        }
         let trace_state = AgentContextTraceState {
             agent_context: AgentContext {
                 session_id: "client-ids".to_string(),
@@ -586,16 +598,27 @@ mod tests {
             x_request_id: None,
             finish_reason_metadata,
             client_tool_call_ids: Some(super::super::ClientToolCallIds(
-                |chat_id, backend_id, _| format!("client-{chat_id}-{backend_id}"),
+                |chat_id, backend_id, occurrence| {
+                    format!("client-{chat_id}-{backend_id}-{occurrence}")
+                },
             )),
         };
 
         let (_, request) = request_metrics_from_agent_state(trace_state, "r1".to_string());
 
         let metadata = request.finish_reason_metadata.expect("finish metadata");
+        let ids: Vec<_> = metadata
+            .tool_calls
+            .iter()
+            .map(|call| call.id.as_deref())
+            .collect();
         assert_eq!(
-            metadata.tool_calls[0].id.as_deref(),
-            Some("client-chatcmpl-r1-call_1")
+            ids,
+            vec![
+                Some("client-chatcmpl-r1-call_1-0"),
+                Some("client-chatcmpl-r1-call_1-1"),
+                Some("client-chatcmpl-r1-call_2-0"),
+            ]
         );
     }
     #[test]

@@ -58,10 +58,12 @@ pub const CLIENT_TOOL_CALL_IDS_CONTEXT_KEY: &str = "request_trace.client_tool_ca
 
 /// How an endpoint turns a backend tool-call ID into the ID its client
 /// receives, so `request_end` records the client's ID. Called as
-/// `derive(chat_completion_id, backend_id, issued)` for each call in order,
-/// exactly as the endpoint does.
+/// `derive(chat_completion_id, backend_id, occurrence)`, where `occurrence`
+/// is how many earlier tool calls in the response, suppressed or not, carried
+/// the same backend ID. Each call's ID depends only on its own identity, so
+/// the endpoint and the trace agree whatever either one filters out.
 #[derive(Clone, Copy)]
-pub struct ClientToolCallIds(pub fn(&str, &str, &mut std::collections::HashSet<String>) -> String);
+pub struct ClientToolCallIds(pub fn(&str, &str, u32) -> String);
 
 pub async fn init_from_env_with_shutdown(shutdown: CancellationToken) -> anyhow::Result<()> {
     let policy = policy();

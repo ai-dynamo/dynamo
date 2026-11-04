@@ -7,8 +7,6 @@
 //! `message_start` -> `content_block_start` -> N x `content_block_delta` ->
 //! `content_block_stop` -> `message_delta` -> `message_stop`
 
-use std::collections::HashSet;
-
 use axum::response::sse::Event;
 use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk, CompletionUsage,
@@ -18,7 +16,7 @@ use uuid::Uuid;
 use super::types::{
     AnthropicDelta, AnthropicErrorBody, AnthropicMessageDeltaBody, AnthropicMessageResponse,
     AnthropicResponseContentBlock, AnthropicStopReason, AnthropicStreamEvent, AnthropicUsage,
-    anthropic_stop_fields, completion_usage_to_anthropic, tool_use_id,
+    anthropic_stop_fields, backend_id_occurrence, completion_usage_to_anthropic, tool_use_id,
 };
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use crate::protocols::unified::AnthropicContext;
@@ -47,10 +45,8 @@ pub struct AnthropicStreamConverter {
     saw_backend_usage: bool,
     // Tool call tracking
     tool_call_states: Vec<ToolCallState>,
-    // The chat completion id, from the first chunk, and the `tool_use` ids
-    // emitted so far.
+    // The chat completion id, from the first chunk; `tool_use` ids derive from it.
     chat_id: String,
-    tool_use_ids: HashSet<String>,
     // Text that arrived after a tool call. Tool blocks stream only once their
     // call is complete, so this text waits and streams in arrival order.
     pending_text: Vec<PendingText>,
@@ -119,7 +115,6 @@ impl AnthropicStreamConverter {
             saw_backend_usage: false,
             tool_call_states: Vec::new(),
             chat_id: String::new(),
-            tool_use_ids: HashSet::new(),
             pending_text: Vec::new(),
             tool_blocks_flushed: false,
             tool_flush_requested: false,
@@ -257,6 +252,18 @@ impl AnthropicStreamConverter {
             .api_context
             .as_ref()
             .is_some_and(|ctx| ctx.disable_parallel_tool_use);
+        // Each call's `tool_use` id counts every earlier call with the same backend
+        // id, emitted or not, as the request trace does.
+        let occurrences: Vec<u32> = (0..self.tool_call_states.len())
+            .map(|index| {
+                backend_id_occurrence(
+                    self.tool_call_states[..index]
+                        .iter()
+                        .map(|call| call.backend_id.as_str()),
+                    &self.tool_call_states[index].backend_id,
+                )
+            })
+            .collect();
 
         for (call_index, tool_call) in self.tool_call_states.iter_mut().enumerate() {
             if tool_call.has_emitted {
@@ -324,8 +331,11 @@ impl AnthropicStreamConverter {
                 &mut block_index,
                 &mut events,
             );
-            let emitted_id =
-                tool_use_id(&self.chat_id, &tool_call.backend_id, &mut self.tool_use_ids);
+            let emitted_id = tool_use_id(
+                &self.chat_id,
+                &tool_call.backend_id,
+                occurrences[call_index],
+            );
             tracing::debug!(
                 backend_id = %tool_call.backend_id,
                 emitted_id = %emitted_id,
@@ -3125,6 +3135,41 @@ mod tests {
             event_types(&conv.emit_end_events_tagged()),
             vec!["message_delta", "message_stop"]
         );
+    }
+
+    /// A suppressed earlier call with the same backend id still counts toward
+    /// the emitted id, so it matches what the request trace derives for the
+    /// valid call's index.
+    #[test]
+    fn test_suppressed_repeat_keeps_trace_id_alignment() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        // Non-object arguments: suppressed at the final drain.
+        conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call_1"),
+            Some("Read"),
+            Some("[]"),
+        ));
+        conv.process_chunk_tagged(&tool_call_chunk(
+            1,
+            Some("call_1"),
+            Some("Read"),
+            Some("{}"),
+        ));
+
+        let finish_events = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
+        let ids: Vec<_> = finish_events
+            .iter()
+            .filter_map(|e| match &e.data {
+                AnthropicStreamEvent::ContentBlockStart {
+                    content_block: AnthropicResponseContentBlock::ToolUse { id, .. },
+                    ..
+                } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec![tool_use_id("chat-1", "call_1", 1)]);
     }
 
     /// Verify that `with_context` stores the context and produces the same
