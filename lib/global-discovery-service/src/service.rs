@@ -184,10 +184,12 @@ async fn healthz(State(backend): State<Arc<PoolDiscoveryBackend>>) -> StatusCode
     }
 }
 
-/// Maps a backend error to a status. The cause is logged, not returned.
+/// Maps a backend error to a status. An outage's cause is logged, not
+/// returned; a rejected registration says why.
 fn error_response(error: DiscoveryError) -> Response {
     let status = match &error {
         DiscoveryError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+        DiscoveryError::Rejected(_) => StatusCode::UNPROCESSABLE_ENTITY,
     };
     tracing::warn!(?error, %status, "discovery request failed");
     (status, error.to_string()).into_response()
@@ -424,6 +426,37 @@ mod tests {
 
         let (status, _) = post_pool(&base, &registration_of(MAX_BODY_BYTES)).await;
         assert_eq!(status, reqwest::StatusCode::OK);
+        shutdown.cancel();
+    }
+
+    /// A registrar that cannot keep any registration.
+    struct Refuses;
+
+    #[async_trait]
+    impl PoolRegistrar for Refuses {
+        async fn register(&self, _registration: PoolRegistration) -> Result<Lease, DiscoveryError> {
+            Err(DiscoveryError::Rejected(
+                "the pool key is too long".to_owned(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rejected_registration_is_unprocessable_and_says_why() {
+        let mut backend = registrations_backend();
+        backend.registrar = Some(Arc::new(Refuses));
+        let (base, shutdown) = start(backend).await;
+        let response = reqwest::Client::new()
+            .post(format!("{base}/pools"))
+            .header("content-type", "application/json")
+            .body(registration().to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+        // Sending it again cannot help, so the PoolRelay is told why.
+        let reason = response.text().await.unwrap();
+        assert!(reason.contains("the pool key is too long"), "{reason}");
         shutdown.cancel();
     }
 

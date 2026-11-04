@@ -36,6 +36,9 @@ pub const EXPIRES_AT: &str = "expires_at";
 
 /// The partition every pool is in, so that one `Query` lists them.
 pub const POOLS: &str = "pool";
+/// DynamoDB's limit on a sort key, in bytes of UTF-8. A pool key's parts
+/// have no length limit, so a long key's [`sort_key`] can exceed it.
+pub const MAX_SORT_KEY_BYTES: usize = 1024;
 
 const SEPARATOR: char = '#';
 const ESCAPE: char = '\\';

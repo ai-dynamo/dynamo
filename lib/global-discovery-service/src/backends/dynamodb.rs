@@ -508,6 +508,15 @@ impl PoolRegistrar for DynamoDbPoolStore {
                 anyhow::Error::new(error).context("encode the registration"),
             )
         })?;
+        // DynamoDB would refuse the write with a `ValidationException` on
+        // every heartbeat, which the PoolRelay would see as an outage.
+        if encoded.sort_key.len() > keys::MAX_SORT_KEY_BYTES {
+            return Err(DiscoveryError::Rejected(format!(
+                "the pool key is {} bytes as a DynamoDB sort key, and DynamoDB allows at most {}",
+                encoded.sort_key.len(),
+                keys::MAX_SORT_KEY_BYTES
+            )));
+        }
         let now_ms = self.shared.clock.now_ms();
         self.shared
             .write(&encoded, now_ms, self.lease.duration().as_secs())
@@ -750,6 +759,34 @@ mod tests {
         )
     }
 
+    /// DynamoDB refuses a sort key over 1,024 bytes on every write. The store
+    /// says so before writing, so the PoolRelay learns why instead of seeing
+    /// an outage.
+    #[tokio::test]
+    async fn a_pool_key_too_long_for_dynamodb_is_rejected() {
+        let store = unreachable_store();
+        let registration = |dgd: &str| PoolRegistration {
+            key: key(dgd),
+            location: pool(dgd, "m1").location,
+            model: "m1".to_owned(),
+            capabilities: Vec::new(),
+            frontends: Vec::new(),
+            capacity: Vec::new(),
+        };
+        // The sort key is `west#dynamo#` and the name.
+        let longest = "d".repeat(keys::MAX_SORT_KEY_BYTES - "west#dynamo#".len());
+        let Err(DiscoveryError::Unavailable(_)) = store.register(registration(&longest)).await
+        else {
+            panic!("a key at the limit should reach the table, which is down");
+        };
+        let longer = format!("{longest}d");
+        let Err(DiscoveryError::Rejected(reason)) = store.register(registration(&longer)).await
+        else {
+            panic!("expected the key to be rejected");
+        };
+        assert!(reason.contains("1025 bytes"), "{reason}");
+    }
+
     /// While a rollout moves the service to a table, PoolRelays that still
     /// register with the old replicas are missing from it.
     #[tokio::test]
@@ -764,7 +801,9 @@ mod tests {
     #[tokio::test]
     async fn an_unreachable_table_is_unavailable() {
         let store = unreachable_store();
-        let DiscoveryError::Unavailable(error) = store.list().await.unwrap_err();
+        let Err(DiscoveryError::Unavailable(error)) = store.list().await else {
+            panic!("expected the table to be unavailable");
+        };
         assert!(
             format!("{error:#}").contains("query DynamoDB table pools"),
             "{error:#}"
@@ -777,7 +816,9 @@ mod tests {
             frontends: Vec::new(),
             capacity: Vec::new(),
         };
-        let DiscoveryError::Unavailable(error) = store.register(registration).await.unwrap_err();
+        let Err(DiscoveryError::Unavailable(error)) = store.register(registration).await else {
+            panic!("expected the table to be unavailable");
+        };
         assert!(
             format!("{error:#}").contains("write to DynamoDB table pools"),
             "{error:#}"

@@ -82,7 +82,7 @@ All bodies are JSON. A reader ignores fields it does not know.
 
 | Method and path | Purpose | Success | Errors |
 | --- | --- | --- | --- |
-| `POST /pools` | Register a pool and renew its lease. | 200 with a lease | 422 for an invalid body, 503 when the store is unreachable |
+| `POST /pools` | Register a pool and renew its lease. | 200 with a lease | 400 for malformed JSON, 413 for a body over 64 KiB, 415 without `Content-Type: application/json`, 422 for an invalid registration or one the store cannot keep, 503 when the store is unreachable |
 | `GET /pools` | List live pools. | 200 with a pool list | 503 when the backend is unreachable |
 | `GET /routers` | List Global Router replicas. | 200 with a router list | 503 when the backend is unreachable |
 | `GET /healthz` | Readiness: the backend answers. | 200 | 503 when the backend is unreachable |
@@ -153,7 +153,7 @@ the sort key is `sk` (string), and TTL is enabled on `expires_at`.
 | Attribute | Type | Content |
 | --- | --- | --- |
 | `pk` | S | The constant `pool`. |
-| `sk` | S | `<cluster_id>#<namespace>#<dgd_name>`, with `#` escaped as `\#` and `\` as `\\` in each part. |
+| `sk` | S | `<cluster_id>#<namespace>#<dgd_name>`, with `#` escaped as `\#` and `\` as `\\` in each part. At most 1,024 bytes, DynamoDB's limit for a sort key. |
 | `registration` | S | The registration as JSON, with `capabilities`, `frontends`, and `capacity` sorted and deduplicated. |
 | `hash` | S | blake3 hex digest of `registration`, used to detect changes. |
 | `renewed_at` | N | Unix milliseconds, on the accepting replica's clock, of the last stored registration. |
@@ -183,6 +183,7 @@ Grant them on the table ARN, in each region where the service runs a replica of 
 | Condition | Result |
 | --- | --- |
 | DynamoDB error, throttling, transport failure, or missing table while serving | 503 from the endpoint, and `GET /healthz` fails. |
+| A pool key whose sort key is over 1,024 bytes | 422 from `POST /pools`, with the reason. Nothing is written. |
 | An item that fails to decode | Logged and skipped. The rest of the list is served. |
 | `--dynamodb-table` missing with `dynamodb` | Startup error. |
 | `--dynamodb-poll-interval-secs` not below `--heartbeat-interval-secs`, with `karmada` or `mcs` | Startup error. |

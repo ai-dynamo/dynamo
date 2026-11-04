@@ -267,6 +267,7 @@ heading or works everywhere.
 | Source | Result |
 |---|---|
 | SDK service error, throttling, transport, missing table | `DiscoveryError::Unavailable` (503) |
+| A sort key over DynamoDB's 1,024 bytes | `DiscoveryError::Rejected` (422) with the reason, before any write; DynamoDB would answer each write with a `ValidationException` |
 | Item that fails to decode | skipped with a warning; the rest of the list is served |
 | `--dynamodb-table` missing with `dynamodb` | startup error |
 | `--dynamodb-poll-interval-secs >= --heartbeat-interval-secs` with `karmada` or `mcs` | usage error |

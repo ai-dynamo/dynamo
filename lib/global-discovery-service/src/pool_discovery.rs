@@ -49,4 +49,8 @@ use thiserror::Error;
 pub enum DiscoveryError {
     #[error("discovery backend is unavailable")]
     Unavailable(#[source] anyhow::Error),
+    /// The backend cannot keep this registration as it is, so sending it
+    /// again cannot help. The reason is for the caller.
+    #[error("the registration cannot be stored: {0}")]
+    Rejected(String),
 }
