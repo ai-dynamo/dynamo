@@ -2104,21 +2104,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-custom-policy-builtin"
-version = "1.7.0"
-dependencies = [
- "async-trait",
- "dynamo-kv-router",
- "fastrand",
- "parking_lot",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "dynamo-decisions"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2145,8 +2130,11 @@ name = "dynamo-global-common"
 version = "1.7.0"
 dependencies = [
  "blake3",
+ "prost 0.13.5",
  "serde",
  "thiserror 2.0.18",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
  "url",
 ]
 
@@ -2163,6 +2151,16 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "dynamo-global-view-broadcaster"
+version = "1.7.0"
+dependencies = [
+ "parking_lot",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -2248,9 +2246,10 @@ dependencies = [
  "derive-getters",
  "derive_builder",
  "dialoguer",
- "dynamo-custom-policy-builtin",
  "dynamo-decisions",
+ "dynamo-global-common",
  "dynamo-global-discovery-client",
+ "dynamo-global-view-broadcaster",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
@@ -2259,6 +2258,7 @@ dependencies = [
  "dynamo-protocols",
  "dynamo-renderer",
  "dynamo-rl",
+ "dynamo-router-policies",
  "dynamo-runtime",
  "dynamo-tokenizers",
  "dynamo-tokens",
@@ -2360,8 +2360,8 @@ dependencies = [
  "blake3",
  "bytes",
  "dashmap",
- "dynamo-custom-policy-builtin",
  "dynamo-kv-router",
+ "dynamo-router-policies",
  "dynamo-tokens",
  "futures",
  "ndarray 0.16.1",
@@ -2456,12 +2456,12 @@ dependencies = [
  "clap",
  "dashmap",
  "dynamo-backend-common",
- "dynamo-custom-policy-builtin",
  "dynamo-generate-format-catalog",
  "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-mocker",
  "dynamo-parsers",
+ "dynamo-router-policies",
  "dynamo-runtime",
  "dynamo-sglang-sidecar",
  "dynamo-sidecar-common",
@@ -2523,6 +2523,21 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "dynamo-router-policies"
+version = "1.7.0"
+dependencies = [
+ "async-trait",
+ "dynamo-kv-router",
+ "fastrand",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2742,6 +2757,7 @@ dependencies = [
  "tokio-util",
  "tonic 0.13.1",
  "tonic-build 0.13.1",
+ "tonic-health 0.13.1",
  "tracing",
 ]
 

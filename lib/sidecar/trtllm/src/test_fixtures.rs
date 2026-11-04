@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use crate::client::ModelLimits;
+use crate::client::{ModelLimits, SupportedMedia};
 use crate::proto as pb;
 use dynamo_backend_common::{
     DisaggregationMode, MultimodalData, OutputOptions, PreprocessedRequest, SamplingOptions,
@@ -54,8 +54,10 @@ pub(crate) fn request() -> PreprocessedRequest {
 pub(crate) fn limits(context_length: u32) -> Option<ModelLimits> {
     Some(ModelLimits {
         context_length: Some(context_length),
+        engine_context_length: Some(context_length),
         max_output_tokens: None,
-        ..Default::default()
+        supported_inputs: None,
+        supported_media: Some(SupportedMedia::default()),
     })
 }
 
@@ -63,8 +65,40 @@ pub(crate) fn image_limits(context_length: u32) -> Option<ModelLimits> {
     Some(ModelLimits {
         context_length: Some(context_length),
         engine_context_length: Some(context_length),
-        supports_image: Some(true),
-        ..Default::default()
+        max_output_tokens: None,
+        supported_inputs: None,
+        supported_media: Some(SupportedMedia {
+            image: true,
+            ..Default::default()
+        }),
+    })
+}
+
+pub(crate) fn image_video_limits(context_length: u32) -> Option<ModelLimits> {
+    Some(ModelLimits {
+        context_length: Some(context_length),
+        engine_context_length: Some(context_length),
+        max_output_tokens: None,
+        supported_inputs: None,
+        supported_media: Some(SupportedMedia {
+            image: true,
+            video: true,
+            ..Default::default()
+        }),
+    })
+}
+
+pub(crate) fn all_media_limits(context_length: u32) -> Option<ModelLimits> {
+    Some(ModelLimits {
+        context_length: Some(context_length),
+        engine_context_length: Some(context_length),
+        max_output_tokens: None,
+        supported_inputs: None,
+        supported_media: Some(SupportedMedia {
+            image: true,
+            video: true,
+            audio: true,
+        }),
     })
 }
 

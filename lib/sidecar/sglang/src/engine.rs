@@ -27,12 +27,14 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
-use crate::client::{self, Client, Discovery, KV_CONFIG_KEY, NodeMetadata, Pool, WORKER_GROUP_KEY};
+use crate::client::{
+    self, Client, Discovery, KV_CONFIG_KEY, MediaSupport, NodeMetadata, Pool, WORKER_GROUP_KEY,
+};
 use crate::native_http::{self, NativeHttp};
 use crate::proto as pb;
 use crate::protocol::{
     build_generate_request, disaggregated_params_to_json, engine_data_from_meta, extract_logprobs,
-    meta_u32, output_ids_to_u32, terminal_from_meta,
+    meta_u32, output_ids_to_u32, require_media_support, terminal_from_meta,
 };
 
 const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
@@ -46,6 +48,9 @@ pub struct SglangSidecarEngine {
     native_http_max_event_bytes: usize,
     state: OnceCell<StartedState>,
     cancel: CancellationToken,
+    /// Cancelled once SGLang is lost after `start`, with the reason set first.
+    lost: CancellationToken,
+    lost_reason: Arc<std::sync::OnceLock<String>>,
 }
 
 struct StartedState {
@@ -53,6 +58,7 @@ struct StartedState {
     native_http: Option<NativeHttp>,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
     combined_token_limit: Option<u32>,
+    media_support: MediaSupport,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -215,6 +221,8 @@ impl SglangSidecarEngine {
                 native_http_max_event_bytes,
                 state: OnceCell::new(),
                 cancel: CancellationToken::new(),
+                lost: CancellationToken::new(),
+                lost_reason: Arc::default(),
             },
             config,
         ))
@@ -322,17 +330,20 @@ impl LLMEngine for SglangSidecarEngine {
         let kv_event_sources =
             discover_kv_event_sources(&discovery, &mut config, &self.endpoint, deadline).await?;
         let connection_count = pool.len();
+        let state_client = pool.control_client();
         let kv_event_source_count = kv_event_sources.len();
         let combined_token_limit = combined_token_limit(&discovery);
         if combined_token_limit.is_none() {
             tracing::warn!("requests without max_tokens keep SGLang's 128-token default");
         }
+        let media_support = client::media_support(&discovery.server_info);
         self.state
             .set(StartedState {
                 pool,
                 native_http,
                 kv_event_sources,
                 combined_token_limit,
+                media_support,
             })
             .map_err(|_| client::engine_shutdown("sglang sidecar already started"))?;
         tracing::info!(
@@ -340,8 +351,23 @@ impl LLMEngine for SglangSidecarEngine {
             mode = ?self.disaggregation_mode,
             connections = connection_count,
             kv_event_sources = kv_event_source_count,
+            media_support = ?media_support,
             "sglang sidecar started"
         );
+        let (stop, lost) = (self.cancel.child_token(), self.lost.clone());
+        let reason = Arc::clone(&self.lost_reason);
+        let open_timeout = self.transport.connect_attempt_timeout;
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = stop.cancelled() => {}
+                why = client::watch_engine_state(state_client, open_timeout) => {
+                    if let Some(why) = why {
+                        let _ = reason.set(why);
+                        lost.cancel();
+                    }
+                }
+            }
+        });
         Ok(config)
     }
 
@@ -389,6 +415,7 @@ impl LLMEngine for SglangSidecarEngine {
             self.bootstrap_host.as_deref(),
             self.bootstrap_port,
         )?;
+        require_media_support(&grpc_request, state.media_support)?;
         let mut prefill_handoff = if self.disaggregation_mode.is_prefill() {
             grpc_request
                 .disaggregated_params
@@ -424,7 +451,7 @@ impl LLMEngine for SglangSidecarEngine {
             let mut stream = match opened {
                 Ok(response) => response.into_inner(),
                 Err(status) => {
-                    yield Err(client::status_to_dynamo("Generate", status));
+                    yield Err(client::stream_status_to_dynamo("Generate", status));
                     return;
                 }
             };
@@ -468,7 +495,7 @@ impl LLMEngine for SglangSidecarEngine {
                                 break;
                             }
                             Err(status) => {
-                                yield Err(client::status_to_dynamo("Generate", status));
+                                yield Err(client::stream_status_to_dynamo("Generate", status));
                                 break;
                             }
                         };
@@ -610,6 +637,12 @@ impl LLMEngine for SglangSidecarEngine {
         self.cancel.cancel();
         tracing::info!("sglang sidecar shutdown complete");
         Ok(())
+    }
+
+    async fn engine_lost(&self) -> DynamoError {
+        self.lost.cancelled().await;
+        let reason = self.lost_reason.get().map_or("unknown", String::as_str);
+        client::engine_shutdown(format!("SGLang engine lost: {reason}"))
     }
 
     async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
