@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import json
 import os
 import pathlib
 from collections.abc import Mapping
@@ -34,6 +35,13 @@ from . import __version__
 
 _U32_MAX = 2**32 - 1
 _MAX_SESSION_AFFINITY_TTL_SECS = 31_536_000
+
+
+def _parse_chat_template_kwargs(value: str) -> Dict[str, Any]:
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict):
+        raise ValueError("--default-chat-template-kwargs must be a JSON object")
+    return parsed
 
 
 def _mountinfo_path(value: str) -> str:
@@ -214,11 +222,14 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     enable_anthropic_api: bool
     enable_systemone_api: bool
     strip_anthropic_preamble: bool
+    reject_media: bool
+    reject_media_status_code: int
     debug_perf: bool
     enable_streaming_tool_dispatch: bool
     enable_streaming_reasoning_dispatch: bool
     reasoning_field_name: str
     exclude_tools_when_tool_choice_none: bool
+    default_chat_template_kwargs: Optional[Dict[str, Any]] = None
     preprocess_workers: Optional[int]
     tokenizer_backend: str
     tokenizer_fallback: bool
@@ -226,6 +237,15 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
     frontend_route_extensions: list[str]
 
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens", "basetenkenizer"}
+
+    def validate_default_chat_template_kwargs(self) -> None:
+        # Request validation rejects a nested chat_template on every path, so
+        # this default would fail every request.
+        if "chat_template" in (self.default_chat_template_kwargs or {}):
+            raise ValueError(
+                "--default-chat-template-kwargs cannot set chat_template. Use "
+                "--custom-jinja-template on the worker to replace the chat template."
+            )
 
     def validate(self) -> None:
         if self.preprocess_workers is None:
@@ -285,6 +305,8 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
             )
         if self.min_initial_workers < 0:
             raise ValueError("--router-min-initial-workers must be >= 0")
+        if not 400 <= self.reject_media_status_code <= 599:
+            raise ValueError("--reject-media-status-code must be a 4xx or 5xx status")
         if self.session_affinity_ttl_secs is not None and not (
             1 <= self.session_affinity_ttl_secs <= _MAX_SESSION_AFFINITY_TTL_SECS
         ):
@@ -292,6 +314,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
                 "--router-session-affinity-ttl-secs must be between 1 and "
                 f"{_MAX_SESSION_AFFINITY_TTL_SECS}"
             )
+        self.validate_default_chat_template_kwargs()
         if self.tokenizer_backend not in self._VALID_TOKENIZER_BACKENDS:
             raise ValueError(
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "
@@ -785,6 +808,33 @@ class FrontendArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             g,
+            flag_name="--reject-media",
+            env_var="DYN_REJECT_MEDIA",
+            default=False,
+            help=(
+                "Refuse chat requests that carry image, video, or audio content in "
+                "any message, including history, before routing. For frontends that "
+                "serve text-only models: a streaming client gets an HTTP error "
+                "instead of a 200 followed by an error event. The status is set by "
+                "--reject-media-status-code."
+            ),
+            env=self.env,
+        )
+        add_argument(
+            g,
+            flag_name="--reject-media-status-code",
+            env_var="DYN_REJECT_MEDIA_STATUS_CODE",
+            default=415,
+            help=(
+                "HTTP status (4xx or 5xx) for a request refused by --reject-media. "
+                "Set it to a status an upstream gateway fails over on, such as 429, "
+                "to send these requests to a multimodal model."
+            ),
+            arg_type=int,
+            env=self.env,
+        )
+        add_negatable_bool_argument(
+            g,
             flag_name="--enable-streaming-tool-dispatch",
             env_var="DYN_ENABLE_STREAMING_TOOL_DISPATCH",
             default=False,
@@ -834,6 +884,23 @@ class FrontendArgGroup(ArgGroup):
                 "Exclude tool definitions from the chat template when "
                 "tool_choice='none'. Prevents models from generating raw XML "
                 "tool calls in the content field."
+            ),
+            env=self.env,
+        )
+        add_argument(
+            g,
+            flag_name="--default-chat-template-kwargs",
+            env_var="DYN_DEFAULT_CHAT_TEMPLATE_KWARGS",
+            default=None,
+            arg_type=_parse_chat_template_kwargs,
+            help=(
+                "JSON object of chat template kwargs that apply to every chat request "
+                "this frontend serves, for every model. Each request's own "
+                'chat_template_kwargs win per key, except null and "auto" values, '
+                "and a request thinking control "
+                "replaces the thinking keys. Set this on the frontend, not on the "
+                "engine: the frontend renders the chat template, so the engine flag "
+                "has no effect behind Dynamo."
             ),
             env=self.env,
         )
