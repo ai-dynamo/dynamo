@@ -195,17 +195,28 @@ but an `unpublish` call returns 409 before changing worker state because discove
 removal currently cancels active QUIC responses. The operation does not use
 SGLang's `pause_generation`, abort requests, or stop the engine.
 
-Frontend recovery is configured separately from endpoint availability. In this
-revision, frontends still use `DYN_EXPERIMENTAL_WORKER_WITHDRAWAL=1` to enable the
-existing three additional drain reselections. Workers do not read this setting.
-It accepts `1`, `true`, or `yes` (case-insensitive) and defaults to disabled.
-The frontend reads it when constructing the model pipeline, not on every request.
-An explicit drain-migration limit and its default and budget-exhaustion semantics
-remain under discussion in [PR #17570](https://github.com/ai-dynamo/dynamo/pull/17570).
+Configure frontend recovery separately from endpoint availability. Set
+`--migration-limit-draining D` or `DYN_MIGRATION_LIMIT_DRAINING=D` on the frontend
+to select the maximum-limit policy. For a pre-execution `backend.worker_draining`
+rejection, the retry limit is `max(M, D)`, where `M` is `--migration-limit`.
+Replacement attempts share one count; the initial dispatch does not count.
+Ordinary errors remain limited to `M`. Explicit `D=0` adds no drain allowance
+beyond `M` and overrides `DYN_EXPERIMENTAL_WORKER_WITHDRAWAL`.
 
-With frontend recovery enabled, the final ordinary attempt retains its replay
-reference to the shared prompt-token buffer until first response data. With
-recovery disabled, it releases that reference after dispatch as before.
+Leaving the new setting unset preserves the existing policy:
+`DYN_EXPERIMENTAL_WORKER_WITHDRAWAL=1` allows three additional drain reselections
+without consuming the ordinary migration budget. After those three are exhausted,
+the frontend returns the drain rejection. The flag accepts `1`, `true`, or `yes`
+(case-insensitive) and defaults to disabled. Workers do not read either frontend
+setting. The frontend reads configuration when constructing the model pipeline,
+not on every request. See [Frontend Configuration](../../../../../reference/components/frontend-configuration.mdx#fault-tolerance)
+for budget interactions and configuration precedence.
+
+While drain recovery remains possible, the final ordinary attempt retains its
+replay reference to the shared prompt-token buffer until first response data.
+Once neither ordinary migration nor drain recovery can retry, the frontend
+releases that reference. Leaving both drain settings disabled preserves the
+existing release after the final ordinary dispatch.
 
 Environment changes apply to newly created Pods, not running processes. Under
 Grove OnDelete, deploy compatible frontend and worker images and enable frontend
@@ -258,9 +269,10 @@ previously admitted work continues independently ──────────�
 
 Expiry establishes local admission closure, not acknowledgement from every
 frontend or permission to delete the Pod. After admission closes, a late request
-receives a typed worker-draining rejection. A supporting
-frontend may reselect up to three times independently of its ordinary migration
-budget, before response data and subject to explicit routing constraints.
+receives a typed worker-draining rejection. A supporting frontend can reselect
+according to its configured drain policy, before response data and subject to
+explicit routing constraints. Transport failures do not receive the drain
+allowance.
 Internal worker health probes remain callable during manual withdrawal.
 
 Manual withdrawal remains in force across native engine controls. Resume is

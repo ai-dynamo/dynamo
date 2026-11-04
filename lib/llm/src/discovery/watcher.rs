@@ -200,6 +200,7 @@ pub struct ModelWatcher {
     drt: DistributedRuntime,
     router_config: RouterConfig,
     migration_limit: u32,
+    migration_limit_draining: Option<u32>,
     migration_max_seq_len: Option<u32>,
     notify_on_model: Notify,
     model_update_tx: Option<Sender<ModelUpdate>>,
@@ -320,6 +321,7 @@ impl ModelWatcher {
             drt: runtime,
             router_config,
             migration_limit,
+            migration_limit_draining: None,
             migration_max_seq_len,
             notify_on_model: Notify::new(),
             model_update_tx: None,
@@ -334,6 +336,10 @@ impl ModelWatcher {
             systemone_enabled: false,
             plugins,
         }
+    }
+
+    pub fn set_migration_limit_draining(&mut self, limit: Option<u32>) {
+        self.migration_limit_draining = limit;
     }
 
     pub fn set_notify_on_model_update(&mut self, tx: Sender<ModelUpdate>) {
@@ -764,6 +770,7 @@ impl ModelWatcher {
                         .build_preprocessed_pipeline(
                             card,
                             self.migration_limit,
+                            self.migration_limit_draining,
                             self.migration_max_seq_len,
                             self.metrics.clone(),
                         )
@@ -789,6 +796,7 @@ impl ModelWatcher {
                                 preprocessor,
                                 tk,
                                 self.migration_limit,
+                                self.migration_limit_draining,
                                 self.migration_max_seq_len,
                                 self.metrics.clone(),
                             )
@@ -830,6 +838,7 @@ impl ModelWatcher {
                             preprocessor,
                             tk,
                             self.migration_limit,
+                            self.migration_limit_draining,
                             self.migration_max_seq_len,
                             self.metrics.clone(),
                         )
@@ -854,6 +863,7 @@ impl ModelWatcher {
                     .build_preprocessed_pipeline(
                         card,
                         GENERATE_MIGRATION_LIMIT,
+                        self.migration_limit_draining,
                         None,
                         self.metrics.clone(),
                     )

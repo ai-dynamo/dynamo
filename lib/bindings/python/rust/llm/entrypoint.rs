@@ -528,6 +528,7 @@ pub(crate) struct EntrypointArgs {
     is_prefill: bool,
     is_decode: bool,
     migration_limit: u32,
+    migration_limit_draining: Option<u32>,
     migration_max_seq_len: Option<u32>,
     chat_engine_factory: Option<PyEngineFactory>,
     ais_perf_config: Option<AisPerfConfig>,
@@ -537,7 +538,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, ais_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, enable_systemone_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None, batch_gateway_url=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, ais_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, enable_systemone_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None, batch_gateway_url=None, migration_limit_draining=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -574,6 +575,7 @@ impl EntrypointArgs {
         tokenizer_backend: Option<String>,
         tokenizer_fallback: Option<bool>,
         batch_gateway_url: Option<String>,
+        migration_limit_draining: Option<u32>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if (tls_cert_path.is_some() && tls_key_path.is_none())
@@ -667,6 +669,7 @@ impl EntrypointArgs {
             is_prefill,
             is_decode,
             migration_limit,
+            migration_limit_draining,
             migration_max_seq_len,
             chat_engine_factory,
             ais_perf_config,
@@ -701,6 +704,7 @@ pub fn make_engine<'p>(
         .kv_cache_block_size(args.kv_cache_block_size)
         .router_config(args.router_config.clone().map(|rc| rc.into()))
         .migration_limit(Some(args.migration_limit))
+        .migration_limit_draining(args.migration_limit_draining)
         .migration_max_seq_len(args.migration_max_seq_len)
         .http_host(args.http_host.clone())
         .http_port(args.http_port)
