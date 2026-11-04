@@ -89,7 +89,11 @@ enum PrefillDispatchErrorClass {
 fn classify_prefill_dispatch_error(
     error: &(dyn std::error::Error + 'static),
 ) -> PrefillDispatchErrorClass {
-    if match_error_chain(error, &[ErrorType::Cancelled], &[]) {
+    if matches!(
+        error.downcast_ref::<PrefillError>(),
+        Some(PrefillError::Cancelled)
+    ) || match_error_chain(error, &[ErrorType::Cancelled], &[])
+    {
         PrefillDispatchErrorClass::Cancelled
     } else if match_error_chain(
         error,
@@ -1244,6 +1248,10 @@ mod tests {
 
         assert_eq!(
             classify_prefill_dispatch_error(cancelled.as_ref()),
+            PrefillDispatchErrorClass::Cancelled
+        );
+        assert_eq!(
+            classify_prefill_dispatch_error(&PrefillError::Cancelled),
             PrefillDispatchErrorClass::Cancelled
         );
         assert_eq!(
