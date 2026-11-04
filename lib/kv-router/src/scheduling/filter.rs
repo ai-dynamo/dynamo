@@ -83,15 +83,20 @@ impl<'a> RoutingEligibility<'a> {
         self
     }
 
+    /// Whether every one of the worker's `dp_size` ranks is past the reject thresholds.
     // TODO: Look into rank granularity: the projection pass already judges every rank, so
     // selection could skip a full rank instead of a worker whose every rank is full.
     #[inline]
-    fn is_worker_full<C: WorkerConfigLike>(&self, worker_id: WorkerId, config: &C) -> bool {
-        self.reject.is_some_and(|check| {
-            check
-                .full_ranks
-                .worker_is_full(worker_id, config.data_parallel_size())
-        })
+    pub(crate) fn is_worker_full(&self, worker_id: WorkerId, dp_size: u32) -> bool {
+        self.reject
+            .is_some_and(|check| check.full_ranks.worker_is_full(worker_id, dp_size))
+    }
+
+    /// Whether some worker has a rank past the reject thresholds, so selection skips any
+    /// worker whose every rank is.
+    #[inline]
+    pub(crate) fn skips_full_workers(&self) -> bool {
+        self.reject.is_some()
     }
 
     #[inline]
@@ -171,7 +176,7 @@ impl<'a> RoutingEligibility<'a> {
             && self
                 .routing_constraints
                 .is_compatible_with_worker_taints(config.taints())
-            && !self.is_worker_full(worker_id, config)
+            && !self.is_worker_full(worker_id, config.data_parallel_size())
     }
 
     #[inline]
@@ -247,7 +252,7 @@ impl<'a> RoutingEligibility<'a> {
         }
 
         if self.is_worker_overloaded(worker.worker_id)
-            || self.is_worker_full(worker.worker_id, config)
+            || self.is_worker_full(worker.worker_id, config.data_parallel_size())
         {
             return Err(WorkerEligibilityError::WorkerOverloaded {
                 worker_id: worker.worker_id,
