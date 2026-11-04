@@ -46,8 +46,10 @@ Intro paragraph (no body `# H1`), then `##` sections.
 
 ## SPDX headers
 
-Every file carries an SPDX header with the copyright **range** `Copyright (c) 2025-2026 NVIDIA
-CORPORATION & AFFILIATES. All rights reserved.` (not a single year). The form depends on the file:
+Every file carries an SPDX header `Copyright (c) <years> NVIDIA CORPORATION & AFFILIATES. All rights
+reserved.` whose last year is the current year: the range `2025-2026` for a file first added in an
+earlier year, or the single year `2026` for a file added this year. Don't backdate a new file to an
+earlier year. The form depends on the file:
 
 - **Fern docs** (`.md`/`.mdx` with frontmatter): two `#` lines **inside** the `---` block (above).
 - **Plain markdown** (READMEs without frontmatter): an HTML comment block:
@@ -388,7 +390,7 @@ Author source pages under `docs/fern/pages/`. Use the lightest format that suppo
 These are checked automatically on every docs/examples/recipes pull request; resolve each before
 merge:
 
-- [ ] SPDX header present, correct form for the file type, `2025-2026` range
+- [ ] SPDX header present, correct form for the file type, ending in the current year (`2025-2026`, or `2026` for a new file)
 - [ ] No body `# H1` (Fern renders the title from the nav `page:`); frontmatter has SPDX + at least one key (`title`/`subtitle`/`sidebar-title`)
 - [ ] New, moved, or deleted page reflected in the right index (`docs/fern/index.yml`, `*-examples.md`, or
       `recipes/README.md`)

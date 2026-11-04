@@ -39,7 +39,8 @@ Every page under `docs/` (and the READMEs under `examples/` and `recipes/`) foll
 writing content. The `Docs Lint` job (`docs/fern/scripts/docs_lint.py`) enforces a **must-fix** subset on every
 PR — get these right or the checks fail:
 
-- **SPDX header** on every file, copyright range `2025-2026`. Fern pages put the two `#` lines
+- **SPDX header** on every file, copyright years ending in the current year (`2025-2026`, or
+  `2026` for a file added this year). Fern pages put the two `#` lines
   *inside* the `---` frontmatter; plain READMEs use an HTML-comment block.
 - **Frontmatter with at least one metadata key** (`title`/`subtitle`/`sidebar-title`) and **no body
   `# H1`**. Fern renders the page H1 from the nav `page:` value, so a body `# H1` produces a

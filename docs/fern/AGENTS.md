@@ -13,7 +13,8 @@ For **where** a new page belongs in the tab structure, read
 ## Authoring non-negotiables
 
 - SPDX header on every file: frontmatter `#` form for Fern docs, `<!-- -->` for plain READMEs,
-  full Apache block for code/config; copyright range `2025-2026`.
+  full Apache block for code/config; copyright years end in the current year (`2025-2026`, or
+  `2026` for a file added this year).
 - Fern docs: `---` frontmatter with SPDX + at least one metadata key (`title`/`subtitle`/
   `sidebar-title`). Fern renders the page H1 from the nav `page:`, so do **not** add a body `# H1`
   (it duplicates the title); start the body at `##`.
