@@ -665,7 +665,7 @@ def test_build_request_aggregated_grid_shard():
         "sla": {"ttftMs": 500.0, "itlMs": 30.0},
     }
     assert spec["recommendation"] == {"maxCandidates": 8}
-    overrides = spec["aisimulate"]["inputOverrides"]
+    overrides = spec["aisim"]["inputOverrides"]
     workers = overrides["engine"]["workers"]
     assert workers["aggregated"]["parallelism"]["preset"][0]["replicas"] == 3
     assert workers["prefill"] is None and workers["decode"] is None
@@ -737,7 +737,7 @@ def test_build_request_point_shard_uses_scalars_and_disagg_budget():
     # 2 x 1 + 4 x (2 x 1 x 2).
     assert spec["hardware"]["gpu"]["budget"] == 18
     assert spec["objective"]["metric"] == "TTFT"
-    overrides = spec["aisimulate"]["inputOverrides"]
+    overrides = spec["aisim"]["inputOverrides"]
     workers = overrides["engine"]["workers"]
     assert workers["aggregated"] is None
     assert workers["prefill"]["parallelism"]["preset"][0]["replicas"] == 2
@@ -906,7 +906,7 @@ def test_input_read_back_allows_operator_defaults_and_follows_overrides():
     assert input_mismatches(body["spec"], effective) == []
 
     # inputOverrides win over the typed trace source.
-    overrides = body["spec"]["aisimulate"]["inputOverrides"]
+    overrides = body["spec"]["aisim"]["inputOverrides"]
     overrides["traffic"] = {"source": {"paths": ["/data/other.jsonl"]}}
     effective = lower_request_input(body, run_name="r-1")
     assert effective["traffic"]["source"]["paths"] == ["/data/other.jsonl"]
@@ -1537,7 +1537,7 @@ def test_job_created_but_not_started_is_not_run_pending(tmp_path):
     result = h.sweep(make_request(deadline_s=LAUNCH_S + 900.0))
     for name in h.kube.requests:
         status = h.kube.run_of(name)["status"]
-        assert status["aisimulate"]["input"] and status["jobRef"]
+        assert status["aisim"]["input"] and status["jobRef"]
         assert "startTime" not in status
     assert result.status == "timeout"
     assert result.failure_reason == "timeout"
@@ -1846,7 +1846,7 @@ def test_missing_run_input_on_a_succeeded_run_is_a_mismatch(tmp_path):
     h.clock.hooks.append(operator)
     result = h.sweep(make_request())
     assert result.failure_reason == "input_mismatch"
-    assert "status.aisimulate.input is missing" in result.error
+    assert "status.aisim.input is missing" in result.error
 
 
 def test_crn_probe_mismatch_fails_the_window(tmp_path):

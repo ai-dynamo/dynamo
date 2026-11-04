@@ -11,7 +11,7 @@ Request deletion, and injectable faults (including writes that time out but
 land). ``FakeDgdrOperator`` drives the Requests in a ``FakeRetuneKube``
 through the DGDR v1beta2 lifecycle (Accepted -> Run -> Completed with
 Candidates) the way the operator at #17483 does, lowering each Request into
-``Run.status.aisimulate.input`` with the same merge-patch rules. The
+``Run.status.aisim.input`` with the same merge-patch rules. The
 operator's golden
 ``deploy/operator/internal/aisimulate/testdata/trace_request_lowering.golden.json``
 is the oracle for that lowering; ``test_live_retune_dgdr`` checks
@@ -178,7 +178,7 @@ def lower_request_input(
     dynamo_version: str = DEFAULT_DYNAMO_VERSION,
     gpus_per_node: int = 8,
 ) -> dict[str, Any]:
-    """``Run.status.aisimulate.input`` for a Request, as the operator lowers it.
+    """``Run.status.aisim.input`` for a Request, as the operator lowers it.
 
     Mirrors ``aisimulate.LowerWithUnderlay`` and ``dgdrRunInput`` at #17483:
     the public role underlay, the ``dgdr_run`` static underlay, the typed
@@ -255,7 +255,7 @@ def lower_request_input(
         nested_get(underlay, "optimization", "strict_sla") is None
     ):
         _nested_set(underlay, ("optimization", "strict_sla"), True)
-    overrides = nested_get(spec, "aisimulate", "inputOverrides", default={}) or {}
+    overrides = nested_get(spec, "aisim", "inputOverrides", default={}) or {}
     effective = merge_patch(underlay, overrides)
     reserved = {
         "name": run_name,
@@ -884,7 +884,7 @@ class FakeRetuneKube:
     def create_job(self, run_name: str, *, record_input: bool = True) -> None:
         """Create the Run's Job, as the operator's ``reconcileRunStatus`` does.
 
-        One status write records ``status.aisimulate.input`` and ``jobRef``
+        One status write records ``status.aisim.input`` and ``jobRef``
         with ``Completed=False`` (``JobPending``). ``record_input=False``
         leaves the input out (an operator that does not record it).
         """
@@ -893,9 +893,7 @@ class FakeRetuneKube:
             run = self.runs[run_name]
             status = run.setdefault("status", {})
             if record_input:
-                status["aisimulate"] = {
-                    "input": copy.deepcopy(self.run_inputs[run_name])
-                }
+                status["aisim"] = {"input": copy.deepcopy(self.run_inputs[run_name])}
             status["jobRef"] = {"name": f"{run_name}-job", "uid": str(uuid.uuid4())}
             status["phase"] = "Pending"
             self._set_completed(
@@ -1129,7 +1127,7 @@ class FakeDgdrOperator:
                     self.kube.complete_run(run_name, reason=reason, message="injected")
                     moved += 1
                     continue
-                effective = run["status"]["aisimulate"]["input"]
+                effective = run["status"]["aisim"]["input"]
                 request = self.kube.requests[name]
                 published = []
                 for point in router_points(effective):

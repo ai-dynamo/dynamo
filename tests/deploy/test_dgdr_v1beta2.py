@@ -91,7 +91,7 @@ async def test_dgdr_v1beta2_publishes_candidate(namespace: str) -> None:
                         "numGpusPerNode": 8,
                     },
                     "objective": {"sla": {}},
-                    "aisimulate": {
+                    "aisim": {
                         "inputOverrides": {
                             "engine": {
                                 "mode": "aggregated",
@@ -200,7 +200,7 @@ async def test_dgdr_v1beta2_publishes_candidate(namespace: str) -> None:
         _assert_owned_by(api.sanitize_for_serialization(config_map), run)
         assert (
             yaml.safe_load(config_map.data["input.yaml"])
-            == run["status"]["aisimulate"]["input"]
+            == run["status"]["aisim"]["input"]
         )
 
         refs = run["status"]["candidateRefs"]

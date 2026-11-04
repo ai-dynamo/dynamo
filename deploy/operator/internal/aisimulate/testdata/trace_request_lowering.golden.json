@@ -33,7 +33,7 @@
     "recommendation": {
       "maxCandidates": 8
     },
-    "aisimulate": {
+    "aisim": {
       "inputOverrides": {
         "engine": {
           "mode": "aggregated",

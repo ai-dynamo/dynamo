@@ -210,7 +210,7 @@ new values; to keep `ttft_ms` and `itl_ms` changeable at runtime, set both `retu
 
 ### Engine section
 
-`retune.dgdr.engine` becomes `spec.aisimulate.inputOverrides.engine` of every Request, so every
+`retune.dgdr.engine` becomes `spec.aisim.inputOverrides.engine` of every Request, so every
 value in it must be a scalar. A `{choices: ...}` or `{range: ...}` domain, or an omitted knob that
 AISimulate searches by default, would make the Run search engine settings as well.
 
