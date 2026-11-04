@@ -519,6 +519,7 @@ rust:
   # The rust-clippy job runs the router crate layering check; it reads the
   # whole lib/router tree.
   - 'scripts/router_layering_check.sh'
+  - 'scripts/router_features_check.sh'
   - 'lib/router/**'
 
 benchmarks:

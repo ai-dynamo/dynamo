@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 [package]
 name = "dynamo-kv-hints"
 description = "KV transfer hints the router hands engines: the wire, the source choice, and the worker transfer keys"
