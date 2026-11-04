@@ -454,6 +454,8 @@ areas:
   - deploy/utils/
   - deploy/utils/manifests/
   - deploy/utils/tests/
+  - docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md
+  - docs/fern/pages/reference/kubernetes-api/full-api-reference.mdx
   - examples/deployments/
   - examples/gpu-sharing/
   - recipes/kustomize/components/dynamo-openapi/dynamo-openapi.json
