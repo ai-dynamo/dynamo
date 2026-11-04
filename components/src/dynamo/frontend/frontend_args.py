@@ -902,6 +902,7 @@ class FrontendArgGroup(ArgGroup):
                 "engine: the frontend renders the chat template, so the engine flag "
                 "has no effect behind Dynamo."
             ),
+            env=self.env,
         )
         add_argument(
             g,
