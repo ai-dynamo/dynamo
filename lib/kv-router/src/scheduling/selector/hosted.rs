@@ -173,7 +173,8 @@ mod tests {
     use super::super::{WorkerSelectionInput, WorkerSelectionPolicy, WorkerSelector};
     use super::*;
     use crate::plugins::worker_selection::{
-        RuntimePolicyError, WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerScorer,
+        KvFetchScorer, KvFetchSource, RuntimePolicyError, WorkerCandidate, WorkerCandidates,
+        WorkerFilter, WorkerScorer,
     };
     use crate::protocols::WorkerWithDpRank;
     use crate::scheduling::config::KvRouterConfig;
@@ -246,6 +247,21 @@ mod tests {
         }
     }
 
+    struct ZeroFetchScorer;
+
+    impl KvFetchScorer for ZeroFetchScorer {
+        fn score(
+            &self,
+            _context: &WorkerSelectionContext<'_>,
+            _candidates: WorkerCandidates<'_>,
+            costs: &mut [f64],
+            _fetches: &mut [Option<KvFetchSource>],
+        ) -> Result<(), WorkerSelectionPolicyError> {
+            costs.fill(0.0);
+            Ok(())
+        }
+    }
+
     fn policy(
         filters: Vec<Box<dyn WorkerFilter>>,
         scorers: Vec<Box<dyn WorkerScorer>>,
@@ -294,6 +310,11 @@ mod tests {
             (
                 "scorer",
                 policy(Vec::new(), vec![Box::new(ZeroScorer)], none()),
+            ),
+            (
+                "KV fetch scorer",
+                policy(Vec::new(), Vec::new(), none())
+                    .with_kv_fetch_scorer(Box::new(ZeroFetchScorer)),
             ),
             (
                 "CACHE",
