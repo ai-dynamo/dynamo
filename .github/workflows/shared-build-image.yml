@@ -444,6 +444,8 @@ jobs:
       - name: Generate Dockerfile
         id: gen-dockerfile
         shell: bash
+        env:
+          EXTRA_BUILD_ARGS: ${{ inputs.extra_build_args }}
         run: |
           echo "Generating Dockerfile for target: ${{ inputs.target }} and framework: ${{ inputs.framework }}"
           MAKE_EFA_FLAG=""
@@ -474,6 +476,13 @@ jobs:
           # `-e -o pipefail` shell (empty stem is correct for them).
           STEM=$(grep -E '^ARG BASELINE_SBOM_FILE=' container/rendered.Dockerfile | head -1 \
                  | sed -E 's/^ARG BASELINE_SBOM_FILE="?([^"]*)"?$/\1/' || true)
+          # A custom runtime can override its parent inventory at build time.
+          # Report that same inventory to the audit, with Docker's last value winning.
+          while IFS= read -r BUILD_ARG; do
+            case "$BUILD_ARG" in
+              BASELINE_SBOM_FILE=*) STEM="${BUILD_ARG#BASELINE_SBOM_FILE=}" ;;
+            esac
+          done <<< "${EXTRA_BUILD_ARGS:-}"
           echo "baseline_stem=${STEM}" >> "$GITHUB_OUTPUT"
       - name: Apply nightly dev version
         if: inputs.dev_version_suffix != ''
@@ -595,6 +604,7 @@ jobs:
           # EPP_IMAGE so the epp stage cache-hits instead of resolving the
           # rendered default upstream staging tag, which gets garbage-collected.
           epp_image: ${{ steps.build-epp-image.outputs.epp_image_uri || '' }}
+          extra_build_args: ${{ inputs.extra_build_args }}
           # Match the build's sccache build-args so the extract reuses the warm
           # wheel_builder/pre_runtime cache instead of a cold rebuild.
           sccache_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}

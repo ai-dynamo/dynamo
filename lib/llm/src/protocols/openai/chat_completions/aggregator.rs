@@ -419,6 +419,7 @@ fn finalize_merged_tool_chunk(
             name,
             arguments: function.arguments.unwrap_or_default(),
         },
+        custom: None,
     })
 }
 
@@ -568,6 +569,7 @@ impl DeltaAggregator {
                                             id: None,
                                             r#type: None,
                                             function: None,
+                                            custom: None,
                                         }
                                     });
                                 merge_tool_call_chunk(entry, chunk);
@@ -1083,6 +1085,7 @@ mod tests {
                         name: tool_calls["name"].as_str().map(|s| s.to_string()),
                         arguments: Some(serde_json::to_string(&tool_calls["arguments"]).unwrap()),
                     }),
+                    custom: None,
                 },
             ]
         });
@@ -1394,6 +1397,7 @@ mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: None,
             }),
+            custom: None,
         };
         let args_chunk_1 = dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
             index: 0,
@@ -1403,6 +1407,7 @@ mod tests {
                 name: None,
                 arguments: Some("{\"city\":".to_string()),
             }),
+            custom: None,
         };
         let args_chunk_2 = dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
             index: 0,
@@ -1412,6 +1417,7 @@ mod tests {
                 name: None,
                 arguments: Some("\"Tokyo\"}".to_string()),
             }),
+            custom: None,
         };
 
         let deltas = vec![
@@ -1477,6 +1483,7 @@ mod tests {
                     name: Some(name.to_string()),
                     arguments: None,
                 }),
+                custom: None,
             }
         };
         let make_args = |idx: u32, fragment: &str| {
@@ -1488,6 +1495,7 @@ mod tests {
                     name: None,
                     arguments: Some(fragment.to_string()),
                 }),
+                custom: None,
             }
         };
 
@@ -1552,6 +1560,7 @@ mod tests {
                     name: Some(name.to_string()),
                     arguments: None,
                 }),
+                custom: None,
             }
         };
         let make_args = |idx: u32, fragment: &str| {
@@ -1563,6 +1572,7 @@ mod tests {
                     name: None,
                     arguments: Some(fragment.to_string()),
                 }),
+                custom: None,
             }
         };
 
@@ -1632,6 +1642,7 @@ mod tests {
                 name: None,
                 arguments: Some("{\"orphaned\":true}".to_string()),
             }),
+            custom: None,
         };
         let deltas = vec![create_test_delta_with_tool_chunks(
             0,
@@ -2595,6 +2606,7 @@ mod tests {
                     name: name.map(str::to_string),
                     arguments: arguments.map(str::to_string),
                 }),
+                custom: None,
             }
         };
 
@@ -2708,6 +2720,7 @@ mod tests {
                     name: name.map(str::to_string),
                     arguments: Some(arguments.to_string()),
                 }),
+                custom: None,
             }
         };
 
@@ -2788,6 +2801,7 @@ mod tests {
                     name: Some(name.to_string()),
                     arguments: None,
                 }),
+                custom: None,
             }
         };
         let make_args = |idx: u32, fragment: &str| {
@@ -2799,6 +2813,7 @@ mod tests {
                     name: None,
                     arguments: Some(fragment.to_string()),
                 }),
+                custom: None,
             }
         };
         let first = create_test_delta_with_tool_chunks(
@@ -2874,6 +2889,7 @@ mod tests {
                     name: Some(name.to_string()),
                     arguments: None,
                 }),
+                custom: None,
             }
         };
         let make_args = |idx: u32, fragment: &str| {
@@ -2885,6 +2901,7 @@ mod tests {
                     name: None,
                     arguments: Some(fragment.to_string()),
                 }),
+                custom: None,
             }
         };
         let first = create_test_delta_with_tool_chunks(
@@ -2932,6 +2949,7 @@ mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: None,
             }),
+            custom: None,
         };
         let result = DeltaAggregator::apply(
             Box::pin(stream::iter(vec![create_test_delta_with_tool_chunks(
@@ -2966,6 +2984,7 @@ mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: None,
             }),
+            custom: None,
         };
         let result = DeltaAggregator::apply(
             Box::pin(stream::iter(vec![create_test_delta_with_tool_chunks(

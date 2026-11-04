@@ -86,6 +86,7 @@ class TestVllmKvEventsApi:
         12. locality (per-tier storage locality; optional for older vLLM)
         13. ownership (secondary offloading tier; added in vLLM 0.29)
         14. session_id (request session; added in vLLM 0.30)
+        15. lookahead_token_ids (optional hash metadata; ignored by Rust)
 
         If vLLM adds/removes/reorders fields, this test will fail.
         """
@@ -111,6 +112,8 @@ class TestVllmKvEventsApi:
             expected_fields.append("ownership")
         if Version(_vllm.__version__).release >= (0, 30):
             expected_fields.append("session_id")
+        if "lookahead_token_ids" in BlockStored.__struct_fields__:
+            expected_fields.append("lookahead_token_ids")
         expected_fields = tuple(expected_fields)
 
         actual_fields = BlockStored.__struct_fields__
@@ -222,10 +225,13 @@ class TestVllmKvEventsApi:
             event_kwargs["locality"] = "LOCAL"
         if Version(_vllm.__version__).release >= (0, 30):
             event_kwargs["session_id"] = "session-1"
+        if "lookahead_token_ids" in BlockStored.__struct_fields__:
+            event_kwargs["lookahead_token_ids"] = [[5, 6], [7, 8]]
         event = BlockStored(**event_kwargs)
 
         encoded = msgspec.msgpack.encode(event)
         decoded = msgspec.msgpack.decode(encoded)
+        assert msgspec.msgpack.decode(encoded, type=BlockStored) == event
 
         assert isinstance(decoded, dict), f"Expected dict, got {type(decoded)}"
         assert decoded["type"] == "BlockStored"
@@ -247,6 +253,8 @@ class TestVllmKvEventsApi:
             assert decoded["locality"] == "LOCAL"
         if Version(_vllm.__version__).release >= (0, 30):
             assert decoded["session_id"] == "session-1"
+        if "lookahead_token_ids" in BlockStored.__struct_fields__:
+            assert decoded["lookahead_token_ids"] == [[5, 6], [7, 8]]
 
     def test_block_stored_tuple_extra_keys_serialization_format(self):
         """Verify multimodal tuple extra_keys keep the vLLM 0.19 wire shape."""

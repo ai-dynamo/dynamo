@@ -835,6 +835,12 @@ async def test_parse_args_rejects_mla_dcp_on_dsa_backend(
         "dynamo.sglang._compat.sglang_get_default_attn_backend",
         lambda *_: "flashinfer",
     )
+    # DSA is rejected only on SGLang builds without DSA DCP decode (< 0.5.22).
+    # Pin that condition so the test does not depend on the installed SGLang.
+    monkeypatch.setattr(
+        "dynamo.sglang.args.sglang_dsa_supports_decode_context_parallel",
+        lambda: False,
+    )
     hf_config = SimpleNamespace(
         architectures=["DeepseekV32ForCausalLM"], index_topk=2048
     )
@@ -863,15 +869,19 @@ async def test_parse_args_rejects_mla_dcp_on_dsa_backend(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("decode_backend", ["cutedsl_mla", "fa3"])
+@pytest.mark.parametrize(
+    "architecture",
+    ["KimiK3ForConditionalGeneration", "KimiK31ForConditionalGeneration"],
+)
 async def test_kimi_k3_dcp_defers_automatic_backend_until_engine_resolution(
-    monkeypatch, mock_sglang_cli, tmp_path, decode_backend
+    monkeypatch, mock_sglang_cli, tmp_path, decode_backend, architecture
 ):
-    """Do not reject Kimi-K3 using Hopper's generic default; check resolved decode."""
+    """Defer Kimi-K3/K3.1 backend prediction; still check the resolved decode."""
     platform_default = Mock(return_value="fa3")
     monkeypatch.setattr(
         "dynamo.sglang._compat.sglang_get_default_attn_backend", platform_default
     )
-    hf_config = SimpleNamespace(architectures=["KimiK3ForConditionalGeneration"])
+    hf_config = SimpleNamespace(architectures=[architecture])
     server_args = _dcp_server_args_stub(
         dcp_size=2,
         use_mla_backend=lambda: True,

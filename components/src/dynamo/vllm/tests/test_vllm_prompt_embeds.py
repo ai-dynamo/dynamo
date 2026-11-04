@@ -5,6 +5,7 @@
 
 import base64
 import io
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import numpy as np
@@ -32,6 +33,8 @@ def mock_handler():
     handler = MockHandler()
     handler.model_config = Mock(enable_prompt_embeds=True)
     handler.model_config.dtype = torch.float32
+    # An absent projection dimension lets vLLM fall back to get_hidden_size().
+    handler.model_config.hf_text_config = SimpleNamespace()
     handler.model_config.get_hidden_size.return_value = 4096
     handler._decode_prompt_embeds = BaseWorkerHandler._decode_prompt_embeds.__get__(  # type: ignore
         handler

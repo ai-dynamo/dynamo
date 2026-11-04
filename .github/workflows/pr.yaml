@@ -126,6 +126,7 @@ jobs:
     runs-on: ubuntu-24.04
     needs:
       - changed-files
+      - compliance-base-drift
       - operator
       - operator-integration
       - helm-chart-tests
@@ -206,6 +207,14 @@ jobs:
       - name: Check all dynamo jobs
         run: |
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
+
+  # Check private registry entries only after copy-pr-bot admits the exact PR
+  # SHA to this trusted workflow. The builder has AWS access for ECR login.
+  compliance-base-drift:
+    needs: changed-files
+    permissions:
+      contents: read
+    uses: ./.github/workflows/compliance-base-drift.yml
 
   # ============================================================================
   # Operator

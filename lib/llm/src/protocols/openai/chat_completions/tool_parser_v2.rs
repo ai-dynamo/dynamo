@@ -217,6 +217,8 @@ pub(crate) fn parse_complete_unified(
     let mut text = String::new();
     for event in events {
         match event {
+            // Phase markers carry no content for the final message.
+            UnifiedEvent::MessageStart { .. } | UnifiedEvent::MessageEnd => {}
             UnifiedEvent::Reasoning { text: t } => reasoning.push_str(&t),
             UnifiedEvent::Text { text: t } => text.push_str(&t),
             UnifiedEvent::ToolCall { name, arguments } => tool_calls.push(ToolCallResponse {
@@ -322,6 +324,7 @@ fn emit_tool_chunks(
                     name: delta.name,
                     arguments: Some(delta.arguments),
                 }),
+                custom: None,
             }
         })
         .collect();

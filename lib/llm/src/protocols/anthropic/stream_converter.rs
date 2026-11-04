@@ -1124,6 +1124,7 @@ mod tests {
                                 name: name.map(String::from),
                                 arguments: args.map(String::from),
                             }),
+                            custom: None,
                         }]),
                         role: None,
                         refusal: None,

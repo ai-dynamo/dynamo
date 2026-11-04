@@ -404,6 +404,9 @@ class TestVllmRendererApi:
             "prompt_token_id_logprobs",
         )
 
+        if "error" in EngineCoreOutput.__struct_fields__:
+            expected_output_fields += ("error",)
+
         if EngineCoreRequest.__module__ == "vllm_omni.engine":
             expected_request_fields += (
                 "additional_information",
@@ -474,6 +477,8 @@ class TestVllmRendererApi:
             assert output.new_sampling_mask is None
         if "spec_decode_metrics" in EngineCoreOutput.__struct_fields__:
             assert output.spec_decode_metrics is None
+        if "error" in EngineCoreOutput.__struct_fields__:
+            assert output.error is None
         if "pooling_output_payload" in EngineCoreOutput.__struct_fields__:
             assert output.pooling_output_payload is None
         if "num_generation_tokens" in EngineCoreOutput.__struct_fields__:

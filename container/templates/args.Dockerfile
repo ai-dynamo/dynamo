@@ -106,6 +106,7 @@ ARG MAX_JOBS={{ context.vllm.max_jobs }}
 ARG TRANSFORMERS_VERSION={{ context.vllm[device_key].transformers_version }}
 ARG TOKENIZERS_VERSION={{ context.vllm[device_key].tokenizers_version }}
 {% endif -%}
+ARG ENABLE_VLLM_OMNI={{ context.vllm.get(device_key, {}).get("enable_vllm_omni", context.vllm.enable_vllm_omni) }}
 ARG VLLM_OMNI_REF={{ context.vllm[device_key].get("vllm_omni_ref", context.vllm.vllm_omni_ref) }}
 
 {% if device == "cuda" -%}
