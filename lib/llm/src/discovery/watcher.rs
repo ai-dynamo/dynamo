@@ -25,7 +25,7 @@ use dynamo_renderer::PromptFormatter;
 
 use crate::{
     backend::Backend,
-    discovery::{LoadThresholdHandle, WORKER_TYPE_DECODE, WorkerSet},
+    discovery::{LoadThresholdHandle, RuntimeConfigWatch, WORKER_TYPE_DECODE, WorkerSet},
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::plugins::RouterPluginBuilder,
@@ -591,6 +591,16 @@ impl ModelWatcher {
                 None
             };
 
+            let chat_runtime_configs = if tokenizer.is_some() && needs_local_chat_pipeline {
+                Some(
+                    self.manager
+                        .get_or_create_runtime_config_watcher(&endpoint)
+                        .await?,
+                )
+            } else {
+                None
+            };
+
             // Routing is required whenever any pipeline (factory chat or local) will exist.
             // tokenizer.is_some() implies a local chat or completions pipeline will be built.
             let needs_factory_chat_pipeline =
@@ -713,7 +723,24 @@ impl ModelWatcher {
             if needs_systemone_preprocessor {
                 worker_set.systemone_preprocessor = match tokenizer.clone() {
                     Some(tokenizer) => {
-                        match worker_set_chat_preprocessor(card, tokenizer, &cancellation) {
+                        let preprocessor = async {
+                            let runtime_configs = match chat_runtime_configs.clone() {
+                                Some(runtime_configs) => runtime_configs,
+                                None => {
+                                    self.manager
+                                        .get_or_create_runtime_config_watcher(&endpoint)
+                                        .await?
+                                }
+                            };
+                            worker_set_chat_preprocessor(
+                                card,
+                                tokenizer,
+                                &cancellation,
+                                runtime_configs,
+                            )
+                        }
+                        .await;
+                        match preprocessor {
                             Ok(preprocessor) => Some(preprocessor),
                             Err(error) => {
                                 tracing::warn!(
@@ -781,7 +808,14 @@ impl ModelWatcher {
                     // Only chat pipelines use speculative prefill.
                     let preprocessor = match worker_set.systemone_preprocessor.clone() {
                         Some(preprocessor) => preprocessor,
-                        None => worker_set_chat_preprocessor(card, tk.clone(), &cancellation)?,
+                        None => worker_set_chat_preprocessor(
+                            card,
+                            tk.clone(),
+                            &cancellation,
+                            chat_runtime_configs
+                                .clone()
+                                .expect("chat preprocessor requires runtime configurations"),
+                        )?,
                     };
                     Some(
                         routing
@@ -1605,17 +1639,19 @@ fn worker_set_chat_preprocessor(
     card: &ModelDeploymentCard,
     tokenizer: crate::tokenizers::Tokenizer,
     cancellation: &CancellationToken,
+    runtime_configs: RuntimeConfigWatch,
 ) -> anyhow::Result<Arc<OpenAIPreprocessor>> {
     let PromptFormatter::OAI(formatter) =
         prompt_formatter_from_mdc(card).context("prompt_formatter_from_mdc")?;
     // A retained pipeline must stop its warmups when its WorkerSet is retired.
-    OpenAIPreprocessor::new_with_parts_and_cancel(
+    OpenAIPreprocessor::new_with_parts_and_runtime_configs(
         card.clone(),
         formatter,
         tokenizer,
         Some(cancellation.clone()),
+        runtime_configs,
     )
-    .context("OpenAIPreprocessor.new_with_parts_and_cancel")
+    .context("OpenAIPreprocessor.new_with_parts_and_runtime_configs")
 }
 
 #[cfg(test)]
@@ -1754,10 +1790,16 @@ mod tests {
             let card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
             let runtime_cancellation = CancellationToken::new();
             let cancellation = runtime_cancellation.child_token();
-            let preprocessor =
-                worker_set_chat_preprocessor(&card, card.tokenizer().unwrap(), &cancellation)
-                    .unwrap()
-                    .into_operator();
+            let (_runtime_configs_tx, runtime_configs) =
+                tokio::sync::watch::channel(HashMap::new());
+            let preprocessor = worker_set_chat_preprocessor(
+                &card,
+                card.tokenizer().unwrap(),
+                &cancellation,
+                runtime_configs,
+            )
+            .unwrap()
+            .into_operator();
             let backend = Arc::new(CompletingBackend::default());
             let source = SegmentSource::<
                 SingleIn<NvCreateChatCompletionRequest>,

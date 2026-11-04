@@ -84,15 +84,17 @@ def publish_sglang_structural_tag_reasoning_policy(
     engine: Optional[sgl.Engine],
     server_args: ServerArgs,
 ) -> None:
-    """Advertise the native gate that consumes reasoning before guided output."""
+    """Advertise whether a native gate can defer guided output until reasoning ends."""
     # vLLM also publishes grammar timing through runtime metadata.
     # SGLang's exclusion additionally depends on require_reasoning per request.
     parser = getattr(server_args, "reasoning_parser", None)
-    if (
-        engine is None
-        or not parser
-        or getattr(server_args, "skip_tokenizer_init", False)
-    ):
+    if not parser:
+        # Only a known absence proves that the native gate cannot defer JSON.
+        runtime_config.set_engine_specific(
+            TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, json.dumps(False)
+        )
+        return
+    if engine is None or getattr(server_args, "skip_tokenizer_init", False):
         return
     tokenizer = getattr(engine.tokenizer_manager, "tokenizer", None)
     if (
@@ -103,8 +105,8 @@ def publish_sglang_structural_tag_reasoning_policy(
         )
     ):
         return
-    # Match the scheduler's gate initialization, including disabled gates when
-    # the reasoning terminator cannot be encoded by the initialized tokenizer.
+    # SGLang rejects an unencodable reasoning terminator. Failure to verify it
+    # here must not advertise immediate grammar activation.
     reasoner = ReasoningParser(
         model_type=parser, stream_reasoning=False, tokenizer=tokenizer
     )
