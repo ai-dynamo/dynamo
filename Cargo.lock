@@ -2494,7 +2494,6 @@ name = "dynamo-global-common"
 version = "1.7.0"
 dependencies = [
  "blake3",
- "bytes",
  "prost 0.13.5",
  "serde",
  "serde_json",
