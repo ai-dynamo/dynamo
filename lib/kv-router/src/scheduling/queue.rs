@@ -1067,6 +1067,9 @@ impl<
             class_index,
             snapshot,
             due_at: None,
+            // The final class's budget counts from the original router ingress, so classifier
+            // and channel waits spend it; an explicit deadline set later takes precedence.
+            class_due_at: self.profile.class(class_index).slo_ttft_due_at(ingress_at),
             // "Arrival" is the router ingress time, stamped before the
             // admission channel — one basis for classified and unclassified
             // requests alike, so time spent in a classifier does not reorder
@@ -5310,7 +5313,7 @@ policy_classes:
     }
 
     #[tokio::test(start_paused = true)]
-    async fn class_ttft_budget_alone_does_not_order_or_expire_queued_requests() {
+    async fn wspt_class_budget_neither_reorders_nor_expires_queued_requests() {
         let profile = policy_profile(
             r#"
 policy_classes:
@@ -5327,12 +5330,13 @@ policy_classes:
         active_rx.await.unwrap().unwrap();
 
         let (long, mut long_rx) = make_request("long", 64);
+        let ingress_at = Instant::now();
+        let metadata = queue.default_queue_metadata(&long, ingress_at).unwrap();
+        // The class due time is resolved for every class, but only EDF orders by it.
+        assert_eq!(metadata.due_at, None);
         assert_eq!(
-            queue
-                .default_queue_metadata(&long, Instant::now())
-                .unwrap()
-                .due_at,
-            None
+            metadata.class_due_at,
+            Some(ingress_at + Duration::from_millis(1))
         );
         queue.enqueue(long).await;
         let (short, mut short_rx) = make_request("short", 16);
@@ -5377,6 +5381,253 @@ policy_classes:
         let stats = queue.class_queue_stats(0).unwrap();
         assert_eq!(stats.received_total, 4);
         assert_eq!(stats.rejected_due_time_passed_total, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn class_due_time_counts_from_original_ingress_for_the_final_class() {
+        let profile = policy_profile(
+            r#"
+default_policy_class: slow
+policy_classes:
+  - name: fast
+    quantum: 1
+    slo_ttft_ms: 100
+  - name: slow
+    quantum: 1
+    slo_ttft_ms: 10000
+  - name: unbudgeted
+    quantum: 1
+"#,
+        );
+        let (queue, _slots) = make_queue_with_profile(1, 16, 64, profile);
+        let ingress_at = Instant::now();
+        // A slow classifier and channel wait spend the budget instead of restarting it.
+        tokio::time::advance(Duration::from_secs(5)).await;
+
+        let (mut request, _rx) = make_request("timed", 16);
+        let class_due_at = |request: &SchedulingRequest| {
+            queue
+                .default_queue_metadata(request, ingress_at)
+                .unwrap()
+                .class_due_at
+        };
+        assert_eq!(
+            class_due_at(&request),
+            Some(ingress_at + Duration::from_secs(10))
+        );
+        request.policy_class = Some("fast".to_string());
+        assert_eq!(
+            class_due_at(&request),
+            Some(ingress_at + Duration::from_millis(100))
+        );
+
+        // A classifier's class replaces the requested one before the budget applies.
+        for (selected, expected) in [
+            ("slow", Some(ingress_at + Duration::from_secs(10))),
+            ("unbudgeted", None),
+        ] {
+            let mut classified = queue
+                .build_classify_request(&request, ingress_at, WorkerInputs::NONE)
+                .0;
+            classified.set_policy_class(selected);
+            let metadata = queue
+                .validate_classification(&mut request, classified, ingress_at)
+                .unwrap();
+            assert_eq!(metadata.class_due_at, expected, "{selected}");
+        }
+
+        // An explicit deadline stays separate; it takes precedence when the queue orders.
+        let due_at = ingress_at + Duration::from_secs(60);
+        let mut classified = queue
+            .build_classify_request(&request, ingress_at, WorkerInputs::NONE)
+            .0;
+        classified.set_due_at(due_at);
+        let metadata = queue
+            .validate_classification(&mut request, classified, ingress_at)
+            .unwrap();
+        assert_eq!(metadata.due_at, Some(due_at));
+        assert_eq!(
+            metadata.class_due_at,
+            Some(ingress_at + Duration::from_millis(100))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn edf_class_budget_orders_by_original_ingress_and_explicit_deadlines_override() {
+        let profile = policy_profile(
+            r#"
+policy_classes:
+  - name: standard
+    quantum: 1
+    slo_ttft_ms: 1000
+    prefill_busy_threshold_frac: 0.0
+"#,
+        );
+        let (queue, slots) = make_queue_with_profile(1, 16, 64, profile);
+        assert_eq!(queue.profile.class(0).queue_policy, RouterQueuePolicy::Edf);
+        let start = Instant::now();
+        let (active, active_rx) = make_request("active", 64);
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+
+        // Enqueue order differs from ingress order, as after slow classification. Strict
+        // priority and priority jumps do not reorder EDF.
+        tokio::time::advance(Duration::from_millis(30)).await;
+        let mut receivers = Vec::new();
+        for (request_id, ingress_ms, explicit_due_ms, strict_priority) in [
+            ("late-ingress", 20, None, 9),
+            ("explicit-late", 0, Some(30_000), 0),
+            ("early-ingress", 10, None, 0),
+            ("explicit-early", 25, Some(900), 0),
+        ] {
+            let (mut request, response_rx) = make_request(request_id, 64);
+            request.strict_priority = strict_priority;
+            request.priority_jump = f64::from(strict_priority) * 100.0;
+            let ingress_at = start + Duration::from_millis(ingress_ms);
+            let classified = explicit_due_ms.map(|due_ms| {
+                let mut classified = queue
+                    .build_classify_request(&request, ingress_at, WorkerInputs::NONE)
+                    .0;
+                classified.set_due_at(start + Duration::from_millis(due_ms));
+                classified
+            });
+            queue
+                .enqueue_admitted_with_block_hashes_and_lease(
+                    request, None, None, None, classified, ingress_at,
+                )
+                .await;
+            receivers.push((request_id, response_rx));
+        }
+        assert_eq!(queue.pending_count(), 4);
+
+        let mut admitted = Vec::new();
+        let mut running = "active".to_string();
+        while !receivers.is_empty() {
+            slots.mark_prefill_completed(&running, decay_now()).unwrap();
+            slots.free(&running, decay_now()).unwrap();
+            queue.update().await;
+            let ready = receivers
+                .iter_mut()
+                .position(|(_, response_rx)| response_rx.try_recv().is_ok())
+                .expect("freed capacity admits the next request");
+            running = receivers.remove(ready).0.to_string();
+            admitted.push(running.clone());
+        }
+        assert_eq!(
+            admitted,
+            [
+                "explicit-early",
+                "early-ingress",
+                "late-ingress",
+                "explicit-late"
+            ]
+        );
+        assert_eq!(
+            queue
+                .class_queue_stats(0)
+                .unwrap()
+                .rejected_due_time_passed_total,
+            0
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn edf_class_budget_passing_neither_rejects_nor_blocks_admission() {
+        let profile = policy_profile(
+            r#"
+policy_classes:
+  - name: standard
+    quantum: 1
+    slo_ttft_ms: 1
+    prefill_busy_threshold_frac: 0.0
+"#,
+        );
+        let (queue, slots) = make_queue_with_profile(1, 16, 64, profile);
+        let (active, active_rx) = make_request("active", 64);
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+        let (first, mut first_rx) = make_request("first", 64);
+        queue.enqueue(first).await;
+        let (second, mut second_rx) = make_request("second", 64);
+        queue.enqueue(second).await;
+
+        // No timer, enqueue check, or refresh check rejects a passed class budget.
+        tokio::time::advance(Duration::from_secs(10)).await;
+        queue.update().await;
+        assert_eq!(queue.pending_count(), 2);
+
+        for (finished, admitted_rx) in [("active", &mut first_rx), ("first", &mut second_rx)] {
+            slots
+                .mark_prefill_completed(&finished.to_string(), decay_now())
+                .unwrap();
+            slots.free(&finished.to_string(), decay_now()).unwrap();
+            queue.update().await;
+            admitted_rx.try_recv().unwrap().unwrap();
+        }
+        assert_eq!(queue.pending_count(), 0);
+        let stats = queue.class_queue_stats(0).unwrap();
+        assert_eq!(stats.received_total, 3);
+        assert_eq!(stats.rejected_due_time_passed_total, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn edf_blocked_pinned_lane_does_not_block_other_worker() {
+        let profile = policy_profile(
+            r#"
+policy_classes:
+  - name: standard
+    quantum: 1
+    slo_ttft_ms: 1000
+    prefill_busy_threshold_frac: 0.0
+"#,
+        );
+        let (queue, slots) = make_queue_with_profile(2, 16, 256, profile);
+        assert_eq!(queue.profile.class(0).queue_policy, RouterQueuePolicy::Edf);
+
+        let (mut first, first_rx) = make_request("pinned-1", 256);
+        first.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
+        queue.enqueue(first).await;
+        let first_resp = first_rx.await.unwrap().unwrap();
+        assert_eq!(first_resp.best_worker, WorkerWithDpRank::new(1, 0));
+
+        // The earliest-due request waits for its full pinned worker.
+        let (mut second, mut second_rx) = make_request("pinned-2", 256);
+        second.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
+        queue.enqueue(second).await;
+        assert_eq!(queue.pending_count(), 1);
+        assert!(
+            second_rx.try_recv().is_err(),
+            "request should remain queued"
+        );
+
+        // A later request pinned to the idle worker does not wait behind it.
+        let (mut other_worker, mut other_worker_rx) = make_request("pinned-0", 256);
+        other_worker.pinned_worker = Some(WorkerWithDpRank::new(0, 0));
+        queue.enqueue(other_worker).await;
+        assert_eq!(queue.pending_count(), 1);
+        let other_worker_resp = other_worker_rx
+            .try_recv()
+            .expect("other worker request should have been scheduled")
+            .expect("scheduling returned error");
+        assert_eq!(other_worker_resp.best_worker, WorkerWithDpRank::new(0, 0));
+        assert!(
+            second_rx.try_recv().is_err(),
+            "pinned request should still be queued"
+        );
+
+        slots
+            .mark_prefill_completed(&"pinned-1".to_string(), decay_now())
+            .unwrap();
+        slots.free(&"pinned-1".to_string(), decay_now()).unwrap();
+        queue.capacity_changed(Some(WorkerWithDpRank::new(1, 0)));
+
+        let second_resp = tokio::time::timeout(Duration::from_secs(1), second_rx)
+            .await
+            .expect("capacity notification should schedule the pinned request")
+            .expect("response channel should remain open");
+        let second_resp = second_resp.expect("scheduling returned error");
+        assert_eq!(second_resp.best_worker, WorkerWithDpRank::new(1, 0));
+        assert_eq!(queue.pending_count(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
