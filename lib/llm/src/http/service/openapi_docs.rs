@@ -210,8 +210,8 @@ fn annotate_vllm_xargs(document: &mut serde_json::Value) -> Result<(), String> {
     use serde_json::json;
 
     let schema = json!({
-        "type": "object",
-        "description": "Extra arguments for vLLM SamplingParams.extra_args on token-input and text-input workers. Request keys override defaults. Other backends ignore this field. Older text workers may ignore it during rolling updates; upgrade all text workers before relying on it. kv_transfer_params and ec_transfer_params are reserved and rejected.",
+        "type": ["object", "null"],
+        "description": "Extra arguments for vLLM SamplingParams.extra_args on token-input and text-input workers. Null is treated as omitted. Request keys override defaults. Other backends ignore this field. Older text workers may ignore it during rolling updates; upgrade all text workers before relying on it. kv_transfer_params and ec_transfer_params are reserved and rejected.",
         "propertyNames": {"not": {"enum": crate::protocols::openai::validate::RESERVED_VLLM_XARGS_KEYS}},
         "additionalProperties": {
             "anyOf": [

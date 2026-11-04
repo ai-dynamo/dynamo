@@ -67,7 +67,7 @@ fn http_export_describes_request_aliases() {
     ));
     for name in ["NvCreateChatCompletionRequest", "NvCreateCompletionRequest"] {
         let xargs = &spec["components"]["schemas"][name]["properties"]["vllm_xargs"];
-        assert_eq!(xargs["type"], "object");
+        assert_eq!(xargs["type"], serde_json::json!(["object", "null"]));
         assert_eq!(
             xargs["additionalProperties"]["anyOf"],
             serde_json::json!([

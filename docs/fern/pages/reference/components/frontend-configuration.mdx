@@ -872,7 +872,7 @@ The frontend exposes the following HTTP endpoints.
 
 #### vLLM extra arguments
 
-Chat and completion requests accept `vllm_xargs` as a root-level JSON object. Its values must be strings, numbers, booleans, or arrays of those scalar types. Nulls, nested objects, and nested arrays are rejected. The keys `kv_transfer_params` and `ec_transfer_params` are reserved for connectors and return HTTP 400.
+Chat and completion requests accept `vllm_xargs` as a root-level JSON object. A root-level `vllm_xargs: null` is treated as omitted. Object values must be strings, numbers, booleans, or arrays of those scalar types. Null values, nested objects, and nested arrays are rejected. The keys `kv_transfer_params` and `ec_transfer_params` are reserved for connectors and return HTTP 400.
 
 Both token-input and text-input vLLM workers merge these values into `SamplingParams.extra_args`. Request keys override matching worker defaults; other defaults remain. Text input includes workers started with `--use-vllm-tokenizer`. SGLang and TensorRT-LLM ignore this field.
 
