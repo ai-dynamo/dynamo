@@ -3322,11 +3322,8 @@ def _test_router_cache_salt_isolation(
         await wait_for_worker("tenant-a", worker_a)
         await wait_for_worker("tenant-b", worker_b)
 
-        # Unpinned requests use the same selection path as production. Each
-        # repeat must go back to the worker that holds its namespace's blocks.
-        # Assert the destination directly: the scores below were already met by
-        # the seeded requests, and events from a wrongly routed repeat can
-        # arrive after the score checks pass.
+        # Unpinned repeats must reach their tenant's worker. Score checks alone
+        # miss a misroute: seeding already met them, and its events may arrive late.
         assert await generate("tenant-a") == worker_a[0]
         assert await generate("tenant-b") == worker_b[0]
         await wait_for_scores("tenant-a", {worker_a: expected_blocks})
