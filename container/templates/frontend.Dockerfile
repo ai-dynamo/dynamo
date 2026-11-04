@@ -97,6 +97,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         gpgsm \
         gpgv \
         keyboxd \
+        libgnutls30t64 \
         libssl3t64 \
         openssl \
     && apt-get clean \
