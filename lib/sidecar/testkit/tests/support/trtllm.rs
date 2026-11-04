@@ -166,7 +166,7 @@ impl SidecarFixture for Fixture {
     }
 
     fn eof_error() -> BackendError {
-        BackendError::Unknown
+        BackendError::StreamIncomplete
     }
 
     fn native_model(request: &pb::GenerateRequest) -> Option<&str> {

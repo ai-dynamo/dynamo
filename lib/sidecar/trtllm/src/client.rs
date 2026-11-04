@@ -22,7 +22,8 @@ use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::{HealthCheckRequest, health_client::HealthClient};
 
 pub(crate) use dynamo_sidecar_common::{
-    cancelled, engine_shutdown, invalid_argument, status_to_dynamo,
+    cancelled, engine_shutdown, invalid_argument, status_to_dynamo, stream_incomplete,
+    stream_status_to_dynamo,
 };
 
 use crate::proto as pb;
@@ -200,7 +201,7 @@ impl TrtllmClient {
             .generate(rpc)
             .await
             .map(tonic::Response::into_inner)
-            .map_err(|status| status_to_dynamo("Generate", status))
+            .map_err(|status| stream_status_to_dynamo("Generate", status))
     }
 
     pub(crate) async fn supports_subagent_affinity(&self) -> Result<bool, DynamoError> {
