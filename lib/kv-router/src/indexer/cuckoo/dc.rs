@@ -393,7 +393,7 @@ struct Ownership {
     resident: bool,
 }
 
-/// Exact source state reconstructed from one replay-ordered rank tree dump.
+/// Exact source state reconstructed from a rank snapshot and its ordered event tail.
 #[derive(Debug, Default)]
 pub struct DcCkfRankReplacement {
     source_lineage: FxHashMap<ExternalSequenceBlockHash, CanonicalSequenceBlockHash>,
@@ -437,7 +437,7 @@ impl DcCkfRankReplacement {
         Ok(())
     }
 
-    /// Append one replay-ordered event when it targets primary GPU residency.
+    /// Replay a snapshot or buffered-tail event when it targets primary GPU residency.
     ///
     /// Valid non-primary events are irrelevant to this Device CKF and are ignored. Unknown or
     /// invalid residency encodings fail closed before any replacement state is changed.
@@ -447,10 +447,20 @@ impl DcCkfRankReplacement {
             Ok(false) => return Ok(()),
             Err(_) => return Err(KvCacheEventError::UnsupportedResidencyDomain),
         }
-        let KvCacheEventData::Stored(store) = event.event.data else {
-            return Err(KvCacheEventError::InvalidBlockSequence);
-        };
-        self.push_store(&store)
+        match event.event.data {
+            KvCacheEventData::Stored(store) => self.push_store(&store),
+            KvCacheEventData::Removed(remove) => {
+                for hash in remove.block_hashes {
+                    self.source_lineage.remove(&hash);
+                }
+                Ok(())
+            }
+            KvCacheEventData::Cleared => {
+                self.source_lineage.clear();
+                self.canonical_candidates.clear();
+                Ok(())
+            }
+        }
     }
 }
 
@@ -1010,7 +1020,7 @@ impl DcCkfState {
     fn install_replacement(
         &mut self,
         worker: WorkerWithDpRank,
-        replacement: DcCkfRankReplacement,
+        mut replacement: DcCkfRankReplacement,
     ) -> Result<(), KvCacheEventError> {
         if self.source_lineage.contains_key(&worker) {
             return Err(KvCacheEventError::IndexerInvariantViolation);
@@ -1029,6 +1039,10 @@ impl DcCkfState {
                 .checked_add(1)
                 .ok_or(KvCacheEventError::OwnershipDegreeOverflow)?;
         }
+        // Cached snapshot tails can remove candidates; admit only hashes with surviving owners.
+        replacement
+            .canonical_candidates
+            .retain(|canonical| owner_increments.contains_key(canonical));
         for (&canonical, &increment) in &owner_increments {
             self.canonical_owners
                 .get(&canonical)
@@ -2096,6 +2110,85 @@ mod tests {
         state.apply_event(removed(worker, 10_002, &[omitted_token]));
         assert!(!state.source_lineage[&worker].contains_key(&external(omitted_token)));
         assert!(state.source_lineage[&worker].contains_key(&external(child_token)));
+    }
+
+    #[test]
+    fn recovery_replays_mixed_snapshot_tails_like_live_events() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let sibling = WorkerWithDpRank::new(1, 1);
+        let cases = [
+            (
+                "remove all",
+                vec![stored(worker, 1, &[11, 12]), removed(worker, 2, &[11, 12])],
+            ),
+            (
+                "remove and restore",
+                vec![
+                    stored(worker, 1, &[11, 12]),
+                    removed(worker, 2, &[11, 12]),
+                    stored(worker, 3, &[11, 12]),
+                ],
+            ),
+            (
+                "partial and unknown removal with a dependent store",
+                vec![
+                    stored(worker, 1, &[11, 12, 13]),
+                    removed(worker, 2, &[12, 13, 99]),
+                    stored_with_parent(worker, 3, 11, &[14]),
+                ],
+            ),
+            (
+                "remove one canonical alias",
+                vec![
+                    stored(worker, 1, &[11]),
+                    stored_exact(worker, 2, None, None, &[(external(12), LocalBlockHash(11))]),
+                    removed(worker, 3, &[11]),
+                ],
+            ),
+            (
+                "clear and replace",
+                vec![
+                    stored(worker, 1, &[11, 12]),
+                    cleared(worker.worker_id, worker.dp_rank, 2),
+                    stored(worker, 3, &[14]),
+                ],
+            ),
+        ];
+
+        for (name, events) in cases {
+            let mut live = DcCkfState::new(CkfConfig::new(32)).unwrap();
+            let mut recovered = DcCkfState::new(CkfConfig::new(32)).unwrap();
+            for state in [&mut live, &mut recovered] {
+                assert!(
+                    state
+                        .apply_event(stored(sibling, 1, &[11]))
+                        .first_error()
+                        .is_none()
+                );
+            }
+            recovered.apply_event(stored(worker, 0, &[98]));
+
+            let mut replacement = DcCkfRankReplacement::new();
+            for event in events {
+                assert!(
+                    live.apply_event(event.clone()).first_error().is_none(),
+                    "{name}"
+                );
+                replacement
+                    .push_event(event)
+                    .unwrap_or_else(|err| panic!("{name}: {err}"));
+            }
+            recovered.replace_rank(worker, replacement).unwrap();
+
+            // Physical layouts may differ; exact ownership and residency must agree.
+            assert_eq!(recovered.source_lineage, live.source_lineage, "{name}");
+            assert_eq!(recovered.canonical_owners, live.canonical_owners, "{name}");
+            assert_eq!(recovered.resident_count, live.resident_count, "{name}");
+            assert_eq!(recovered.member_block_count(sibling), 1, "{name}");
+            for &hash in live.canonical_owners.keys() {
+                assert!(recovered.contains(hash), "{name}");
+            }
+        }
     }
 
     #[test]

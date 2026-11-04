@@ -1,14 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Sweep aiohttp vs httpx through dynamo.common.http.
+"""Measure the dynamo.common.http fetch path under concurrent load.
 
-Rate-limited emitter. For each (request_rate, server-processing-time-mean-ms)
-pair, brings up a local media server with that processing-time-mean and
-issues `--requests` total requests at the target RPS, twice (once per
-backend), alternating which backend goes first to remove cold-start bias.
-Reports a per-iteration table and a per-(request_rate) cross-iteration
-grid.
+The sweep sends requests at a fixed rate. For each pair of a request rate and
+a mean server processing time, it starts a local media server with that
+processing time. It then sends `--requests` requests at that rate. It prints
+one table for each pair, and one grid for each request rate that lists all of
+its pairs.
+
+The media server runs on localhost, and the fetch path refuses private
+addresses by default. So the sweep sets DYN_MM_ALLOW_INTERNAL=1 when the
+variable is not set. If every request of a pair fails, the sweep exits with
+status 1.
 
 Usage:
   python -m benchmarks.multimodal.http.sweep \\
@@ -22,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import resource
 import sys
 
@@ -35,7 +40,7 @@ DEFAULT_IMAGE_URL = "http://images.cocodataset.org/val2017/000000039769.jpg"
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Sweep aiohttp vs httpx across server delays and request rates."
+        description="Measure the HTTP fetch path across server delays and request rates."
     )
     p.add_argument(
         "--server-processing-time-means-ms",
@@ -82,13 +87,6 @@ def _check_ulimit(peak_inflight_estimate: int) -> None:
         )
 
 
-def _by_backend(summaries: list[Summary], backend: str) -> Summary:
-    for s in summaries:
-        if s.backend == backend:
-            return s
-    raise KeyError(f"no summary for backend {backend!r}")
-
-
 def _parse_float_list(raw: str, flag: str) -> list[float]:
     values = [float(x) for x in raw.split(",") if x.strip()]
     if not values:
@@ -109,36 +107,44 @@ async def _run_sweep(args: argparse.Namespace) -> int:
     peak_inflight = int(max(rates) * (max(means) / 1000.0)) + args.requests // 10
     _check_ulimit(peak_inflight)
 
+    failed_pairs: list[str] = []
     for rate in rates:
         print_batch_header(request_rate=rate, requests=args.requests)
-        grid_rows: list[tuple[float, Summary, Summary]] = []
-        for i, mean_ms in enumerate(means):
+        grid_rows: list[tuple[float, Summary]] = []
+        for mean_ms in means:
             with local_media_server(
                 port=args.port, image_url=args.image_url, mean_ms=mean_ms
             ) as base_url:
                 urls = gen_urls([base_url], args.requests)
-                order = ["httpx", "aiohttp"] if i % 2 else ["aiohttp", "httpx"]
-                print(f"[sweep] mean_ms={mean_ms:g}  order={order}")
-                results = [await run_one(b, urls, args.timeout, rate) for b in order]
+                print(f"[sweep] mean_ms={mean_ms:g}")
+                result = await run_one(urls, args.timeout, rate)
 
-            summaries = [summarize(r) for r in results]
-            print_iteration(mean_ms, summaries)
-            grid_rows.append(
-                (
-                    mean_ms,
-                    _by_backend(summaries, "aiohttp"),
-                    _by_backend(summaries, "httpx"),
+            summary = summarize(result)
+            print_iteration(mean_ms, summary)
+            grid_rows.append((mean_ms, summary))
+            # A pair with no success measured nothing: its latencies print as 0.
+            if summary.n and not summary.outcomes.get("success"):
+                outcomes = ", ".join(
+                    f"{name}={count}"
+                    for name, count in sorted(summary.outcomes.items())
                 )
-            )
+                failed_pairs.append(
+                    f"request_rate={rate:g} mean_ms={mean_ms:g}: {outcomes}"
+                )
 
         print_grid(grid_rows)
         print()
 
-    return 0
+    for pair in failed_pairs:
+        print(f"[sweep] every request failed at {pair}", file=sys.stderr)
+    return 1 if failed_pairs else 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    # Here and not in _run_sweep, so that tests that call it do not change
+    # the environment of the shared test process.
+    os.environ.setdefault("DYN_MM_ALLOW_INTERNAL", "1")
     return asyncio.run(_run_sweep(args))
 
 

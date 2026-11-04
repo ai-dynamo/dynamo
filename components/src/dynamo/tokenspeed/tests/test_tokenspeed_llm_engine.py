@@ -61,6 +61,19 @@ def test_build_sampling_params_maps_dynamo_request():
     assert params["regex"] == "(yes|no)"
 
 
+def test_build_sampling_params_forwards_logit_bias():
+    params = build_sampling_params(
+        {
+            "token_ids": [1],
+            "sampling_options": {
+                "logit_bias": {"18": -10.0, "42": 5.5},
+            },
+        }
+    )
+
+    assert params["logit_bias"] == {"18": -10.0, "42": 5.5}
+
+
 def test_build_sampling_params_maps_json_guided_decoding():
     params = build_sampling_params(
         {

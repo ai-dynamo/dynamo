@@ -33,7 +33,7 @@ pub use dynamo_llm::protocols::common::preprocessor::{
 pub use dynamo_llm::protocols::common::{
     FinishReason, GuidedDecodingOptions, OutputOptions, SamplingOptions, StopConditions,
 };
-pub use dynamo_protocols::types::{CompletionUsage, StopReason};
+pub use dynamo_protocols::types::{CompletionUsage, PromptTokensDetails, StopReason};
 pub use dynamo_runtime::engine::AsyncEngineContext;
 
 /// Per-request handle wrapping the runtime context. `Deref`s to
@@ -507,6 +507,8 @@ pub enum KvEventSource {
         dp_rank: u32,
         /// Model image-placeholder token used to normalize multimodal events.
         image_token_id: Option<u32>,
+        /// Opt-in idle heartbeat deadline; absent preserves legacy publishers.
+        heartbeat_timeout: Option<std::time::Duration>,
     },
     Push {
         on_ready: OnPublisherReady,

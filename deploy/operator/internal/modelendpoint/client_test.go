@@ -31,7 +31,6 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -147,10 +146,8 @@ func TestLoadLoRA(t *testing.T) {
 			}
 
 			model := &v1alpha1.DynamoModel{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-model",
-					Namespace: "default",
-				},
+				Name:      "test-model",
+				Namespace: "default",
 				Spec: v1alpha1.DynamoModelSpec{
 					ModelName: "test-model",
 					ModelType: tt.modelType,
@@ -222,7 +219,7 @@ func TestLoadLoRAAllowsLegacyUnavailableVLLMPrefill(t *testing.T) {
 	defer incapableServer.Close()
 
 	model := &v1alpha1.DynamoModel{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-lora", Namespace: "default"},
+		Name: "test-lora", Namespace: "default",
 		Spec: v1alpha1.DynamoModelSpec{
 			ModelName: "test-lora",
 			ModelType: "lora",
@@ -364,7 +361,7 @@ func TestLoadLoRAIncludesCapablePrefill(t *testing.T) {
 	defer server.Close()
 
 	model := &v1alpha1.DynamoModel{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-lora", Namespace: "default"},
+		Name: "test-lora", Namespace: "default",
 		Spec: v1alpha1.DynamoModelSpec{
 			ModelName: "test-lora",
 			ModelType: "lora",
@@ -400,7 +397,7 @@ func TestLoadLoRALegacyFallbackRequiresKubernetesReadiness(t *testing.T) {
 	defer server.Close()
 
 	model := &v1alpha1.DynamoModel{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-lora", Namespace: "default"},
+		Name: "test-lora", Namespace: "default",
 		Spec: v1alpha1.DynamoModelSpec{
 			ModelName: "test-lora",
 			ModelType: "lora",
@@ -629,7 +626,7 @@ func TestUnloadLoRARetainsQueuedEndpointAfterCancellation(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("expected one unload summary log, got %d", len(entries))
 	}
-	failedEndpoints, ok := entries[0].ContextMap()["failedEndpoints"].([]interface{})
+	failedEndpoints, ok := entries[0].ContextMap()["failedEndpoints"].([]any)
 	if !ok {
 		t.Fatalf("expected failedEndpoints in unload summary, got %#v", entries[0].ContextMap())
 	}

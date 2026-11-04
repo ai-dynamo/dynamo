@@ -21,13 +21,12 @@ pub mod peer_discovery;
 pub mod picker;
 pub mod pod_discovery;
 pub mod proto;
+pub mod render_client;
 pub mod render_http;
 mod runner;
 pub mod selector;
 pub mod server;
-pub mod sglang_renderer_client;
 pub mod topology_adapter;
-pub mod vllm_render_client;
 
 pub use epp::Router;
 pub use epp_router::EppRouter;
@@ -37,10 +36,9 @@ pub use epp_standalone_config::{
 pub use inference_pool::PoolState;
 pub use picker::{Endpoint, EndpointPicker, PickResult, RequestInfo, ResponseUsage};
 pub use pod_discovery::{PodDiscovery, RawWorker};
+pub use render_client::RenderClient;
 pub use render_http::RenderError;
 pub use runner::run;
 pub use selector::{OverlapSummary, SelectRequest, SelectResponse, Selector};
 pub use server::ExtProcServer;
-pub use sglang_renderer_client::SglangRendererClient;
 pub use topology_adapter::{RegistrationDefaults, TopologyAdapter};
-pub use vllm_render_client::VllmRenderClient;

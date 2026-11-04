@@ -1,10 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+pub(crate) mod image_edits;
 mod model;
 pub(crate) mod readiness;
-pub(crate) use model::GenerateEngineSelection;
 pub use model::Model;
+pub(crate) use model::{
+    GenerateEngineSelection, SystemOneExecutionSelection, SystemOneSelectionError,
+};
 
 pub mod kv_source_membership;
 pub use kv_source_membership::{
@@ -20,9 +23,12 @@ pub use kv_source_watch::KvSourceMembershipWatch;
 pub mod kv_state_agent;
 
 mod model_manager;
+pub(crate) mod router_policy;
+pub(crate) use model_manager::CommittedModelView;
 pub use model_manager::{ModelManager, ModelManagerError, UNKNOWN_METRIC_MODEL};
 
 mod controller;
+pub(crate) mod worker_inventory;
 
 mod allocator;
 
@@ -40,6 +46,7 @@ mod watcher;
 pub use watcher::{ModelUpdate, ModelWatcher};
 
 mod worker_monitor;
+pub(crate) use worker_monitor::RoutableThresholds;
 pub use worker_monitor::{
     KvWorkerMonitor, LoadThresholdConfig, LoadThresholdHandle, WORKER_TYPE_DECODE,
     WORKER_TYPE_PREFILL, WorkerLoadState,

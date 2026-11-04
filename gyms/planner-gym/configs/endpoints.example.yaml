@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Real endpoint model values are operational AIPerf request names.
+# declared_deployment is copied into results as unverified provenance only.
+endpoints:
+  - name: fast-endpoint
+    url: http://127.0.0.1:8112
+    model: gpt2
+    endpoint_type: chat
+    description: Example endpoint (low latency). Replace with a real deployment.
+    declared_deployment:
+      topology: disagg
+      model:
+        name: gpt2
+      engines:
+        common:
+          backend: vllm
+          backend_version: replace-with-deployed-version
+          system: replace-with-deployed-system
+          tp_size: 1
+          attention_dp_size: 1
+
+  - name: slow-endpoint
+    url: http://127.0.0.1:8113
+    model: gpt2
+    endpoint_type: chat
+    description: Example endpoint (higher latency). Replace with a real deployment.
+    declared_deployment:
+      topology: disagg
+      model:
+        name: gpt2
+      engines:
+        common:
+          backend: vllm
+          backend_version: replace-with-deployed-version
+          system: replace-with-deployed-system
+          tp_size: 1
+          attention_dp_size: 1

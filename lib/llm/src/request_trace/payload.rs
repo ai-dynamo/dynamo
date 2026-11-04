@@ -140,16 +140,20 @@ fn create_handle_with_config(
     }
     let requested_streaming = req.inner.stream.unwrap_or(false);
     let model = req.inner.model.clone();
+    let mut trace_request = req.clone();
+    if let Some(nvext) = trace_request.nvext.as_mut() {
+        // Upload destinations contain capabilities and signed header values.
+        nvext.metadata_upload = None;
+    }
 
     Some(RequestPayloadHandle {
         requested_streaming,
         request_id: request_id.to_string(),
         model,
-        // Snapshot the pristine inbound request (before the preprocessor
-        // overrides stream/usage) and stamp arrival time on the producing
-        // thread, so the record reflects what the client sent and when.
+        // Snapshot ingress fields without upload capabilities, before stream/
+        // usage overrides, and stamp arrival time on the producing thread.
         event_time: SystemTime::now(),
-        request: Arc::new(req.clone()),
+        request: Arc::new(trace_request),
         http_request_headers,
     })
 }
@@ -195,6 +199,24 @@ mod tests {
         assert!(
             handle.is_some(),
             "request_payload records should create a handle even with store=false"
+        );
+    }
+
+    #[test]
+    fn request_payload_omits_upload_capabilities_without_changing_request() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test", "messages": [{"role": "user", "content": "hello"}],
+            "nvext": {"extra_fields": ["timing"], "metadata_upload": {"kind": "generation_artifact", "contents": [], "mode": "object_store", "destination": {"kind": "presigned_http_put", "url": "https://storage.example/object?sig=secret", "required_headers": {"x-token": "private-token"}, "expires_at": "2030-01-01T00:00:00Z", "max_bytes": 1024, "object_id": "object-1"}}}
+        })).unwrap();
+        let handle = create_handle_with_config(&request, "test-id", true, true, None).unwrap();
+        assert!(request.nvext.as_ref().unwrap().metadata_upload.is_some());
+        let trace = serde_json::to_string(&handle.request).unwrap();
+        assert!(!trace.contains("metadata_upload"));
+        assert!(!trace.contains("secret"));
+        assert!(!trace.contains("private-token"));
+        assert_eq!(
+            handle.request.nvext.as_ref().unwrap().extra_fields,
+            Some(vec!["timing".into()])
         );
     }
 

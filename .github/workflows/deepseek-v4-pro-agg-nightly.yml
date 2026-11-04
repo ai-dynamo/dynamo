@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: DeepSeek V4 Pro Aggregated Perf
+
+on:
+  workflow_call:
+    inputs:
+      source_ref:
+        type: string
+        required: true
+      image_tag:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Published ACR vLLM nightly tag (<version>-ci-<sha>-vllm-runtime-nightly)'
+        type: string
+        required: true
+      preflight_only:
+        description: 'Render and server-side dry-run without deploying'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deepseek-v4-pro-nightly
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  perf:
+    name: DeepSeek V4 Pro aggregated
+    uses: ./.github/workflows/shared-recipe-perf.yml
+    with:
+      recipe: deepseek-v4-pro-agg
+      source_ref: ${{ inputs.source_ref || github.sha }}
+      image_tag: ${{ inputs.image_tag }}
+      preflight_only: ${{ inputs.preflight_only || false }}
+    secrets: inherit

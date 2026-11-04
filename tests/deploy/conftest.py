@@ -45,7 +45,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--frontend-image",
         type=str,
         default=None,
-        help="Frontend container image (used by GAIE and checkpoint deploy tests).",
+        help="Frontend container image override for deployment tests.",
     )
     parser.addoption(
         "--checkpoint-backend",
@@ -53,6 +53,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default="vllm",
         choices=("vllm", "sglang", "trtllm"),
         help="Snapshot checkpoint backend to test.",
+    )
+    parser.addoption(
+        "--checkpoint-tp",
+        type=int,
+        default=1,
+        help="Tensor-parallel size of the checkpointed worker; it uses one GPU "
+        "per rank.",
     )
     parser.addoption(
         "--model-cache-pvc",
@@ -453,6 +460,10 @@ def deployment_spec(
     # Override image if provided
     if image:
         spec.set_image(image)
+
+    frontend_image = request.config.getoption("--frontend-image")
+    if frontend_image:
+        spec.set_image(frontend_image, service_name="Frontend")
 
     # Mount the shared model cache onto workers when a PVC is provided (CI on
     # clusters that provision it); otherwise workers download from HuggingFace.

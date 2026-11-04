@@ -2129,6 +2129,16 @@ mod tests {
     /// connector built.
     #[test]
     fn request_plane_tls_connector_from_env_parses() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::request_plane_tls_connector_from_env_parses"
+            ),
+            &[],
+        ) {
+            return;
+        }
+
         let (cert, key) = self_signed_pair();
         // Clear every var the builder reads (incl. the client-identity vars) so
         // ambient mTLS settings can't flip the "no TLS -> plaintext" assertion.
@@ -2257,6 +2267,13 @@ mod tests {
     /// reader/writer + framing, not just a `tls_utils` round-trip.
     #[tokio::test]
     async fn request_plane_tls_end_to_end() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::request_plane_tls_end_to_end"),
+            &[],
+        ) {
+            return;
+        }
+
         // Self-signed cert (SAN=localhost), trusted as the CA by the client.
         let (cert, key) = self_signed_pair();
         let server_config =
@@ -2308,6 +2325,13 @@ mod tests {
     /// when the server enforces mTLS.
     #[tokio::test]
     async fn request_plane_mtls_end_to_end() {
+        if crate::test_utils::run_isolated(
+            concat!(module_path!(), "::request_plane_mtls_end_to_end"),
+            &[],
+        ) {
+            return;
+        }
+
         let (ca, server_cert, server_key, client_cert, client_key) = mtls_chain();
         let server_config = crate::tls_utils::server_tls_config(
             server_cert.path(),

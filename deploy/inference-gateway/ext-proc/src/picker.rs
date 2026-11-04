@@ -63,9 +63,9 @@ pub enum CacheSaltForwarding {
     #[default]
     Preserve,
     /// Write `cache_salt = "dynamo-cache-salt:" + namespace` at the top level.
-    /// Raw native vLLM has no Dynamo code in the request path to add the
-    /// marker, so the EPP must add it.
-    NativeVllm,
+    /// Raw engines (vLLM, SGLang, TensorRT-LLM) read that field but have no
+    /// Dynamo code in the request path to add the marker, so the EPP must add it.
+    RawEngine,
 }
 
 /// The endpoint selection result, with the Dynamo-specific routing headers
@@ -95,6 +95,10 @@ pub struct PickResult {
     pub cache_namespace: Option<String>,
     /// Body-encoding policy for `cache_namespace`.
     pub cache_salt_forwarding: CacheSaltForwarding,
+    /// Remove the client's top-level `nvext` from the forwarded body. Standalone
+    /// pickers set it: raw engines never read it, and TensorRT-LLM
+    /// (`extra="forbid"`) rejects requests that carry it.
+    pub strip_nvext: bool,
     /// Booking id the picker recorded for this request's load reservation, if
     /// any. The server carries it on the per-stream context and hands it back to
     /// [`EndpointPicker::on_prefill_complete`] / [`EndpointPicker::on_request_complete`]

@@ -55,6 +55,13 @@ impl Store for EtcdStore {
     fn shutdown(&self) {
         // Revoke the lease? etcd will do it for us on disconnect.
     }
+
+    async fn check_connection(&self) -> Result<(), StoreError> {
+        self.client
+            .check_connection()
+            .await
+            .map_err(|e| StoreError::EtcdError(e.to_string()))
+    }
 }
 
 pub struct EtcdBucket {
