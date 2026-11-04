@@ -5,19 +5,137 @@
 """Run the Rust adapter against an unmodified upstream TRT-LLM image."""
 
 import argparse
+import base64
+import hashlib
 import importlib.metadata
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
 import sys
 import time
 import traceback
+import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-TEST = "tests::e2e::e2e_real_openengine_image"
+FIXTURES = {
+    "image": {
+        "prompt": "Name the colors from left to right.",
+        "token_ids": [
+            151644,
+            872,
+            198,
+            151652,
+            151655,
+            151653,
+            675,
+            279,
+            7987,
+            504,
+            2115,
+            311,
+            1290,
+            13,
+            151645,
+            198,
+            151644,
+            77091,
+            198,
+        ],
+        "context_length": 2048,
+    },
+    "video": {
+        "prompt": "Describe the shape and its motion in this video.",
+        "token_ids": [
+            151644,
+            872,
+            198,
+            151652,
+            151656,
+            151653,
+            74785,
+            279,
+            6083,
+            323,
+            1181,
+            11379,
+            304,
+            419,
+            2766,
+            13,
+            151645,
+            198,
+            151644,
+            77091,
+            198,
+        ],
+        "context_length": 2048,
+    },
+    "audio": {
+        "prompt": "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>",
+        "token_ids": [],
+        "context_length": 1500,
+    },
+}
+VIDEO_PATH = (
+    Path(__file__).resolve().parents[3] / "llm/tests/data/media/triangle_240p_10.mp4"
+)
+VIDEO_SHA256 = "04171a85ee3ba5ac9118b0a5858adf0892b49474cdf15320e32599a3d1ab9919"
+
+AUDIO_URL = (
+    "https://raw.githubusercontent.com/yuekaizhang/Triton-ASR-Client/"
+    "8e35ed77aeece087fa53abf2a68a282dc13efc8c/"
+    "datasets/mini_en/wav/1221-135766-0002.wav"
+)
+AUDIO_SHA256 = "65b222837919ccbb924a4e1077413ea7cc6af3e68b663b012a9539d5c05850f0"
+
+
+def prepare_audio(results):
+    with urllib.request.urlopen(AUDIO_URL, timeout=30) as response:
+        data = response.read(1024 * 1024 + 1)
+    if hashlib.sha256(data).hexdigest() != AUDIO_SHA256:
+        raise ValueError("Audio fixture does not match the validated speech sample")
+    path = results / "audio-data-uri.txt"
+    path.write_text("data:audio/wav;base64," + base64.b64encode(data).decode("ascii"))
+    return path
+
+
+def model_config(config, media):
+    if media == "audio":
+        return {**config, **config["audio"]}
+    return config
+
+
+def video_data_uri(path=VIDEO_PATH):
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != VIDEO_SHA256:
+        raise ValueError(
+            "Video fixture changed; revalidate its content and expected response"
+        )
+    return "data:video/mp4;base64," + base64.b64encode(data).decode("ascii")
+
+
+def validate_response(media, caption, response, input_token_count):
+    words = re.findall(r"[a-z]+", caption.lower())
+    if media == "image":
+        colors = [word for word in words if word in ("red", "blue")]
+        if colors[:2] != ["red", "blue"]:
+            raise AssertionError(f"Expected red, then blue, got: {caption}")
+    elif media == "audio":
+        if "thoughts affected hester" not in " ".join(words):
+            raise AssertionError(f"Unexpected speech transcription: {caption}")
+    elif not {"triangle", "triangular"}.intersection(words):
+        raise AssertionError(
+            f"Expected a triangle in the video description, got: {caption}"
+        )
+    if (
+        response["completion_tokens"] <= 0
+        or response["prompt_tokens"] <= input_token_count
+    ):
+        raise AssertionError(f"Missing authoritative {media} token usage: {response}")
 
 
 def wait_for_engine(process, port, timeout=600):
@@ -49,13 +167,41 @@ def stop_engine(process):
             process.wait(timeout=10)
 
 
+def run_rust_test(binary, env, test, results):
+    completed = subprocess.run(
+        [
+            str(binary),
+            "--exact",
+            test,
+            "--ignored",
+            "--nocapture",
+            "--color",
+            "never",
+        ],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=240,
+    )
+    (results / "rust-test.log").write_text(completed.stdout)
+    print(completed.stdout, flush=True)
+    completed.check_returncode()
+    if "1 passed; 0 failed; 0 ignored;" not in completed.stdout:
+        raise RuntimeError(f"{test} did not execute exactly once")
+
+
 def run(args, results):
+    # GPU-only dependencies stay out of the CPU harness tests.
     from huggingface_hub import snapshot_download
     from transformers import AutoTokenizer
 
-    config = json.loads(args.config.read_text())
+    fixture = FIXTURES[args.media]
+    test = f"tests::e2e::e2e_real_openengine_{args.media}"
+    config = model_config(json.loads(args.config.read_text()), args.media)
     identity = {
         **config,
+        "media": args.media,
         "installed_version": importlib.metadata.version("tensorrt_llm"),
         "installed_commit": os.environ.get("TRT_LLM_GIT_COMMIT"),
     }
@@ -65,73 +211,61 @@ def run(args, results):
             f"Unexpected upstream commit: {identity['installed_commit']}"
         )
 
+    video = video_data_uri() if args.media == "video" else None
+    audio_path = prepare_audio(results) if args.media == "audio" else None
+
     binary = args.binary.resolve()
     binary.chmod(binary.stat().st_mode | 0o111)
     listing = subprocess.check_output(
-        [str(binary), "--list", "--exact", TEST, "--format", "terse"], text=True
+        [str(binary), "--list", "--exact", test, "--format", "terse"], text=True
     )
-    if listing.splitlines().count(f"{TEST}: test") != 1:
+    if listing.splitlines().count(f"{test}: test") != 1:
         raise RuntimeError(
-            f"Expected exactly one image integration test, got: {listing}"
+            f"Expected exactly one {args.media} integration test, got: {listing}"
         )
 
     model_path = args.model_path or snapshot_download(
         config["model"], revision=config["model_revision"]
     )
     tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
-    # The fixed Rust fixture uses Qwen3-VL's rendering of this exact message.
-    # Check it against the pinned tokenizer so a template change fails loudly.
-    token_ids = tokenizer.apply_chat_template(
-        [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image"},
-                    {"type": "text", "text": "Name the colors from left to right."},
-                ],
-            }
-        ],
-        tokenize=True,
-        add_generation_prompt=True,
-    )
-    expected_ids = [
-        151644,
-        872,
-        198,
-        151652,
-        151655,
-        151653,
-        675,
-        279,
-        7987,
-        504,
-        2115,
-        311,
-        1290,
-        13,
-        151645,
-        198,
-        151644,
-        77091,
-        198,
-    ]
-    token_ids = (
-        token_ids["input_ids"]
-        if isinstance(token_ids, dict) or hasattr(token_ids, "input_ids")
-        else token_ids
-    )
-    if token_ids != expected_ids:
-        raise RuntimeError(f"Image fixture tokenizer mismatch: {token_ids}")
+    expected_ids = fixture["token_ids"]
+    if args.media != "audio":
+        # The fixed Rust fixture uses Qwen3-VL's rendering of this exact message.
+        # Check it against the pinned tokenizer so a template change fails loudly.
+        token_ids = tokenizer.apply_chat_template(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": args.media},
+                        {"type": "text", "text": fixture["prompt"]},
+                    ],
+                }
+            ],
+            tokenize=True,
+            add_generation_prompt=True,
+        )
+        token_ids = (
+            token_ids["input_ids"]
+            if isinstance(token_ids, dict) or hasattr(token_ids, "input_ids")
+            else token_ids
+        )
+        if token_ids != expected_ids:
+            raise RuntimeError(f"{args.media} fixture tokenizer mismatch: {token_ids}")
 
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
     options = results / "engine.yaml"
-    options.write_text(
-        "max_batch_size: 1\nmax_num_tokens: 2048\n"
-        "kv_cache_config:\n  max_tokens: 2048\n"
-        "  free_gpu_memory_fraction: 0.15\n"
-    )
+    context_length = fixture["context_length"]
+    if args.media == "audio":
+        options.write_text(Path(__file__).with_name("whisper.yaml").read_text())
+    else:
+        options.write_text(
+            f"max_batch_size: 1\nmax_num_tokens: {context_length}\n"
+            f"kv_cache_config:\n  max_tokens: {context_length}\n"
+            "  free_gpu_memory_fraction: 0.15\n"
+        )
     result_path = results / "response.json"
     engine = None
     try:
@@ -150,7 +284,7 @@ def run(args, results):
                     "--port",
                     str(port),
                     "--max_seq_len",
-                    "2048",
+                    str(context_length),
                     "--extra_llm_api_options",
                     str(options),
                 ],
@@ -165,29 +299,12 @@ def run(args, results):
                 TRTLLM_E2E_MODEL=config["model"],
                 TRTLLM_E2E_RESULT=str(result_path),
             )
-            completed = subprocess.run(
-                [
-                    str(binary),
-                    "--exact",
-                    TEST,
-                    "--ignored",
-                    "--nocapture",
-                    "--color",
-                    "never",
-                ],
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=240,
-            )
-            (results / "rust-test.log").write_text(completed.stdout)
-            print(completed.stdout, flush=True)
-            completed.check_returncode()
-            if "1 passed; 0 failed; 0 ignored;" not in completed.stdout:
-                raise RuntimeError(
-                    "Image integration test did not execute exactly once"
-                )
+            if video is not None:
+                env["TRTLLM_E2E_VIDEO_DATA_URI"] = video
+            if audio_path is not None:
+                env["TRTLLM_E2E_AUDIO_DATA_URI_FILE"] = str(audio_path)
+                env["TRTLLM_E2E_AUDIO_PROMPT"] = fixture["prompt"]
+            run_rust_test(binary, env, test, results)
     finally:
         stop_engine(engine)
 
@@ -195,34 +312,25 @@ def run(args, results):
     caption = tokenizer.decode(response["token_ids"], skip_special_tokens=True)
     response["text"] = caption
     result_path.write_text(json.dumps(response, indent=2) + "\n")
-    print(f"Image response: {caption}", flush=True)
-    words = caption.lower().replace("-", " ").split()
-    # Accept phrasing differences, but require the fixture colors left to right.
-    colors = [word.strip(".,:;!?()\"'") for word in words]
-    if [color for color in colors if color in ("red", "blue")][:2] != ["red", "blue"]:
-        raise AssertionError(
-            f"Expected red, then blue, in the image description, got: {caption}"
-        )
-    if response["completion_tokens"] <= 0 or response["prompt_tokens"] <= len(
-        expected_ids
-    ):
-        raise AssertionError(f"Missing authoritative image token usage: {response}")
+    print(f"{args.media} response: {caption}", flush=True)
+    validate_response(args.media, caption, response, len(expected_ids))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--media", choices=FIXTURES, default="image")
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument(
         "--config", type=Path, required=True, help="Resolved nightly image manifest"
     )
-    parser.add_argument(
-        "--results", type=Path, default=Path("test-results/trtllm-nightly-image")
-    )
+    parser.add_argument("--results", type=Path)
     parser.add_argument(
         "--model-path", type=Path, help="Use an already downloaded model snapshot"
     )
     args = parser.parse_args()
-    results = args.results.resolve()
+    results = (
+        args.results or Path(f"test-results/trtllm-nightly-{args.media}")
+    ).resolve()
     results.mkdir(parents=True, exist_ok=True)
     start = time.monotonic()
     failure = None
@@ -234,14 +342,18 @@ def main():
     duration = str(time.monotonic() - start)
     suite = ET.Element(
         "testsuite",
-        name="trtllm-nightly-image",
+        name=f"trtllm-nightly-{args.media}",
         tests="1",
         failures=str(int(failure is not None)),
         skipped="0",
         time=duration,
     )
     case = ET.SubElement(
-        suite, "testcase", name=TEST, classname="trtllm.sidecar", time=duration
+        suite,
+        "testcase",
+        name=f"tests::e2e::e2e_real_openengine_{args.media}",
+        classname="trtllm.sidecar",
+        time=duration,
     )
     if failure:
         ET.SubElement(case, "failure", message=failure.splitlines()[-1]).text = failure

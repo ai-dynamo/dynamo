@@ -6,7 +6,7 @@ require (
 	capnproto.org/go/capnp/v3 v3.1.0-alpha.2
 	emperror.dev/errors v0.8.1
 	github.com/Masterminds/semver/v3 v3.4.0
-	github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.15
+	github.com/ai-dynamo/grove/operator/api v0.2.0-beta1
 	github.com/ai-dynamo/modelexpress/modelexpress_client/go v0.0.0-20261002171923-ac6d03a87a55
 	github.com/ai-dynamo/snapshot/api v0.2.0
 	github.com/bsm/gomega v1.27.10

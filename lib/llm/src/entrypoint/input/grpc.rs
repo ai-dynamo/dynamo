@@ -12,9 +12,8 @@ use crate::{
     http::service::metrics::Metrics,
     local_model::runtime_config::TokenizerBackend,
     namespace::NamespaceFilter,
-    types::openai::{
-        chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-        completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
+    types::openai::chat_completions::{
+        NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
 };
 use dynamo_runtime::DistributedRuntime;
@@ -99,11 +98,8 @@ pub async fn run(
             .await?;
             manager.add_chat_completions_model(model.service_name(), checksum, chat_pipeline)?;
 
-            let cmpl_pipeline = common::build_pipeline::<
-                NvCreateCompletionRequest,
-                NvCreateCompletionResponse,
-            >(model.card(), inner_engine, tokenizer)
-            .await?;
+            let cmpl_pipeline =
+                common::build_completions_pipeline(model.card(), inner_engine, tokenizer)?;
             manager.add_completions_model(model.service_name(), checksum, cmpl_pipeline)?;
             grpc_service
         }

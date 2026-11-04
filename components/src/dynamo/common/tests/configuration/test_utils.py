@@ -8,6 +8,7 @@ import argparse
 import pytest
 
 from dynamo.common.configuration.utils import (
+    ArgEnv,
     Deprecated,
     add_argument,
     add_negatable_bool_argument,
@@ -389,6 +390,35 @@ def test_deprecated_argument_env_and_cli_precedence(monkeypatch):
     assert parser.parse_args([]).old == 3
     with pytest.warns(FutureWarning, match="--old is deprecated"):
         assert parser.parse_args(["--old", "4"]).old == 4
+
+
+def test_arg_env_replaces_os_environ_and_skips_deprecation(monkeypatch, recwarn):
+    monkeypatch.setenv("TEST_OLD", "3")
+    env = ArgEnv(environ={"TEST_FLAG": "false", "TEST_OLD": "5"})
+    parser = argparse.ArgumentParser()
+    add_argument(
+        parser,
+        flag_name="--old",
+        env_var="TEST_OLD",
+        default=1,
+        help="Old",
+        arg_type=int,
+        deprecated=Deprecated("--new", remove_in="v2.0"),
+        env=env,
+    )
+    add_negatable_bool_argument(
+        parser,
+        flag_name="--flag",
+        env_var="TEST_FLAG",
+        default=True,
+        help="Flag",
+        env=env,
+    )
+    assert vars(parser.parse_args([])) == {"old": 5, "flag": False}
+    assert parser.parse_args(["--old", "4"]).old == 4
+    assert env.env_dests == {"TEST_OLD": "old", "TEST_FLAG": "flag"}
+    assert env_or_default("TEST_OLD", 0, env=ArgEnv(environ={})) == 0
+    assert not recwarn
 
 
 def test_deprecated_hidden_argument_is_quiet_unless_used(monkeypatch, recwarn):

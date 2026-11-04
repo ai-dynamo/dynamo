@@ -18,9 +18,12 @@ use dynamo_sidecar_common::{
     connection_timeout,
 };
 use tonic::transport::Channel;
+use tonic_health::pb::health_check_response::ServingStatus;
+use tonic_health::pb::{HealthCheckRequest, health_client::HealthClient};
 
 pub(crate) use dynamo_sidecar_common::{
-    cancelled, engine_shutdown, invalid_argument, status_to_dynamo,
+    cancelled, engine_shutdown, invalid_argument, status_to_dynamo, stream_incomplete,
+    stream_status_to_dynamo,
 };
 
 use crate::proto as pb;
@@ -32,6 +35,32 @@ use crate::proto::inference_client::InferenceClient;
 /// `--grpc-startup-deadline-secs` instead.
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 const LOAD_RPC_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Media modalities confirmed by both OpenEngine capability signals.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SupportedMedia {
+    pub(crate) image: bool,
+    pub(crate) video: bool,
+    pub(crate) audio: bool,
+}
+
+/// Input forms explicitly advertised by `Control.GetModelInfo`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SupportedInputs {
+    pub(crate) text: bool,
+    pub(crate) token_ids: bool,
+}
+
+impl SupportedMedia {
+    pub(crate) fn contains(self, modality: &str) -> bool {
+        match modality {
+            "image" => self.image,
+            "video" => self.video,
+            "audio" => self.audio,
+            _ => false,
+        }
+    }
+}
 
 /// Startup metadata from `--context-length` and `Control.GetModelInfo`.
 #[derive(Clone, Copy, Debug, Default)]
@@ -45,9 +74,12 @@ pub(crate) struct ModelLimits {
     /// Cap on generated tokens, when the engine reports one. A context window
     /// alone can imply a larger budget than the engine will accept.
     pub(crate) max_output_tokens: Option<u32>,
-    /// Whether both portable and engine-specific capabilities advertise images.
-    /// `None` is reserved for unresolved/test metadata; startup always resolves this.
-    pub(crate) supports_image: Option<bool>,
+    /// `None` preserves token-ID behavior for older servers that omit both
+    /// optional input-capability fields.
+    pub(crate) supported_inputs: Option<SupportedInputs>,
+    /// Modalities advertised by both the portable and engine-specific capabilities.
+    /// `None` is unresolved metadata; startup always resolves this.
+    pub(crate) supported_media: Option<SupportedMedia>,
 }
 
 #[derive(Clone, Debug)]
@@ -78,6 +110,10 @@ impl TrtllmClient {
 
     pub(crate) fn connection_count(&self) -> usize {
         self.pool.len()
+    }
+
+    pub(crate) fn health_channel(&self) -> Channel {
+        self.pool.next_channel()
     }
 
     fn inference(&self) -> InferenceClient<Channel> {
@@ -155,7 +191,7 @@ impl TrtllmClient {
             .generate(rpc)
             .await
             .map(tonic::Response::into_inner)
-            .map_err(|status| status_to_dynamo("Generate", status))
+            .map_err(|status| stream_status_to_dynamo("Generate", status))
     }
 
     pub(crate) async fn supports_subagent_affinity(&self) -> Result<bool, DynamoError> {
@@ -189,31 +225,43 @@ impl TrtllmClient {
             })
             .await?
             .into_inner();
-        let supports_image = info.supports_multimodal == Some(true)
-            && info.extra.as_ref().is_some_and(|extra| {
-                extra
-                    .fields
-                    .get("trtllm_supported_modalities")
-                    .and_then(|value| value.kind.as_ref())
-                    .is_some_and(|kind| match kind {
-                        prost_types::value::Kind::ListValue(modalities) => {
-                            modalities.values.iter().any(|value| {
-                                matches!(
-                                    value.kind.as_ref(),
-                                    Some(prost_types::value::Kind::StringValue(modality))
-                                        if modality == "image"
-                                )
-                            })
-                        }
-                        _ => false,
-                    })
-            });
+        let mut supported_media = SupportedMedia::default();
+        let supported_inputs =
+            if info.supports_text_input.is_none() && info.supports_token_ids_input.is_none() {
+                None
+            } else {
+                Some(SupportedInputs {
+                    text: info.supports_text_input == Some(true),
+                    token_ids: info.supports_token_ids_input == Some(true),
+                })
+            };
+        if info.supports_multimodal == Some(true)
+            && let Some(prost_types::value::Kind::ListValue(modalities)) = info
+                .extra
+                .as_ref()
+                .and_then(|extra| extra.fields.get("trtllm_supported_modalities"))
+                .and_then(|value| value.kind.as_ref())
+        {
+            for value in &modalities.values {
+                let Some(prost_types::value::Kind::StringValue(modality)) = value.kind.as_ref()
+                else {
+                    continue;
+                };
+                match modality.as_str() {
+                    "image" => supported_media.image = true,
+                    "video" => supported_media.video = true,
+                    "audio" => supported_media.audio = true,
+                    _ => {}
+                }
+            }
+        }
         Ok(ModelInfo {
             limits: ModelLimits {
                 context_length: info.max_context_length.filter(|len| *len > 0),
                 engine_context_length: info.max_context_length.filter(|len| *len > 0),
                 max_output_tokens: info.max_output_tokens.filter(|cap| *cap > 0),
-                supports_image: Some(supports_image),
+                supported_inputs,
+                supported_media: Some(supported_media),
             },
             served_model_name: info.served_model_name,
         })
@@ -389,6 +437,46 @@ fn is_terminal_discovery_error(status: &tonic::Status) -> bool {
 
 pub(crate) fn protocol_error(message: impl Into<String>) -> DynamoError {
     dynamo_sidecar_common::protocol_error("TensorRT-LLM", message)
+}
+
+/// Follows TensorRT-LLM's `liveness` gRPC health until TensorRT-LLM stops
+/// serving, and returns why. Never returns for an engine without `liveness`.
+pub(crate) async fn watch_liveness(channel: Channel, open_timeout: Duration) -> String {
+    let request = HealthCheckRequest {
+        service: "liveness".to_string(),
+    };
+    let mut stream =
+        match tokio::time::timeout(open_timeout, HealthClient::new(channel).watch(request)).await {
+            Ok(Ok(response)) => response.into_inner(),
+            // Images before NVIDIA/TensorRT-LLM#20437 do not serve `liveness`.
+            Ok(Err(status))
+                if matches!(
+                    status.code(),
+                    tonic::Code::NotFound | tonic::Code::Unimplemented
+                ) =>
+            {
+                tracing::warn!(
+                    code = ?status.code(),
+                    "TensorRT-LLM does not serve gRPC liveness health; not watching it"
+                );
+                return std::future::pending().await;
+            }
+            Ok(Err(status)) => return format!("liveness watch failed: {status}"),
+            Err(_) => return format!("liveness watch did not open in {open_timeout:?}"),
+        };
+    loop {
+        match stream.message().await {
+            Ok(Some(response)) => {
+                let status =
+                    ServingStatus::try_from(response.status).unwrap_or(ServingStatus::Unknown);
+                if status != ServingStatus::Serving {
+                    return format!("liveness reported {}", status.as_str_name());
+                }
+            }
+            Ok(None) => return "liveness stream ended".to_string(),
+            Err(status) => return format!("liveness stream failed: {status}"),
+        }
+    }
 }
 
 /// A generation failure the engine reported in-band via an `EngineError` event

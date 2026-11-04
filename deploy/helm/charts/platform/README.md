@@ -261,6 +261,47 @@ sidecar guides.
 **Existing deployments:** No existing workload rolls. Components without a `runtime` init
 container keep running the engine and Dynamo together in `main`.
 
+#### Dependency compatibility
+
+##### Grove v0.2.0-beta1
+
+**Change:** The bundled Grove chart and Go API dependency are now `v0.2.0-beta1`.
+Grove stores resources as `grove.io/v1beta1` and continues serving the
+`grove.io/v1alpha1` API used by Dynamo. The external Grove preflight accepts beta
+release tags and requires the pinned version or later.
+
+**Affected:** All Grove-backed deployments upgrading to Dynamo 1.7.0.
+
+**Action:** Upgrade externally managed Grove and matching CRDs first, with
+`crdInstaller.upgradeCRDs=true`. The platform chart enables this setting for
+bundled Grove, replacing `grove.crdInstaller.enabled`. The API server must be able
+to reach Grove's conversion webhook. With Grove integration enabled, Dynamo's
+alpha informers depend on that webhook to read beta-stored resources. If it is
+unavailable during initial cache synchronization, the shared Dynamo manager can
+fail to start, affecting non-Grove workloads handled by that manager too. After
+startup, failed LIST/WATCH reconnects can leave Grove observations stale while
+cached reads continue to work. This Grove informer dependency does not apply
+when Grove integration is disabled. Read the
+[Grove upgrade and downgrade guide](https://github.com/ai-dynamo/grove/blob/v0.2.0-beta1/docs/user-guide/upgrading-to-v1beta1-v0.2.0-beta1.md)
+before upgrading. Run the downgrade migration back to `v1alpha1` while the
+`v0.2.0-beta1` operator is still running, then roll back to Grove
+`v0.1.0-alpha.16`.
+Earlier CRDs can drop fields written by newer releases.
+
+For bundled Grove, prepare the rollback platform chart with its
+`dynamo.nvidia.com/grove-version` annotation and `grove` dependency pinned to
+`v0.1.0-alpha.16`, then rebuild its dependencies with `helm dependency update`.
+After the migration, deploy that chart with `helm upgrade` to the same release
+and namespace, using saved pre-upgrade values, `global.grove.install=true`, and
+`grove.crdInstaller.enabled=true`. Use client-side apply for this rollback:
+Helm 3 does so by default; with Helm 4, pass `--server-side=false`. Do not roll
+back to an unmodified older platform chart: Dynamo `v1.6.0` bundles `alpha.14`,
+and pre-upgrade `main` bundles `alpha.15`.
+
+**Existing deployments:** Grove converts existing alpha resources without requiring
+manifest changes. An unset clique or scaling-group `scaleConfig.minReplicas` now
+defaults to `minAvailable` rather than `replicas`; existing explicit minima are retained.
+
 ### v1.6.0
 
 #### Runtime Compatibility
@@ -610,7 +651,7 @@ Kubernetes: `>=1.30.0-0`
 | file://components/operator | dynamo-operator | 1.7.0 |
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
-| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.15 |
+| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.2.0-beta1 |
 | oci://ghcr.io/ai-dynamo/snapshot | snapshot | 0.2.0 |
 | oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.17.0 |
 
@@ -645,6 +686,7 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedUpgradeOverride | string | `""` | Target minor (N.M) allowed for an otherwise unsupported forward upgrade. The value is ignored for other target minors and never bypasses other checks. |
 | dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedDowngradeOverride | string | `""` | Target minor (N.M) allowed for an otherwise unsupported downgrade. The value is ignored for other target minors and never bypasses other checks. |
 | dynamo-operator.dgdrV1Beta2.enabled | bool | `false` | EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Serve the unfinished DGDR v1beta2 Request API with conversion and install the Run and Candidate APIs. Run and Candidate objects are persisted in etcd; incompatible schema changes may make them unreadable or block future CRD upgrades. When true, the operator reconciles v1beta2 Requests into Runs and executes each Run as an AISimulate planner Job with a publisher sidecar that persists deployment Candidates. |
+| dynamo-operator.dgdrV1Beta2.plannerLiveRetune | bool | `false` | EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: With dgdrV1Beta2.enabled, grant every Planner ServiceAccount what Planner live retune (retune.executor: dgdr) needs: create, read and delete DGDR v1beta2 Requests, read their Runs and Candidates, and read, create, update and delete any Lease in the namespace. |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication. When empty, the operator uses bundled NATS only if global.nats.install=true; otherwise NATS is not configured. Format: `nats://hostname:4222` |
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: `http://hostname:2379` or `https://hostname:2379` |
 | dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |
@@ -707,7 +749,7 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.checkpoint.enabled | bool | `false` | Whether to enable checkpoint/restore functionality |
 | grove.tolerations | list | `[]` | Node tolerations for Grove pods |
 | grove.affinity | object | `{}` | Affinity for Grove pods |
-| grove.crdInstaller.enabled | bool | `true` | Upgrade Grove CRDs before the bundled operator starts. |
+| grove.crdInstaller.upgradeCRDs | bool | `true` | Upgrade Grove CRDs before the bundled operator starts. |
 | grove.config.server.healthProbes.enable | bool | `true` | Enable Grove's webhook-aware liveness and readiness probes. The readiness endpoint stays false until certificates and the webhook server are ready. |
 | kai-scheduler.global.tolerations | list | `[]` | Node tolerations for kai-scheduler pods |
 | kai-scheduler.global.affinity | object | `{}` | Affinity for kai-scheduler pods |
@@ -781,6 +823,7 @@ For **production environments**, Kai Scheduler and Grove should be installed sep
 | 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.12-rc1 |
 | 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
 | 1.6.x           | >= v0.17.0    | >= v0.1.0-alpha.15 |
+| 1.7.x           | >= v0.17.0    | >= v0.2.0-beta1 |
 
 Upgrade Grove in lockstep with Dynamo while Grove APIs are not stable. See the
 [v1.4.0 upgrade notes](#v140) for the topology API transition and the

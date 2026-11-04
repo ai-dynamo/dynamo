@@ -27,7 +27,7 @@ server. See the [sidecar overview](../README.md) for installation.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
-| Kubernetes multinode tensor parallelism (TP) and attention data parallelism (attention-DP) | Experimental |
+| Kubernetes multinode tensor parallelism (TP) and attention data parallelism (attention-DP) | Yes |
 | Image, video, and audio input | Yes; disaggregated serving is untested |
 
 The sidecar sends a media kind only when the SGLang gRPC server lists it in
@@ -38,6 +38,8 @@ The sidecar sends a media kind only when the SGLang gRPC server lists it in
 > SGLang downloads `http://` and `https://` media URLs itself, from any host by
 > default, including `127.0.0.1` and its own HTTP API. Start SGLang with
 > `--allowed-media-domains` to limit the hosts it fetches.
+
+See [support notes](../SUPPORT_NOTES.md#sglang) for feature restrictions and operational limits.
 
 ## Run locally
 

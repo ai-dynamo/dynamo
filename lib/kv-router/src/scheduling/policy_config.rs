@@ -12,14 +12,11 @@ use thiserror::Error;
 
 use super::config::RouterQueuePolicy;
 use crate::plugins::request_classifier::RawRequestClassifierConfig;
+use crate::plugins::request_classifier::RequestClassifierConfig;
+use crate::plugins::worker_selection::{RawWorkerSelectionConfig, WorkerSelectionConfig};
 use crate::plugins::worker_selection::{WorkerCapacity, WorkerLoadInput};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::WorkerLoadProjection;
-// TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
-pub use crate::plugins::request_classifier::RequestClassifierConfig;
-use crate::plugins::worker_selection::RawWorkerSelectionConfig;
-// TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
-pub use crate::plugins::worker_selection::{WorkerSelectionConfig, WorkerSelectionInstance};
 
 const SYNTHETIC_POLICY_CLASS: &str = "default";
 

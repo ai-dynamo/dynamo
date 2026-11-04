@@ -207,6 +207,13 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) reconcileMissingRun(
 	}
 
 	marker := meta.FindStatusCondition(request.Status.Conditions, nvidiacomv1beta2.DGDRRequestConditionAccepted)
+	if request.Status.ActiveRunRef == nil && marker != nil && marker.ObservedGeneration == request.Generation &&
+		marker.Reason == dgdrReasonInvalidSpec {
+		// The Run CRD rejected this generation's Run; only a new generation can change that.
+		condition := dgdrV1beta2Condition(request, metav1.ConditionFalse, dgdrReasonInvalidSpec, marker.Message)
+		return &condition, ctrl.Result{}, nil
+	}
+
 	markerMatches := request.Status.ActiveRunRef != nil && request.Status.ActiveRunRef.Name == wantName &&
 		marker != nil && marker.ObservedGeneration == request.Generation
 	if markerMatches && (marker.Reason == dgdrReasonRunCreating || marker.Reason == dgdrReasonRunCreated) {
@@ -298,6 +305,17 @@ func (r *DynamoGraphDeploymentRequestV1beta2Reconciler) createReservedRun(
 	original *nvidiacomv1beta2.DynamoGraphDeploymentRequest,
 ) (ctrl.Result, error) {
 	err := r.Create(ctx, run)
+
+	// The Run CRD rejects the frozen spec, such as a trace that reached the Request without
+	// admission. Retrying the same spec cannot succeed, so the reservation is released and the
+	// Request reports the invalid spec until a new generation.
+	if apierrors.IsInvalid(err) {
+		log.FromContext(ctx).Info("Run CRD rejects the Request spec", "reason", err.Error())
+		request.Status.ActiveRunRef = nil
+		meta.SetStatusCondition(&request.Status.Conditions,
+			dgdrV1beta2Condition(request, metav1.ConditionFalse, dgdrReasonInvalidSpec, err.Error()))
+		return ctrl.Result{}, r.patchStatus(ctx, request, original)
+	}
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return ctrl.Result{}, fmt.Errorf("create Run %q: %w", run.Name, err)
 	}
