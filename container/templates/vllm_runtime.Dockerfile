@@ -103,6 +103,7 @@ RUN apt-get update && \
         gpgsm \
         gpgv \
         keyboxd \
+        libgnutls30t64 \
         libssl3t64 \
         openssl && \
     rm -rf /var/lib/apt/lists/*
