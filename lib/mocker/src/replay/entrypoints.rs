@@ -2762,6 +2762,121 @@ mod tests {
         assert_eq!(reuse_ratio, 0.0);
     }
 
+    /// A `CanonicalV1` scope makes offline KV-router replay reproducible: two replays of one trace
+    /// and configuration produce the same canonical report, routing included, for tie-breaking and
+    /// sampling routers in both topologies.
+    #[test]
+    fn canonical_scope_reproduces_kv_router_replay() {
+        use crate::replay::{
+            CanonicalReplayCoverage, CanonicalReplayRecord, ReplayDeterminism, ReplayScope,
+        };
+
+        // Three prefix groups arriving faster than requests finish, so selection sees ties
+        // between idle workers as well as overlap and load.
+        let trace = Trace {
+            block_size: 4,
+            sessions: (0..48u32)
+                .map(|index| SessionTrace {
+                    session_id: format!("request_{index}"),
+                    first_arrival_timestamp_ms: Some(index as f64 * 3.0),
+                    turns: vec![TurnTrace {
+                        input_length: 32,
+                        max_output_tokens: 4 + index as usize % 5,
+                        hash_ids: (0..4)
+                            .map(|block| 100 * (index % 3) + block)
+                            .chain((4..8).map(|block| 1_000 + 8 * index + block))
+                            .collect(),
+                        ..Default::default()
+                    }],
+                })
+                .collect(),
+        };
+        let disagg = OfflineDisaggReplayConfig {
+            num_prefill_workers: 3,
+            num_decode_workers: 3,
+            ..disagg_test_config()
+        };
+        let sla = SlaThresholds {
+            ttft_ms: Some(50.0),
+            itl_ms: Some(10.0),
+            e2e_ms: None,
+        };
+        let capture = ReplayCaptureOptions {
+            capture_per_request: true,
+            ..Default::default()
+        };
+        let canonical_line = |report: &TraceSimulationReport| {
+            let coverage = CanonicalReplayCoverage::from_report(report, capture);
+            let empty = serde_json::json!({});
+            let line = CanonicalReplayRecord::build(report, empty.clone(), &coverage, empty)
+                .unwrap()
+                .into_json_line()
+                .unwrap();
+            String::from_utf8(line).unwrap()
+        };
+
+        for router_temperature in [0.0, 0.5] {
+            let router_config = KvRouterConfig {
+                router_temperature,
+                ..KvRouterConfig::default()
+            };
+            for disaggregated in [false, true] {
+                let replay = |determinism| {
+                    let scope = ReplayScope {
+                        determinism,
+                        ..Default::default()
+                    };
+                    crate::replay::with_replay_scope(scope, || {
+                        if disaggregated {
+                            simulate_loaded_trace_disagg_with_router_mode_and_options(
+                                disagg.clone(),
+                                Some(router_config.clone()),
+                                None,
+                                trace.clone(),
+                                1.0,
+                                ReplayRouterMode::KvRouter,
+                                true,
+                                None,
+                                sla,
+                            )
+                        } else {
+                            simulate_loaded_trace_with_router_mode_and_options(
+                                replay_test_args(),
+                                Some(router_config.clone()),
+                                None,
+                                trace.clone(),
+                                4,
+                                1.0,
+                                ReplayRouterMode::KvRouter,
+                                true,
+                                None,
+                                sla,
+                            )
+                        }
+                    })
+                    .unwrap()
+                    .unwrap()
+                };
+                let label = format!("temperature={router_temperature} disagg={disaggregated}");
+                let first = replay(ReplayDeterminism::CanonicalV1);
+                assert_eq!(first.per_request.len(), 48, "{label}");
+                assert!(first.goodput.is_some(), "{label}");
+                let first_line = canonical_line(&first);
+                assert_eq!(
+                    canonical_line(&replay(ReplayDeterminism::CanonicalV1)),
+                    first_line,
+                    "{label}"
+                );
+                // Outside a canonical scope, request IDs stay random.
+                assert_ne!(
+                    canonical_line(&replay(ReplayDeterminism::Random)),
+                    first_line,
+                    "{label}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn loaded_dynamo_online_trace_preserves_request_metadata_contract() {
         let report = simulate_loaded_trace_live_with_router_mode_and_options(

@@ -36,6 +36,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang._compat import (
     ConfigArgumentMerger,
     add_sglang_cli_compat,
+    kv_events_config_with_dynamo_format,
     resolved_server_args,
     sglang_default_mla_attention_backend,
     sglang_uses_mla_backend,
@@ -902,6 +903,9 @@ async def parse_args(args: list[str]) -> Config:
         gateway_count = effective_gateway_workers(parsed_args, dynamo_config)
         if gateway_count > 1 and parsed_args.tokenizer_worker_num != gateway_count:
             parsed_args.tokenizer_worker_num = gateway_count
+        parsed_args.kv_events_config = kv_events_config_with_dynamo_format(
+            parsed_args.kv_events_config
+        )
         server_args = ServerArgs.from_cli_args(parsed_args)
         _default_cuda_coredump_wait(server_args)
 

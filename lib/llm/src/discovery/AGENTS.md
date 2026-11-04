@@ -72,7 +72,7 @@ availability tradeoff: serving each frontend's admitted incumbent is preferable
 to serving none. Different local winners are expected behavior, not a defect
 to correct with fail-closed withdrawal or a shared election.
 
-Frontend readiness reflects its committed membership. The KV DC Relay evaluates
+Frontend readiness reflects its committed membership. The Pool Relay evaluates
 discovery independently and can remain conservative while a frontend serves its
 incumbent. The shared readiness evaluator guarantees equal answers for equivalent
 input units, not for these different views of conflicting registrations.

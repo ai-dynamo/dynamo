@@ -1,0 +1,24 @@
+{
+  "prompt": "A cat walks across a windowsill.",
+  "model": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+  "input_reference": "https://example.com/reference.png",
+  "seconds": 4,
+  "size": "1280x704",
+  "user": "user-1",
+  "response_format": "url",
+  "output_format": "mp4",
+  "stream": true,
+  "nvext": {
+    "annotations": [
+      "request_id"
+    ],
+    "fps": 24,
+    "num_frames": 97,
+    "negative_prompt": "blurry",
+    "num_inference_steps": 40,
+    "guidance_scale": 5.0,
+    "seed": 7,
+    "boundary_ratio": 0.875,
+    "guidance_scale_2": 3.0
+  }
+}

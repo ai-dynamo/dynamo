@@ -493,7 +493,7 @@ pub(crate) fn start_scheduler_load_publisher(
     replica_sync: bool,
     cancellation_token: CancellationToken,
 ) {
-    if !crate::kv_dc_relay::serving_load_publishing_enabled() {
+    if !crate::pool_relay::serving_load_publishing_enabled() {
         return;
     }
     let group = if replica_sync {
@@ -1128,7 +1128,7 @@ mod tests {
                     ..Default::default()
                 },
                 dynamo_kv_router::WorkerType::Aggregated,
-                dynamo_custom_policy_builtin::default_registry(),
+                dynamo_router_policies::default_registry(),
             )
             .indexer_threads(1)
             .build()

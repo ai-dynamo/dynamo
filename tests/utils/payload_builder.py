@@ -21,6 +21,7 @@ from tests.utils.payloads import (
     DisaggregatedKvRoutingPayload,
     ElasticEPScalePayload,
     EmbeddingPayload,
+    EngineFailurePayload,
     GuidedDecodingChatPayload,
     HttpCancellationPayload,
     ImagesAccountingPayload,
@@ -38,7 +39,10 @@ from tests.utils.payloads import (
     SGLangGenerateCancellationPayload,
     SGLangGenerateRecoveryPayload,
     SGLangMetricsPayload,
+    StopStringChatPayload,
     StreamingChatPayload,
+    StreamingToolCallingChatPayload,
+    ToolCallingChatPayload,
     TRTLLMMetricsPayload,
     VLLMMetricsPayload,
 )
@@ -967,6 +971,61 @@ def chat_logprobs_and_structured_output_payloads(
     return [chat_payload_default(), logprobs, unicode_logprobs, structured]
 
 
+def forced_tool_call_payloads() -> list[BasePayload]:
+    # The question asks for values that the one-value enums forbid, and the named call
+    # forces the tool the question does not need, so only the enforced grammar passes.
+    def tool(name: str, **arguments: str) -> Dict[str, Any]:
+        properties = {
+            key: {"type": "string", "enum": [value]} for key, value in arguments.items()
+        }
+        parameters = {
+            "type": "object",
+            "properties": properties,
+            "required": list(arguments),
+            "additionalProperties": False,
+        }
+        return {
+            "type": "function",
+            "function": {"name": name, "parameters": parameters},
+        }
+
+    weather = {"city": "Paris", "unit": "celsius"}
+    common = {
+        "messages": [
+            {"role": "user", "content": "What is the weather in Tokyo, in fahrenheit?"}
+        ],
+        "parallel_tool_calls": False,
+        "max_tokens": 64,
+        "temperature": 0,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    named = ToolCallingChatPayload(
+        body={
+            **common,
+            "tools": [tool("get_weather", **weather), tool("get_time", timezone="UTC")],
+            "tool_choice": {"type": "function", "function": {"name": "get_time"}},
+        },
+        expected_response=[],
+        expected_log=[],
+        expected_tool_name="get_time",
+        expected_arguments={"timezone": "UTC"},
+    )
+    required = StreamingToolCallingChatPayload(
+        body={
+            **common,
+            "tools": [tool("get_weather", **weather)],
+            "tool_choice": "required",
+            "stream": True,
+        },
+        expected_response=[],
+        expected_log=[],
+        expected_tool_name="get_weather",
+        expected_arguments=weather,
+        expected_finish_reason="tool_calls",
+    )
+    return [named, required]
+
+
 def http_cancellation_payloads(
     metrics: EngineMetrics | None, *, max_tokens: int
 ) -> list[BasePayload]:
@@ -991,6 +1050,54 @@ def http_cancellation_payloads(
             expected_log=[],
             expected_finish_reason="length",
             expected_completion_tokens=4,
+        ),
+    ]
+
+
+def engine_failure_payload(
+    workers: tuple[int, ...], *, max_tokens: int = 1024
+) -> BasePayload:
+    """Stream a chat request and kill the engine serving it; see EngineFailurePayload."""
+    return EngineFailurePayload(
+        body={
+            "messages": [{"role": "user", "content": "Count from one to a thousand."}],
+            "max_tokens": max_tokens,
+            "ignore_eos": True,
+            "temperature": 0,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        },
+        expected_response=[],
+        expected_log=[],
+        workers=workers,
+    )
+
+
+def stop_string_payloads(metrics: EngineMetrics | None) -> list[BasePayload]:
+    """End on a stop string, once keeping it and once trimming it.
+
+    With metrics, the trimming request also checks that the engine stops at
+    the match. It cannot use ignore_eos, which drops stop strings; Qwen3's
+    thinking for this prompt runs past max_tokens instead, so an engine that
+    misses the cancel generates all of them.
+    """
+    body = {
+        "messages": [{"role": "user", "content": "Can you write me a song?"}],
+        "temperature": 0,
+        "stop": ["song"],
+    }
+    return [
+        StopStringChatPayload(
+            body={**body, "max_tokens": 32, "include_stop_str_in_output": True},
+            expected_response=["song"],
+            expected_log=[],
+        ),
+        StopStringChatPayload(
+            body={**body, "max_tokens": 256},
+            expected_response=[],
+            expected_log=[],
+            metrics=metrics,
         ),
     ]
 
