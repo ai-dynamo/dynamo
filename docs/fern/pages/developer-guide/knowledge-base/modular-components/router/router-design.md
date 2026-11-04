@@ -82,7 +82,7 @@ The router uses a cost function that combines cache-aware prefill cost, potentia
    - Lower costs indicate better routing choices
    - `overlap_score_credit` is a finite, nonnegative device-local prefix-overlap credit multiplier
    - `overlap_score_credit_decay_factor` is `1 / (1 + decay * normalized_excess_prefill)`; it is `1` when decay is disabled or the worker has no excess prefill load
-   - `fetchable_blocks` are the prompt blocks a worker could fetch from a peer through a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints), beyond the blocks it holds on device, in host memory, or on disk. The router credits the same source the hint would name, so topology islands apply. The credit lowers only the score; booked prefill still counts these blocks, because a fetch can miss
+   - `fetchable_blocks` are the prompt blocks a worker could fetch from a peer through a [KV fetch hint](topology-aware-kv-transfer.md#kv-fetch-hints), beyond the blocks it holds on device, in host memory, or on disk. Only the [`kvcr` policy](configuration-and-tuning.md#worker-selection-policies) credits them; for the default policy they are `0`. `kvcr` commits each worker to the source the hint would name, so topology islands apply. The credit lowers only the score; booked prefill still counts these blocks, because a fetch can miss
    - The combined cache credit is clamped so adjusted prefill blocks cannot become negative
    - `prefill_load_scale` controls adjusted prompt-side load relative to potential decode blocks
    - `decode_active_request_weight` defaults to `0`; use a positive value only when decode step latency depends materially on active batch size
