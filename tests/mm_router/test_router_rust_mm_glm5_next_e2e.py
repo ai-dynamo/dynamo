@@ -30,17 +30,18 @@ size the worker advertises, so the module reads that size from the frontend's
 metrics and derives the image sizes and every block assertion from it.
 
 Checks, per engine:
-  1. Worker expansion: the router's ``total_blocks`` (planner-expanded prompt)
-     must equal ``ceil(usage.prompt_tokens / block)``, where the engine reports
-     ``prompt_tokens`` after its own placeholder expansion. Per-image token
-     increments must follow GLM geometry.
+  1. Worker expansion, on every request: the router's ``total_blocks``
+     (planner-expanded prompt) must equal ``ceil(usage.prompt_tokens / block)``,
+     where the engine reports ``prompt_tokens`` after its own placeholder
+     expansion. Per-image token increments must follow GLM geometry.
   2. KV-event hash parity: a repeated request matches nearly every block the
      worker published, and the engine reports a prefix-cache hit.
   3. Different-image isolation: a new image on the same prompt matches neither
      at the router nor in the engine's prefix cache.
   4. Multiple images across block boundaries: image runs that straddle block
-     boundaries agree block for block, and swapping the second image
-     invalidates exactly the blocks from the boundary on.
+     boundaries agree block for block, and swapping the second image keeps
+     the first image's blocks and invalidates exactly the blocks from the
+     boundary on.
 
 Hardware: GLM5-Next's DSA layers need sparse MLA attention, which vLLM 0.32
 and SGLang 0.5.22 implement only for Hopper and Blackwell (FlashMLA sparse,
@@ -109,7 +110,7 @@ pytestmark = [
     pytest.mark.multimodal,
     pytest.mark.gpu_1,
     pytest.mark.h100,
-    pytest.mark.model(GLM_MM_MODEL),
+    pytest.mark.model(GLM_MM_MODEL, revision=GLM_MM_REVISION),
 ]
 
 
@@ -130,6 +131,18 @@ class GlmServices:
     block_size: int
     large_image: SquareImage
     small_image: SquareImage
+
+
+@dataclass(frozen=True)
+class RequestObservation:
+    """What the router and the engine reported for one request."""
+
+    label: str
+    overlap_blocks: int
+    total_blocks: int
+    prompt_tokens: int
+    cached_tokens: int | None
+    logs: str
 
 
 def _make_process_env(namespace: str, **extra: str) -> dict[str, str]:
@@ -344,11 +357,15 @@ def _advertised_block_size(frontend_port: int, timeout_s: float = 60.0) -> int:
 def glm_model_path(predownload_models) -> str:
     """Local snapshot of the pinned checkpoint revision.
 
-    The workers load and register this directory, so both engines and the
+    The ``model`` mark carries the revision, so predownload_models caches this
+    snapshot before it turns on HF_HUB_OFFLINE; here it is only looked up. The
+    workers load and register this directory, so both engines and the
     frontend's planner read the same tokenizer, chat template and processor
     config, whatever the repository's default branch holds later.
     """
-    return snapshot_download(repo_id=GLM_MM_MODEL, revision=GLM_MM_REVISION)
+    return snapshot_download(
+        repo_id=GLM_MM_MODEL, revision=GLM_MM_REVISION, local_files_only=True
+    )
 
 
 @pytest.fixture(
@@ -427,17 +444,16 @@ def _build_payload(image_uris: list[str], prompt: str) -> dict[str, Any]:
 
 
 def _send(
-    frontend_port: int,
-    router_proc: ManagedProcess,
-    payload: dict[str, Any],
-    label: str,
-) -> tuple[int, int, dict[str, Any], str]:
-    """Send one request; return router overlap/total, engine usage, and logs."""
+    services: GlmServices, payload: dict[str, Any], label: str
+) -> RequestObservation:
+    """Send one request and return what the router and the engine reported,
+    after checking that both expanded the prompt to the same block count."""
+    router_proc = services.frontend
     pre_request_logs = router_proc.read_logs()
     start_offset = len(pre_request_logs)
     pre_request_record_count = len(extract_router_kv_overlap_records(pre_request_logs))
     resp = requests.post(
-        f"http://localhost:{frontend_port}/v1/chat/completions",
+        f"http://localhost:{services.frontend_port}/v1/chat/completions",
         json=payload,
         timeout=240,
     )
@@ -454,10 +470,19 @@ def _send(
         log_label="frontend",
     )
     print(f"[ROUTER_RUST_MM_GLM] {label}: overlap={overlap}/{total} usage={usage}")
+    observation = RequestObservation(
+        label=label,
+        overlap_blocks=overlap,
+        total_blocks=total,
+        prompt_tokens=_prompt_tokens(label, usage),
+        cached_tokens=_cached_tokens(usage),
+        logs=recent_logs,
+    )
+    _assert_worker_expansion_matches_router(observation, services.block_size)
     # Let the worker's KV events for this request reach the router before the
     # next request is scored against them.
     time.sleep(2)
-    return overlap, total, usage, recent_logs
+    return observation
 
 
 def _prompt_tokens(label: str, usage: dict[str, Any]) -> int:
@@ -473,56 +498,42 @@ def _cached_tokens(usage: dict[str, Any]) -> int | None:
     return details.get("cached_tokens")
 
 
-def _text_only_blocks(
-    frontend_port: int,
-    router_proc: ManagedProcess,
-    prompt: str,
-    block_size: int,
-    label: str,
-) -> int:
+def _text_only_blocks(services: GlmServices, prompt: str, label: str) -> int:
     """Count the full blocks a prompt's text fills before its first image.
 
     Image prompts with the same text share at most the text-only prompt's
     header and text, so only these blocks may match across different images.
     """
-    _, _, usage, _ = _send(
-        frontend_port, router_proc, _build_payload([], prompt), label
-    )
-    return _prompt_tokens(label, usage) // block_size
+    text_only = _send(services, _build_payload([], prompt), label)
+    return text_only.prompt_tokens // services.block_size
 
 
 def _assert_worker_expansion_matches_router(
-    label: str,
-    total_blocks: int,
-    usage: dict[str, Any],
-    recent_logs: str,
-    block_size: int,
-) -> int:
+    observation: RequestObservation, block_size: int
+) -> None:
     """The planner-expanded routing prompt and the engine's expanded prompt
     must cover the same number of blocks."""
-    prompt_tokens = _prompt_tokens(label, usage)
-    expected_blocks = math.ceil(prompt_tokens / block_size)
-    assert total_blocks == expected_blocks, (
-        f"{label}: the router hashed {total_blocks} blocks from the planner-expanded "
-        f"prompt, but the worker reports prompt_tokens={prompt_tokens}, which is "
-        f"{expected_blocks} blocks of {block_size}. The glm5_next planner and the "
-        f"engine processor disagree on image token expansion.\n"
-        f"Recent frontend logs:\n{recent_logs[-4000:]}"
+    expected_blocks = math.ceil(observation.prompt_tokens / block_size)
+    assert observation.total_blocks == expected_blocks, (
+        f"{observation.label}: the router hashed {observation.total_blocks} blocks "
+        f"from the planner-expanded prompt, but the worker reports "
+        f"prompt_tokens={observation.prompt_tokens}, which is {expected_blocks} "
+        f"blocks of {block_size}. The glm5_next planner and the engine processor "
+        f"disagree on image token expansion.\n"
+        f"Recent frontend logs:\n{observation.logs[-4000:]}"
     )
-    return prompt_tokens
 
 
-def _assert_nearly_full_repeat_overlap(
-    label: str, overlap: int, total: int, recent_logs: str
-) -> None:
+def _assert_nearly_full_repeat_overlap(repeat: RequestObservation) -> None:
     """Every full block the worker published must match; only the trailing
     partial block, which the engine never caches, may miss."""
-    min_expected = max(1, total - 1)
-    assert overlap >= min_expected, (
-        f"{label}: expected the repeat to match nearly every cached block, got "
-        f"{overlap}/{total}, expected >= {min_expected}/{total}. The frontend's "
-        f"block hashes do not reproduce the worker's KV events.\n"
-        f"Recent frontend logs:\n{recent_logs[-4000:]}"
+    min_expected = max(1, repeat.total_blocks - 1)
+    assert repeat.overlap_blocks >= min_expected, (
+        f"{repeat.label}: expected the repeat to match nearly every cached block, "
+        f"got {repeat.overlap_blocks}/{repeat.total_blocks}, expected >= "
+        f"{min_expected}/{repeat.total_blocks}. The frontend's block hashes do not "
+        f"reproduce the worker's KV events.\n"
+        f"Recent frontend logs:\n{repeat.logs[-4000:]}"
     )
 
 
@@ -537,59 +548,46 @@ def test_glm_repeated_image_cache_overlap(start_glm_mm_services, predownload_mod
     count, and the repeat hits the worker's KV blocks at the router and in the
     engine's prefix cache."""
     services = start_glm_mm_services
-    frontend_port, router_proc = services.frontend_port, services.frontend
-    block_size = services.block_size
     image = services.large_image
     prompt = "GLM routing e2e: repeated single image."
-    text_blocks = _text_only_blocks(
-        frontend_port, router_proc, prompt, block_size, "single_text_only"
-    )
+    text_blocks = _text_only_blocks(services, prompt, "single_text_only")
     payload = _build_payload([_make_data_uri((201, 17, 99), image.side)], prompt)
 
-    overlap_1, total_1, usage_1, logs_1 = _send(
-        frontend_port, router_proc, payload, "single_req1"
-    )
-    overlap_2, total_2, usage_2, logs_2 = _send(
-        frontend_port, router_proc, payload, "single_req2"
-    )
+    req1 = _send(services, payload, "single_req1")
+    req2 = _send(services, payload, "single_req2")
 
-    prompt_tokens_1 = _assert_worker_expansion_matches_router(
-        "single_req1", total_1, usage_1, logs_1, block_size
-    )
-    _assert_worker_expansion_matches_router(
-        "single_req2", total_2, usage_2, logs_2, block_size
-    )
-    assert prompt_tokens_1 > image.tokens, (
-        f"single_req1: prompt_tokens={prompt_tokens_1} is not larger than the "
+    assert req1.prompt_tokens > image.tokens, (
+        f"single_req1: prompt_tokens={req1.prompt_tokens} is not larger than the "
         f"{image.tokens} image tokens a {image.side}px image expands to; "
         f"the worker did not expand the image placeholder."
     )
-    assert (
-        total_1 == total_2
-    ), f"total blocks changed between repeats: {total_1} -> {total_2}"
+    assert req1.total_blocks == req2.total_blocks, (
+        f"total blocks changed between repeats: "
+        f"{req1.total_blocks} -> {req2.total_blocks}"
+    )
 
-    assert overlap_1 <= text_blocks, (
+    assert req1.overlap_blocks <= text_blocks, (
         f"single_req1: a never-seen image should overlap at most the "
-        f"{text_blocks} text-only block(s), got {overlap_1}/{total_1}.\n"
-        f"Recent frontend logs:\n{logs_1[-4000:]}"
+        f"{text_blocks} text-only block(s), got "
+        f"{req1.overlap_blocks}/{req1.total_blocks}.\n"
+        f"Recent frontend logs:\n{req1.logs[-4000:]}"
     )
-    _assert_nearly_full_repeat_overlap("single_req2", overlap_2, total_2, logs_2)
-    assert overlap_2 > text_blocks, (
+    _assert_nearly_full_repeat_overlap(req2)
+    assert req2.overlap_blocks > text_blocks, (
         f"single_req2: the repeat must match blocks holding image tokens, not just "
-        f"the {text_blocks} text-only block(s), got req1={overlap_1}/{total_1}, "
-        f"req2={overlap_2}/{total_2}"
+        f"the {text_blocks} text-only block(s), got "
+        f"req1={req1.overlap_blocks}/{req1.total_blocks}, "
+        f"req2={req2.overlap_blocks}/{req2.total_blocks}"
     )
 
-    cached_2 = _cached_tokens(usage_2)
-    prompt_tokens_2 = _prompt_tokens("single_req2", usage_2)
-    min_cached = (text_blocks + 1) * block_size
-    assert cached_2 is not None and cached_2 >= min_cached, (
+    min_cached = (text_blocks + 1) * services.block_size
+    assert req2.cached_tokens is not None and req2.cached_tokens >= min_cached, (
         f"single_req2: expected an engine-side prefix-cache hit covering at least "
         f"one block of image tokens ({min_cached} tokens), got "
-        f"cached_tokens={cached_2} of prompt_tokens={prompt_tokens_2}"
+        f"cached_tokens={req2.cached_tokens} of prompt_tokens={req2.prompt_tokens}"
     )
 
-    log_text = router_proc.read_logs()
+    log_text = services.frontend.read_logs()
     assert (
         "MM-aware KV routing enabled" in log_text
     ), "frontend should log MM-routing initialization for the GLM checkpoint"
@@ -600,52 +598,40 @@ def test_glm_different_image_isolation(start_glm_mm_services, predownload_models
     """Same prompt, different image: the warm image keeps its overlap while the
     new image matches neither the router's blocks nor the engine's cache."""
     services = start_glm_mm_services
-    frontend_port, router_proc = services.frontend_port, services.frontend
-    block_size = services.block_size
     side = services.large_image.side
     prompt = "GLM routing e2e: different image isolation."
-    text_blocks = _text_only_blocks(
-        frontend_port, router_proc, prompt, block_size, "isolation_text_only"
-    )
+    text_blocks = _text_only_blocks(services, prompt, "isolation_text_only")
     payload_a = _build_payload([_make_data_uri((11, 22, 33), side)], prompt)
     payload_b = _build_payload([_make_data_uri((222, 111, 200), side)], prompt)
 
-    _send(frontend_port, router_proc, payload_a, "warm_A")
-    overlap_a_repeat, total_a, usage_a, logs_a = _send(
-        frontend_port, router_proc, payload_a, "A_repeat"
-    )
-    overlap_b_cold, total_b, usage_b, logs_b = _send(
-        frontend_port, router_proc, payload_b, "B_cold"
+    _send(services, payload_a, "warm_A")
+    a_repeat = _send(services, payload_a, "A_repeat")
+    b_cold = _send(services, payload_b, "B_cold")
+
+    assert b_cold.total_blocks == a_repeat.total_blocks, (
+        f"same geometry must expand identically, got A={a_repeat.total_blocks}, "
+        f"B={b_cold.total_blocks} blocks"
     )
 
-    _assert_worker_expansion_matches_router(
-        "A_repeat", total_a, usage_a, logs_a, block_size
-    )
-    prompt_tokens_b = _assert_worker_expansion_matches_router(
-        "B_cold", total_b, usage_b, logs_b, block_size
-    )
-    assert (
-        total_b == total_a
-    ), f"same geometry must expand identically, got A={total_a}, B={total_b} blocks"
-
-    _assert_nearly_full_repeat_overlap("A_repeat", overlap_a_repeat, total_a, logs_a)
-    assert overlap_b_cold <= text_blocks, (
+    _assert_nearly_full_repeat_overlap(a_repeat)
+    assert b_cold.overlap_blocks <= text_blocks, (
         f"B_cold: a first-time image must overlap at most the {text_blocks} "
-        f"text-only block(s); got {overlap_b_cold}/{total_b}. The image content is "
-        f"not part of the routing key.\nRecent frontend logs:\n{logs_b[-4000:]}"
+        f"text-only block(s); got {b_cold.overlap_blocks}/{b_cold.total_blocks}. "
+        f"The image content is not part of the routing key.\n"
+        f"Recent frontend logs:\n{b_cold.logs[-4000:]}"
     )
-    assert overlap_a_repeat > overlap_b_cold, (
-        f"warm-A overlap ({overlap_a_repeat}/{total_a}) must exceed cold-B overlap "
-        f"({overlap_b_cold}/{total_b}); equal means image hashes collide"
+    assert a_repeat.overlap_blocks > b_cold.overlap_blocks, (
+        f"warm-A overlap ({a_repeat.overlap_blocks}/{a_repeat.total_blocks}) must "
+        f"exceed cold-B overlap ({b_cold.overlap_blocks}/{b_cold.total_blocks}); "
+        f"equal means image hashes collide"
     )
 
-    cached_b = _cached_tokens(usage_b)
-    max_cached = text_blocks * block_size
-    assert cached_b is not None and cached_b <= max_cached, (
-        f"B_cold: the engine reused {cached_b} of {prompt_tokens_b} prompt tokens "
-        f"for an image it had never seen, more than the {max_cached} text-only "
-        f"tokens; the forwarded mm_hash does not isolate image B from image A in "
-        f"the engine's prefix cache"
+    max_cached = text_blocks * services.block_size
+    assert b_cold.cached_tokens is not None and b_cold.cached_tokens <= max_cached, (
+        f"B_cold: the engine reused {b_cold.cached_tokens} of "
+        f"{b_cold.prompt_tokens} prompt tokens for an image it had never seen, "
+        f"more than the {max_cached} text-only tokens; the forwarded mm_hash does "
+        f"not isolate image B from image A in the engine's prefix cache"
     )
 
 
@@ -655,11 +641,9 @@ def test_glm_multiple_images_across_block_boundaries(
 ):
     """Two images whose token runs straddle block boundaries: per-image
     expansion follows GLM geometry on the worker, repeats agree block for
-    block, and swapping the second image invalidates exactly the blocks after
-    the first image's last full block."""
+    block, and swapping the second image keeps the first image's blocks and
+    invalidates exactly the blocks after the first image's last full block."""
     services = start_glm_mm_services
-    frontend_port, router_proc = services.frontend_port, services.frontend
-    block_size = services.block_size
     large, small = services.large_image, services.small_image
     prompt = "GLM routing e2e: multiple images across block boundaries."
     image_a = _make_data_uri((17, 99, 201), large.side)
@@ -671,92 +655,73 @@ def test_glm_multiple_images_across_block_boundaries(
     payload_ac = _build_payload([image_a, image_c], prompt)
     payload_aa = _build_payload([image_a, image_a], prompt)
 
-    _, total_text, usage_text, logs_text = _send(
-        frontend_port, router_proc, payload_text, "text_only"
-    )
-    _, total_a1, usage_a1, logs_a1 = _send(
-        frontend_port, router_proc, payload_a, "A_cold"
-    )
-    overlap_a2, total_a2, usage_a2, logs_a2 = _send(
-        frontend_port, router_proc, payload_a, "A_repeat"
-    )
-    _, total_ab1, usage_ab1, logs_ab1 = _send(
-        frontend_port, router_proc, payload_ab, "AB_cold"
-    )
-    overlap_ab2, total_ab2, usage_ab2, logs_ab2 = _send(
-        frontend_port, router_proc, payload_ab, "AB_repeat"
-    )
-    overlap_ac, total_ac, usage_ac, logs_ac = _send(
-        frontend_port, router_proc, payload_ac, "AC_cold"
-    )
-    _, total_aa, usage_aa, logs_aa = _send(
-        frontend_port, router_proc, payload_aa, "AA_cold"
-    )
-
-    # Worker expansion: every request's engine token count covers exactly the
-    # blocks the router hashed from the planner's expansion.
-    tokens_text = _assert_worker_expansion_matches_router(
-        "text_only", total_text, usage_text, logs_text, block_size
-    )
-    tokens_a = _assert_worker_expansion_matches_router(
-        "A_cold", total_a1, usage_a1, logs_a1, block_size
-    )
-    _assert_worker_expansion_matches_router(
-        "A_repeat", total_a2, usage_a2, logs_a2, block_size
-    )
-    tokens_ab = _assert_worker_expansion_matches_router(
-        "AB_cold", total_ab1, usage_ab1, logs_ab1, block_size
-    )
-    _assert_worker_expansion_matches_router(
-        "AB_repeat", total_ab2, usage_ab2, logs_ab2, block_size
-    )
-    tokens_ac = _assert_worker_expansion_matches_router(
-        "AC_cold", total_ac, usage_ac, logs_ac, block_size
-    )
-    tokens_aa = _assert_worker_expansion_matches_router(
-        "AA_cold", total_aa, usage_aa, logs_aa, block_size
-    )
+    # _send checks every request's engine token count against the blocks the
+    # router hashed from the planner's expansion.
+    text_only = _send(services, payload_text, "text_only")
+    a_cold = _send(services, payload_a, "A_cold")
+    a_repeat = _send(services, payload_a, "A_repeat")
+    ab_cold = _send(services, payload_ab, "AB_cold")
+    ab_repeat = _send(services, payload_ab, "AB_repeat")
+    ac_cold = _send(services, payload_ac, "AC_cold")
+    aa_cold = _send(services, payload_aa, "AA_cold")
+    text_blocks = text_only.prompt_tokens // services.block_size
 
     # Each image adds its geometry's token count plus the template delimiters,
     # measured entirely on the engine side.
     large_increment = large.tokens + IMAGE_DELIMITER_TOKENS
     small_increment = small.tokens + IMAGE_DELIMITER_TOKENS
-    assert tokens_a - tokens_text == large_increment, (
-        f"one {large.side}px image added {tokens_a - tokens_text} prompt tokens "
-        f"on the worker, expected {large_increment}"
+    added_a = a_cold.prompt_tokens - text_only.prompt_tokens
+    added_b = ab_cold.prompt_tokens - a_cold.prompt_tokens
+    added_second_a = aa_cold.prompt_tokens - a_cold.prompt_tokens
+    assert added_a == large_increment, (
+        f"one {large.side}px image added {added_a} prompt tokens on the worker, "
+        f"expected {large_increment}"
     )
-    assert tokens_ab - tokens_a == small_increment, (
-        f"appending a {small.side}px image added {tokens_ab - tokens_a} prompt "
-        f"tokens on the worker, expected {small_increment}"
+    assert added_b == small_increment, (
+        f"appending a {small.side}px image added {added_b} prompt tokens on the "
+        f"worker, expected {small_increment}"
     )
-    assert tokens_aa - tokens_a == large_increment, (
-        f"appending a second {large.side}px image added {tokens_aa - tokens_a} "
-        f"prompt tokens on the worker, expected {large_increment}"
+    assert added_second_a == large_increment, (
+        f"appending a second {large.side}px image added {added_second_a} prompt "
+        f"tokens on the worker, expected {large_increment}"
     )
-    assert tokens_ac == tokens_ab, (
+    assert ac_cold.prompt_tokens == ab_cold.prompt_tokens, (
         f"same geometry, different content must expand identically, got "
-        f"AB={tokens_ab}, AC={tokens_ac}"
+        f"AB={ab_cold.prompt_tokens}, AC={ac_cold.prompt_tokens}"
     )
 
     # KV-event hash parity across both image runs and the boundary they share.
-    _assert_nearly_full_repeat_overlap("A_repeat", overlap_a2, total_a2, logs_a2)
-    _assert_nearly_full_repeat_overlap("AB_repeat", overlap_ab2, total_ab2, logs_ab2)
+    _assert_nearly_full_repeat_overlap(a_repeat)
+    _assert_nearly_full_repeat_overlap(ab_repeat)
 
     # A then C shares header, text, image A and C's opening delimiter with the
     # cached A-then-B prompt. Blocks wholly inside that prefix must match; the
     # block where C's tokens begin must not, and nothing after it may either.
+    # Image A is longer than a block, so that prefix fills at least one block
+    # past the text-only prompt's: C must keep image A's cached blocks.
+    assert ac_cold.overlap_blocks > text_blocks, (
+        f"AC_cold: swapping the second image must keep the first image's cached "
+        f"blocks, got {ac_cold.overlap_blocks}/{ac_cold.total_blocks}, no more than "
+        f"the {text_blocks} text-only block(s) (A repeat matched "
+        f"{a_repeat.overlap_blocks}/{a_repeat.total_blocks}).\n"
+        f"Recent frontend logs:\n{ac_cold.logs[-4000:]}"
+    )
     # Image A's cached blocks bound the match: at most all of them, at least
     # all but the one that in the single-image prompt held the suffix instead.
-    assert overlap_a2 - 1 <= overlap_ac <= overlap_a2, (
+    min_overlap_ac = a_repeat.overlap_blocks - 1
+    max_overlap_ac = a_repeat.overlap_blocks
+    assert min_overlap_ac <= ac_cold.overlap_blocks <= max_overlap_ac, (
         f"AC_cold: expected the overlap to stop at image A's last full block, "
-        f"within [{overlap_a2 - 1}, {overlap_a2}], got {overlap_ac}/{total_ac} "
-        f"(A repeat matched {overlap_a2}/{total_a2}).\n"
-        f"Recent frontend logs:\n{logs_ac[-4000:]}"
+        f"within [{min_overlap_ac}, {max_overlap_ac}], got "
+        f"{ac_cold.overlap_blocks}/{ac_cold.total_blocks} (A repeat matched "
+        f"{a_repeat.overlap_blocks}/{a_repeat.total_blocks}).\n"
+        f"Recent frontend logs:\n{ac_cold.logs[-4000:]}"
     )
     # The second image is longer than a block, so the cached A-then-B prompt
     # holds at least one full block past that boundary for C to miss.
-    assert overlap_ac < overlap_ab2, (
+    assert ac_cold.overlap_blocks < ab_repeat.overlap_blocks, (
         f"AC_cold: swapping the second image must lose overlap versus the AB repeat, "
-        f"got AC={overlap_ac}/{total_ac}, AB repeat={overlap_ab2}/{total_ab2}; the "
-        f"second image's content is not part of its blocks' routing keys"
+        f"got AC={ac_cold.overlap_blocks}/{ac_cold.total_blocks}, AB repeat="
+        f"{ab_repeat.overlap_blocks}/{ab_repeat.total_blocks}; the second image's "
+        f"content is not part of its blocks' routing keys"
     )
