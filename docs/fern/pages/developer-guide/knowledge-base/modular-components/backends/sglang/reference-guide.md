@@ -198,8 +198,10 @@ SGLang's `pause_generation`, abort requests, or stop the engine.
 
 Configure frontend recovery separately from endpoint availability. Set
 `--migration-limit-draining D` or `DYN_MIGRATION_LIMIT_DRAINING=D` on the frontend.
-For a pre-execution `backend.worker_draining` rejection before response data starts,
-the retry limit is `max(M, D)`, where `M` is `--migration-limit`.
+For a pre-execution drain rejection before response data starts, the retry limit is
+`max(M, D)`, where `M` is `--migration-limit`. Workers keep the known
+`backend.worker_unavailable` wire reason and add `retry_hint: "draining"`; the Python
+exception remains `WorkerDraining`.
 Replacement attempts share one count; the initial dispatch does not count.
 Ordinary errors remain limited to `M`. Omitted and explicit `D=0` both add no drain
 allowance beyond `M`.
@@ -230,10 +232,14 @@ request state. At a capacity of 128 Ki tokens and 1,024 waiting requests, that i
 512 MiB. This is a sizing example, not measured RSS growth; model limits and actual
 concurrency determine the budget. Other owners may already retain these buffers.
 
-Upgrade frontends to a revision supporting `backend.worker_draining` before
-upgrading workers. New workers can return this reason during ordinary SIGTERM
-shutdown even without a system listener or an `unpublish` call. Older frontends,
-including v1.6.0, may reject the reason instead of migrating the request.
+Frontends that already recognize `WorkerUnavailable`, including v1.6.0, ignore
+the optional hint and retain ordinary recovery under `M`, including during
+SIGTERM without a system listener. New frontends apply drain accounting only
+when the hint accompanies the validated
+worker-unavailable error identity. An absent or unknown hint keeps ordinary
+behavior. Rejections from older workers without the hint use only the ordinary
+allowance. The hint does not bypass response-data, explicit-target, or replay
+eligibility checks.
 
 Use the selected worker's system listener directly, rather than a load-balanced
 Service. The listener follows the existing engine-control network boundary; keep

@@ -123,6 +123,10 @@ class DistributedRuntime:
         """
         ...
 
+    def system_status_server_url(self) -> Optional[str]:
+        """Return the system listener URL, or None when it is disabled."""
+        ...
+
     def register_engine_http_handler(
         self,
         name: str,

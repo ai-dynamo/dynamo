@@ -11,7 +11,7 @@
 //! corresponding entry to the macro invocation below to keep Python exceptions
 //! in sync.
 
-use dynamo_runtime::error::{BackendError, DynamoError, ErrorClass, ErrorReason};
+use dynamo_runtime::error::{BackendError, DynamoError, ErrorClass, RetryHint};
 use dynamo_runtime::protocols::annotated::Annotated;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
@@ -64,7 +64,7 @@ fn is_worker_draining(error: &(dyn std::error::Error + 'static)) -> bool {
     while let Some(cause) = current {
         if cause
             .downcast_ref::<DynamoError>()
-            .is_some_and(|error| error.reason().as_str() == "backend.worker_draining")
+            .is_some_and(|error| error.retry_hint() == Some(RetryHint::Draining))
         {
             return true;
         }
@@ -102,7 +102,7 @@ pub(crate) fn worker_unavailable_to_dynamo(py: Python<'_>, err: &PyErr) -> Optio
         .class(ErrorClass::WorkerUnavailable)
         .message(message);
     if err.is_instance_of::<WorkerDraining>(py) {
-        error = error.reason(ErrorReason::new("backend.worker_draining").ok()?);
+        error = error.retry_hint(RetryHint::Draining);
     }
     Some(error.build())
 }
@@ -361,7 +361,7 @@ mod tests {
     fn worker_draining_remains_distinct_through_error_context() {
         let rejection = DynamoError::builder()
             .class(ErrorClass::WorkerUnavailable)
-            .reason(ErrorReason::new("backend.worker_draining").unwrap())
+            .retry_hint(RetryHint::Draining)
             .message("worker closed admission")
             .build();
         assert_eq!(rejection.class(), ErrorClass::Unavailable);

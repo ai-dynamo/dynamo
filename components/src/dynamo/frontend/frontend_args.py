@@ -823,6 +823,7 @@ class FrontendArgGroup(ArgGroup):
                 "instead of a 200 followed by an error event. The status is set by "
                 "--reject-media-status-code."
             ),
+            env=self.env,
         )
         add_argument(
             g,
@@ -835,6 +836,7 @@ class FrontendArgGroup(ArgGroup):
                 "to send these requests to a multimodal model."
             ),
             arg_type=int,
+            env=self.env,
         )
         add_negatable_bool_argument(
             g,

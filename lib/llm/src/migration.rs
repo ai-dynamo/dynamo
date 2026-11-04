@@ -27,7 +27,7 @@ use crate::{
 use dynamo_kv_router::plugins::request_classifier::AbortCause;
 use dynamo_protocols::types::CompletionUsage;
 use dynamo_runtime::engine::Data;
-use dynamo_runtime::error::{self, DynamoError, ErrorReason, ErrorType};
+use dynamo_runtime::error::{self, DynamoError, ErrorReason, ErrorType, RetryHint};
 use dynamo_runtime::metrics::prometheus_names::frontend_service;
 use dynamo_runtime::pipeline::{
     AsyncEngineContext, AsyncEngineContextProvider, Context, ManyOut, Operator, PipelineOperator,
@@ -113,7 +113,6 @@ fn is_migration_eligible(reason: &ErrorReason) -> bool {
             | "backend.engine_shutdown"
             | "backend.stream_incomplete"
             | "backend.worker_unavailable"
-            | "backend.worker_draining"
             | "capacity.worker_overloaded"
     )
 }
@@ -158,7 +157,7 @@ fn worker_draining_error<'a>(err: &'a (dyn StdError + 'static)) -> Option<&'a Dy
             if blocks_migration(error.reason()) {
                 return None;
             }
-            if error.reason().as_str() == "backend.worker_draining" {
+            if error.retry_hint() == Some(RetryHint::Draining) {
                 draining = Some(error);
             }
         }
@@ -1450,7 +1449,7 @@ mod tests {
             streamed: bool,
         },
         AdmissionRejections {
-            draining: Vec<bool>,
+            retry_hints: Vec<Option<&'static str>>,
             streamed: bool,
         },
         /// Succeeds initially, fails mid-stream with specific error, then succeeds on retry
@@ -1671,7 +1670,7 @@ mod tests {
                     if call_num < *rejected {
                         let error = DynamoError::builder()
                             .class(ErrorType::WorkerUnavailable)
-                            .reason(ErrorReason::new("backend.worker_draining").unwrap())
+                            .retry_hint(RetryHint::Draining)
                             .message("worker closed admission")
                             .build();
                         if !streamed {
@@ -1699,16 +1698,13 @@ mod tests {
                     }
                     let error = DynamoError::builder()
                         .class(ErrorType::WorkerUnavailable)
-                        .reason(
-                            ErrorReason::new(if call_num == 0 {
-                                "backend.disconnected"
-                            } else {
-                                "backend.worker_draining"
-                            })
-                            .unwrap(),
-                        )
-                        .message("worker unavailable")
-                        .build();
+                        .message("worker unavailable");
+                    let error = if call_num == 0 {
+                        error.reason(ErrorReason::new("backend.disconnected").unwrap())
+                    } else {
+                        error.retry_hint(RetryHint::Draining)
+                    }
+                    .build();
                     if call_num == 1 && !streamed {
                         return Err(error.into());
                     }
@@ -1722,21 +1718,22 @@ mod tests {
                         Arc::new(Controller::new(self.context_id.clone())),
                     ))
                 }
-                MockBehavior::AdmissionRejections { draining, streamed } => {
+                MockBehavior::AdmissionRejections {
+                    retry_hints,
+                    streamed,
+                } => {
                     assert_eq!(preprocessed_request.token_ids.as_slice(), &[1, 2, 3]);
-                    if let Some(&is_draining) = draining.get(call_num as usize) {
-                        let error = DynamoError::builder()
-                            .class(ErrorType::WorkerUnavailable)
-                            .reason(
-                                ErrorReason::new(if is_draining {
-                                    "backend.worker_draining"
-                                } else {
-                                    "backend.worker_unavailable"
-                                })
-                                .unwrap(),
-                            )
-                            .message("worker rejected request")
-                            .build();
+                    if let Some(hint) = retry_hints.get(call_num as usize) {
+                        let mut wire = serde_json::json!({
+                            "error_type": "WorkerUnavailable",
+                            "class": "Unavailable",
+                            "reason": "backend.worker_unavailable",
+                            "message": "worker rejected request",
+                        });
+                        if let Some(hint) = hint {
+                            wire["retry_hint"] = serde_json::json!(hint);
+                        }
+                        let error: DynamoError = serde_json::from_value(wire).unwrap();
                         if !streamed {
                             return Err(error.into());
                         }
@@ -2413,22 +2410,25 @@ mod tests {
 
     #[tokio::test]
     async fn draining_policy_accounts_for_mixed_failures() {
+        let drain = Some("draining");
         for streamed in [false, true] {
             for (ordinary, draining, failures, expected_calls, success) in [
-                (0, Some(0), vec![true], 1, false),
-                (0, Some(3), vec![true; 3], 4, true),
-                (0, Some(3), vec![false], 1, false),
-                (2, None, vec![true; 2], 3, true),
-                (2, Some(0), vec![true; 2], 3, true),
-                (5, Some(2), vec![true; 5], 6, true),
-                (2, Some(5), vec![true; 6], 6, false),
-                (2, Some(5), vec![false, false, true, true, true], 6, true),
-                (2, Some(5), vec![true, true, true, false], 4, false),
+                (0, Some(0), vec![drain], 1, false),
+                (0, Some(3), vec![drain; 3], 4, true),
+                (0, Some(3), vec![None], 1, false),
+                (2, Some(5), vec![None; 2], 3, true),
+                (2, Some(5), vec![Some("unknown"); 3], 3, false),
+                (2, None, vec![drain; 2], 3, true),
+                (2, Some(0), vec![drain; 2], 3, true),
+                (5, Some(2), vec![drain; 5], 6, true),
+                (2, Some(5), vec![drain; 6], 6, false),
+                (2, Some(5), vec![None, None, drain, drain, drain], 6, true),
+                (2, Some(5), vec![drain, drain, drain, None], 4, false),
             ] {
                 let context_id = uuid::Uuid::new_v4().to_string();
                 let engine = Arc::new(MockEngine::new(
                     MockBehavior::AdmissionRejections {
-                        draining: failures,
+                        retry_hints: failures,
                         streamed,
                     },
                     1,
@@ -2475,7 +2475,7 @@ mod tests {
             let context_id = uuid::Uuid::new_v4().to_string();
             let engine = Arc::new(MockEngine::new(
                 MockBehavior::AdmissionRejections {
-                    draining: vec![true],
+                    retry_hints: vec![Some("draining")],
                     streamed,
                 },
                 1,
