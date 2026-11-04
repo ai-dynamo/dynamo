@@ -30,10 +30,6 @@ provider_logos:
     asset: docs/fern/assets/img/recipes/providers/inclusionai.webp
     source: https://cdn-avatars.huggingface.co/v1/production/uploads/662e1f9da266499277937d33/fyKuazRifqiaIO34xrhhm.jpeg
     organization_metadata: https://huggingface.co/api/organizations/inclusionAI/overview
-  Wan-AI:
-    asset: docs/fern/assets/img/recipes/providers/wan-ai.webp
-    source: https://cdn-avatars.huggingface.co/v1/production/uploads/67b610677ea7952def8b29c6/N6jQbbeaa_FcUY-wI1dgG.png
-    organization_metadata: https://huggingface.co/api/organizations/Wan-AI/overview
 models:
   Qwen/Qwen-Image:
     revision: 75e0b4be04f60ec59a75f475837eced720f823b6
@@ -63,35 +59,6 @@ models:
     files:
       model.safetensors: 3833402552
       speech_tokenizer/model.safetensors: 682293092
-  Wan-AI/Wan2.1-T2V-1.3B-Diffusers:
-    revision: 0fad780a534b6463e45facd96134c9f345acfa5b
-    source: https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers/tree/0fad780a534b6463e45facd96134c9f345acfa5b
-    size_bytes: 28907334284
-    size_gb: 28.9
-    files:
-      text_encoder/model-00001-of-00005.safetensors: 4972389712
-      text_encoder/model-00002-of-00005.safetensors: 4899225672
-      text_encoder/model-00003-of-00005.safetensors: 4966309504
-      text_encoder/model-00004-of-00005.safetensors: 4999880704
-      text_encoder/model-00005-of-00005.safetensors: 2885866152
-      transformer/diffusion_pytorch_model-00001-of-00002.safetensors: 4998781576
-      transformer/diffusion_pytorch_model-00002-of-00002.safetensors: 677289072
-      vae/diffusion_pytorch_model.safetensors: 507591892
-  Wan-AI/Wan2.2-TI2V-5B-Diffusers:
-    revision: b8fff7315c768468a5333511427288870b2e9635
-    source: https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/tree/b8fff7315c768468a5333511427288870b2e9635
-    size_bytes: 34179863648
-    size_gb: 34.2
-    files:
-      text_encoder/model-00001-of-00003.safetensors: 4935812536
-      text_encoder/model-00002-of-00003.safetensors: 4983103192
-      text_encoder/model-00003-of-00003.safetensors: 1442935480
-      transformer/diffusion_pytorch_model-00001-of-00005.safetensors: 4978254344
-      transformer/diffusion_pytorch_model-00002-of-00005.safetensors: 4846784976
-      transformer/diffusion_pytorch_model-00003-of-00005.safetensors: 4972658392
-      transformer/diffusion_pytorch_model-00004-of-00005.safetensors: 4846785080
-      transformer/diffusion_pytorch_model-00005-of-00005.safetensors: 354751840
-      vae/diffusion_pytorch_model.safetensors: 2818777808
   black-forest-labs/FLUX.1-schnell:
     revision: 741f7c3ce8b383c54771c7003378a50191e9efe9
     source: https://huggingface.co/black-forest-labs/FLUX.1-schnell/tree/741f7c3ce8b383c54771c7003378a50191e9efe9
