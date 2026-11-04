@@ -3607,7 +3607,9 @@ mod tests {
 
     #[tokio::test]
     async fn client_availability_distinguishes_startup_from_last_worker_removal() {
-        use dynamo_kv_router::scheduling::{RoutingEligibility, WorkerEligibilityError};
+        use dynamo_kv_router::scheduling::{
+            RoutingEligibility, WorkerEligibilityError, WorkerIdSet,
+        };
 
         const DECODE_WORKER: u64 = 1;
         const PREFILL_WORKER: u64 = 2;
@@ -3634,9 +3636,10 @@ mod tests {
         ]);
         let constraints = RoutingConstraints::default();
         let validate = |available: &HashSet<u64>, worker: u64| {
+            let available: WorkerIdSet = available.iter().copied().collect();
             let pinned = WorkerWithDpRank::from_worker_id(worker);
             RoutingEligibility::new(None, None, Some(pinned), &constraints)
-                .with_available_workers(Some(available))
+                .with_available_workers(Some(&available))
                 .validate_worker_rank(&workers, pinned)
                 .map(|_| ())
         };
