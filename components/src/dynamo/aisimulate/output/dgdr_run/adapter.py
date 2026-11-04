@@ -198,6 +198,14 @@ def _pareto_dominates(
     return strictly_better
 
 
+def _capped_from_front(
+    front: dict[str, "_Retained"], max_candidates: int
+) -> dict[str, "_Retained"]:
+    """Return a rank-ordered bounded subset of a full Pareto front."""
+    ordered = sorted(front.values(), key=lambda r: r.rank_key)
+    return {r.id: r for r in ordered[:max_candidates]}
+
+
 @dataclass(frozen=True)
 class _Retained:
     """One retained point: immutable evaluation facts, no rendering."""
@@ -453,38 +461,42 @@ class DGDRRunOutputAdapter:
             self._evaluated += 1
             # First observation wins: an evaluated point is immutable, so a
             # re-evaluation of the same point never changes what was published.
-            if retained is not None and retained.id not in self._retained:
+            # For Pareto mode, _live_pareto_front tracks the full unbounded front;
+            # a point capped out of _retained may still be in _live_pareto_front.
+            already_seen = retained is not None and (
+                retained.id in self._retained or retained.id in self._live_pareto_front
+            )
+            if retained is not None and not already_seen:
                 if self._is_pareto and self._pareto_objectives:
                     new_obj = retained.metrics.get("objectives") or {}
-                    if new_obj and any(
+                    if not new_obj:
+                        # No objectives vector; this point will be incorporated via on_round().
+                        pass
+                    elif any(
                         _pareto_dominates(
                             ex.metrics.get("objectives") or {},
                             new_obj,
                             self._pareto_objectives,
                         )
-                        for ex in self._retained.values()
+                        for ex in self._live_pareto_front.values()
                         if ex.metrics.get("objectives")
                     ):
-                        pass  # dominated by an existing retained point; excluded
+                        pass  # dominated by a known full-front member; excluded
                     else:
-                        if new_obj:
-                            # Evict any existing retained points now dominated by the new one.
-                            dominated = [
-                                eid
-                                for eid, ex in self._retained.items()
-                                if (exobj := ex.metrics.get("objectives") or {})
-                                and _pareto_dominates(
-                                    new_obj, exobj, self._pareto_objectives
-                                )
-                            ]
-                            for eid in dominated:
-                                del self._retained[eid]
-                        self._retained[retained.id] = retained
-                        if len(self._retained) > self._max_candidates:
-                            worst = max(
-                                self._retained.values(), key=lambda r: r.rank_key
-                            )
-                            del self._retained[worst.id]
+                        # Remove any full-front members now dominated by the new candidate,
+                        # then add it and rederive the capped publication set from the full front.
+                        dominated = [
+                            eid
+                            for eid, ex in self._live_pareto_front.items()
+                            if (exobj := ex.metrics.get("objectives") or {})
+                            and _pareto_dominates(new_obj, exobj, self._pareto_objectives)
+                        ]
+                        for eid in dominated:
+                            del self._live_pareto_front[eid]
+                        self._live_pareto_front[retained.id] = retained
+                        self._retained = _capped_from_front(
+                            self._live_pareto_front, self._max_candidates
+                        )
                 else:
                     self._retained[retained.id] = retained
                     if len(self._retained) > self._max_candidates:

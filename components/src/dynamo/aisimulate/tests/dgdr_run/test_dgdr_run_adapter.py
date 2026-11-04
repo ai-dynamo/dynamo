@@ -1303,6 +1303,115 @@ def test_pareto_on_candidate_does_not_publish_dominated_points_between_rounds(
     adapter.close()
 
 
+def test_pareto_on_candidate_uses_full_front_for_dominance_across_cap(
+    tmp_path: Path,
+    renders: list[str],
+) -> None:
+    """Dominance checks must use the full Pareto front, not only the capped publication set.
+
+    With max_candidates=2 and a 3-point round-1 front {A,B,C}, C is cap-evicted from
+    _retained but remains on the full front.  A new candidate E dominated by the unselected
+    C must be excluded, not admitted because C is absent from _retained.
+
+    Sequence (both objectives maximize; score == throughput_per_gpu):
+      Round 1: A=(100,10), B=(90,20), C=(80,100) — full front {A,B,C}, retained={A,B}
+      D=(110,30) arrives  — dominates A and B; front becomes {C,D}, retained={D,C}
+      E=(70,90) arrives   — dominated by C=(80,100); must be excluded
+    """
+    from aisimulate.sweeper.config import OptimizationTarget
+
+    pareto_objectives = [
+        OptimizationTarget.THROUGHPUT_PER_GPU,
+        OptimizationTarget.THROUGHPUT_PER_USER,
+    ]
+    adapter = DGDRRunOutputAdapter(
+        make_config(tmp_path, max_candidates=2, is_pareto=True),
+        workload=None,
+        pareto_objectives=pareto_objectives,
+    )
+    adapter.start()
+
+    def oc(tag: str, tpg: float, tpu: float) -> None:
+        adapter.on_candidate(
+            record(tag, tpg, objectives={"throughput_per_gpu": tpg, "throughput_per_user": tpu})
+        )
+
+    # Establish 3-point front via on_candidate; with max_candidates=2, C is cap-evicted
+    # from _retained but must remain in _live_pareto_front.
+    oc("A", 100.0, 10.0)
+    oc("B", 90.0, 20.0)
+    oc("C", 80.0, 100.0)
+    wait_for(lambda: load(tmp_path)["progress"]["evaluated"] >= 3)
+
+    # D dominates A and B but not C.
+    oc("D", 110.0, 30.0)
+    wait_for(lambda: load(tmp_path)["progress"]["evaluated"] >= 4)
+    after_d = load(tmp_path)
+    assert "D" in tags(after_d), "D must enter the live front"
+    assert "A" not in tags(after_d), "A is dominated by D"
+    assert "B" not in tags(after_d), "B is dominated by D"
+
+    # E is dominated by C=(80,100); C is on the full front but was cap-evicted from
+    # _retained after round 1.  With the full-front check, E must be excluded.
+    oc("E", 70.0, 90.0)
+    wait_for(lambda: load(tmp_path)["progress"]["evaluated"] >= 5)
+    after_e = load(tmp_path)
+    assert "E" not in tags(after_e), (
+        "E is dominated by C=(80,100) which is on the full front; "
+        "it must not appear even though C was cap-evicted from _retained"
+    )
+    assert "C" in tags(after_e), "C must remain in the capped publication set"
+    assert "D" in tags(after_e), "D must remain in the capped publication set"
+
+    adapter.close()
+
+
+def test_pareto_between_round_front_growth_updates_pareto_count(
+    tmp_path: Path,
+    renders: list[str],
+) -> None:
+    """paretoFront must reflect newly arrived non-dominated candidates before on_round fires.
+
+    After round 1 establishes A=(100,10), a non-dominated C=(80,100) arrives via
+    on_candidate.  The live snapshot must immediately report paretoFront=2 and include
+    both A and C, without waiting for on_round().
+    """
+    from aisimulate.sweeper.config import OptimizationTarget
+
+    pareto_objectives = [
+        OptimizationTarget.THROUGHPUT_PER_GPU,
+        OptimizationTarget.THROUGHPUT_PER_USER,
+    ]
+    adapter = DGDRRunOutputAdapter(
+        make_config(tmp_path, max_candidates=3, is_pareto=True),
+        workload=None,
+        pareto_objectives=pareto_objectives,
+    )
+    adapter.start()
+
+    # First candidate establishes a 1-point front.
+    adapter.on_candidate(
+        record("A", 100.0, objectives={"throughput_per_gpu": 100.0, "throughput_per_user": 10.0})
+    )
+    wait_for(lambda: load(tmp_path)["progress"]["evaluated"] >= 1)
+
+    # Non-dominated C arrives; no on_round has fired yet.
+    adapter.on_candidate(
+        record("C", 80.0, objectives={"throughput_per_gpu": 80.0, "throughput_per_user": 100.0})
+    )
+    wait_for(lambda: load(tmp_path)["progress"]["evaluated"] >= 2)
+    snapshot = load(tmp_path)
+    assert tags(snapshot) == sorted(["A", "C"]) or set(tags(snapshot)) == {"A", "C"}, (
+        "both A and C must be in the live snapshot before on_round fires"
+    )
+    assert snapshot["progress"].get("paretoFront") == 2, (
+        "paretoFront must be 2 immediately after a non-dominated candidate arrives, "
+        "not deferred until on_round"
+    )
+
+    adapter.close()
+
+
 def test_subscribe_with_pareto_objectives_in_config_enables_live_selection(
     tmp_path: Path,
     renders: list[str],
