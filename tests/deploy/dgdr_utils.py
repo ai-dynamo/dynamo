@@ -530,11 +530,12 @@ class ManagedDGDR:
     ) -> None:
         """Delete evicted DGD Pods so Grove recreates them.
 
-        Grove v0.1.0-alpha.15 counts Failed Pods against PodClique replicas and
-        never replaces them, so a Pod the kubelet rejects under DiskPressure
-        keeps the DGDR in Deploying until the deploy timeout. Only Pods with
-        reason Evicted are deleted; other failures still fail the test. Pods
-        are tracked by UID because a recreated Pod can reuse the same name.
+        Grove (v0.1.0-alpha.15 and v0.2.0-beta1) counts Failed Pods against
+        PodClique replicas and never replaces them, so a Pod the kubelet rejects
+        under DiskPressure keeps the DGDR in Deploying until the deploy timeout.
+        Only Pods with reason Evicted are deleted; other failures still fail the
+        test. Pods are tracked by UID because a recreated Pod can reuse the same
+        name.
         """
         dgd_name = dgdr.get("status", {}).get("dgdName")
         if not dgd_name:
