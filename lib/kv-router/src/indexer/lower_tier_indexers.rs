@@ -85,7 +85,7 @@ impl LowerTierIndexers {
         &self,
         storage_tier: StorageTier,
     ) -> Arc<ThreadPoolIndexer<LowerTierIndexer>> {
-        debug_assert!(!storage_tier.is_gpu());
+        debug_assert_ne!(storage_tier, StorageTier::Device);
         if let Some(indexer) = self.indexers.read().unwrap().get(&storage_tier).cloned() {
             return indexer;
         }
