@@ -71,6 +71,22 @@ pub struct TransferSourceResult {
 }
 
 impl SelectionCore {
+    /// Ready retained GPU blocks already owned by the admitted target. This
+    /// advisory count changes cost estimates only, never execution overlap or bookings.
+    pub async fn query_local_gpu_direct_prefix(
+        &self,
+        query: &TransferSourceQuery<'_>,
+    ) -> Result<Option<usize>, SelectionError> {
+        self.ensure_running()?;
+        let key = RoutingPartitionId::new(query.model_name, query.routing_group);
+        let Some(partition) = self.partition(&key) else {
+            return Ok(None);
+        };
+        let result = partition.query_local_gpu_direct_prefix(query).await;
+        self.ensure_running()?;
+        result
+    }
+
     /// Query inventory without selecting, queuing, booking or dispatching work.
     /// Missing partitions and expired advisory deadlines yield no donor.
     pub async fn query_transfer_sources(
@@ -109,6 +125,46 @@ impl SelectionPartition {
         Ok((Instant::now() < query.deadline)
             .then_some(result)
             .flatten())
+    }
+
+    async fn query_local_gpu_direct_prefix(
+        &self,
+        query: &TransferSourceQuery<'_>,
+    ) -> Result<Option<usize>, SelectionError> {
+        if query.memory_kind != TransferSourceMemoryKind::Gpu || !query.target_gpu_direct {
+            return Ok(None);
+        }
+        let target = {
+            let workers = self.0.workers_tx.borrow();
+            let Some(target) = workers.get(&query.target.worker_id) else {
+                return Ok(None);
+            };
+            let end = target
+                .data_parallel_start_rank
+                .saturating_add(target.data_parallel_size);
+            if !(target.data_parallel_start_rank..end).contains(&query.target.dp_rank)
+                || target.router_hint_transfer_domain() != query.target_transfer_domain
+                || target
+                    .kv_hint_gpu_transfer_metadata_for_dp_rank(query.target.dp_rank)
+                    .is_none_or(|metadata| metadata.worker_type != "prefill")
+            {
+                return Ok(None);
+            }
+            target.clone()
+        };
+        let worker = query.target;
+        let prefix = self
+            .query_transfer_inventory(query, move |lower_tier, hashes| {
+                lower_tier.gpu_direct_prefix_for_worker(hashes, worker)
+            })
+            .await?
+            .flatten();
+        if Instant::now() >= query.deadline
+            || self.0.workers_tx.borrow().get(&query.target.worker_id) != Some(&target)
+        {
+            return Ok(None);
+        }
+        Ok(prefix)
     }
 
     async fn query_transfer_inventory<T, F>(

@@ -2177,6 +2177,62 @@ mod tests {
     }
 
     #[test]
+    fn gpu_prefill_target_consumes_retained_inventory_without_cache_selection() {
+        let mut config = KvRouterConfig {
+            enable_decode_to_prefill_gpu_reuse: true,
+            overlap_score_credit: 0.0,
+            router_track_prefill_tokens: false,
+            transfer_source_gpu_estimated_block_us: Some(1.0),
+            transfer_source_prefill_token_us: Some(1.0),
+            ..Default::default()
+        };
+        let inputs = WorkerInputs::LOAD;
+        let requirement =
+            KvEventSourceRequirement::derive(Some(WorkerType::Prefill), &config, inputs);
+        assert_eq!(
+            requirement,
+            KvEventSourceRequirement::PrefillGpuTransferTarget
+        );
+        assert!(requirement.requires_source());
+        assert!(requirement.should_subscribe());
+        assert!(!inputs.contains(WorkerInputs::CACHE));
+        assert!(!config.enable_decode_to_prefill_reuse);
+        assert_eq!(config.overlap_score_credit, 0.0);
+        assert_eq!(
+            KvEventSourceRequirement::derive(
+                Some(WorkerType::Prefill),
+                &config,
+                inputs | WorkerInputs::CACHE,
+            ),
+            KvEventSourceRequirement::CacheAwareRouting,
+        );
+        for role in [None, Some(WorkerType::Aggregated), Some(WorkerType::Encode)] {
+            assert_eq!(
+                KvEventSourceRequirement::derive(role, &config, inputs),
+                KvEventSourceRequirement::NotRequired,
+            );
+        }
+        config.use_remote_indexer = true;
+        assert_eq!(
+            KvEventSourceRequirement::derive(Some(WorkerType::Prefill), &config, inputs),
+            KvEventSourceRequirement::NotRequired,
+        );
+        config.use_remote_indexer = false;
+        config.use_kv_events = false;
+        assert_eq!(
+            KvEventSourceRequirement::derive(Some(WorkerType::Prefill), &config, inputs),
+            KvEventSourceRequirement::NotRequired,
+        );
+        config.use_kv_events = true;
+        config.enable_decode_to_prefill_gpu_reuse = false;
+        config.enable_decode_to_prefill_reuse = true;
+        assert_eq!(
+            KvEventSourceRequirement::derive(Some(WorkerType::Prefill), &config, inputs),
+            KvEventSourceRequirement::NotRequired,
+        );
+    }
+
+    #[test]
     fn kv_event_source_requirement_matrix() {
         for role in [
             None,

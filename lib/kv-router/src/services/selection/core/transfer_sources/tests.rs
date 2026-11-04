@@ -323,3 +323,129 @@ fn preferred_topology_ranks_shorter_near_prefix_before_longer_far_prefix() {
     target.target_kv_transfer_enforcement = Some(KvTransferEnforcement::Required);
     assert!(transfer_source_for_target(&configs, &target, &candidates).is_none());
 }
+
+#[test]
+fn persistent_topology_overrides_attachment_and_only_empty_metadata_inherits() {
+    let prompt = PromptRequest::default();
+    let domains = HashMap::from([("zone".to_string(), "near".to_string())]);
+    let mut target = query(&prompt);
+    target.target_topology_domains = Some(&domains);
+    target.target_kv_transfer_domain = Some("zone");
+    let owner = owner_id();
+    let source =
+        KvTransferCandidateSource::CacheOwner(ResidencyOwner::cache_owner(owner).compact_key());
+    for (attached_island, owner_domains, expected) in [
+        ("near", HashMap::new(), true),
+        ("far", domains.clone(), true),
+        (
+            "near",
+            HashMap::from([("zone".to_string(), "far".to_string())]),
+            false,
+        ),
+        (
+            "near",
+            HashMap::from([("rack".to_string(), "near".to_string())]),
+            false,
+        ),
+    ] {
+        let mut donor = config();
+        donor.kv_event_source_mode = Some("state_agent_v2".to_string());
+        donor
+            .topology_domains
+            .insert("zone".to_string(), attached_island.to_string());
+        let mut candidates = candidates(source);
+        candidates.routing_snapshot = Some(Arc::new(ResidencyRoutingSnapshot::new(
+            ResidencyProjection::default(),
+            [(
+                owner,
+                RouterHintSourceMetadata {
+                    source_control_endpoint: "tcp://owner:9000".to_string(),
+                    worker_type: "decode".to_string(),
+                    topology_domains: owner_domains,
+                },
+                Some(WorkerWithDpRank::new(7, 0)),
+            )],
+        )));
+        assert_eq!(
+            transfer_source_for_target(&HashMap::from([(7, donor)]), &target, &candidates)
+                .is_some(),
+            expected
+        );
+    }
+}
+
+fn gpu_config() -> SelectionWorkerConfig {
+    let mut config = config();
+    config.router_hint_worker_type = None;
+    config.router_hint_source_control_endpoints.clear();
+    config.router_hint_gpu_transfer = Some(crate::protocols::KvGpuTransferWorkerConfig {
+        enabled: true,
+        worker_type: "decode".into(),
+        source_control_endpoints: HashMap::from([(1, "tcp://gpu-only:9011".into())]),
+    });
+    config
+}
+
+fn gpu_query(prompt: &PromptRequest) -> TransferSourceQuery<'_> {
+    let mut query = query(prompt);
+    query.memory_kind = TransferSourceMemoryKind::Gpu;
+    query.target_gpu_direct = true;
+    query
+}
+
+#[test]
+fn gpu_donor_requires_separate_source_target_capabilities_and_dp_endpoint() {
+    let prompt = PromptRequest::default();
+    let candidates = candidates(WorkerWithDpRank::new(7, 1).into());
+    let gpu = HashMap::from([(7, gpu_config())]);
+    let result = transfer_source_for_target(&gpu, &gpu_query(&prompt), &candidates).unwrap();
+    assert_eq!(result.memory_kind, TransferSourceMemoryKind::Gpu);
+    assert_eq!(
+        result.payload.source_control_endpoint,
+        "tcp://gpu-only:9011"
+    );
+    assert_eq!(result.payload.block_hashes.len(), 3);
+    // A CPU endpoint can never certify GPU memory, and GPU-only cards cannot
+    // be silently interpreted as legacy CPU donors.
+    assert!(
+        transfer_source_for_target(
+            &HashMap::from([(7, config())]),
+            &gpu_query(&prompt),
+            &candidates
+        )
+        .is_none()
+    );
+    assert!(transfer_source_for_target(&gpu, &query(&prompt), &candidates).is_none());
+    let mut old_target = gpu_query(&prompt);
+    old_target.target_gpu_direct = false;
+    assert!(transfer_source_for_target(&gpu, &old_target, &candidates).is_none());
+    for change in 0..5 {
+        let mut config = gpu_config();
+        match change {
+            0 => config.router_hint_gpu_transfer.as_mut().unwrap().enabled = false,
+            1 => config
+                .router_hint_gpu_transfer
+                .as_mut()
+                .unwrap()
+                .source_control_endpoints
+                .clear(),
+            2 => {
+                config
+                    .router_hint_gpu_transfer
+                    .as_mut()
+                    .unwrap()
+                    .worker_type = "prefill".into()
+            }
+            3 => config.router_hint_transfer_domain = Some("foreign-layout".into()),
+            _ => config.data_parallel_size = 1,
+        }
+        assert!(
+            transfer_source_for_target(
+                &HashMap::from([(7, config)]),
+                &gpu_query(&prompt),
+                &candidates
+            )
+            .is_none()
+        );
+    }
+}

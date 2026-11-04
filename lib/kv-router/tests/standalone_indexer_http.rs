@@ -663,14 +663,12 @@ async fn zmq_published_tiered_events_appear_in_http_query() {
     let (base_url, server_cancel, server_task) = spawn_indexer_http(state).await;
     let client = reqwest::Client::new();
 
-    // Bind a PUB socket BEFORE /register so the listener finds someone to
-    // subscribe to once it spawns. ZMQ's slow-joiner problem still means a
-    // few early messages may be lost; we send a probe before the real
-    // payloads to flush the connection.
+    // XPUB exposes the listener's subscription before either payload is sent.
     let zmq_endpoint = reserve_zmq_endpoint();
     let zmq_ctx = zmq::Context::new();
-    let pub_socket = zmq_ctx.socket(zmq::PUB).expect("create PUB socket");
+    let pub_socket = zmq_ctx.socket(zmq::XPUB).expect("create XPUB socket");
     pub_socket.set_linger(0).expect("set_linger");
+    pub_socket.set_rcvtimeo(5000).expect("set_rcvtimeo");
     pub_socket.bind(&zmq_endpoint).expect("bind PUB socket");
 
     // Register the worker — this triggers the listener to connect a SUB.
@@ -689,9 +687,7 @@ async fn zmq_published_tiered_events_appear_in_http_query() {
         .expect("POST /register");
     assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
 
-    // Give the SUB time to connect to our PUB. ZMQ buffers most things, but
-    // empirically a short settle plus a probe message reduces flake.
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(pub_socket.recv_bytes(0).expect("SUB readiness"), [1]);
 
     // Token sequences for two adjacent blocks. block_size = 4.
     let device_tokens = vec![10_u32, 11, 12, 13];
