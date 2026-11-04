@@ -348,7 +348,7 @@ grove:
   affinity: {}
   crdInstaller:
     # -- Upgrade Grove CRDs before the bundled operator starts.
-    enabled: true
+    upgradeCRDs: true
   config:
     server:
       healthProbes:

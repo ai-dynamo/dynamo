@@ -784,11 +784,15 @@ runs:
             -o json)
           if ! jq -e --arg webhook_name "${webhook_name}" '
             any(.webhooks[];
+              (.matchPolicy // "Equivalent") as $matchPolicy |
               .name == $webhook_name
               and .failurePolicy == "Fail"
               and any(.rules[];
                 (.apiGroups | index("grove.io")) != null
-                and (.apiVersions | index("v1alpha1")) != null
+                and (
+                  (.apiVersions | index("v1alpha1")) != null
+                  or ($matchPolicy == "Equivalent" and (.apiVersions | index("v1beta1")) != null)
+                )
                 and (.resources | index("podcliquesets")) != null
                 and (.operations | index("CREATE")) != null
               )

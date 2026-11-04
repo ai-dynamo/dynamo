@@ -24,8 +24,6 @@ CLUSTERTEST_OPERATOR_IMAGE ?= $(DYNAMO_CLUSTERTEST_OPERATOR_IMAGE)
 CLUSTERTEST_PLATFORM ?= linux/$(GOARCH)
 CLUSTERTEST_LWS_VERSION = $(shell go list -m -f '{{.Version}}' sigs.k8s.io/lws)
 CLUSTERTEST_LWS_CRD_DIR = $(shell go env GOMODCACHE)/sigs.k8s.io/lws@$(CLUSTERTEST_LWS_VERSION)/config/crd/bases
-CLUSTERTEST_GROVE_VERSION = $(shell go list -m -f '{{.Version}}' github.com/ai-dynamo/grove/operator/api)
-CLUSTERTEST_GROVE_CRD_DIR = $(shell go env GOMODCACHE)/github.com/ai-dynamo/grove/operator/api@$(CLUSTERTEST_GROVE_VERSION)/core/v1alpha1/crds
 CLUSTERTEST_VOLCANO_VERSION = $(shell go list -m -f '{{.Version}}' volcano.sh/apis)
 CLUSTERTEST_VOLCANO_PODGROUP_CRD_URL = https://raw.githubusercontent.com/volcano-sh/volcano/$(CLUSTERTEST_VOLCANO_VERSION)/config/crd/volcano/bases/scheduling.volcano.sh_podgroups.yaml
 
@@ -344,8 +342,9 @@ setup-clustertest-crds-in-cluster: kubectl ## Install shared CRDs into the expli
 	$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context "$${DYNAMO_CLUSTERTEST_CONTEXT}" apply --server-side -f config/crd/bases
 	go mod download sigs.k8s.io/lws@$(CLUSTERTEST_LWS_VERSION)
 	$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context "$${DYNAMO_CLUSTERTEST_CONTEXT}" apply --server-side -f '$(CLUSTERTEST_LWS_CRD_DIR)'
-	go mod download github.com/ai-dynamo/grove/operator/api@$(CLUSTERTEST_GROVE_VERSION)
-	$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context "$${DYNAMO_CLUSTERTEST_CONTEXT}" apply --server-side -f '$(CLUSTERTEST_GROVE_CRD_DIR)'
+	# Dependency controllers do not run in clustertests; retain the pinned alpha schema without webhook conversion.
+	go run ./hack/prepare_grove_test_crds | \
+		$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context "$${DYNAMO_CLUSTERTEST_CONTEXT}" apply --server-side -f -
 	curl --fail --location --silent --show-error --max-time 60 --retry 3 '$(CLUSTERTEST_VOLCANO_PODGROUP_CRD_URL)' | \
 		$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context "$${DYNAMO_CLUSTERTEST_CONTEXT}" apply --server-side -f -
 	$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context "$${DYNAMO_CLUSTERTEST_CONTEXT}" wait --for=condition=Established crd --all --timeout=2m
