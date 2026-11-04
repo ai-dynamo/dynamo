@@ -97,7 +97,7 @@ func (o DGDRV1beta2Options) resolveDefaults(
 // never asks the cluster: a Request created while discovery had nothing to offer must not
 // pick hardware up once discovery recovers, which would change its spec and generation behind
 // the writer's back. oldSpec is the stored spec on UPDATE and nil otherwise. The decision reads
-// the typed hardware alone, never spec.aisimulate.inputOverrides.
+// the typed hardware alone, never spec.aisim.inputOverrides.
 //
 // After discovery, an omitted SKU becomes the cluster's AISimulate SKU, an omitted budget
 // becomes min(matching GPUs, cap), and an omitted node width becomes the selected node shape.
