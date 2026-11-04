@@ -422,6 +422,10 @@ impl ZmqEventNormalizer {
         raw: &mut RawKvEvent,
         worker: WorkerWithDpRank,
     ) -> Result<(), ZmqEventFilterReason> {
+        // vLLM's CPU offload tier republishes device hashes without their salt
+        // (#18052). Such a store is a lower-tier copy of the same block, not a
+        // second unsalted one, so it must not demote the device namespace.
+        let host_pinned = storage_tier_of(raw) == Some(StorageTier::HostPinned);
         match raw {
             RawKvEvent::BlockStored {
                 block_hashes,
@@ -483,7 +487,7 @@ impl ZmqEventNormalizer {
                             })
                             .or_insert_with(|| state.clone());
                     }
-                } else {
+                } else if !host_pinned {
                     // Do not retain every unsalted block. If this hash already
                     // belongs to a namespace, however, fail closed on future
                     // propagation because the external hash is now ambiguous.
