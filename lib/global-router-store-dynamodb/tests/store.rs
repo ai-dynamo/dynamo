@@ -1,10 +1,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Real SDK/conditional-expression tests. Run with an ephemeral DynamoDB Local:
-//! DYNAMODB_LOCAL_ENDPOINT=http://127.0.0.1:18000 cargo test -p
-//! dynamo-global-router-store-dynamodb --test store -- --ignored
-//! These tests do not emulate or claim to verify MREC replication.
+//! Real SDK and conditional-expression tests, against DynamoDB Local. CI does
+//! not start DynamoDB Local, so these are `#[ignore]`d there; run them by hand
+//! after changing this crate:
+//!
+//! ```text
+//! docker run --rm -d -p 18000:8000 amazon/dynamodb-local:3.0.0
+//! DYNAMODB_LOCAL_ENDPOINT=http://127.0.0.1:18000 \
+//!   cargo test -p dynamo-global-router-store-dynamodb --test store -- --ignored
+//! ```
+//!
+//! Each test creates and deletes its own table, and refuses any endpoint other
+//! than localhost. These tests do not emulate or claim to verify MREC
+//! replication.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
