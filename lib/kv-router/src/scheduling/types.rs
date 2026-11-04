@@ -138,12 +138,58 @@ pub enum KvSchedulerError {
     WorkerSelectionPolicy(#[from] WorkerSelectionPolicyError),
 }
 
+/// What a scheduler refusal means to a client. Classified once here so every
+/// host (the selection service, the Rust EPP) gives an error the same status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerRejection {
+    /// Downstream capacity is saturated; retryable backpressure.
+    Overloaded,
+    /// A policy class refused to admit the request rather than queue it.
+    QueueRejected,
+    /// The request's deadline passed while it waited in the router's queue.
+    DeadlineExceeded,
+    /// No worker can serve the request right now.
+    Unavailable,
+    /// The request itself was not routable, such as a pin outside the allowed set.
+    BadRequest,
+    /// The request contradicted scheduler state, such as a duplicate booking.
+    Conflict,
+    /// A scheduler invariant failed.
+    Internal,
+}
+
 impl KvSchedulerError {
     pub fn is_overload(&self) -> bool {
         matches!(
             self,
             Self::AllEligibleWorkersOverloaded | Self::PinnedWorkerOverloaded { .. }
         )
+    }
+
+    /// Classify this error for a client-facing host.
+    pub fn rejection(&self) -> SchedulerRejection {
+        match self {
+            Self::AllEligibleWorkersOverloaded | Self::PinnedWorkerOverloaded { .. } => {
+                SchedulerRejection::Overloaded
+            }
+            Self::QueueRejected(_) => SchedulerRejection::QueueRejected,
+            Self::NoEndpoints
+            | Self::AllEligibleWorkersFiltered
+            | Self::SubscriberShutdown
+            | Self::InitFailed(_) => SchedulerRejection::Unavailable,
+            Self::DeadlineExceeded => SchedulerRejection::DeadlineExceeded,
+            Self::PinnedWorkerNotAllowed { .. } => SchedulerRejection::BadRequest,
+            // A duplicate live request id, or a lifecycle the caller ended (or
+            // re-registered) mid-classification, is caller-induced, like
+            // `BookingFailed` and `SequenceError::DuplicateRequest`.
+            Self::BookingFailed(_)
+            | Self::DuplicateClassificationRequestId(_)
+            | Self::ClassificationLifecycleEnded(_) => SchedulerRejection::Conflict,
+            Self::WorkerSelectionPolicy(_)
+            | Self::RequestClassifierPanicked(_)
+            | Self::RequestClassifierFailed(_)
+            | Self::InvalidClassificationMetadata(_) => SchedulerRejection::Internal,
+        }
     }
 }
 
