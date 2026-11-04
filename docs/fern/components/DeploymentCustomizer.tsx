@@ -42,6 +42,7 @@ import {
   initialEnvRows,
   isModelId,
   isTaggableImage,
+  resolvedImageTagVars,
   rewriteImage,
   splitLines,
   type ComponentOverride,
@@ -500,8 +501,11 @@ function Customizer({
     );
   });
   const scaleSummary = `${plural(totals.gpus, "GPU")} across ${plural(totals.pods, "pod")}${scaleChanged ? " · edited" : ""}`;
-  const filledVars = info.templateVars.filter((name) => templateVars[name]?.trim()).length;
-  const variablesSummary = `${plural(info.templateVars.length, "template variable")}, ${filledVars} filled`;
+  // The image tag setting fills image-tag variables such as ${DYNAMO_VERSION} unless it keeps tags as written.
+  const tagVars = resolvedImageTagVars(info, image);
+  const shownVars = info.templateVars.filter((name) => !tagVars.has(name));
+  const filledVars = shownVars.filter((name) => templateVars[name]?.trim()).length;
+  const variablesSummary = `${plural(shownVars.length, "template variable")}, ${filledVars} filled`;
 
   const defaultStorage: StorageMode = existingPvc ? "pvc" : "download";
   const cacheChanged =
@@ -733,10 +737,10 @@ function Customizer({
             </Row>
           )}
 
-          {info.templateVars.length > 0 && (
+          {shownVars.length > 0 && (
             <Row label="Variables" disclosure={disclosure("variables", true, variablesSummary)}>
               <div className="dc-field-row">
-                {info.templateVars.map((name) => (
+                {shownVars.map((name) => (
                   <Field key={name} label={name} htmlFor={`${id}-var-${name}`}>
                     <input
                       id={`${id}-var-${name}`}

@@ -138,8 +138,9 @@ environment variables, and scale tables with more than four components, start co
 from the manifest itself, so write manifests it can read:
 
 - Use `my-registry/<repository>:my-tag` or `nvcr.io/nvidia/ai-dynamo/<repository>:my-tag` for
-  Dynamo images. Pin a digest only when the example requires that exact build; digests stay as
-  written.
+  Dynamo images. A whole-tag template variable, such as `:${DYNAMO_VERSION}`, is also a placeholder:
+  the image tag setting fills it in, and **Keep manifest tags** leaves it for `envsubst`. Pin a digest
+  only when the example requires that exact build; digests stay as written.
 - Pass the model with `--model`, `--model-path`, or `--served-model-name`, in `args` or in the
   container command.
 - Request GPUs with `nvidia.com/gpu` in the main container's resources. When a tensor-parallel flag

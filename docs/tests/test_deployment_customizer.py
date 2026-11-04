@@ -406,3 +406,80 @@ def test_omitted_auto_apply_defaults_to_enabled(tmp_path: Path) -> None:
     )
     assert completed.returncode == 0, completed.stderr
     assert json.loads(completed.stdout) == [True, True, False]
+
+
+# Customizes inline manifests whose Dynamo image tags are ${DYNAMO_VERSION}.
+TAG_VAR_PROBE = r"""
+import { pathToFileURL } from "node:url";
+
+const [enginePath, sources] = process.argv.slice(2);
+const engine = await import(pathToFileURL(enginePath).href);
+const out = JSON.parse(sources).map((source) => {
+  const info = engine.analyzeManifest(source);
+  const run = (tagMode) => {
+    const image = { defaultRegistry: "nvcr.io/nvidia/ai-dynamo", publishedRepos: ["vllm-runtime"], registry: null, tagMode, tag: "1.4.1" };
+    const result = engine.customizeManifest(source, info, {
+      fileName: "probe.yaml", model: null, image, names: {}, components: {}, env: null,
+      storage: { mode: "download", pvcName: "model-cache", size: "100Gi", storageClass: "", accessMode: "ReadWriteMany", mountPath: "/cache", createPvc: false, downloadJob: false },
+      secret: { mode: "none", name: "hf-token-secret" }, templateVars: {}, namespace: "dynamo-system", bundle: false, chatModel: false,
+    });
+    const files = Object.fromEntries(result.files.map((file) => [file.id, file.content]));
+    return { manifest: files.manifest, steps: files.steps, resolved: [...engine.resolvedImageTagVars(info, image)] };
+  };
+  return {
+    placeholder: engine.hasPlaceholderImages(info.images, "nvcr.io/nvidia/ai-dynamo"),
+    templateVars: info.templateVars,
+    imageTagVars: info.imageTagVars,
+    release: run("release"),
+    keep: run("keep"),
+  };
+});
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def test_image_tag_variables_follow_the_image_tag_setting(tmp_path: Path) -> None:
+    # Templates such as agg_omni_image.yaml tag Dynamo images with ${DYNAMO_VERSION}.
+    command = node_command()
+    if command is None:
+        pytest.skip("needs Node with TypeScript type stripping (22.6 or later)")
+    probe = tmp_path / "probe.mjs"
+    probe.write_text(TAG_VAR_PROBE)
+    image = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:${DYNAMO_VERSION}"
+    base = (
+        "# envsubst '${DYNAMO_VERSION}' < probe.yaml\n"
+        "apiVersion: nvidia.com/v1beta1\nkind: DynamoGraphDeployment\n"
+        "metadata:\n  name: probe\nspec:\n  components:\n"
+        "  - name: Frontend\n    type: frontend\n    podTemplate:\n      spec:\n"
+        f"        containers:\n        - name: main\n          image: {image}\n"
+    )
+    shared = (
+        base
+        + "          env:\n          - name: VERSION\n            value: ${DYNAMO_VERSION}\n"
+    )
+    completed = subprocess.run(
+        [*command, str(probe), str(ENGINE), json.dumps([base, shared])],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    only_tag, also_env = json.loads(completed.stdout)
+
+    assert only_tag["placeholder"]
+    assert only_tag["imageTagVars"] == {"DYNAMO_VERSION": [image]}
+    release, keep = only_tag["release"], only_tag["keep"]
+    assert "image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1\n" in release["manifest"]
+    assert release["resolved"] == ["DYNAMO_VERSION"]
+    assert "envsubst" not in release["steps"]
+    assert f"image: {image}\n" in keep["manifest"]
+    assert keep["resolved"] == []
+    assert 'export DYNAMO_VERSION="<dynamo-version>"' in keep["steps"]
+    assert "envsubst < probe.yaml" in keep["steps"]
+
+    # A variable used outside an image tag still needs its own value.
+    assert also_env["templateVars"] == ["DYNAMO_VERSION"]
+    assert also_env["imageTagVars"] == {}
+    assert also_env["release"]["resolved"] == []
+    assert "envsubst < probe.yaml" in also_env["release"]["steps"]
