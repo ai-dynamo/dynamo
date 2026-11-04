@@ -1990,11 +1990,31 @@ async def _run_generate(
 class TestRoutedEnginePath:
     @pytest.mark.asyncio
     @pytest.mark.core
-    @pytest.mark.parametrize("stop_reason", [None, 0, 42, "backend-stop", ""])
-    @pytest.mark.parametrize("include_stop_reason", [False, True])
+    @pytest.mark.parametrize(
+        "stop_reason,include_stop_reason,clear_processed_stop_reason",
+        [
+            (stop_reason, include_stop_reason, False)
+            for stop_reason in [None, 0, 42, "backend-stop", ""]
+            for include_stop_reason in [False, True]
+        ]
+        + [
+            pytest.param(0, True, True, id="worker-zero-fallback"),
+            pytest.param(42, True, True, id="worker-token-fallback"),
+            pytest.param("backend-stop", True, True, id="worker-string-fallback"),
+            pytest.param("", True, True, id="worker-empty-string-fallback"),
+            pytest.param(42, False, True, id="worker-fallback-not-requested"),
+        ],
+    )
     async def test_stop_reason_metadata_is_opt_in(
-        self, tokenizer, real_vllm_processor_module, stop_reason, include_stop_reason
+        self,
+        tokenizer,
+        real_vllm_processor_module,
+        stop_reason,
+        include_stop_reason,
+        clear_processed_stop_reason,
+        monkeypatch,
     ):
+        """Expose requested stop hints without dropping falsey or worker-only values."""
         module = real_vllm_processor_module
         request = {
             "model": MODEL,
@@ -2035,6 +2055,25 @@ class TestRoutedEnginePath:
         engine = _FakeRoutedEngine(frames)
         processor = _make_processor(module, engine)
         processor.output_processor = module.OutputProcessor(tokenizer, log_stats=False)
+        cleared_stop_reasons = []
+        if clear_processed_stop_reason:
+            process_outputs = processor.output_processor.process_outputs
+
+            def process_outputs_without_stop_reason(*args, **kwargs):
+                """Clear only the local terminal hint to exercise worker fallback."""
+                processed = process_outputs(*args, **kwargs)
+                for request_output in processed.request_outputs:
+                    for output in request_output.outputs:
+                        if output.finish_reason is not None:
+                            cleared_stop_reasons.append(output.stop_reason)
+                            output.stop_reason = None
+                return processed
+
+            monkeypatch.setattr(
+                processor.output_processor,
+                "process_outputs",
+                process_outputs_without_stop_reason,
+            )
         chunks = [
             item["data"]
             async for item in processor._generate_and_stream(
@@ -2051,6 +2090,8 @@ class TestRoutedEnginePath:
             assert type(chunks[-1]["nvext"]["stop_reason"]) is type(stop_reason)
         else:
             assert "nvext" not in chunks[-1]
+        if clear_processed_stop_reason:
+            assert cleared_stop_reasons == [stop_reason]
         assert frames[-1]["stop_reason"] == stop_reason
         assert not processor.output_processor.request_states
         assert engine.stream_released
@@ -2308,6 +2349,7 @@ class TestRoutedEnginePath:
     async def test_local_stop_preserves_late_backend_outcome(
         self, tokenizer, texts, backend_end, usage_mode
     ):
+        """Preserve late metadata and failures after a local stop, including its hint."""
         import dynamo.frontend.vllm_processor as module
 
         request = {

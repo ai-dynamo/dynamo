@@ -1208,6 +1208,12 @@ class VllmProcessor:
         mm_routing_info: dict[str, Any] | None = None,
         context: Any | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
+        """Stream routed worker tokens through vLLM and per-choice postprocessors.
+
+        Emit response chunks with usage annotations and requested metadata. For
+        stop reasons, prefer a non-null local result and retain the worker hint
+        when local processing supplies none. Release request state on exit.
+        """
         sp = vllm_preproc.sampling_params
         output_request_ids: dict[int, str]
         registered_request_ids: list[str]
