@@ -145,15 +145,17 @@ async fn anthropic_error_middleware(mut request: Request<Body>, next: Next) -> R
         let body_bytes = axum::body::to_bytes(body, get_body_limit())
             .await
             .unwrap_or_default();
-        if matches!(
-            parts.status,
-            StatusCode::UNPROCESSABLE_ENTITY | StatusCode::UNSUPPORTED_MEDIA_TYPE
-        ) {
-            parts.status = StatusCode::BAD_REQUEST;
-        }
         let mut body = match serde_json::from_slice::<AnthropicErrorResponse>(&body_bytes) {
-            Ok(error) => serde_json::to_value(error).expect("Anthropic error is serializable"),
-            Err(_) => {
+            Ok(error) if error.object_type == "error" => {
+                serde_json::to_value(error).expect("Anthropic error is serializable")
+            }
+            _ => {
+                if matches!(
+                    parts.status,
+                    StatusCode::UNPROCESSABLE_ENTITY | StatusCode::UNSUPPORTED_MEDIA_TYPE
+                ) {
+                    parts.status = StatusCode::BAD_REQUEST;
+                }
                 super::openai::record_local_failure(
                     if parts.status == StatusCode::PAYLOAD_TOO_LARGE {
                         ErrorClass::PayloadTooLarge
@@ -176,21 +178,33 @@ async fn anthropic_error_middleware(mut request: Request<Body>, next: Next) -> R
                 })
             }
         };
-        body["request_id"] = serde_json::Value::String(request_id.clone());
+        stamp_request_id(&mut body, &mut parts.headers, &request_id);
         parts.headers.insert(
             header::CONTENT_TYPE,
             header::HeaderValue::from_static("application/json"),
         );
         parts.headers.remove(header::CONTENT_LENGTH);
-        response = Response::from_parts(parts, Body::from(body.to_string()));
+        Response::from_parts(parts, Body::from(body.to_string()))
+    } else {
+        insert_request_id_header(response.headers_mut(), &request_id);
+        response
     }
-    response.headers_mut().insert(
+}
+
+/// Sets the `request-id` header that Anthropic clients read.
+fn insert_request_id_header(headers: &mut HeaderMap, request_id: &str) {
+    headers.insert(
         "request-id",
         request_id
             .parse()
             .expect("assigned request ID is a valid header"),
     );
-    response
+}
+
+/// Adds the request ID to an Anthropic error body and its response headers.
+fn stamp_request_id(body: &mut serde_json::Value, headers: &mut HeaderMap, request_id: &str) {
+    body["request_id"] = serde_json::Value::String(request_id.to_owned());
+    insert_request_id_header(headers, request_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -434,6 +448,23 @@ async fn handler_anthropic_messages(
         streaming,
         &request_id,
     );
+    if state.media_rejection().enabled() {
+        let content_type = request.media_content_type(&headers).map_err(|error| {
+            AnthropicHandlerError::validation(error).into_marked_response(&mut inflight_guard)
+        })?;
+        if let Some(refusal) =
+            super::openai::media_refusal_for_content_type(&state, || content_type)
+        {
+            return Err(AnthropicHandlerError::new(
+                ErrorClass::UnsupportedMedia,
+                refusal.status,
+                "invalid_request_error",
+                refusal.message,
+                ErrorType::UnsupportedModality,
+            )
+            .into_marked_response(&mut inflight_guard));
+        }
+    }
     let mut request = request.into_request(&headers).map_err(|error| {
         AnthropicHandlerError::validation(error).into_marked_response(&mut inflight_guard)
     })?;
@@ -561,8 +592,11 @@ async fn anthropic_messages(
 
     tracing::trace!("Received Anthropic messages request: {:?}", &*request);
 
-    // Look up engine and parsing options early so we know whether a reasoning
-    // parser is configured before converting the request.
+    let (orig_request, context) = request.into_parts();
+    let model_for_resp = orig_request.model.clone();
+
+    // Looked up after the media refusal so a refused request gets the
+    // configured status, not this lookup's 404/503.
     let (engine, parsing_options) = state
         .manager()
         .get_chat_completions_engine_with_parsing(&model)
@@ -588,9 +622,6 @@ async fn anthropic_messages(
             )
             .into_marked_response(&mut inflight_guard),
         })?;
-
-    let (orig_request, context) = request.into_parts();
-    let model_for_resp = orig_request.model.clone();
 
     // Anthropic exposes input usage in `message_start`, before the backend's
     // authoritative count is available. Seed the stream with the same
@@ -1501,6 +1532,29 @@ fn anthropic_error_unrecorded(status: StatusCode, error_type: &str, message: &st
         }),
     )
         .into_response()
+}
+
+/// Returns the Anthropic error for a request the readiness gate rejects.
+///
+/// The gate runs outside `anthropic_error_middleware`, so this adds the same
+/// `request-id` header and body field. The caller has already recorded the failure.
+pub(crate) fn readiness_rejection_response(
+    headers: &HeaderMap,
+    status: StatusCode,
+    message: &str,
+) -> Response {
+    let request_id = get_or_create_request_id(headers);
+    let mut body = serde_json::to_value(AnthropicErrorResponse {
+        object_type: "error".to_string(),
+        error: AnthropicErrorBody {
+            error_type: anthropic_error_type_for_status(status, "api_error").to_string(),
+            message: message.to_string(),
+        },
+    })
+    .expect("Anthropic error is serializable");
+    let mut response_headers = HeaderMap::new();
+    stamp_request_id(&mut body, &mut response_headers, &request_id);
+    (status, response_headers, Json(body)).into_response()
 }
 
 /// Returns an Anthropic-compatible JSON `404` error response for an unmatched route.

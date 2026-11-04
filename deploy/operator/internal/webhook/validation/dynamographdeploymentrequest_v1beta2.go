@@ -60,6 +60,9 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 	if spec.Hardware != nil {
 		allErrs = append(allErrs, v.validateHardwareSpecV1beta2(spec.Hardware, fldPath.Child("hardware"))...)
 	}
+	if spec.Workload != nil {
+		allErrs = append(allErrs, validateWorkloadSpec(spec.Workload, fldPath.Child("workload"))...)
+	}
 	if spec.AISimulate == nil {
 		return allErrs
 	}

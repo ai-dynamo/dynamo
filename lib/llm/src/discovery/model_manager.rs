@@ -9,13 +9,15 @@ use std::{
     },
 };
 
+#[cfg(test)]
+use crate::model_card::LoraInfo;
 use arc_swap::ArcSwap;
 use dashmap::{DashMap, mapref::entry::Entry};
 use dynamo_kv_router::{
     PrefillLoadEstimator,
     config::KvRouterConfig,
+    plugins::worker_selection::WorkerInputs,
     protocols::{KvTransferEnforcement, RoutingConstraints, WorkerId, WorkerWithDpRank},
-    selector::WorkerInputs,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -42,9 +44,12 @@ use crate::{
         DisaggregatedEndpoint, ModelRuntimeConfig, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
         topology_taint,
     },
-    lora::state_tracker::LoraWorkerProjection,
-    lora::{LoraFilter, LoraRoutingTable, LoraStateTracker, load_estimator::LoadEstimator},
-    model_card::{LoraInfo, ModelDeploymentCard},
+    lora::state_tracker::{LoraWorkerObservation, LoraWorkerProjection},
+    lora::{
+        LoadEstimatorSubscription, LoraFilter, LoraRoutingTable, LoraStateTracker,
+        load_estimator::LoadEstimator,
+    },
+    model_card::ModelDeploymentCard,
     model_type::ModelType,
     types::{
         RealtimeBidirectionalEngine,
@@ -137,13 +142,6 @@ struct CommittedDiscoveryGroup {
     adapters: HashMap<String, ModelDeploymentCard>,
     representative: ModelDeploymentCard,
     worker_set: Arc<WorkerSet>,
-}
-
-#[derive(Default)]
-struct PendingLoraProjection {
-    base_capacities: Vec<u32>,
-    adapters: HashMap<String, LoraInfo>,
-    is_registration_required: bool,
 }
 
 type EndpointLoraProjection = HashMap<EndpointId, HashMap<WorkerWithDpRank, LoraWorkerProjection>>;
@@ -327,7 +325,7 @@ impl ModelManager {
     }
 
     fn lora_projection_locked(&self) -> EndpointLoraProjection {
-        let mut pending: HashMap<EndpointId, HashMap<WorkerWithDpRank, PendingLoraProjection>> =
+        let mut pending: HashMap<EndpointId, HashMap<WorkerWithDpRank, LoraWorkerObservation>> =
             HashMap::new();
         for group in self.discovery_groups.iter() {
             for (key, card) in &group.cards {
@@ -377,45 +375,10 @@ impl ModelManager {
             .map(|(endpoint_id, workers)| {
                 let workers = workers
                     .into_iter()
-                    .filter_map(|(worker, mut projection)| {
-                        projection.base_capacities.sort_unstable();
-                        projection.base_capacities.dedup();
-                        if projection.base_capacities.len() > 1 {
-                            tracing::warn!(
-                                endpoint = %endpoint_id,
-                                worker_id = worker.worker_id,
-                                capacities = ?projection.base_capacities,
-                                "Base MDCs disagree on LoRA capacity; using the conservative minimum"
-                            );
-                        }
-                        let mut loras = projection.adapters.into_values().collect::<Vec<_>>();
-                        loras.sort_by(|left, right| left.name.cmp(&right.name));
-                        let mut adapter_capacities = loras
-                            .iter()
-                            .filter_map(|lora| lora.max_gpu_lora_count)
-                            .collect::<Vec<_>>();
-                        adapter_capacities.sort_unstable();
-                        adapter_capacities.dedup();
-                        if adapter_capacities.len() > 1 {
-                            tracing::warn!(
-                                endpoint = %endpoint_id,
-                                worker_id = worker.worker_id,
-                                capacities = ?adapter_capacities,
-                                "Adapter MDCs disagree on LoRA capacity; using the conservative minimum"
-                            );
-                        }
-                        let capacity = projection
-                            .base_capacities
-                            .first()
-                            .copied()
-                            .or_else(|| adapter_capacities.first().copied())
-                            .or_else(|| (!loras.is_empty()).then_some(4))
-                            .or_else(|| projection.is_registration_required.then_some(0))?;
-                        Some((worker, LoraWorkerProjection {
-                            capacity,
-                            loras,
-                            is_registration_required: projection.is_registration_required,
-                        }))
+                    .filter_map(|(worker, projection)| {
+                        projection
+                            .into_projection(worker, &endpoint_id)
+                            .map(|projection| (worker, projection))
                     })
                     .collect();
                 (endpoint_id, workers)
@@ -435,18 +398,7 @@ impl ModelManager {
                     endpoint_union.insert(*worker, projection.clone());
                     continue;
                 };
-                existing.capacity = existing.capacity.min(projection.capacity);
-                existing.is_registration_required |= projection.is_registration_required;
-                let mut loras = existing
-                    .loras
-                    .iter()
-                    .chain(&projection.loras)
-                    .map(|lora| (lora.name.clone(), lora.clone()))
-                    .collect::<HashMap<_, _>>()
-                    .into_values()
-                    .collect::<Vec<_>>();
-                loras.sort_by(|left, right| left.name.cmp(&right.name));
-                existing.loras = loras;
+                existing.merge(projection);
             }
         }
         union
@@ -2645,13 +2597,14 @@ impl ModelManager {
             });
         let domain_cancel = cancel_token.child_token();
         *domain.controller_cancel.lock() = Some(domain_cancel.clone());
-        let _handle = crate::lora::LoraController::start_for_endpoint(
+        let _handle = crate::lora::LoraController::start_for_endpoint_with_metrics(
             endpoint_id.clone(),
             config,
             domain.routing_table.clone(),
             domain.state_tracker.clone(),
             domain.load_estimator.clone(),
             domain_cancel,
+            crate::lora::controller_metrics(),
         );
     }
 
@@ -2913,6 +2866,21 @@ impl ModelManager {
         Some(configs.get(&worker_id)?.data_parallel_size)
     }
 
+    pub fn worker_supports_runtime_capability(
+        &self,
+        endpoint_id: &EndpointId,
+        worker_id: WorkerId,
+        capability: &str,
+    ) -> bool {
+        let Some(rx) = self.runtime_configs.get(endpoint_id) else {
+            return false;
+        };
+        let configs = rx.borrow();
+        configs
+            .get(&worker_id)
+            .is_some_and(|config| config.supports_runtime_capability(capability))
+    }
+
     /// Whether any worker on this endpoint advertises a required KV-transfer topology policy.
     pub fn has_kv_transfer_required_routing_policy(&self, endpoint_id: &EndpointId) -> bool {
         let Some(rx) = self.runtime_configs.get(endpoint_id) else {
@@ -3022,7 +2990,7 @@ mod tests {
     };
     use crate::{
         discovery::{KvEventSource, KvSourceStatus},
-        local_model::runtime_config::ModelRuntimeConfig,
+        local_model::runtime_config::{DISAGG_PREFILL_CANCEL_ANYTIME_V1, ModelRuntimeConfig},
     };
 
     fn make_worker_set(namespace: &str, mdcsum: &str) -> WorkerSet {
@@ -3407,6 +3375,42 @@ mod tests {
             .topology_domains
             .insert("zone".to_string(), "us-east-1a".to_string());
         config
+    }
+
+    #[test]
+    fn runtime_capability_lookup_is_worker_specific_and_fail_closed() {
+        let manager = ModelManager::new();
+        let endpoint_id = EndpointId::from("test.prefill.generate");
+        let missing_endpoint = EndpointId::from("test.missing.generate");
+        let mut enabled = ModelRuntimeConfig::default();
+        enabled.runtime_data.insert(
+            DISAGG_PREFILL_CANCEL_ANYTIME_V1.to_string(),
+            serde_json::Value::Bool(true),
+        );
+        let mut disabled = ModelRuntimeConfig::default();
+        disabled.runtime_data.insert(
+            DISAGG_PREFILL_CANCEL_ANYTIME_V1.to_string(),
+            serde_json::Value::Bool(false),
+        );
+        insert_runtime_configs(
+            &manager,
+            &endpoint_id,
+            HashMap::from([(7, enabled), (8, disabled)]),
+        );
+
+        assert!(manager.worker_supports_runtime_capability(
+            &endpoint_id,
+            7,
+            DISAGG_PREFILL_CANCEL_ANYTIME_V1,
+        ));
+        for (endpoint, worker_id) in [(&endpoint_id, 8), (&endpoint_id, 9), (&missing_endpoint, 7)]
+        {
+            assert!(!manager.worker_supports_runtime_capability(
+                endpoint,
+                worker_id,
+                DISAGG_PREFILL_CANCEL_ANYTIME_V1,
+            ));
+        }
     }
 
     #[test]

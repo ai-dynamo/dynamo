@@ -155,7 +155,7 @@ impl TieredMatchDetails {
             .or(self.device.kv_transfer_candidates.as_ref())
     }
 
-    pub(crate) fn into_kv_transfer_candidates(mut self) -> Option<KvTransferCandidates> {
+    pub fn into_kv_transfer_candidates(mut self) -> Option<KvTransferCandidates> {
         self.lower_tier
             .get_mut(&StorageTier::HostPinned)
             .and_then(|details| details.kv_transfer_candidates.take())

@@ -101,7 +101,6 @@ You can then use the default routing methods exposed by the client class to send
 
 - **Round-robin routing**: Default strategy, available through `client.generate()` on a standard endpoint client or explicitly through `client.round_robin()`
 - **Random routing**: Selects a random worker through `client.random()`
-- **Power-of-two routing**: Samples two workers and selects the less-loaded one through `--router-mode power-of-two`
 - **Direct routing**: Explicitly targets a specific worker via `client.direct(input, component_id)`
 - **Least-loaded routing**: Routes to the worker with fewest active connections via `--router-mode least-loaded`
 - **Device-aware weighted routing**: Routes using CPU/non-CPU ratio budgeting plus least-loaded selection within the selected device group via `--router-mode device-aware-weighted`

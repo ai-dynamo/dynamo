@@ -18,9 +18,12 @@ impl ControlClient {
     pub async fn new(component: Component, instance_id: i64) -> Result<Self> {
         let client = component.endpoint("controller").client().await?;
         client.wait_for_instances().await?;
-        let client =
-            PushRouter::<ControlMessage, Annotated<Value>>::from_client(client, Default::default())
-                .await?;
+        let client = PushRouter::<ControlMessage, Annotated<Value>>::from_client_with_options(
+            client,
+            Default::default(),
+            crate::kv_router::plugins::push_router_options(),
+        )
+        .await?;
 
         Ok(Self {
             client,
