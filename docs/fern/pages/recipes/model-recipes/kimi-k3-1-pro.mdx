@@ -167,17 +167,17 @@ Review storage paths, node placement, registry credentials, and resource claims 
 
 ## Deploy
 
-<div data-sku="b200 gb300">
+<div data-sku="b200 gb300 vr200">
 
 Create the shared model cache and download the main checkpoint:
 
 <Warning>
-Edit `storageClassName` in `recipes/kimi-k3.1/model-cache/model-cache.yaml` to a ReadWriteMany class on your cluster before you apply it.
+Edit `storageClassName` in `recipes/kimi-k3.1-pro/model-cache/model-cache.yaml` to a ReadWriteMany class on your cluster before you apply it.
 </Warning>
 
 ```bash
-kubectl apply -f recipes/kimi-k3.1/model-cache/model-cache.yaml -n ${NAMESPACE}
-kubectl apply -f recipes/kimi-k3.1/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/kimi-k3.1-pro/model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/kimi-k3.1-pro/model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
 ```
 
@@ -193,7 +193,7 @@ For B200, also stage the `Inferact/Kimi-K3-DSpark` draft checkpoint at the path 
 
 <div data-sku="vr200">
 
-For VR200, stage the main weights and tokenizer at `/mnt/vr-nvme/models/moonshotai/Kimi-K3.1-Pro` on every frontend and worker node, and the draft weights at `/mnt/vr-nvme/models/kimi-k3-dspark` on every worker node. The manifests mount these node-local directories at `/shared-model-cache/moonshotai/Kimi-K3.1-Pro` and `/draft-model`; change the `hostPath` values if your storage layout differs. The shared-storage download Job above does not populate these directories.
+For VR200, also stage the `Inferact/Kimi-K3-DSpark` draft checkpoint at `/shared-model-cache/Inferact/Kimi-K3-DSpark` on the same PVC. Both topologies mount `shared-model-cache` for the frontend and all workers; no node-local weight staging is required.
 
 </div>
 
@@ -203,7 +203,7 @@ Deploy the selected DynamoGraphDeployment (DGD):
 
 ```bash
 export DGD=kimi-k3-1-pro-vllm-aggregate-gb300
-kubectl apply -f recipes/kimi-k3.1/vllm/agg-gb300-agentic/deploy-gb300.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/kimi-k3.1-pro/vllm/agg-gb300-agentic/deploy-gb300.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -213,7 +213,7 @@ kubectl apply -f recipes/kimi-k3.1/vllm/agg-gb300-agentic/deploy-gb300.yaml -n $
 For image and video input, apply the multimodal overlay instead:
 
 ```bash
-kubectl apply -f recipes/kimi-k3.1/vllm/agg-gb300-agentic/deploy-gb300-multimodal.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/kimi-k3.1-pro/vllm/agg-gb300-agentic/deploy-gb300-multimodal.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -222,7 +222,7 @@ kubectl apply -f recipes/kimi-k3.1/vllm/agg-gb300-agentic/deploy-gb300-multimoda
 
 ```bash
 export DGD=kimi-k3-1-pro-vllm-disagg-gb300
-kubectl apply -f recipes/kimi-k3.1/vllm/disagg-gb300-agentic/deploy-gb300.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/kimi-k3.1-pro/vllm/disagg-gb300-agentic/deploy-gb300.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -232,7 +232,7 @@ kubectl apply -f recipes/kimi-k3.1/vllm/disagg-gb300-agentic/deploy-gb300.yaml -
 For image and video input, apply the multimodal overlay instead:
 
 ```bash
-kubectl apply -f recipes/kimi-k3.1/vllm/disagg-gb300-agentic/deploy-gb300-multimodal.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/kimi-k3.1-pro/vllm/disagg-gb300-agentic/deploy-gb300-multimodal.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -241,7 +241,7 @@ kubectl apply -f recipes/kimi-k3.1/vllm/disagg-gb300-agentic/deploy-gb300-multim
 
 ```bash
 export DGD=kimi-k3-1-pro-sglang-aggregate-gb300
-kubectl apply -f recipes/kimi-k3.1/sglang/agg-gb300-agentic/deploy-gb300.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/kimi-k3.1-pro/sglang/agg-gb300-agentic/deploy-gb300.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -250,7 +250,7 @@ kubectl apply -f recipes/kimi-k3.1/sglang/agg-gb300-agentic/deploy-gb300.yaml -n
 
 ```bash
 export DGD=kimi-k3-1-pro-sglang-disagg-gb300
-kubectl apply -f recipes/kimi-k3.1/sglang/disagg-gb300-agentic/deploy-gb300.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/kimi-k3.1-pro/sglang/disagg-gb300-agentic/deploy-gb300.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -259,7 +259,7 @@ kubectl apply -f recipes/kimi-k3.1/sglang/disagg-gb300-agentic/deploy-gb300.yaml
 
 ```bash
 export DGD=kimi-k3-1-pro-vllm-aggregate-b200
-kubectl apply -f recipes/kimi-k3.1/vllm/agg-b200-agentx/deploy-b200.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/kimi-k3.1-pro/vllm/agg-b200-agentx/deploy-b200.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -268,7 +268,7 @@ kubectl apply -f recipes/kimi-k3.1/vllm/agg-b200-agentx/deploy-b200.yaml -n ${NA
 
 ```bash
 export DGD=kimi-k3-1-pro-vllm-aggregate-vr200
-kubectl apply -f recipes/kimi-k3.1/vllm/agg-vr200-agentx/deploy-vr200.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/kimi-k3.1-pro/vllm/agg-vr200-agentx/deploy-vr200.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -277,7 +277,7 @@ kubectl apply -f recipes/kimi-k3.1/vllm/agg-vr200-agentx/deploy-vr200.yaml -n ${
 
 ```bash
 export DGD=kimi-k3-1-pro-vllm-disagg-vr200
-kubectl apply -f recipes/kimi-k3.1/vllm/disagg-vr200-agentx/deploy-vr200.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/kimi-k3.1-pro/vllm/disagg-vr200-agentx/deploy-vr200.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -304,14 +304,14 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## Benchmark
 
-Use [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1/perf/perf.yaml) to run AIPerf 0.13.0 against the deployment. It runs `aiperf profile` with the chat endpoint type and streaming on the AgentX agentic trace (`semianalysis_cc_traces_weka_062126`), with an agentic warmup and a 1200 s profiling phase. The tokenizer is read from the model path on the `shared-model-cache` PVC.
+Use [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/perf/perf.yaml) to run AIPerf 0.13.0 against the deployment. It runs `aiperf profile` with the chat endpoint type and streaming on the AgentX agentic trace (`semianalysis_cc_traces_weka_062126`), with an agentic warmup and a 1200 s profiling phase. The tokenizer is read from the model path on the `shared-model-cache` PVC.
 
 The performance results use text-only AgentX traffic. Apply the selected benchmark variant before running AIPerf; normal serving commands above use natural acceptance.
 
 <div data-recipe-framework="vllm" data-sku="b200" data-variant="agg">
 
 ```bash
-kubectl apply -f recipes/kimi-k3.1/vllm/agg-b200-agentx/deploy-b200-synthetic-al.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/kimi-k3.1-pro/vllm/agg-b200-agentx/deploy-b200-synthetic-al.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -319,7 +319,7 @@ kubectl apply -f recipes/kimi-k3.1/vllm/agg-b200-agentx/deploy-b200-synthetic-al
 <div data-recipe-framework="vllm" data-sku="vr200" data-variant="agg">
 
 ```bash
-kubectl apply -f recipes/kimi-k3.1/vllm/agg-vr200-agentx/deploy-vr200-synthetic-al.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/kimi-k3.1-pro/vllm/agg-vr200-agentx/deploy-vr200-synthetic-al.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -327,7 +327,7 @@ kubectl apply -f recipes/kimi-k3.1/vllm/agg-vr200-agentx/deploy-vr200-synthetic-
 <div data-recipe-framework="vllm" data-sku="vr200" data-variant="disagg">
 
 ```bash
-kubectl apply -f recipes/kimi-k3.1/vllm/disagg-vr200-agentx/deploy-vr200-synthetic-al.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/kimi-k3.1-pro/vllm/disagg-vr200-agentx/deploy-vr200-synthetic-al.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -337,10 +337,10 @@ Set these values in the Job `env` section for your target:
 - `ENDPOINT`: the frontend Service of the DynamoGraphDeployment, `${DGD}-frontend:8000` (substitute the selected deployment name).
 - `CONCURRENCY`: GB300 uses 32 for vLLM aggregated and 48 for disaggregated. Reported VR200 points use 180 for aggregated and 174 for disaggregated; B200 uses 48.
 
-The benchmark Job mounts `shared-model-cache` even when the server uses VR200 node-local storage. Prepare that PVC with the tokenizer files for the Job, or adapt its volume and placement to your storage layout.
+The benchmark Job uses the same `shared-model-cache` PVC and tokenizer files as the deployment.
 
 ```bash
-kubectl apply -f recipes/kimi-k3.1/perf/perf.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/kimi-k3.1-pro/perf/perf.yaml -n ${NAMESPACE}
 kubectl logs -f job/kimi-k3-1-aiperf -n ${NAMESPACE}
 ```
 
@@ -389,8 +389,8 @@ GPU counts below describe the checked-in manifests. P counts prefill workers; D 
 <tr data-highlight-target="sglang-gb300-agg"><td>SGLang</td><td>GB300</td><td>1 worker</td><td>8</td><td>TP8 across 2 nodes per worker</td><td>Disabled</td><td>Shared PVC</td></tr>
 <tr data-highlight-target="sglang-gb300-disagg"><td>SGLang</td><td>GB300</td><td>1P1D</td><td>16</td><td>TP8 across 2 nodes per worker</td><td>Disabled</td><td>Shared PVC</td></tr>
 <tr data-highlight-target="vllm-b200-agg"><td>vLLM</td><td>B200</td><td>1 worker</td><td>16</td><td>TP8 × PP2 across 2 nodes</td><td>DSpark (7 draft tokens)</td><td>Shared PVC</td></tr>
-<tr data-highlight-target="vllm-vr200-agg"><td>vLLM</td><td>VR200</td><td>2 workers</td><td>16</td><td>TP8 across 2 nodes per worker</td><td>DSpark (7 draft tokens)</td><td>Node-local</td></tr>
-<tr data-highlight-target="vllm-vr200-disagg"><td>vLLM</td><td>VR200</td><td>2P1D</td><td>24</td><td>TP8 across 2 nodes per worker</td><td>DSpark (7 draft tokens)</td><td>Node-local</td></tr>
+<tr data-highlight-target="vllm-vr200-agg"><td>vLLM</td><td>VR200</td><td>2 workers</td><td>16</td><td>TP8 across 2 nodes per worker</td><td>DSpark (7 draft tokens)</td><td>Shared PVC</td></tr>
+<tr data-highlight-target="vllm-vr200-disagg"><td>vLLM</td><td>VR200</td><td>2P1D</td><td>24</td><td>TP8 across 2 nodes per worker</td><td>DSpark (7 draft tokens)</td><td>Shared PVC</td></tr>
 </tbody>
 </table>
 </div>
@@ -404,10 +404,10 @@ GPU counts below describe the checked-in manifests. P counts prefill workers; D 
 
 ## Source
 
-- Deployment assets: [Kimi-K3.1-Pro recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k3.1)
-- Setup assets: [model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1/model-cache/model-cache.yaml) and [model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1/model-cache/model-download.yaml)
-- Benchmark manifest: [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1/perf/perf.yaml)
+- Deployment assets: [Kimi-K3.1-Pro recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k3.1-pro)
+- Setup assets: [model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/model-cache/model-cache.yaml) and [model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/model-cache/model-download.yaml)
+- Benchmark manifest: [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/perf/perf.yaml)
 
-- B200 aggregated: [deployment manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1/vllm/agg-b200-agentx/deploy-b200.yaml)
-- VR200 aggregated: [deployment manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1/vllm/agg-vr200-agentx/deploy-vr200.yaml)
-- VR200 disaggregated: [deployment manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1/vllm/disagg-vr200-agentx/deploy-vr200.yaml)
+- B200 aggregated: [deployment manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/agg-b200-agentx/deploy-b200.yaml)
+- VR200 aggregated: [deployment manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/agg-vr200-agentx/deploy-vr200.yaml)
+- VR200 disaggregated: [deployment manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3.1-pro/vllm/disagg-vr200-agentx/deploy-vr200.yaml)

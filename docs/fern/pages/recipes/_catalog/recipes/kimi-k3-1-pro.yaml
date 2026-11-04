@@ -24,10 +24,10 @@ targets:
     type: agentic-trace-replay
     traffic: AgentX (semianalysis_cc_traces_weka_062126), 1200 s, concurrency 32
   deploy:
-    asset: recipes/kimi-k3.1/vllm/agg-gb300-agentic/deploy-gb300.yaml
+    asset: recipes/kimi-k3.1-pro/vllm/agg-gb300-agentic/deploy-gb300.yaml
   benchmark:
     tool: aiperf
-    asset: recipes/kimi-k3.1/perf/perf.yaml
+    asset: recipes/kimi-k3.1-pro/perf/perf.yaml
   expected_performance:
     available: true
     summary: 39.89 output tok/s/GPU, 76.7 user tok/s P50, TTFT P50 428 ms at concurrency 32
@@ -46,13 +46,13 @@ targets:
     type: agentic-trace-replay
     traffic: Text-only AgentX (semianalysis_cc_traces_weka_062126)
   deploy:
-    asset: recipes/kimi-k3.1/vllm/agg-gb300-agentic/deploy-gb300-multimodal.yaml
+    asset: recipes/kimi-k3.1-pro/vllm/agg-gb300-agentic/deploy-gb300-multimodal.yaml
   expected_performance:
     available: true
     summary: 39.56 output tok/s/GPU, 70.9 user tok/s P50, TTFT P50 440 ms
   benchmark:
     tool: aiperf
-    asset: recipes/kimi-k3.1/perf/perf.yaml
+    asset: recipes/kimi-k3.1-pro/perf/perf.yaml
 - id: vllm-disagg-gb300
   recommended: false
   hardware:
@@ -70,10 +70,10 @@ targets:
     type: agentic-trace-replay
     traffic: AgentX (semianalysis_cc_traces_weka_062126), 1200 s, concurrency 48
   deploy:
-    asset: recipes/kimi-k3.1/vllm/disagg-gb300-agentic/deploy-gb300.yaml
+    asset: recipes/kimi-k3.1-pro/vllm/disagg-gb300-agentic/deploy-gb300.yaml
   benchmark:
     tool: aiperf
-    asset: recipes/kimi-k3.1/perf/perf.yaml
+    asset: recipes/kimi-k3.1-pro/perf/perf.yaml
   expected_performance:
     available: true
     summary: 23.08 output tok/s/GPU, 87.1 user tok/s P50, TTFT P50 656 ms
@@ -93,13 +93,13 @@ targets:
     type: agentic-trace-replay
     traffic: Text-only AgentX (semianalysis_cc_traces_weka_062126)
   deploy:
-    asset: recipes/kimi-k3.1/vllm/disagg-gb300-agentic/deploy-gb300-multimodal.yaml
+    asset: recipes/kimi-k3.1-pro/vllm/disagg-gb300-agentic/deploy-gb300-multimodal.yaml
   expected_performance:
     available: true
     summary: 23.38 output tok/s/GPU, 85.7 user tok/s P50, TTFT P50 693 ms
   benchmark:
     tool: aiperf
-    asset: recipes/kimi-k3.1/perf/perf.yaml
+    asset: recipes/kimi-k3.1-pro/perf/perf.yaml
 - id: sglang-agg-gb300
   recommended: false
   hardware:
@@ -114,7 +114,7 @@ targets:
     type: functional-validation
     traffic: Experimental, functional-only
   deploy:
-    asset: recipes/kimi-k3.1/sglang/agg-gb300-agentic/deploy-gb300.yaml
+    asset: recipes/kimi-k3.1-pro/sglang/agg-gb300-agentic/deploy-gb300.yaml
   expected_performance:
     available: false
 - id: sglang-disagg-gb300
@@ -133,7 +133,7 @@ targets:
     type: functional-validation
     traffic: Experimental, functional-only
   deploy:
-    asset: recipes/kimi-k3.1/sglang/disagg-gb300-agentic/deploy-gb300.yaml
+    asset: recipes/kimi-k3.1-pro/sglang/disagg-gb300-agentic/deploy-gb300.yaml
   expected_performance:
     available: false
 - id: vllm-agg-b200
@@ -156,13 +156,13 @@ targets:
     type: agentic-trace-replay
     traffic: Text-only AgentX (semianalysis_cc_traces_weka_062126)
   deploy:
-    asset: recipes/kimi-k3.1/vllm/agg-b200-agentx/deploy-b200.yaml
+    asset: recipes/kimi-k3.1-pro/vllm/agg-b200-agentx/deploy-b200-synthetic-al.yaml
   expected_performance:
     available: true
     summary: 422.50 output tok/s, 64.02 user tok/s P50, TTFT P50 550.45 ms
   benchmark:
     tool: aiperf
-    asset: recipes/kimi-k3.1/perf/perf.yaml
+    asset: recipes/kimi-k3.1-pro/perf/perf.yaml
 - id: vllm-agg-vr200
   recommended: false
   hardware:
@@ -182,13 +182,13 @@ targets:
     type: agentic-trace-replay
     traffic: Text-only AgentX (semianalysis_cc_traces_weka_062126)
   deploy:
-    asset: recipes/kimi-k3.1/vllm/agg-vr200-agentx/deploy-vr200.yaml
+    asset: recipes/kimi-k3.1-pro/vllm/agg-vr200-agentx/deploy-vr200-synthetic-al.yaml
   expected_performance:
     available: true
     summary: 2448.08 output tok/s, 153.01 output tok/s/GPU, 57.71 user tok/s P50, TTFT P50 1534 ms
   benchmark:
     tool: aiperf
-    asset: recipes/kimi-k3.1/perf/perf.yaml
+    asset: recipes/kimi-k3.1-pro/perf/perf.yaml
 - id: vllm-disagg-vr200
   recommended: false
   hardware:
@@ -209,11 +209,11 @@ targets:
     type: agentic-trace-replay
     traffic: Text-only AgentX (semianalysis_cc_traces_weka_062126)
   deploy:
-    asset: recipes/kimi-k3.1/vllm/disagg-vr200-agentx/deploy-vr200.yaml
+    asset: recipes/kimi-k3.1-pro/vllm/disagg-vr200-agentx/deploy-vr200-synthetic-al.yaml
   expected_performance:
     available: true
     summary: 2932.63 output tok/s, 122.19 output tok/s/GPU, 73.93 user tok/s P50, TTFT P50 1761 ms
   benchmark:
     tool: aiperf
-    asset: recipes/kimi-k3.1/perf/perf.yaml
+    asset: recipes/kimi-k3.1-pro/perf/perf.yaml
 maintainer: Shubham Gandhi
