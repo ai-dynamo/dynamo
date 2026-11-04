@@ -1231,7 +1231,7 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
         .with_default(LevelFilter::ERROR)
         .with_target("runtime", LevelFilter::TRACE)
         .with_target("tokio", LevelFilter::TRACE);
-    let l = console_layer(console_log_format(), FmtSpan::NONE, filters(load_config()));
+    let l = console_layer(console_log_format(), FmtSpan::NONE).with_filter(filters(load_config()));
     tracing_subscriber::registry()
         .with(l)
         .with(tokio_console_layer.with_filter(tokio_console_target))
@@ -1243,7 +1243,8 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
 fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     let fmt_filter_layer = filters(load_config());
     let trace_filter_layer = filters(load_config());
-    let otel_filter_layer = otel_filters(load_config(), lifecycle_tracing_enabled());
+    let lifecycle_enabled = lifecycle_tracing_enabled();
+    let otel_filter_layer = otel_filters(load_config(), lifecycle_enabled);
     let otel_logs_filter_layer = filters(load_config());
     let console_format = console_log_format();
     let legacy_jsonl_enabled = legacy_jsonl_logging_enabled();
@@ -1361,23 +1362,40 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
         let tracer = tracer_provider.tracer(service_name.to_string());
         let otel_logs_layer = logger_provider_opt
             .as_ref()
-            .map(|lp| OpenTelemetryTracingBridge::new(lp).with_filter(otel_logs_filter_layer));
+            .map(OpenTelemetryTracingBridge::new);
 
-        let l = console_layer(console_format, span_events, fmt_filter_layer);
-        tracing_subscriber::registry()
-            .with(
-                tracing_opentelemetry::layer()
-                    .with_tracer(tracer)
-                    .with_filter(otel_filter_layer),
-            )
-            .with(otel_logs_layer)
-            .with(DistributedTraceIdLayer.with_filter(trace_filter_layer))
-            .with(l)
-            .init();
+        if lifecycle_enabled {
+            // The OTel layer also takes lifecycle spans, so each layer keeps its own filter.
+            tracing_subscriber::registry()
+                .with(
+                    tracing_opentelemetry::layer()
+                        .with_tracer(tracer)
+                        .with_filter(otel_filter_layer),
+                )
+                .with(otel_logs_layer.map(|layer| layer.with_filter(otel_logs_filter_layer)))
+                .with(DistributedTraceIdLayer.with_filter(trace_filter_layer))
+                .with(console_layer(console_format, span_events).with_filter(fmt_filter_layer))
+                .init();
+        } else {
+            // Every layer would get the same filter, so filter once, globally. A
+            // per-layer filter looks the span up in the registry on every enter and
+            // exit, once per layer, i.e. several times per poll of a task instrumented
+            // with an always-on `request_span` span. Without OTLP the logs layer is
+            // `None`, which turns the per-layer filters' `never` callsite interest
+            // into `sometimes`: every disabled `trace!` and `trace_span!` hit (h2 has
+            // several per frame) re-runs the filters and creates its span.
+            tracing_subscriber::registry()
+                .with(fmt_filter_layer.into_global())
+                .with(tracing_opentelemetry::layer().with_tracer(tracer))
+                .with(otel_logs_layer)
+                .with(DistributedTraceIdLayer)
+                .with(console_layer(console_format, span_events))
+                .init();
+        }
 
         log_otel_init_status(&service_name, endpoint_opt, console_format);
     } else {
-        let l = console_layer(console_format, span_events, fmt_filter_layer);
+        let l = console_layer(console_format, span_events).with_filter(fmt_filter_layer);
 
         tracing_subscriber::registry().with(l).init();
     }
@@ -1387,11 +1405,7 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Console (stderr) fmt layer whose event format is selected by
 /// `DYN_LOGGING_CONSOLE_FORMAT`, independent of the OTel export state.
-fn console_layer<S>(
-    format: ConsoleLogFormat,
-    span_events: FmtSpan,
-    filter_layer: LoggingFilter,
-) -> impl Layer<S>
+fn console_layer<S>(format: ConsoleLogFormat, span_events: FmtSpan) -> impl Layer<S>
 where
     S: Subscriber + for<'a> LookupSpan<'a> + 'static,
 {
@@ -1400,7 +1414,6 @@ where
         .with_span_events(span_events)
         .event_format(ConsoleEventFormatter::new(format))
         .with_writer(std::io::stderr)
-        .with_filter(filter_layer)
 }
 
 type ReadableEventFormatter = tracing_subscriber::fmt::format::Format<
@@ -1450,6 +1463,17 @@ where
 enum LoggingFilter {
     Targets(Targets),
     Env(EnvFilter),
+}
+
+impl LoggingFilter {
+    /// This filter as a global filter, for when every layer would get the same filter.
+    #[cfg(not(feature = "tokio-console"))]
+    fn into_global(self) -> Box<dyn Layer<Registry> + Send + Sync> {
+        match self {
+            Self::Targets(filter) => Box::new(filter),
+            Self::Env(filter) => Box::new(filter),
+        }
+    }
 }
 
 impl<S> Filter<S> for LoggingFilter {
@@ -3225,6 +3249,108 @@ pub mod tests {
                 "expected readable log line, got JSON: {line}"
             );
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_jsonl_request_span_keeps_trace_context() {
+        use std::process::Command;
+
+        let output = Command::new("cargo")
+            .args([
+                "test",
+                "-p",
+                "dynamo-runtime",
+                "logging::tests::test_jsonl_request_span_keeps_trace_context_subprocess",
+                "--",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("DYN_TEST_LOGGING_JSONL_REQUEST_SPAN", "1")
+            .env("DYN_LOGGING_CONSOLE_FORMAT", "jsonl")
+            .env_remove("DYN_LOGGING_JSONL")
+            .env_remove("OTEL_EXPORT_ENABLED")
+            .env_remove("DYN_LIFECYCLE_TRACE_ENABLED")
+            .env("DYN_LOG", "warn")
+            .output()
+            .expect("Failed to execute subprocess test");
+
+        if !output.status.success() {
+            eprintln!(
+                "=== STDOUT ===\n{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            eprintln!(
+                "=== STDERR ===\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        assert!(
+            output.status.success(),
+            "Subprocess test failed with exit code: {:?}",
+            output.status.code()
+        );
+    }
+
+    /// With trace context on and lifecycle tracing off, every layer shares one
+    /// global filter. At `DYN_LOG=warn` the request span must still be created,
+    /// continue the inbound trace, and give its context to the warn events inside it.
+    #[test]
+    fn test_jsonl_request_span_keeps_trace_context_subprocess() -> Result<()> {
+        if std::env::var("DYN_TEST_LOGGING_JSONL_REQUEST_SPAN").is_err() {
+            return Ok(());
+        }
+
+        let tmp_file = NamedTempFile::new().unwrap();
+        let file_name = tmp_file.path().to_str().unwrap();
+        let guard = StderrOverride::from_file(file_name)?;
+        init();
+
+        let trace_id = "4bf92f3577b34da6a3ce929d0e0e4736";
+        let parent_id = "00f067aa0ba902b7";
+        let headers = HashMap::from([
+            (
+                "traceparent".to_string(),
+                format!("00-{trace_id}-{parent_id}-01"),
+            ),
+            ("x-request-id".to_string(), "jsonl-req".to_string()),
+        ]);
+        let span = make_handle_payload_span_from_tcp_headers(
+            &headers,
+            "component",
+            "endpoint",
+            "namespace",
+            7,
+        );
+        assert!(
+            !span.is_disabled(),
+            "request_span must stay enabled at warn"
+        );
+        span.in_scope(|| {
+            tracing::info!("jsonl request info marker");
+            tracing::warn!("jsonl request warn marker");
+        });
+        drop(guard);
+
+        let lines = load_log(file_name)?;
+        let has_message =
+            |line: &&Value, text: &str| line.get("message").and_then(|v| v.as_str()) == Some(text);
+        assert!(
+            !lines
+                .iter()
+                .any(|line| has_message(&line, "jsonl request info marker")),
+            "info event should be filtered at DYN_LOG=warn, got: {lines:?}"
+        );
+        let warn_line = lines
+            .iter()
+            .find(|line| has_message(line, "jsonl request warn marker"))
+            .expect("warn event inside the request span should be logged");
+        assert_eq!(warn_line["span_name"], "handle_payload");
+        assert_eq!(warn_line["trace_id"], trace_id);
+        assert_eq!(warn_line["parent_id"], parent_id);
+        assert_eq!(warn_line["x_request_id"], "jsonl-req");
 
         Ok(())
     }
