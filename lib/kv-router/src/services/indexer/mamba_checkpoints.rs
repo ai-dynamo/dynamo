@@ -19,11 +19,10 @@ use crate::protocols::{
 
 const ENV_MAMBA_CHECKPOINT_CAP: &str = "DYN_ROUTER_MAMBA_CHECKPOINT_CAP";
 
-/// True when `DYN_ROUTER_MAMBA_CHECKPOINT_CAP` is `1` or `true` (case-insensitive).
+/// True when `DYN_ROUTER_MAMBA_CHECKPOINT_CAP` is truthy (`1`, `true`, `on`, `yes`;
+/// case-insensitive).
 pub fn mamba_checkpoint_cap_enabled() -> bool {
-    std::env::var(ENV_MAMBA_CHECKPOINT_CAP)
-        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true"))
-        .unwrap_or(false)
+    dynamo_truthy::env_is_truthy(ENV_MAMBA_CHECKPOINT_CAP)
 }
 
 /// Result of capping one worker's match.
