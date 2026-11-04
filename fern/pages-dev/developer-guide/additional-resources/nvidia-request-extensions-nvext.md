@@ -151,7 +151,7 @@ The `agent_hints` sub-object carries per-request hints that the router uses for 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `priority` | `i32` | `None` | Unified soft request priority. Used for router policy scoring and backend scheduling/eviction. |
-| `strict_priority` | `u32` | `None` | Router pending-queue tier. Higher values always precede lower values; see [Priority Scheduling](../../use-cases/agents/priority-scheduling.md) for due-time ordering within a tier. Unset is equivalent to `0`. |
+| `strict_priority` | `u32` | `None` | Router pending-queue tier for `fcfs`, `lcfs` (synthetic fallback class only), and `wspt` classes. Higher values always precede lower values; see [Priority Scheduling](../../use-cases/agents/priority-scheduling.md) for due-time ordering within a tier. Unset is equivalent to `0`. The `edf` queue policy, the default for configured policy classes, ignores it. |
 | `osl` | `u32` | `None` | Expected output sequence length (tokens). Used for output block tracking and resource estimation. |
 | `speculative_prefill` | `bool` | `false` | When `true`, speculatively prefills the predicted next-turn prompt after the current turn completes to warm the KV cache. |
 
@@ -160,7 +160,7 @@ The `agent_hints` sub-object carries per-request hints that the router uses for 
 `priority` is the cross-layer scheduling hint. Higher values mean "more
 important" across Dynamo.
 
-When `--router-queue-threshold` is set and the queue is active, higher-priority requests are shifted earlier in the router queue. Once dispatched, Dynamo forwards the same semantic priority to the backend engine for queue ordering, preemption, and KV cache eviction. Dynamo normalizes backend-specific polarity internally, including vLLM's lower-is-higher convention.
+When the router queue is active and the request's policy class uses `fcfs` or `wspt`, such as the synthetic class that `--router-queue-threshold` enables, higher-priority requests are shifted earlier in the router queue. An `edf` class, the default for configured policy classes, does not reorder by priority. Once dispatched, Dynamo forwards the same semantic priority to the backend engine for queue ordering, preemption, and KV cache eviction. Dynamo normalizes backend-specific polarity internally, including vLLM's lower-is-higher convention.
 
 For layer-by-layer behavior and backend requirements, see
 [Priority Scheduling](../../use-cases/agents/priority-scheduling.md).
@@ -178,11 +178,14 @@ For layer-by-layer behavior and backend requirements, see
 ### `strict_priority`
 
 `strict_priority` is an unsigned router-only tier for requests waiting in a
-router scheduler queue. The queue orders requests by
-`(strict_priority, due_at, configured_policy_key)`, so FCFS, LCFS, or WSPT still orders
-requests within the same tier; see
+router scheduler queue whose class uses `fcfs`, `lcfs`, or `wspt`. That queue orders
+requests by `(strict_priority, due_at, configured_policy_key)`, so FCFS, LCFS, or WSPT
+still orders requests within the same tier; see
 [Priority Scheduling](../../use-cases/agents/priority-scheduling.md) for how due-time
-ordering applies within a tier.
+ordering applies within a tier. An `edf` class, the default for configured policy
+classes, orders by due time and arrival alone and ignores `strict_priority`. Only the
+synthetic fallback class can use `lcfs`, through the router-wide queue policy;
+policy-class YAML rejects it.
 
 This field does not change backend engine priority, preempt running work, or
 provide ordering across router replicas. It also does not prevent an eligible
