@@ -322,6 +322,15 @@ pub struct NvCreateChatCompletionResponse {
 }
 
 /// Parser lifecycle evidence carried between serving components, never to OpenAI clients.
+///
+/// Evidence is keyed by choice and tool index. It may repeat or arrive without
+/// a matching choice or tool-call delta.
+///
+/// In unified-parser output, `complete` reflects parser state after processing
+/// the source chunk. Multiple rewritten children can carry that final state,
+/// including a name-only child before its argument fragments. It is not an
+/// argument-delivery barrier: consumers must not infer that all arguments have
+/// arrived, or interpret empty arguments as a parameterless call, from it alone.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallCompletion {
     pub choice_index: u32,

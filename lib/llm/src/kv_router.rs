@@ -401,13 +401,6 @@ pub(crate) fn to_worker_selection_session_context(
     .with_agent_headers(agent_headers.clone())
 }
 
-/// Whether a policy reads the KV index: its overlaps (`CACHE`) or the prefixes
-/// workers could fetch (`KV_TRANSFER`). Each component still reads only the
-/// inputs it declares.
-pub(crate) fn needs_kv_index(inputs: WorkerInputs) -> bool {
-    inputs.contains(WorkerInputs::CACHE) || inputs.contains(WorkerInputs::KV_TRANSFER)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KvEventSourceRequirement {
     NotRequired,
@@ -422,7 +415,7 @@ impl KvEventSourceRequirement {
         config: &KvRouterConfig,
         inputs: WorkerInputs,
     ) -> Self {
-        if !needs_kv_index(inputs) || config.use_remote_indexer || !config.use_kv_events {
+        if !inputs.reads_kv_index() || config.use_remote_indexer || !config.use_kv_events {
             return Self::NotRequired;
         }
 

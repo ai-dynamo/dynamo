@@ -551,6 +551,7 @@ pub(super) fn monitor_for_disconnects_with_activity_and_error_signal(
     stream_handle: ConnectionHandle,
     activity_rx: mpsc::UnboundedReceiver<()>,
     error_signal: StreamErrorSignal,
+    emit_done_sentinel: bool,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     monitor_for_disconnects_with_timeout_error_and_keep_alive(
         stream,
@@ -562,7 +563,7 @@ pub(super) fn monitor_for_disconnects_with_activity_and_error_signal(
         StreamMonitorOptions {
             activity_rx: Some(activity_rx),
             error_signal: Some(error_signal),
-            ..Default::default()
+            emit_done_sentinel,
         },
     )
 }
@@ -976,6 +977,7 @@ mod tests {
                     handle,
                     rx,
                     StreamErrorSignal::default(),
+                    true,
                 ))
                 .await
             } else {
