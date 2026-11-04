@@ -3237,6 +3237,7 @@ dependencies = [
  "tokio-util",
  "tonic 0.13.1",
  "tonic 0.14.6",
+ "tonic-health 0.13.1",
  "tonic-health 0.14.6",
 ]
 
@@ -3340,6 +3341,7 @@ dependencies = [
  "tokio-util",
  "tonic 0.13.1",
  "tonic-build 0.13.1",
+ "tonic-health 0.13.1",
  "tracing",
 ]
 
