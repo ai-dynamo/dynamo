@@ -98,6 +98,7 @@ spec:
           - |
             set -euo pipefail
             exec python3 -m dynamo.vllm \
+              --reasoning-parser kimi_k3 \
               --model /shared-model-cache/moonshotai/Kimi-K3.1-Pro \
               --served-model-name moonshotai/Kimi-K3.1-Pro \
               --trust-remote-code \
@@ -259,6 +260,7 @@ spec:
           - |
             set -euo pipefail
             exec python3 -m dynamo.vllm \
+              --reasoning-parser kimi_k3 \
               --model /shared-model-cache/moonshotai/Kimi-K3.1-Pro \
               --served-model-name moonshotai/Kimi-K3.1-Pro \
               --trust-remote-code \

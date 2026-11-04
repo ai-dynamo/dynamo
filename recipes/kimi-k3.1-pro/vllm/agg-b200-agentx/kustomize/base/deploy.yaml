@@ -82,6 +82,7 @@ spec:
             set -euo pipefail
 
             exec python3 -m dynamo.vllm \
+              --reasoning-parser kimi_k3 \
               --model "${MODEL_PATH}" \
               --served-model-name moonshotai/Kimi-K3.1-Pro \
               --trust-remote-code \

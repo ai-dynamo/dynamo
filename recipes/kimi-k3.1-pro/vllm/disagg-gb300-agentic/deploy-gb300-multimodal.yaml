@@ -109,6 +109,7 @@ spec:
             ulimit -n 1048576
 
             exec python3 -m dynamo.vllm \
+              --reasoning-parser kimi_k3 \
               --model "${MODEL_PATH}" \
               --served-model-name moonshotai/Kimi-K3.1-Pro \
               --tensor-parallel-size 8 \
@@ -226,6 +227,7 @@ spec:
             ulimit -n 1048576
 
             exec python3 -m dynamo.vllm \
+              --reasoning-parser kimi_k3 \
               --model "${MODEL_PATH}" \
               --served-model-name moonshotai/Kimi-K3.1-Pro \
               --tensor-parallel-size 8 \

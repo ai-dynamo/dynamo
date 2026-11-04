@@ -116,6 +116,7 @@ spec:
             ls "$STAGE" | wc -l
 
             exec python3 -m dynamo.sglang \
+              --reasoning-parser kimi_k3 \
               --model-path "${MODEL_PATH}" \
               --served-model-name moonshotai/Kimi-K3.1-Pro \
               --tensor-parallel-size 8 \
