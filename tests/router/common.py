@@ -22,6 +22,7 @@ from tests.router.helper import (
     get_runtime,
     managed_runtime,
     poll_for_worker_instances,
+    read_routed_worker_from_stream,
     send_inflight_requests,
     send_request_via_python_kv_router,
     verify_response_timing,
@@ -3236,19 +3237,7 @@ def _test_router_cache_salt_isolation(
                 "routing": routing,
             }
             stream = await kv_router.generate_from_request(request)
-            routed_worker = None
-            terminal = None
-            async for response in stream:
-                if not isinstance(response, dict):
-                    continue
-                worker_info = (response.get("routing_data") or {}).get("worker_id")
-                if worker_info and routed_worker is None:
-                    routed_worker = worker_info.get("decode_worker_id")
-                if response.get("finish_reason") is not None:
-                    terminal = response
-            assert terminal is not None, f"tenant {cache_salt} request did not finish"
-            assert routed_worker is not None, f"tenant {cache_salt}: no routed worker"
-            return routed_worker
+            return await read_routed_worker_from_stream(stream, f"tenant {cache_salt}")
 
         async def device_blocks(
             cache_salt: Optional[str],
@@ -3392,19 +3381,7 @@ def _test_router_lora_isolation(
                 "routing": routing,
             }
             stream = await kv_router.generate_from_request(request)
-            routed_worker = None
-            terminal = None
-            async for response in stream:
-                if not isinstance(response, dict):
-                    continue
-                worker_info = (response.get("routing_data") or {}).get("worker_id")
-                if worker_info and routed_worker is None:
-                    routed_worker = worker_info.get("decode_worker_id")
-                if response.get("finish_reason") is not None:
-                    terminal = response
-            assert terminal is not None, f"lora={lora!r} request did not finish"
-            assert routed_worker is not None, f"lora={lora!r}: no routed worker"
-            return routed_worker
+            return await read_routed_worker_from_stream(stream, f"lora={lora!r}")
 
         async def device_blocks(lora: Optional[str]) -> dict[tuple[int, int], int]:
             scores = await kv_router.get_overlap_scores(
