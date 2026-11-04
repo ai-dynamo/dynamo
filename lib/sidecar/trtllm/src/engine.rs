@@ -24,7 +24,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
 use crate::client::{self, ModelInfo, TrtllmClient};
-use crate::convert::{ResponseState, build_generate_request_with_routing};
+use crate::convert::{
+    ResponseState, build_generate_request_with_routing, validate_remote_media_urls,
+};
 use crate::model::ConfiguredModel;
 use crate::proto as pb;
 
@@ -66,6 +68,7 @@ impl Default for RoutingSupervision {
 }
 
 struct RoutingState {
+    instance_id: String,
     node: Option<crate::node::NodeMetadata>,
     dp_size: u32,
     dp_targeting: bool,
@@ -88,6 +91,7 @@ pub struct TrtllmSidecarEngine {
     /// `kv.session` divergence in `convert`.
     mode: DisaggregationMode,
     subagent_affinity_auth_key: Option<String>,
+    allow_remote_media_urls: bool,
     /// Connection and model information may be discovered in the cancellable sidecar bootstrap.
     connection: OnceCell<(TrtllmClient, ModelInfo)>,
     started: OnceCell<()>,
@@ -96,6 +100,9 @@ pub struct TrtllmSidecarEngine {
     metrics_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     cancel: CancellationToken,
     load_failed: CancellationToken,
+    /// Cancelled once TensorRT-LLM stops serving after `start`, with the reason set first.
+    lost: CancellationToken,
+    lost_reason: Arc<std::sync::OnceLock<String>>,
 }
 
 impl TrtllmSidecarEngine {
@@ -111,6 +118,7 @@ impl TrtllmSidecarEngine {
             model,
             mode,
             subagent_affinity_auth_key: None,
+            allow_remote_media_urls: true,
             connection: OnceCell::new(),
             started: OnceCell::new(),
             routing: OnceCell::new(),
@@ -118,6 +126,8 @@ impl TrtllmSidecarEngine {
             metrics_task: Arc::new(Mutex::new(None)),
             cancel: CancellationToken::new(),
             load_failed: CancellationToken::new(),
+            lost: CancellationToken::new(),
+            lost_reason: Arc::default(),
         }
     }
 
@@ -129,7 +139,7 @@ impl TrtllmSidecarEngine {
     }
 
     /// Fence a restarted native engine before continuing with stale discovery.
-    pub(crate) async fn monitor_routing(&self) -> anyhow::Result<()> {
+    async fn monitor_routing(&self) -> anyhow::Result<()> {
         tokio::select! {
             _ = self.load_failed.cancelled() => {
                 anyhow::bail!(
@@ -206,6 +216,15 @@ impl TrtllmSidecarEngine {
                 "subagent-affinity-auth-key must not be empty",
             ));
         }
+        let remote_urls = std::env::var("DYN_MM_ALLOW_REMOTE_URLS")
+            .map(Some)
+            .or_else(|error| match error {
+                std::env::VarError::NotPresent => Ok(None),
+                _ => Err(client::invalid_argument(
+                    "DYN_MM_ALLOW_REMOTE_URLS must be valid UTF-8",
+                )),
+            })?;
+        let allow_remote_media_urls = crate::args::allow_remote_media_urls(remote_urls.as_deref())?;
         let mode = args.sidecar.common.disaggregation_mode;
         if mode.is_encode() {
             return Err(client::invalid_argument(
@@ -234,6 +253,7 @@ impl TrtllmSidecarEngine {
         };
         let mut engine = Self::new(endpoint, transport, model.clone(), mode);
         engine.subagent_affinity_auth_key = args.subagent_affinity_auth_key;
+        engine.allow_remote_media_urls = allow_remote_media_urls;
         // Off by default: TensorRT-LLM's xgrammar rejects several tag formats (NVIDIA/TensorRT-LLM#19913).
         let structural_tag = args.sidecar.common.structural_tag(false);
         let config = WorkerConfig {
@@ -270,7 +290,6 @@ impl TrtllmSidecarEngine {
         };
         Ok((engine, config))
     }
-
     pub(crate) async fn bootstrap(
         (engine, config): (Self, WorkerConfig),
     ) -> Result<(Self, WorkerConfig), DynamoError> {
@@ -303,7 +322,7 @@ impl TrtllmSidecarEngine {
             ));
         }
 
-        let limits = client
+        let info = client
             .wait_for_model_info(
                 &self.model.source,
                 self.model.context_length,
@@ -311,7 +330,7 @@ impl TrtllmSidecarEngine {
                 self.transport.retry_interval,
             )
             .await?;
-        Ok((client, limits))
+        Ok((client, info))
     }
 }
 
@@ -399,6 +418,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                     "Discovered OpenEngine routing capabilities"
                 );
                 Ok::<RoutingState, DynamoError>(RoutingState {
+                    instance_id: server.instance_id,
                     node,
                     dp_size,
                     dp_targeting,
@@ -435,6 +455,21 @@ impl LLMEngine for TrtllmSidecarEngine {
                     .map_err(|error| client::protocol_error(error.to_string()))?,
             );
         }
+        let (stop, lost) = (self.cancel.child_token(), self.lost.clone());
+        let reason = Arc::clone(&self.lost_reason);
+        let (health, open_timeout) = (
+            client.health_channel(),
+            self.transport.connect_attempt_timeout,
+        );
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = stop.cancelled() => {}
+                why = client::watch_liveness(health, open_timeout) => {
+                    let _ = reason.set(why);
+                    lost.cancel();
+                }
+            }
+        });
         Ok(config)
     }
 
@@ -456,14 +491,6 @@ impl LLMEngine for TrtllmSidecarEngine {
             .routing
             .get()
             .is_some_and(|routing| routing.dp_targeting && routing.dp_size > 1);
-        let proto_request = build_generate_request_with_routing(
-            &request,
-            &request_id,
-            &self.model.source,
-            Some(info.limits),
-            self.mode,
-            use_dp_targeting,
-        )?;
         let target_dp_rank = request.routing.as_ref().and_then(|routing| {
             if self.mode.is_prefill() {
                 routing.prefill_dp_rank.or(routing.dp_rank)
@@ -488,6 +515,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                     .as_deref()
                     .map(str::trim)
                     .filter(|parent| !parent.is_empty() && *parent != agent.session_id.trim())
+                    .map(str::to_owned)
             })
         } else {
             None
@@ -531,11 +559,22 @@ impl LLMEngine for TrtllmSidecarEngine {
             biased;
             _ = &mut request_cancellation, if !needs_cancellation_deferral => None,
             _ = &mut shutdown_cancellation => None,
-            result = client.generate(
-                proto_request,
-                target_dp_rank,
-                parent_affinity.zip(self.subagent_affinity_auth_key.as_deref()),
-            ) => Some(result?),
+            result = async {
+                validate_remote_media_urls(&request, self.allow_remote_media_urls)?;
+                let proto_request = build_generate_request_with_routing(
+                    request,
+                    &request_id,
+                    &self.model.source,
+                    Some(info.limits),
+                    self.mode,
+                    use_dp_targeting,
+                )?;
+                client.generate(
+                    proto_request,
+                    target_dp_rank,
+                    parent_affinity.as_deref().zip(self.subagent_affinity_auth_key.as_deref()),
+                ).await
+            } => Some(result?),
         };
         let Some(mut stream) = stream else {
             let output = cancelled(&state);
@@ -573,13 +612,13 @@ impl LLMEngine for TrtllmSidecarEngine {
                                 }
                             },
                             Ok(None) => {
-                                yield Err(client::protocol_error(
-                                    "Generate ended before a terminal response",
+                                yield Err(client::stream_incomplete(
+                                    "TensorRT-LLM Generate ended before a terminal response",
                                 ));
                                 break;
                             }
                             Err(status) => {
-                                yield Err(client::status_to_dynamo("Generate", status));
+                                yield Err(client::stream_status_to_dynamo("Generate", status));
                                 break;
                             }
                         }
@@ -620,6 +659,26 @@ impl LLMEngine for TrtllmSidecarEngine {
         }
         tracing::info!("TensorRT-LLM sidecar shutdown complete");
         Ok(())
+    }
+
+    async fn engine_lost(&self) -> DynamoError {
+        let reason = tokio::select! {
+            _ = self.lost.cancelled() => {
+                self.lost_reason.get().map_or("unknown", String::as_str).to_owned()
+            }
+            // Routing supervision only returns on a failure.
+            result = self.monitor_routing() => match result {
+                Err(error) => format!("{error:#}"),
+                Ok(()) => "routing supervision stopped".to_owned(),
+            },
+        };
+        let instance_id = self
+            .routing
+            .get()
+            .map_or("unknown", |routing| routing.instance_id.as_str());
+        client::engine_shutdown(format!(
+            "TensorRT-LLM engine lost: {reason} (instance {instance_id})"
+        ))
     }
 
     async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {

@@ -124,6 +124,8 @@ impl KvEventIngress for ZmqDirectIngress {
                     && ranks.contains(&rank)
                     && old_endpoints.get(&rank) == endpoints.get(&rank)
                     && previous.replay_endpoint == record.replay_endpoint
+                    && previous.engine_owned_mm_identity.unwrap_or(false)
+                        == record.engine_owned_mm_identity.unwrap_or(false)
                 {
                     retained.insert(rank);
                 } else if listener_present {
@@ -158,6 +160,7 @@ impl KvEventIngress for ZmqDirectIngress {
                     record.routing_group.clone(),
                     block_size,
                     record.replay_endpoint.clone(),
+                    record.engine_owned_mm_identity.unwrap_or(false),
                 )
                 .await
                 .map_err(|error| SelectionError::BadRequest(error.to_string()))?;
