@@ -336,7 +336,7 @@ impl Indexer {
     }
 
     /// Apply an event, routing to the device-tier primary when
-    /// `event.storage_tier.is_gpu()` and to the appropriate lower-tier
+    /// `event.targets_primary()` and to the appropriate lower-tier
     /// indexer otherwise. `Cleared` events fan out to their applicable physical
     /// indexes according to the event's reset scope. Failures are logged and
     /// the first one is returned after every tier was attempted.
@@ -368,7 +368,7 @@ impl Indexer {
                         tracing::warn!(%error, "Failed to reset primary residency");
                         reset_error = Some(error);
                     }
-                    for indexer in lower_tier.all() {
+                    for indexer in lower_tier.for_clear(event.storage_tier) {
                         if let Err(error) = indexer.apply_event_and_wait(event.clone()).await {
                             tracing::warn!(%error, "Failed to reset lower-tier residency");
                             reset_error.get_or_insert(error);
@@ -399,7 +399,7 @@ impl Indexer {
                         tracing::warn!(%error, "Failed to reset primary residency");
                         reset_error = Some(error);
                     }
-                    for indexer in lower_tier.all() {
+                    for indexer in lower_tier.for_clear(event.storage_tier) {
                         if let Err(error) = indexer.apply_event_and_wait(event.clone()).await {
                             tracing::warn!(%error, "Failed to reset lower-tier residency");
                             reset_error.get_or_insert(error);
@@ -470,7 +470,7 @@ impl Indexer {
                             .reset_worker_dp_rank_and_wait(event.worker_id, event.event.dp_rank)
                             .await?;
                     }
-                    for indexer in lower_tier.all() {
+                    for indexer in lower_tier.for_clear(event.storage_tier) {
                         indexer.apply_event_and_wait(event.clone()).await?;
                     }
                 } else if targets_primary {
@@ -494,7 +494,7 @@ impl Indexer {
                     if targets_primary {
                         primary.apply_event_and_wait(event.clone()).await?;
                     }
-                    for indexer in lower_tier.all() {
+                    for indexer in lower_tier.for_clear(event.storage_tier) {
                         indexer.apply_event_and_wait(event.clone()).await?;
                     }
                 } else if targets_primary {
@@ -1548,6 +1548,184 @@ mod tests {
         assert!(IndexerPolicy::from_router_config(&side_without_events).is_err());
     }
 
+    #[tokio::test]
+    async fn native_and_retained_gpu_clear_lifetimes_match_for_every_local_backend_ingress() {
+        use super::test_util::store_event;
+        use crate::protocols::StorageTier;
+
+        async fn admit(indexer: &Indexer, event: RouterEvent, queued: bool) {
+            if queued {
+                indexer.try_apply_event(event).await.unwrap();
+            } else {
+                indexer.apply_event_routed(event).await.unwrap();
+            }
+        }
+        fn root_hits(indexer: &Indexer, tier: StorageTier, worker: WorkerWithDpRank) -> usize {
+            let lower = match indexer {
+                Indexer::Single { lower_tier, .. } | Indexer::Concurrent { lower_tier, .. } => {
+                    lower_tier
+                }
+                _ => unreachable!(),
+            };
+            let sequence = [LocalBlockHash(11), LocalBlockHash(12)];
+            let Some(indexer) = lower.get(tier) else {
+                return 0;
+            };
+            let continuations = rustc_hash::FxHashMap::from_iter([(
+                worker,
+                crate::indexer::LowerTierContinuation::from_root(0),
+            )]);
+            indexer
+                .backend()
+                .query_contiguous_hits(&sequence, &continuations)
+                .get(&worker)
+                .copied()
+                .unwrap_or(0)
+        }
+        for threads in [1, 2] {
+            for queued in [false, true] {
+                let indexer = create_indexer(4, threads);
+                let worker = WorkerWithDpRank::new(17, 0);
+                for (index, tier) in [
+                    StorageTier::Device,
+                    StorageTier::HostPinned,
+                    StorageTier::GpuDirect,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    admit(
+                        &indexer,
+                        store_event(17, 0, index as u64 + 1, &[], &[11, 12], tier),
+                        queued,
+                    )
+                    .await;
+                }
+                indexer.dump_events().await.unwrap();
+                assert_eq!(root_hits(&indexer, StorageTier::GpuDirect, worker), 2);
+                admit(
+                    &indexer,
+                    RouterEvent::with_storage_tier(
+                        17,
+                        KvCacheEvent {
+                            event_id: 4,
+                            data: KvCacheEventData::Cleared,
+                            dp_rank: 0,
+                        },
+                        StorageTier::Device,
+                    ),
+                    queued,
+                )
+                .await;
+                assert!(
+                    indexer
+                        .find_matches(vec![LocalBlockHash(11), LocalBlockHash(12)])
+                        .await
+                        .unwrap()
+                        .scores
+                        .is_empty()
+                );
+                assert_eq!(root_hits(&indexer, StorageTier::HostPinned, worker), 0);
+                assert_eq!(root_hits(&indexer, StorageTier::GpuDirect, worker), 2);
+                for (id, tier) in [(5, StorageTier::Device), (6, StorageTier::HostPinned)] {
+                    admit(
+                        &indexer,
+                        store_event(17, 0, id, &[], &[11, 12], tier),
+                        queued,
+                    )
+                    .await;
+                }
+                indexer.dump_events().await.unwrap();
+                admit(
+                    &indexer,
+                    RouterEvent::with_storage_tier(
+                        17,
+                        KvCacheEvent {
+                            event_id: 7,
+                            data: KvCacheEventData::Cleared,
+                            dp_rank: 0,
+                        },
+                        StorageTier::GpuDirect,
+                    ),
+                    queued,
+                )
+                .await;
+                assert_eq!(
+                    indexer
+                        .find_matches(vec![LocalBlockHash(11), LocalBlockHash(12)])
+                        .await
+                        .unwrap()
+                        .scores
+                        .get(&worker),
+                    Some(&2)
+                );
+                assert_eq!(root_hits(&indexer, StorageTier::HostPinned, worker), 2);
+                assert_eq!(root_hits(&indexer, StorageTier::GpuDirect, worker), 0);
+                admit(
+                    &indexer,
+                    store_event(17, 0, 8, &[], &[11, 12], StorageTier::GpuDirect),
+                    queued,
+                )
+                .await;
+                indexer.dump_events().await.unwrap();
+                let stored = store_event(17, 0, 8, &[], &[11, 12], StorageTier::GpuDirect);
+                let KvCacheEventData::Stored(data) = stored.event.data else {
+                    unreachable!()
+                };
+                admit(
+                    &indexer,
+                    RouterEvent::with_storage_tier(
+                        17,
+                        KvCacheEvent {
+                            event_id: 9,
+                            data: KvCacheEventData::Removed(crate::protocols::KvCacheRemoveData {
+                                block_hashes: data
+                                    .blocks
+                                    .into_iter()
+                                    .map(|block| block.block_hash)
+                                    .collect(),
+                            }),
+                            dp_rank: 0,
+                        },
+                        StorageTier::GpuDirect,
+                    ),
+                    queued,
+                )
+                .await;
+                indexer.dump_events().await.unwrap();
+                assert_eq!(root_hits(&indexer, StorageTier::GpuDirect, worker), 0);
+                assert_eq!(root_hits(&indexer, StorageTier::HostPinned, worker), 2);
+                assert_eq!(
+                    indexer
+                        .find_matches(vec![LocalBlockHash(11), LocalBlockHash(12)])
+                        .await
+                        .unwrap()
+                        .scores
+                        .get(&worker),
+                    Some(&2)
+                );
+                admit(
+                    &indexer,
+                    store_event(17, 0, 10, &[], &[11, 12], StorageTier::GpuDirect),
+                    queued,
+                )
+                .await;
+                indexer.dump_events().await.unwrap();
+                indexer.reset_worker_dp_rank_and_wait(17, 0).await.unwrap();
+                assert_eq!(root_hits(&indexer, StorageTier::GpuDirect, worker), 0);
+                assert_eq!(root_hits(&indexer, StorageTier::HostPinned, worker), 0);
+                assert!(
+                    indexer
+                        .find_matches(vec![LocalBlockHash(11), LocalBlockHash(12)])
+                        .await
+                        .unwrap()
+                        .scores
+                        .is_empty()
+                );
+            }
+        }
+    }
+
     /// Offline replay cannot build this indexer, so it asks the config.
     #[tokio::test]
     async fn config_predicts_kv_transfer_chain_retention() {
@@ -2317,60 +2495,55 @@ mod session_tests {
 
     #[tokio::test]
     async fn lower_tier_session_updates_follow_the_lower_tier_physical_apply() {
-        let (indexer, session_prefix_index) = make_concurrent_session_test_indexer();
-        let worker = WorkerWithDpRank::new(7, 0);
+        for tier in [StorageTier::HostPinned, StorageTier::GpuDirect] {
+            let (indexer, session_prefix_index) = make_concurrent_session_test_indexer();
+            let worker = WorkerWithDpRank::new(7, 0);
 
-        // Fill the host lane with work the session consumer would otherwise outrun.
-        for event_id in 1..=2000u64 {
-            let local_hashes: Vec<u64> = (1..=32).map(|i| 100_000 + event_id * 64 + i).collect();
+            // Fill the lower-tier lane so the session consumer can outrun it.
+            for event_id in 1..=2000u64 {
+                let local_hashes: Vec<u64> =
+                    (1..=32).map(|i| 100_000 + event_id * 64 + i).collect();
+                indexer
+                    .try_apply_event(store_event(7, 0, event_id, &[], &local_hashes, tier))
+                    .await
+                    .unwrap();
+            }
             indexer
-                .try_apply_event(store_event(
-                    7,
-                    0,
-                    event_id,
-                    &[],
-                    &local_hashes,
-                    StorageTier::HostPinned,
-                ))
+                .try_apply_event(
+                    store_event(7, 0, 2001, &[], &[41], StorageTier::Device)
+                        .with_session_id("session-1"),
+                )
                 .await
                 .unwrap();
-        }
-        indexer
-            .try_apply_event(
-                store_event(7, 0, 2001, &[], &[41], StorageTier::Device)
-                    .with_session_id("session-1"),
-            )
-            .await
-            .unwrap();
-        indexer
-            .try_apply_event(store_event(7, 0, 2002, &[], &[41], StorageTier::HostPinned))
-            .await
-            .unwrap();
-        indexer.flush_session_updates().await.unwrap();
+            indexer
+                .try_apply_event(store_event(7, 0, 2002, &[], &[41], tier))
+                .await
+                .unwrap();
+            indexer.flush_session_updates().await.unwrap();
 
-        assert_eq!(
-            session_prefix_index
-                .get_session_block_lineage_in_tier(
-                    "session-1",
-                    SessionResidencyOwner::Worker(worker),
-                    StorageTier::HostPinned,
-                    None
-                )
-                .unwrap()
-                .len(),
-            1
-        );
-        let Indexer::Concurrent { lower_tier, .. } = &indexer else {
-            unreachable!()
-        };
-        let host = lower_tier
-            .get(StorageTier::HostPinned)
-            .expect("host tier allocated");
-        assert_eq!(
-            host.backend()
-                .root_workers(LocalBlockHash(41), &ResidencyProjection::default()),
-            vec![worker],
-            "host residency was reported before the host index applied the store"
-        );
+            assert_eq!(
+                session_prefix_index
+                    .get_session_block_lineage_in_tier(
+                        "session-1",
+                        SessionResidencyOwner::Worker(worker),
+                        tier,
+                        None
+                    )
+                    .unwrap()
+                    .len(),
+                1
+            );
+            let Indexer::Concurrent { lower_tier, .. } = &indexer else {
+                unreachable!()
+            };
+            let lower = lower_tier.get(tier).expect("lower tier allocated");
+            assert_eq!(
+                lower
+                    .backend()
+                    .root_workers(LocalBlockHash(41), &ResidencyProjection::default()),
+                vec![worker],
+                "session residency preceded the lower-tier store"
+            );
+        }
     }
 }
