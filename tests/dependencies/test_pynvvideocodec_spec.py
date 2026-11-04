@@ -47,10 +47,10 @@ ROOT = Path(__file__).resolve().parents[2]
 # The spec every image installs: pinned exactly, so the declared version is the
 # version, and `container/deps/README.md`'s "every installed version should be
 # explicitly tested" holds without an audit.
-EXPECTED_SPEC = "==2.2.3"
+EXPECTED_SPEC = "==2.2.4"
 # The bare version, which is what the shell guards in the templates compare
 # against -- they check an installed version string, not a specifier.
-EXPECTED_VERSION = "2.2.3"
+EXPECTED_VERSION = "2.2.4"
 
 DISTRIBUTION = "pynvvideocodec"
 

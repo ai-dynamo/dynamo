@@ -560,7 +560,7 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
 # Removing the file keeps the narrow waivers, and the tripwire, intact.
 #
 # Pinned exactly, like DALI above: requirements.trtllm.txt installs
-# PyNvVideoCodec==2.2.3 into /opt/dynamo/venv and this stage pins the system copy
+# PyNvVideoCodec==2.2.4 into /opt/dynamo/venv and this stage pins the system copy
 # to the same version, so the guard below is a plain equality and the venv
 # cross-check compares the two copies to each other. tests/dependencies/
 # test_pynvvideocodec_spec.py asserts that, and covers the vllm and sglang
@@ -584,7 +584,7 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
 # build log carries a pip resolver complaint here:
 #
 #     tensorrt-llm 1.3.0rc28 requires PyNvVideoCodec~=2.1.0,
-#     but you have pynvvideocodec 2.2.3 which is incompatible
+#     but you have pynvvideocodec 2.2.4 which is incompatible
 #
 # The complaint is expected and the override is deliberate. `~=2.1.0` excludes
 # everything above 2.1.x by construction, and 2.1.0 is the version that bundles
@@ -618,8 +618,8 @@ RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compl
         echo "       requirements.trtllm.txt is the one that matters." >&2; \
         exit 1; \
     fi; \
-    newest=$(printf '%s\n2.2.3\n' "$before" | sort -V | tail -1); \
-    if [ "$before" = "2.2.3" ] || [ "$newest" != "2.2.3" ]; then \
+    newest=$(printf '%s\n2.2.4\n' "$before" | sort -V | tail -1); \
+    if [ "$before" = "2.2.4" ] || [ "$newest" != "2.2.4" ]; then \
         echo "ERROR: base image already carries PyNvVideoCodec $before, so this block" >&2; \
         echo "       is obsolete -- delete it and let the base version stand. Keep the" >&2; \
         echo "       libavcodec assertion below and the post-overlay one in" >&2; \
@@ -636,8 +636,8 @@ RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compl
         exit 1; \
     fi; \
     /usr/bin/python3 -m pip install --break-system-packages --no-cache-dir \
-        'PyNvVideoCodec==2.2.3'; \
-    PYTHONPATH=/tmp/compliance /usr/bin/python3 -m compliance.check_pynvvideocodec --pinned 2.2.3; \
+        'PyNvVideoCodec==2.2.4'; \
+    PYTHONPATH=/tmp/compliance /usr/bin/python3 -m compliance.check_pynvvideocodec --pinned 2.2.4; \
     v=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("pynvvideocodec"))'); \
     echo "PyNvVideoCodec version: $v"; \
     examined=0; \
@@ -794,11 +794,11 @@ RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
 # overlay COPY has nothing to write over them and the base image's copies would
 # come straight back. Without this entry the upgrade buys nothing and the scan
 # fails exactly as it did before. The version-stamped dist-info is renamed by the
-# upgrade (pynvvideocodec-2.1.0.dist-info -> -2.2.3.dist-info), so the glob takes
+# upgrade (pynvvideocodec-2.1.0.dist-info -> -2.2.4.dist-info), so the glob takes
 # that and the stray `pynvvideocodec.` entry beside it.
 #
 # The SONAMEs move too, which is why the deletion cannot be narrowed to a version
-# glob: 2.1.0 ships libavformat.so.61 / libavutil.so.59 (FFmpeg 7.0.2) and 2.2.3
+# glob: 2.1.0 ships libavformat.so.61 / libavutil.so.59 (FFmpeg 7.0.2) and 2.2.4
 # ships libavformat.so.63 / libavutil.so.61 (FFmpeg 9.0.1). The overlay writes
 # over the two bare `libav*.so` symlinks and nothing else -- every versioned file
 # the base carries, and the whole libavcodec/libavdevice/libavfilter/libsw*
@@ -967,6 +967,13 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
         find /usr/local/external/ffmpeg -name 'ffmpeg-*.tar.*' >&2; \
         exit 1; \
     fi
+
+# The PyNvVideoCodec replacement in runtime_full needs the same post-overlay
+# check. A missed whiteout leaves the base image's dist-info beside the new one,
+# and the tarball count above cannot see that when both releases ship the same
+# FFmpeg source. The shared guard counts distributions, so it runs again here.
+RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compliance \
+    PYTHONPATH=/tmp/compliance /usr/bin/python3 -m compliance.check_pynvvideocodec --pinned 2.2.4
 
 # The Nsight Systems CLI in the CUDA base ships an optional efa_metrics sampler
 # for EFA network counters. Nothing in the Dynamo tree references it, and AWS
