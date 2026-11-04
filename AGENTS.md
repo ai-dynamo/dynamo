@@ -18,7 +18,7 @@ SPDX-License-Identifier: Apache-2.0
 | `docs/fern/` | Fern docs site; pages are in `pages/` |
 | `examples/`, `recipes/` | Runnable examples and deployment recipes |
 | `benchmarks/`, `tests/` | Benchmark harnesses and the top-level pytest suite |
-| `.ai/` | Topic guidelines for agents (pytest, Python, CI, launch scripts, AISimulate); read the matching one before writing that kind of code |
+| `.ai/` | Topic guidelines for agents (pytest, Python, CI, launch scripts, AISimulate, and metrics, logs, and traces); read the matching one before writing that kind of code |
 | `.agents/skills/` | Agent skills (see [Skills](#skills)) |
 | `agents/`, `agent-docs/` | Role contracts, guides, and rules for the recipe optimization loop |
 
