@@ -397,3 +397,441 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use crate::discovery::KvSourceMembershipCoordinator;
+    use crate::kv_router::SelectionPolicySource;
+    use crate::local_model::runtime_config::ModelRuntimeConfig;
+    use dynamo_kv_router::WorkerType;
+    use dynamo_kv_router::protocols::{
+        BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData,
+        KvCacheStoreData, KvCacheStoredBlockData, RouterEvent, StorageTier,
+        compute_block_hash_for_seq, compute_seq_hash_for_block,
+    };
+    use dynamo_runtime::{
+        DistributedRuntime, Runtime,
+        component::Instance,
+        distributed::DistributedConfig,
+        pipeline::{AddressedRequest, Context, ManyIn, RouterMode, StreamingDispatch},
+    };
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::watch;
+
+    #[derive(Default)]
+    struct HintDispatch(Mutex<Vec<(u64, Option<KvHint>)>>);
+
+    #[async_trait]
+    impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for HintDispatch {
+        async fn generate(
+            &self,
+            request: SingleIn<AddressedRequest<PreprocessedRequest>>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let (addressed, context) = request.transfer(());
+            let (request, _, instance) = addressed.into_parts();
+            self.0
+                .lock()
+                .unwrap()
+                .push((instance.unwrap().id(), request.kv_hint));
+            Ok(ResponseStream::new(
+                Box::pin(stream::once(async {
+                    Annotated::from_data(LLMEngineOutput {
+                        finish_reason: Some(FinishReason::Stop),
+                        ..Default::default()
+                    })
+                })),
+                context.context(),
+            ))
+        }
+        async fn generate_bidirectional(
+            &self,
+            _: Instance,
+            _: String,
+            _: ManyIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            unreachable!()
+        }
+    }
+
+    async fn host(
+        distributed: &DistributedRuntime,
+        component_name: &str,
+        role: WorkerType,
+        enabled: bool,
+    ) -> (RoutingHost, u64, Arc<HintDispatch>) {
+        host_with_topology(distributed, component_name, role, enabled, None).await
+    }
+
+    async fn host_with_topology(
+        distributed: &DistributedRuntime,
+        component_name: &str,
+        role: WorkerType,
+        enabled: bool,
+        topology: Option<(
+            &str,
+            Option<&str>,
+            dynamo_kv_router::protocols::KvTransferEnforcement,
+        )>,
+    ) -> (RoutingHost, u64, Arc<HintDispatch>) {
+        host_with_gpu_options(
+            distributed,
+            component_name,
+            role,
+            enabled,
+            topology,
+            false,
+            0.0,
+        )
+        .await
+    }
+
+    async fn host_with_gpu_options(
+        distributed: &DistributedRuntime,
+        component_name: &str,
+        role: WorkerType,
+        enabled: bool,
+        topology: Option<(
+            &str,
+            Option<&str>,
+            dynamo_kv_router::protocols::KvTransferEnforcement,
+        )>,
+        gpu: bool,
+        minimum_saving_ms: f64,
+    ) -> (RoutingHost, u64, Arc<HintDispatch>) {
+        // Discovery instance IDs belong to a DRT, not to an endpoint. Model
+        // distinct serving processes so the donor is not rejected as the target.
+        let distributed = DistributedRuntime::new(
+            distributed.runtime().clone(),
+            DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        let endpoint = distributed
+            .namespace("d-to-p-transfer-tests".to_string())
+            .unwrap()
+            .component(component_name.to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+        let mut runtime_config = ModelRuntimeConfig::default();
+        if let Some((domain, island, enforcement)) = topology {
+            runtime_config.kv_transfer_domain = Some(domain.to_string());
+            runtime_config.kv_transfer_enforcement = Some(enforcement);
+            if let Some(island) = island {
+                runtime_config
+                    .topology_domains
+                    .insert(domain.to_string(), island.to_string());
+            }
+        }
+        runtime_config
+            .runtime_data
+            .insert("router_hint".to_string(), serde_json::json!(!gpu));
+        runtime_config.runtime_data.insert(
+            "router_hint_worker_type".to_string(),
+            serde_json::json!(role.as_str()),
+        );
+        runtime_config.runtime_data.insert(
+            "router_hint_transfer_domain".to_string(),
+            serde_json::json!("certified-test-layout"),
+        );
+        runtime_config.runtime_data.insert(
+            "router_hint_source_control_endpoints".to_string(),
+            serde_json::json!({"0": format!("tcp://{component_name}:9000")}),
+        );
+        if gpu {
+            runtime_config
+                .runtime_data
+                .insert("router_hint_gpu_direct".into(), serde_json::json!(true));
+            runtime_config.runtime_data.insert(
+                "router_hint_gpu_source_control_endpoints".into(),
+                serde_json::json!({"0": format!("tcp://{component_name}:9010")}),
+            );
+        }
+        let (_workers_tx, workers) = watch::channel(HashMap::from([(worker_id, runtime_config)]));
+        let membership = KvSourceMembershipCoordinator::start(
+            endpoint.id(),
+            workers.clone(),
+            distributed.discovery(),
+        )
+        .subscribe();
+        let config = KvRouterConfig {
+            enable_decode_to_prefill_reuse: enabled && !gpu,
+            enable_decode_to_prefill_gpu_reuse: enabled && gpu,
+            transfer_source_gpu_estimated_block_us: gpu.then_some(1.0),
+            minimum_estimated_ttft_saving_ms: minimum_saving_ms,
+            transfer_source_lookup_budget_ms: 200,
+            transfer_source_estimated_block_us: Some(1.0),
+            transfer_source_prefill_token_us: Some(if gpu { 100_000.0 } else { 1_000.0 }),
+            skip_initial_worker_wait: true,
+            overlap_score_credit: 0.0,
+            host_cache_hit_weight: 0.0,
+            disk_cache_hit_weight: 0.0,
+            router_track_active_blocks: false,
+            router_track_prefill_tokens: false,
+            ..Default::default()
+        };
+        let execution_inputs = SelectionPolicySource::Registry
+            .prepare(&config, role, role.as_str(), Some("test"))
+            .unwrap()
+            .inputs();
+        let chooser = KvRouter::new_with_worker_role(
+            endpoint,
+            client.clone(),
+            workers,
+            Some(membership),
+            16,
+            SelectionPolicySource::Registry,
+            Some(config),
+            None,
+            Some(role),
+            role.as_str(),
+            Some("test".to_string()),
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        if enabled && gpu {
+            assert_eq!(
+                chooser.required_worker_inputs(),
+                execution_inputs,
+                "GPU advisory inventory must not change execution selection inputs",
+            );
+            assert!(execution_inputs.contains(WorkerInputs::LOAD));
+            assert!(!execution_inputs.contains(WorkerInputs::CACHE));
+            assert!(
+                !matches!(chooser.indexer(), crate::kv_router::Indexer::None),
+                "GPU source and target need actual retained inventory",
+            );
+            assert!(!chooser.kv_router_config().enable_decode_to_prefill_reuse);
+        }
+        let dispatch = Arc::new(HintDispatch::default());
+        let router = RoutingHost::builder(client, RouterMode::KV)
+            .kv_router(Arc::new(chooser))
+            .dispatch(dispatch.clone() as Arc<dyn StreamingDispatch<_, _>>)
+            .build()
+            .await
+            .unwrap();
+        (router, worker_id, dispatch)
+    }
+
+    fn request() -> SingleIn<PreprocessedRequest> {
+        Context::new(
+            PreprocessedRequest::builder()
+                .model("test".to_string())
+                .token_ids((1..=64).collect::<Vec<_>>())
+                .stop_conditions(Default::default())
+                .sampling_options(Default::default())
+                .output_options(Default::default())
+                .build()
+                .unwrap(),
+        )
+    }
+
+    async fn seed_host_prefix(
+        host: &RoutingHost,
+        worker_id: u64,
+        tokens: &[u32],
+        blocks: usize,
+    ) -> Vec<ExternalSequenceBlockHash> {
+        seed_prefix(host, worker_id, tokens, blocks, StorageTier::HostPinned).await
+    }
+
+    async fn seed_prefix(
+        host: &RoutingHost,
+        worker_id: u64,
+        tokens: &[u32],
+        blocks: usize,
+        tier: StorageTier,
+    ) -> Vec<ExternalSequenceBlockHash> {
+        let local = compute_block_hash_for_seq(tokens, 16, BlockHashOptions::default());
+        let external = compute_seq_hash_for_block(&local);
+        let hashes = external[..blocks]
+            .iter()
+            .copied()
+            .map(ExternalSequenceBlockHash)
+            .collect::<Vec<_>>();
+        let event = RouterEvent::with_storage_tier(
+            worker_id,
+            KvCacheEvent {
+                event_id: 1,
+                dp_rank: 0,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: local
+                        .iter()
+                        .zip(&hashes)
+                        .map(|(local, external)| KvCacheStoredBlockData {
+                            block_hash: *external,
+                            tokens_hash: *local,
+                            mm_extra_info: None,
+                        })
+                        .collect(),
+                }),
+            },
+            tier,
+        );
+        host.kv_router()
+            .indexer()
+            .apply_event_routed(event)
+            .await
+            .unwrap();
+        host.kv_router().indexer().dump_events().await.unwrap();
+        hashes
+    }
+
+    fn same_role_hint(prefix: usize) -> KvHint {
+        KvHint::new(
+            "prefill-source",
+            vec![KvHintAction::fetch(
+                "fetch",
+                KvSourceLocationsPayload {
+                    source_control_endpoint: "tcp://prefill-source:9000".to_string(),
+                    block_hashes: (0..prefix)
+                        .map(|hash| ExternalSequenceBlockHash(hash as u64))
+                        .collect(),
+                },
+            )],
+        )
+    }
+
+    async fn selected(
+        host: &RoutingHost,
+        request: &SingleIn<PreprocessedRequest>,
+    ) -> WorkerSelection {
+        host.select_with_affinity(
+            request,
+            RequestPhase::Prefill,
+            true,
+            &CleanupBudget::default(),
+        )
+        .await
+        .unwrap()
+        .0
+    }
+
+    async fn assert_no_decode_bookings(source: &RoutingHost) {
+        let loads = source
+            .kv_router()
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap();
+        assert!(
+            loads
+                .iter()
+                .all(|load| load.active_requests == 0 && load.potential_prefill_tokens == 0),
+            "donor lookup changed decode load: {loads:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn longer_decode_root_chain_reaches_final_prefill_dispatch_without_decode_booking() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let (target, target_id, dispatch) =
+            Box::pin(host(&distributed, "prefill", WorkerType::Prefill, true)).await;
+        let (source, source_id, _) =
+            Box::pin(host(&distributed, "decode", WorkerType::Decode, true)).await;
+        assert_ne!(source_id, target_id, "the donor must be a different worker");
+        assert!(
+            !source
+                .kv_router()
+                .required_worker_inputs()
+                .contains(WorkerInputs::CACHE),
+            "source visibility must not change decode policy inputs"
+        );
+        assert!(
+            source
+                .kv_router()
+                .indexer()
+                .supports_kv_transfer_chain_retention()
+        );
+        let request = request();
+        let expected = seed_host_prefix(&source, source_id, &request.token_ids, 3).await;
+        let PrefillDispatch { mut stream, .. } =
+            Box::pin(
+                target.select_and_dispatch_prefill(request, Some(&source), |_, target| Ok(target)),
+            )
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        {
+            let calls = dispatch.0.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].0, target_id);
+            let hint = calls[0]
+                .1
+                .as_ref()
+                .expect("final backend request carries decode hint");
+            let payload: KvSourceLocationsPayload =
+                serde_json::from_value(serde_json::to_value(&hint.actions[0].payload).unwrap())
+                    .unwrap();
+            assert_eq!(payload.block_hashes, expected);
+            assert_eq!(payload.source_control_endpoint, "tcp://decode:9000");
+        }
+        assert_no_decode_bookings(&source).await;
+        drop(target);
+        drop(source);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn disabled_missing_and_cancelled_source_lookup_preserve_same_role_hint() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let (disabled, _, _) =
+            Box::pin(host(&distributed, "disabled", WorkerType::Prefill, false)).await;
+        let (enabled, _, _) =
+            Box::pin(host(&distributed, "enabled", WorkerType::Prefill, true)).await;
+        let (source, source_id, _) =
+            Box::pin(host(&distributed, "decode", WorkerType::Decode, true)).await;
+        // A discovered decoder with no eligible host inventory is an advisory
+        // cache miss and must preserve the already-selected same-role source.
+        let input = request();
+        let mut selection = selected(&enabled, &input).await;
+        let expected = same_role_hint(1);
+        selection.kv_hint = Some(expected.clone());
+        enabled
+            .enrich_prefill_transfer_hint(&input, &mut selection, Some(&source))
+            .await;
+        assert_eq!(selection.kv_hint, Some(expected));
+        let seed_request = request();
+        seed_host_prefix(&source, source_id, &seed_request.token_ids, 3).await;
+        for (target, donor, cancel) in [
+            (&disabled, Some(&source), false),
+            (&enabled, None, false),
+            (&enabled, Some(&source), true),
+        ] {
+            let input = request();
+            let mut selection = selected(target, &input).await;
+            let expected = same_role_hint(1);
+            selection.kv_hint = Some(expected.clone());
+            if cancel {
+                input.context().stop();
+            }
+            target
+                .enrich_prefill_transfer_hint(&input, &mut selection, donor)
+                .await;
+            assert_eq!(selection.kv_hint, Some(expected));
+        }
+        assert_no_decode_bookings(&source).await;
+        drop(disabled);
+        drop(enabled);
+        drop(source);
+        runtime.shutdown();
+    }
+}
