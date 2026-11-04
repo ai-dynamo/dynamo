@@ -18,7 +18,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 	const sidecarRoleErr = "Forbidden: Dynamo sidecar mode in role pod templates is supported only on the LPX role that hosts the engine: the conductor role when the component declares one, otherwise the agent role"
 	const conductorTemplateErr = "spec.components[0].roles[1].podTemplate: Required value: LPX conductor requires an explicit podTemplate"
 	const lpxGateErr = "spec.components[0].type: Forbidden: LPX components require lpx.enabled=true"
-	const alphaLPXGateErr = "spec.services[lpx].componentType: Forbidden: LPX components require lpx.enabled=true"
 	const lpxOnDeleteErr = `metadata.annotations[nvidia.com/grove-update-strategy]: Invalid value: "OnDelete": must be "Coherent" or "RollingRecreate" when LPX components are configured`
 
 	// Keep LPX inputs and oracles together without a separate admission execution path.
