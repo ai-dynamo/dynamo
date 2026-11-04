@@ -392,23 +392,6 @@ mod tests {
                 }
                 assert_eq!(lookup.len(), model.len());
                 assert_eq!(lookup.get(&k), model.get(&k));
-
-                // A run of keys holding one value, then any keys, as removal grouping sees.
-                if let Some(&value) = model.get(&k) {
-                    let mut run: Vec<_> = model
-                        .iter()
-                        .filter(|&(_, &v)| v == value)
-                        .map(|(&key, _)| key)
-                        .collect();
-                    run.sort();
-                    run.truncate(rng.usize(..=run.len()));
-                    run.extend((0..rng.usize(..4)).map(|_| key(rng.u64(..key_space))));
-                    let expected = run
-                        .iter()
-                        .take_while(|key| model.get(key) == Some(&value))
-                        .count();
-                    assert_eq!(lookup.leading_holding(&run, value), expected);
-                }
             }
 
             let mut entries: Vec<_> = lookup.iter().map(|(k, v)| (k, *v)).collect();

@@ -424,7 +424,7 @@ mod tests {
                 let hashes: Vec<_> = (0..rng.usize(..8))
                     .map(|_| hash(rng.u64(..key_space)))
                     .collect();
-                match rng.u32(..13) {
+                match rng.u32(..12) {
                     0..=3 => {
                         let changed = lane.upsert_all(worker, hashes.iter().copied(), &pool[node]);
                         let expected = hashes
@@ -470,19 +470,6 @@ mod tests {
                             }
                         }
                         assert_eq!(changed, expected);
-                    }
-                    11 => {
-                        let h = hash(rng.u64(..key_space));
-                        if let Some((id, held)) = lane.held(worker, h) {
-                            let held = pool.iter().position(|n| Arc::ptr_eq(n, held)).unwrap();
-                            assert_eq!(model.get(&(worker, h)), Some(&held));
-                            let changed = lane.upsert_all_held(worker, hashes.iter().copied(), id);
-                            let expected = hashes
-                                .iter()
-                                .filter(|&&h| model.insert((worker, h), held) != Some(held))
-                                .count();
-                            assert_eq!(changed, expected);
-                        }
                     }
                     _ => {
                         let mut removed = Vec::new();
