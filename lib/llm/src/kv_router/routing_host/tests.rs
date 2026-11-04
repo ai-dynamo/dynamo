@@ -4427,69 +4427,75 @@ async fn conditional_route_stages_share_one_cleanup_budget() {
 #[serial_test::serial]
 async fn ttft_includes_session_affinity_wait() {
     for is_kv in [true, false] {
-        let (mut router, _, _, runtime) = router_with_recorded_dispatch_and_affinity(
-            "ttft-affinity-wait",
-            Some(Duration::from_secs(10)),
-        )
-        .await;
-        let client = router.inner.client.clone();
-        let dispatch = Arc::new(CompletedBuiltinDispatch {
-            token_ids: vec![1],
-            ..Default::default()
-        });
-        let mode = if is_kv {
-            RouterMode::KV
-        } else {
-            RouterMode::RoundRobin
-        };
-        let builder = RoutingHost::builder(client.clone(), mode)
-            .affinity_coordinator(router.affinity.clone())
-            .dispatch(dispatch as LlmDispatch);
-        let builder = if is_kv {
-            builder.kv_router(Arc::clone(router.kv_router()))
-        } else {
-            builder.load_context(test_load_context(&client).await)
-        };
-        router = builder.build().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let (mut router, _, _, runtime) = router_with_recorded_dispatch_and_affinity(
+                "ttft-affinity-wait",
+                Some(Duration::from_secs(10)),
+            )
+            .await;
+            let client = router.inner.client.clone();
+            let dispatch = Arc::new(CompletedBuiltinDispatch {
+                token_ids: vec![1],
+                ..Default::default()
+            });
+            let mode = if is_kv {
+                RouterMode::KV
+            } else {
+                RouterMode::RoundRobin
+            };
+            let builder = RoutingHost::builder(client.clone(), mode)
+                .affinity_coordinator(router.affinity.clone())
+                .dispatch(dispatch as LlmDispatch);
+            let builder = if is_kv {
+                builder.kv_router(Arc::clone(router.kv_router()))
+            } else {
+                builder.load_context(test_load_context(&client).await)
+            };
+            router = builder.build().await.unwrap();
 
-        let model = if is_kv {
-            "ttft-kv-wait"
-        } else {
-            "ttft-builtin-wait"
-        };
-        let metrics = router.request_metrics.clone();
-        let coordinator = router.affinity.as_ref().unwrap().clone();
-        let session_id = SessionAffinityId::new("ttft-contended-session");
-        let Hold::Initialize(holder) = coordinator.acquire(&session_id, None).await.unwrap() else {
-            panic!("the first acquisition must initialize the session");
-        };
-        let mut content = request();
-        content.model = model.to_string();
-        content.tracker = Some(Arc::new(RequestTracker::new()));
-        let mut request = Context::new(content);
-        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
+            let model = if is_kv {
+                "ttft-kv-wait"
+            } else {
+                "ttft-builtin-wait"
+            };
+            let metrics = router.request_metrics.clone();
+            let coordinator = router.affinity.as_ref().unwrap().clone();
+            let session_id = SessionAffinityId::new("ttft-contended-session");
+            let Hold::Initialize(holder) =
+                coordinator.acquire(&session_id, None).await.unwrap()
+            else {
+                panic!("the first acquisition must initialize the session");
+            };
+            let mut content = request();
+            content.model = model.to_string();
+            content.tracker = Some(Arc::new(RequestTracker::new()));
+            let mut request = Context::new(content);
+            request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
 
-        tokio::time::pause();
-        let router = Arc::new(router);
-        let generate_router = Arc::clone(&router);
-        let generate = tokio::spawn(async move { generate_router.generate(request).await });
-        coordinator.wait_for_initializing_waiter().await;
-        tokio::time::advance(Duration::from_millis(100)).await;
-        drop(holder);
-        let mut stream = generate.await.unwrap().unwrap();
-        while stream.next().await.is_some() {}
+            tokio::time::pause();
+            let router = Arc::new(router);
+            let generate_router = Arc::clone(&router);
+            let generate = tokio::spawn(async move { generate_router.generate(request).await });
+            coordinator.wait_for_initializing_waiter().await;
+            tokio::time::advance(Duration::from_millis(100)).await;
+            drop(holder);
+            let mut stream = generate.await.unwrap().unwrap();
+            while stream.next().await.is_some() {}
 
-        let ttft = metrics
-            .time_to_first_token_seconds
-            .with_label_values(&["aggregated", model]);
-        assert_eq!(ttft.get_sample_count(), 1);
-        assert!(
-            ttft.get_sample_sum() >= 0.1,
-            "TTFT must include the affinity wait"
-        );
-        drop(router);
-        runtime.shutdown();
-        tokio::time::resume();
+            let ttft = metrics
+                .time_to_first_token_seconds
+                .with_label_values(&["aggregated", model]);
+            assert_eq!(ttft.get_sample_count(), 1);
+            assert!(
+                ttft.get_sample_sum() >= 0.1,
+                "TTFT must include the affinity wait"
+            );
+            drop(router);
+            runtime.shutdown();
+            tokio::time::resume();
+        })
+        .await
+        .expect("affinity-wait TTFT case must finish within 10 seconds");
     }
 }
 
