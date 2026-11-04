@@ -15,10 +15,15 @@ import stat
 import tempfile
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
+from vllm import _custom_ops as ops
+from vllm.v1.kv_offload.base import OffloadingWorker
+from vllm.v1.kv_offload.cpu.gpu_worker import SingleDirectionOffloadingHandler
 
 
 def region_path(engine_id: str, *, rank: int | None = None) -> Path:
@@ -182,3 +187,150 @@ def open_region(engine_id: str, shape: tuple[int, int], timeout: float = 30):
             "GPU cache IPC metadata must be a private owner-controlled file"
         )
     return import_ipc(json.loads(path.read_text()), shape)
+
+
+def _copy_gpu_payload(source, destination, sizes, **kwargs):
+    # Both payload endpoints are CUDA. Host tensors contain addresses/sizes
+    # only. Preserve source stream ordering in both cache-copy directions.
+    return ops.swap_blocks_batch(
+        source, destination, sizes, is_src_access_order_any=False
+    )
+
+
+class GPUCacheCopyHandler(SingleDirectionOffloadingHandler):
+    """Reuse vLLM's block geometry and CUDA event fences with CUDA endpoints.
+
+    The pinned vLLM handler's constructor enforces CPU destinations. This
+    initializer supplies its documented raw-page state with GPU cache views;
+    its block/chunk cursor, stream ordering and completion code are unchanged.
+    Canonical cross-topology layouts are deliberately unsupported here.
+    """
+
+    def __init__(self, gpu_tensors, cache_tensors, blocks_per_chunk, groups, store):
+        if not gpu_tensors or len(gpu_tensors) != len(cache_tensors):
+            raise ValueError("GPU cache tensor set differs from the model allocation")
+        for original, cached in zip(gpu_tensors, cache_tensors, strict=True):
+            if (
+                not original.is_cuda
+                or not cached.is_cuda
+                or original.device != cached.device
+            ):
+                raise ValueError(
+                    "Local KV cache copies require CUDA buffers on one GPU"
+                )
+            if original.dtype != torch.int8 or cached.dtype != torch.int8:
+                raise ValueError("GPU KV copies require byte views")
+            if cached.shape[1] != original.shape[1] * blocks_per_chunk:
+                raise ValueError("GPU cache page size differs from the model layout")
+        self.src_tensors = gpu_tensors if store else cache_tensors
+        self.dst_tensors = cache_tensors if store else gpu_tensors
+        self.gpu_to_cpu = store  # Inherited geometry direction, not a memory type.
+        self.layer_refs_per_group = groups
+        self._swap_blocks_batch = _copy_gpu_payload
+        self.src_blocks_per_chunk = 1 if store else blocks_per_chunk
+        self.dst_blocks_per_chunk = blocks_per_chunk if store else 1
+        self._canonical_copy_plans = None
+        self._fill_group_ops = self._fill_direct_ops
+        self._scratch_bases_src = np.empty(0, dtype=np.uint64)
+        self._scratch_bases_dst = np.empty(0, dtype=np.uint64)
+        self._transfer_events = {}
+        self._transfers = deque()
+        self._stream_pool = []
+        self._event_pool = []
+        self._buffer_pool = []
+
+    def shutdown(self):
+        super().shutdown()
+        # The parent releases CUDA views after successful event synchronization.
+        # Break the remaining bound-method cycle so this handler also retires
+        # deterministically, without a garbage-collection pass.
+        self._fill_group_ops = None
+
+
+class GPUCacheWorker(OffloadingWorker):
+    def __init__(self, spec, caches):
+        self.spec, self.caches = spec, caches
+        self.handlers = None
+        self.region = None
+
+    def _initialize(self):
+        if self.handlers is not None:
+            return
+        options = {}
+        if self.spec.config.parallel.world_size > 1:
+            options = {
+                "rank": self.spec.config.parallel.rank,
+                "world_size": self.spec.config.parallel.world_size,
+            }
+        if self.spec.gpu_transport == "mnnvl":
+            options.update(
+                {
+                    "gpu_transport": "mnnvl",
+                    "base_domain": self.spec.base_domain,
+                    "compatibility_domain": self.spec.extra_config[
+                        "router_hint_transfer_domain"
+                    ],
+                    "fabric_domain": self.spec.fabric_domain,
+                }
+            )
+        self.region = open_region(
+            self.spec.config.engine_id,
+            (self.spec.num_chunks, self.spec.row_bytes),
+            **options,
+        )
+        originals, cached, offset = [], [], 0
+        for cache in self.caches.tensors:
+            page_bytes = cache.page_size_bytes
+            width = page_bytes * self.spec.blocks_per_chunk
+            if offset + width > self.spec.row_bytes:
+                raise ValueError("Actual GPU banks exceed the configured cache row")
+            originals.append(cache.tensor.view(torch.int8).view(-1, page_bytes))
+            cached.append(
+                self.region.as_strided(
+                    (self.spec.num_chunks, width), (self.spec.row_bytes, 1), offset
+                )
+            )
+            offset += width
+        if offset != self.spec.row_bytes:
+            raise ValueError(
+                "Actual GPU bank set does not cover the configured cache row"
+            )
+        self.handlers = tuple(
+            GPUCacheCopyHandler(
+                originals,
+                cached,
+                self.spec.blocks_per_chunk,
+                self.caches.group_data_refs,
+                store,
+            )
+            for store in (True, False)
+        )
+
+    def submit_store(self, job_id, src_spec, dst_spec):
+        self._initialize()
+        return self.handlers[0].transfer_async(job_id, src_spec, dst_spec)
+
+    def submit_load(self, job_id, src_spec, dst_spec):
+        self._initialize()
+        return self.handlers[1].transfer_async(job_id, src_spec, dst_spec)
+
+    def get_finished(self):
+        return (
+            []
+            if self.handlers is None
+            else [
+                result for handler in self.handlers for result in handler.get_finished()
+            ]
+        )
+
+    def wait(self, job_ids):
+        for handler in self.handlers or ():
+            handler.wait(job_ids)
+
+    def shutdown(self):
+        for handler in self.handlers or ():
+            handler.shutdown()
+        # A failed handler shutdown retains its views above. Once all CUDA
+        # events have drained, release imported/local views before IPC teardown.
+        self.handlers = None
+        self.region = None

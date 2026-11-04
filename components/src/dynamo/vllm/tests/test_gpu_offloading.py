@@ -10,12 +10,15 @@ import os
 import subprocess
 import sys
 import uuid
+import weakref
 from types import SimpleNamespace
 
 import pytest
 import torch
 from kvbm.vllm_integration import gpu_memory
-from kvbm.vllm_integration.gpu_memory import GPUCacheRegion, import_ipc
+from kvbm.vllm_integration.gpu_memory import GPUCacheRegion, GPUCacheWorker, import_ipc
+from kvbm.vllm_integration.gpu_offloading import GPURetainedLoadStoreSpec
+from vllm.v1.kv_offload.base import GPULoadStoreSpec
 
 pytestmark = [
     pytest.mark.post_merge,
@@ -114,4 +117,68 @@ del region
         assert "could not unlink" not in result.stderr
         assert bool(torch.all(region.tensor == 37).item())
     finally:
+        region.cleanup()
+
+
+@pytest.mark.gpu_1
+def test_mixed_bank_d2d_roundtrip_preserves_permuted_slots_and_guards():
+    config = SimpleNamespace(
+        engine_id=f"mixed-bank-{uuid.uuid4()}", parallel=SimpleNamespace(world_size=1)
+    )
+    spec = SimpleNamespace(
+        config=config,
+        num_chunks=8,
+        row_bytes=384,
+        blocks_per_chunk=1,
+        gpu_transport="cuda_ipc",
+    )
+    region = GPUCacheRegion(config.engine_id, spec.num_chunks, spec.row_bytes)
+    originals = [
+        (torch.arange(6 * width, device="cuda", dtype=torch.int64) % 113)
+        .to(torch.int8)
+        .reshape(6, width)
+        for width in (128, 256)
+    ]
+    expected = [tensor.clone() for tensor in originals]
+    caches = SimpleNamespace(
+        tensors=[
+            SimpleNamespace(tensor=t, page_size_bytes=t.shape[1]) for t in originals
+        ],
+        group_data_refs=[
+            [SimpleNamespace(tensor_idx=0, page_size_bytes=128)],
+            [SimpleNamespace(tensor_idx=1, page_size_bytes=256)],
+        ],
+    )
+    worker = GPUCacheWorker(spec, caches)
+    try:
+        source = GPULoadStoreSpec([3, 1, 2, 0], [2, 2], [0, 0])
+        slots = GPURetainedLoadStoreSpec([5, 1, 6, 4])
+        assert worker.submit_store(1, source, slots)
+        worker.wait({1})
+        assert [result.job_id for result in worker.get_finished()] == [1]
+        assert bool(torch.all(region.tensor[0] == 0).item())
+        originals[0][4].zero_()
+        originals[0][0].zero_()
+        originals[1][5].zero_()
+        originals[1][1].zero_()
+        target = GPULoadStoreSpec([4, 0, 5, 1], [2, 2], [0, 0])
+        assert worker.submit_load(2, slots, target)
+        worker.wait({2})
+        assert [result.job_id for result in worker.get_finished()] == [2]
+        assert torch.equal(originals[0][4], expected[0][3])
+        assert torch.equal(originals[0][0], expected[0][1])
+        assert torch.equal(originals[1][5], expected[1][2])
+        assert torch.equal(originals[1][1], expected[1][0])
+        assert torch.equal(originals[0][2], expected[0][2])
+        assert torch.equal(originals[1][3], expected[1][3])
+        assert bool(torch.all(region.tensor[0] == 0).item())
+        handler_refs = [weakref.ref(handler) for handler in worker.handlers]
+        view_ref = weakref.ref(worker.handlers[0].dst_tensors[0])
+        worker.shutdown()
+        # Correct teardown must release CUDA views without a garbage-collection
+        # pass; a retained bound-method cycle otherwise outlives IPC globals.
+        assert all(reference() is None for reference in handler_refs)
+        assert view_ref() is None
+    finally:
+        worker.shutdown()
         region.cleanup()
