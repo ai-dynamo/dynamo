@@ -5,6 +5,9 @@
 
 Each session owns its own TokTier tokenizer/store: upstream's per-tokenizer store
 lock must not serialize unrelated Dynamo sessions. No persistent store is opened.
+TokTier's cache_budget_bytes is an eviction threshold, not a preallocation; each
+store has one active named session that eviction pins, so the parent manager's
+entry reservation bounds the retained row.
 """
 
 from __future__ import annotations
@@ -264,6 +267,7 @@ def _create_delta_tokenizer(
         ToktierError,
         OSError,
         ValueError,
+        AttributeError,
         UnsupportedTransition,
     ):
         logger.warning("delta tokenizer unavailable: artifact or loader not certified")

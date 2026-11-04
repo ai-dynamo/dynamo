@@ -1,14 +1,36 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Pinned vendor contract and optional staged family-matrix tests."""
+import json
 from types import SimpleNamespace
 
 import pytest
 
 from dynamo.frontend import toktier_session as adapter
-from dynamo.frontend.delta_tokenizer import UnsupportedTransition
+from dynamo.frontend.delta_tokenizer import DeltaConfig, UnsupportedTransition
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
+
+
+class MissingSpecialTokenFlag:
+    """A backend without the tokenizers>=0.23 encode_special_tokens flag."""
+
+    def to_str(self):
+        return json.dumps({"truncation": None, "padding": None})
+
+
+class FakeFastTokenizer:
+    __module__ = "transformers.fake"
+    split_special_tokens = False
+
+    def __init__(self):
+        self.backend_tokenizer = MissingSpecialTokenFlag()
+
+    def encode(self, *args, **kwargs):
+        raise AssertionError("the adapter should decline before encoding")
+
+    def __call__(self, *args, **kwargs):
+        raise AssertionError("the adapter should decline before calling")
 
 
 def report():
@@ -24,6 +46,27 @@ def report():
         "backend": "fast_cpu",
         "session_repair": {"status": "active", "last": {"reason": None}},
     }
+
+
+def test_missing_special_token_flag_is_unavailable(monkeypatch):
+    monkeypatch.setattr(adapter, "_AVAILABLE", True)
+    monkeypatch.setattr(adapter, "ToktierError", RuntimeError, raising=False)
+    monkeypatch.setattr(
+        adapter,
+        "version",
+        lambda package: "0.3.0" if package == "toktier" else "0.22.2",
+    )
+    monkeypatch.setattr(
+        adapter, "PreTrainedTokenizerFast", FakeFastTokenizer, raising=False
+    )
+    monkeypatch.setattr(
+        adapter, "HfCoreTokenizer", MissingSpecialTokenFlag, raising=False
+    )
+
+    assert (
+        adapter.create_delta_tokenizer(FakeFastTokenizer(), ".", "model", DeltaConfig())
+        is None
+    )
 
 
 @pytest.mark.parametrize("value", [None, [], {}, {"certification": []}, {"probe": {}}])

@@ -119,7 +119,7 @@ When a non-default backend is selected:
 4. If construction fails because the tokenizer uses unsupported features, Dynamo logs a warning and falls back to HuggingFace. With `--no-tokenizer-fallback`, model initialization fails and reports the backend loading error instead. In dynamic mode, discovery retries the load while the frontend continues running.
 5. When the L1 prefix cache is enabled, Dynamo wraps the selected backend with the same special-token boundary metadata and cache metrics used by the default path.
 
-## Experimental incremental prompt tokenization
+## Experimental Incremental Prompt Tokenization
 
 **Experimental.** The optional TokTier adapter accelerates append-only, rendered
 text prompts in the single-process Python SGLang HTTP Chat Completions frontend. It
@@ -141,7 +141,7 @@ Python `tokenizers` 0.22.2, 0.23.2 and 0.23.3 are the initially admitted
 oracle versions. Other versions and custom tokenizers use full reference
 tokenization. This does not change the Rust frontend's reference dependency.
 
-### Session scope
+### Session Scope
 
 A trusted gateway supplies both `x-dynamo-meta-delta-tokenizer-session` and
 `x-dynamo-meta-delta-tokenizer-scope` using the configured metadata-header
@@ -155,7 +155,7 @@ from forging that marker through metadata headers. Session affinity is separate;
 tokenizer state never changes routing. Another frontend replica or a restarted
 frontend has no state and performs a full encode.
 
-### Exactness and lifecycle
+### Exactness and Lifecycle
 
 Each model load captures a private reference tokenizer snapshot and binds it to
 the model, artifact, loader versions, effective configuration and backend.
@@ -188,9 +188,12 @@ for that manager. Verification never authorizes an otherwise uncertified route.
 
 Entry count and conservative approximate retained bytes are bounded across
 model-specific managers in one frontend process. The byte budget includes
-reference snapshots, loaded per-session TokTier tables, retained text/tokens and
-in-flight reservations. The estimate is not an operating-system RSS limit.
-Each session owns a separate TokTier store, so independent sessions do not
+reference snapshots, retained text/tokens, a conservative per-entry allowance
+for TokTier's loaded session state, and in-flight reservations. TokTier's
+`cache_budget_bytes` is an eviction threshold, not a preallocation. Each
+session owns a separate TokTier store with one pinned named session, so passing
+the remaining process budget there does not multiply the reservation. The
+estimate is not an operating-system RSS limit. Independent sessions do not
 serialize on TokTier's shared-tokenizer store lock.
 
 Idle TTL cleanup removes at most 16 entries per pass. LRU eviction breaks ties

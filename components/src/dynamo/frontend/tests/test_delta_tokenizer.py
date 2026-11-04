@@ -24,7 +24,12 @@ from dynamo.frontend.delta_tokenizer import (
     delta_request_context,
 )
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.timeout(30),
+]
 
 
 def reference(text):
