@@ -60,6 +60,7 @@ mod reservations;
 mod run;
 #[cfg(test)]
 mod tests;
+mod transfer_sources;
 mod workers;
 
 use reservations::ReservationIndex;
@@ -67,6 +68,10 @@ use reservations::ReservationIndex;
 pub use operation::{
     LookupTimings, Selected, SelectionAdmission, SelectionOperation, SelectionOutcome,
     SelectionRun, SessionBinding,
+};
+
+pub use transfer_sources::{
+    TransferSourceMemoryKind, TransferSourceQuery, TransferSourceResult, transfer_source_for_target,
 };
 
 use super::affinity::{
