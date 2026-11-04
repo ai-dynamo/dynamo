@@ -114,10 +114,10 @@ pub async fn find_key(pools: &PoolDirectory, wanted: &PoolKey) -> Option<PoolLis
         .find(|listing| &listing.key == wanted)
 }
 
-/// The next event that is not a `Resync`. Stores differ in when they publish
-/// a `Resync` (the memory store once a lease has passed, the DynamoDB store
-/// never after the first), so a case that only cares about pool changes
-/// skips them.
+/// The next event that is not a `Resync`. Stores publish a `Resync` at times
+/// of their own (both once a lease has passed since they started, and the
+/// DynamoDB store at its next poll after that), so a case that only cares
+/// about pool changes skips them.
 pub async fn next_change(watch: &mut WatchStream<PoolListing, PoolKey>) -> PoolEvent {
     use futures::StreamExt;
     loop {

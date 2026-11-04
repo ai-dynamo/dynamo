@@ -172,11 +172,11 @@ since they work with every `--pool-discovery` value:
 | Flag | Default | Meaning |
 |---|---|---|
 | `--registration-storage dynamodb` | `memory` | select the store |
-| `--dynamodb-table <name>` | none, required with `dynamodb` | table name |
+| `--dynamodb-table <name>` | none, required with `dynamodb` | table name: 3 to 255 letters, digits, `_`, `-` or `.`, as DynamoDB requires |
 | `--dynamodb-region <region>` | SDK default chain (`AWS_REGION`) | region of the table replica this process uses |
 | `--dynamodb-endpoint <url>` | none | endpoint override for dynamodb-local; an `http` or `https` URL |
 | `--dynamodb-poll-interval-secs <n>` | 2 | watch poll period; with `karmada` and `mcs`, which watch, must be less than `--heartbeat-interval-secs` |
-| `--dynamodb-ensure-table` | off | create the table if it does not exist, and turn on its TTL if it is off, on every start (development; needs `CreateTable`, `DescribeTimeToLive` and `UpdateTimeToLive`) |
+| `--dynamodb-ensure-table` | off | create the table if it does not exist, and turn on its TTL if it is off, on every start (development; needs `CreateTable`, and for TTL `DescribeTimeToLive` and `UpdateTimeToLive`, without which it warns and starts) |
 | `--lease-skew-secs <n>` | 2 | clock skew allowed when evaluating leases |
 
 The `--dynamodb-*` flags and `--lease-skew-secs` fail at startup without
@@ -271,7 +271,7 @@ heading or works everywhere.
 | Item that fails to decode | skipped with a warning; the rest of the list is served |
 | `--dynamodb-table` missing with `dynamodb` | startup error |
 | `--dynamodb-poll-interval-secs >= --heartbeat-interval-secs` with `karmada` or `mcs` | usage error |
-| An empty `--dynamodb-table` or `--dynamodb-region`, or a `--dynamodb-endpoint` that is not `http` or `https` | usage error |
+| A `--dynamodb-table` that DynamoDB would refuse, an empty `--dynamodb-region`, or a `--dynamodb-endpoint` that is not `http` or `https` | usage error |
 | A `--dynamodb-*` flag or `--lease-skew-secs` without `--registration-storage dynamodb` | startup error |
 | No region from `--dynamodb-region` or the SDK chain | startup error (`ConnectError::Config`) |
 | Table absent at startup without `--dynamodb-ensure-table` | logged, naming the table and the create-table command, and retried (`ConnectError::Table`) |

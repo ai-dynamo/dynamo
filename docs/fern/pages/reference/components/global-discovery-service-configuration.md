@@ -60,11 +60,11 @@ These flags work with every `--pool-discovery` value: in each mode the service k
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--lease-skew-secs <n>` | `2` | Clock skew allowed when evaluating leases. |
-| `--dynamodb-table <name>` | None | Table name. Required with `--registration-storage dynamodb`. |
+| `--dynamodb-table <name>` | None | Table name: 3 to 255 letters, digits, `_`, `-`, or `.`. Required with `--registration-storage dynamodb`. |
 | `--dynamodb-region <region>` | SDK default chain (`AWS_REGION`) | Region of the table replica this process uses. |
 | `--dynamodb-endpoint <url>` | Unset | Endpoint override, for DynamoDB Local. Must be an `http` or `https` URL. |
 | `--dynamodb-poll-interval-secs <n>` | `2` | How often the store polls the table for changes. Only `--pool-discovery karmada` and `mcs` watch the table, and with them it must be less than `--heartbeat-interval-secs`. |
-| `--dynamodb-ensure-table` | Off | Create the table if it does not exist, and turn on its TTL if it is off. For development. Needs `dynamodb:CreateTable`, `dynamodb:DescribeTimeToLive`, and `dynamodb:UpdateTimeToLive`. |
+| `--dynamodb-ensure-table` | Off | Create the table if it does not exist, and turn on its TTL if it is off. For development. Needs `dynamodb:CreateTable`, and for TTL `dynamodb:DescribeTimeToLive` and `dynamodb:UpdateTimeToLive`; without those two it logs a warning and starts. |
 
 The `--dynamodb-*` flags and `--lease-skew-secs` apply only with `--registration-storage dynamodb`; giving one with the memory store is a startup error.
 
@@ -187,7 +187,7 @@ Grant them on the table ARN, in each region where the service runs a replica of 
 | An item that fails to decode | Logged and skipped. The rest of the list is served. |
 | `--dynamodb-table` missing with `dynamodb` | Startup error. |
 | `--dynamodb-poll-interval-secs` not below `--heartbeat-interval-secs`, with `karmada` or `mcs` | Startup error. |
-| An empty `--dynamodb-table` or `--dynamodb-region`, or a `--dynamodb-endpoint` that is not an `http` or `https` URL | Startup error. |
+| A `--dynamodb-table` that DynamoDB would refuse, an empty `--dynamodb-region`, or a `--dynamodb-endpoint` that is not an `http` or `https` URL | Startup error. |
 | Table absent at startup without `--dynamodb-ensure-table` | Logged with the table name and the create-table command, then retried. The service does not serve until the table exists. |
 | DynamoDB or STS unreachable, or access denied, at startup | Logged and retried with a backoff of up to 30 seconds. The service does not serve until the check passes. |
 | A `--dynamodb-*` flag or `--lease-skew-secs` without `--registration-storage dynamodb` | Startup error. |

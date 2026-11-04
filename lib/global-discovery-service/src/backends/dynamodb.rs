@@ -409,6 +409,9 @@ impl Shared {
     async fn refresh(&self) -> Result<(), DiscoveryError> {
         let _one_at_a_time = self.refreshing.lock().await;
         let began = self.lock().writes;
+        // Before the read: a read that began before the lists became complete
+        // may miss a PoolRelay that wrote meanwhile.
+        let read_at_ms = self.clock.now_ms();
         let live = self
             .live()
             .await?
@@ -422,7 +425,7 @@ impl Shared {
                 (item.registration.key, seen)
             })
             .collect();
-        let exact = self.completeness(self.clock.now_ms()) == Completeness::Exact;
+        let exact = self.completeness(read_at_ms) == Completeness::Exact;
         let mut watched = self.lock();
         let mut events = watched.apply_poll(live, began);
         if exact {
@@ -536,13 +539,14 @@ impl Directory<PoolListing, PoolKey> for DynamoDbPoolStore {
     /// since the store was made, then `Exact`. Fails while the table cannot
     /// be read.
     async fn list(&self) -> Result<Snapshot<PoolListing>, DiscoveryError> {
+        let read_at_ms = self.shared.clock.now_ms();
         let live = self.shared.live().await?;
         Ok(Snapshot {
             items: live
                 .iter()
                 .map(|item| listing(&item.registration))
                 .collect(),
-            completeness: self.shared.completeness(self.shared.clock.now_ms()),
+            completeness: self.shared.completeness(read_at_ms),
         })
     }
 

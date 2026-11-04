@@ -29,10 +29,10 @@ const FIRST_CHECK_AFTER: Duration = Duration::from_millis(250);
 const MAX_CHECK_EVERY: Duration = Duration::from_secs(5);
 
 /// Creates `table` unless it exists, waits until it is active, and turns on
-/// TTL on `expires_at` unless it is on. Needs `dynamodb:CreateTable`,
-/// `dynamodb:DescribeTimeToLive` and `dynamodb:UpdateTimeToLive` besides
-/// `dynamodb:DescribeTable`. Replicas that start together may all call it:
-/// one creates the table, and the rest wait for it.
+/// TTL on `expires_at` unless it is on. Needs `dynamodb:CreateTable` besides
+/// `dynamodb:DescribeTable`, and for TTL `dynamodb:DescribeTimeToLive` and
+/// `dynamodb:UpdateTimeToLive`. Replicas that start together may all call
+/// it: one creates the table, and the rest wait for it.
 pub async fn ensure_table(client: &Client, table: &str) -> anyhow::Result<()> {
     if read(client, table).await?.is_none() {
         let created = client
@@ -58,7 +58,17 @@ pub async fn ensure_table(client: &Client, table: &str) -> anyhow::Result<()> {
         }
     }
     wait_until_active(client, table).await?;
-    ensure_ttl(client, table).await
+    // TTL only collects garbage, so a TTL that cannot be checked or turned
+    // on, as without the TTL permissions, is no reason to stop.
+    if let Err(error) = ensure_ttl(client, table).await {
+        tracing::warn!(
+            table,
+            error = %format!("{error:#}"),
+            "cannot make sure that TTL is on for the DynamoDB table; until it is on \
+             expires_at, items of retired pools stay in the table"
+        );
+    }
+    Ok(())
 }
 
 /// Turns on TTL on `expires_at` unless it is on or being turned on. TTL is

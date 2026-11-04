@@ -164,8 +164,7 @@ With `--pool-discovery mcs`, only that flag changes.
 The service checks the table at startup with `DescribeTable`. While the check fails, for example during
 a DynamoDB outage or before the table is created, the service logs why, names the table, and tries again
 after a backoff of up to 30 seconds. It serves nothing until the check passes, so the Pod stays unready
-rather than restarting. A configuration that cannot work, such as no AWS region, stops the service at
-once. With `--pool-discovery karmada` or `mcs`, which watch the table, `--dynamodb-poll-interval-secs`
+rather than restarting. A missing AWS region stops the service at once. With `--pool-discovery karmada` or `mcs`, which watch the table, `--dynamodb-poll-interval-secs`
 (default 2) must be less than `--heartbeat-interval-secs` (default 5), or the service refuses to start.
 
 ### Local development
@@ -192,7 +191,8 @@ With Karmada, keep these DynamoDB flags and use the Karmada flags from the examp
 `--pool-discovery=registrations`.
 
 `--dynamodb-ensure-table` creates the table if it is missing and turns on TTL if it is off, on every
-start, without point-in-time recovery or replicas. Do not use it in production.
+start, without point-in-time recovery or replicas. Without the TTL permissions, it logs a warning and
+starts anyway. Do not use it in production.
 
 ## How leases and expiry work
 

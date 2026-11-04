@@ -17,5 +17,5 @@ pub mod pool_discovery;
 pub mod service;
 
 pub use backends::clock::{Clock, ManualClock, SystemClock};
-pub use backends::dynamodb::{DynamoDbConfig, DynamoDbPoolStore};
+pub use backends::dynamodb::{ConnectError, DynamoDbConfig, DynamoDbPoolStore};
 pub use service::{PoolDiscoveryBackend, Tls, routes, serve};

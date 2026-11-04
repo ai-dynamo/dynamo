@@ -120,12 +120,12 @@ struct Args {
     /// A Global Router replica as `<id>=<url>`. Repeat it for each replica.
     #[arg(long = "router", value_parser = parse_router, help_heading = WITH_REGISTRATIONS)]
     routers: Vec<RouterReplica>,
-    /// The DynamoDB table that keeps registrations. Needed with
-    /// `--registration-storage dynamodb`.
+    /// The DynamoDB table that keeps registrations: 3 to 255 letters, digits,
+    /// `_`, `-` or `.`. Needed with `--registration-storage dynamodb`.
     #[arg(
         long,
         required_if_eq("registration_storage", "dynamodb"),
-        value_parser = NonEmptyStringValueParser::new(),
+        value_parser = parse_dynamodb_table,
         help_heading = WITH_DYNAMODB
     )]
     dynamodb_table: Option<String>,
@@ -152,8 +152,9 @@ struct Args {
     )]
     dynamodb_poll_interval_secs: u64,
     /// Create the DynamoDB table if it does not exist, and turn on its TTL if
-    /// it is off. For development: it needs `dynamodb:CreateTable`,
-    /// `dynamodb:DescribeTimeToLive` and `dynamodb:UpdateTimeToLive`.
+    /// it is off. For development: it needs `dynamodb:CreateTable`, and for
+    /// TTL `dynamodb:DescribeTimeToLive` and `dynamodb:UpdateTimeToLive`,
+    /// without which it warns and starts.
     #[arg(long, help_heading = WITH_DYNAMODB)]
     dynamodb_ensure_table: bool,
     /// How far the clocks of replicas sharing a DynamoDB table may disagree.
@@ -269,6 +270,21 @@ fn parse_router(value: &str) -> Result<RouterReplica, String> {
 
 fn parse_dynamodb_endpoint(value: &str) -> Result<Url, String> {
     http_url(value, "http://localhost:8000")
+}
+
+/// A name DynamoDB accepts for a table: 3 to 255 letters, digits, `_`, `-`
+/// or `.`. DynamoDB refuses any other name on every call, and the startup
+/// check would try again forever.
+fn parse_dynamodb_table(value: &str) -> Result<String, String> {
+    let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.');
+    if !(3..=255).contains(&value.len()) || !value.chars().all(allowed) {
+        return Err(
+            "a DynamoDB table name has 3 to 255 characters, each a letter, a digit, `_`, `-` \
+             or `.`"
+                .to_owned(),
+        );
+    }
+    Ok(value.to_owned())
 }
 
 /// An http or https URL. Without `http://`, `Url` reads a host such as
@@ -449,7 +465,7 @@ async fn registration_storage(
 /// during a DynamoDB or STS outage, or before the table exists, this tries
 /// again after a backoff instead of exiting, which would keep the Pod in
 /// CrashLoopBackOff after the table is back. Nothing listens meanwhile, so
-/// the Pod stays unready. A configuration that cannot work fails at once.
+/// the Pod stays unready. A missing AWS region fails at once.
 async fn connect_dynamodb(lease: Lease, config: DynamoDbConfig) -> Result<Arc<DynamoDbPoolStore>> {
     let table = config.table.clone();
     // From 0.8 s, doubling to 30 s, with jitter. It never runs out.
@@ -819,20 +835,40 @@ mod tests {
             ]))
             .is_ok()
         );
-        // An empty table or region is a usage error. An empty region would
-        // otherwise pass the SDK's "no region" check.
-        for args in [
-            vec![
+        // An empty region is a usage error. It would otherwise pass the SDK's
+        // "no region" check.
+        let error = parse_args(dynamodb(&["--dynamodb-region="])).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidValue, "{error}");
+        // So is a table name that DynamoDB refuses, which the startup check
+        // would retry forever.
+        let long = "t".repeat(256);
+        for table in ["", "ab", "my pools", "pools/v1", long.as_str()] {
+            let args = [
                 "gds",
                 "--registration-storage",
                 "dynamodb",
-                "--dynamodb-table=",
-            ],
-            dynamodb(&["--dynamodb-region="]),
-        ] {
-            let error = parse_args(args.clone()).unwrap_err();
-            assert_eq!(error.kind(), ErrorKind::InvalidValue, "{args:?}: {error}");
+                "--dynamodb-table",
+                table,
+            ];
+            let error = parse_args(args).unwrap_err();
+            assert_eq!(
+                error.kind(),
+                ErrorKind::ValueValidation,
+                "{table:?}: {error}"
+            );
         }
+        let table = "global-discovery_pools.v1";
+        let args = [
+            "gds",
+            "--registration-storage",
+            "dynamodb",
+            "--dynamodb-table",
+            table,
+        ];
+        assert_eq!(
+            parse_args(args).unwrap().dynamodb_table.as_deref(),
+            Some(table)
+        );
     }
 
     #[test]
