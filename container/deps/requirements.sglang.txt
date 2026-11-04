@@ -37,7 +37,7 @@ joblib>=1.0,<1.6  # Keep the dependency-free support line for --no-deps installs
 # `mooncake` package, so flooring the generic name overlays the CUDA 13 build
 # with an unloadable one instead of upgrading it. CUDA only: stripped for the
 # XPU image in sglang_runtime.Dockerfile.
-mooncake-transfer-engine-cuda13>=0.3.13.post1,<0.4
+mooncake-transfer-engine-cuda13>=0.3.14,<0.4
 nltk>=3.10.3,<4
 packaging>=23.1,<27
 # The upstream SGLang image bundles pillow at an older release; floor it so the
