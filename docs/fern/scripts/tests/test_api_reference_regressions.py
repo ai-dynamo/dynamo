@@ -840,6 +840,26 @@ def test_kubernetes_validation_drops_valueless_optional_required_braces() -> Non
         assert "Enum: [a, b]" in rendered
 
 
+def test_kubernetes_validation_drops_embedded_and_schemaless_braces() -> None:
+    """EmbeddedResource / Schemaless valueless markers lose their braces too."""
+    for raw in (
+        "EmbeddedResource: {}  Optional: {}",
+        r"Schemaless: \{\} <br />Type: object <br />Optional: \{\}",
+    ):
+        rendered = kubernetes_api_rendering._prose(raw)
+        assert "&#123;" not in rendered
+        assert "&#125;" not in rendered
+        assert "{}" not in rendered
+
+
+def test_kubernetes_valueless_marker_strip_skips_inline_code() -> None:
+    """Literal ``Optional: {}`` inside an inline code span is left intact."""
+    raw = "Set `Optional: {}` to opt in. Optional: {}"
+    rendered = kubernetes_api_rendering._prose(raw)
+    assert "`Optional: {}`" in rendered
+    assert rendered.endswith("Optional")
+
+
 def test_kubernetes_table_parser_preserves_literal_pipes() -> None:
     row = r"| `field` _string_ | uses `a|b` and x \| y |  | Required: {} |"
 

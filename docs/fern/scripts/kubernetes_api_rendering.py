@@ -78,18 +78,31 @@ _WARNING = (
 )
 
 
-# crd-ref-docs emits valueless markers as ``Optional: {}`` / ``Required: {}``,
-# often already Markdown-escaped as ``\{\}``. Escaping those braces again for
-# MDX surfaces ``\&#123;\&#125;`` noise (#17194).
+# crd-ref-docs emits valueless markers as ``Optional: {}``, ``Required: {}``,
+# ``EmbeddedResource: {}`` and ``Schemaless: {}``, often already
+# Markdown-escaped as ``\{\}``. Escaping those braces again for MDX surfaces
+# ``\&#123;\&#125;`` noise (#17194).
 _VALUELESS_MARKER_RE = re.compile(
-    r"\b(Optional|Required):\s*(?:\\\{\\\}|\{\s*\})"
+    r"\b(Optional|Required|EmbeddedResource|Schemaless):\s*(?:\\\{\\\}|\{\s*\})"
 )
+_INLINE_CODE_RE = re.compile(r"(`+)(?:.+?)\1")
+
+
+def _drop_valueless_markers(text: str) -> str:
+    """Strip valueless-marker braces outside inline code spans."""
+    out: list[str] = []
+    pos = 0
+    for match in _INLINE_CODE_RE.finditer(text):
+        out.append(_VALUELESS_MARKER_RE.sub(r"\1", text[pos : match.start()]))
+        out.append(match.group(0))
+        pos = match.end()
+    out.append(_VALUELESS_MARKER_RE.sub(r"\1", text[pos:]))
+    return "".join(out)
 
 
 def _prose(text: str) -> str:
     """Escape crd-ref-docs prose for MDX, collapsing its ``<br />`` wraps."""
-    normalized = _VALUELESS_MARKER_RE.sub(r"\1", BR_RE.sub(" ", text))
-    return escape_mdx_prose(normalized)
+    return escape_mdx_prose(_drop_valueless_markers(BR_RE.sub(" ", text)))
 
 
 def render_mdx(reference: KubernetesReference) -> str:
