@@ -124,10 +124,8 @@ PREFILL_PID=$!
 # Wait for prefill worker to initialize before starting decode worker.
 # Both workers share one GPU with --delete-ckpt-after-loading; without this
 # wait they compete for GPU memory during model loading and the scheduler OOMs.
-# A timeout still starts decode, but a prefill worker that already exited
-# (e.g. CUDA OOM at startup) must end the script here: bash reports and drops
-# a job that dies during this poll loop, so wait_any_exit below would never
-# see it and the script would hang with only decode running.
+# A timeout still starts decode, but stop if prefill already exited: bash drops
+# a job that dies during this poll, so wait_any_exit would never see it.
 PREFILL_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}"
 if ! wait_for_ready "http://localhost:${PREFILL_SYSTEM_PORT}/health" 45 \
     && ! kill -0 "$PREFILL_PID" 2>/dev/null; then
