@@ -9,7 +9,7 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Deploy DeepSeek-V4.1-Flash with NVIDIA Dynamo. The vLLM B200 and GB200 recipes use eight GPUs, sparse-indexer logits, and DSpark speculative decoding. H200 uses 16 GPUs for aggregated serving or eight for disaggregated serving, with CUTLASS MoE, EPLB, and DSpark-3. SGLang recipes are also available for GB200.
+Deploy DeepSeek-V4.1-Flash with NVIDIA Dynamo. The vLLM B200 and GB200 recipes use eight GPUs, sparse-indexer logits, and DSpark speculative decoding. H200 uses eight GPUs, with CUTLASS MoE, EPLB, and DSpark-3. SGLang recipes are also available for GB200.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
@@ -94,7 +94,7 @@ Deploy DeepSeek-V4.1-Flash with NVIDIA Dynamo. The vLLM B200 and GB200 recipes u
 
 ## Prerequisites
 
-- A Kubernetes cluster with a compatible Dynamo operator and eight B200/GB200 GPUs, 16 H200 GPUs for aggregated serving, or eight H200 GPUs for disaggregated serving.
+- A Kubernetes cluster with a compatible Dynamo operator and eight B200, GB200, or H200 GPUs.
 - Per frontend: 16 CPU cores and 128 GiB of host memory on B200/GB200, or 4 CPU cores and 8 GiB on H200.
 - Per worker: four GPUs, 16 CPU cores, 512 GiB of host memory, 64 GiB of ephemeral storage, and capacity for a 200 GiB shared-memory volume.
 - A populated ReadWriteMany model-cache PVC, referenced as `shared-model-cache` by the recipes.
@@ -320,7 +320,7 @@ For disaggregated SGLang, HTTP 200 can still contain `content: null` and zero co
 <div data-recipe-framework="vllm">
 
 Results for the agentic workload (64K input tokens, 400 output tokens), using
-eight B200/GB200 GPUs, 16 H200 GPUs for aggregated serving, or eight H200 GPUs for disaggregated serving. Output throughput includes reasoning tokens.
+eight B200, GB200, or H200 GPUs. Output throughput includes reasoning tokens.
 
 | Workload | Recipe | Framework | SKU | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) | TTFT P90 (ms) |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
@@ -328,7 +328,7 @@ eight B200/GB200 GPUs, 16 H200 GPUs for aggregated serving, or eight H200 GPUs f
 | Agentic (64K input, 400 output) | Disaggregated (1 prefill, 1 decode; TP4 each) | vLLM | B200 | 184 | 1,087.71 | 82.12 | 135.12 | 90,076.83 |
 | Agentic (64K input, 400 output) | Aggregated (2 × TP4) | vLLM | GB200 | 168 | 953.08 | 51.83 | 286.75 | 3,524.82 |
 | Agentic (64K input, 400 output) | Disaggregated (1 prefill, 1 decode; TP4 each) | vLLM | GB200 | 168 | 1,154.87 | 80.85 | 169.02 | 57,116.54 |
-| Agentic (64K input, 400 output) | Aggregated (4 × TP4) | vLLM | H200 | 80 | 209.18 | 51.32 | 171.29 | 6,368.76 |
+| Agentic (64K input, 400 output) | Aggregated (2 × TP4) | vLLM | H200 | 56 | 315.45 | 50.63 | 153.68 | 3,453.68 |
 | Agentic (64K input, 400 output) | Disaggregated (1 prefill, 1 decode; TP4 each) | vLLM | H200 | 64 | 359.41 | 50.63 | 177.59 | 35,043.23 |
 
 The catalog recommends GB200 disaggregated for maximum measured system output
