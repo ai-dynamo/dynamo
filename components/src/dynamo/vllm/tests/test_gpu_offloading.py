@@ -7,6 +7,7 @@ only scalar verdicts return to the host. Remote KVCR/NIXL tests are separate.
 """
 
 import base64
+import json
 import os
 import subprocess
 import sys
@@ -57,6 +58,9 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     make_offload_key,
 )
+
+from dynamo.llm import WorkerType
+from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 
 pytestmark = [
     pytest.mark.post_merge,
@@ -991,6 +995,54 @@ def test_tp_retained_inventory_waits_for_every_worker_completion(tp_size):
     assert primary.lookup(key, context) is LookupResult.HIT
     assert [event.keys for event in primary.take_events()] == [[key]]
     assert scheduler._jobs == {}
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parametrize("transport", ["cuda_ipc", "mnnvl"])
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+def test_tp_discovery_and_storage_publish_the_same_domain(
+    monkeypatch, transport, tp_size
+):
+    tier = {
+        "type": "GPUKVCRSecondaryTierManager",
+        "gpu_transport": transport,
+        "compatibility_domain": "test-gpu-layout-v1",
+        "router_capabilities": ["router_hint_gpu_direct"],
+        "control_advertise_host": "worker-a",
+        "control_ports": [24123],
+    }
+    if transport == "mnnvl":
+        tier["ucx_tls"] = ["cuda_ipc", "tcp", "self"]
+        observed = SimpleNamespace(domain="mnnvl:" + "1" * 32 + ":0")
+        monkeypatch.setattr(gpu_mnnvl, "observe_fabric", lambda: observed)
+    config = make_tp_config(tp_size, gpu_transport=transport, secondary_tiers=[tier])
+    spec = GPUOffloadingSpec(config)
+    spec._resolve_gpu_transport()
+    runtime = MagicMock()
+    publish_kv_hint_capabilities(
+        runtime,
+        SimpleNamespace(
+            tensor_parallel_size=tp_size,
+            kv_transfer_config=SimpleNamespace(
+                kv_connector="GPUOffloadingConnector",
+                kv_connector_extra_config=config.extra_config,
+            ),
+        ),
+        WorkerType.Decode,
+    )
+    fields = {
+        call.args[0]: json.loads(call.args[1])
+        for call in runtime.set_engine_specific.call_args_list
+    }
+    assert (
+        fields["router_hint_transfer_domain"]
+        == spec.extra_config["router_hint_transfer_domain"]
+    )
+    assert fields["router_hint_transfer_domain"] != "test-gpu-layout-v1"
+    assert (
+        spec.tiers[0]["compatibility_domain"] == fields["router_hint_transfer_domain"]
+    )
 
 
 @pytest.mark.pre_merge

@@ -13,6 +13,7 @@ from dynamo.common.constants import (
     KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
 )
 from dynamo.llm import WorkerType
+from dynamo.vllm import kv_hints
 from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 
 pytestmark = [
@@ -555,6 +556,166 @@ def _gpu_connector(**tier_changes):
     }
 
 
+def test_gpu_hint_capability_is_separate_from_cpu_and_keeps_global_rank():
+    runtime = MagicMock()
+    publish_kv_hint_capabilities(
+        runtime,
+        _wrapped_engine_args(
+            "PdConnector",
+            [_gpu_connector()],
+            router_hint_transfer_domain="gpu-certified-layout-v1",
+        ),
+        WorkerType.Decode,
+        (3, 1),
+    )
+    fields = {
+        call.args[0]: json.loads(call.args[1])
+        for call in runtime.set_engine_specific.call_args_list
+    }
+    assert fields["router_hint_gpu_direct"] is True
+    assert fields["router_hint_gpu_source_control_endpoints"] == {
+        "3": "tcp://worker-a:24123"
+    }
+    assert fields["router_hint_worker_type"] == "decode"
+    assert fields["router_hint_transfer_domain"] == "gpu-certified-layout-v1"
+    assert KV_HINT_TRANSFER_CAPABILITY_KEY not in fields
+    assert KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY not in fields
+
+
+@pytest.mark.parametrize(
+    "tier_changes",
+    [
+        {"type": "kvcr"},
+        {"compatibility_domain": "different-layout"},
+        {"control_ports": [True]},
+        {"control_advertise_host": "0.0.0.0"},
+    ],
+)
+def test_gpu_hint_rejects_wrong_memory_provider_domain_or_endpoint(tier_changes):
+    runtime = MagicMock()
+    with pytest.raises(ValueError):
+        publish_kv_hint_capabilities(
+            runtime,
+            _wrapped_engine_args(
+                "PdConnector",
+                [_gpu_connector(**tier_changes)],
+                router_hint_transfer_domain="gpu-certified-layout-v1",
+            ),
+            WorkerType.Decode,
+            (0, 1),
+        )
+    runtime.set_engine_specific.assert_not_called()
+
+
+def test_gpu_hint_does_not_advertise_an_unsupported_cache_owner_source():
+    runtime = MagicMock()
+    with pytest.raises(ValueError, match="CacheOwner"):
+        publish_kv_hint_capabilities(
+            runtime,
+            _wrapped_engine_args(
+                "PdConnector",
+                [_gpu_connector()],
+                router_hint_transfer_domain="gpu-certified-layout-v1",
+                dynamo_state_agent={"raw_advertise_host": "worker-a"},
+            ),
+            WorkerType.Decode,
+            (0, 1),
+        )
+    runtime.set_engine_specific.assert_not_called()
+
+
+def test_mnnvl_capability_uses_observed_fabric_effective_domain_without_mutating_config(
+    monkeypatch,
+):
+    observed = SimpleNamespace(domain="mnnvl:" + "1" * 32 + ":0")
+    helper = SimpleNamespace(
+        observe_fabric=MagicMock(return_value=observed),
+        effective_domain=MagicMock(return_value="mnnvl-sha256:observed-layout-fabric"),
+    )
+    loader = MagicMock(return_value=helper)
+    monkeypatch.setattr(kv_hints, "importlib", SimpleNamespace(import_module=loader))
+    args = _wrapped_engine_args(
+        "PdConnector",
+        [_gpu_connector(gpu_transport="mnnvl", ucx_tls=["cuda_ipc", "tcp", "self"])],
+        router_hint_transfer_domain="gpu-certified-layout-v1",
+    )
+    runtime = MagicMock()
+    publish_kv_hint_capabilities(runtime, args, WorkerType.Decode)
+    fields = {
+        call.args[0]: json.loads(call.args[1])
+        for call in runtime.set_engine_specific.call_args_list
+    }
+    assert (
+        fields["router_hint_transfer_domain"] == "mnnvl-sha256:observed-layout-fabric"
+    )
+    assert fields["router_hint_gpu_direct"] is True
+    assert KV_HINT_TRANSFER_CAPABILITY_KEY not in fields
+    loader.assert_called_once_with("kvbm.vllm_integration.gpu_mnnvl")
+    helper.effective_domain.assert_called_once_with(
+        "gpu-certified-layout-v1", observed.domain
+    )
+    assert (
+        args.kv_transfer_config.kv_connector_extra_config["router_hint_transfer_domain"]
+        == "gpu-certified-layout-v1"
+    )
+    assert (
+        args.kv_transfer_config.kv_connector_extra_config["connectors"][0][
+            "kv_connector_extra_config"
+        ]["secondary_tiers"][0]["compatibility_domain"]
+        == "gpu-certified-layout-v1"
+    )
+
+
+def test_default_gpu_profile_does_not_load_mnnvl_or_native_dependencies(monkeypatch):
+    loader = MagicMock(
+        side_effect=AssertionError("Default profile must not load MNNVL")
+    )
+    monkeypatch.setattr(kv_hints, "importlib", SimpleNamespace(import_module=loader))
+    runtime = MagicMock()
+    publish_kv_hint_capabilities(
+        runtime,
+        _wrapped_engine_args(
+            "PdConnector",
+            [_gpu_connector()],
+            router_hint_transfer_domain="gpu-certified-layout-v1",
+        ),
+        WorkerType.Decode,
+    )
+    loader.assert_not_called()
+    runtime.set_engine_specific.assert_any_call(
+        "router_hint_transfer_domain", '"gpu-certified-layout-v1"'
+    )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"gpu_transport": "unknown"},
+        {"gpu_transport": "mnnvl"},
+        {"gpu_transport": "mnnvl", "ucx_tls": True},
+        {"gpu_transport": "mnnvl", "ucx_tls": ["cuda_ipc", "posix", "self"]},
+    ],
+)
+def test_mnnvl_capability_rejects_unknown_or_nonexplicit_profile_before_native_import(
+    monkeypatch, changes
+):
+    loader = MagicMock(side_effect=AssertionError("Invalid policy must fail first"))
+    monkeypatch.setattr(kv_hints, "importlib", SimpleNamespace(import_module=loader))
+    runtime = MagicMock()
+    with pytest.raises(ValueError):
+        publish_kv_hint_capabilities(
+            runtime,
+            _wrapped_engine_args(
+                "PdConnector",
+                [_gpu_connector(**changes)],
+                router_hint_transfer_domain="gpu-certified-layout-v1",
+            ),
+            WorkerType.Decode,
+        )
+    loader.assert_not_called()
+    runtime.set_engine_specific.assert_not_called()
+
+
 def test_mnnvl_and_cpu_hint_providers_cannot_partially_publish_a_shared_domain():
     runtime = MagicMock()
     with pytest.raises(ValueError, match="CPU-hint"):
@@ -577,3 +738,140 @@ def test_mnnvl_and_cpu_hint_providers_cannot_partially_publish_a_shared_domain()
             WorkerType.Decode,
         )
     runtime.set_engine_specific.assert_not_called()
+
+
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+def test_tp_gpu_and_cpu_hints_reject_shared_domain_before_publication(
+    monkeypatch, tp_size
+):
+    runtime = MagicMock()
+    layout = SimpleNamespace(
+        parallel_layout_domain=MagicMock(return_value="transformed-domain")
+    )
+    loader = MagicMock(return_value=layout)
+    monkeypatch.setattr(kv_hints, "importlib", SimpleNamespace(import_module=loader))
+    args = _wrapped_engine_args(
+        "MultiConnector",
+        [_gpu_connector(), _kvcr_connector(control_ports=[24124])],
+        router_hint_transfer_domain="gpu-certified-layout-v1",
+    )
+    args.tensor_parallel_size = tp_size
+
+    with pytest.raises(ValueError, match="CPU-hint runtime domain"):
+        publish_kv_hint_capabilities(runtime, args, WorkerType.Decode)
+
+    runtime.set_engine_specific.assert_not_called()
+    loader.assert_not_called()
+
+
+def test_tp1_gpu_and_cpu_hints_preserve_same_domain_publication():
+    runtime = MagicMock()
+    args = _wrapped_engine_args(
+        "MultiConnector",
+        [_gpu_connector(), _kvcr_connector(control_ports=[24124])],
+        router_hint_transfer_domain="gpu-certified-layout-v1",
+    )
+    args.tensor_parallel_size = 1
+
+    publish_kv_hint_capabilities(runtime, args, WorkerType.Decode)
+
+    fields = {
+        call.args[0]: json.loads(call.args[1])
+        for call in runtime.set_engine_specific.call_args_list
+    }
+    assert fields[KV_HINT_TRANSFER_CAPABILITY_KEY] is True
+    assert fields["router_hint_gpu_direct"] is True
+    assert fields["router_hint_transfer_domain"] == "gpu-certified-layout-v1"
+    domain_calls = [
+        call.args[1]
+        for call in runtime.set_engine_specific.call_args_list
+        if call.args[0] == "router_hint_transfer_domain"
+    ]
+    assert domain_calls
+    assert all(json.loads(value) == "gpu-certified-layout-v1" for value in domain_calls)
+
+
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+def test_gpu_tp_discovery_accepts_matching_raw_layout(monkeypatch, tp_size):
+    base = "gpu-certified-layout-v1"
+    domain = f"{base}|gpu-raw-tp-v1:tp={tp_size}"
+    layout = SimpleNamespace(parallel_layout_domain=MagicMock(return_value=domain))
+    loader = MagicMock(return_value=layout)
+    monkeypatch.setattr(kv_hints, "importlib", SimpleNamespace(import_module=loader))
+    args = _wrapped_engine_args(
+        "PdConnector", [_gpu_connector()], router_hint_transfer_domain=base
+    )
+    args.tensor_parallel_size = tp_size
+    args.distributed_executor_backend = "mp"
+    runtime = MagicMock()
+
+    publish_kv_hint_capabilities(runtime, args, WorkerType.Decode)
+
+    fields = {
+        call.args[0]: json.loads(call.args[1])
+        for call in runtime.set_engine_specific.call_args_list
+    }
+    assert fields["router_hint_gpu_direct"] is True
+    assert fields["router_hint_transfer_domain"] == domain
+    assert fields["router_hint_gpu_source_control_endpoints"] == {
+        "0": "tcp://worker-a:24123"
+    }
+    assert KV_HINT_TRANSFER_CAPABILITY_KEY not in fields
+    loader.assert_called_once_with("kvbm.vllm_integration.gpu_layout")
+    layout.parallel_layout_domain.assert_called_once_with(base, tp_size)
+    assert (
+        args.kv_transfer_config.kv_connector_extra_config["router_hint_transfer_domain"]
+        == base
+    )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"data_parallel_size": 2},
+        {"distributed_executor_backend": "ray"},
+        {"pipeline_parallel_size": 2},
+        {"prefill_context_parallel_size": 2},
+        {"decode_context_parallel_size": 2},
+    ],
+)
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+def test_gpu_tp_discovery_rejects_unsupported_parallel_topologies(
+    monkeypatch, changes, tp_size
+):
+    loader = MagicMock(side_effect=AssertionError("Invalid topology must fail first"))
+    monkeypatch.setattr(kv_hints, "importlib", SimpleNamespace(import_module=loader))
+    args = _wrapped_engine_args(
+        "PdConnector",
+        [_gpu_connector()],
+        router_hint_transfer_domain="gpu-certified-layout-v1",
+    )
+    args.tensor_parallel_size = tp_size
+    for field, value in changes.items():
+        setattr(args, field, value)
+    runtime = MagicMock()
+    with pytest.raises(ValueError, match="single local MP"):
+        publish_kv_hint_capabilities(runtime, args, WorkerType.Decode)
+    runtime.set_engine_specific.assert_not_called()
+    loader.assert_not_called()
+
+
+@pytest.mark.parametrize("tp_size", [True, False, 0, -1, 3.0, "3", None])
+def test_gpu_discovery_rejects_invalid_tp_count_before_import_or_publication(
+    monkeypatch, tp_size
+):
+    loader = MagicMock(side_effect=AssertionError("Invalid TP count must fail first"))
+    monkeypatch.setattr(kv_hints, "importlib", SimpleNamespace(import_module=loader))
+    args = _wrapped_engine_args(
+        "PdConnector",
+        [_gpu_connector()],
+        router_hint_transfer_domain="gpu-certified-layout-v1",
+    )
+    args.tensor_parallel_size = tp_size
+    runtime = MagicMock()
+
+    with pytest.raises(ValueError):
+        publish_kv_hint_capabilities(runtime, args, WorkerType.Decode)
+
+    runtime.set_engine_specific.assert_not_called()
+    loader.assert_not_called()

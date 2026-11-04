@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib
 import ipaddress
 import json
 import os
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
 
 from dynamo.common.constants import (
     KV_HINT_GPU_DIRECT_CAPABILITY_KEY,
+    KV_HINT_GPU_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
     KV_HINT_TRANSFER_CAPABILITY_KEY,
     KV_HINT_TRANSFER_DOMAIN_RUNTIME_KEY,
     KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
@@ -345,3 +347,102 @@ def publish_kv_hint_capabilities(
         dp_range,
         publish_source_endpoints=publish_source_endpoints,
     )
+    _publish_gpu_transfer_hint_capability(
+        runtime_config,
+        engine_args,
+        worker_type,
+        dp_range,
+        publish_source_endpoints=publish_source_endpoints,
+    )
+
+
+def _publish_gpu_transfer_hint_capability(
+    runtime_config: ModelRuntimeConfig,
+    engine_args: AsyncEngineArgs,
+    worker_type: WorkerType,
+    dp_range: tuple[int, int],
+    *,
+    publish_source_endpoints: bool,
+) -> None:
+    tiers = [
+        tier
+        for tier in _secondary_tiers(engine_args)
+        if KV_HINT_GPU_DIRECT_CAPABILITY_KEY in (tier.get("router_capabilities") or ())
+    ]
+    if not tiers:
+        return
+    if len(tiers) != 1 or dp_range[1] != 1:
+        raise ValueError(
+            "Direct GPU KV transfer requires one GPU tier per engine/DP rank"
+        )
+    tier = tiers[0]
+    if tier.get("type") != "GPUKVCRSecondaryTierManager":
+        raise ValueError("Direct GPU capability requires the GPU-only KVCR tier")
+    domain = _transfer_hint_domain(engine_args)
+    if domain is None or tier.get("compatibility_domain") != domain:
+        raise ValueError("Direct GPU capability requires one certified layout domain")
+    role = _transfer_hint_worker_type(worker_type)
+    endpoints = _transfer_hint_source_control_endpoints(tier, dp_range)
+    if role is None or endpoints is None or not publish_source_endpoints:
+        raise ValueError(
+            "Direct GPU transfer requires native worker-owned source endpoints"
+        )
+    # CacheOwner/state-agent sources use a different ownership contract; they
+    # must not advertise this worker-owned retained-GPU inventory as CPU RAM.
+    kv_config = getattr(engine_args, "kv_transfer_config", None)
+    extra = getattr(kv_config, "kv_connector_extra_config", None) or {}
+    if extra.get("dynamo_state_agent") is not None:
+        raise ValueError(
+            "Direct GPU KV transfer does not support CacheOwner attachments"
+        )
+    transport = tier.get("gpu_transport", "cuda_ipc")
+    if transport not in ("cuda_ipc", "mnnvl"):
+        raise ValueError("GPU transport must be cuda_ipc or mnnvl")
+    tp_size = getattr(engine_args, "tensor_parallel_size", 1)
+    if type(tp_size) is not int or tp_size <= 0:
+        raise ValueError("Direct GPU KV transfer requires a positive integer TP size")
+    if tp_size > 1:
+        if (
+            getattr(engine_args, "data_parallel_size", 1) != 1
+            or getattr(engine_args, "distributed_executor_backend", None)
+            not in (None, "mp")
+            or any(
+                getattr(engine_args, name, 1) != 1
+                for name in (
+                    "pipeline_parallel_size",
+                    "prefill_context_parallel_size",
+                    "decode_context_parallel_size",
+                )
+            )
+        ):
+            raise ValueError(
+                "Retained GPU TP requires a single local MP engine without DP/PP/CP"
+            )
+        layout = importlib.import_module("kvbm.vllm_integration.gpu_layout")
+        domain = layout.parallel_layout_domain(domain, tp_size)
+    if transport == "mnnvl":
+        tls = tier.get("ucx_tls")
+        if not isinstance(tls, (list, tuple)) or tuple(tls) != (
+            "cuda_ipc",
+            "tcp",
+            "self",
+        ):
+            raise ValueError("MNNVL requires explicit cuda_ipc,tcp,self context TLS")
+        # KVBM/NIXL are optional on ordinary backend paths. Load this stdlib-only
+        # helper only for the explicitly selected MNNVL profile after engine
+        # startup; its device/NVML observation is never a configured attestation.
+        fabric = importlib.import_module("kvbm.vllm_integration.gpu_mnnvl")
+        identity = fabric.observe_fabric()
+        expected_fabric = tier.get("fabric_domain")
+        if expected_fabric is not None and expected_fabric != identity.domain:
+            raise ValueError(
+                "Configured fabric constraint differs from actual assigned GPU"
+            )
+        domain = fabric.effective_domain(domain, identity.domain)
+    for key, value in (
+        (KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, role),
+        (KV_HINT_TRANSFER_DOMAIN_RUNTIME_KEY, domain),
+        (KV_HINT_GPU_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY, endpoints),
+        (KV_HINT_GPU_DIRECT_CAPABILITY_KEY, True),
+    ):
+        runtime_config.set_engine_specific(key, json.dumps(value))
