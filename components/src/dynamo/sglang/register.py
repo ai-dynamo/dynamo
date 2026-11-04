@@ -284,9 +284,8 @@ async def _register_model_with_runtime_config(
             json.dumps(True),
         )
         logging.info("Published SGLang engine-native generate capability")
-        # The capability is hashed into the model checksum, so publish it only
-        # on explicit opt-in; otherwise an eligible chat worker would leave its
-        # checksum cohort even when the frontend Decisions API is disabled.
+        # The capability is hashed into the model checksum; publish only on
+        # opt-in so eligible chat workers keep their checksum cohort.
         if getattr(dynamo_args, "systemone_serial", False):
             if _supports_systemone_serial(
                 server_args, input_type, output_type, worker_type
