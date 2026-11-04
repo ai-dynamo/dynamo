@@ -312,6 +312,176 @@ def import_fabric(
 _OWNED_GPU_REGIONS: dict[Path, GPUCacheRegion | GPUFabricCacheRegion] = {}
 
 
+_RETAINED_FAILED_GPU_GROUPS = []
+
+
+def _read_private_json(path):
+    directory_info = path.parent.stat(follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(directory_info.st_mode)
+        or directory_info.st_uid != os.getuid()
+        or directory_info.st_mode & 0o077
+    ):
+        raise ValueError("GPU bank metadata directory must be private and owned")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as source:
+        info = os.fstat(source.fileno())
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_mode & 0o077
+            or not 0 < info.st_size <= 65536
+        ):
+            raise ValueError("GPU bank metadata must be a bounded private owner file")
+        raw = source.read(65537)
+    if len(raw) != info.st_size:
+        raise ValueError("GPU bank metadata changed while being read")
+    return json.loads(raw), raw
+
+
+class GPUMultiRankCacheRegion:
+    """One rank-local CUDA bank per worker, with aggregate row accounting.
+
+    The facade deliberately has no Tensor or host buffer protocol. Native
+    multipart registration consumes the ordered banks, while each model rank
+    opens only its own same-GPU bank. The group becomes visible atomically
+    after every bank has published its complete descriptor.
+    """
+
+    def __init__(
+        self,
+        engine_id,
+        chunks,
+        row_bytes,
+        base_domain=None,
+        *,
+        gpu_rank_devices,
+        gpu_transport="mnnvl",
+    ):
+        if (
+            type(chunks) is not int
+            or chunks <= 0
+            or type(row_bytes) is not int
+            or row_bytes <= 0
+        ):
+            raise ValueError("GPU bank geometry requires positive integer dimensions")
+        if (
+            not isinstance(gpu_rank_devices, list)
+            or len(gpu_rank_devices) < 2
+            or any(type(device) is not int or device < 0 for device in gpu_rank_devices)
+            or len(set(gpu_rank_devices)) != len(gpu_rank_devices)
+        ):
+            raise ValueError("GPU rank devices must be an explicit unique ordinal list")
+        if any(device >= torch.cuda.device_count() for device in gpu_rank_devices):
+            raise ValueError("GPU rank device ordinal is outside the visible CUDA set")
+        if gpu_transport not in ("cuda_ipc", "mnnvl"):
+            raise ValueError("Unknown retained GPU transport")
+        self.gpu_transport = gpu_transport
+        self.world_size = len(gpu_rank_devices)
+        self.shape = (chunks, row_bytes * self.world_size)
+        self.strides = (self.shape[1], 1)
+        self.path = region_path(engine_id)
+        self.banks = []
+        self.fabric_domain = self.compatibility_domain = None
+        self._closed = False
+        self.path.mkdir(mode=0o700)
+        try:
+            entries = []
+            owner_pid = os.getpid()
+            owner_ticks = _process_start_ticks(owner_pid)
+            for rank, device in enumerate(gpu_rank_devices):
+                with torch.cuda.device(device):
+                    options = {"_path": region_path(engine_id, rank=rank)}
+                    bank = (
+                        GPUFabricCacheRegion(
+                            engine_id, chunks, row_bytes, base_domain, **options
+                        )
+                        if gpu_transport == "mnnvl"
+                        else GPUCacheRegion(engine_id, chunks, row_bytes, **options)
+                    )
+                self.banks.append(bank)
+                if gpu_transport == "mnnvl":
+                    if rank == 0:
+                        self.fabric_domain = bank.fabric_domain
+                        self.compatibility_domain = bank.compatibility_domain
+                    if (
+                        bank.fabric_domain != self.fabric_domain
+                        or bank.compatibility_domain != self.compatibility_domain
+                    ):
+                        raise ValueError("All rank banks must share one fabric/domain")
+                descriptor, raw = _read_private_json(bank.path / "ipc.json")
+                entries.append(
+                    {
+                        "rank": rank,
+                        "world_size": self.world_size,
+                        "device": device,
+                        "engine_id": engine_id,
+                        "shape": list(bank.shape),
+                        "stride": list(bank.strides),
+                        "gpu_uuid": descriptor["gpu_uuid"],
+                        "owner_pid": owner_pid,
+                        "owner_start_ticks": owner_ticks,
+                        "descriptor_sha256": hashlib.sha256(raw).hexdigest(),
+                    }
+                )
+            if len({entry["gpu_uuid"] for entry in entries}) != self.world_size:
+                raise ValueError("Rank banks must belong to distinct physical GPUs")
+            self.metadata = {
+                "schema": "dynamo-gpu-bank-group-v1",
+                "gpu_transport": gpu_transport,
+                "engine_id": engine_id,
+                "world_size": self.world_size,
+                "shape": list(self.shape),
+                "stride": list(self.strides),
+                "owner_pid": owner_pid,
+                "owner_start_ticks": owner_ticks,
+                "base_domain": base_domain if gpu_transport == "mnnvl" else None,
+                "compatibility_domain": self.compatibility_domain,
+                "fabric_domain": self.fabric_domain,
+                "banks": entries,
+            }
+            raw_group = json.dumps(self.metadata).encode()
+            if len(raw_group) > 65536:
+                raise ValueError("GPU bank group metadata exceeds 64 KiB")
+            temporary = self.path / "group.json.pending"
+            fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, "wb") as output:
+                output.write(raw_group)
+                output.flush()
+                os.fsync(output.fileno())
+            os.rename(temporary, self.path / "group.json")
+            self.banks = tuple(self.banks)
+        except Exception:
+            try:
+                self.cleanup()
+            except Exception:
+                # A failed CUDA drain must retain all remaining owners. No
+                # native registration has happened at this constructor boundary.
+                _RETAINED_FAILED_GPU_GROUPS.append(self)
+            raise
+
+    def __len__(self):
+        return self.shape[0]
+
+    def cleanup(self):
+        if self._closed:
+            return
+        (self.path / "group.json").unlink(missing_ok=True)
+        (self.path / "group.json.pending").unlink(missing_ok=True)
+        try:
+            for bank in self.banks:
+                if not bank._closed:
+                    with torch.cuda.device(bank.tensor.device):
+                        bank.cleanup()
+                if _OWNED_GPU_REGIONS.get(bank.path) is bank:
+                    del _OWNED_GPU_REGIONS[bank.path]
+            self.path.rmdir()
+        except Exception:
+            _RETAINED_FAILED_GPU_GROUPS.append(self)
+            raise
+        self._closed = True
+
+
 def open_region(
     engine_id: str,
     shape: tuple[int, int],
