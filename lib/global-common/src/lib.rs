@@ -19,6 +19,8 @@
 //! - Global Router replicas ([`RouterReplica`]), and list-and-watch events
 //!   and snapshots ([`WatchEvent`], [`Snapshot`]), which the service's watch
 //!   contract and its clients share.
+//! - The gRPC contract replicas sync bookings and session bindings over
+//!   ([`replica_sync`]); its generated code needs the `grpc` feature.
 
 mod discovery;
 /// Relay-to-router receiving transport. Identity fields name routing state;
@@ -31,6 +33,7 @@ pub mod grpc {
     pub const MAX_POOL_VIEW_FRAME_BYTES: usize = 4 * 4 * 1024 * 1024 + 64;
 }
 mod pool;
+pub mod replica_sync;
 mod replicas;
 mod watch;
 

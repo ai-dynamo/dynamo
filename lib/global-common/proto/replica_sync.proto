@@ -1,0 +1,113 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package dynamo.globalrouter.replica.v1;
+
+// Replica sync between Global Router replicas (DEP #17639).
+//
+// Each Global Frontend embeds the router core, whose workers are pools. This
+// stream carries, from one replica to the others, the core's session-affinity
+// bindings and each replica's requests in flight per pool (InflightCount), so
+// every replica sees every replica's session pins and load. Bookings are not
+// carried: no policy ranks on them.
+//
+// v1 is a compatibility major, not a schema revision. Additive fields keep
+// contract_marker. Preserve field numbers, types and meanings; reserve
+// deleted field numbers and names. Incompatible semantics require a new
+// package.
+
+// One replica publishes; peers subscribe and receive a snapshot of the
+// publisher's session bindings, then at once its InflightCount when it
+// publishes one, then its bindings as they change and its InflightCount
+// every interval.
+service ReplicaSync
+{
+  rpc SubscribeReplicaEvents(SubscribeRequest) returns (stream ReplicaFrame);
+}
+
+// A peer opening the stream.
+message SubscribeRequest
+{
+  // The subscribing replica's process id, the `writer_id` and `replica_id`
+  // it stamps on its own frames. The publisher may use it to avoid echoing
+  // the subscriber's state back.
+  uint64 subscriber_id = 1;
+  // The routing group whose partitions the subscriber wants; empty means
+  // every group the publisher serves.
+  string routing_group = 2;
+  // Must equal the publisher's CONTRACT_MARKER; the server rejects a
+  // mismatch with FAILED_PRECONDITION.
+  uint32 contract_marker = 3;
+}
+
+// One message on the stream: the opening snapshot, then binding batches and
+// the publisher's in-flight counts. Snapshot and BindingBatch carry the
+// router core's session table; InflightCount is the Global Frontend's.
+message ReplicaFrame
+{
+  oneof frame
+  {
+    Snapshot snapshot = 1;
+    BindingBatch bindings = 2;
+    InflightCount inflight_count = 3;
+  }
+}
+
+// The publisher's state when the subscriber joined: every live session
+// binding. Frames after it apply on top.
+message Snapshot
+{
+  repeated AffinityBinding bindings = 1;
+}
+
+// Session bindings that changed since the previous frame, in the
+// publisher's order.
+message BindingBatch
+{
+  repeated AffinityBinding bindings = 1;
+}
+
+// One replicated session binding: the pool a session is pinned to.
+message AffinityBinding
+{
+  // With routing_group, the core partition the binding belongs to.
+  string model_name = 1;
+  string routing_group = 2;
+  // The session pinned.
+  string session_id = 3;
+  // The worker the session is pinned to, and its rank if the pin is
+  // rank-specific.
+  uint64 worker_id = 4;
+  optional uint32 dp_rank = 5;
+  // Version of the binding: a receiver keeps the higher sequence, and on a
+  // tie the higher writer_id.
+  uint64 sequence = 6;
+  // The publishing replica's process id, which versions the binding and
+  // lets a receiver drop its own echoes.
+  uint64 writer_id = 7;
+}
+
+// The publishing Global Frontend's own requests in flight per pool, sent on
+// a timer and not per request, so the stream's cost does not grow with the
+// request rate. Each is the publisher's whole view: a pool it does not list,
+// or lists at zero, has nothing in flight from it. A receiver counts a
+// publisher's last view until it goes stale, so a publisher that stops
+// sending stops counting without a goodbye.
+message InflightCount
+{
+  // The publishing replica's process id, as on its bindings.
+  uint64 replica_id = 1;
+  repeated PoolInflightCount pools = 2;
+}
+
+// One pool's entry in a replica's InflightCount: that replica's requests to
+// the pool, not the pool's total.
+message PoolInflightCount
+{
+  // The pool's worker id in the router core, as on AffinityBinding.
+  uint64 worker_id = 1;
+  // The publisher's requests sent to the pool and not yet finished.
+  uint64 count = 2;
+}
