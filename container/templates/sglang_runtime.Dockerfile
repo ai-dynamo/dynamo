@@ -103,10 +103,9 @@ COPY --chown=dynamo:0 --from=wheel_builder /opt/intel/intel_nixl/lib/x86_64-linu
 COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
-# Install RDMA libraries required for UCX to find RDMA devices. UCX is configured
-# --with-verbs for xpu (see wheel_builder.Dockerfile), but the published
-# lmsysorg/sglang XPU base ships none of these, so the verbs transports are
-# compiled in yet cannot load without them. Matches vllm_runtime.Dockerfile.
+# Install RDMA libraries required for UCX to find RDMA devices. UCX is built
+# --with-verbs for xpu but the published XPU base ships none, so the verbs
+# transports are compiled in yet cannot load. Matches vllm_runtime.Dockerfile.
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libibverbs1 \
@@ -416,11 +415,10 @@ ENV SGLANG_FORCE_SHUTDOWN=1
 RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
     sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
 
-{# No conda activation and no `source setvars.sh` for XPU any more: the upstream
-   image puts /opt/venv on PATH and exports the whole oneAPI environment
-   (SETVARS_COMPLETED=1) through Docker ENV, which every process inherits --
-   unlike a bashrc, which only interactive shells read. /sgl-workspace is the
-   upstream WORKDIR on both devices, so the symlink needs no mkdir. #}
+{# oneAPI and /opt/venv come through Docker ENV (SETVARS_COMPLETED=1), which every
+   process inherits -- do not move this into a bashrc, which only interactive
+   shells read. /sgl-workspace is the upstream WORKDIR on both devices, so the
+   symlink needs no mkdir. #}
 RUN chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc && \
     ln -sf /workspace /sgl-workspace/dynamo
