@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
@@ -111,7 +112,17 @@ func (w *clientWriter) PrepareCandidate(
 	if err == nil {
 		return candidate, nil
 	}
+
+	// RBAC changes propagate asynchronously, so Forbidden remains retryable as well.
 	if !apierrors.IsInvalid(err) && !apierrors.IsBadRequest(err) {
+		// Generated probe names differ on each attempt; keep otherwise identical diagnostics stable.
+		if apiStatus, ok := errors.AsType[*apierrors.StatusError](err); ok {
+			status := apiStatus.Status()
+			if status.Details != nil && strings.HasPrefix(status.Details.Name, probe.GetGenerateName()) {
+				status.Message = strings.ReplaceAll(status.Message, fmt.Sprintf("%q", status.Details.Name), `"<generated DGD>"`)
+				err = &apierrors.StatusError{ErrStatus: status}
+			}
+		}
 		return candidate, fmt.Errorf("strict DGD dry-run: %w", err)
 	}
 	candidate.Validity.Status = metav1.ConditionFalse

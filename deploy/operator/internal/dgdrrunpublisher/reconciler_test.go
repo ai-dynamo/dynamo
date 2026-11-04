@@ -32,6 +32,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -253,6 +254,10 @@ func (w *memWriter) UpdateRunStatus(ctx context.Context, resourceVersion string,
 	run.Status.CandidateRefs = nil
 	for _, name := range status.CandidateNames {
 		run.Status.CandidateRefs = append(run.Status.CandidateRefs, corev1.LocalObjectReference{Name: name})
+	}
+	meta.RemoveStatusCondition(&run.Status.Conditions, v1beta2.DGDRRunConditionPublished)
+	if status.Publication != nil {
+		meta.SetStatusCondition(&run.Status.Conditions, *status.Publication)
 	}
 	return w.c.Update(ctx, &run)
 }
@@ -645,6 +650,8 @@ func TestTerminalFailedSnapshotIsReconciledThenFails(t *testing.T) {
 func TestTerminalSucceededSnapshotWithoutAMaterializedCandidateFails(t *testing.T) {
 	f := newFixture(t)
 	f.publish(snapshotJSON(t, PhaseSucceeded, cand{id: "x", failed: true}))
+	t.Log("Publish the projection condition before acknowledging the failed search")
+	f.mustReconcile()
 	f.mustReconcile()
 
 	err := f.r.Completion.Err()
@@ -653,8 +660,8 @@ func TestTerminalSucceededSnapshotWithoutAMaterializedCandidateFails(t *testing.
 		!strings.Contains(err.Error(), "1 candidate failure") || !strings.HasPrefix(failure.Outcome.Error, "x: ") {
 		t.Fatalf("err = %v", err)
 	}
-	if ops := f.takeOps(); len(ops) != 0 {
-		t.Fatalf("a failed materialization must not produce cluster writes, got %v", ops)
+	if ops := f.takeOps(); !reflect.DeepEqual(ops, []string{"status"}) {
+		t.Fatalf("a failed materialization must only report Run status, got %v", ops)
 	}
 }
 
@@ -830,7 +837,7 @@ func TestOwnedCandidateDriftIsReconciledSafely(t *testing.T) {
 			existingName:   cn("obsolete"),
 			existingID:     "obsolete",
 			removeRunLabel: true,
-			want:           []string{"delete:" + cn("obsolete")},
+			want:           []string{"status", "delete:" + cn("obsolete")},
 		},
 		{
 			name:         "wrong identity label is reapplied",

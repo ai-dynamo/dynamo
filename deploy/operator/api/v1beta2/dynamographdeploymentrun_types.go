@@ -186,6 +186,11 @@ type DynamoGraphDeploymentRunStatus struct {
 	LastProgressTime *metav1.Time `json:"lastProgressTime,omitempty"`
 
 	// Conditions contains standard Kubernetes conditions merged by type.
+	// Completed is owned by the Run controller. Published is owned by the publisher:
+	// False reports a retryable Candidate preparation error, including a forbidden DGD dry-run;
+	// True means the current Candidate projection is published, including any invalid Candidates.
+	// A preparation error leaves the Run open and is retried until configuration is repaired
+	// or the Run is stopped. Published does not determine the Run's terminal outcome.
 	// +optional
 	// +listType=map
 	// +listMapKey=type

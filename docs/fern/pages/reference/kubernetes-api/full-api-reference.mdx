@@ -5160,7 +5160,7 @@ See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#
 </ParamField>
 
 <ParamField path="conditions" type="Condition array">
-Conditions contains standard Kubernetes conditions merged by type.
+Conditions contains standard Kubernetes conditions merged by type. Completed is owned by the Run controller. Published is owned by the publisher: False reports a retryable Candidate preparation error, including a forbidden DGD dry-run; True means the current Candidate projection is published, including any invalid Candidates. A preparation error leaves the Run open and is retried until configuration is repaired or the Run is stopped. Published does not determine the Run's terminal outcome.
 See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>

@@ -142,6 +142,28 @@ Unknown fields and incorrect field types remain visible on invalid Candidates;
 `Valid=False` records the failure. Infrastructure failures are retried instead of being
 recorded as an invalid deployment.
 
+Retryable Candidate preparation errors are visible on the Run as `Published=False`,
+reason `PublicationBlocked`, with the error in the condition's message. This includes
+HTTP 403 from a DGD dry-run: RBAC changes propagate asynchronously, and a permission or
+policy configuration can be repaired. The publisher keeps retrying and preserves the
+already published Candidate references and progress. Once publication succeeds, it sets
+`Published=True` with reason `PublicationSucceeded`. `Published` is owned by the publisher;
+the Run controller independently owns `Completed`. Changing the request's spec stops the
+old Run and its publisher before starting the replacement Run.
+
+For example, the Run can report this status while retrying a denied DGD dry-run:
+
+```yaml
+status:
+  conditions:
+    - type: Published
+      status: "False"
+      reason: PublicationBlocked
+      message: "DGD dry-run forbidden: exceeded namespace quota"
+      observedGeneration: 1
+      lastTransitionTime: "2026-11-04T18:00:00Z"
+```
+
 `Candidate.spec` contains exactly the DGD spec, including `backendFramework`.
 DGD labels and annotations are copied to Candidate metadata. If an override fails to
 apply, only the original generated labels and annotations are copied; metadata from

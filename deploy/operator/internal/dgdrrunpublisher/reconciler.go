@@ -22,10 +22,13 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	v1beta2 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta2"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -161,7 +164,14 @@ func (r *Reconciler) reconcile(ctx context.Context) error {
 
 	desired := Desire(r.RunName, r.RunUID, input.Snapshot)
 	if err := r.prepareCandidates(ctx, &run, &desired); err != nil {
-		return r.retryOrFail(err)
+		if retryErr := r.retryOrFail(err); retryErr != nil {
+			// Report the blocked preparation without publishing unprepared references or losing progress.
+			status := observedStatus(&run)
+			status.Publication = publicationCondition(&run, metav1.ConditionFalse, "PublicationBlocked", retryErr.Error())
+			_, reportErr := r.updateRunStatus(ctx, &run, status)
+			return errors.Join(retryErr, reportErr)
+		}
+		return nil
 	}
 	quiescent, err := r.apply(ctx, &run, desired)
 	if err != nil {
@@ -283,6 +293,8 @@ func (r *Reconciler) apply(ctx context.Context, run *v1beta2.DynamoGraphDeployme
 		r.expectCandidate(name, candidateObservation{UID: uids[name], ID: candidate.ID, Present: true, Populated: true})
 	}
 
+	// All referenced Candidates have their evaluation status before publication is acknowledged.
+	desired.Status.Publication = publicationCondition(run, metav1.ConditionTrue, "PublicationSucceeded", "The current Candidate projection is published")
 	updated, err := r.updateRunStatus(ctx, run, desired.Status)
 	if err != nil {
 		return false, err
@@ -358,12 +370,24 @@ func (r *Reconciler) observeWrites(run *v1beta2.DynamoGraphDeploymentRun, candid
 }
 
 func runStatusEqual(left, right RunStatus) bool {
-	return left.Published == right.Published && left.LastProgress.Equal(right.LastProgress) && slices.Equal(left.CandidateNames, right.CandidateNames)
+	return left.Published == right.Published && left.LastProgress.Equal(right.LastProgress) &&
+		slices.Equal(left.CandidateNames, right.CandidateNames) && apiequality.Semantic.DeepEqual(left.Publication, right.Publication)
+}
+
+// publicationCondition preserves transition time on retries without mutating run, which must not be nil.
+func publicationCondition(run *v1beta2.DynamoGraphDeploymentRun, status metav1.ConditionStatus, reason, message string) *metav1.Condition {
+	conditions := slices.Clone(run.Status.Conditions)
+	meta.SetStatusCondition(&conditions, metav1.Condition{
+		Type: v1beta2.DGDRRunConditionPublished, Status: status, Reason: reason, Message: boundDiagnostic(message),
+		ObservedGeneration: run.Generation, LastTransitionTime: metav1.NewTime(time.Now().UTC().Truncate(time.Second)),
+	})
+	return meta.FindStatusCondition(conditions, v1beta2.DGDRRunConditionPublished)
 }
 
 // observedStatus is the publisher-owned part of the run's current (cached) status.
 func observedStatus(run *v1beta2.DynamoGraphDeploymentRun) RunStatus {
 	var observed RunStatus
+	observed.Publication = meta.FindStatusCondition(run.Status.Conditions, v1beta2.DGDRRunConditionPublished).DeepCopy()
 	if progress := run.Status.Progress; progress != nil && progress.Candidates != nil {
 		observed.Published = progress.Candidates.Published
 	}

@@ -36,8 +36,10 @@ import (
 	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -663,11 +665,30 @@ func TestEnvtestRunStatusIsOwnedByThePublisher(t *testing.T) {
 	f := newWriterFixture(t)
 	first := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
 
+	t.Log("Seed lifecycle conditions and optimizer progress under a different SSA owner")
+	controllerStatus := v1beta2.DynamoGraphDeploymentRunStatus{
+		Conditions: []metav1.Condition{{Type: v1beta2.DGDRRunConditionCompleted, Status: metav1.ConditionFalse,
+			Reason: "JobRunning", Message: "execution is running", ObservedGeneration: 1, LastTransitionTime: metav1.NewTime(first)}},
+		Progress: &v1beta2.DGDRRunProgress{
+			Branches:    []v1beta2.BranchProgress{{Name: "agg", Rounds: v1beta2.RoundProgress{Completed: 1, Total: 2}}},
+			Evaluations: &v1beta2.EvaluationProgress{Feasible: 1}, Candidates: &v1beta2.CandidateProgress{ParetoFront: 2},
+		},
+	}
+	fields, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&controllerStatus)
+	require.NoError(t, err)
+	controllerApply := &unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"namespace": f.run.Namespace, "name": f.run.Name}, "status": fields,
+	}}
+	controllerApply.SetGroupVersionKind(v1beta2.DynamoGraphDeploymentRunGVK)
+	require.NoError(t, f.client.Status().Apply(f.ctx, client.ApplyConfigurationFromUnstructured(controllerApply.DeepCopy()), client.FieldOwner("run-controller-test")))
+
+	t.Log("Publish a retryable failure while retaining the other owner's condition and progress")
 	staleVersion := f.currentRun().ResourceVersion
 	if err := f.writer.UpdateRunStatus(f.ctx, staleVersion, RunStatus{
 		Published:      2,
 		LastProgress:   first,
 		CandidateNames: []string{f.name("a"), f.name("b")},
+		Publication:    publicationCondition(f.currentRun(), metav1.ConditionFalse, "PublicationBlocked", "HTTP 403: authorization is not visible yet"),
 	}); err != nil {
 		t.Fatalf("update run status: %v", err)
 	}
@@ -684,12 +705,34 @@ func TestEnvtestRunStatusIsOwnedByThePublisher(t *testing.T) {
 	if !hasApplyManager(run.ManagedFields, "status") {
 		t.Errorf("no status apply manager %q: %+v", fieldOwner, run.ManagedFields)
 	}
+	require.True(t, apiequality.Semantic.DeepEqual(&controllerStatus.Conditions[0], meta.FindStatusCondition(run.Status.Conditions, v1beta2.DGDRRunConditionCompleted)), "publisher must preserve the lifecycle condition")
+	require.Equal(t, controllerStatus.Progress.Branches, run.Status.Progress.Branches)
+	require.Equal(t, controllerStatus.Progress.Evaluations, run.Status.Progress.Evaluations)
+	require.Equal(t, int64(2), run.Status.Progress.Candidates.ParetoFront)
+	require.True(t, meta.IsStatusConditionFalse(run.Status.Conditions, v1beta2.DGDRRunConditionPublished))
 
 	// A write based on the version read before the first write conflicts.
-	err := f.writer.UpdateRunStatus(f.ctx, staleVersion, RunStatus{Published: 1, CandidateNames: []string{f.name("a")}})
+	err = f.writer.UpdateRunStatus(f.ctx, staleVersion, RunStatus{Published: 1, CandidateNames: []string{f.name("a")}})
 	if !apierrors.IsConflict(err) {
 		t.Fatalf("update with a stale resourceVersion: err = %v, want a conflict", err)
 	}
+
+	t.Log("The lifecycle owner can still update Completed without forcing ownership")
+	controllerStatus.Conditions[0].Message = "execution is still running"
+	fields, err = runtime.DefaultUnstructuredConverter.ToUnstructured(&controllerStatus)
+	require.NoError(t, err)
+	controllerApply.Object["status"] = fields
+	require.NoError(t, f.client.Status().Apply(f.ctx, client.ApplyConfigurationFromUnstructured(controllerApply.DeepCopy()), client.FieldOwner("run-controller-test")))
+	run = f.currentRun()
+
+	t.Log("Recover the publication condition without changing references or progress")
+	require.NoError(t, f.writer.UpdateRunStatus(f.ctx, run.ResourceVersion, RunStatus{
+		Published: 2, LastProgress: first, CandidateNames: []string{f.name("a"), f.name("b")},
+		Publication: publicationCondition(run, metav1.ConditionTrue, "PublicationSucceeded", "The current Candidate projection is published"),
+	}))
+	run = f.currentRun()
+	require.True(t, meta.IsStatusConditionTrue(run.Status.Conditions, v1beta2.DGDRRunConditionPublished))
+	require.True(t, apiequality.Semantic.DeepEqual(&controllerStatus.Conditions[0], meta.FindStatusCondition(run.Status.Conditions, v1beta2.DGDRRunConditionCompleted)), "publisher must preserve the lifecycle condition")
 
 	// Fields the publisher owns and omits are removed: this is why the reconciler carries
 	// the existing progress time into every payload.
@@ -703,6 +746,11 @@ func TestEnvtestRunStatusIsOwnedByThePublisher(t *testing.T) {
 	if run.Status.LastProgressTime != nil {
 		t.Errorf("lastProgressTime = %v, want it removed when the payload omits it", run.Status.LastProgressTime)
 	}
+	require.Nil(t, meta.FindStatusCondition(run.Status.Conditions, v1beta2.DGDRRunConditionPublished))
+	require.True(t, apiequality.Semantic.DeepEqual(&controllerStatus.Conditions[0], meta.FindStatusCondition(run.Status.Conditions, v1beta2.DGDRRunConditionCompleted)), "publisher must preserve the lifecycle condition")
+	require.Equal(t, controllerStatus.Progress.Branches, run.Status.Progress.Branches)
+	require.Equal(t, controllerStatus.Progress.Evaluations, run.Status.Progress.Evaluations)
+	require.Equal(t, int64(2), run.Status.Progress.Candidates.ParetoFront)
 }
 
 func TestEnvtestDeleteCandidateHonorsTheUIDPrecondition(t *testing.T) {
@@ -734,7 +782,7 @@ func TestEnvtestDeleteCandidateHonorsTheUIDPrecondition(t *testing.T) {
 func TestEnvtestProductionWatchesDriveRepairAndTerminalCompletion(t *testing.T) {
 	f := newWriterFixture(t)
 	candidate := envtestCandidate()
-	snapshot, err := ParseSnapshot(snapshotJSON(t, PhaseRunning, cand{id: "a", metrics: candidate.Metrics}))
+	snapshot, err := ParseSnapshot(withTimestamp(t, snapshotJSON(t, PhaseRunning, cand{id: "a", metrics: candidate.Metrics}), "2026-10-05T21:35:12Z"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -778,7 +826,23 @@ func TestEnvtestProductionWatchesDriveRepairAndTerminalCompletion(t *testing.T) 
 	}, 10*time.Second, 25*time.Millisecond, "candidate status update did not trigger repair")
 	waitForReconcileQuiet(t, recorder, 250*time.Millisecond, 10*time.Second)
 
-	t.Log("Publish a terminal replacement and let write echoes drive completion")
+	t.Log("Block DGD dry-runs through real HTTP 403 quota admission")
+	quotaResource := corev1.ResourceName("count/dynamographdeployments.nvidia.com")
+	quota := &corev1.ResourceQuota{
+		Name: "block-dgd-publication", Namespace: f.run.Namespace,
+		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{quotaResource: resource.MustParse("0")}},
+	}
+	require.NoError(t, f.client.Create(f.ctx, quota))
+	quota.Status = corev1.ResourceQuotaStatus{Hard: quota.Spec.Hard.DeepCopy(), Used: corev1.ResourceList{quotaResource: resource.MustParse("0")}}
+	require.NoError(t, f.client.Status().Update(f.ctx, quota))
+	require.Eventually(t, func() bool {
+		_, denied := f.writer.PrepareCandidate(f.ctx, f.currentRun(), candidate)
+		return apierrors.IsForbidden(denied)
+	}, 10*time.Second, 25*time.Millisecond, "quota must deny DGD dry-runs with HTTP 403")
+	beforeBlocked := f.currentRun().Status.DeepCopy()
+	require.NotNil(t, beforeBlocked.LastProgressTime)
+
+	t.Log("Keep retrying the terminal replacement while reporting the denial on the Run")
 	terminal, err := ParseSnapshot(snapshotJSON(t, PhaseSucceeded, cand{id: "b", metrics: candidate.Metrics}))
 	if err != nil {
 		t.Fatal(err)
@@ -788,6 +852,25 @@ func TestEnvtestProductionWatchesDriveRepairAndTerminalCompletion(t *testing.T) 
 	}
 	beforeTerminal := recorder.count.Load()
 	events <- event.GenericEvent{Object: runKeyObject(types.NamespacedName{Namespace: f.run.Namespace, Name: f.run.Name})}
+	require.Eventually(t, func() bool {
+		condition := meta.FindStatusCondition(f.currentRun().Status.Conditions, v1beta2.DGDRRunConditionPublished)
+		return condition != nil && condition.Status == metav1.ConditionFalse && strings.Contains(condition.Message, "forbidden")
+	}, 10*time.Second, 25*time.Millisecond, "retryable HTTP 403 must be visible in a Run condition")
+	blocked := f.currentRun()
+	require.Equal(t, "PublicationBlocked", meta.FindStatusCondition(blocked.Status.Conditions, v1beta2.DGDRRunConditionPublished).Reason)
+	require.Equal(t, beforeBlocked.CandidateRefs, blocked.Status.CandidateRefs)
+	require.Equal(t, beforeBlocked.Progress, blocked.Status.Progress)
+	require.Equal(t, beforeBlocked.LastProgressTime, blocked.Status.LastProgressTime)
+	require.False(t, completion.Finished(), "403 must not finish the Run or reject its Candidate permanently")
+	var unpublished v1beta2.DynamoGraphDeploymentCandidate
+	require.True(t, apierrors.IsNotFound(f.client.Get(f.ctx, types.NamespacedName{Namespace: f.run.Namespace, Name: f.name("b")}, &unpublished)))
+	beforeRetry := recorder.count.Load()
+	require.Eventually(t, func() bool { return recorder.count.Load() > beforeRetry }, 10*time.Second, 25*time.Millisecond)
+	retried := f.currentRun()
+	require.Equal(t, blocked.ResourceVersion, retried.ResourceVersion, "identical denials must not churn Run status: before=%+v after=%+v", blocked.Status.Conditions, retried.Status.Conditions)
+
+	t.Log("Repair the configuration and let the same terminal snapshot complete automatically")
+	require.NoError(t, f.client.Delete(f.ctx, quota))
 	select {
 	case <-completion.Done():
 	case <-time.After(10 * time.Second):
@@ -805,6 +888,12 @@ func TestEnvtestProductionWatchesDriveRepairAndTerminalCompletion(t *testing.T) 
 		t.Fatal("candidate metrics were not populated before completion")
 	}
 	run := f.currentRun()
+	publication := meta.FindStatusCondition(run.Status.Conditions, v1beta2.DGDRRunConditionPublished)
+	require.NotNil(t, publication)
+	require.Equal(t, metav1.ConditionTrue, publication.Status)
+	require.Equal(t, "PublicationSucceeded", publication.Reason)
+	require.NotContains(t, publication.Message, "forbidden")
+	require.Equal(t, beforeBlocked.LastProgressTime, run.Status.LastProgressTime)
 	if len(run.Status.CandidateRefs) != 1 || run.Status.CandidateRefs[0].Name != f.name("b") {
 		t.Fatalf("candidateRefs = %+v, want the terminal candidate", run.Status.CandidateRefs)
 	}

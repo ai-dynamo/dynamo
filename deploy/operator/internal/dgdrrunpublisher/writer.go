@@ -256,6 +256,13 @@ func buildRunStatusApply(namespace, runName, resourceVersion string, status RunS
 		"candidateRefs": refs,
 		"progress":      map[string]any{"candidates": map[string]any{"published": int64(status.Published)}},
 	}
+	if condition := status.Publication; condition != nil {
+		fields["conditions"] = []any{map[string]any{
+			"type": condition.Type, "status": string(condition.Status), "reason": condition.Reason, "message": condition.Message,
+			"observedGeneration": condition.ObservedGeneration,
+			"lastTransitionTime": condition.LastTransitionTime.UTC().Format(time.RFC3339),
+		}}
+	}
 	if !status.LastProgress.IsZero() {
 		fields["lastProgressTime"] = status.LastProgress.UTC().Format(time.RFC3339)
 	}

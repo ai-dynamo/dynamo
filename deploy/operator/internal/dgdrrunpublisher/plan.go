@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdcreconcile"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // SnapshotFileName is the file the Sweeper container writes.
@@ -34,7 +36,7 @@ const SnapshotFileName = "dgdr_run_snapshot.yaml"
 const maxObjectName = 253
 
 // RunStatus is the part of DynamoGraphDeploymentRun.status the publisher owns: the
-// ordered candidate references, the number of published candidates
+// publication condition, ordered candidate references, the number of published candidates
 // (status.progress.candidates.published) and the coarse progress time. CandidateNames is
 // in rank order (best first for scalar searches). Published always equals
 // len(CandidateNames) in a desired status; it is kept separately so a status whose
@@ -49,6 +51,7 @@ type RunStatus struct {
 	Published      int32
 	LastProgress   time.Time
 	CandidateNames []string
+	Publication    *metav1.Condition
 }
 
 // DesiredState is what one snapshot says should exist in the cluster.
@@ -164,5 +167,6 @@ func (desired RunStatus) NeedsUpdate(observed RunStatus) bool {
 	if !desired.LastProgress.IsZero() && !desired.LastProgress.Equal(observed.LastProgress) {
 		return true
 	}
-	return !slices.Equal(desired.CandidateNames, observed.CandidateNames)
+	return !slices.Equal(desired.CandidateNames, observed.CandidateNames) ||
+		!apiequality.Semantic.DeepEqual(desired.Publication, observed.Publication)
 }
