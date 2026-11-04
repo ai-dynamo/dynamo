@@ -52,7 +52,7 @@ fn params(trace_block_size: usize, lanes: Option<usize>) -> WorkloadParams {
     }
 }
 
-fn replay(corpus: &Arc<Corpus>, mode: Mode) -> engine::RunResult {
+fn replay(corpus: &Arc<Corpus>, mode: Mode, queue_threshold: Option<f64>) -> engine::RunResult {
     let params = &corpus.params;
     let workers: Vec<_> = (1..=params.workers as u64)
         .map(|id| worker_request(id, params.block_size, params.dp_size, 8_192, 2_048))
@@ -60,6 +60,7 @@ fn replay(corpus: &Arc<Corpus>, mode: Mode) -> engine::RunResult {
     let host_config = HostConfig {
         router: KvRouterConfig {
             router_replica_sync: true,
+            router_queue_threshold: queue_threshold,
             ..KvRouterConfig::default()
         },
         block_size: params.block_size,
@@ -96,28 +97,26 @@ fn replay(corpus: &Arc<Corpus>, mode: Mode) -> engine::RunResult {
 #[test]
 fn replays_every_request_through_the_frontend_lifecycle() {
     let corpus =
-        Arc::new(corpus::generate(Path::new(MOONCAKE_TRACE), &params(512, None), 4).unwrap());
+        Arc::new(corpus::generate(Path::new(MOONCAKE_TRACE), &params(512, Some(32)), 4).unwrap());
     assert!(!corpus.requests.is_empty());
     // Every window request finished inside the mocker's run, so none is missing.
     assert_eq!(corpus.omitted.unfinished, 0, "{:?}", corpus.omitted);
-    let unfinished = corpus
-        .requests
-        .iter()
-        .filter(|request| request.completed_us.is_none())
-        .count() as u64;
-
     for mode in [
         Mode::Fixed { scale: 20.0 },
         Mode::Saturation {
             admission_window: 32,
         },
     ] {
-        let result = replay(&corpus, mode);
+        let result = replay(&corpus, mode, None);
         assert_eq!(result.failed, 0, "{:?}", result.failure_samples);
         assert!(result.window_requests > 0);
         assert_eq!(result.admitted, result.window_requests);
-        // Every completed request released its booking; the rest still hold one.
-        assert_eq!(result.booked_at_end, unfinished, "{mode:?}");
+        // Requests release as they complete: at the end each closed-loop lane holds
+        // at most its one running request.
+        assert!(
+            result.booked_at_end <= corpus.lanes.len() as u64,
+            "{mode:?}"
+        );
         // Booked workers cache and publish what they run, the router then finds it,
         // and full caches evict.
         assert!(result.cache.stored_blocks > 0 && result.cache.decode_blocks > 0);
@@ -136,6 +135,23 @@ fn replays_every_request_through_the_frontend_lifecycle() {
             );
         }
     }
+}
+
+#[test]
+fn saturation_runs_on_while_the_router_queues() {
+    // Queue whenever every rank has prefill in flight, with few admission slots, so
+    // queued requests hold every slot while they wait on engine actions.
+    let corpus =
+        Arc::new(corpus::generate(Path::new(MOONCAKE_TRACE), &params(512, Some(32)), 4).unwrap());
+    let result = replay(
+        &corpus,
+        Mode::Saturation {
+            admission_window: 4,
+        },
+        Some(0.0),
+    );
+    assert_eq!(result.failed, 0, "{:?}", result.failure_samples);
+    assert_eq!(result.admitted + result.rejected, result.window_requests);
 }
 
 /// Three three-turn sessions, each turn extending the last, in a temporary Mooncake file.

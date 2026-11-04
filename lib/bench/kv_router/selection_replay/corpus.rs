@@ -12,8 +12,8 @@
 //! Only timing comes from the mocker: when each request arrives, produces its first
 //! output, and completes. Where its KV blocks live is decided at replay by the router
 //! (see `kv_cache`), so the lanes are simply pinned to engine ranks here. The mocker
-//! runs half a window past the measured window so that window requests finish and
-//! are recorded; timing after the window is dropped.
+//! runs a window past the measured window so that window requests finish and
+//! are recorded; requests arriving after the window are dropped.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -356,54 +356,46 @@ fn load_plays(trace: &Path, params: &WorkloadParams) -> Result<(usize, Vec<Play>
     }
 }
 
-/// The plays each lane replays, each copy on its own hash-ID range. A closed-loop
-/// (per-play) trace chains plays, as an aiperf slot takes the next conversation; a
-/// shared-scope trace gives each lane one copy and keeps cross-play sharing within it.
+/// The plays each lane replays back to back, as an aiperf slot takes the next
+/// conversation. With per-play hash IDs every copy gets its own range; with shared
+/// IDs each pass over the trace does, so plays keep the prefixes they share.
 fn lane_copies(plays: &[Play], lanes: usize, scope: HashScope) -> Result<Vec<Vec<PlayCopy>>> {
-    let fits = |next: u64| u32::try_from(next).context("lanes exceed the u32 hash-ID space");
-    match scope {
-        HashScope::PerPlay => {
-            let spans: Vec<u64> = plays
+    let spans: Vec<u64> = plays
+        .iter()
+        .map(|play| {
+            play.turns
                 .iter()
-                .map(|play| {
-                    play.turns
-                        .iter()
-                        .flat_map(|turn| turn.hash_ids.iter())
-                        .map(|&id| u64::from(id) + 1)
-                        .max()
-                        .unwrap_or(0)
-                })
-                .collect();
-            let mut next = 0u64;
-            (0..lanes)
-                .map(|lane| {
-                    let mut copies = Vec::new();
-                    let mut turns = 0;
-                    while turns < LANE_TURNS {
-                        let play = (lane + copies.len() * lanes) % plays.len();
-                        copies.push(PlayCopy {
-                            play: play as u32,
-                            base: fits(next)?,
-                        });
+                .flat_map(|turn| turn.hash_ids.iter())
+                .map(|&id| u64::from(id) + 1)
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let mut next = 0u64;
+    (0..lanes)
+        .map(|lane| {
+            let mut copies = Vec::new();
+            let mut turns = 0;
+            while turns < LANE_TURNS {
+                let n = lane + copies.len() * lanes;
+                let play = n % plays.len();
+                let base = match scope {
+                    HashScope::PerPlay => {
                         next += spans[play];
-                        turns += plays[play].turns.len();
+                        next - spans[play]
                     }
-                    fits(next)?;
-                    Ok(copies)
-                })
-                .collect()
-        }
-        HashScope::Shared { span } => (0..lanes)
-            .map(|lane| {
-                let base = (lane / plays.len()) as u64 * u64::from(span);
-                fits(base + u64::from(span))?;
-                Ok(vec![PlayCopy {
-                    play: (lane % plays.len()) as u32,
+                    HashScope::Shared { span } => (n / plays.len()) as u64 * u64::from(span),
+                };
+                u32::try_from(base + spans[play]).context("lanes exceed the u32 hash-ID space")?;
+                copies.push(PlayCopy {
+                    play: play as u32,
                     base: base as u32,
-                }])
-            })
-            .collect(),
-    }
+                });
+                turns += plays[play].turns.len();
+            }
+            Ok(copies)
+        })
+        .collect()
 }
 
 struct Simulator<'a> {
@@ -466,7 +458,11 @@ impl Simulator<'_> {
                     .collect();
                 SessionTrace {
                     session_id: lane.to_string(),
-                    first_arrival_timestamp_ms: Some(self.plays[copies[0].play as usize].start_ms),
+                    first_arrival_timestamp_ms: Some(if params.ignore_trace_delays {
+                        0.0
+                    } else {
+                        self.plays[copies[0].play as usize].start_ms
+                    }),
                     turns,
                 }
             })
@@ -479,7 +475,7 @@ impl Simulator<'_> {
         else {
             return Ok((Vec::new(), Omitted::default()));
         };
-        let stop_ms = window_end_ms + params.window_ms as f64 / 2.0 - offset_ms;
+        let stop_ms = window_end_ms + params.window_ms as f64 - offset_ms;
         if stop_ms <= 0.0 {
             return Ok((Vec::new(), Omitted::default()));
         }
@@ -513,7 +509,6 @@ impl Simulator<'_> {
         // Back to trace time, in microseconds.
         let micros = |local_ms: f64| ((local_ms + offset_ms) * 1_000.0) as u64;
         let window_end_us = (window_end_ms * 1_000.0) as u64;
-        let in_window = |us: u64| (us < window_end_us).then_some(us);
         let mut requests = Vec::with_capacity(report.per_request.len());
         let mut omitted = Omitted::default();
         // The last recorded turn of each lane, and when it completed.
@@ -543,8 +538,8 @@ impl Simulator<'_> {
             }
             requests.push(ReplayRequest {
                 arrival_us,
-                first_output_us: record.first_token_ms.map(micros).and_then(in_window),
-                completed_us: in_window(completed_us),
+                first_output_us: record.first_token_ms.map(micros),
+                completed_us: Some(completed_us),
                 lane: lanes[index] as u32,
                 copy,
                 turn,
