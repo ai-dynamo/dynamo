@@ -791,10 +791,8 @@ def _serialize_tool_constraint(
     tag_value = constraint[1]
     # SGLang returns a Pydantic model (LegacyStructuralTagResponseFormat)
     # here. Convert to a plain dict before it hits the RPC layer because
-    # msgpack/serde_json cannot serialize BaseModel instances. Dump by alias,
-    # as SGLang's own server does: the backend reads each structure's
-    # "schema" key and compiles an unconstrained value when it finds only
-    # the field name "schema_".
+    # msgpack/serde_json cannot serialize BaseModel instances. Dump by alias:
+    # the backend reads only "schema"; "schema_" leaves arguments unconstrained.
     if hasattr(tag_value, "model_dump"):
         tag_value = tag_value.model_dump(by_alias=True)
     if stop_after_first and isinstance(tag_value, dict) and "structures" in tag_value:

@@ -956,10 +956,8 @@ class TestToolCallingMultiTurn:
             # A named tool_choice still allows parallel calls; without this the
             # model repeats <tool_call> blocks until max_tokens ('length').
             parallel_tool_calls=False,
-            # Greedy decoding for every step: with sampling, Qwen3-0.6B
-            # sometimes never closes an argument string or an extra key (the
-            # schemas allow additionalProperties) and runs to max_tokens.
-            # The chain then follows one fixed path.
+            # Greedy decoding for every step: with sampling, Qwen3-0.6B sometimes
+            # leaves an argument string or extra key open and runs to max_tokens.
             temperature=0,
             seed=0,
         )
