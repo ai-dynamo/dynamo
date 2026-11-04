@@ -132,6 +132,19 @@ func TestDynamoGraphDeploymentRunValidator_Validate(t *testing.T) {
 
 		// The same lowered-input schema and execution guards apply to Requests and Runs.
 		{
+			name: "Run creation validates the shared DGD override envelope",
+			test: admissionTestCase{
+				object: func() *nvidiacomv1beta2.DynamoGraphDeploymentRun {
+					run := v1beta2RunForAdmission(v1beta2AdmissionModel, nil)
+					run.Spec.Overrides = &nvidiacomv1beta2.OverridesSpec{DGD: &runtime.RawExtension{Raw: []byte(`{"apiVersion":"nvidia.com/v1alpha1","kind":"DynamoGraphDeployment","spec":{}}`)}}
+					return run
+				}(),
+				wantWebhookErrors: []string{
+					`spec.overrides.dgd.apiVersion: Unsupported value: "nvidia.com/v1alpha1": supported values: "nvidia.com/v1beta1"`,
+				},
+			},
+		},
+		{
 			name: "merged input rejects a nonpositive trial budget",
 			test: admissionTestCase{
 				object: schemaRunForAdmission(`{"optimizer":{"max_trials":-1}}`, nil),
