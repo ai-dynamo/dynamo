@@ -85,6 +85,7 @@ fn setup_kv_publishers(
                     video_token_id: None,
                     expected_rank: Some(dp_rank),
                     liveness: heartbeat_timeout.map(|timeout| (dp_rank, timeout)),
+                    engine_owned_mm_identity: false,
                     recovery: None,
                 }),
                 None,
