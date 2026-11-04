@@ -1001,11 +1001,15 @@ class TestToolCallingMultiTurn:
             }
         )
 
+        # Greedy decoding: with sampling the model sometimes rewrites the tool
+        # result as "1.396 million", which the numeric check below rejects.
         step3 = stream_chat(
             client,
             model,
             messages=messages,
             tools=TOOLS_SEARCH + TOOLS_CALCULATOR,
+            temperature=0,
+            seed=0,
         )
         assert_finish_reason(step3, {"stop"})
         assert step3.tool_calls == []
