@@ -1360,7 +1360,10 @@ index 150fdab..76f5271 100644
  
  # ======================================================================
  # Data structures
-@@ -36,2 +41,6 @@
+@@ -33,6 +38,10 @@ def _is_attention_spec(spec_type: type[KVCacheSpec]) -> bool:
+     return issubclass(spec_type, AttentionSpec)
+ 
+ 
 +def _is_full_attention_spec(spec_type: type[KVCacheSpec]) -> bool:
 +    return issubclass(spec_type, FullAttentionSpec)
 +
