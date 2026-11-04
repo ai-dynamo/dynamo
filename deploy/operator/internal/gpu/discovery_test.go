@@ -841,13 +841,11 @@ func TestDiscoverGPUsFiltered_RTXPRO6000ProductLabels(t *testing.T) {
 	} {
 		t.Run(product, func(t *testing.T) {
 			node := &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "rtx-pro-6000-node",
-					Labels: map[string]string{
-						LabelGPUCount:   "1",
-						LabelGPUProduct: product,
-						LabelGPUMemory:  "98304",
-					},
+				Name: "rtx-pro-6000-node",
+				Labels: map[string]string{
+					LabelGPUCount:   "1",
+					LabelGPUProduct: product,
+					LabelGPUMemory:  "98304",
 				},
 			}
 
