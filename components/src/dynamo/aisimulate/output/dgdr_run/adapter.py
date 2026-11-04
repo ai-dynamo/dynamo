@@ -35,10 +35,12 @@ Design points (all adapter-specific, none of them shared with ``dgd``):
   terminal snapshot before returning. A failure to write it is raised, never
   swallowed, so the Sweeper container cannot exit successfully without it.
 
-Both scalar and Pareto searches are supported. The live path uses score-based
-retention for both (live snapshots are progress indicators; AISimulate owns the
-final Pareto front selection). The terminal ``write()`` path uses the result's
-``pareto_front`` view for Pareto searches.
+Both scalar and Pareto searches are supported. For Pareto searches the live path
+uses AISimulate's own ``pareto_front()`` selection on each ``on_round`` payload
+(which is the cumulative feasible-candidate list, not a pre-filtered front) to
+derive the true non-dominated set, reports its full cardinality as ``paretoFront``,
+and selects the bounded publication subset from that front. The terminal
+``write()`` path uses the result's ``pareto_front`` view.
 """
 
 from __future__ import annotations
@@ -60,8 +62,9 @@ from aisimulate.output_adapter import (
     OUTPUT_ADAPTER_API_VERSION,
     RecommendationOutputCallbacks,
 )
-from aisimulate.sweeper.config import SmartSearchConfig
+from aisimulate.sweeper.config import OptimizationTarget, SmartSearchConfig
 from aisimulate.sweeper.result import SweepResult
+from aisimulate.sweeper.score import pareto_front as ais_pareto_front
 from aisimulate_core.sdk.perf_database import load_system_spec
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -351,10 +354,15 @@ class DGDRRunOutputAdapter:
         *,
         snapshot_dir: Path | None = None,
         is_pareto: bool | None = None,
+        pareto_objectives: list[OptimizationTarget] | None = None,
         pareto_front_size: int = 0,
         keep_arrival_order: bool = False,
     ) -> None:
         self._is_pareto = config.is_pareto if is_pareto is None else is_pareto
+        # Objectives used by ais_pareto_front() to compute the live non-dominated set from
+        # on_round's cumulative feasible-candidate payload. None disables live Pareto selection
+        # (front size falls back to len(ordered) until terminal write() supplies _pareto_front_size).
+        self._pareto_objectives = pareto_objectives
         self._pareto_front_size = pareto_front_size
         directory = snapshot_dir if snapshot_dir is not None else config.snapshot_dir
         if directory is None:
@@ -430,11 +438,21 @@ class DGDRRunOutputAdapter:
             self._wake.set()
 
     def on_round(self, round_number: int, candidates: list[Any]) -> None:
-        # For Pareto searches, AISimulate passes the current non-dominated front.
-        # Process outside the lock so _retain's JSON work does not stall on_candidate.
+        # AISimulate passes the cumulative feasible-candidate list, not a pre-filtered front.
+        # For Pareto searches, derive the true non-dominated set with AISimulate's own selection
+        # machinery before updating state. Process outside the lock so the dominance calculation
+        # and _retain's JSON work do not stall on_candidate.
         new_front_items: list[_Retained] = []
-        if self._is_pareto:
-            for c in candidates:
+        if self._is_pareto and self._pareto_objectives:
+            try:
+                # ais_pareto_front filters to the non-dominated subset over the given objectives.
+                front_candidates = ais_pareto_front(candidates, self._pareto_objectives)
+            except Exception:
+                logger.exception(
+                    "dgdr_run: Pareto front selection failed on on_round payload; skipping round"
+                )
+                front_candidates = []
+            for c in front_candidates:
                 try:
                     retained = self._retain(c)
                 except Exception:
@@ -448,10 +466,10 @@ class DGDRRunOutputAdapter:
             if not self._accepting:
                 return
             self._round_no = max(self._round_no, round_number)
-            if self._is_pareto:
-                # Replace _live_pareto_front with AISimulate's authoritative non-dominated
-                # set; this is the full cardinality reported as paretoFront. Rebuild
-                # _retained as the bounded publication subset without re-running dominance.
+            if self._is_pareto and self._pareto_objectives:
+                # Replace _live_pareto_front with the true non-dominated set; its cardinality
+                # is reported as paretoFront. _retained is the bounded publication subset
+                # selected from that front, never from the scalar-evicted cumulative set.
                 new_front = {r.id: r for r in new_front_items}
                 self._live_pareto_front = new_front
                 self._retained = dict(list(new_front.items())[: self._max_candidates])
@@ -795,7 +813,24 @@ class DGDRRunOutputPlugin:
         workload = getattr(context, "workload", None)
         if workload is None or resolved.snapshot_dir is None:
             return None
-        adapter = DGDRRunOutputAdapter(resolved, workload, is_pareto=resolved.is_pareto)
+        # Extract the Pareto objectives from the workload so on_round can call
+        # AISimulate's own pareto_front() on the cumulative feasible-candidate payload.
+        pareto_objectives: list[OptimizationTarget] | None = None
+        if resolved.is_pareto:
+            try:
+                smart = SmartSearchConfig.model_validate(workload)
+                pareto_objectives = smart.goal.resolved_pareto_objectives
+            except Exception:
+                logger.warning(
+                    "dgdr_run: could not resolve Pareto objectives from workload; "
+                    "live front size will fall back to len(ordered)"
+                )
+        adapter = DGDRRunOutputAdapter(
+            resolved,
+            workload,
+            is_pareto=resolved.is_pareto,
+            pareto_objectives=pareto_objectives,
+        )
         adapter.start()
         return RecommendationOutputCallbacks(
             on_candidate=adapter.on_candidate,

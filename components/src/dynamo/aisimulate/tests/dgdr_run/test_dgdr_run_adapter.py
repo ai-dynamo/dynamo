@@ -1092,6 +1092,9 @@ def test_on_round_tolerates_upstream_candidate_objects(
     raised AttributeError on the first real non-empty Pareto round and broke the search
     (AISimulate wraps callback exceptions as OutputAdapterExecutionError).  The regression
     is detected by calling on_round with a real Candidate from the pinned SDK.
+
+    Without pareto_objectives the adapter skips live front selection; this tests only that
+    on_round advances the round counter without crashing.
     """
     from aisimulate.sweeper.config import Candidate
 
@@ -1111,11 +1114,8 @@ def test_on_round_tolerates_upstream_candidate_objects(
     # pareto_candidate.candidate_id (which Candidate does not carry).
     adapter.on_round(1, [pareto_candidate])
 
-    # The round counter must advance, the adapter must still be accepting, and
-    # _live_pareto_front must hold the one point AISimulate passed.
+    # The round counter must advance and the adapter must still be accepting.
     assert adapter._round_no == 1
-    assert len(adapter._live_pareto_front) == 1
-    assert len(adapter._retained) == 1
 
 
 def test_pareto_live_front_size_exceeds_max_candidates(
@@ -1124,15 +1124,18 @@ def test_pareto_live_front_size_exceeds_max_candidates(
 ) -> None:
     """Live snapshot must report the full Pareto-front cardinality, not the publication cap.
 
-    With maxCandidates=1 and a front of 3 points, the snapshot's paretoFront must be 3
-    (the real front size from AISimulate's on_round payload) and the candidates list must
-    contain at most 1 entry.
+    The on_round payload is the cumulative feasible-candidate list.  Among 4 points
+    (f0, f1, f2 non-dominated; f3 dominated by f0), the adapter must call AISimulate's
+    pareto_front() to derive the 3-point true front.  With maxCandidates=1, the snapshot
+    must report paretoFront=3 and publish exactly 1 candidate.
     """
-    from aisimulate.sweeper.config import Candidate as AISCandidate
+    from aisimulate.sweeper.config import Candidate as AISCandidate, OptimizationTarget
 
-    t_gpu = [100.0, 50.0, 10.0]
-    t_usr = [10.0, 50.0, 100.0]
-    front = [
+    # f0, f1, f2 are mutually non-dominated (trade off tpg vs tpu).
+    # f3 is dominated by f0 on both objectives and must be excluded from the front.
+    t_gpu = [100.0, 50.0, 10.0, 90.0]
+    t_usr = [10.0, 50.0, 100.0, 9.0]  # f3: (90, 9) dominated by f0: (100, 10)
+    cumulative = [
         AISCandidate(
             config={"backend": "vllm", "backend_version": "0.1", "tag": f"f{i}"},
             used_gpus=8,
@@ -1143,13 +1146,18 @@ def test_pareto_live_front_size_exceeds_max_candidates(
                 "throughput_per_user": t_usr[i],
             },
         )
-        for i in range(3)
+        for i in range(4)
+    ]
+    pareto_objectives = [
+        OptimizationTarget.THROUGHPUT_PER_GPU,
+        OptimizationTarget.THROUGHPUT_PER_USER,
     ]
     adapter = DGDRRunOutputAdapter(
         make_config(tmp_path, max_candidates=1, is_pareto=True),
         workload=None,
+        pareto_objectives=pareto_objectives,
     )
-    adapter.on_round(1, front)
+    adapter.on_round(1, cumulative)
     adapter.close()
 
     snapshot = load(tmp_path)
@@ -1158,21 +1166,23 @@ def test_pareto_live_front_size_exceeds_max_candidates(
     ), "publication subset is bounded by max_candidates=1"
     assert (
         snapshot["progress"]["paretoFront"] == 3
-    ), "paretoFront reports the full front, not the publication cap"
+    ), "paretoFront reports the true non-dominated front size, not the publication cap"
 
 
 def test_pareto_on_round_replaces_dominated_points_with_true_front(
     tmp_path: Path,
     renders: list[str],
 ) -> None:
-    """on_round for a Pareto search must replace scalar-evicted membership with the true front.
+    """on_round's cumulative payload must yield the true Pareto front, not the scalar-evicted set.
 
+    The SDK sends the cumulative feasible-candidate list to on_round, not a pre-filtered front.
     Scenario: A(tpg=100, tpu=10), B(tpg=90, tpu=9), C(tpg=80, tpu=100).
     B is dominated by A on both objectives; the true Pareto front is {A, C}.
-    Scalar retention (highest score first) with max_candidates=2 would keep A+B.
-    AISimulate's on_round provides {A, C}, which must override the scalar result.
+    Without pareto_objectives, scalar retention with max_candidates=2 keeps A+B and drops C.
+    With pareto_objectives, the adapter calls ais_pareto_front([A,B,C], objectives) and
+    correctly identifies {A, C}.
     """
-    from aisimulate.sweeper.config import Candidate as AISCandidate
+    from aisimulate.sweeper.config import Candidate as AISCandidate, OptimizationTarget
 
     def ais_point(tag: str, tpg: float, tpu: float) -> AISCandidate:
         return AISCandidate(
@@ -1183,9 +1193,14 @@ def test_pareto_on_round_replaces_dominated_points_with_true_front(
             objectives={"throughput_per_gpu": tpg, "throughput_per_user": tpu},
         )
 
+    pareto_objectives = [
+        OptimizationTarget.THROUGHPUT_PER_GPU,
+        OptimizationTarget.THROUGHPUT_PER_USER,
+    ]
     adapter = DGDRRunOutputAdapter(
         make_config(tmp_path, max_candidates=2, is_pareto=True),
         workload=None,
+        pareto_objectives=pareto_objectives,
     )
 
     # on_candidate: scalar eviction with max_candidates=2 keeps A+B (highest scores)
@@ -1211,8 +1226,16 @@ def test_pareto_on_round_replaces_dominated_points_with_true_front(
         )
     )
 
-    # on_round provides the true Pareto front {A, C} from AISimulate — must override scalar eviction
-    adapter.on_round(1, [ais_point("A", 100.0, 10.0), ais_point("C", 80.0, 100.0)])
+    # on_round receives the cumulative feasible-candidate list [A, B, C] — the real SDK payload.
+    # The adapter must call ais_pareto_front to derive {A, C} and discard the dominated B.
+    adapter.on_round(
+        1,
+        [
+            ais_point("A", 100.0, 10.0),
+            ais_point("B", 90.0, 9.0),
+            ais_point("C", 80.0, 100.0),
+        ],
+    )
     adapter.close()
 
     snapshot = load(tmp_path)
