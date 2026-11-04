@@ -231,7 +231,8 @@ pub enum ConnectError {
 
 impl DynamoDbPoolStore {
     /// Builds the SDK client from the default chain plus `config`, optionally
-    /// creates the table, and checks it with DescribeTable.
+    /// creates the table, checks it with DescribeTable, and checks that it
+    /// may read and write it, so that a store that cannot is never served.
     pub async fn connect(lease: Lease, config: DynamoDbConfig) -> Result<Arc<Self>, ConnectError> {
         let client = client(&config).await.map_err(ConnectError::Config)?;
         if config.ensure_table {
@@ -240,6 +241,9 @@ impl DynamoDbPoolStore {
                 .map_err(ConnectError::Table)?;
         }
         table::describe(&client, &config.table, config.endpoint.as_ref())
+            .await
+            .map_err(ConnectError::Table)?;
+        table::check_access(&client, &config.table)
             .await
             .map_err(ConnectError::Table)?;
         Ok(Self::with_client(

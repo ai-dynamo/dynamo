@@ -13,8 +13,8 @@ use anyhow::{Context, bail};
 use aws_sdk_dynamodb::Client;
 use aws_sdk_dynamodb::config::Region;
 use aws_sdk_dynamodb::types::{
-    AttributeDefinition, BillingMode, KeySchemaElement, KeyType, ScalarAttributeType,
-    TableDescription, TableStatus, TimeToLiveSpecification, TimeToLiveStatus,
+    AttributeDefinition, AttributeValue, BillingMode, KeySchemaElement, KeyType,
+    ScalarAttributeType, TableDescription, TableStatus, TimeToLiveSpecification, TimeToLiveStatus,
 };
 use url::Url;
 
@@ -27,6 +27,52 @@ const ACTIVE_WITHIN: Duration = Duration::from_secs(300);
 /// [`MAX_CHECK_EVERY`].
 const FIRST_CHECK_AFTER: Duration = Duration::from_millis(250);
 const MAX_CHECK_EVERY: Duration = Duration::from_secs(5);
+
+/// The sort key that the write check names. It is not a pool's sort key,
+/// which has three parts, and the check never writes it.
+const ACCESS_CHECK_KEY: &str = "#access-check";
+
+/// Checks that `client` may read and write `table`, in the region it uses.
+/// The read is a `Query` of at most one item. The write is an `UpdateItem`
+/// whose condition can never hold, so it writes nothing: DynamoDB checks
+/// permissions before the condition, so `ConditionalCheckFailedException`
+/// means that writes are allowed. Without this, a replica whose role cannot
+/// write would serve while every `POST /pools` failed.
+pub async fn check_access(client: &Client, table: &str) -> anyhow::Result<()> {
+    client
+        .query()
+        .table_name(table)
+        .key_condition_expression("#pk = :pk")
+        .expression_attribute_names("#pk", keys::PK)
+        .expression_attribute_values(":pk", AttributeValue::S(keys::POOLS.to_owned()))
+        .limit(1)
+        .send()
+        .await
+        .with_context(|| format!("read DynamoDB table {table}"))?;
+    let written = client
+        .update_item()
+        .table_name(table)
+        .key(keys::PK, AttributeValue::S(keys::POOLS.to_owned()))
+        .key(keys::SK, AttributeValue::S(ACCESS_CHECK_KEY.to_owned()))
+        .update_expression("SET #renewed = :renewed")
+        .condition_expression("attribute_exists(#pk) AND attribute_not_exists(#pk)")
+        .expression_attribute_names("#pk", keys::PK)
+        .expression_attribute_names("#renewed", keys::RENEWED_AT)
+        .expression_attribute_values(":renewed", AttributeValue::N("0".to_owned()))
+        .send()
+        .await;
+    match written {
+        Err(error)
+            if error
+                .as_service_error()
+                .is_some_and(|error| error.is_conditional_check_failed_exception()) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error).with_context(|| format!("write to DynamoDB table {table}")),
+        Ok(_) => bail!("the write check wrote to DynamoDB table {table}, which it never should"),
+    }
+}
 
 /// Creates `table` unless it exists, waits until it is active, and turns on
 /// TTL on `expires_at` unless it is on. Needs `dynamodb:CreateTable` besides

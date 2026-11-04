@@ -169,8 +169,8 @@ without a condition, and `GET /pools` is one paginated `Query` on `pk = "pool"`.
 
 | Action | Needed for |
 | --- | --- |
-| `dynamodb:Query` | `GET /pools` and change polling. |
-| `dynamodb:UpdateItem` | `POST /pools`. |
+| `dynamodb:Query` | `GET /pools`, change polling, and the startup check. |
+| `dynamodb:UpdateItem` | `POST /pools`, and the startup check, whose conditional write never writes. |
 | `dynamodb:DescribeTable` | The startup check. |
 | `dynamodb:CreateTable` | Only with `--dynamodb-ensure-table`. |
 | `dynamodb:DescribeTimeToLive` | Only with `--dynamodb-ensure-table`. |
@@ -189,7 +189,7 @@ Grant them on the table ARN, in each region where the service runs a replica of 
 | `--dynamodb-poll-interval-secs` not below `--heartbeat-interval-secs`, with `karmada` or `mcs` | Startup error. |
 | A `--dynamodb-table` that DynamoDB would refuse, an empty `--dynamodb-region`, or a `--dynamodb-endpoint` that is not an `http` or `https` URL | Startup error. |
 | Table absent at startup without `--dynamodb-ensure-table` | Logged with the table name and the create-table command, then retried. The service does not serve until the table exists. |
-| DynamoDB or STS unreachable, or access denied, at startup | Logged and retried with a backoff of up to 30 seconds. The service does not serve until the check passes. |
+| DynamoDB or STS unreachable at startup, or the role cannot describe, read, or write the table | Logged and retried with a backoff of up to 30 seconds. The service does not serve until the check passes. |
 | A `--dynamodb-*` flag or `--lease-skew-secs` without `--registration-storage dynamodb` | Startup error. |
 | No region from `--dynamodb-region` or the AWS SDK default chain | Startup error. |
 | Table whose key schema is not `pk` (HASH, S) and `sk` (RANGE, S) | Logged and retried, as for an absent table. |

@@ -161,10 +161,14 @@ Start from [`container/global-discovery-service.yaml`](https://github.com/ai-dyn
 which grants the EndpointSlice access this mode needs, and give its ServiceAccount the IAM role above.
 With `--pool-discovery mcs`, only that flag changes.
 
-The service checks the table at startup with `DescribeTable`. While the check fails, for example during
-a DynamoDB outage or before the table is created, the service logs why, names the table, and tries again
-after a backoff of up to 30 seconds. It serves nothing until the check passes, so the Pod stays unready
-rather than restarting. A missing AWS region stops the service at once. With `--pool-discovery karmada` or `mcs`, which watch the table, `--dynamodb-poll-interval-secs`
+At startup, the service checks that the table exists (`DescribeTable`), that it can read the table (a
+`Query` of one item), and that it can write it (an `UpdateItem` whose condition never holds, so nothing
+is written). While a check fails, for example during a DynamoDB outage, before the table is created, or
+while the role lacks one of the three actions, the service logs why, names the table, and tries again
+after a backoff of up to 30 seconds. It serves nothing until every check passes, so the Pod stays unready
+rather than restarting. A missing AWS region stops the service at once.
+
+With `--pool-discovery karmada` or `mcs`, which watch the table, `--dynamodb-poll-interval-secs`
 (default 2) must be less than `--heartbeat-interval-secs` (default 5), or the service refuses to start.
 
 ### Local development

@@ -461,6 +461,9 @@ async fn ensure_table_creates_the_table_and_its_ttl() {
     let store = DynamoDbPoolStore::connect(lease(), ensure.clone())
         .await
         .unwrap();
+    // `connect` checked that it may write, and wrote nothing doing so.
+    let scanned = client.scan().table_name(&table).send().await.unwrap();
+    assert_eq!(scanned.count(), 0, "{scanned:?}");
     let description = client
         .describe_table()
         .table_name(&table)

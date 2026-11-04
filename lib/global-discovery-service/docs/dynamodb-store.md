@@ -278,11 +278,15 @@ heading or works everywhere.
 | Table whose key is not `pk` (HASH, S) and `sk` (RANGE, S) | logged and retried (`ConnectError::Table`) |
 | DynamoDB or STS unreachable, or access denied, at startup | logged and retried (`ConnectError::Table`) |
 
-`main.rs` listens for SIGTERM before it connects, and retries a
-`ConnectError::Table` with kube's `DefaultBackoff` (0.8 s doubling to 30 s,
-with jitter) instead of exiting, so a short outage at startup does not leave
-the Pod in CrashLoopBackOff. Nothing listens until `connect` succeeds, so the
-Pod stays unready meanwhile.
+`connect` describes the table, then checks that it may read it (a `Query`
+of one item) and write it: an `UpdateItem` on a key that is not a pool's,
+with a condition that never holds. DynamoDB checks permissions before the
+condition, so `ConditionalCheckFailedException` means writes are allowed, and
+nothing is written. `main.rs` listens for SIGTERM before it connects, and
+retries a `ConnectError::Table` with kube's `DefaultBackoff` (0.8 s doubling
+to 30 s, with jitter) instead of exiting, so a short outage at startup does
+not leave the Pod in CrashLoopBackOff. Nothing listens until `connect`
+succeeds, so the Pod stays unready meanwhile.
 
 ## Tests
 
