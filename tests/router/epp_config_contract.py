@@ -53,7 +53,7 @@ import logging
 import re
 import time
 import warnings
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
@@ -4286,15 +4286,11 @@ def assert_frontend_session_prefix_index_false(*, profile: str) -> None:
     # only inside this selected-test helper.
     from dynamo.common.configuration.groups.kv_router_args import KvRouterConfigBase
 
-    field = next(
-        item
-        for item in fields(KvRouterConfigBase)
-        if item.name == SESSION_PREFIX_INDEX_ROW
-    )
-    if field.default is not False:
+    default = KvRouterConfigBase.enable_session_prefix_index
+    if default is not False:
         raise AssertionError(
-            f"{profile} authoritative {SESSION_PREFIX_INDEX_ROW} default "
-            f"{field.default!r} is not False"
+            f"{profile} authoritative KvRouterConfigBase."
+            f"{SESSION_PREFIX_INDEX_ROW}={default!r} is not False"
         )
     snapshot = _frontend_router_snapshot()
     attr = snapshot.config_attrs.get(SESSION_PREFIX_INDEX_ROW)
