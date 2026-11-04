@@ -124,7 +124,8 @@ pub struct RequestTracker {
     /// Number of cached tokens derived from the effective cache hit - set once via OnceLock
     cached_tokens: OnceLock<usize>,
 
-    /// Prompt tokens the engine reported it reused (`engine_data.kv_cache_hit`).
+    /// Prompt tokens the engine reported it reused (`engine_data.kv_cache_hit`, or the
+    /// final usage `cached_tokens` when the engine sends no `kv_cache_hit`).
     /// First report wins, so a later decode leg or retry does not overwrite it.
     engine_reused_tokens: OnceLock<u64>,
 

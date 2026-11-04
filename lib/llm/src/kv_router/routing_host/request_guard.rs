@@ -87,6 +87,12 @@ pub(super) struct RouteObservation {
 
 struct KvHitTracking {
     prompt_tokens: u64,
+    /// Whether usage `cached_tokens` may stand in for a missing `kv_cache_hit`. Not on the
+    /// decode leg of a remote prefill: its usage carries the prefill leg's count, which the
+    /// prefill attempt already reported. That leg carries the prefill's result, or is a
+    /// decode attempt with bootstrap info (the prefill leg carries bootstrap info too). A
+    /// decode attempt without either prefilled locally and reports its own reuse.
+    usage_fallback: bool,
     /// Taken by the first valid worker report, so an attempt counts at most once.
     reused_tokens: Option<IntCounter>,
 }
@@ -98,12 +104,19 @@ impl KvHitTracking {
         if self.reused_tokens.is_none() {
             return;
         }
-        let Some(reused) = item
-            .data
+        let Some(data) = item.data.as_ref() else {
+            return;
+        };
+        let Some(reused) = data
+            .engine_data
             .as_ref()
-            .and_then(|data| data.engine_data.as_ref())
             .and_then(|data| data.get("kv_cache_hit"))
             .and_then(|value| worker_cache_hit_tokens(self.prompt_tokens, value))
+            .or_else(|| {
+                self.usage_fallback
+                    .then(|| usage_cached_tokens(self.prompt_tokens, data))
+                    .flatten()
+            })
         else {
             return;
         };
@@ -129,6 +142,22 @@ fn worker_cache_hit_tokens(prompt_tokens: u64, value: &serde_json::Value) -> Opt
         return None;
     }
     Some(report.reused_tokens)
+}
+
+/// Prefix-cache hit from the usage on the final chunk, for engines that report reuse only
+/// there (the native vLLM sidecar). Only the final chunk counts: an engine that sends usage
+/// earlier sends `kv_cache_hit` with its final usage, and that report must win.
+fn usage_cached_tokens(prompt_tokens: u64, data: &LLMEngineOutput) -> Option<u64> {
+    data.finish_reason.as_ref()?;
+    let usage = data.completion_usage.as_ref()?;
+    if u64::from(usage.prompt_tokens) != prompt_tokens {
+        return None;
+    }
+    usage
+        .prompt_tokens_details
+        .as_ref()?
+        .cached_tokens
+        .map(u64::from)
 }
 
 pub(crate) fn prompt_private_blocks(
@@ -677,6 +706,8 @@ impl RequestGuard {
         }
         let kv_hit = kv_route.map(|route| KvHitTracking {
             prompt_tokens: route.prompt_tokens,
+            usage_fallback: request.prefill_result.is_none()
+                && !(phase == RequestPhase::Decode && request.bootstrap_info.is_some()),
             reused_tokens: Some(request_metrics.observe_kv_route_estimate(
                 phase,
                 &request.model,
@@ -999,6 +1030,7 @@ mod kv_cache_hit_tests {
         (
             KvHitTracking {
                 prompt_tokens,
+                usage_fallback: true,
                 reused_tokens: Some(counter.clone()),
             },
             counter,
