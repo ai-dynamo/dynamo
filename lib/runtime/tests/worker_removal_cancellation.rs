@@ -6,6 +6,9 @@
 //! established. QUIC also cancels active streams on discovery removal and has no
 //! drain guarantee.
 
+#[path = "common/selector.rs"]
+mod selector;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -113,9 +116,13 @@ async fn assert_removal_cancels_request_waiting_for_response_stream(
     let client = endpoint.client().await.unwrap();
     client.wait_for_instances().await.unwrap();
     let mut instance_updates = client.instance_source.as_ref().clone();
-    let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
-        .await
-        .unwrap();
+    let router = PushRouter::<u64, TestResponse>::from_client_with_options(
+        client,
+        RouterMode::RoundRobin,
+        selector::options(),
+    )
+    .await
+    .unwrap();
 
     let request = tokio::spawn(async move { router.generate(SingleIn::new(42)).await });
     tokio::time::timeout(Duration::from_secs(5), request_received.notified())
@@ -179,9 +186,13 @@ async fn assert_removal_drains_established_response_stream(
     let client = endpoint.client().await.unwrap();
     client.wait_for_instances().await.unwrap();
     let mut instance_updates = client.instance_source.as_ref().clone();
-    let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
-        .await
-        .unwrap();
+    let router = PushRouter::<u64, TestResponse>::from_client_with_options(
+        client,
+        RouterMode::RoundRobin,
+        selector::options(),
+    )
+    .await
+    .unwrap();
     let mut response =
         tokio::time::timeout(Duration::from_secs(5), router.generate(SingleIn::new(42)))
             .await

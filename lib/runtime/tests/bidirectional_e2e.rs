@@ -8,6 +8,9 @@
 //! Lives in its own `tests/` binary so the process-global TCP server's
 //! accept loop runs for the whole test process.
 
+#[path = "common/selector.rs"]
+mod selector;
+
 use std::sync::Arc;
 
 use anyhow::Error;
@@ -104,9 +107,13 @@ async fn bidirectional_end_to_end_echo() {
     let client = endpoint.client().await.unwrap();
     client.wait_for_instances().await.unwrap();
 
-    let router = PushRouter::<u64, EchoResponse>::from_client(client, RouterMode::RoundRobin)
-        .await
-        .unwrap();
+    let router = PushRouter::<u64, EchoResponse>::from_client_with_options(
+        client,
+        RouterMode::RoundRobin,
+        selector::options(),
+    )
+    .await
+    .unwrap();
 
     let input: ManyIn<u64> = Context::new(RequestStream::new(Box::pin(tokio_stream::iter(vec![
         1u64, 2, 3,
