@@ -65,7 +65,7 @@ These flags work with every `--pool-discovery` value: in each mode the service k
 | `--dynamodb-table <name>` | None | Table name: 3 to 255 letters, digits, `_`, `-`, or `.`. Required with `--registration-storage dynamodb`. |
 | `--dynamodb-region <region>` | SDK default chain (`AWS_REGION`) | Region of the table replica this process uses. |
 | `--dynamodb-endpoint <url>` | Unset | Endpoint override, for DynamoDB Local. Must be an `http` or `https` URL. |
-| `--dynamodb-poll-interval-secs <n>` | `2` | How often the store polls the table for changes. Only `--pool-discovery karmada` and `mcs` watch the table, and with them it must be less than `--heartbeat-interval-secs`. |
+| `--dynamodb-poll-interval-secs <n>` | `2` | How often each replica reads the table again. `GET /pools` answers from these reads. This plus `--heartbeat-interval-secs` must be less than `--lease-duration-secs` plus `--lease-skew-secs`, so that a renewal shows before its lease runs out. |
 | `--dynamodb-ensure-table` | Off | Create the table if it does not exist, and turn on its TTL if it is off. For development. Needs `dynamodb:CreateTable`, and for TTL `dynamodb:DescribeTimeToLive` and `dynamodb:UpdateTimeToLive`; without those two it logs a warning and starts. |
 
 The `--dynamodb-*` flags and `--lease-skew-secs` apply only with `--registration-storage dynamodb`; giving one with the memory store is a startup error.
@@ -85,7 +85,7 @@ All bodies are JSON. A reader ignores fields it does not know.
 | Method and path | Purpose | Success | Errors |
 | --- | --- | --- | --- |
 | `POST /pools` | Register a pool and renew its lease. | 200 with a lease | 400 for malformed JSON, 413 for a body over 64 KiB, 415 without `Content-Type: application/json`, 422 for an invalid registration or one the store cannot keep, 503 when the store is unreachable |
-| `GET /pools` | List live pools. | 200 with a pool list | 503 when the backend is unreachable |
+| `GET /pools` | List live pools. | 200 with a pool list | 503 when the backend is unreachable. With `dynamodb`, only before the first read of the table. |
 | `GET /routers` | List Global Router replicas. | 200 with a router list | 503 when the backend is unreachable |
 | `GET /healthz` | Readiness: the backend has answered once. With DynamoDB, that follows the startup check that the table can be read and written. Later backend failures show in the answers to requests, not here. | 200 | 503 until the backend has answered |
 
@@ -168,13 +168,15 @@ A pool is live when `renewed_at + lease_s * 1000 + skew >= now` on the reading r
 `skew` is `--lease-skew-secs`. A pool whose `written_in` is another region than the reader's stays
 listed for `--dynamodb-replication-grace-secs` more, and `complete` is `false` while any pool is listed
 that way. The store never expires a pool itself. A registration is one `UpdateItem`
-without a condition, and `GET /pools` is one paginated `Query` on `pk = "pool"`.
+without a condition. Each replica reads the table with one paginated `Query` on `pk = "pool"` every
+`--dynamodb-poll-interval-secs`, and `GET /pools` answers from the last read, leaving out at once a pool
+whose lease has lapsed since.
 
 ## IAM actions
 
 | Action | Needed for |
 | --- | --- |
-| `dynamodb:Query` | `GET /pools`, change polling, and the startup check. |
+| `dynamodb:Query` | Reading the table every poll interval, which `GET /pools` answers from, and the startup check. |
 | `dynamodb:UpdateItem` | `POST /pools`, and the startup check, whose conditional write never writes. |
 | `dynamodb:DescribeTable` | The startup check. |
 | `dynamodb:CreateTable` | Only with `--dynamodb-ensure-table`. |
@@ -187,11 +189,11 @@ Grant them on the table ARN, in each region where the service runs a replica of 
 
 | Condition | Result |
 | --- | --- |
-| DynamoDB error, throttling, transport failure, or missing table while serving | 503 from the endpoint that called DynamoDB. `GET /pools` is `complete: false` until a lease after the table answers again. `GET /healthz` stays 200. |
+| DynamoDB error, throttling, transport failure, or missing table while serving | `POST /pools` returns 503. `GET /pools` answers from the last read of the table, with `complete: false` until a lease after the table answers again, and drops pools as their leases lapse. `GET /healthz` stays 200. |
 | A pool key whose sort key is over 1,024 bytes | 422 from `POST /pools`, with the reason. Nothing is written. |
 | An item that fails to decode | Logged and skipped. The rest of the list is served. |
 | `--dynamodb-table` missing with `dynamodb` | Startup error. |
-| `--dynamodb-poll-interval-secs` not below `--heartbeat-interval-secs`, with `karmada` or `mcs` | Startup error. |
+| `--dynamodb-poll-interval-secs` plus `--heartbeat-interval-secs` not below `--lease-duration-secs` plus `--lease-skew-secs` | Startup error. |
 | A `--dynamodb-table` that DynamoDB would refuse, an empty `--dynamodb-region`, or a `--dynamodb-endpoint` that is not an `http` or `https` URL | Startup error. |
 | Table absent at startup without `--dynamodb-ensure-table` | Logged with the table name and the create-table command, then retried. The service does not serve until the table exists. |
 | DynamoDB or STS unreachable at startup, or the role cannot describe, read, or write the table | Logged and retried with a backoff of up to 30 seconds. The service does not serve until the check passes. |

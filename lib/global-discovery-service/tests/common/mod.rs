@@ -362,11 +362,9 @@ pub mod conformance {
         );
 
         clock.advance(lease().duration()).await;
-        assert_eq!(
-            pools.list().await.unwrap().completeness,
-            Completeness::Exact
-        );
-        // Watchers learn it too. With no pools nothing else is published.
+        // Watchers learn it: the memory store's sweep wakes, and the DynamoDB
+        // store's next poll reads the table. With no pools nothing else is
+        // published.
         let next = tokio::time::timeout(Duration::from_secs(30), watch.next())
             .await
             .expect("timed out waiting for the Resync");
@@ -374,5 +372,10 @@ pub mod conformance {
             panic!("expected a Resync");
         };
         assert_eq!(complete.completeness, Completeness::Exact);
+        // And so do lists, which the DynamoDB store serves from the same view.
+        assert_eq!(
+            pools.list().await.unwrap().completeness,
+            Completeness::Exact
+        );
     }
 }

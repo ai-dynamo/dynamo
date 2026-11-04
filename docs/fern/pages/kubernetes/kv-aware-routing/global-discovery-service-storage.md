@@ -175,8 +175,11 @@ while the role lacks one of the three actions, the service logs why, names the t
 after a backoff of up to 30 seconds. It serves nothing until every check passes, so the Pod stays unready
 rather than restarting. A missing AWS region stops the service at once.
 
-With `--pool-discovery karmada` or `mcs`, which watch the table, `--dynamodb-poll-interval-secs`
-(default 2) must be less than `--heartbeat-interval-secs` (default 5), or the service refuses to start.
+Each replica then reads the table every `--dynamodb-poll-interval-secs` (default 2) and answers
+`GET /pools` from what it read, so a request costs no read of its own, and a pool registered through
+another replica shows within that interval. The poll interval plus `--heartbeat-interval-secs` must be
+less than `--lease-duration-secs` plus `--lease-skew-secs`, so that every renewal shows before its lease
+runs out, or the service refuses to start.
 
 ### Local development
 
@@ -253,16 +256,16 @@ DynamoDB. A DynamoDB outage then shows in the answers to requests instead, so it
 replica out of the Service at once:
 
 - `POST /pools` returns 503, and Pool Relays register again on their next heartbeat.
-- With `--pool-discovery registrations`, `GET /pools` returns 503.
-- With `karmada` or `mcs`, `GET /pools` keeps answering with `complete: false`, and drops each pool
-  whose lease lapses, since no Pool Relay can renew meanwhile.
+- `GET /pools` keeps answering from the last read of the table, with `complete: false`, and drops each
+  pool whose lease lapses, since no Pool Relay can renew meanwhile.
 - After the table is back, `complete` stays `false` for one more lease, until every Pool Relay has
   registered again.
 
 ## Operate
 
 - **Replicas.** Put any number of replicas behind one Kubernetes Service. Any replica accepts
-  `POST /pools` and any replica answers `GET /pools`.
+  `POST /pools` and any replica answers `GET /pools`. A pool registered through one replica shows on
+  the others at their next read of the table, within `--dynamodb-poll-interval-secs`.
 - **Rolling restarts.** Nothing special is needed. A new replica lists every live pool at once, with
   `complete: false` for one lease, and Pool Relays keep heartbeating through the Service.
 - **Moving to DynamoDB, or to another table.** During a rolling update, old and new replicas keep

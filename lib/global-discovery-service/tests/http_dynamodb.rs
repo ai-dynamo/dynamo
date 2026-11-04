@@ -11,6 +11,7 @@ mod common;
 mod dynamodb_support;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use dynamo_global_discovery_service::backends::memory::StaticReplicaDirectory;
 use dynamo_global_discovery_service::pool_discovery::{
@@ -70,6 +71,24 @@ async fn get_json(base: &str, path: &str) -> (reqwest::StatusCode, Value) {
     (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
 }
 
+/// Waits until `GET /pools` on `base` answers `expected`. A replica serves
+/// its view of the table, which shows another replica's registration, or
+/// lists becoming complete, at its next poll.
+async fn pools_soon(base: &str, expected: &Value) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let (status, pools) = get_json(base, "/pools").await;
+        if status == reqwest::StatusCode::OK && pools == *expected {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{base}/pools answers {status} {pools}, not {expected}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn post_pool(base: &str, body: &Value) -> (reqwest::StatusCode, Value) {
     let response = reqwest::Client::new()
         .post(format!("{base}/pools"))
@@ -121,10 +140,10 @@ async fn a_pool_registered_on_one_replica_is_listed_by_another() {
             "complete": complete
         })
     };
-    for base in [&b, &a] {
-        let (status, pools) = get_json(base, "/pools").await;
-        assert_eq!(status, reqwest::StatusCode::OK);
-        assert_eq!(pools, expected(false));
+    // A shows it at once; B, which serves its view of the table, at its next
+    // poll.
+    for base in [&a, &b] {
+        pools_soon(base, &expected(false)).await;
     }
     let (status, _) = get_json(&b, "/healthz").await;
     assert_eq!(status, reqwest::StatusCode::OK);
@@ -134,16 +153,17 @@ async fn a_pool_registered_on_one_replica_is_listed_by_another() {
         json!({"routers": [{"replica": "aws-ohio/global-router-0", "url": "http://10.42.0.5:50051/"}]})
     );
 
-    // A lease later, both lists are complete, and the pool is still live.
+    // A lease later, both lists are complete at their next poll, and the
+    // pool is still live.
     let lease = Lease::new(5, 15).unwrap().duration();
     fixture.advance(lease);
     for base in [&b, &a] {
-        let (_, pools) = get_json(base, "/pools").await;
-        assert_eq!(pools, expected(true));
+        pools_soon(base, &expected(true)).await;
     }
 
-    // Past the lease and the skew with no heartbeat, both replicas drop it.
-    fixture.advance(dynamodb_support::SKEW + std::time::Duration::from_secs(1));
+    // Past the lease and the skew with no heartbeat, both replicas drop it at
+    // once.
+    fixture.advance(dynamodb_support::SKEW + Duration::from_secs(1));
     for base in [&a, &b] {
         let (_, pools) = get_json(base, "/pools").await;
         assert_eq!(pools, json!({"pools": [], "complete": true}));

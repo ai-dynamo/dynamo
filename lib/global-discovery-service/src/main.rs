@@ -141,9 +141,9 @@ struct Args {
     /// example to dynamodb-local at `http://localhost:8000`.
     #[arg(long, value_parser = parse_dynamodb_endpoint, help_heading = WITH_DYNAMODB)]
     dynamodb_endpoint: Option<Url>,
-    /// How often a watch reads the DynamoDB table again. Only the join with
-    /// MCS watches it, so with `--pool-discovery karmada` or `mcs` this must
-    /// be less than the heartbeat interval.
+    /// How often the service reads the DynamoDB table again. Lists come from
+    /// these reads, so this plus the heartbeat interval must be less than the
+    /// lease plus the skew: a renewal then shows before its lease runs out.
     #[arg(
         long,
         default_value_t = 2,
@@ -349,19 +349,27 @@ where
             format!("check --heartbeat-interval-secs and --lease-duration-secs: {error}"),
         ));
     }
-    // Only the join with MCS watches the DynamoDB table. Polling it more
-    // often than PoolRelays register sees each change before the next
-    // heartbeat. With `registrations`, the service only lists and registers.
+    // In every mode, lists come from polls of the DynamoDB table. A pool's
+    // renewal must show in one before its lease and the skew run out, or a
+    // live pool would drop out of lists between polls.
     if parsed.registration_storage == RegistrationStorage::Dynamodb
-        && parsed.pool_discovery.mcs().is_some()
-        && parsed.dynamodb_poll_interval_secs >= parsed.heartbeat_interval_secs
+        && parsed
+            .dynamodb_poll_interval_secs
+            .saturating_add(parsed.heartbeat_interval_secs)
+            >= parsed
+                .lease_duration_secs
+                .saturating_add(parsed.lease_skew_secs)
     {
         return Err(command.error(
             ErrorKind::ValueValidation,
             format!(
-                "--dynamodb-poll-interval-secs {} must be less than --heartbeat-interval-secs {} \
-                 with --pool-discovery karmada or mcs, which watch the table",
-                parsed.dynamodb_poll_interval_secs, parsed.heartbeat_interval_secs
+                "--dynamodb-poll-interval-secs {} plus --heartbeat-interval-secs {} must be less \
+                 than --lease-duration-secs {} plus --lease-skew-secs {}: lists come from polls of \
+                 the table, and a renewal must show in one before the pool's lease runs out",
+                parsed.dynamodb_poll_interval_secs,
+                parsed.heartbeat_interval_secs,
+                parsed.lease_duration_secs,
+                parsed.lease_skew_secs
             ),
         ));
     }
@@ -915,31 +923,44 @@ mod tests {
     }
 
     #[test]
-    fn a_dynamodb_watch_polls_faster_than_relays_register() {
-        // The join with MCS watches the table.
-        let with_karmada = |poll: &str| {
-            parse_args(karmada(&[
+    fn dynamodb_polls_see_a_renewal_before_its_lease_lapses() {
+        // In every mode, lists come from polls: a renewal shows within the
+        // poll interval plus the heartbeat interval, which must be less than
+        // the lease plus the skew (by default 2 + 5 < 15 + 2).
+        for poll in ["11", "12"] {
+            let registrations = parse_args(dynamodb(&["--dynamodb-poll-interval-secs", poll]));
+            let with_karmada = parse_args(karmada(&[
                 "--registration-storage",
                 "dynamodb",
                 "--dynamodb-table",
                 "pools",
                 "--dynamodb-poll-interval-secs",
                 poll,
-            ]))
-        };
-        assert!(with_karmada("4").is_ok());
-        let error = with_karmada("5").unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::ValueValidation, "{error}");
-        assert_eq!(error.exit_code(), 2);
-        assert!(
-            error
-                .to_string()
-                .contains("must be less than --heartbeat-interval-secs 5"),
-            "{error}"
-        );
-        // With registrations, nothing watches the table, so the interval
-        // does not matter, even with a 1 s heartbeat.
-        assert!(parse_args(dynamodb(&["--dynamodb-poll-interval-secs", "5"])).is_ok());
+            ]));
+            for parsed in [registrations, with_karmada] {
+                if poll == "11" {
+                    assert!(parsed.is_ok(), "{poll}");
+                    continue;
+                }
+                let error = parsed.unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::ValueValidation, "{error}");
+                assert_eq!(error.exit_code(), 2);
+                assert!(
+                    error.to_string().contains(
+                        "must be less than --lease-duration-secs 15 plus --lease-skew-secs 2"
+                    ),
+                    "{error}"
+                );
+            }
+        }
+        // More skew leaves room for a slower poll, and a 1 s heartbeat works.
+        let slow = [
+            "--dynamodb-poll-interval-secs",
+            "12",
+            "--lease-skew-secs",
+            "3",
+        ];
+        assert!(parse_args(dynamodb(&slow)).is_ok());
         assert!(parse_args(dynamodb(&["--heartbeat-interval-secs", "1"])).is_ok());
     }
 

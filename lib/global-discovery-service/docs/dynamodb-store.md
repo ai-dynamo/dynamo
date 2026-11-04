@@ -112,11 +112,15 @@ Why not `PutItem`: `UpdateItem` keeps `created_at` without a read.
 
 ## Reads
 
-`list()` is a `Query` on `pk = "pool"` with pagination, eventually consistent
+Reads are a `Query` on `pk = "pool"` with pagination, eventually consistent
 (a Global Table is eventually consistent anyway, and a just-written item is
 visible to the writing region within milliseconds). Each page's items are
-decoded, expired ones dropped, and the result is
-`Snapshot { items, completeness }`, where `completeness` is `Estimated` until a
+decoded and expired ones dropped. `list()` reads the table only before the
+first poll; after that it answers from the polled view (below), leaving out
+at once a pool whose lease has lapsed since the last poll, so a request costs
+no read of its own and read cost scales with replicas, not with clients and
+probes. A pool registered through another replica shows within a poll
+interval. The result is `Snapshot { items, completeness }`, where `completeness` is `Estimated` until a
 lease has passed since the store was made (see "Why"), and `Exact` after
 that. A failed call to the table, a read or a write, makes it `Estimated`
 again until a lease has passed since the next successful read: no PoolRelay
@@ -124,16 +128,18 @@ could renew while the table could not be reached, so items may have lapsed
 until their PoolRelays register again. The time a read began decides. A decode failure of one item is
 logged and that item skipped, so one bad write cannot take the list down. Any
 SDK error (throttling, access denied, transport, missing table) becomes
-`DiscoveryError::Unavailable`, which the HTTP layer maps to 503, so `/healthz`
-fails when the table is unreachable.
+`DiscoveryError::Unavailable`, which the HTTP layer maps to 503 for
+`register`, and for `list` before the first read. `/healthz` stays OK once the
+backend has answered.
 
 `list_and_watch()` polls. The store keeps one view per process, shared by
 its watchers: the live pools of the last poll, plus this replica's
 registrations since. Each call first runs the `Query` (and fails with
 `Unavailable` if it does), then starts one poller per store if none runs.
-Every `--dynamodb-poll-interval-secs` (default 2 s, which must be below the
-heartbeat interval where something watches: with `karmada` and `mcs`) the
-poller runs the same `Query`, diffs the live set
+Every `--dynamodb-poll-interval-secs` (default 2 s; plus the heartbeat
+interval, it must be less than the lease plus the skew, so a renewal shows in
+a poll before its lease runs out) the poller runs the same `Query`, diffs the
+live set
 against the view by `PoolKey` and `hash`, and emits `Upserted` for new or
 changed pools and `Removed` for pools that are gone or expired. The stream
 starts with one `Upserted` per pool in the view followed by a `Resync`, as
@@ -200,7 +206,7 @@ since they work with every `--pool-discovery` value:
 | `--dynamodb-table <name>` | none, required with `dynamodb` | table name: 3 to 255 letters, digits, `_`, `-` or `.`, as DynamoDB requires |
 | `--dynamodb-region <region>` | SDK default chain (`AWS_REGION`) | region of the table replica this process uses |
 | `--dynamodb-endpoint <url>` | none | endpoint override for dynamodb-local; an `http` or `https` URL |
-| `--dynamodb-poll-interval-secs <n>` | 2 | watch poll period; with `karmada` and `mcs`, which watch, must be less than `--heartbeat-interval-secs` |
+| `--dynamodb-poll-interval-secs <n>` | 2 | poll period, which `list` and watches answer from; plus `--heartbeat-interval-secs`, must be less than `--lease-duration-secs` plus `--lease-skew-secs` |
 | `--dynamodb-ensure-table` | off | create the table if it does not exist, and turn on its TTL if it is off, on every start (development; needs `CreateTable`, and for TTL `DescribeTimeToLive` and `UpdateTimeToLive`, without which it warns and starts) |
 | `--lease-skew-secs <n>` | 2 | clock skew allowed when evaluating leases |
 | `--dynamodb-replication-grace-secs <n>` | 60 | with a Global Table, how long past its lease a pool written through another region's replica stays listed, as `Estimated`; 0 drops it when its lease lapses |
@@ -297,7 +303,7 @@ heading or works everywhere.
 | A sort key over DynamoDB's 1,024 bytes | `DiscoveryError::Rejected` (422) with the reason, before any write; DynamoDB would answer each write with a `ValidationException` |
 | Item that fails to decode | skipped with a warning; the rest of the list is served |
 | `--dynamodb-table` missing with `dynamodb` | startup error |
-| `--dynamodb-poll-interval-secs >= --heartbeat-interval-secs` with `karmada` or `mcs` | usage error |
+| `--dynamodb-poll-interval-secs + --heartbeat-interval-secs >= --lease-duration-secs + --lease-skew-secs` | usage error |
 | A `--dynamodb-table` that DynamoDB would refuse, an empty `--dynamodb-region`, or a `--dynamodb-endpoint` that is not `http` or `https` | usage error |
 | A `--dynamodb-*` flag or `--lease-skew-secs` without `--registration-storage dynamodb` | startup error |
 | No region from `--dynamodb-region` or the SDK chain | startup error (`ConnectError::Config`) |

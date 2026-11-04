@@ -15,8 +15,8 @@ use std::time::Duration;
 use aws_sdk_dynamodb::types::AttributeValue;
 use common::{conformance, find, key, lease, mocker, next_change};
 use dynamo_global_discovery_service::pool_discovery::{
-    Completeness, Directory, DiscoveryError, Lease, PoolEvent, PoolRegistrar, PoolRegistration,
-    WatchEvent,
+    Completeness, Directory, DiscoveryError, Lease, PoolEvent, PoolListing, PoolRegistrar,
+    PoolRegistration, Snapshot, WatchEvent,
 };
 use dynamo_global_discovery_service::{DynamoDbPoolStore, SystemClock};
 use dynamodb_support::{
@@ -144,12 +144,25 @@ async fn two_stores_over_one_table_list_each_others_pools() {
     let fresh = fixture.store();
     assert_eq!(fresh.list().await.unwrap().items.len(), 2);
 
-    // A lease later, every replica is exact, and the pools are still live.
+    // A lease later, every replica is exact at its next poll, and the pools
+    // are still live.
     fixture.advance(lease().duration());
     for store in [&a, &b, &fresh] {
+        assert_eq!(exact_list(store).await.items.len(), 2);
+    }
+}
+
+/// `store`'s list once it is `Exact`. Lists come from the store's view of
+/// the table, so one that becomes complete does at the store's next poll.
+async fn exact_list(store: &DynamoDbPoolStore) -> Snapshot<PoolListing> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
         let snapshot = store.list().await.unwrap();
-        assert_eq!(snapshot.completeness, Completeness::Exact);
-        assert_eq!(snapshot.items.len(), 2);
+        if snapshot.completeness == Completeness::Exact {
+            return snapshot;
+        }
+        assert!(Instant::now() < deadline, "the list never became exact");
+        tokio::time::sleep(POLL).await;
     }
 }
 
@@ -302,11 +315,11 @@ async fn a_pool_written_in_another_region_stays_listed_until_the_grace() {
     assert!(find(&*store, "here").await.is_none());
     assert!(find(&*store, "there").await.is_some());
 
-    // Past the grace too, it is gone, and the list is complete again.
+    // Past the grace too, it is gone at once, and the list is complete again
+    // at the next poll.
     fixture.advance(REPLICATION_GRACE);
-    let snapshot = store.list().await.unwrap();
-    assert!(snapshot.items.is_empty());
-    assert_eq!(snapshot.completeness, Completeness::Exact);
+    assert!(store.list().await.unwrap().items.is_empty());
+    assert!(exact_list(&store).await.items.is_empty());
 }
 
 /// An item written outside the store, with the attributes the store reads.

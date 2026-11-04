@@ -187,9 +187,14 @@ struct Seen {
     /// `writes` when this replica last registered the pool, or 0 if a poll
     /// set it.
     written: u64,
-    /// The last Unix millisecond at which the pool is live unless it is
-    /// renewed: its renewal plus its lease and the skew.
+    /// The last Unix millisecond at which the view lists the pool unless it
+    /// is renewed: its renewal plus its lease and the skew, and for a pool
+    /// written through another region, the replication grace too.
     live_until_ms: u64,
+    /// The last Unix millisecond its own lease and the skew cover. Earlier
+    /// than `live_until_ms` only for a pool from another region, which is
+    /// listed on trust in between.
+    lease_until_ms: u64,
 }
 
 impl Watched {
@@ -198,6 +203,33 @@ impl Watched {
         Some(Snapshot {
             items: pools.values().map(|seen| seen.listing.clone()).collect(),
             completeness: if self.exact {
+                Completeness::Exact
+            } else {
+                Completeness::Estimated
+            },
+        })
+    }
+
+    /// What `list` serves from the view at `now_ms`; `None` before the first
+    /// poll. A pool whose lease has lapsed since the last poll is left out
+    /// at once, as a read of the table would. The list is `Exact` only while
+    /// watchers were told so, no call to the table has failed since, and no
+    /// pool is listed past its own lease.
+    fn listed(&self, now_ms: u64) -> Option<Snapshot<PoolListing>> {
+        let pools = self.pools.as_ref()?;
+        let mut on_trust = false;
+        let items = pools
+            .values()
+            .filter(|seen| seen.live_until_ms >= now_ms)
+            .map(|seen| {
+                on_trust |= seen.lease_until_ms < now_ms;
+                seen.listing.clone()
+            })
+            .collect();
+        let exact = self.exact && !self.failing && !on_trust;
+        Some(Snapshot {
+            items,
+            completeness: if exact {
                 Completeness::Exact
             } else {
                 Completeness::Estimated
@@ -301,6 +333,7 @@ impl Watched {
                 hash,
                 written: self.writes,
                 live_until_ms,
+                lease_until_ms: live_until_ms,
             },
         );
         event
@@ -555,6 +588,7 @@ impl Shared {
                 let seen = Seen {
                     listing: listing(&item.registration),
                     live_until_ms: listed_until_ms,
+                    lease_until_ms: item.live_until_ms(self.lease_skew),
                     hash: item.hash,
                     written: 0,
                 };
@@ -574,6 +608,12 @@ impl Shared {
             let _ = self.events.send(event);
         }
         Ok(())
+    }
+
+    /// What `list` serves now from the view; `None` before the first poll.
+    fn listed(&self) -> Option<Snapshot<PoolListing>> {
+        let now_ms = self.clock.now_ms();
+        self.lock().listed(now_ms)
     }
 
     /// After a failed poll: drops the pools whose leases have lapsed, and
@@ -694,24 +734,28 @@ impl PoolRegistrar for DynamoDbPoolStore {
 
 #[async_trait]
 impl Directory<PoolListing, PoolKey> for DynamoDbPoolStore {
-    /// The live pools in the table. `Estimated` until a lease has passed since
-    /// the store was made, and after a failed call to the table until a
-    /// lease has passed since reads recovered; `Exact` otherwise. Fails while
-    /// the table cannot be read.
+    /// The live pools, from this replica's view of the table, which a poll
+    /// every [`DynamoDbConfig::poll_interval`] keeps current and this
+    /// replica's registrations update at once. The first call reads the
+    /// table and starts the polls, so a request costs no read of its own. A
+    /// pool registered through another replica shows within a poll interval;
+    /// one whose lease lapses is left out at once. `Estimated` until a lease
+    /// has passed since the store was made, after a failed call to the table
+    /// until a lease has passed since reads recovered, and while a pool is
+    /// listed on trust; `Exact` otherwise. Fails only if the first read
+    /// does.
     async fn list(&self) -> Result<Snapshot<PoolListing>, DiscoveryError> {
-        let read_at_ms = self.shared.clock.now_ms();
-        let read = self.shared.live().await?;
-        let completeness = match self.shared.lock().read(read_at_ms, self.shared.lease_ms) {
-            _ if read.on_trust => Completeness::Estimated,
-            completeness => completeness,
-        };
-        Ok(Snapshot {
-            items: read
-                .pools
-                .iter()
-                .map(|(item, _)| listing(&item.registration))
-                .collect(),
-            completeness,
+        self.ensure_polling();
+        if let Some(snapshot) = self.shared.listed() {
+            return Ok(snapshot);
+        }
+        // Before the first poll: read the table now, which starts the view.
+        self.shared.refresh().await?;
+        self.shared.listed().ok_or_else(|| {
+            DiscoveryError::Unavailable(anyhow::anyhow!(
+                "no view of DynamoDB table {} after reading it",
+                self.shared.table
+            ))
         })
     }
 
@@ -781,6 +825,7 @@ mod tests {
                     hash: (*model).to_owned(),
                     written: 0,
                     live_until_ms: u64::MAX,
+                    lease_until_ms: u64::MAX,
                 };
                 (key(dgd), seen)
             })
@@ -977,6 +1022,48 @@ mod tests {
             panic!("expected the key to be rejected");
         };
         assert!(reason.contains("1025 bytes"), "{reason}");
+    }
+
+    /// `list` answers from the view between polls, as a read of the table at
+    /// that moment would: lapsed pools are left out at once, and the list
+    /// says when it may be wrong.
+    #[test]
+    fn a_list_from_the_view_leaves_out_lapsed_pools_at_once() {
+        let mut watched = Watched::default();
+        assert!(watched.listed(0).is_none());
+        // `here` lapses at 17 s. `there` came through another region: its
+        // lease lapses at 17 s, but it is listed until 77 s.
+        let mut view = polled(&[("here", "m1"), ("there", "m1")]);
+        for (dgd, lease_until_ms, live_until_ms) in
+            [("here", 17_000, 17_000), ("there", 17_000, 77_000)]
+        {
+            let seen = view.get_mut(&key(dgd)).unwrap();
+            seen.lease_until_ms = lease_until_ms;
+            seen.live_until_ms = live_until_ms;
+        }
+        let _ = watched.apply_poll(view, 0);
+        let _ = watched.set_completeness(Completeness::Exact);
+        let names = |snapshot: &Snapshot<PoolListing>| {
+            let mut names: Vec<String> = snapshot
+                .items
+                .iter()
+                .map(|listing| listing.key.dgd_name().to_owned())
+                .collect();
+            names.sort();
+            names
+        };
+
+        let listed = watched.listed(17_000).unwrap();
+        assert_eq!(names(&listed), ["here", "there"]);
+        assert_eq!(listed.completeness, Completeness::Exact);
+        // Just after, `here` is gone, and `there` is listed on trust.
+        let listed = watched.listed(17_001).unwrap();
+        assert_eq!(names(&listed), ["there"]);
+        assert_eq!(listed.completeness, Completeness::Estimated);
+        // A failed call makes the list incomplete at once, before any poll.
+        watched.failed();
+        let listed = watched.listed(17_000).unwrap();
+        assert_eq!(listed.completeness, Completeness::Estimated);
     }
 
     /// While a rollout moves the service to a table, PoolRelays that still
