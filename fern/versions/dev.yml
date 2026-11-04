@@ -772,7 +772,7 @@ navigation:
           - page: Structural Tag
             path: ../pages-dev/use-cases/tool-calling-and-reasoning/structural-tag.md
           - page: Reasoning Parsing
-            path: ../pages-dev/use-cases/tool-calling-and-reasoning/reasoning-parsing.md
+            path: ../pages-dev/use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx
           - page: Troubleshooting Tool Calls
             path: ../pages-dev/use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md
       - section: Many-Model Serving
