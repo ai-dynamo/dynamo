@@ -143,17 +143,26 @@ pub(crate) fn anthropic_context_length_public_message(error: &DynamoError) -> Op
         PublicDetails::ContextLength {
             limit,
             actual: Some(actual),
-        } if actual > limit => Some(format!(
+        } => anthropic_context_length_message(*limit, *actual),
+        _ => None,
+    }
+}
+
+/// Render Anthropic's context-length sentence from structured bounds.
+///
+/// Returns `None` for a count below the limit, which neither producer should
+/// emit; callers keep their class-level fallback instead of claiming an
+/// overflow that did not happen.
+pub(crate) fn anthropic_context_length_message(limit: u64, actual: u64) -> Option<String> {
+    match actual.cmp(&limit) {
+        std::cmp::Ordering::Greater => Some(format!(
             "prompt is too long: {actual} tokens > {limit} maximum"
         )),
-        PublicDetails::ContextLength {
-            limit,
-            actual: Some(actual),
-        } if actual == limit => Some(format!(
+        std::cmp::Ordering::Equal => Some(format!(
             "prompt is too long: {actual} tokens, which leaves no room for output under the \
              {limit}-token maximum"
         )),
-        _ => None,
+        std::cmp::Ordering::Less => None,
     }
 }
 

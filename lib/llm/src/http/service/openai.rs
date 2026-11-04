@@ -255,6 +255,16 @@ impl ErrorMessage {
         &self.message
     }
 
+    pub(crate) fn context_length_bounds(&self) -> Option<(u64, Option<u64>)> {
+        let details = self.details.as_deref()?;
+        match dynamo_runtime::error::PublicDetails::deserialize(details).ok()? {
+            dynamo_runtime::error::PublicDetails::ContextLength { limit, actual } => {
+                Some((limit, actual))
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn is_overload(&self) -> bool {
         self.metric_error_type == Some(ErrorType::Overload)
     }

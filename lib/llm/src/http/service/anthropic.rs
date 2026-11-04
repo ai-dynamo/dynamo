@@ -65,8 +65,9 @@ use crate::types::Annotated;
 
 // Re-use helpers from the openai module (sibling under service/)
 use super::error::{
-    ClientErrorAction, SanitizedError, anthropic_context_length_public_message,
-    find_canonical_error_in_chain, http_action_for_error, invalid_argument,
+    ClientErrorAction, SanitizedError, anthropic_context_length_message,
+    anthropic_context_length_public_message, find_canonical_error_in_chain, http_action_for_error,
+    invalid_argument,
 };
 use super::metadata::{attach_x_request_id, extract_metadata_from_http};
 use super::openai::{get_body_limit, get_or_create_request_id, warn_nvext_disabled};
@@ -1389,7 +1390,13 @@ fn anthropic_backend_error_response(error_response: super::openai::ErrorResponse
     } else {
         anthropic_error_type_for_status(status, "api_error")
     };
-    anthropic_error_unrecorded(status, error_type, error.message())
+    let rendered_message = error
+        .context_length_bounds()
+        .and_then(|(limit, actual)| {
+            actual.and_then(|actual| anthropic_context_length_message(limit, actual))
+        })
+        .unwrap_or_else(|| error.message().to_string());
+    anthropic_error_unrecorded(status, error_type, &rendered_message)
 }
 
 /// Build an Anthropic-formatted error response from a canonical
@@ -1698,6 +1705,49 @@ mod tests {
         let body: AnthropicErrorResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(body.error.error_type, "invalid_request_error");
         assert_eq!(body.error.message, "CLIENT_SAFE_MESSAGE");
+        assert!(!body.error.message.contains("PRIVATE_BACKEND_DIAGNOSTIC"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(failure_metrics)]
+    async fn anthropic_backend_error_rewrap_renders_context_length_wording() {
+        use dynamo_runtime::error::{DynamoError, ErrorType, PublicDetails};
+
+        let error = DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .diagnostic("PRIVATE_BACKEND_DIAGNOSTIC")
+            .public_details(PublicDetails::ContextLength {
+                limit: 8192,
+                actual: Some(9000),
+            })
+            .build();
+        let event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(error),
+        };
+        let response = match super::super::openai::check_for_backend_error(
+            futures::stream::iter([event]),
+            BackendErrorCheck::UntilFirstEvent,
+        )
+        .await
+        {
+            Err(response) => anthropic_backend_error_response(response),
+            Ok(_) => panic!("typed backend failure must fail preflight"),
+        };
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), get_body_limit())
+            .await
+            .unwrap();
+        let body: AnthropicErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.error.error_type, "invalid_request_error");
+        assert_eq!(
+            body.error.message,
+            "prompt is too long: 9000 tokens > 8192 maximum"
+        );
         assert!(!body.error.message.contains("PRIVATE_BACKEND_DIAGNOSTIC"));
     }
 
