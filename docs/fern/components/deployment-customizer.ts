@@ -753,7 +753,6 @@ export interface ManifestInfo {
   modelPvc: ModelPvc | null;
   claims: string[];
   templateVars: string[];
-  frontends: number;
 }
 
 const MODEL_FLAGS = new Set(["--model", "--model-path", "--served-model-name", "--model-name"]);
@@ -832,7 +831,6 @@ export function analyzeManifest(source: string): ManifestInfo {
     modelPvc: null,
     claims: [],
     templateVars: [],
-    frontends: 0,
   };
   const modelCounts = new Map<string, number>();
   const secretCounts = new Map<string, number>();
@@ -875,7 +873,9 @@ export function analyzeManifest(source: string): ManifestInfo {
     const kind = graphKind(root);
     if (!kind) return;
     const graphName = text(at(root, ["metadata", "name"])) ?? `document ${docIndex + 1}`;
-    info.graphs.push({ doc: docIndex, kind, name: graphName, autoApply: text(at(root, ["spec", "autoApply"])) === "true" });
+    // The operator defaults an omitted autoApply to true.
+    const autoApply = text(at(root, ["spec", "autoApply"]))?.toLowerCase() !== "false";
+    info.graphs.push({ doc: docIndex, kind, name: graphName, autoApply });
     if (kind === "DynamoGraphDeploymentRequest") {
       const model = text(at(root, ["spec", "model"]));
       if (model && isModelId(model)) countInto(modelCounts, model);
@@ -911,7 +911,6 @@ export function analyzeManifest(source: string): ManifestInfo {
       const gpus = intOf(child(limits, "nvidia.com/gpu")) ?? intOf(child(requests, "nvidia.com/gpu"));
       const podSpec = at(component, ["podTemplate", "spec"]);
       const dra = itemsOf(child(podSpec, "resourceClaims")).length > 0 || itemsOf(at(container, ["resources", "claims"])).length > 0;
-      if (type === "frontend") info.frontends++;
       info.components.push({
         key: `${graph.doc}:${index}`,
         doc: graph.doc,
@@ -1571,7 +1570,9 @@ function deploySteps(
   let service: string | null = null;
   if (dgds.length === 1 && dgdrs.length === 0) {
     out.push(`kubectl wait --for=condition=Ready dgd/${nameOf(dgds[0])} ${ns} --timeout=30m`);
-    if (info.frontends > 0) service = `${nameOf(dgds[0]).toLowerCase()}-frontend`;
+    const frontend = info.components.find((c) => c.doc === dgds[0].doc && c.type === "frontend");
+    // The operator names the Service <dgd>-<component>, lowercased with dots replaced.
+    if (frontend) service = `${nameOf(dgds[0])}-${frontend.name}`.toLowerCase().replace(/\./g, "-");
   } else if (dgdrs.length === 1 && dgds.length === 0) {
     if (dgdrs[0].autoApply) {
       out.push(

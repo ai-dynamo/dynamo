@@ -104,7 +104,9 @@ Use `--wan-size 1b` (default, 1 GPU) or `--wan-size 14b` (2 GPUs). See the launc
 
 ## Generate a Video from an Image
 
-Provide the source image alongside the prompt in the `/v1/videos` request. See the [launch script](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/launch/text-to-video-diffusion.sh) and [Deployment Examples](../../../recipes/examples/video-generation.mdx) for the full I2V request format and supported models.
+Send the [text-to-video request](text-to-video.md#sglang) with the source image in an
+`input_reference` field. SGLang accepts an HTTP or HTTPS URL there but, unlike vLLM-Omni, not a
+`data:` URI. See the [launch script](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/launch/text-to-video-diffusion.sh) for supported models and options.
 
 ## See Also
 

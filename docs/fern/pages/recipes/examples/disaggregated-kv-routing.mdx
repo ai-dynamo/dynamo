@@ -64,6 +64,9 @@ import { ExampleSelector } from "@/components/ExampleSelector";
 
 **Experimental.** Uses three hosts with eight H200 or four GB300 GPUs each, an RDMA fabric, and
 shared etcd and NATS. Run `prefill` on two hosts, `decode` on the third, and `frontend` on the first.
+These commands use the launcher's H200 defaults. On GB300, use the
+[GB300 worker options](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/tokenspeed/README.md#gb300-worker-options)
+instead.
 
 ```bash
 bash examples/backends/tokenspeed/launch_disagg.sh prefill

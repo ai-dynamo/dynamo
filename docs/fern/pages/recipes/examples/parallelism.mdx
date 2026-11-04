@@ -43,8 +43,14 @@ import { ExampleSelector } from "@/components/ExampleSelector";
 
 <div className="dynamo-example-variant" data-example-variant="local-vllm-dsr1-dep-sh">
 
+Runs on two nodes with eight GPUs each. Replace `192.0.2.10` with the head node's reachable IP
+address, and run the first command on the head node and the second on the other node.
+
 ```bash
-(cd examples/backends/vllm && bash launch/dsr1_dep.sh)
+(cd examples/backends/vllm && bash launch/dsr1_dep.sh \
+  --num-nodes 2 --node-rank 0 --gpus-per-node 8 --master-addr 192.0.2.10)
+(cd examples/backends/vllm && bash launch/dsr1_dep.sh \
+  --num-nodes 2 --node-rank 1 --gpus-per-node 8 --master-addr 192.0.2.10)
 ```
 
 [Source: `dsr1_dep.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/dsr1_dep.sh)
@@ -55,8 +61,13 @@ import { ExampleSelector } from "@/components/ExampleSelector";
 
 <div className="dynamo-example-variant" data-example-variant="local-vllm-multi-node-tp-sh">
 
+Runs on two nodes with eight GPUs each, with NATS and etcd reachable from the head node. Replace
+`192.0.2.10` with the head node's reachable IP address. Start the head node first, then the worker
+node.
+
 ```bash
-(cd examples/backends/vllm && bash launch/multi_node_tp.sh)
+(cd examples/backends/vllm && bash launch/multi_node_tp.sh --head --head-ip 192.0.2.10)
+(cd examples/backends/vllm && bash launch/multi_node_tp.sh --worker --head-ip 192.0.2.10)
 ```
 
 [Source: `multi_node_tp.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/multi_node_tp.sh)

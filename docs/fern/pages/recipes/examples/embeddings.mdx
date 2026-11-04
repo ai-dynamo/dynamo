@@ -54,8 +54,12 @@ This template serves `Qwen/Qwen3-Embedding-0.6B` on one GPU; the local script de
 
 <div className="dynamo-example-variant" data-example-variant="local-vllm-agg-embed-multiworker-sh">
 
+Pass a model for each worker. The same model twice load-balances across both workers; two different
+models route each request to the worker that serves it.
+
 ```bash
-(cd examples/backends/vllm && bash launch/agg_embed_multiworker.sh)
+(cd examples/backends/vllm && bash launch/agg_embed_multiworker.sh \
+  Qwen/Qwen3-Embedding-0.6B Qwen/Qwen3-Embedding-0.6B)
 ```
 
 [Source: `agg_embed_multiworker.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_embed_multiworker.sh)
