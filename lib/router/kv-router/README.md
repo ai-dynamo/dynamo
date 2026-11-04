@@ -93,7 +93,7 @@ before pushing (it needs `cargo-hack`):
 ```bash
 cargo test -p dynamo-kv-router --features http,ingest-zmq,replica-sync-zmq,peer-recovery
 cargo clippy -p dynamo-kv-router --all-targets --features http,ingest-zmq,replica-sync-zmq,peer-recovery
-bash scripts/router_features_check.sh
+cargo hack check --locked -p dynamo-kv-router --each-feature --all-targets
 ```
 
 ## Removed paths (migration map)

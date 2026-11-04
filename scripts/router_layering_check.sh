@@ -15,11 +15,11 @@
 #              protocol behavior grep, the composition crate's no-features
 #              tree, the plugin table, the workspace test-feature check, and
 #              the source rules (no #[doc(hidden)], no cross-crate glob
-#              re-export); pre-commit runs this in about ten seconds.
+#              re-export); run it locally on demand, about ten seconds.
 #   --host     additionally resolve the host packages in HOSTS and
 #              HOSTS_EXTERNAL and fail if any table crate reaches a heavy
 #              external crate in the host's own graph (feature unification
-#              included); CI runs this.
+#              included); the rust-clippy job runs this.
 #
 # Exit status: 0 all checks passed, 1 at least one layering check failed,
 # 2 the gate could not run (missing crate, empty cargo output, bad usage).
