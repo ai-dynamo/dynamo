@@ -2441,3 +2441,168 @@ mod fused_lookup_validation_tests {
         assert_eq!(shared_anchor.children_snapshot().len(), 1);
     }
 }
+
+mod tail_append_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    fn tail_appends(index: &ConcurrentRadixTreeCompressed) -> u64 {
+        index.bench_metrics.tail_appends.load(Ordering::Relaxed)
+    }
+
+    /// Decode stores whose parent is the worker's covered leaf tail take the one-lock
+    /// path, extend the leaf in place, and point their lookup entries at it.
+    #[test]
+    fn decode_stores_append_at_the_covered_leaf_tail() {
+        let index = ConcurrentRadixTreeCompressed::new();
+        let mut lookup = direct_lookup();
+        apply_direct(&index, &mut lookup, make_store_event(0, &[1, 2, 3]));
+        for next in 4..=6 {
+            let prefix: Vec<u64> = (1..next).collect();
+            apply_direct(
+                &index,
+                &mut lookup,
+                make_store_event_with_parent(0, &prefix, &[next]),
+            );
+        }
+
+        assert_eq!(tail_appends(&index), 3);
+        assert_eq!(
+            index.edge_topology_for_test(),
+            vec![edge_topology(&[1, 2, 3, 4, 5, 6], vec![])]
+        );
+        let leaf = index.root.child_snapshot(LocalBlockHash(1)).unwrap();
+        for hash in remove_hashes_with_parent(&[], &[1, 2, 3, 4, 5, 6]) {
+            assert!(Arc::ptr_eq(&lookup.node(worker(0), hash).unwrap(), &leaf));
+        }
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker(0), 6);
+    }
+
+    /// An entry still naming the prefix after another lane split the edge sends the store
+    /// down the general path, which repairs the entry and extends the suffix; the next
+    /// store appends there on the one-lock path.
+    #[test]
+    fn a_stale_parent_entry_falls_back_then_appends() {
+        let index = ConcurrentRadixTreeCompressed::new();
+        let mut lookup0 = direct_lookup();
+        let mut lookup1 = direct_lookup();
+        let chain = [1, 2, 3, 4, 5, 6];
+        apply_direct(&index, &mut lookup0, make_store_event(0, &chain));
+        apply_direct(&index, &mut lookup1, make_store_event(1, &chain));
+        apply_direct(
+            &index,
+            &mut lookup1,
+            make_store_event_with_parent(1, &[1, 2, 3], &[7]),
+        );
+
+        apply_direct(
+            &index,
+            &mut lookup0,
+            make_store_event_with_parent(0, &chain, &[8]),
+        );
+        assert_eq!(tail_appends(&index), 0);
+        apply_direct(
+            &index,
+            &mut lookup0,
+            make_store_event_with_parent(0, &[1, 2, 3, 4, 5, 6, 8], &[9]),
+        );
+        assert_eq!(tail_appends(&index), 1);
+
+        let query = [1, 2, 3, 4, 5, 6, 8, 9];
+        assert_direct_score(&index, &query, worker(0), 8);
+        assert_direct_score(&index, &query, worker(1), 6);
+        assert_direct_score(&index, &[1, 2, 3, 7], worker(1), 4);
+    }
+
+    /// A node that has had children keeps its edge: the store becomes another child.
+    #[test]
+    fn an_internal_parent_gets_a_child() {
+        let index = ConcurrentRadixTreeCompressed::new();
+        let mut lookup = direct_lookup();
+        apply_direct(&index, &mut lookup, make_store_event(0, &[1, 2, 3]));
+        // Splits after block 2, leaving `[1, 2]` internal with the worker covering its tail.
+        apply_direct(
+            &index,
+            &mut lookup,
+            make_store_event_with_parent(0, &[1, 2], &[9]),
+        );
+        apply_direct(
+            &index,
+            &mut lookup,
+            make_store_event_with_parent(0, &[1, 2], &[10]),
+        );
+
+        assert_eq!(tail_appends(&index), 0);
+        assert_eq!(
+            index.edge_topology_for_test(),
+            vec![edge_topology(
+                &[1, 2],
+                vec![
+                    edge_topology(&[3], vec![]),
+                    edge_topology(&[9], vec![]),
+                    edge_topology(&[10], vec![]),
+                ],
+            )]
+        );
+    }
+
+    /// An anchor in the worker's lookup, covered after an empty store under it, still
+    /// never extends.
+    #[test]
+    fn an_anchor_parent_gets_a_child() {
+        let index = ConcurrentRadixTreeCompressed::new();
+        let mut lookup = direct_lookup();
+        let anchor_id = remove_hashes_with_parent(&[], &[1, 2])[1];
+        index
+            .apply_anchor(
+                worker(1),
+                AnchorTask {
+                    anchor_id,
+                    anchor_local_hash: LocalBlockHash(2),
+                    anchor_depth: 2,
+                },
+            )
+            .unwrap();
+        apply_direct(
+            &index,
+            &mut lookup,
+            make_store_event_with_parent(3, &[1, 2], &[]),
+        );
+        apply_direct(
+            &index,
+            &mut lookup,
+            make_store_event_with_parent(3, &[1, 2], &[5]),
+        );
+
+        assert_eq!(tail_appends(&index), 0);
+        let anchor = index.anchor_nodes.get(&anchor_id).unwrap().clone();
+        assert_eq!(anchor.edge_len_for_test(), 1);
+        assert_eq!(anchor.children_snapshot().len(), 1);
+    }
+
+    /// An entry for a tail the worker does not cover, which a race can leave behind, is
+    /// rejected by the general path rather than extended.
+    #[test]
+    fn an_uncovered_tail_is_rejected() {
+        let index = ConcurrentRadixTreeCompressed::new();
+        let mut lookup0 = direct_lookup();
+        let mut lookup1 = direct_lookup();
+        apply_direct(&index, &mut lookup0, make_store_event(0, &[1, 2, 3]));
+        let leaf = index.root.child_snapshot(LocalBlockHash(1)).unwrap();
+        let tail = remove_hashes_with_parent(&[], &[1, 2, 3])[2];
+        lookup1.insert(worker(1), tail, &leaf);
+
+        let result = index.apply_event(
+            &mut lookup1,
+            make_store_event_with_parent(1, &[1, 2, 3], &[4]),
+            None,
+        );
+
+        assert!(matches!(
+            result,
+            Err(KvCacheEventError::ParentBlockNotFound)
+        ));
+        assert_eq!(tail_appends(&index), 0);
+        assert_eq!(leaf.edge_len_for_test(), 3);
+    }
+}

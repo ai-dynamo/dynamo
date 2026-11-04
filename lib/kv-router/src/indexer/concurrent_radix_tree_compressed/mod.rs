@@ -85,6 +85,9 @@ struct CrtcBenchMetrics {
     node_splits: AtomicU64,
     lookup_repair_scans: AtomicU64,
     lookup_repair_entries: AtomicU64,
+    /// Stores appended by the one-lock tail path.
+    #[cfg(test)]
+    tail_appends: AtomicU64,
 }
 
 #[cfg(any(test, feature = "bench"))]
@@ -94,6 +97,8 @@ impl CrtcBenchMetrics {
             node_splits: AtomicU64::new(0),
             lookup_repair_scans: AtomicU64::new(0),
             lookup_repair_entries: AtomicU64::new(0),
+            #[cfg(test)]
+            tail_appends: AtomicU64::new(0),
         }
     }
 }
@@ -327,12 +332,16 @@ impl ConcurrentRadixTreeCompressed {
     ) -> bool {
         let changed =
             lookup.upsert_all(worker, blocks.iter().map(|block| block.block_hash), node) > 0;
+        self.insert_lifecycle_hashes(worker, blocks);
+        changed
+    }
+
+    fn insert_lifecycle_hashes(&self, worker: WorkerWithDpRank, blocks: &[KvCacheStoredBlockData]) {
         if self.lifecycle.is_enabled() {
             for block in blocks {
                 self.lifecycle.insert(worker, block.block_hash);
             }
         }
-        changed
     }
 
     // ------------------------------------------------------------------

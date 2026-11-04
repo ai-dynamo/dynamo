@@ -270,6 +270,23 @@ impl<V: Copy + Eq> BlockLookup<V> {
         changed
     }
 
+    /// How many leading `keys` hold `value`, prefetching slots ahead as the batch
+    /// operations do.
+    pub(crate) fn leading_holding(&self, keys: &[ExternalSequenceBlockHash], value: V) -> usize {
+        for &key in keys.iter().take(PREFETCH_DISTANCE) {
+            self.prefetch(key);
+        }
+        for (i, key) in keys.iter().enumerate() {
+            if let Some(&ahead) = keys.get(i + PREFETCH_DISTANCE) {
+                self.prefetch(ahead);
+            }
+            if self.get(key) != Some(&value) {
+                return i;
+            }
+        }
+        keys.len()
+    }
+
     /// Points keys holding `from` at `to`, leaving missing keys and keys holding anything
     /// else alone: lookup repair treats a missing or differently placed entry as
     /// meaningful state. Returns the number changed.
@@ -375,6 +392,23 @@ mod tests {
                 }
                 assert_eq!(lookup.len(), model.len());
                 assert_eq!(lookup.get(&k), model.get(&k));
+
+                // A run of keys holding one value, then any keys, as removal grouping sees.
+                if let Some(&value) = model.get(&k) {
+                    let mut run: Vec<_> = model
+                        .iter()
+                        .filter(|&(_, &v)| v == value)
+                        .map(|(&key, _)| key)
+                        .collect();
+                    run.sort();
+                    run.truncate(rng.usize(..=run.len()));
+                    run.extend((0..rng.usize(..4)).map(|_| key(rng.u64(..key_space))));
+                    let expected = run
+                        .iter()
+                        .take_while(|key| model.get(key) == Some(&value))
+                        .count();
+                    assert_eq!(lookup.leading_holding(&run, value), expected);
+                }
             }
 
             let mut entries: Vec<_> = lookup.iter().map(|(k, v)| (k, *v)).collect();
