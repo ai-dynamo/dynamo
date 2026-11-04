@@ -76,6 +76,12 @@ impl From<RouterMode> for RsRouterMode {
     }
 }
 
+#[cfg(all(
+    feature = "jemalloc",
+    not(target_env = "msvc"),
+    not(target_env = "musl")
+))]
+mod allocator;
 mod backend;
 mod context;
 mod engine;
