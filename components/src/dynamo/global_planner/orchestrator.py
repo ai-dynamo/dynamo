@@ -1015,13 +1015,13 @@ class Orchestrator:
         targets: list[TargetReplica],
         pools: dict[str, PoolSpec],
     ) -> bool:
-        """True if the request contains both up and down directions across pools."""
+        """True if pools in the request have both positive and negative GPU deltas."""
         has_up = False
         has_down = False
         for target in targets:
             sub_type = target.sub_component_type.value
             spec = pools.get(sub_type)
-            if spec is None:
+            if spec is None or spec.gpu_per_replica == 0:
                 continue
             direction = self._direction(target.desired_replicas, spec.current_replicas)
             if direction == "up":

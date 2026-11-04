@@ -349,6 +349,14 @@ hardware offload recipe.
   polynomial model.
 - `router.policy: kv_router` supports one or more routable workers. Set
   `router.prefill_load_model.type` to `none` or `aic`.
+- With `router.policy: kv_router`, each vLLM aggregated or prefill worker that sets
+  `engine.workers.<role>.kv_cache.kvcr` gets the `kv.fetch` hint that the production
+  [KV router](../../developer-guide/knowledge-base/modular-components/router/topology-aware-kv-transfer.md#kv-fetch-hints)
+  chooses, so it pulls the prompt prefix it lacks from the named peer's G2 (see
+  [KV Cache Runner (KVCR) peer fetch](https://github.com/ai-dynamo/aisimulate/blob/main/docs/replay/engine/kv-cache.md#kvcr-peer-fetch)).
+  `round_robin` sends no hints, and neither does `router.overlap_score_credit: 0`, which reads no KV
+  index; the router then logs one warning. Replay treats all workers as one transfer island and
+  models no cache-owner sources.
 - `planner.policy` is `disabled` or `enabled`. Enabled settings use the production
   `PlannerConfig` defaults and normalization. The default target is `throughput`, which enables
   load scaling and disables throughput scaling. Throughput scaling with `target: sla` requires

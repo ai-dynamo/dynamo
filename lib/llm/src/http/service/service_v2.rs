@@ -21,7 +21,10 @@ use super::frontend_extension::{
     FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
 };
 use super::metrics;
-use super::metrics::{register_lora_allocation_metrics, register_model_ready_metric};
+use super::metrics::{
+    register_frontend_metrics_start_time_metric, register_lora_allocation_metrics,
+    register_model_ready_metric,
+};
 use super::worker_metrics::register_worker_metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
@@ -49,7 +52,8 @@ use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
 use crate::frontend_config::{
-    DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, FrontendApiConfig, MetricsConfig,
+    ChatTemplateDefaults, DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION, FrontendApiConfig,
+    MediaRejectionConfig, MetricsConfig,
 };
 
 /// Middleware that echoes `x-request-id` from request to response headers.
@@ -120,29 +124,47 @@ fn close_draining_connection(
     response
 }
 
+/// Error protocol of a mounted inference route, used when the readiness gate
+/// rejects a request before the route's own error handling runs.
+#[derive(Clone, Copy)]
+enum MountedProtocol {
+    Decision(dynamo_decisions::Dialect),
+    Anthropic,
+}
+
 struct InferenceReadinessState {
     state: Arc<State>,
-    decision_dialects: HashMap<String, dynamo_decisions::Dialect>,
+    mounted_protocols: HashMap<String, MountedProtocol>,
 }
 
 impl InferenceReadinessState {
     fn rejection(&self, request: &axum::extract::Request) -> axum::response::Response {
-        let unavailable = super::openai::ErrorMessage::_service_unavailable();
-        let dialect = request
+        // Records the unavailable failure once; the protocol bodies below must not record again.
+        let (status, axum::Json(error)) = super::openai::ErrorMessage::_service_unavailable();
+        let protocol = request
             .extensions()
             .get::<axum::extract::MatchedPath>()
             .filter(|_| request.method() == axum::http::Method::POST)
-            .and_then(|path| self.decision_dialects.get(path.as_str()));
-        let Some(&dialect) = dialect else {
-            return draining_inference_response(request.version());
+            .and_then(|path| self.mounted_protocols.get(path.as_str()));
+        let dialect = match protocol {
+            Some(&MountedProtocol::Decision(dialect)) => dialect,
+            Some(MountedProtocol::Anthropic) => {
+                let response = super::anthropic::readiness_rejection_response(
+                    request.headers(),
+                    status,
+                    error.message(),
+                );
+                return close_draining_connection(response, request.version());
+            }
+            None => return draining_inference_response(request.version()),
         };
-        let error = dynamo_decisions::DecisionError::new(
+        let decision_error = dynamo_decisions::DecisionError::new(
             dialect,
-            unavailable.0.as_u16(),
+            status.as_u16(),
             "server_error",
-            unavailable.1.0.message(),
+            error.message(),
         );
-        let mut response = (unavailable.0, axum::Json(error.response_body())).into_response();
+        let mut response = (status, axum::Json(decision_error.response_body())).into_response();
         let request_id = super::openai::get_or_create_request_id(request.headers());
         super::systemone::attach_request_ids(&mut response, &request_id);
         close_draining_connection(response, request.version())
@@ -553,6 +575,7 @@ struct StateFlags {
     images_endpoints_enabled: AtomicBool,
     videos_endpoints_enabled: AtomicBool,
     audios_endpoints_enabled: AtomicBool,
+    transcriptions_endpoints_enabled: AtomicBool,
     realtime_endpoints_enabled: AtomicBool,
     responses_endpoints_enabled: AtomicBool,
     anthropic_endpoints_enabled: AtomicBool,
@@ -573,6 +596,9 @@ impl StateFlags {
             EndpointType::Images => self.images_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Videos => self.videos_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Audios => self.audios_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Transcriptions => self
+                .transcriptions_endpoints_enabled
+                .load(Ordering::Relaxed),
             EndpointType::Realtime => self.realtime_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Responses => self.responses_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::AnthropicMessages => {
@@ -612,6 +638,9 @@ impl StateFlags {
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Audios => self
                 .audios_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Transcriptions => self
+                .transcriptions_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Realtime => self
                 .realtime_endpoints_enabled
@@ -663,6 +692,7 @@ impl State {
                 images_endpoints_enabled: AtomicBool::new(false),
                 videos_endpoints_enabled: AtomicBool::new(false),
                 audios_endpoints_enabled: AtomicBool::new(false),
+                transcriptions_endpoints_enabled: AtomicBool::new(false),
                 realtime_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
                 anthropic_endpoints_enabled: AtomicBool::new(false),
@@ -770,6 +800,10 @@ impl State {
             (model.has_images_engine(), EndpointType::Images),
             (model.has_videos_engine(), EndpointType::Videos),
             (model.has_audios_engine(), EndpointType::Audios),
+            (
+                model.has_transcriptions_engine(),
+                EndpointType::Transcriptions,
+            ),
             (model.has_realtime_engine(), EndpointType::Realtime),
             (
                 model.has_generate_engine()
@@ -884,6 +918,14 @@ impl State {
     /// Response field used for emitted OpenAI-compatible reasoning content.
     pub fn reasoning_field(&self) -> ReasoningField {
         self.frontend_api_config.reasoning_field()
+    }
+
+    pub fn media_rejection(&self) -> MediaRejectionConfig {
+        self.frontend_api_config.media_rejection()
+    }
+
+    pub fn chat_template_defaults(&self) -> &ChatTemplateDefaults {
+        self.frontend_api_config.chat_template_defaults()
     }
 }
 
@@ -1570,7 +1612,7 @@ impl HttpServiceConfigBuilder {
         }
 
         let model_manager = Arc::new(ModelManager::new());
-        let cancel_token = config.cancel_token.unwrap_or_default();
+        let cancel_token = config.cancel_token.unwrap_or_default().child_token();
         // Use the provided discovery client, or fall back to a no-op memory-backed one
         // (for in-process modes that don't need discovery)
         let discovery_client = config.discovery.unwrap_or_else(|| {
@@ -1626,6 +1668,7 @@ impl HttpServiceConfigBuilder {
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
+        register_frontend_metrics_start_time_metric(&registry)?;
         state
             .metrics_clone()
             .register_with_model_manager(&registry, Some(state.manager_clone()))?;
@@ -1724,17 +1767,22 @@ impl HttpServiceConfigBuilder {
             systemone_enabled,
             config.enable_batch_endpoints && config.batch_gateway_url.is_none(),
         )?;
-        let decision_dialects = endpoint_routes
+        // Route docs carry the resolved paths, including custom Anthropic bases.
+        let mounted_protocols = endpoint_routes
             .iter()
-            .filter(|(endpoint, _, _)| *endpoint == EndpointType::SystemOne)
-            .flat_map(|(_, docs, _)| docs)
-            .map(|doc| {
-                let dialect = if doc.path() == super::systemone::DECISIONS_PATH {
-                    dynamo_decisions::Dialect::OpenAi
-                } else {
-                    dynamo_decisions::Dialect::Jev
+            .flat_map(|(endpoint, docs, _)| docs.iter().map(move |doc| (*endpoint, doc)))
+            .filter_map(|(endpoint, doc)| {
+                let protocol = match endpoint {
+                    EndpointType::SystemOne if doc.path() == super::systemone::DECISIONS_PATH => {
+                        MountedProtocol::Decision(dynamo_decisions::Dialect::OpenAi)
+                    }
+                    EndpointType::SystemOne => {
+                        MountedProtocol::Decision(dynamo_decisions::Dialect::Jev)
+                    }
+                    EndpointType::AnthropicMessages => MountedProtocol::Anthropic,
+                    _ => return None,
                 };
-                (doc.path().to_owned(), dialect)
+                Some((doc.path().to_owned(), protocol))
             })
             .collect();
         let mut inference_router = axum::Router::new();
@@ -1750,7 +1798,7 @@ impl HttpServiceConfigBuilder {
         inference_router = inference_router.layer(axum::middleware::from_fn_with_state(
             Arc::new(InferenceReadinessState {
                 state: state.clone(),
-                decision_dialects,
+                mounted_protocols,
             }),
             track_inflight_inference,
         ));
@@ -1919,6 +1967,13 @@ impl HttpServiceConfigBuilder {
         self
     }
 
+    pub fn media_rejection(mut self, media_rejection: MediaRejectionConfig) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .set_media_rejection(media_rejection);
+        self
+    }
+
     fn get_endpoints_router(
         state: Arc<State>,
         request_template: &Option<RequestTemplate>,
@@ -1947,6 +2002,8 @@ impl HttpServiceConfigBuilder {
         let (images_docs, images_route) = super::openai::images_router(state.clone(), None);
         let (videos_docs, videos_route) = super::openai::videos_router(state.clone(), None);
         let (audios_docs, audios_route) = super::openai::audios_router(state.clone(), None);
+        let (transcriptions_docs, transcriptions_route) =
+            super::transcriptions::transcriptions_router(state.clone(), None);
         let (realtime_docs, realtime_route) = super::realtime::realtime_router(state.clone(), None);
         let (responses_docs, responses_route) = super::openai::responses_router(
             state.clone(),
@@ -1963,6 +2020,10 @@ impl HttpServiceConfigBuilder {
         endpoint_routes.insert(EndpointType::Images, (images_docs, images_route));
         endpoint_routes.insert(EndpointType::Videos, (videos_docs, videos_route));
         endpoint_routes.insert(EndpointType::Audios, (audios_docs, audios_route));
+        endpoint_routes.insert(
+            EndpointType::Transcriptions,
+            (transcriptions_docs, transcriptions_route),
+        );
         endpoint_routes.insert(EndpointType::Realtime, (realtime_docs, realtime_route));
         endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
 
@@ -2586,6 +2647,42 @@ mod tests {
         assert_eq!(
             client.get(&url).send().await.unwrap().status(),
             reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn model_readiness_waits_for_transcriptions_route() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder().port(port).build().unwrap();
+        let state = service.state_clone();
+        let control = service.clone();
+        state
+            .manager()
+            .add_transcriptions_model("whisper", "worker", Arc::new(ReadinessOnlyEngine))
+            .unwrap();
+        control
+            .enable_model_endpoint(EndpointType::Transcriptions, false)
+            .unwrap();
+        let handle = tokio::spawn(async move {
+            service
+                .run_with_listener(CancellationToken::new(), listener)
+                .await
+                .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{port}/v1/models/whisper/ready");
+        assert_eq!(
+            client.get(&url).send().await.unwrap().status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+        control
+            .enable_model_endpoint(EndpointType::Transcriptions, true)
+            .unwrap();
+        assert_eq!(
+            client.get(&url).send().await.unwrap().status(),
+            reqwest::StatusCode::OK
         );
         handle.abort();
     }
@@ -3283,6 +3380,70 @@ mod tests {
         .unwrap();
     }
 
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn shutdown_deadline_interrupts_handlers_and_response_bodies() {
+        temp_env::async_with_vars(
+            [(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("1"))],
+            async {
+                for (tls, before_headers) in [(false, false), (true, true)] {
+                        let certificates = make_mtls_test_certificates();
+                        let parent = CancellationToken::new();
+                        let mut service = HttpService::builder()
+                            .host("127.0.0.1").port(0).enable_tls(tls)
+                            .cancel_token(Some(parent.clone()))
+                            .tls_cert_path(tls.then(|| certificates.server_cert.path().to_path_buf()))
+                            .tls_key_path(tls.then(|| certificates.server_key.path().to_path_buf()))
+                            .build().unwrap();
+                        let state = service.state_clone();
+                        let entered = CancellationToken::new();
+                        let released = CancellationToken::new();
+                        let handler_entered = entered.clone();
+                        let handler_released = released.clone();
+                        service.router = axum::Router::new().route("/blocked", axum::routing::get(move || {
+                            let entered = handler_entered.clone();
+                            let guard = handler_released.clone().drop_guard();
+                            async move {
+                                entered.cancel();
+                                if before_headers { std::future::pending::<()>().await; }
+                                Body::from_stream(async_stream::stream! {
+                                    let _guard = guard;
+                                    yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"first"));
+                                    std::future::pending::<()>().await;
+                                })
+                            }
+                        })).layer(axum::middleware::from_fn_with_state(state.clone(), track_inflight_inference));
+                        let cancel = CancellationToken::new();
+                        let server_cancel = cancel.clone();
+                        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                        let address = listener.local_addr().unwrap();
+                        let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                            service.run_with_listener(server_cancel, listener).await
+                        }));
+                        let client = reqwest::Client::builder().no_proxy().danger_accept_invalid_certs(true)
+                            .timeout(Duration::from_secs(4)).build().unwrap();
+                        let request = client.get(format!("{}://{address}/blocked", if tls { "https" } else { "http" })).send();
+                        let mut request = Some(tokio::spawn(request));
+                        tokio::time::timeout(Duration::from_secs(2), entered.cancelled()).await.unwrap();
+                        let response = if before_headers { None } else { Some(request.take().unwrap().await.unwrap().unwrap()) };
+                        cancel.cancel();
+                        if let Some(response) = response {
+                            assert!(response.bytes().await.is_err(), "interruption must not look like EOF");
+                        }
+                        tokio::time::timeout(Duration::from_secs(3), task).await.unwrap().unwrap().unwrap();
+                        tokio::time::timeout(Duration::from_secs(1), released.cancelled()).await.unwrap();
+                        if let Some(request) = request
+                            && let Ok(response) = request.await.unwrap()
+                        {
+                            assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+                        }
+                        assert_eq!(state.inflight_count(), 0);
+                        assert!(!parent.is_cancelled(), "local deadline must not cancel the runtime");
+                }
+            },
+        ).await;
+    }
+
     /// Verifies that an unsupported content type returns the standard JSON error
     /// envelope instead of Axum's default plain-text rejection.
     #[tokio::test]
@@ -3463,6 +3624,8 @@ mod tests {
     /// Verifies that unmatched routes under the Anthropic Messages API path return
     /// the Anthropic error envelope.
     #[tokio::test]
+    // Serial because other tests set `DYN_HTTP_SVC_ANTHROPIC_PATH`.
+    #[serial_test::serial]
     async fn test_unmatched_anthropic_route_returns_anthropic_envelope() {
         let (port, _state, handle) =
             spawn_service(|builder| builder.enable_anthropic_endpoints(true)).await;
@@ -4184,6 +4347,88 @@ mod tests {
                         .await
                         .unwrap();
                     assert_eq!(unmatched.status(), axum::http::StatusCode::NOT_FOUND);
+                    assert_eq!(service.state().inflight_count(), 0);
+                },
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn anthropic_readiness_rejections_preserve_envelope_and_request_ids() {
+        use tower::ServiceExt;
+
+        for configured_path in [None, Some("/custom/messages")] {
+            temp_env::async_with_vars(
+                [(HTTP_SVC_ANTHROPIC_PATH_ENV, configured_path)],
+                async move {
+                    let service = HttpService::builder()
+                        .enable_anthropic_endpoints(true)
+                        .build()
+                        .unwrap();
+                    service.state().start_draining();
+                    let base = configured_path.unwrap_or("/v1/messages");
+                    let count_tokens = format!("{base}/count_tokens");
+                    for path in [base, count_tokens.as_str()] {
+                        let response = service
+                            .router
+                            .clone()
+                            .oneshot(
+                                axum::http::Request::post(path)
+                                    .header("content-type", "application/json")
+                                    .header("anthropic-version", "2023-06-01")
+                                    .header("x-request-id", "anthropic-readiness")
+                                    .body(Body::from("{}"))
+                                    .unwrap(),
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            response.status(),
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                            "{path}"
+                        );
+                        assert_eq!(response.headers()[header::CONNECTION], "close");
+                        let request_id = response.headers()["request-id"]
+                            .to_str()
+                            .unwrap()
+                            .to_owned();
+                        // The server owns `request-id`; clients correlate with `x-request-id`.
+                        assert!(uuid::Uuid::parse_str(&request_id).is_ok());
+                        assert_eq!(response.headers()["x-request-id"], "anthropic-readiness");
+                        let body = axum::body::to_bytes(response.into_body(), 4096)
+                            .await
+                            .unwrap();
+                        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        assert_eq!(body["type"], "error", "{path}: {body}");
+                        assert_eq!(body["error"]["type"], "overloaded_error");
+                        assert_eq!(body["error"]["message"], "Service is not ready");
+                        assert_eq!(body["request_id"], request_id.as_str());
+                    }
+
+                    // Other inference routes keep the OpenAI body.
+                    let control = service
+                        .router
+                        .clone()
+                        .oneshot(
+                            axum::http::Request::post("/v1/chat/completions")
+                                .header("content-type", "application/json")
+                                .body(Body::from("{}"))
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        control.status(),
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE
+                    );
+                    let body = axum::body::to_bytes(control.into_body(), 4096)
+                        .await
+                        .unwrap();
+                    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(body["code"], 503);
+                    assert_ne!(body["type"], "error");
                     assert_eq!(service.state().inflight_count(), 0);
                 },
             )

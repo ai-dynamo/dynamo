@@ -56,13 +56,14 @@ Backend workers expose `dynamo_component_*` only when `DYN_SYSTEM_PORT` is set (
 
 Emitted by `python -m dynamo.frontend` at `/metrics` on the HTTP port (`--http-port`, default `8000`). The frontend serves its [router](#router-metrics) and [runtime](#every-process) metrics on the same port and does not use `DYN_SYSTEM_PORT`. Frontend metrics carry no automatic labels.
 
-- `--metrics-prefix` (`DYN_METRICS_PREFIX`) replaces the `dynamo_frontend` prefix of the `dynamo_frontend_*` metrics, except `dynamo_frontend_stage_*`, `dynamo_frontend_tokenize_seconds`, `dynamo_frontend_template_seconds`, `dynamo_frontend_detokenize_*`, `dynamo_frontend_tokenizer_cache_*`, `dynamo_frontend_worker_*`, `dynamo_frontend_router_*`, `dynamo_frontend_lora_*`, and `dynamo_frontend_event_loop_*`, which keep their names.
+- `--metrics-prefix` (`DYN_METRICS_PREFIX`) replaces the `dynamo_frontend` prefix of the `dynamo_frontend_*` metrics, except `dynamo_frontend_stage_*`, `dynamo_frontend_tokenize_seconds`, `dynamo_frontend_template_seconds`, `dynamo_frontend_detokenize_*`, `dynamo_frontend_tokenizer_cache_*`, `dynamo_frontend_worker_*`, `dynamo_frontend_router_*`, `dynamo_frontend_lora_*`, `dynamo_frontend_event_loop_*`, and `dynamo_frontend_metrics_start_time_seconds`, which keep their names.
 - With `--kserve-grpc-server`, the frontend serves metrics on `DYN_GRPC_METRICS_PORT` (default `8788`) instead. The model configuration, migration, router, and routing overhead metrics are not exposed in that mode.
 
 For endpoints that canonicalize aliases, the `model` label holds the primary served model name — the first `--served-model-name` value — so a request sent to an alias is counted under the primary. A name the frontend has not registered is counted under `unknown_model`.
 
 | Metric | Type | Labels | Description | Status |
 |---|---|---|---|---|
+| `dynamo_frontend_metrics_start_time_seconds` | gauge | — | Unix timestamp in seconds when the HTTP frontend first initializes its metrics in this process. One series per frontend scrape target; all HTTP registries in the process expose the same fixed value. Planner uses it alongside request counters to detect a new exporter lifetime and reset its rate baseline. This is not the OS process start time or a model readiness signal. Not exposed by the KServe gRPC metrics endpoint. | Experimental |
 | `dynamo_frontend_active_requests` | gauge | `model` | Requests currently being handled by the frontend, from HTTP handler entry until the response stream completes. The top-level in-flight count with no stage breakdown. | |
 | `dynamo_frontend_stage_requests` | gauge | `stage`, `phase` | Requests currently in a given frontend pipeline stage. See [Stage values](metric-labels.mdx#stage-values) and [Phase values](metric-labels.mdx#phase-values). | |
 | `dynamo_frontend_inflight_requests` | gauge | `model` | In-flight requests, kept for backward compatibility. Same value as `dynamo_frontend_active_requests`; use that instead. | Deprecated |
