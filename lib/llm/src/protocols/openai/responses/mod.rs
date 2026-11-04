@@ -1499,9 +1499,10 @@ impl ResponseParams {
         include_requests_logprobs(self.include.as_deref())
     }
 
-    /// The `top_logprobs` value the response object reports.
+    /// The `top_logprobs` value the response object reports: the count the
+    /// backend was asked for, so a request above the supported cap sees the cap.
     pub(crate) fn echoed_top_logprobs(&self) -> u8 {
-        self.top_logprobs.unwrap_or(0)
+        convert_top_logprobs(self.top_logprobs).unwrap_or(0)
     }
 
     fn reasoning_summary_requested(&self) -> bool {
@@ -2159,6 +2160,15 @@ mod tests {
 
         let resp = chat_completion_to_response(chat_resp.clone(), &params, None).unwrap();
         assert_eq!(resp.inner.top_logprobs, Some(2));
+        let capped = ResponseParams {
+            top_logprobs: Some(21),
+            ..params.clone()
+        };
+        assert_eq!(
+            capped.echoed_top_logprobs(),
+            20,
+            "echo the count sent to chat"
+        );
         let OutputItem::Message(message) = &resp.inner.output[0] else {
             panic!("expected message output");
         };

@@ -34,7 +34,7 @@ use serde::{
 };
 use uuid::Uuid;
 
-use dynamo_protocols::types::{ChatCompletionMessageContent, FinishReason};
+use dynamo_protocols::types::{ChatChoiceStream, ChatCompletionMessageContent, FinishReason};
 
 use super::{
     ResponseParams, chat_logprobs_to_output_text, output_text_logprobs_to_events,
@@ -218,6 +218,21 @@ impl ResponseStreamConverter {
                     }),
                 });
             events.push(self.make_sse_event(&added));
+        }
+    }
+
+    /// Chat scores every generated token, whatever the parser made of it.
+    /// Queue a choice's scores in arrival order; the next text delta, or the
+    /// close of the open message, carries them.
+    fn queue_choice_logprobs(&mut self, choice: &ChatChoiceStream) {
+        if self.params.logprobs_requested()
+            && let Some(entries) = choice
+                .logprobs
+                .as_ref()
+                .and_then(|lp| lp.content.as_deref())
+        {
+            self.pending_logprobs
+                .extend(chat_logprobs_to_output_text(entries));
         }
     }
 
@@ -555,6 +570,17 @@ impl ResponseStreamConverter {
                 }
             }
         }
+        // Scores on an end-boundary chunk belong to the message that closes
+        // here, so queue them before the close drains the buffer into it.
+        let end_boundary = matches!(
+            &chunk.message_boundary,
+            Some(super::super::chat_completions::MessageBoundary::End)
+        );
+        if end_boundary {
+            for choice in &chunk.inner.choices {
+                self.queue_choice_logprobs(choice);
+            }
+        }
         let mut should_finish_function_calls = false;
         match &chunk.message_boundary {
             Some(super::super::chat_completions::MessageBoundary::Start(phase)) => {
@@ -577,16 +603,8 @@ impl ResponseStreamConverter {
         for choice in &chunk.inner.choices {
             let delta = &choice.delta;
 
-            // Chat scores every generated token, whatever the parser made of
-            // it. Queue them in arrival order; the next text delta carries them.
-            if self.params.logprobs_requested()
-                && let Some(entries) = choice
-                    .logprobs
-                    .as_ref()
-                    .and_then(|lp| lp.content.as_deref())
-            {
-                self.pending_logprobs
-                    .extend(chat_logprobs_to_output_text(entries));
+            if !end_boundary {
+                self.queue_choice_logprobs(choice);
             }
 
             if let Some(reasoning) = delta.reasoning_content.as_deref()
@@ -1984,6 +2002,53 @@ mod tests {
         assert_eq!(text["text"], "hi!");
         assert_eq!(logprob_tokens(&text["logprobs"]), ["A", "B", "C", "D"]);
         assert_eq!(text["logprobs"][1]["bytes"], serde_json::json!([66]));
+    }
+
+    /// Scores on the chunk that ends a message belong to that message, and scores
+    /// on the chunk that starts the next one belong to the next.
+    #[test]
+    fn boundary_chunk_scores_stay_with_their_message() {
+        use super::super::super::chat_completions::MessageBoundary;
+        use dynamo_protocols::types::responses::MessagePhase;
+
+        let mut end = finish_chunk(FinishReason::Stop);
+        end.inner.choices[0].finish_reason = None;
+        end.message_boundary = Some(MessageBoundary::End);
+        let end = scored(end, "B");
+        let mut start = finish_chunk(FinishReason::Stop);
+        start.inner.choices[0].finish_reason = None;
+        start.message_boundary = Some(MessageBoundary::Start(MessagePhase::FinalAnswer));
+        let start = scored(start, "C");
+
+        let mut conv = ResponseStreamConverter::new("test-model".into(), logprob_params());
+        let _ = conv.emit_start_events();
+        conv.process_chunk(&scored(text_chunk("first"), "A"));
+        conv.process_chunk(&end);
+        conv.process_chunk(&start);
+        conv.process_chunk(&scored(text_chunk("second"), "D"));
+        conv.process_chunk(&finish_chunk(FinishReason::Stop));
+        let _ = conv.emit_end_events();
+
+        let messages: Vec<Vec<String>> = conv
+            .completed_output()
+            .iter()
+            .filter_map(|item| match item {
+                OutputItem::Message(message) => Some(
+                    message
+                        .content
+                        .iter()
+                        .filter_map(|part| match part {
+                            OutputMessageContent::OutputText(text) => text.logprobs.as_ref(),
+                            _ => None,
+                        })
+                        .flatten()
+                        .map(|entry| entry.token.clone())
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(messages, [["A", "B"], ["C", "D"]]);
     }
 
     /// Without `include: message.output_text.logprobs`, chat scores are dropped and
