@@ -22,7 +22,6 @@ class SGLangMmRoutingPayload(CachedTokensChatPayload):
         if sglang_has_wide_mm_pad_values():
             # Wide-pad SGLang builds route media by text prefix only (#17653),
             # so exact media overlap is required only on scalar-pad builds.
-            # Keep response-content and worker cached-token checks enabled.
             self.min_avg_kv_hit_rate = 0.0
 
 
