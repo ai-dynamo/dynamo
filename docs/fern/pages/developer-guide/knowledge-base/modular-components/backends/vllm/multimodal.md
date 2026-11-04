@@ -80,6 +80,7 @@ The main multimodal vLLM launchers in this repo are:
 | E/PD (Encode + PD) | CUDA | `disagg_multimodal_e_pd.sh` | Separate encoder and embedding-cache workflows |
 | E/P/D (Full Disaggregation) | CUDA | `disagg_multimodal_epd.sh` | Separate encode, prefill, and decode workers |
 | Aggregated ASR | CUDA | `agg_asr.sh` | Speech recognition with Qwen3-ASR; see [Speech Recognition (ASR)](#speech-recognition-asr) |
+| Aggregated streaming ASR | CUDA | `agg_asr_realtime.sh` | Streaming transcription with Qwen3-ASR over `/v1/realtime`; see [Streaming Transcription](#streaming-transcription) |
 
 ### Custom Vision Encoders
 
@@ -389,7 +390,10 @@ CUDA_VISIBLE_DEVICES=0 bash launch/disagg_multimodal_epd.sh --model Qwen/Qwen3-V
 
 ## Audio Serving
 
-Dynamo supports `audio_url` requests for audio-capable models. Audio is loaded via vLLM's `AudioMediaIO` at native sample rate, and vLLM resamples it to the rate the model's feature extractor expects before extracting features. vLLM resamples through PyAV, which the Dynamo runtime images do not ship, so audio whose sample rate differs from the model's needs PyAV installed. See [Additional Media Decoders](../../../../../use-cases/multimodal-serving/additional-media-decoders.md). Omni models can handle `image_url`, `video_url`, and `audio_url` in the same request.
+Dynamo supports `audio_url` requests for audio-capable models. Audio is loaded via vLLM's `AudioMediaIO` at native sample rate, and vLLM resamples it to the rate the model's feature extractor expects before extracting features. Omni models can handle `image_url`, `video_url`, and `audio_url` in the same request.
+
+> [!TIP]
+> Resampling needs PyAV, which the Dynamo runtime images do not ship. To accept audio at a rate other than the model's, see [Audio Sample Rates](#audio-sample-rates).
 
 ### Aggregated Serving
 
@@ -495,17 +499,17 @@ language English<asr_text>Yet these thoughts affected Hester Prynne less with ho
 
 Strip the text up to and including `<asr_text>` to keep only the transcript. With `"stream": true`, the prefix arrives in the first chunks.
 
-The Dynamo runtime images accept audio at the model's 16 kHz rate. Audio at any other rate fails with HTTP 500 until PyAV is installed, and the frontend or worker log shows `ImportError: Please install vllm[audio] for audio support`. With the Python chat processor, the frontend also resamples audio, so install PyAV where both the frontend and the worker run, or convert audio to 16 kHz before sending it:
-
-```bash
-pip install --no-deps 'av>=18.0.0,<19'
-```
-
 Dynamo does not serve `/v1/audio/transcriptions`. Send audio through `/v1/chat/completions` or stream it through `/v1/realtime`.
 
-#### Kubernetes Deployment
+#### Audio Sample Rates
 
-[`agg_asr.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_asr.yaml) deploys the same frontend and worker as a DynamoGraphDeployment. The frontend and worker run in separate pods, so the default shared-memory transfer of processed audio cannot reach the worker, and the worker transcribes the prompt without the audio (`language None<asr_text>`). The manifest sets `DYNAMO_DISABLE_NIXL_MM=1` on the frontend so the worker loads and processes the audio itself. NIXL transfer also works across pods and spares the worker a second pass over the audio. To use it, remove `DYNAMO_DISABLE_NIXL_MM` from the frontend and set `DYNAMO_MM_TRANSFER=nixl` there. The frontend checks `DYNAMO_DISABLE_NIXL_MM` before it selects a transfer mode, so setting `DYNAMO_MM_TRANSFER=nixl` alone has no effect. With `Qwen/Qwen3-ASR-1.7B-hf` behind the default Rust frontend, the worker always loads the audio, so neither setting applies. To accept audio at other sample rates, run both components from an image with PyAV installed; see [Additional Media Decoders](../../../../../use-cases/multimodal-serving/additional-media-decoders.md#kubernetes).
+The Dynamo runtime images accept audio at the model's 16 kHz rate. Audio at any other rate fails with HTTP 500, and the frontend or worker log shows `ImportError: Please install vllm[audio] for audio support`, because vLLM resamples through PyAV, which the images do not ship. To accept other rates, run the bundled installer where the worker runs. With the Python chat processor, the frontend also resamples audio, so run it where the frontend runs too:
+
+```bash
+python -m dynamo.common.utils.install_media_decoders vllm
+```
+
+Alternatively, convert audio to 16 kHz before you send it. See [Additional Media Decoders](../../../../../use-cases/multimodal-serving/additional-media-decoders.md) for what the installer changes.
 
 #### Streaming Transcription
 
@@ -525,7 +529,7 @@ python launch/realtime_audio_client.py --session-type transcription \
   --url ws://localhost:8000/v1/realtime --model Qwen/Qwen3-ASR-1.7B
 ```
 
-The session accepts 24 kHz PCM16 input, which the worker resamples to 16 kHz with `scipy`. The Dynamo vLLM runtime images do not include `scipy`, and without it the session returns an empty transcript while the worker log shows `ModuleNotFoundError: No module named 'scipy'`. Install it where the worker runs:
+The session accepts 24 kHz PCM16 input, which the worker resamples to 16 kHz with `scipy`. The Dynamo vLLM runtime images do not include `scipy`, and without it the session returns an empty transcript while the worker log shows `ModuleNotFoundError: No module named 'scipy'`. For a local run, install it in the worker's environment:
 
 ```bash
 pip install 'scipy>=1.14,<2'
@@ -533,7 +537,9 @@ pip install 'scipy>=1.14,<2'
 
 The model transcribes each 5-second segment as it arrives. Each segment's text starts on a new line with its own `language <Language><asr_text>` prefix, and a very short final segment can repeat the previous segment's text.
 
-[`agg_asr_realtime.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_asr_realtime.yaml) deploys streaming transcription as a DynamoGraphDeployment. A `--realtime` worker cannot be combined with `--enable-multimodal`, so it serves only `/v1/realtime`. Deploy `agg_asr.yaml` for `/v1/chat/completions`. Run the worker from an image with `scipy` installed.
+#### Kubernetes Deployment
+
+To deploy transcription or streaming transcription as a DynamoGraphDeployment, see [Speech Recognition on Kubernetes](../../../../../use-cases/multimodal-serving/voice.md#speech-recognition-on-kubernetes).
 
 ## Embedding Cache
 

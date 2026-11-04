@@ -66,7 +66,7 @@ KVCR memory-service sidecar. See [`kvcr/README.md`](./kvcr/README.md) for image,
 RDMA, and lifecycle requirements.
 
 ### 9. **Aggregated Speech Recognition** (`agg_asr.yaml`)
-Serves Qwen3-ASR through `/v1/chat/completions` with `audio_url` content parts. See the [vLLM multimodal guide](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#speech-recognition-asr) for request format, output format, and audio requirements.
+Serves Qwen3-ASR through `/v1/chat/completions` with `audio_url` content parts. See [Speech Recognition on Kubernetes](../../../../docs/fern/pages/use-cases/multimodal-serving/voice.md#speech-recognition-on-kubernetes) for audio transfer and image requirements, and the [vLLM multimodal guide](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#speech-recognition-asr) for request and output format.
 
 **Architecture:**
 - `Frontend`: OpenAI-compatible API server with the vLLM chat processor (`--dyn-chat-processor vllm`), because the original Qwen3-ASR checkpoints ship no `tokenizer.json`. `DYNAMO_DISABLE_NIXL_MM=1` makes the worker load the audio, because shared-memory handoff does not cross pods.
@@ -77,7 +77,7 @@ Streams Qwen3-ASR transcription over the `/v1/realtime` WebSocket. See the [vLLM
 
 **Architecture:**
 - `Frontend`: OpenAI-compatible API server. Realtime models do not tokenize in the frontend, so it needs no chat processor.
-- `worker`: Single worker with `--realtime` and the `Qwen3ASRRealtimeGeneration` architecture selected through `--hf-overrides`. A realtime worker cannot also serve `/v1/chat/completions`; deploy `agg_asr.yaml` for that. The worker resamples audio with `scipy`, which the vLLM runtime image does not include, so run it from an image with `scipy` installed.
+- `worker`: Single worker with `--realtime` and the `Qwen3ASRRealtimeGeneration` architecture selected through `--hf-overrides`. A realtime worker cannot also serve `/v1/chat/completions`; deploy `agg_asr.yaml` for that. The worker resamples audio with `scipy`, which the vLLM runtime image does not include, so run it from an image with `scipy` installed; see [Image Requirements](../../../../docs/fern/pages/use-cases/multimodal-serving/voice.md#image-requirements).
 
 ## CRD Structure
 
