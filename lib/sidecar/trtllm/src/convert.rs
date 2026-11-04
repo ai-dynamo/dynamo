@@ -138,9 +138,8 @@ pub(crate) fn build_generate_request_with_routing(
             conditions,
             ignore_eos: stop.ignore_eos,
             // Keeps a matched visible stop token (e.g. Harmony's `<|call|>`) in
-            // the output, or any matched stop when the request keeps stop text.
-            // A stop equal to `end_id` finishes as END_ID and may still be
-            // dropped.
+            // the output, or any matched stop when the request keeps stop text. A
+            // stop equal to `end_id` finishes as END_ID and may still be dropped.
             include_stop_in_output,
         }),
         response: Some(pb::ResponseOptions {
