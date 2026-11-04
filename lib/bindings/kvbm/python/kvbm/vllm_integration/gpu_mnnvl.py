@@ -7,10 +7,68 @@ memory. Each PyTorch CUDA-array-interface storage retains its allocation owner;
 the owner must outlive every local view and all native transfer leases.
 """
 
+import ctypes
 import hashlib
 import json
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
+
+_FABRIC = 8
+
+
+_DEVICE = 1
+
+
+_PINNED = 1
+
+
+_READ_WRITE = 3
+
+
+_FABRIC_HANDLE_BYTES = 64
+
+
+_MAX_BYTES = min((1 << (ctypes.sizeof(ctypes.c_size_t) * 8)) - 1, (1 << 63) - 1)
+
+
+class _Location(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_int), ("id", ctypes.c_int)]
+
+
+class _AllocationFlags(ctypes.Structure):
+    _fields_ = [
+        ("compressionType", ctypes.c_ubyte),
+        ("gpuDirectRDMACapable", ctypes.c_ubyte),
+        ("usage", ctypes.c_ushort),
+        ("reserved", ctypes.c_ubyte * 4),
+    ]
+
+
+class _AllocationProperties(ctypes.Structure):
+    _fields_ = [
+        ("type", ctypes.c_int),
+        ("requestedHandleTypes", ctypes.c_int),
+        ("location", _Location),
+        ("win32HandleMetaData", ctypes.c_void_p),
+        ("allocFlags", _AllocationFlags),
+    ]
+
+
+class _Access(ctypes.Structure):
+    _fields_ = [("location", _Location), ("flags", ctypes.c_int)]
+
+
+class _FabricInfo(ctypes.Structure):
+    # NVML nvmlGpuFabricInfo_v2_t, also present in nvidia-ml-py13.580.65.
+    _fields_ = [
+        ("version", ctypes.c_uint),
+        ("clusterUuid", ctypes.c_ubyte * 16),
+        ("status", ctypes.c_uint),
+        ("cliqueId", ctypes.c_uint),
+        ("state", ctypes.c_uint),
+        ("healthMask", ctypes.c_uint),
+    ]
 
 
 def _gpu_uuid(value):
@@ -78,3 +136,218 @@ def effective_domain(layout_domain, fabric_domain):
             json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
     )
+
+
+class _CudaDriver:
+    def __init__(self):
+        if ctypes.sizeof(ctypes.c_void_p) != 8:
+            raise RuntimeError("MNNVL VMM requires a64-bit CUDA process")
+        self.lib = ctypes.CDLL("libcuda.so.1")
+        ptr, size, handle, device = (
+            ctypes.c_ulonglong,
+            ctypes.c_size_t,
+            ctypes.c_ulonglong,
+            ctypes.c_int,
+        )
+        signatures = {
+            "cuInit": [ctypes.c_uint],
+            "cuDeviceGet": [ctypes.POINTER(device), ctypes.c_int],
+            "cuCtxGetDevice": [ctypes.POINTER(device)],
+            "cuDeviceGetUuid_v2": [ctypes.c_void_p, device],
+            "cuDevicePrimaryCtxRetain": [ctypes.POINTER(ctypes.c_void_p), device],
+            "cuDevicePrimaryCtxRelease_v2": [device],
+            "cuCtxPushCurrent_v2": [ctypes.c_void_p],
+            "cuCtxPopCurrent_v2": [ctypes.POINTER(ctypes.c_void_p)],
+            "cuCtxSynchronize": [],
+            "cuMemGetAllocationGranularity": [
+                ctypes.POINTER(size),
+                ctypes.POINTER(_AllocationProperties),
+                ctypes.c_int,
+            ],
+            "cuMemCreate": [
+                ctypes.POINTER(handle),
+                size,
+                ctypes.POINTER(_AllocationProperties),
+                ctypes.c_ulonglong,
+            ],
+            "cuMemGetAllocationPropertiesFromHandle": [
+                ctypes.POINTER(_AllocationProperties),
+                handle,
+            ],
+            "cuMemAddressReserve": [
+                ctypes.POINTER(ptr),
+                size,
+                size,
+                ptr,
+                ctypes.c_ulonglong,
+            ],
+            "cuMemMap": [ptr, size, size, handle, ctypes.c_ulonglong],
+            "cuMemSetAccess": [ptr, size, ctypes.POINTER(_Access), size],
+            "cuMemsetD8_v2": [ptr, ctypes.c_ubyte, size],
+            "cuMemExportToShareableHandle": [
+                ctypes.c_void_p,
+                handle,
+                ctypes.c_int,
+                ctypes.c_ulonglong,
+            ],
+            "cuMemImportFromShareableHandle": [
+                ctypes.POINTER(handle),
+                ctypes.c_void_p,
+                ctypes.c_int,
+            ],
+            "cuMemUnmap": [ptr, size],
+            "cuMemAddressFree": [ptr, size],
+            "cuMemRelease": [handle],
+        }
+        for name, arguments in signatures.items():
+            function = getattr(self.lib, name)
+            function.argtypes, function.restype = arguments, ctypes.c_int
+        self.call("cuInit", 0)
+
+    def call(self, name, *args):
+        result = getattr(self.lib, name)(*args)
+        if result != 0:
+            raise RuntimeError(
+                f"MNNVL CUDA {name} failed ({result}); FABRIC/IMEX access is required; no fallback"
+            )
+
+    def device(self):
+        value = ctypes.c_int()
+        result = self.lib.cuCtxGetDevice(ctypes.byref(value))
+        if result == 201:  # No current context in the TP1 registration process.
+            self.call("cuDeviceGet", ctypes.byref(value), 0)
+        elif result != 0:
+            raise RuntimeError(f"MNNVL current CUDA device query failed ({result})")
+        return value.value
+
+    def gpu_uuid(self, device):
+        value = (ctypes.c_ubyte * 16)()
+        self.call("cuDeviceGetUuid_v2", ctypes.byref(value), device)
+        return "GPU-" + str(uuid.UUID(bytes=bytes(value)))
+
+    def retain_context(self, device):
+        value = ctypes.c_void_p()
+        self.call("cuDevicePrimaryCtxRetain", ctypes.byref(value), device)
+        return value.value
+
+    @contextmanager
+    def context(self, context):
+        self.call("cuCtxPushCurrent_v2", context)
+        try:
+            yield
+        finally:
+            previous = ctypes.c_void_p()
+            self.call("cuCtxPopCurrent_v2", ctypes.byref(previous))
+
+    def release_context(self, device):
+        self.call("cuDevicePrimaryCtxRelease_v2", device)
+
+    def properties(self, device):
+        value = _AllocationProperties()
+        value.type, value.requestedHandleTypes = _PINNED, _FABRIC
+        value.location.type, value.location.id = _DEVICE, device
+        return value
+
+    def granularity(self, properties):
+        value = ctypes.c_size_t()
+        self.call(
+            "cuMemGetAllocationGranularity",
+            ctypes.byref(value),
+            ctypes.byref(properties),
+            0,
+        )
+        return value.value
+
+    def create(self, size, properties):
+        value = ctypes.c_ulonglong()
+        self.call("cuMemCreate", ctypes.byref(value), size, ctypes.byref(properties), 0)
+        return value.value
+
+    def allocation_properties(self, handle):
+        value = _AllocationProperties()
+        self.call("cuMemGetAllocationPropertiesFromHandle", ctypes.byref(value), handle)
+        return value
+
+    def reserve(self, size, granularity):
+        value = ctypes.c_ulonglong()
+        self.call("cuMemAddressReserve", ctypes.byref(value), size, granularity, 0, 0)
+        return value.value
+
+    def map(self, pointer, size, handle):
+        self.call("cuMemMap", pointer, size, 0, handle, 0)
+
+    def set_access(self, pointer, size, device):
+        value = _Access(_Location(_DEVICE, device), _READ_WRITE)
+        self.call("cuMemSetAccess", pointer, size, ctypes.byref(value), 1)
+
+    def zero(self, pointer, size):
+        self.call("cuMemsetD8_v2", pointer, 0, size)
+
+    def synchronize(self):
+        self.call("cuCtxSynchronize")
+
+    def export(self, handle):
+        value = (ctypes.c_ubyte * _FABRIC_HANDLE_BYTES)()
+        self.call(
+            "cuMemExportToShareableHandle", ctypes.byref(value), handle, _FABRIC, 0
+        )
+        return bytes(value)
+
+    def import_handle(self, value):
+        if not isinstance(value, bytes) or len(value) != _FABRIC_HANDLE_BYTES:
+            raise ValueError("Exactly64 opaque FABRIC handle bytes required")
+        raw = (ctypes.c_ubyte * _FABRIC_HANDLE_BYTES).from_buffer_copy(value)
+        handle = ctypes.c_ulonglong()
+        self.call(
+            "cuMemImportFromShareableHandle",
+            ctypes.byref(handle),
+            ctypes.byref(raw),
+            _FABRIC,
+        )
+        return handle.value
+
+    def unmap(self, pointer, size):
+        self.call("cuMemUnmap", pointer, size)
+
+    def free_address(self, pointer, size):
+        self.call("cuMemAddressFree", pointer, size)
+
+    def release(self, handle):
+        self.call("cuMemRelease", handle)
+
+
+def observe_fabric(device=None, *, driver=None):
+    """Observe actual assigned GPU/NVML fabric; device presence is not IMEX proof."""
+    driver = _CudaDriver() if driver is None else driver
+    device = driver.device() if device is None else device
+    gpu = driver.gpu_uuid(device)
+    library = ctypes.CDLL("libnvidia-ml.so.1")
+    signatures = {
+        "nvmlInit_v2": [],
+        "nvmlShutdown": [],
+        "nvmlDeviceGetHandleByUUID": [ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)],
+        "nvmlDeviceGetGpuFabricInfoV": [ctypes.c_void_p, ctypes.POINTER(_FabricInfo)],
+    }
+    for name, arguments in signatures.items():
+        function = getattr(library, name)
+        function.argtypes, function.restype = arguments, ctypes.c_uint
+    if library.nvmlInit_v2() != 0:
+        raise RuntimeError("NVML initialization is required for MNNVL")
+    try:
+        handle = ctypes.c_void_p()
+        if library.nvmlDeviceGetHandleByUUID(gpu.encode(), ctypes.byref(handle)) != 0:
+            raise RuntimeError("Actual assigned GPU UUID is absent from NVML")
+        info = _FabricInfo()
+        info.version = 0x02000024
+        if (
+            library.nvmlDeviceGetGpuFabricInfoV(handle, ctypes.byref(info)) != 0
+            or info.state != 3
+            or info.status != 0
+        ):
+            raise RuntimeError("MNNVL requires actual NVML fabric Completed/Success")
+        return FabricIdentity(
+            gpu, bytes(info.clusterUuid).hex(), int(info.cliqueId), int(info.healthMask)
+        )
+    finally:
+        if library.nvmlShutdown() != 0:
+            raise RuntimeError("NVML shutdown failed after MNNVL fabric observation")
