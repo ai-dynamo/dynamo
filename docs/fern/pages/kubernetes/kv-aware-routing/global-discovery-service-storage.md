@@ -5,10 +5,12 @@ title: Global Discovery Service Registration Storage
 subtitle: Keep pool registrations in memory or in a shared DynamoDB table
 ---
 
-**Experimental.** With `--pool-discovery registrations`, the Global Discovery Service lists the pools
-that [Pool Relays](pool-relay.md) register with `POST /pools`. The registration store decides where
-those registrations live. This page explains when to use each store, how to set up DynamoDB, and how
-to run and verify the service. For every flag and endpoint, see
+**Experimental.** The Global Discovery Service keeps the registrations that [Pool Relays](pool-relay.md)
+send with `POST /pools`, with every `--pool-discovery` value. With `registrations`, it lists the
+registered pools. With `karmada` or `mcs`, it joins them with the EndpointSlices that Multi-Cluster
+Services imports. The registration store decides where those registrations live, and each store works
+in every mode. This page explains when to use each store, how to set up DynamoDB, and how to run and
+verify the service. For every flag and endpoint, see
 [Global Discovery Service Configuration](../../reference/components/global-discovery-service-configuration.md).
 
 ## Choose a store
@@ -129,7 +131,7 @@ spec:
         - name: global-discovery
           image: IMAGE
           args:
-            - --listen=0.0.0.0:8080
+            - --listen=[::]:8080
             - --pool-discovery=registrations
             - --registration-storage=dynamodb
             - --dynamodb-table=global-discovery-pools
@@ -139,6 +141,25 @@ spec:
 
 The complete manifest, with the Service and ServiceAccount, is
 [`container/global-discovery-service-dynamodb.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/container/global-discovery-service-dynamodb.yaml).
+
+With Karmada, the DynamoDB flags stay the same. The router Service's flags replace `--router`, and the
+service joins the registrations with the pools that Karmada imports:
+
+```yaml
+          args:
+            - --listen=[::]:8080
+            - --pool-discovery=karmada
+            - --router-namespace=global-discovery
+            - --router-service=global-router
+            - --router-port-name=http
+            - --registration-storage=dynamodb
+            - --dynamodb-table=global-discovery-pools
+            - --dynamodb-region=us-east-1
+```
+
+Start from [`container/global-discovery-service.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/container/global-discovery-service.yaml),
+which grants the EndpointSlice access this mode needs, and give its ServiceAccount the IAM role above.
+With `--pool-discovery mcs`, only that flag changes.
 
 The service checks the table at startup with `DescribeTable` and exits with an error that names the
 table if it is missing. `--dynamodb-poll-interval-secs` (default 2) must be less than
@@ -163,6 +184,9 @@ and let the service create the table:
             - name: AWS_SECRET_ACCESS_KEY
               value: local
 ```
+
+With Karmada, keep these DynamoDB flags and use the Karmada flags from the example above in place of
+`--pool-discovery=registrations`.
 
 `--dynamodb-ensure-table` creates the table and enables TTL, without point-in-time recovery or
 replicas. Do not use it in production.
@@ -201,8 +225,9 @@ restart:
  "complete": true}
 ```
 
-Query another replica, or delete a Pod, and the same pools appear. `relay_identities` is empty because
-registrations do not carry relay identities.
+Query another replica, or delete a Pod, and the same pools appear. With `--pool-discovery registrations`,
+`relay_identities` is empty because registrations do not carry relay identities. With `karmada` or
+`mcs`, MCS supplies them, and a pool is listed only while MCS also imports a Ready Pool Relay for it.
 
 `GET /healthz` returns 200 while the table answers. It returns 503 when the table is unreachable, when
 the Pod lacks permission, or when the table does not exist. The readiness probe in the example manifest

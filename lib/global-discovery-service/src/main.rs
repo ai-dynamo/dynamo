@@ -80,6 +80,10 @@ const _: () = assert!(KUBE_CONNECT_TIMEOUT.as_secs() + KUBE_READ_TIMEOUT.as_secs
 /// than being ignored.
 const WITH_REGISTRATIONS: &str = "With --pool-discovery registrations";
 const WITH_MCS: &str = "With --pool-discovery karmada or mcs";
+/// The `--help` heading for the flags that only `--registration-storage
+/// dynamodb` reads, with any `--pool-discovery` value: every value keeps
+/// registrations. Without that storage, such a flag fails at startup.
+const WITH_DYNAMODB: &str = "With --registration-storage dynamodb";
 
 #[derive(Debug, Parser)]
 #[command(about = "Serve Global Router pool discovery over HTTP")]
@@ -118,16 +122,16 @@ struct Args {
     #[arg(
         long,
         required_if_eq("registration_storage", "dynamodb"),
-        help_heading = WITH_REGISTRATIONS
+        help_heading = WITH_DYNAMODB
     )]
     dynamodb_table: Option<String>,
     /// The region of the DynamoDB table (replica) to use. By default the AWS
     /// SDK's: `AWS_REGION`, then the shared config.
-    #[arg(long, help_heading = WITH_REGISTRATIONS)]
+    #[arg(long, help_heading = WITH_DYNAMODB)]
     dynamodb_region: Option<String>,
     /// Send DynamoDB requests here instead of to the region's endpoint, for
     /// example to dynamodb-local.
-    #[arg(long, help_heading = WITH_REGISTRATIONS)]
+    #[arg(long, help_heading = WITH_DYNAMODB)]
     dynamodb_endpoint: Option<Url>,
     /// How often a watch reads the DynamoDB table again. Less than the
     /// heartbeat interval.
@@ -135,16 +139,16 @@ struct Args {
         long,
         default_value_t = 2,
         value_parser = clap::value_parser!(u64).range(1..),
-        help_heading = WITH_REGISTRATIONS
+        help_heading = WITH_DYNAMODB
     )]
     dynamodb_poll_interval_secs: u64,
     /// Create the DynamoDB table if it does not exist. For development: it
     /// needs `dynamodb:CreateTable` and `dynamodb:UpdateTimeToLive`.
-    #[arg(long, help_heading = WITH_REGISTRATIONS)]
+    #[arg(long, help_heading = WITH_DYNAMODB)]
     dynamodb_ensure_table: bool,
     /// How far the clocks of replicas sharing a DynamoDB table may disagree.
     /// A pool stays listed this much longer than its lease.
-    #[arg(long, default_value_t = 2, help_heading = WITH_REGISTRATIONS)]
+    #[arg(long, default_value_t = 2, help_heading = WITH_DYNAMODB)]
     lease_skew_secs: u64,
     /// Each PoolRelay Service is named `<DGD name><suffix>`. Give a suffix
     /// that starts with `-` after an `=`: `--pool-service-suffix=-relay`.
@@ -239,16 +243,6 @@ enum RegistrationStorage {
     Dynamodb,
 }
 
-/// The flags only `--registration-storage dynamodb` reads.
-const DYNAMODB_ONLY: [&str; 6] = [
-    "dynamodb_table",
-    "dynamodb_region",
-    "dynamodb_endpoint",
-    "dynamodb_poll_interval_secs",
-    "dynamodb_ensure_table",
-    "lease_skew_secs",
-];
-
 fn parse_router(value: &str) -> Result<RouterReplica, String> {
     let (id, url) = value
         .split_once('=')
@@ -272,8 +266,8 @@ fn parse_router(value: &str) -> Result<RouterReplica, String> {
 
 /// Parses the flags. A flag set under the `--help` heading of another
 /// `--pool-discovery` value fails, as clap's own errors do, and so does a
-/// DynamoDB flag without `--registration-storage dynamodb`. A flag left at
-/// its default is not refused.
+/// flag under [`WITH_DYNAMODB`] without `--registration-storage dynamodb`. A
+/// flag left at its default is not refused.
 fn parse_args<I, T>(args: I) -> Result<Args, clap::Error>
 where
     I: IntoIterator<Item = T>,
@@ -300,8 +294,8 @@ where
     let conflict = if let Some(flag) = given(&|arg| arg.get_help_heading() == Some(refused)) {
         Some(format!("--{flag} works only {}", refused.to_lowercase()))
     } else if parsed.registration_storage != RegistrationStorage::Dynamodb {
-        given(&|arg| DYNAMODB_ONLY.contains(&arg.get_id().as_str()))
-            .map(|flag| format!("--{flag} works only with --registration-storage dynamodb"))
+        given(&|arg| arg.get_help_heading() == Some(WITH_DYNAMODB))
+            .map(|flag| format!("--{flag} works only {}", WITH_DYNAMODB.to_lowercase()))
     } else {
         None
     };
@@ -569,9 +563,10 @@ mod tests {
     }
 
     #[test]
-    fn every_flag_says_which_pool_discovery_it_works_with() {
-        // The flags that work with every --pool-discovery value. Any other
-        // flag needs one of the two headings, which `parse_args` enforces.
+    fn every_flag_says_what_it_works_with() {
+        // The flags that work with every --pool-discovery value and either
+        // storage. Any other flag needs one of the three headings, which
+        // `parse_args` enforces.
         const EVERY_VALUE: &[&str] = &[
             "listen",
             "tls_cert_path",
@@ -584,11 +579,14 @@ mod tests {
         ];
         for arg in Args::command().get_arguments() {
             let id = arg.get_id().as_str();
-            let headed = matches!(arg.get_help_heading(), Some(WITH_REGISTRATIONS | WITH_MCS));
+            let headed = matches!(
+                arg.get_help_heading(),
+                Some(WITH_REGISTRATIONS | WITH_MCS | WITH_DYNAMODB)
+            );
             assert_ne!(
                 EVERY_VALUE.contains(&id),
                 headed,
-                "--{id}: list it in EVERY_VALUE or give it a --pool-discovery heading"
+                "--{id}: list it in EVERY_VALUE or give it one of the headings"
             );
         }
     }
@@ -627,7 +625,8 @@ mod tests {
             "frontend-service-suffix",
             "karmada or mcs",
         );
-        // Every --pool-discovery value takes registrations.
+        // Every --pool-discovery value takes registrations, kept in either
+        // storage.
         assert!(
             parse_args(karmada(&[
                 "--lease-duration-secs",
@@ -637,10 +636,23 @@ mod tests {
             ]))
             .is_ok()
         );
-        assert_refused(
-            &karmada(&["--dynamodb-table", "pools"]),
-            "dynamodb-table",
-            "registrations",
+        assert!(
+            parse_args(karmada(&[
+                "--registration-storage",
+                "dynamodb",
+                "--dynamodb-table",
+                "pools"
+            ]))
+            .is_ok()
+        );
+        // A DynamoDB flag still needs that storage, in every mode.
+        let error = parse_args(karmada(&["--dynamodb-table", "pools"])).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict, "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("--dynamodb-table works only with --registration-storage dynamodb"),
+            "{error}"
         );
         // Flags left at their defaults are not refused, whatever their heading.
         assert!(parse_args(karmada(&[])).is_ok());
@@ -686,7 +698,11 @@ mod tests {
 
     #[test]
     fn dynamodb_flags_set_the_store() {
-        let args = parse_args(dynamodb(&[
+        let flags = [
+            "--registration-storage",
+            "dynamodb",
+            "--dynamodb-table",
+            "pools",
             "--dynamodb-region",
             "us-east-2",
             "--dynamodb-endpoint",
@@ -696,19 +712,27 @@ mod tests {
             "--dynamodb-ensure-table",
             "--lease-skew-secs",
             "0",
-        ]))
-        .unwrap();
-        assert_eq!(
-            dynamodb_config(&args).unwrap(),
-            DynamoDbConfig {
-                table: "pools".to_owned(),
-                region: Some("us-east-2".to_owned()),
-                endpoint: Some(Url::parse("http://localhost:8000").unwrap()),
-                poll_interval: Duration::from_secs(1),
-                lease_skew: Duration::ZERO,
-                ensure_table: true,
-            }
-        );
+        ];
+        // With every --pool-discovery value.
+        let mut mcs = karmada(&flags);
+        mcs[2] = "mcs";
+        let mut registrations = vec!["gds"];
+        registrations.extend_from_slice(&flags);
+        for args in [registrations, karmada(&flags), mcs] {
+            let parsed = parse_args(args.clone()).unwrap();
+            assert_eq!(
+                dynamodb_config(&parsed).unwrap(),
+                DynamoDbConfig {
+                    table: "pools".to_owned(),
+                    region: Some("us-east-2".to_owned()),
+                    endpoint: Some(Url::parse("http://localhost:8000").unwrap()),
+                    poll_interval: Duration::from_secs(1),
+                    lease_skew: Duration::ZERO,
+                    ensure_table: true,
+                },
+                "{args:?}"
+            );
+        }
         assert!(parse_args(dynamodb(&["--dynamodb-endpoint", "localhost"])).is_err());
         assert!(parse_args(dynamodb(&["--dynamodb-poll-interval-secs", "0"])).is_err());
     }
@@ -733,12 +757,11 @@ mod tests {
             );
             assert!(error.to_string().contains(&reason), "{error}");
         }
-        // Every DynamoDB flag is listed, and only those.
+        // Every DynamoDB flag has the heading, and only those.
         for arg in Args::command().get_arguments() {
             let id = arg.get_id().as_str();
-            let listed = DYNAMODB_ONLY.contains(&id);
             assert_eq!(
-                listed,
+                arg.get_help_heading() == Some(WITH_DYNAMODB),
                 id.starts_with("dynamodb_") || id == "lease_skew_secs",
                 "{id}"
             );

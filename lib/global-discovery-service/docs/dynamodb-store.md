@@ -6,13 +6,15 @@ SPDX-License-Identifier: Apache-2.0
 # DynamoDB registration storage for the Global Discovery Service
 
 Design for `--registration-storage dynamodb`, an alternative to `memory` for
-`--pool-discovery registrations`. It keeps pool registrations in one DynamoDB
+every `--pool-discovery` value. It keeps pool registrations in one DynamoDB
 table so that any number of service replicas, in one region or across regions
-through a Global Table, serve the same pool list and survive restarts.
+through a Global Table, serve the same pool list and survive restarts. With
+`karmada` or `mcs`, the service joins these registrations with what MCS
+imports, as it does with `memory`.
 
 The service's contract does not change: `POST /pools` still answers a `Lease`,
 `GET /pools` still lists live pools with `complete`, and `GET /routers` still
-comes from `--router`. Only where registrations live changes.
+comes from `--router` or MCS. Only where registrations live changes.
 
 ## Why
 
@@ -129,7 +131,9 @@ leaves the stream open; the poller logs it (warn, then debug) and waits twice
 as long each time, up to 30 s. The poller stops when the store is dropped,
 which also ends every stream; a caller's `CancellationToken` ends its own.
 Polling rather than DynamoDB Streams keeps the store to one table and one IAM
-policy; nothing in the service consumes the watch over HTTP yet.
+policy. With `--pool-discovery registrations` nothing consumes the watch yet:
+the HTTP API calls only `list` and `register`. With `karmada` or `mcs`, the
+join with MCS watches the store.
 
 ## Clock
 
@@ -151,7 +155,8 @@ heartbeat old. There are no cross-region conditions to break.
 
 ## Configuration
 
-New flags, all under the `With --pool-discovery registrations` heading:
+New flags, under their own `With --registration-storage dynamodb` heading,
+since they work with every `--pool-discovery` value:
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -236,9 +241,12 @@ impl DynamoDbPoolStore {
 ```
 
 `main.rs` gains the flags, a `RegistrationStorage::Dynamodb` variant and a
-match arm in `registrations_backend` that awaits `connect`. `parse_args`'s
-heading rule covers the new flags because they carry `WITH_REGISTRATIONS`;
-the `every_flag_says_which_pool_discovery_it_works_with` test enforces it.
+match arm in `registration_storage`, which `registrations_backend` and
+`mcs_backend` both use. The flags carry the `WITH_DYNAMODB` heading, and
+`parse_args` refuses a flag under it without `--registration-storage
+dynamodb`, whatever `--pool-discovery` is. The
+`every_flag_says_what_it_works_with` test checks that every flag has a
+heading or works everywhere.
 
 ## Errors
 

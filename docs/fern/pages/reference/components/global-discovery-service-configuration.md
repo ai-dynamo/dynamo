@@ -12,8 +12,9 @@ the `global-discovery-service` binary. For choosing and setting up a registratio
 
 ## Flags
 
-`--help` groups the flags under three headings. A flag under the heading of another
-`--pool-discovery` value fails at startup when you set it. A flag left at its default is never refused.
+`--help` groups the flags under four headings. A flag under the heading of another
+`--pool-discovery` value fails at startup when you set it, and so does a DynamoDB flag without
+`--registration-storage dynamodb`. A flag left at its default is never refused.
 
 ### All modes
 
@@ -23,7 +24,7 @@ the `global-discovery-service` binary. For choosing and setting up a registratio
 | `--tls-cert-path <path>` | Unset | Serve HTTPS with this certificate. Requires `--tls-key-path`. |
 | `--tls-key-path <path>` | Unset | Private key for `--tls-cert-path`. |
 | `--pool-discovery <mode>` | `registrations` | Where the pool and router lists come from: `registrations`, `karmada`, or `mcs`. |
-| `--registration-storage <store>` | `memory` | Where registrations are kept: `memory` in all modes, or `dynamodb` with `--pool-discovery registrations`. |
+| `--registration-storage <store>` | `memory` | Where registrations are kept: `memory` or `dynamodb`. Both work with every `--pool-discovery` value. |
 | `--heartbeat-interval-secs <n>` | `5` | How often a Pool Relay registers again. Must be above zero and below the lease. |
 | `--lease-duration-secs <n>` | `15` | How long a registration lasts. Longer than the heartbeat interval and at most `86400` (one day). |
 
@@ -32,14 +33,6 @@ the `global-discovery-service` binary. For choosing and setting up a registratio
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--router <id>=<url>` | None | A Global Router replica. Repeat for each replica. Ids must be unique. |
-| `--lease-skew-secs <n>` | `2` | Clock skew allowed when evaluating leases. Works with `--registration-storage dynamodb`. |
-| `--dynamodb-table <name>` | None | Table name. Required with `--registration-storage dynamodb`. |
-| `--dynamodb-region <region>` | SDK default chain (`AWS_REGION`) | Region of the table replica this process uses. |
-| `--dynamodb-endpoint <url>` | Unset | Endpoint override, for DynamoDB Local. |
-| `--dynamodb-poll-interval-secs <n>` | `2` | How often the store polls the table for changes. Must be less than `--heartbeat-interval-secs`. |
-| `--dynamodb-ensure-table` | Off | Create the table if it does not exist. For development. Needs `dynamodb:CreateTable` and `dynamodb:UpdateTimeToLive`. |
-
-The `--dynamodb-*` flags and `--lease-skew-secs` apply only with `--registration-storage dynamodb`; giving one with the memory store is a startup error.
 
 ### With `--pool-discovery karmada` or `mcs`
 
@@ -59,6 +52,21 @@ MCS supplies relay identities and frontend addresses; the registration supplies 
 capabilities, capacity, and location. Export each pool's frontend Service to supply its addresses.
 The service needs read access to `endpointslices`. `karmada` reads slices named the Karmada way, and `mcs`
 reads slices with the standard `multicluster.kubernetes.io` labels.
+
+### With `--registration-storage dynamodb`
+
+These flags work with every `--pool-discovery` value: in each mode the service keeps registrations.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--lease-skew-secs <n>` | `2` | Clock skew allowed when evaluating leases. |
+| `--dynamodb-table <name>` | None | Table name. Required with `--registration-storage dynamodb`. |
+| `--dynamodb-region <region>` | SDK default chain (`AWS_REGION`) | Region of the table replica this process uses. |
+| `--dynamodb-endpoint <url>` | Unset | Endpoint override, for DynamoDB Local. |
+| `--dynamodb-poll-interval-secs <n>` | `2` | How often the store polls the table for changes. Must be less than `--heartbeat-interval-secs`. |
+| `--dynamodb-ensure-table` | Off | Create the table if it does not exist. For development. Needs `dynamodb:CreateTable` and `dynamodb:UpdateTimeToLive`. |
+
+The `--dynamodb-*` flags and `--lease-skew-secs` apply only with `--registration-storage dynamodb`; giving one with the memory store is a startup error.
 
 ## Environment
 

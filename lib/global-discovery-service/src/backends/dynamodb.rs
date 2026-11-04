@@ -9,8 +9,9 @@
 //! last renewed, and the lease its writer granted ([`codec`]). A reader
 //! decides on its own clock which pools are live, so the store never expires
 //! anything; DynamoDB's TTL removes items nobody has renewed for a week. Every
-//! replica reads the same items, so lists are `Exact` from the start. Router
-//! replicas still come from configuration.
+//! replica reads the same items, so lists are `Exact` from the start. The
+//! store keeps registrations for every kind of pool discovery; router
+//! replicas come from configuration or MCS, not from this store.
 
 pub mod codec;
 pub mod keys;

@@ -23,13 +23,12 @@ Router reads `GET /pools` for the pools it can route to and `GET /routers` for i
 
 ## Registration stores
 
-`--registration-storage` chooses where registrations are kept:
+`--registration-storage` chooses where registrations are kept, with every `--pool-discovery` value:
 
 - `memory` (default): in the process. Run one replica. A restart loses the registrations, and
   `GET /pools` reports `complete: false` until one lease has passed.
-- `dynamodb` (with `--pool-discovery registrations`): in a DynamoDB table, so any number of replicas
-  serve the same pools, a restart loses nothing, and `complete` is `true` at once. A Global Table
-  extends it across regions.
+- `dynamodb`: in a DynamoDB table, so any number of replicas serve the same pools, a restart loses
+  nothing, and `complete` is `true` at once. A Global Table extends it across regions.
 
 The DynamoDB design (item layout, leases, multi-region behavior, errors) is in
 [`docs/dynamodb-store.md`](docs/dynamodb-store.md).
