@@ -13,6 +13,7 @@ use dynamo_kv_router::services::selection::{WorkerCatalogSource, WorkerRequest};
 use tokio::sync::{oneshot, watch};
 use xxhash_rust::xxh3::xxh3_64;
 
+use super::directory::PoolDirectory;
 use crate::Pool;
 use crate::selector::reachable;
 
@@ -50,16 +51,22 @@ fn workers(pools: &[Pool]) -> Vec<WorkerRequest> {
 /// Feeds each pool snapshot to the core's `CatalogReconciler`.
 pub(super) struct PoolCatalogSource<S> {
     pools: watch::Receiver<Arc<S>>,
+    directory: Arc<PoolDirectory>,
     started: bool,
     first_taken: Option<oneshot::Sender<()>>,
 }
 
 impl<S> PoolCatalogSource<S> {
-    /// The receiver resolves once the first snapshot is applied.
-    pub(super) fn new(pools: watch::Receiver<Arc<S>>) -> (Self, oneshot::Receiver<()>) {
+    /// Keeps `directory` in step with each snapshot. The receiver resolves
+    /// once the first snapshot is applied.
+    pub(super) fn new(
+        pools: watch::Receiver<Arc<S>>,
+        directory: Arc<PoolDirectory>,
+    ) -> (Self, oneshot::Receiver<()>) {
         let (first_taken, is_taken) = oneshot::channel();
         let source = Self {
             pools,
+            directory,
             started: false,
             first_taken: Some(first_taken),
         };
@@ -80,7 +87,9 @@ where
             self.pools.changed().await.ok()?;
         }
         let snapshot = self.pools.borrow_and_update().clone();
-        Some(workers((*snapshot).as_ref()))
+        let pools: &[Pool] = (*snapshot).as_ref();
+        self.directory.replace(pools);
+        Some(workers(pools))
     }
 }
 
@@ -135,10 +144,15 @@ mod tests {
         let blue = pool("blue", "qwen", &["http://blue:8000"]);
         let green = pool("green", "qwen", &["http://green:8000"]);
         let (catalog, pools) = watch::channel(Arc::new(vec![blue.clone()]));
-        let (mut source, _first_taken) = PoolCatalogSource::new(pools);
+        let directory = Arc::new(PoolDirectory::default());
+        let (mut source, _first_taken) = PoolCatalogSource::new(pools, directory.clone());
 
         let first = source.next_snapshot().await.unwrap();
         assert_eq!(ids(&first), [worker_id(&blue.id)]);
+        assert_eq!(
+            directory.snapshot().get(&worker_id(&blue.id)),
+            Some(&blue.id)
+        );
 
         catalog.send_replace(Arc::new(vec![blue.clone(), green.clone()]));
         let mut second = ids(&source.next_snapshot().await.unwrap());
@@ -152,6 +166,9 @@ mod tests {
         catalog.send_replace(Arc::new(vec![blue_down, green.clone()]));
         let third = source.next_snapshot().await.unwrap();
         assert_eq!(ids(&third), [worker_id(&green.id)]);
+        catalog.send_replace(Arc::new(vec![green.clone()]));
+        source.next_snapshot().await.unwrap();
+        assert_eq!(directory.snapshot().get(&worker_id(&blue.id)), None);
 
         drop(catalog);
         assert!(source.next_snapshot().await.is_none());

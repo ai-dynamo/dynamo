@@ -67,7 +67,7 @@ struct Args {
     connect_timeout_secs: u64,
     #[arg(long, value_enum, default_value_t = RouterPolicy::RoundRobin)]
     router_policy: RouterPolicy,
-    /// Select pools through the embedded router core (round-robin only for now).
+    /// Select pools through the embedded router core (not yet with affinity).
     #[arg(long)]
     use_selection_core: bool,
     /// The region this process runs in. Affinity prefers it, and metrics
@@ -307,8 +307,9 @@ async fn main() -> Result<()> {
 fn selection_core_policy(policy: RouterPolicy) -> Result<SelectionCorePolicy> {
     match policy {
         RouterPolicy::RoundRobin => Ok(SelectionCorePolicy::RoundRobin),
-        RouterPolicy::LeastInFlight | RouterPolicy::Affinity => {
-            bail!("--use-selection-core supports only --router-policy round-robin for now")
+        RouterPolicy::LeastInFlight => Ok(SelectionCorePolicy::LeastInFlight),
+        RouterPolicy::Affinity => {
+            bail!("--use-selection-core does not support --router-policy affinity yet")
         }
     }
 }

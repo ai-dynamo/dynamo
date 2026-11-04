@@ -154,8 +154,9 @@ for each family.
 
 With `--use-selection-core`, the Global Frontend selects pools through an
 embedded router core: each pool is a core worker and the policy is a picker
-plugin. Only `round-robin` runs on the core for now, picking as the
-round-robin selector does.
+plugin. `round-robin` and `least-in-flight` run on the core, picking as the
+selectors do. A least-in-flight pick counts as pending on its pool until the
+request is counted, so concurrent picks see each other.
 
 ## Limitations
 

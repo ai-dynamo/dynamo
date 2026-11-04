@@ -12,6 +12,7 @@
 //! [`SelectionCoreSelector`] selects through the embedded router core instead.
 
 mod affinity;
+mod frontend_signals;
 mod load;
 mod pool;
 mod selection_core;
