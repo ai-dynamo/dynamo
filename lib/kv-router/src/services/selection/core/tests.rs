@@ -139,6 +139,8 @@ fn worker(worker_id: WorkerId) -> WorkerRequest {
         kv_transfer_enforcement: None,
         kv_transfer_preferred_weight: None,
         router_hint_worker_type: None,
+        router_hint_gpu_transfer: None,
+        router_hint_transfer_domain: None,
         router_hint_source_control_endpoints: HashMap::new(),
         kv_event_source_mode: None,
         engine_owned_mm_identity: None,
@@ -3730,6 +3732,8 @@ fn hint_config(worker_type: &str, endpoints: &[(u32, &str)]) -> SelectionWorkerC
         kv_transfer_enforcement: None,
         kv_transfer_preferred_weight: None,
         router_hint_worker_type: Some(worker_type.to_string()),
+        router_hint_gpu_transfer: None,
+        router_hint_transfer_domain: None,
         router_hint_source_control_endpoints: endpoints
             .iter()
             .map(|(rank, endpoint)| (*rank, endpoint.to_string()))

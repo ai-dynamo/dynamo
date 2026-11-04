@@ -402,6 +402,8 @@ pub(crate) enum KvEventSourceRequirement {
     NotRequired,
     CacheAwareRouting,
     ConditionalDisaggDecodeCache,
+    DecodeTransferSource,
+    PrefillGpuTransferTarget,
     Unknown,
 }
 
@@ -411,7 +413,26 @@ impl KvEventSourceRequirement {
         config: &KvRouterConfig,
         inputs: WorkerInputs,
     ) -> Self {
-        if !inputs.reads_kv_index() || config.use_remote_indexer || !config.use_kv_events {
+        if config.use_remote_indexer || !config.use_kv_events {
+            return Self::NotRequired;
+        }
+
+        // A donor is a cache consumer even when decode execution uses load only.
+        // Do not change the selection policy's inputs or overlap weight to obtain
+        // this subscription: donor discovery must not affect decode scheduling.
+        if worker_role == Some(WorkerType::Decode)
+            && (config.enable_decode_to_prefill_reuse || config.enable_decode_to_prefill_gpu_reuse)
+        {
+            return Self::DecodeTransferSource;
+        }
+        if !inputs.reads_kv_index() {
+            // GPU advisory routing must count the target's retained rows even
+            // when execution selection is load-only. Native Device eviction
+            // does not remove that inventory or make it new prefill savings.
+            if worker_role == Some(WorkerType::Prefill) && config.enable_decode_to_prefill_gpu_reuse
+            {
+                return Self::PrefillGpuTransferTarget;
+            }
             return Self::NotRequired;
         }
 
@@ -429,6 +450,8 @@ impl KvEventSourceRequirement {
             Self::NotRequired => "not_required",
             Self::CacheAwareRouting => "cache_aware_routing",
             Self::ConditionalDisaggDecodeCache => "conditional_disagg_decode_cache",
+            Self::DecodeTransferSource => "decode_transfer_source",
+            Self::PrefillGpuTransferTarget => "prefill_gpu_transfer_target",
             Self::Unknown => "unknown",
         }
     }
@@ -436,7 +459,10 @@ impl KvEventSourceRequirement {
     pub(crate) fn requires_source(self) -> bool {
         matches!(
             self,
-            Self::CacheAwareRouting | Self::ConditionalDisaggDecodeCache
+            Self::CacheAwareRouting
+                | Self::ConditionalDisaggDecodeCache
+                | Self::DecodeTransferSource
+                | Self::PrefillGpuTransferTarget
         )
     }
 
@@ -2100,6 +2126,53 @@ mod tests {
         assert_eq!(
             resolve_tracking_model_name(TrackingHashAlgorithm::PublicXxh3V1, Some("")).unwrap(),
             ""
+        );
+    }
+
+    #[test]
+    fn decode_transfer_source_consumes_inventory_without_changing_execution_inputs() {
+        let mut config = KvRouterConfig {
+            enable_decode_to_prefill_reuse: true,
+            overlap_score_credit: 0.0,
+            router_track_prefill_tokens: false,
+            transfer_source_estimated_block_us: Some(1.0),
+            transfer_source_prefill_token_us: Some(1.0),
+            ..Default::default()
+        };
+        let inputs = WorkerInputs::LOAD;
+        let requirement =
+            KvEventSourceRequirement::derive(Some(WorkerType::Decode), &config, inputs);
+        assert_eq!(requirement, KvEventSourceRequirement::DecodeTransferSource);
+        assert!(requirement.should_subscribe());
+        assert!(requirement.requires_source());
+        assert!(!inputs.contains(WorkerInputs::CACHE));
+        assert_eq!(
+            KvEventSourceRequirement::derive(Some(WorkerType::Prefill), &config, inputs),
+            KvEventSourceRequirement::NotRequired
+        );
+        config.enable_decode_to_prefill_reuse = false;
+        assert_eq!(
+            KvEventSourceRequirement::derive(Some(WorkerType::Decode), &config, inputs),
+            KvEventSourceRequirement::NotRequired
+        );
+        config.enable_decode_to_prefill_gpu_reuse = true;
+        assert_eq!(
+            KvEventSourceRequirement::derive(Some(WorkerType::Decode), &config, inputs),
+            KvEventSourceRequirement::DecodeTransferSource
+        );
+        assert!(!inputs.contains(WorkerInputs::CACHE));
+        config.enable_decode_to_prefill_gpu_reuse = false;
+        config.enable_decode_to_prefill_reuse = true;
+        config.use_remote_indexer = true;
+        assert_eq!(
+            KvEventSourceRequirement::derive(Some(WorkerType::Decode), &config, inputs),
+            KvEventSourceRequirement::NotRequired
+        );
+        config.use_remote_indexer = false;
+        config.use_kv_events = false;
+        assert_eq!(
+            KvEventSourceRequirement::derive(Some(WorkerType::Decode), &config, inputs),
+            KvEventSourceRequirement::NotRequired
         );
     }
 

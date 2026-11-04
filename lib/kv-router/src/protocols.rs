@@ -293,6 +293,18 @@ pub struct KvHintTransferWorkerMetadata<'a> {
     pub source_control_endpoint: Option<&'a str>,
 }
 
+/// Optional GPU-only router-hint metadata carried by the standalone catalog.
+/// Missing/disabled metadata never upgrades a legacy CPU worker. A source must
+/// expose a GPU-only endpoint that atomically pins the requested keys and holds
+/// allocations until native completion or confirmed cancellation quiescence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KvGpuTransferWorkerConfig {
+    pub enabled: bool,
+    pub worker_type: String,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub source_control_endpoints: HashMap<DpRank, String>,
+}
+
 /// Trait abstracting the worker configuration fields needed by the scheduling layer.
 ///
 /// `ModelRuntimeConfig` (in `lib/llm`) implements this directly so no adapter type is needed.
@@ -312,6 +324,20 @@ pub trait WorkerConfigLike {
         &self,
         _dp_rank: DpRank,
     ) -> Option<KvHintTransferWorkerMetadata<'_>> {
+        None
+    }
+
+    /// Separate direct GPU capability; absence is the N-2-compatible default.
+    fn kv_hint_gpu_transfer_metadata_for_dp_rank(
+        &self,
+        _dp_rank: DpRank,
+    ) -> Option<KvHintTransferWorkerMetadata<'_>> {
+        None
+    }
+
+    /// Operator-certified identity of model weights, tokenizer and KV layout.
+    /// Missing identity disables cross-role reuse. This is not a topology label.
+    fn router_hint_transfer_domain(&self) -> Option<&str> {
         None
     }
 
