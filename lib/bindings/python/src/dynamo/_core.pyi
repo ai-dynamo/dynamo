@@ -1957,9 +1957,9 @@ class KvRouterConfig:
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
                 Enables priority scheduling via request priority hints.
                 Set a numeric value to enable queueing.
-            router_policy_config: Startup-only policy-family and cache-bucket queue
-                YAML path. When omitted, router_queue_threshold and
-                router_queue_policy define one synthetic policy class.
+            router_policy_config: Startup-only policy-class queue YAML path.
+                When omitted, router_queue_threshold and router_queue_policy
+                define one synthetic policy class.
             router_prefill_policy: Process-local override of
                 worker_selection.prefill for disaggregated prefill workers.
             router_decode_policy: Process-local override of worker_selection.decode
@@ -1968,6 +1968,8 @@ class KvRouterConfig:
                 When > 1, uses a concurrent radix tree with a thread pool,
                 including for approximate routing when KV events are disabled.
             router_queue_policy: Scheduling policy for the router queue (default: "fcfs").
+                It sets the synthetic policy class; configured policy classes default to "edf".
+                "edf": earliest due time first, then arrival order; priorities do not reorder it.
                 "fcfs": first-come first-served with priority bumps — optimizes tail TTFT.
                 "lcfs": last-come first-served with priority bumps — intentionally worsens tail behavior for policy comparisons.
                 "wspt": weighted shortest processing time (Smith's rule) — optimizes average TTFT.
@@ -2836,6 +2838,8 @@ class PoolRelay:
         connection_revision: Optional[str] = None,
         global_discovery_url: Optional[str] = None,
         routing_pool: Optional[str] = None,
+        routing_pool_region: Optional[str] = None,
+        routing_pool_frontends: Optional[List[str]] = None,
     ) -> None:
         ...
 
@@ -3032,9 +3036,9 @@ class KvRouter:
                            blocks. When provided, this is used in block hash computation
                            to enable MM-aware worker selection.
             cache_namespace: Optional cache namespace used in block hash computation.
-            policy_class: Requested policy family, or an exact explicit class.
-                          Missing, unknown, and ordinary physical-class names use the
-                          configured default family before cache-bucket resolution.
+            policy_class: Requested policy class name. An omitted name uses
+                          the configured default class; a name that matches no
+                          configured class raises an error.
 
         Returns:
             A tuple of (worker_id, dp_rank, overlap_blocks) where:
