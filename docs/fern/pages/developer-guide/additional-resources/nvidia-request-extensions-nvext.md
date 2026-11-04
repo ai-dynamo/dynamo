@@ -31,7 +31,7 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | Field | Type | Default | Consumed By | Description |
 |-------|------|---------|-------------|-------------|
 | `greed_sampling` | `bool` | `None` | Preprocessor | Forces greedy sampling regardless of other sampling parameters. |
-| `use_raw_prompt` | `bool` | `None` | Preprocessor | Bypasses the prompt template and passes the prompt directly to the tokenizer. |
+| `use_raw_prompt` | `bool` | `None` | Preprocessor | Bypasses the prompt template. Chat requests must contain exactly one user message; its text parts are concatenated without a separator and non-text payloads are handled separately. Other chat message shapes return a request error. |
 | `annotations` | `string[]` | `None` | Preprocessor | Triggers out-of-band information in the SSE stream via the `event:` field. |
 | `backend_instance_id` | `u64` | `None` | Router | Routes the request to a specific backend instance. |
 | `token_data` | `u32[]` | `None` | Preprocessor | Pre-tokenized prompt tokens. When present, the frontend skips tokenization. |

@@ -222,6 +222,11 @@ fn media_data(request: &PreprocessedRequest) -> Result<[Vec<String>; 3], DynamoE
 /// SGLang reads `file://` URLs and bare paths from the disk of the SGLang server.
 fn media_source(item: &MultimodalData) -> Result<String, DynamoError> {
     let source = match item {
+        MultimodalData::Json(_) => {
+            return Err(client::invalid_request(
+                "Custom JSON content requires a dynamo.vllm worker; the SGLang sidecar does not support it",
+            ));
+        }
         MultimodalData::Url(url) => url.as_str(),
         MultimodalData::RawUrl(source) => source,
         MultimodalData::Decoded(_) => {
