@@ -20,13 +20,14 @@ use std::collections::{HashMap, HashSet};
 use dynamo_protocols::types::responses::{
     AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, IncompleteDetails,
     InputContent, InputImageContent, InputItem, InputOutputMessageContent, InputParam, InputRole,
-    InputTokenDetails, Instructions, Item, MessageItem, MessagePhase, NamespaceToolParamTool,
-    OutputItem, OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent,
-    OutputTokenDetails, PromptCacheRetention, Reasoning, ReasoningItem, ReasoningItemContent,
-    ReasoningTextContent, RefusalContent, RequestTool, RequestToolChoiceParam, Response,
-    ResponseTextParam, ResponseUsage, Role as ResponseRole, ServiceTierResponses, Status,
-    SummaryPart, TextResponseFormatConfiguration, Tool, ToolChoiceAllowed, ToolChoiceAllowedMode,
-    ToolChoiceOptions, ToolSearchExecutionType, Truncation,
+    InputTokenDetails, Instructions, Item, LogProb, MessageItem, MessagePhase,
+    NamespaceToolParamTool, OutputItem, OutputMessage, OutputMessageContent, OutputStatus,
+    OutputTextContent, OutputTokenDetails, PromptCacheRetention, Reasoning, ReasoningItem,
+    ReasoningItemContent, ReasoningTextContent, RefusalContent, RequestTool,
+    RequestToolChoiceParam, Response, ResponseLogProb, ResponseTextParam, ResponseTopLobProb,
+    ResponseUsage, Role as ResponseRole, ServiceTierResponses, Status, SummaryPart,
+    TextResponseFormatConfiguration, Tool, ToolChoiceAllowed, ToolChoiceAllowedMode,
+    ToolChoiceOptions, ToolSearchExecutionType, TopLogProb, Truncation,
 };
 use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
@@ -37,10 +38,10 @@ use dynamo_protocols::types::{
     ChatCompletionRequestToolMessage, ChatCompletionRequestToolMessageContent,
     ChatCompletionRequestToolMessageContentPart, ChatCompletionRequestUserMessage,
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
-    ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType,
-    CreateChatCompletionRequest, FinishReason, FunctionName, FunctionObject, FunctionType,
-    ImageUrl, ReasoningContent, ReasoningEffort as ChatReasoningEffort, ResponseFormat,
-    ServiceTier as ChatServiceTier,
+    ChatCompletionTokenLogprob, ChatCompletionTool, ChatCompletionToolChoiceOption,
+    ChatCompletionToolType, CreateChatCompletionRequest, FinishReason, FunctionName,
+    FunctionObject, FunctionType, ImageUrl, ReasoningContent,
+    ReasoningEffort as ChatReasoningEffort, ResponseFormat, ServiceTier as ChatServiceTier,
 };
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
@@ -1250,7 +1251,14 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             history_phases.clear();
         }
 
-        let top_logprobs = convert_top_logprobs(resp.inner.top_logprobs);
+        // Responses returns scores only when `include` asks for them. The chat
+        // request then needs `logprobs: true` and an explicit count, since the
+        // chat default is 1. Without the include, `top_logprobs` selects
+        // nothing, and chat rejects it without `logprobs: true`, so it stays
+        // out of the backend request and is only echoed on the response.
+        let logprobs_requested = include_requests_logprobs(resp.inner.include.as_deref());
+        let top_logprobs =
+            logprobs_requested.then(|| convert_top_logprobs(resp.inner.top_logprobs).unwrap_or(0));
 
         let (tools, tool_choice) = convert_tools_and_choice(
             (!inner_tools.is_empty()).then_some(inner_tools.as_slice()),
@@ -1342,6 +1350,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
                 max_completion_tokens: resp.inner.max_output_tokens,
                 store: resp.inner.store,
                 parallel_tool_calls: resp.inner.parallel_tool_calls,
+                logprobs: logprobs_requested.then_some(true),
                 top_logprobs,
                 metadata: resp
                     .inner
@@ -1366,6 +1375,57 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             unsupported_fields: Default::default(),
         })
     }
+}
+
+/// Whether `include` asks for token log probabilities on output text.
+pub(crate) fn include_requests_logprobs(include: Option<&[IncludeEnum]>) -> bool {
+    include.is_some_and(|include| include.contains(&IncludeEnum::MessageOutputTextLogprobs))
+}
+
+/// Project chat token records onto Responses `output_text` logprob entries.
+///
+/// Responses has one logprob slot, on the text part. Chat records every
+/// generated token there in generation order, including reasoning, tool-call
+/// and control tokens that the parsed text does not show, so the entries need
+/// not line up with the visible text.
+pub(crate) fn chat_logprobs_to_output_text(entries: &[ChatCompletionTokenLogprob]) -> Vec<LogProb> {
+    entries
+        .iter()
+        .map(|entry| LogProb {
+            token: entry.token.clone(),
+            logprob: f64::from(entry.logprob),
+            bytes: entry.bytes.clone().unwrap_or_default(),
+            top_logprobs: entry
+                .top_logprobs
+                .iter()
+                .map(|top| TopLogProb {
+                    token: top.token.clone(),
+                    logprob: f64::from(top.logprob),
+                    bytes: top.bytes.clone().unwrap_or_default(),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// Project `output_text` logprob entries onto the stream event form, which
+/// carries no `bytes`.
+pub(crate) fn output_text_logprobs_to_events(entries: &[LogProb]) -> Vec<ResponseLogProb> {
+    entries
+        .iter()
+        .map(|entry| ResponseLogProb {
+            token: entry.token.clone(),
+            logprob: entry.logprob,
+            top_logprobs: entry
+                .top_logprobs
+                .iter()
+                .map(|top| ResponseTopLobProb {
+                    token: top.token.clone(),
+                    logprob: top.logprob,
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 fn convert_top_logprobs(input: Option<u8>) -> Option<u8> {
@@ -1399,6 +1459,8 @@ pub struct ResponseParams {
     pub text: Option<ResponseTextParam>,
     pub service_tier: Option<ServiceTierResponses>,
     pub include: Option<Vec<IncludeEnum>>,
+    /// Requested top-k per token, echoed on the response object.
+    pub top_logprobs: Option<u8>,
     pub truncation: Option<Truncation>,
     /// OpenResponses spec requires these fields on the response body. Upstream
     /// `CreateResponse` doesn't model them on the request yet, so for now they
@@ -1432,6 +1494,16 @@ pub(crate) fn responses_incomplete_reason(
 }
 
 impl ResponseParams {
+    /// Whether `include` asks for token log probabilities on output text.
+    pub(crate) fn logprobs_requested(&self) -> bool {
+        include_requests_logprobs(self.include.as_deref())
+    }
+
+    /// The `top_logprobs` value the response object reports.
+    pub(crate) fn echoed_top_logprobs(&self) -> u8 {
+        self.top_logprobs.unwrap_or(0)
+    }
+
     fn reasoning_summary_requested(&self) -> bool {
         self.reasoning
             .as_ref()
@@ -1545,9 +1617,20 @@ pub fn chat_completion_to_response(
     let choice = chat_resp.choices.into_iter().next();
     let mut output = Vec::new();
     let mut incomplete_reason = None;
+    // Every token record the backend scored, in generation order. Responses
+    // carries them on the text part, so hold them until the output exists.
+    let mut text_logprobs = Vec::new();
 
     if let Some(choice) = choice {
         incomplete_reason = responses_incomplete_reason(choice.finish_reason);
+        if params.logprobs_requested()
+            && let Some(entries) = choice
+                .logprobs
+                .as_ref()
+                .and_then(|lp| lp.content.as_deref())
+        {
+            text_logprobs = chat_logprobs_to_output_text(entries);
+        }
 
         // Reasoning precedes tool calls so output order matches the decoded turn.
         if let Some(reasoning_text) = choice.message.reasoning_content
@@ -1766,19 +1849,15 @@ pub fn chat_completion_to_response(
         output.push(make_text_message(message_id, String::new()));
     }
 
-    // Apply `include` filtering: strip logprobs from output text unless
-    // the caller explicitly requested them via `message.output_text.logprobs`.
-    let keep_logprobs = params
-        .include
-        .as_ref()
-        .is_some_and(|inc| inc.contains(&IncludeEnum::MessageOutputTextLogprobs));
+    // Apply `include` filtering: the chat scores go on the first output text
+    // part when the caller requested `message.output_text.logprobs`; every
+    // text part otherwise reports an empty array, which the schema requires.
+    let mut text_logprobs = Some(text_logprobs);
     for item in &mut output {
         if let OutputItem::Message(msg) = item {
             for content in &mut msg.content {
-                if let OutputMessageContent::OutputText(text) = content
-                    && (!keep_logprobs || text.logprobs.is_none())
-                {
-                    text.logprobs = Some(Vec::new());
+                if let OutputMessageContent::OutputText(text) = content {
+                    text.logprobs = Some(text_logprobs.take().unwrap_or_default());
                 }
             }
         }
@@ -1884,7 +1963,7 @@ pub fn chat_completion_to_response(
                 .clone()
                 .unwrap_or(ServiceTierResponses::Auto),
         ),
-        top_logprobs: Some(0),
+        top_logprobs: Some(params.echoed_top_logprobs()),
         usage: chat_resp.usage.map(|u| ResponseUsage {
             input_tokens: u.prompt_tokens,
             input_tokens_details: InputTokenDetails {
@@ -2012,7 +2091,8 @@ mod tests {
         assert_eq!(nv_req.inner.temperature, Some(0.5));
         assert_eq!(nv_req.inner.top_p, Some(0.9));
         assert_eq!(nv_req.inner.max_completion_tokens, Some(1024));
-        assert_eq!(nv_req.inner.top_logprobs, Some(15));
+        // Scores were not requested, so the count does not reach the backend.
+        assert_eq!(nv_req.inner.top_logprobs, None);
         assert_eq!(nv_req.inner.stream, Some(true));
 
         let messages = &nv_req.inner.messages;
@@ -2026,6 +2106,87 @@ mod tests {
             },
             _ => panic!("expected user message"),
         }
+    }
+
+    /// `include: message.output_text.logprobs` is what asks for scores; it turns on
+    /// chat `logprobs` and defaults `top_logprobs` to 0 so the chat default of 1 does
+    /// not apply. `top_logprobs` alone requests nothing and is not forwarded, because
+    /// chat rejects a count without `logprobs: true`.
+    #[test]
+    fn include_logprobs_enables_chat_logprobs() {
+        let nv_req: NvCreateChatCompletionRequest =
+            make_response_with_input("hi").try_into().unwrap();
+        assert_eq!(nv_req.inner.logprobs, None);
+        assert_eq!(nv_req.inner.top_logprobs, None);
+
+        let mut request = make_response_with_input("hi");
+        request.inner.include = Some(vec![IncludeEnum::MessageOutputTextLogprobs]);
+        let nv_req: NvCreateChatCompletionRequest = request.try_into().unwrap();
+        assert_eq!(nv_req.inner.logprobs, Some(true));
+        assert_eq!(nv_req.inner.top_logprobs, Some(15));
+
+        let mut request = make_response_with_input("hi");
+        request.inner.include = Some(vec![IncludeEnum::MessageOutputTextLogprobs]);
+        request.inner.top_logprobs = None;
+        let nv_req: NvCreateChatCompletionRequest = request.try_into().unwrap();
+        assert_eq!(nv_req.inner.logprobs, Some(true));
+        assert_eq!(nv_req.inner.top_logprobs, Some(0));
+    }
+
+    /// Aggregated chat scores land on the output text part, with bytes and
+    /// alternatives, and the response echoes the requested `top_logprobs`.
+    #[test]
+    fn included_logprobs_map_onto_output_text() {
+        let mut chat_resp = make_chat_resp_with_text("hi");
+        chat_resp.inner.choices[0].logprobs = Some(
+            serde_json::from_value(serde_json::json!({
+                "content": [
+                    {"token": "h", "logprob": -0.25, "bytes": [104],
+                     "top_logprobs": [{"token": "h", "logprob": -0.25, "bytes": [104]},
+                                      {"token": "H", "logprob": -1.5, "bytes": [72]}]},
+                    {"token": "i", "logprob": -0.5, "bytes": null, "top_logprobs": []},
+                    {"token": "<eos>", "logprob": -0.75, "bytes": [], "top_logprobs": []}
+                ],
+                "refusal": null
+            }))
+            .unwrap(),
+        );
+        let params = ResponseParams {
+            include: Some(vec![IncludeEnum::MessageOutputTextLogprobs]),
+            top_logprobs: Some(2),
+            ..Default::default()
+        };
+
+        let resp = chat_completion_to_response(chat_resp.clone(), &params, None).unwrap();
+        assert_eq!(resp.inner.top_logprobs, Some(2));
+        let OutputItem::Message(message) = &resp.inner.output[0] else {
+            panic!("expected message output");
+        };
+        let OutputMessageContent::OutputText(text) = &message.content[0] else {
+            panic!("expected text content");
+        };
+        let logprobs = text.logprobs.as_ref().unwrap();
+        let tokens: Vec<_> = logprobs.iter().map(|entry| entry.token.as_str()).collect();
+        assert_eq!(tokens, ["h", "i", "<eos>"]);
+        assert_eq!(logprobs[0].logprob, -0.25);
+        assert_eq!(logprobs[0].bytes, vec![104]);
+        assert_eq!(logprobs[0].top_logprobs.len(), 2);
+        assert_eq!(logprobs[0].top_logprobs[1].token, "H");
+        assert!(
+            logprobs[1].bytes.is_empty(),
+            "null bytes become an empty array"
+        );
+
+        let resp =
+            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+        assert_eq!(resp.inner.top_logprobs, Some(0));
+        let OutputItem::Message(message) = &resp.inner.output[0] else {
+            panic!("expected message output");
+        };
+        let OutputMessageContent::OutputText(text) = &message.content[0] else {
+            panic!("expected text content");
+        };
+        assert_eq!(text.logprobs.as_deref(), Some(&[][..]));
     }
 
     #[test]

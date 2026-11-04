@@ -14,18 +14,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::sse::Event;
 use dynamo_protocols::types::responses::{
-    AssistantRole, IncompleteDetails, InputTokenDetails, Instructions, MessagePhase, OutputContent,
-    OutputItem, OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent,
-    OutputTokenDetails, ReasoningItem, ReasoningItemContent, ReasoningTextContent, RefusalContent,
-    RequestToolChoiceParam, Response, ResponseCompletedEvent, ResponseContentPartAddedEvent,
-    ResponseContentPartDoneEvent, ResponseCreatedEvent, ResponseCustomToolCallInputDeltaEvent,
-    ResponseCustomToolCallInputDoneEvent, ResponseError, ResponseErrorCode, ResponseFailedEvent,
-    ResponseFunctionCallArgumentsDeltaEvent, ResponseFunctionCallArgumentsDoneEvent,
-    ResponseInProgressEvent, ResponseIncompleteEvent, ResponseOutputItemAddedEvent,
-    ResponseOutputItemDoneEvent, ResponseReasoningTextDeltaEvent, ResponseReasoningTextDoneEvent,
-    ResponseRefusalDeltaEvent, ResponseRefusalDoneEvent, ResponseStreamEvent,
-    ResponseTextDeltaEvent, ResponseTextDoneEvent, ResponseTextParam, ResponseUsage,
-    ServiceTierResponses, Status, TextResponseFormatConfiguration, ToolChoiceOptions, Truncation,
+    AssistantRole, IncompleteDetails, InputTokenDetails, Instructions, LogProb, MessagePhase,
+    OutputContent, OutputItem, OutputMessage, OutputMessageContent, OutputStatus,
+    OutputTextContent, OutputTokenDetails, ReasoningItem, ReasoningItemContent,
+    ReasoningTextContent, RefusalContent, RequestToolChoiceParam, Response, ResponseCompletedEvent,
+    ResponseContentPartAddedEvent, ResponseContentPartDoneEvent, ResponseCreatedEvent,
+    ResponseCustomToolCallInputDeltaEvent, ResponseCustomToolCallInputDoneEvent, ResponseError,
+    ResponseErrorCode, ResponseFailedEvent, ResponseFunctionCallArgumentsDeltaEvent,
+    ResponseFunctionCallArgumentsDoneEvent, ResponseInProgressEvent, ResponseIncompleteEvent,
+    ResponseOutputItemAddedEvent, ResponseOutputItemDoneEvent, ResponseReasoningTextDeltaEvent,
+    ResponseReasoningTextDoneEvent, ResponseRefusalDeltaEvent, ResponseRefusalDoneEvent,
+    ResponseStreamEvent, ResponseTextDeltaEvent, ResponseTextDoneEvent, ResponseTextParam,
+    ResponseUsage, ServiceTierResponses, Status, TextResponseFormatConfiguration,
+    ToolChoiceOptions, Truncation,
 };
 use serde::{
     Serialize,
@@ -35,7 +36,10 @@ use uuid::Uuid;
 
 use dynamo_protocols::types::{ChatCompletionMessageContent, FinishReason};
 
-use super::{ResponseParams, responses_incomplete_reason};
+use super::{
+    ResponseParams, chat_logprobs_to_output_text, output_text_logprobs_to_events,
+    responses_incomplete_reason,
+};
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use crate::protocols::unified::ResponsesContext;
 
@@ -61,6 +65,12 @@ pub struct ResponseStreamConverter {
     accumulated_refusal: String,
     text_content_index: Option<u32>,
     refusal_content_index: Option<u32>,
+    // Scores received since the last text delta. Chunks that show no text
+    // (reasoning, tool calls, a trailing EOS score) still carry scores, which
+    // ride on the next text delta or on `output_text.done`.
+    pending_logprobs: Vec<LogProb>,
+    // Scores already delivered for the open message's text part.
+    text_logprobs: Vec<LogProb>,
     // Ordered reasoning spans; a new item opens when reasoning resumes after
     // a tool call.
     reasoning_items: Vec<ReasoningState>,
@@ -157,6 +167,8 @@ impl ResponseStreamConverter {
             accumulated_refusal: String::new(),
             text_content_index: None,
             refusal_content_index: None,
+            pending_logprobs: Vec::new(),
+            text_logprobs: Vec::new(),
             reasoning_items: Vec::new(),
             active_reasoning_index: None,
             function_call_items: Vec::new(),
@@ -427,7 +439,7 @@ impl ResponseStreamConverter {
                     .clone()
                     .unwrap_or(ServiceTierResponses::Auto),
             ),
-            top_logprobs: Some(0),
+            top_logprobs: Some(self.params.echoed_top_logprobs()),
             usage: self.usage.clone(),
         }
     }
@@ -565,6 +577,18 @@ impl ResponseStreamConverter {
         for choice in &chunk.inner.choices {
             let delta = &choice.delta;
 
+            // Chat scores every generated token, whatever the parser made of
+            // it. Queue them in arrival order; the next text delta carries them.
+            if self.params.logprobs_requested()
+                && let Some(entries) = choice
+                    .logprobs
+                    .as_ref()
+                    .and_then(|lp| lp.content.as_deref())
+            {
+                self.pending_logprobs
+                    .extend(chat_logprobs_to_output_text(entries));
+            }
+
             if let Some(reasoning) = delta.reasoning_content.as_deref()
                 && !reasoning.is_empty()
                 && !self.message_started
@@ -608,6 +632,7 @@ impl ResponseStreamConverter {
 
                 // Emit text delta
                 self.accumulated_text.push_str(content);
+                let delta_logprobs = std::mem::take(&mut self.pending_logprobs);
                 let text_delta =
                     ResponseStreamEvent::ResponseOutputTextDelta(ResponseTextDeltaEvent {
                         sequence_number: self.next_seq(),
@@ -615,8 +640,9 @@ impl ResponseStreamConverter {
                         output_index: self.message_output_index,
                         content_index,
                         delta: content.to_string(),
-                        logprobs: Some(vec![]),
+                        logprobs: Some(output_text_logprobs_to_events(&delta_logprobs)),
                     });
+                self.text_logprobs.extend(delta_logprobs);
                 events.push(self.make_sse_event(&text_delta));
             }
 
@@ -1028,7 +1054,7 @@ impl ResponseStreamConverter {
                 OutputMessageContent::OutputText(OutputTextContent {
                     text: self.accumulated_text.clone(),
                     annotations: vec![],
-                    logprobs: Some(vec![]),
+                    logprobs: Some(self.text_logprobs.clone()),
                 }),
             ));
         }
@@ -1127,6 +1153,10 @@ impl ResponseStreamConverter {
             );
             self.text_content_index = Some(index);
         }
+        // Scores that arrived after the last text delta (a tool call, a hidden
+        // EOS, a late score-only chunk) complete this text part's record.
+        let late_logprobs = std::mem::take(&mut self.pending_logprobs);
+        self.text_logprobs.extend(late_logprobs);
 
         for (index, content) in self.message_content().into_iter().enumerate() {
             let content_index = index as u32;
@@ -1138,7 +1168,9 @@ impl ResponseStreamConverter {
                         output_index: self.message_output_index,
                         content_index,
                         text: text.text.clone(),
-                        logprobs: Some(vec![]),
+                        logprobs: Some(output_text_logprobs_to_events(
+                            text.logprobs.as_deref().unwrap_or_default(),
+                        )),
                     });
                     events.push(self.make_sse_event(&done));
                     OutputContent::OutputText(text)
@@ -1190,6 +1222,7 @@ impl ResponseStreamConverter {
         self.accumulated_refusal.clear();
         self.text_content_index = None;
         self.refusal_content_index = None;
+        self.text_logprobs.clear();
     }
 
     /// Emit remaining output completion events and `response.completed` at stream end.
@@ -1841,8 +1874,147 @@ mod tests {
         );
     }
 
+    /// Decode the JSON body of one SSE event. `Event` exposes only its `Debug`
+    /// form, which prints the wire buffer as a Rust byte-string literal.
+    fn event_json(event: &Result<Event, anyhow::Error>) -> serde_json::Value {
+        let debug = format!("{:?}", event.as_ref().unwrap());
+        let start = debug.find("data: ").expect("event has a data line") + 6;
+        let literal = &debug[start..];
+        let mut json = String::new();
+        let mut chars = literal.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => match chars.next() {
+                    Some('n') => break,
+                    Some('"') => json.push('"'),
+                    Some('\\') => json.push('\\'),
+                    Some('t') => json.push('\t'),
+                    Some('r') => json.push('\r'),
+                    Some('\'') => json.push('\''),
+                    Some('x') => {
+                        let hex: String = chars.by_ref().take(2).collect();
+                        json.push(u8::from_str_radix(&hex, 16).unwrap() as char);
+                    }
+                    other => panic!("unexpected escape {other:?}"),
+                },
+                _ => json.push(c),
+            }
+        }
+        serde_json::from_str(&json).expect("event data is JSON")
+    }
+
+    fn logprob_tokens(logprobs: &serde_json::Value) -> Vec<&str> {
+        logprobs
+            .as_array()
+            .expect("logprobs is an array")
+            .iter()
+            .map(|entry| entry["token"].as_str().unwrap())
+            .collect()
+    }
+
+    fn scored(
+        mut chunk: NvCreateChatCompletionStreamResponse,
+        token: &str,
+    ) -> NvCreateChatCompletionStreamResponse {
+        chunk.inner.choices[0].logprobs = Some(
+            serde_json::from_value(serde_json::json!({
+                "content": [{
+                    "token": token,
+                    "logprob": -0.5,
+                    "bytes": token.as_bytes(),
+                    "top_logprobs": [{"token": token, "logprob": -0.5, "bytes": token.as_bytes()}]
+                }],
+                "refusal": null
+            }))
+            .unwrap(),
+        );
+        chunk
+    }
+
+    fn logprob_params() -> ResponseParams {
+        use dynamo_protocols::types::responses::IncludeEnum;
+
+        ResponseParams {
+            include: Some(vec![IncludeEnum::MessageOutputTextLogprobs]),
+            top_logprobs: Some(1),
+            ..default_params()
+        }
+    }
+
+    /// Every chat score reaches the client once, in generation order: a text
+    /// delta carries the scores received since the previous delta, and scores
+    /// after the last delta complete the record on `output_text.done`.
+    #[test]
+    fn requested_logprobs_ride_on_text_deltas_and_done() {
+        let mut score_only = finish_chunk(FinishReason::Stop);
+        score_only.inner.choices[0] =
+            crate::protocols::openai::chat_completions::unified_parser::empty_choice(0);
+        let score_only = scored(score_only, "D");
+
+        let mut conv = ResponseStreamConverter::new("test-model".into(), logprob_params());
+        let _ = conv.emit_start_events();
+        // Reasoning is not surfaced without a summary request, but its score is.
+        assert!(
+            conv.process_chunk(&scored(reasoning_chunk("think"), "A"))
+                .is_empty()
+        );
+
+        let events = conv.process_chunk(&scored(text_chunk("hi"), "B"));
+        let delta = events
+            .iter()
+            .find(|event| event_type(event) == "response.output_text.delta")
+            .expect("text delta");
+        assert_eq!(logprob_tokens(&event_json(delta)["logprobs"]), ["A", "B"]);
+
+        let events = conv.process_chunk(&scored(text_chunk("!"), "C"));
+        assert_eq!(logprob_tokens(&event_json(&events[0])["logprobs"]), ["C"]);
+
+        conv.process_chunk(&finish_chunk(FinishReason::Stop));
+        assert!(conv.process_chunk(&score_only).is_empty());
+
+        let events = conv.emit_end_events();
+        let done = event_json(&events[0]);
+        assert_eq!(done["type"], "response.output_text.done");
+        assert_eq!(logprob_tokens(&done["logprobs"]), ["A", "B", "C", "D"]);
+        assert_eq!(done["logprobs"][0]["top_logprobs"][0]["token"], "A");
+
+        let completed = event_json(events.last().unwrap());
+        assert_eq!(completed["response"]["top_logprobs"], 1);
+        let text = &completed["response"]["output"][0]["content"][0];
+        assert_eq!(text["text"], "hi!");
+        assert_eq!(logprob_tokens(&text["logprobs"]), ["A", "B", "C", "D"]);
+        assert_eq!(text["logprobs"][1]["bytes"], serde_json::json!([66]));
+    }
+
+    /// Without `include: message.output_text.logprobs`, chat scores are dropped and
+    /// the schema-required arrays stay empty.
+    #[test]
+    fn logprobs_stay_empty_without_include() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+        let _ = conv.emit_start_events();
+
+        let events = conv.process_chunk(&scored(text_chunk("hi"), "A"));
+        let delta = events
+            .iter()
+            .find(|event| event_type(event) == "response.output_text.delta")
+            .expect("text delta");
+        assert_eq!(event_json(delta)["logprobs"], serde_json::json!([]));
+
+        conv.process_chunk(&finish_chunk(FinishReason::Stop));
+        let events = conv.emit_end_events();
+        let done = event_json(&events[0]);
+        assert_eq!(done["logprobs"], serde_json::json!([]));
+        let completed = event_json(events.last().unwrap());
+        assert_eq!(completed["response"]["top_logprobs"], 0);
+        assert_eq!(
+            completed["response"]["output"][0]["content"][0]["logprobs"],
+            serde_json::json!([])
+        );
+    }
+
     /// The V1 tool jail can send late scores on an empty-delta choice after `finish_reason`.
-    /// Responses carries no chat logprobs, so that choice must not change the output.
+    /// Without an `include` request Responses drops chat logprobs, so that choice must not
+    /// change the output.
     #[test]
     fn post_finish_score_only_choice_emits_no_events() {
         let mut score_only = finish_chunk(FinishReason::Stop);
