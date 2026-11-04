@@ -334,7 +334,7 @@ async fn postprocessor_parsing_stream_replays_unit_test_fixture() {
 
 #[tokio::test]
 async fn postprocessor_parsing_stream_replays_interval_20_fixture() {
-    let preprocessor = build_preprocessor(Some("qwen"), Some("hermes"));
+    let preprocessor = build_preprocessor(Some("qwen3"), Some("hermes"));
     let (mut request, _expected_stream_json, input_chunks) =
         parse_fixture(&fixture_path("stream_interval_20.jsonl"));
 
