@@ -29,7 +29,7 @@ impl ConcurrentRadixTreeCompressed {
         let mut queue = VecDeque::from([self.root.clone()]);
         queue.extend(self.anchor_nodes.iter().map(|entry| entry.value().clone()));
         let mut candidates = Vec::new();
-        let mut visited = 0u64;
+        let mut visited = queue.len() as u64;
 
         while let Some(parent) = queue.pop_front() {
             parent.for_each_child(|key, child| {

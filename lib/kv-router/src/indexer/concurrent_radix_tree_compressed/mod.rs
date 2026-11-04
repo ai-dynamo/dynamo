@@ -66,9 +66,9 @@ const SWEEP_TICK: Duration = Duration::from_millis(50);
 const SWEEP_AFTER_DEATHS: u64 = 1024;
 /// ...or once this long has passed, for nodes no death was counted for.
 const SWEEP_MAX_INTERVAL: Duration = Duration::from_secs(30);
-/// A sweep walks the whole tree, so it also waits for deaths in proportion to the nodes
-/// the last sweep visited: one per this many. The walk then costs at most this many node
-/// visits per death, and the dead leaves the lanes miss stay a small share of the tree.
+/// A sweep walks the whole tree, so it also waits for one death per this many nodes the
+/// last sweep visited. That keeps the walk near this many visits per death, and the dead
+/// leaves the lanes miss to a small share of the tree.
 const SWEEP_VISITS_PER_DEATH: u64 = 8;
 
 /// Most queued dead leaves an idle event lane unlinks before it checks for new events.
@@ -194,9 +194,8 @@ impl ConcurrentRadixTreeCompressed {
         self.deaths_since_sweep.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// One maintenance tick: sweeps stale leaves once enough nodes have died, for the
-    /// schedule and the size of the tree the last sweep walked, or the schedule's longest
-    /// interval has passed.
+    /// One maintenance tick: sweeps stale leaves once enough nodes have died or the
+    /// schedule's longest interval has passed.
     fn sweep_if_due(&self) {
         let schedule = &self.sweep_schedule;
         let mut last = self.last_sweep.lock();

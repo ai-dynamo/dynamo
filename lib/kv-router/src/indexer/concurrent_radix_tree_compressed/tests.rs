@@ -1981,15 +1981,16 @@ mod reclamation_tests {
 
     #[test]
     fn the_sweep_waits_for_deaths_in_proportion_to_the_tree_it_last_walked() {
-        // Sixteen root leaves; deaths are never drained, so only the sweep unlinks them.
+        // Fifteen root leaves; deaths are never drained, so only the sweep unlinks them.
         let index = ConcurrentRadixTreeCompressed::new().with_sweep_schedule(None, 1, HOUR);
         let mut lookup = direct_lookup();
-        for hash in 1..=16 {
+        for hash in 1..=15 {
             apply(&index, &mut lookup, make_store_event(0, &[hash]));
         }
         let mut kill = |hash| apply(&index, &mut lookup, make_remove_event(0, &[hash]));
 
-        // Before any sweep, one death meets the threshold, and the walk visits 16 nodes.
+        // Before any sweep, one death meets the threshold. The walk visits 16 nodes: the
+        // root and its 15 leaves.
         kill(1);
         index.sweep_if_due();
         assert_eq!(dead_node_count(&index), 0);
