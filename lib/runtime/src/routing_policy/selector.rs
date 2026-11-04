@@ -3,8 +3,7 @@
 
 //! How `PushRouter` picks an instance for its routing modes.
 //!
-//! The runtime ships no selection algorithm for round-robin, random, least-loaded or
-//! power-of-two. Whoever builds a `PushRouter` passes [`ModeSelectors`] in
+//! The runtime ships no selection algorithm for round-robin, random or least-loaded. Whoever builds a `PushRouter` passes [`ModeSelectors`] in
 //! [`PushRouterOptions`](crate::pipeline::PushRouterOptions); Dynamo's hosts back them with
 //! the router-mode plugins.
 

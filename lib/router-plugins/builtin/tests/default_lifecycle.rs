@@ -138,9 +138,10 @@ async fn runtime_updates_are_conditional_and_cancelled_writes_do_not_apply() {
 
 #[tokio::test]
 async fn scoring_error_does_not_book_and_allows_retry() {
-    use dynamo_kv_router::{
+    use dynamo_kv_router::WorkerSelectionPolicyError;
+    use dynamo_kv_router::plugins::worker_selection::{
         WorkerCandidates, WorkerInputView, WorkerPicker, WorkerScorer, WorkerSelectionContext,
-        WorkerSelectionPolicy, WorkerSelectionPolicyError,
+        WorkerSelectionPolicy,
     };
     use std::sync::{
         Arc,

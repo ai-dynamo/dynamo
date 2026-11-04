@@ -262,6 +262,9 @@ pub enum RouterMode {
     #[default]
     RoundRobin,
     Random,
+    /// `--router-mode power-of-two`, removed in v1.7. Cards from v1.5 and v1.6 workers can still
+    /// carry it, so it stays decodable; building a router with it fails.
+    // TODO(v1.9): Remove when v1.6 falls outside the N-2 compatibility window.
     PowerOfTwoChoices,
     KV,
     Direct,
@@ -355,19 +358,13 @@ impl RouterMode {
 
     /// Whether this mode admits requests against host-owned occupancy counters.
     pub const fn requires_occupancy(self) -> bool {
-        matches!(
-            self,
-            Self::PowerOfTwoChoices | Self::LeastLoaded | Self::DeviceAwareWeighted
-        )
+        matches!(self, Self::LeastLoaded | Self::DeviceAwareWeighted)
     }
 
     /// Whether this mode picks with an [`InstanceSelector`] passed in
     /// [`PushRouterOptions::selectors`].
     pub const fn picks_with_selector(self) -> bool {
-        matches!(
-            self,
-            Self::RoundRobin | Self::Random | Self::PowerOfTwoChoices | Self::LeastLoaded
-        )
+        matches!(self, Self::RoundRobin | Self::Random | Self::LeastLoaded)
     }
 }
 
@@ -377,6 +374,11 @@ fn resolve_selectors(
     router_mode: RouterMode,
     selectors: Option<&ModeSelectors>,
 ) -> anyhow::Result<Vec<(RouterMode, Arc<dyn InstanceSelector>)>> {
+    // TODO(v1.9): Remove with the `PowerOfTwoChoices` wire value.
+    anyhow::ensure!(
+        router_mode != RouterMode::PowerOfTwoChoices,
+        "the power-of-two router mode was removed in Dynamo v1.7; use another router mode"
+    );
     let Some(selectors) = selectors else {
         anyhow::ensure!(
             !router_mode.picks_with_selector(),
@@ -658,7 +660,7 @@ pub struct PushRouterOptions<T, U> {
     /// route `direct()` through the filtered available list. Off for recovery and
     /// query paths that must reach a worker regardless of its health.
     pub fault_detection: bool,
-    /// Instance selectors for round-robin, random, least-loaded and power-of-two. Required
+    /// Instance selectors for round-robin, random and least-loaded. Required
     /// when the router's mode is one of them; also backs [`PushRouter::round_robin`] and
     /// [`PushRouter::random`] on routers of any mode.
     pub selectors: Option<ModeSelectors>,
@@ -1000,12 +1002,6 @@ where
     /// Issue a request to a random instance.
     pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         self.dispatch_by(RouterMode::Random, request).await
-    }
-
-    /// Issue a request to the less loaded of two random instances.
-    pub async fn power_of_two_choices(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        self.dispatch_by(RouterMode::PowerOfTwoChoices, request)
-            .await
     }
 
     /// Issue a request to the instance with the fewest requests in flight.
@@ -2079,8 +2075,7 @@ where
 /// unary impl.
 ///
 /// **Reserve-before-observe rationale.** The router-mode strategies
-/// (`RoundRobin`, `Random`, `PowerOfTwoChoices`, `LeastLoaded`,
-/// `DeviceAwareWeighted`) don't depend on frame contents, so selection
+/// (`RoundRobin`, `Random`, `LeastLoaded`, `DeviceAwareWeighted`) don't depend on frame contents, so selection
 /// runs immediately and connection setup proceeds in parallel with the
 /// client producing its first frame. A client that connects but never
 /// sends one still releases the slot via the response-stream-drop path;
@@ -2851,11 +2846,7 @@ mod tests {
         let ns = drt.namespace("test_bidi_load_aware".to_string()).unwrap();
         let component = ns.component("test_component".to_string()).unwrap();
 
-        for mode in [
-            RouterMode::PowerOfTwoChoices,
-            RouterMode::LeastLoaded,
-            RouterMode::DeviceAwareWeighted,
-        ] {
+        for mode in [RouterMode::LeastLoaded, RouterMode::DeviceAwareWeighted] {
             let endpoint = component.endpoint("test_endpoint".to_string());
             let client = endpoint.client().await.unwrap();
             let router = PushRouter::<u64, TestResponse>::for_test(client, mode)

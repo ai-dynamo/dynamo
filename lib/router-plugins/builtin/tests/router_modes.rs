@@ -6,14 +6,13 @@ mod support;
 use std::collections::HashSet;
 
 use dynamo_kv_router::plugins::RouterPluginRegistry;
-use dynamo_kv_router::{
-    KvRouterConfig, RoutingPartitionRef, WorkerSelectionPolicy, WorkerSelector, WorkerType,
-};
-use dynamo_router_policies::router_modes::{LEAST_LOADED, POWER_OF_TWO, RANDOM, ROUND_ROBIN};
+use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicy;
+use dynamo_kv_router::{KvRouterConfig, RoutingPartitionRef, WorkerSelector, WorkerType};
+use dynamo_router_policies::router_modes::{LEAST_LOADED, RANDOM, ROUND_ROBIN};
 use dynamo_router_policies::{default_registry, register, with_defaults};
 use support::*;
 
-const MODES: [&str; 4] = [RANDOM, ROUND_ROBIN, LEAST_LOADED, POWER_OF_TWO];
+const MODES: [&str; 3] = [RANDOM, ROUND_ROBIN, LEAST_LOADED];
 
 fn policy(policy_type: &str) -> WorkerSelectionPolicy {
     let factory = default_registry().resolve_type(policy_type).unwrap();
