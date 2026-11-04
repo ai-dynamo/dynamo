@@ -161,9 +161,12 @@ Start from [`container/global-discovery-service.yaml`](https://github.com/ai-dyn
 which grants the EndpointSlice access this mode needs, and give its ServiceAccount the IAM role above.
 With `--pool-discovery mcs`, only that flag changes.
 
-The service checks the table at startup with `DescribeTable` and exits with an error that names the
-table if it is missing. `--dynamodb-poll-interval-secs` (default 2) must be less than
-`--heartbeat-interval-secs` (default 5), or the service refuses to start.
+The service checks the table at startup with `DescribeTable`. While the check fails, for example during
+a DynamoDB outage or before the table is created, the service logs why, names the table, and tries again
+after a backoff of up to 30 seconds. It serves nothing until the check passes, so the Pod stays unready
+rather than restarting. A configuration that cannot work, such as no AWS region, stops the service at
+once. `--dynamodb-poll-interval-secs` (default 2) must be less than `--heartbeat-interval-secs`
+(default 5), or the service refuses to start.
 
 ### Local development
 

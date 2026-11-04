@@ -42,7 +42,9 @@ use clap::error::ErrorKind;
 use clap::parser::ValueSource;
 use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 use dynamo_global_common::Lease;
-use dynamo_global_discovery_service::backends::dynamodb::{DynamoDbConfig, DynamoDbPoolStore};
+use dynamo_global_discovery_service::backends::dynamodb::{
+    ConnectError, DynamoDbConfig, DynamoDbPoolStore,
+};
 use dynamo_global_discovery_service::backends::kubernetes::{
     ExportedService, FrontendService, KARMADA_MAX_SERVICE_NAME, McsImplementation,
     McsPoolDirectory, McsReplicaDirectory,
@@ -54,6 +56,7 @@ use dynamo_global_discovery_service::pool_discovery::{
 };
 use dynamo_global_discovery_service::service::{self, PoolDiscoveryBackend, Tls};
 use kube::Client;
+use kube::runtime::watcher::DefaultBackoff;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -355,17 +358,29 @@ fn frontend_service(args: &Args) -> FrontendService {
 async fn main() -> Result<()> {
     dynamo_runtime::logging::init();
     let args = parse_args(std::env::args_os()).unwrap_or_else(|error| error.exit());
-    let backend = match args.pool_discovery.mcs() {
-        None => registrations_backend(&args).await?,
-        Some(mcs) => mcs_backend(&args, mcs).await?,
+    // Listen for SIGTERM before building the backend, which may wait for
+    // DynamoDB or the Kubernetes API server. As PID 1 in its container, the
+    // process would otherwise ignore SIGTERM until then.
+    let shutdown = CancellationToken::new();
+    cancel_on_signal(shutdown.clone())?;
+    let backend = tokio::select! {
+        biased;
+        () = shutdown.cancelled() => {
+            tracing::info!("stopped before the Global Discovery Service started");
+            return Ok(());
+        }
+        backend = async {
+            match args.pool_discovery.mcs() {
+                None => registrations_backend(&args).await,
+                Some(mcs) => mcs_backend(&args, mcs).await,
+            }
+        } => backend?,
     };
     let listener = TcpListener::bind(args.listen)
         .await
         .with_context(|| format!("bind the Global Discovery listener at {}", args.listen))?;
     tracing::info!(address = %args.listen, "Global Discovery Service listening");
 
-    let shutdown = CancellationToken::new();
-    cancel_on_signal(shutdown.clone())?;
     let tls = args
         .tls_cert_path
         .clone()
@@ -392,12 +407,38 @@ async fn registration_storage(
             Ok((store.clone(), store))
         }
         RegistrationStorage::Dynamodb => {
-            let config = dynamodb_config(args)?;
-            let table = config.table.clone();
-            let store = DynamoDbPoolStore::connect(lease, config)
-                .await
-                .with_context(|| format!("use DynamoDB table {table} for registrations"))?;
+            let store = connect_dynamodb(lease, dynamodb_config(args)?).await?;
             Ok((store.clone(), store))
+        }
+    }
+}
+
+/// Connects to the DynamoDB table. While the table cannot be checked, as
+/// during a DynamoDB or STS outage, or before the table exists, this tries
+/// again after a backoff instead of exiting, which would keep the Pod in
+/// CrashLoopBackOff after the table is back. Nothing listens meanwhile, so
+/// the Pod stays unready. A configuration that cannot work fails at once.
+async fn connect_dynamodb(lease: Lease, config: DynamoDbConfig) -> Result<Arc<DynamoDbPoolStore>> {
+    let table = config.table.clone();
+    // From 0.8 s, doubling to 30 s, with jitter. It never runs out.
+    let mut backoff = DefaultBackoff::default();
+    loop {
+        match DynamoDbPoolStore::connect(lease, config.clone()).await {
+            Ok(store) => return Ok(store),
+            Err(ConnectError::Table(error)) => {
+                let retry_in = backoff.next().unwrap_or(Duration::from_secs(30));
+                tracing::warn!(
+                    table,
+                    error = %format!("{error:#}"),
+                    ?retry_in,
+                    "cannot use the DynamoDB table for registrations yet; trying again"
+                );
+                tokio::time::sleep(retry_in).await;
+            }
+            Err(error) => {
+                return Err(anyhow::Error::new(error)
+                    .context(format!("use DynamoDB table {table} for registrations")));
+            }
         }
     }
 }

@@ -34,6 +34,7 @@ use aws_sdk_dynamodb::config::Region;
 use aws_sdk_dynamodb::config::timeout::TimeoutConfig;
 use aws_sdk_dynamodb::types::AttributeValue;
 use dynamo_global_common::PoolKey;
+use thiserror::Error;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -190,15 +191,33 @@ impl Watched {
     }
 }
 
+/// Why [`DynamoDbPoolStore::connect`] failed.
+#[derive(Debug, Error)]
+pub enum ConnectError {
+    /// The configuration cannot work, as when it gives no AWS region. Trying
+    /// again does not help.
+    #[error(transparent)]
+    Config(anyhow::Error),
+    /// The table could not be checked or created: DynamoDB or STS did not
+    /// answer, access was denied, or the table is missing or not usable.
+    /// Trying again may help once that is fixed.
+    #[error(transparent)]
+    Table(anyhow::Error),
+}
+
 impl DynamoDbPoolStore {
     /// Builds the SDK client from the default chain plus `config`, optionally
     /// creates the table, and checks it with DescribeTable.
-    pub async fn connect(lease: Lease, config: DynamoDbConfig) -> anyhow::Result<Arc<Self>> {
-        let client = client(&config).await?;
+    pub async fn connect(lease: Lease, config: DynamoDbConfig) -> Result<Arc<Self>, ConnectError> {
+        let client = client(&config).await.map_err(ConnectError::Config)?;
         if config.ensure_table {
-            table::ensure_table(&client, &config.table).await?;
+            table::ensure_table(&client, &config.table)
+                .await
+                .map_err(ConnectError::Table)?;
         }
-        table::describe(&client, &config.table).await?;
+        table::describe(&client, &config.table)
+            .await
+            .map_err(ConnectError::Table)?;
         Ok(Self::with_client(
             lease,
             config,

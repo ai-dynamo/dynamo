@@ -234,7 +234,7 @@ pub struct DynamoDbConfig {
 impl DynamoDbPoolStore {
     /// Builds the SDK client from the default chain plus `config`, optionally
     /// creates the table, and checks it with DescribeTable.
-    pub async fn connect(lease: Lease, config: DynamoDbConfig) -> anyhow::Result<Arc<Self>>;
+    pub async fn connect(lease: Lease, config: DynamoDbConfig) -> Result<Arc<Self>, ConnectError>;
     /// For tests: a store over an existing client and clock.
     pub fn with_client(lease: Lease, config: DynamoDbConfig, client: aws_sdk_dynamodb::Client, clock: Arc<dyn Clock>) -> Arc<Self>;
 }
@@ -257,9 +257,16 @@ heading or works everywhere.
 | `--dynamodb-table` missing with `dynamodb` | startup error |
 | `--dynamodb-poll-interval-secs >= --heartbeat-interval-secs` | startup error |
 | A `--dynamodb-*` flag or `--lease-skew-secs` without `--registration-storage dynamodb` | startup error |
-| No region from `--dynamodb-region` or the SDK chain | startup error |
-| Table absent at startup without `--dynamodb-ensure-table` | startup error naming the table and the create-table command |
-| Table whose key is not `pk` (HASH, S) and `sk` (RANGE, S) | startup error |
+| No region from `--dynamodb-region` or the SDK chain | startup error (`ConnectError::Config`) |
+| Table absent at startup without `--dynamodb-ensure-table` | logged, naming the table and the create-table command, and retried (`ConnectError::Table`) |
+| Table whose key is not `pk` (HASH, S) and `sk` (RANGE, S) | logged and retried (`ConnectError::Table`) |
+| DynamoDB or STS unreachable, or access denied, at startup | logged and retried (`ConnectError::Table`) |
+
+`main.rs` listens for SIGTERM before it connects, and retries a
+`ConnectError::Table` with kube's `DefaultBackoff` (0.8 s doubling to 30 s,
+with jitter) instead of exiting, so a short outage at startup does not leave
+the Pod in CrashLoopBackOff. Nothing listens until `connect` succeeds, so the
+Pod stays unready meanwhile.
 
 ## Tests
 

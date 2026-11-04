@@ -185,7 +185,8 @@ Grant them on the table ARN, in each region where the service runs a replica of 
 | An item that fails to decode | Logged and skipped. The rest of the list is served. |
 | `--dynamodb-table` missing with `dynamodb` | Startup error. |
 | `--dynamodb-poll-interval-secs` not below `--heartbeat-interval-secs` | Startup error. |
-| Table absent at startup without `--dynamodb-ensure-table` | Startup error that names the table and the create-table command. |
+| Table absent at startup without `--dynamodb-ensure-table` | Logged with the table name and the create-table command, then retried. The service does not serve until the table exists. |
+| DynamoDB or STS unreachable, or access denied, at startup | Logged and retried with a backoff of up to 30 seconds. The service does not serve until the check passes. |
 | A `--dynamodb-*` flag or `--lease-skew-secs` without `--registration-storage dynamodb` | Startup error. |
 | No region from `--dynamodb-region` or the AWS SDK default chain | Startup error. |
-| Table whose key schema is not `pk` (HASH, S) and `sk` (RANGE, S) | Startup error. |
+| Table whose key schema is not `pk` (HASH, S) and `sk` (RANGE, S) | Logged and retried, as for an absent table. |
