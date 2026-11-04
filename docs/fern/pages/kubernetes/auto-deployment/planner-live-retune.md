@@ -75,12 +75,16 @@ This applies to all DGDR trace Runs, not only those the Planner creates.
 - **A KV-router frontend with default routing fields**, and workers that do not set their own
   router mode or pass a value the Planner cannot read where an option could stand. See
   [Deployment rules](#deployment-rules).
+- **The frontend admin listener, reachable from the Planner.** The frontend serves
+  `/router_policy` only on its admin listener, which is off by default and binds `127.0.0.1`.
+  See [Configure the frontend](#configure-the-frontend).
 - **One Planner replica.**
 
 ## Configure the frontend
 
-Add the trace environment and the claim to the frontend container of the DGD. The planner checks
-these values against `retune.dgdr` at startup and whenever the DGD changes.
+Add the trace environment, the admin listener and the claim to the frontend container of the
+DGD. The planner checks these values against `retune.dgdr` at startup and whenever the DGD
+changes.
 
 ```yaml
 spec:
@@ -105,6 +109,8 @@ spec:
             value: /trace/segments/$(DYN_PARENT_DGD_K8S_NAME)/$(DYN_POD_NAME)/req
           - {name: DYN_REQUEST_TRACE_FILE_ROLL_BYTES, value: "67108864"}
           - {name: DYN_REQUEST_TRACE_CAPACITY, value: "8192"}
+          - {name: DYN_ENABLE_FRONTEND_ADMIN_API, value: "1"}
+          - {name: DYN_FRONTEND_ADMIN_HOST, value: "0.0.0.0"}
           volumeMounts:
           - {name: request-traces, mountPath: /trace}
         volumes:
@@ -116,6 +122,12 @@ spec:
   `<mount_path>/<segments_dir>/$(DYN_PARENT_DGD_K8S_NAME)/$(DYN_POD_NAME)/`, such as `req`: the
   part after `$(DYN_POD_NAME)/` must not contain `/`. `<mount_path>` is where the frontend mounts
   `retune.dgdr.claim_name`. The operator injects `DYN_PARENT_DGD_K8S_NAME`.
+- `DYN_ENABLE_FRONTEND_ADMIN_API` and `DYN_FRONTEND_ADMIN_HOST` start the frontend admin
+  listener on every pod address, on port 8002 unless `DYN_FRONTEND_ADMIN_PORT` sets another. The
+  Planner reads the port from each frontend pod and sets the router policies there; the inference
+  port does not serve `/router_policy`. The host may also be the pod IP, through
+  `valueFrom: {fieldRef: {fieldPath: status.podIP}}`; the other two values must be literal. The
+  listener has no authentication; see [Security](#security).
 - Records are dropped without a count for `prompt_embeds`, multimodal, `n > 1` and `best_of > 1`
   requests, and when the writer lags or a batch write fails.
 - The trace holds unkeyed xxh3 hash chains of the prompts. Anyone who can create pods in the
@@ -270,7 +282,7 @@ retries:
 | P7 | The DGD serves one model; the frontend is not an EPP, not a `frontendSidecar`, and has no TLS |
 | P8 | One frontend replica, or `--router-replica-sync` |
 | P9 | No `scalingAdapter` on worker components; one Planner replica |
-| P10 | The frontend trace environment and claim mount match [Configure the frontend](#configure-the-frontend), with the trace file prefix directly under `$(DYN_POD_NAME)/` |
+| P10 | The frontend trace environment, claim mount and admin listener match [Configure the frontend](#configure-the-frontend): the trace file prefix is directly under `$(DYN_POD_NAME)/`, and the admin API is on, bound to an address other than loopback, with a port from 1 to 65535 |
 | P14 | Every router's startup parameters equal the ones the Planner parsed from the frontend |
 
 **Health**, checked every round. While one fails, windows do not launch; nothing is reset:
@@ -278,7 +290,7 @@ retries:
 | Rule | Requirement |
 |---|---|
 | P11 | The API server accepts a dry-run Request with `spec.workload.trace` |
-| P12 | At least `max(1, replicas)` frontends are Ready, each with a router per worker type, and `/router_policy` answers |
+| P12 | At least `max(1, replicas)` frontends are Ready, each with a router per worker type, and `/router_policy` answers on each one's admin listener |
 
 The Planner only warns when AISimulate does not list the model among its default models (P6).
 
@@ -328,11 +340,12 @@ retune Requests.
 
 ## Security
 
-- **Frontend admin API.** `/router_policy` is served on the frontend HTTP port, next to the
-  OpenAI API, without authentication, and is on by default. An Ingress that forwards `/` exposes
-  it. Deny the admin paths at L7 and allow in-cluster access only from the ingress controller and
-  the Planner. Do not set `DYN_DISABLE_FRONTEND_ADMIN_API` on the frontend: the Planner reports a
-  frontend whose `/router_policy` answers 404 as not ready.
+- **Frontend admin API.** The Planner calls `/router_policy` on each frontend's admin listener,
+  which has no authentication. [Configure the frontend](#configure-the-frontend) binds it to the
+  pod's addresses, so anything that reaches a frontend pod on the admin port (8002 by default) can
+  change its router policies. Admit only the Planner to that port, for example with a
+  NetworkPolicy, and do not expose it through a Service or an Ingress. While a frontend's admin
+  listener does not answer `/router_policy`, the Planner launches no windows (P12) and logs why.
 - **Ownership.** Outside advisory mode the Planner owns the eight router policy parameters and
   reverts manual changes.
 - **Trace data.** See the privacy note in [Configure the frontend](#configure-the-frontend).

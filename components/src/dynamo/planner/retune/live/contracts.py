@@ -10,6 +10,7 @@ each can be built and tested with fakes.
 
 from __future__ import annotations
 
+import re
 import threading
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -37,6 +38,41 @@ DGDR_ROUTER_KNOBS: dict[str, str] = {
     "prefill_load_scale": "prefill_load_scale",
     "temperature": "router_temperature",
 }
+
+# The frontend admin listener, the only one that serves GET/PATCH
+# /router_policy (lib/llm/src/http/service/service_v2.rs: off unless
+# DYN_ENABLE_FRONTEND_ADMIN_API is truthy, bound to
+# DYN_FRONTEND_ADMIN_HOST:DYN_FRONTEND_ADMIN_PORT, by default 127.0.0.1:8002).
+ENV_FRONTEND_ADMIN_API = "DYN_ENABLE_FRONTEND_ADMIN_API"
+ENV_FRONTEND_ADMIN_HOST = "DYN_FRONTEND_ADMIN_HOST"
+ENV_FRONTEND_ADMIN_PORT = "DYN_FRONTEND_ADMIN_PORT"
+DEFAULT_FRONTEND_ADMIN_PORT = 8002
+# lib/truthy is_truthy.
+TRUTHY = frozenset({"1", "true", "on", "yes"})
+# What Rust's ``str::parse::<u16>`` accepts.
+_U16 = re.compile(r"\+?[0-9]+")
+
+
+def is_truthy(value: Optional[str]) -> bool:
+    """``lib/truthy`` ``is_truthy``: 1/true/on/yes, any case, trimmed."""
+
+    return value is not None and value.strip().lower() in TRUTHY
+
+
+def frontend_admin_port(value: Optional[str]) -> Optional[int]:
+    """The port a frontend's admin listener binds for
+    ``DYN_FRONTEND_ADMIN_PORT=value`` (``None``: unset).
+
+    Mirrors ``default_admin_port``: a value that does not parse as a ``u16``
+    falls back to 8002. ``0`` asks the OS for a port nobody else can know,
+    so it maps to ``None``.
+    """
+
+    if value is None or _U16.fullmatch(value) is None or int(value) > 65535:
+        return DEFAULT_FRONTEND_ADMIN_PORT
+    port = int(value)
+    return port or None
+
 
 LABEL_PREFIX = "nvidia.com/planner-retune-"
 LABEL_DGD = LABEL_PREFIX + "dgd"
@@ -133,8 +169,10 @@ class PodInfo:
     ready: bool
     terminating: bool
     labels: Mapping[str, str] = field(default_factory=dict)
-    # Container port named ``http`` of the frontend container, if any.
-    http_port: Optional[int] = None
+    # Port of the frontend admin listener, which serves /router_policy, from
+    # the main container's env; ``None`` when that env does not enable the
+    # admin API or the port cannot be read.
+    admin_port: Optional[int] = None
     # ``status.phase`` (Pending, Running, Succeeded, Failed, Unknown).
     phase: Optional[str] = None
     # ``restartCount`` of the ``main`` container, if reported. A restarted

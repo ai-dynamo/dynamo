@@ -126,6 +126,15 @@ def trace_env(**overrides: Any) -> list[dict[str, Any]]:
             "name": "DYN_REQUEST_TRACE_CAPACITY",
             "value": "8192",
         },
+        # The admin listener that serves /router_policy (P10).
+        "DYN_ENABLE_FRONTEND_ADMIN_API": {
+            "name": "DYN_ENABLE_FRONTEND_ADMIN_API",
+            "value": "1",
+        },
+        "DYN_FRONTEND_ADMIN_HOST": {
+            "name": "DYN_FRONTEND_ADMIN_HOST",
+            "value": "0.0.0.0",
+        },
     }
     for name, entry in overrides.items():
         if entry is None:
@@ -2314,6 +2323,68 @@ P10_CASES = [
             ]
         },
         None,
+    ),
+    # The admin listener that serves /router_policy.
+    (
+        {"DYN_ENABLE_FRONTEND_ADMIN_API": None},
+        None,
+        "must set DYN_ENABLE_FRONTEND_ADMIN_API=1",
+    ),
+    (
+        {"DYN_ENABLE_FRONTEND_ADMIN_API": "off"},
+        None,
+        "must set DYN_ENABLE_FRONTEND_ADMIN_API=1",
+    ),
+    ({"DYN_ENABLE_FRONTEND_ADMIN_API": " Yes "}, None, None),
+    (
+        {
+            "DYN_ENABLE_FRONTEND_ADMIN_API": {
+                "valueFrom": {"configMapKeyRef": {"name": "c", "key": "k"}}
+            }
+        },
+        None,
+        "must set DYN_ENABLE_FRONTEND_ADMIN_API=1 as a literal value",
+    ),
+    (
+        {"DYN_FRONTEND_ADMIN_HOST": None},
+        None,
+        "its admin listener binds 127.0.0.1 by default",
+    ),
+    ({"DYN_FRONTEND_ADMIN_HOST": "127.0.0.2"}, None, "is a loopback address"),
+    ({"DYN_FRONTEND_ADMIN_HOST": "[::1]"}, None, "is a loopback address"),
+    ({"DYN_FRONTEND_ADMIN_HOST": "localhost"}, None, "is not an IP address"),
+    ({"DYN_FRONTEND_ADMIN_HOST": "[::]"}, None, None),
+    ({"DYN_FRONTEND_ADMIN_HOST": "10.1.2.3"}, None, None),
+    (
+        {
+            "DYN_FRONTEND_ADMIN_HOST": {
+                "valueFrom": {"fieldRef": {"fieldPath": "status.podIP"}}
+            }
+        },
+        None,
+        None,
+    ),
+    (
+        {
+            "DYN_FRONTEND_ADMIN_HOST": {
+                "valueFrom": {"fieldRef": {"fieldPath": "status.hostIP"}}
+            }
+        },
+        None,
+        "literal address or fieldRef status.podIP",
+    ),
+    ({"DYN_FRONTEND_ADMIN_PORT": "9100"}, None, None),
+    ({"DYN_FRONTEND_ADMIN_PORT": "0"}, None, "a port number from 1 to 65535"),
+    ({"DYN_FRONTEND_ADMIN_PORT": " 9100"}, None, "a port number from 1 to 65535"),
+    ({"DYN_FRONTEND_ADMIN_PORT": "65536"}, None, "a port number from 1 to 65535"),
+    (
+        {
+            "DYN_FRONTEND_ADMIN_PORT": {
+                "valueFrom": {"secretKeyRef": {"name": "s", "key": "k"}}
+            }
+        },
+        None,
+        "DYN_FRONTEND_ADMIN_PORT must be a literal value",
     ),
 ]
 

@@ -237,7 +237,7 @@ def pod(
         ready=ready,
         terminating=terminating,
         labels={POD_LABEL_DGD_NAME: DGD.name, POD_LABEL_COMPONENT_TYPE: "frontend"},
-        http_port=8000,
+        admin_port=8002,
         phase=phase,
         restarts=restarts,
     )
@@ -748,7 +748,7 @@ async def frontend_server():
         ip="127.0.0.1",
         ready=True,
         terminating=False,
-        http_port=server.port,
+        admin_port=server.port,
     )
     try:
         yield frontend, client, target
@@ -808,8 +808,33 @@ async def test_client_errors_are_statuses(frontend_server) -> None:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         closed_port = sock.getsockname()[1]
-    result = await client.get(replace(target, http_port=closed_port))
+    result = await client.get(replace(target, admin_port=closed_port))
     assert result.status == 0 and result.error
+
+    # A pod whose env enables no admin listener is never called.
+    calls = len(frontend.requests)
+    result = await client.get(replace(target, admin_port=None))
+    assert result.status == 0
+    assert result.error and "DYN_ENABLE_FRONTEND_ADMIN_API" in result.error
+    assert len(frontend.requests) == calls
+
+
+def test_client_targets_the_admin_listener() -> None:
+    client = AiohttpRouterPolicyClient()
+    pod = PodInfo(
+        name="fe",
+        uid="u",
+        ip="10.0.0.5",
+        ready=True,
+        terminating=False,
+        admin_port=8002,
+    )
+    assert client.url(pod) == "http://10.0.0.5:8002/router_policy"
+    assert (
+        client.url(replace(pod, ip="fd00::5")) == "http://[fd00::5]:8002/router_policy"
+    )
+    assert client.url(replace(pod, admin_port=None)) is None
+    assert client.url(replace(pod, ip=None)) is None
 
 
 def test_client_timeout_outlasts_the_server_control_timeout() -> None:

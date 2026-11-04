@@ -4,7 +4,8 @@
 """Apply the retune router parameters to every frontend router.
 
 ``RouterActuator.reconcile`` runs one round: list the DGD's frontend pods,
-``GET /router_policy`` on each, keep the routers of the DGD's dynamo
+``GET /router_policy`` on each pod's admin listener (the frontend serves the
+router policy API on no other port; ``PodInfo.admin_port``), keep the routers of the DGD's dynamo
 namespace, latch each router's initial configuration, check it against the
 parsed startup maps (P14), write what the target needs and report whether
 every router has converged.
@@ -71,6 +72,8 @@ from typing import Any, Optional
 import aiohttp
 
 from dynamo.planner.retune.live.contracts import (
+    ENV_FRONTEND_ADMIN_API,
+    ENV_FRONTEND_ADMIN_PORT,
     POD_LABEL_COMPONENT_TYPE,
     POD_LABEL_DGD_NAME,
     POLICY_PARAMETER_KEYS,
@@ -88,9 +91,6 @@ from dynamo.planner.retune.live.contracts import (
 logger = logging.getLogger(__name__)
 
 ROUTER_POLICY_PATH = "/router_policy"
-# Container port of the frontend when the pod has no port named ``http``
-# (deploy/operator/internal/consts/consts.go DynamoServicePort).
-DEFAULT_FRONTEND_PORT = 8000
 # Consecutive rounds of GET 404 on a frontend after which its admin API is
 # reported disabled (P12).
 ADMIN_API_DISABLED_ROUNDS = 3
@@ -126,7 +126,8 @@ class AiohttpRouterPolicyClient:
     closed by ``close()``. Every call returns a ``PolicyCallResult`` and never
     raises for HTTP, network or decoding failures: ``status`` is the HTTP
     status, or 0 when no well-formed response arrived (connection error,
-    timeout, a pod without an IP, or a body that is not the documented JSON).
+    timeout, a pod without an IP or without an admin listener, or a body
+    that is not the documented JSON).
     ``timeout_s`` bounds each call and must stay above the server's
     ``ROUTER_CONTROL_TIMEOUT_S``.
     """
@@ -136,7 +137,6 @@ class AiohttpRouterPolicyClient:
         timeout_s: float = DEFAULT_CLIENT_TIMEOUT_S,
         scheme: str = "http",
         *,
-        default_port: int = DEFAULT_FRONTEND_PORT,
         max_connections: int = 32,
     ) -> None:
         if not (math.isfinite(timeout_s) and timeout_s > 0):
@@ -145,18 +145,17 @@ class AiohttpRouterPolicyClient:
             raise ValueError(f"scheme must be 'http' or 'https', got {scheme!r}")
         self._timeout = aiohttp.ClientTimeout(total=float(timeout_s))
         self._scheme = scheme
-        self._default_port = int(default_port)
         self._max_connections = int(max_connections)
         self._session: Optional[aiohttp.ClientSession] = None
 
     def url(self, pod: PodInfo) -> Optional[str]:
-        """The pod's ``/router_policy`` URL, or None without a pod IP."""
+        """The pod's ``/router_policy`` URL on its admin listener, or None
+        without a pod IP or an admin listener."""
 
-        if not pod.ip:
+        if not pod.ip or pod.admin_port is None:
             return None
         host = f"[{pod.ip}]" if ":" in pod.ip else pod.ip
-        port = pod.http_port if pod.http_port is not None else self._default_port
-        return f"{self._scheme}://{host}:{port}{ROUTER_POLICY_PATH}"
+        return f"{self._scheme}://{host}:{pod.admin_port}{ROUTER_POLICY_PATH}"
 
     async def get(self, pod: PodInfo) -> PolicyCallResult:
         return await self._call(pod, "GET", None, _parse_list)
@@ -202,7 +201,15 @@ class AiohttpRouterPolicyClient:
     ) -> PolicyCallResult:
         url = self.url(pod)
         if url is None:
-            return PolicyCallResult(status=0, error=f"pod {pod.name} has no IP")
+            if not pod.ip:
+                return PolicyCallResult(status=0, error=f"pod {pod.name} has no IP")
+            return PolicyCallResult(
+                status=0,
+                error=(
+                    f"pod {pod.name} has no frontend admin listener the planner "
+                    f"can read ({ENV_FRONTEND_ADMIN_API} and {ENV_FRONTEND_ADMIN_PORT})"
+                ),
+            )
         try:
             session = self._ensure_session()
             async with session.request(method, url, json=body) as response:
