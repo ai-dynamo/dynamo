@@ -377,6 +377,10 @@ pub mod llm {
     /// HTTP body size limit in MB
     pub const DYN_HTTP_BODY_LIMIT_MB: &str = "DYN_HTTP_BODY_LIMIT_MB";
 
+    /// Memory in MiB for the last request of each conversation the Global
+    /// Frontend sends as deltas; unset or 0 accepts no deltas.
+    pub const DYN_HTTP_DELTA_STATE_MB: &str = "DYN_HTTP_DELTA_STATE_MB";
+
     /// Batch file upload limit in MiB, including multipart framing (default 202).
     pub const DYN_BATCH_UPLOAD_BODY_LIMIT_MB: &str = "DYN_BATCH_UPLOAD_BODY_LIMIT_MB";
 
@@ -1211,6 +1215,7 @@ mod tests {
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
+            llm::DYN_HTTP_DELTA_STATE_MB,
             llm::DYN_BATCH_UPLOAD_BODY_LIMIT_MB,
             llm::DYN_BATCH_MAX_FILE_TRANSFERS,
             llm::DYN_BATCH_FILE_TRANSFER_TIMEOUT_SECS,

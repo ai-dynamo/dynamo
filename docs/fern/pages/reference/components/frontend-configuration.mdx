@@ -90,6 +90,17 @@ The Rust HTTP server also reads these environment variables, which are not expos
   See [Runtime Configuration](runtime-configuration.mdx) for `DYN_TCP_MAX_MESSAGE_SIZE`.
 </ParamField>
 
+<ParamField path="DYN_HTTP_DELTA_STATE_MB" type="integer" default="0">
+  Memory in MiB for the last request of each conversation a Global Frontend
+  sends with `--deltas`. When set above 0, the frontend keeps those requests,
+  rebuilds each request the Global Frontend sends as a delta against one, and
+  accepts zstd-compressed request bodies (`Content-Encoding: zstd`). The least
+  used requests go first, and each goes after 30 minutes without a next one.
+  Unset or 0, the frontend keeps nothing and the Global Frontend sends it every
+  request whole. Enable it only where clients reach the frontend through a
+  Global Frontend.
+</ParamField>
+
 <ParamField path="DYN_HTTP_LISTEN_BACKLOG" type="integer" default="4096">
   Listen backlog of the frontend socket, for both plain HTTP and TLS, capped by
   the kernel at `net.core.somaxconn`. Raise it when many clients open connections

@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The Global Frontend's HTTP server. Each `POST /v1/...` request goes, as
-//! received, to the same route on the pool frontend its selector picks, and
-//! the pool's response comes back as sent. Only the request's `model`, and
-//! for a request whose headers name no session its input, are read; the pool
-//! frontend validates, preprocesses, and formats everything exactly as for a
-//! request sent to it directly.
+//! received or as a delta the pool frontend rebuilds it from (see
+//! [`crate::Deltas`]), to the same route on the pool frontend its selector
+//! picks, and the pool's response comes back as sent. Only the request's
+//! `model`, and for a request whose headers name no session its input, are
+//! read; the pool frontend validates, preprocesses, and formats everything
+//! exactly as for a request sent to it directly.
 
 use std::io;
 use std::pin::pin;
@@ -15,11 +16,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::{HeaderMap, HeaderName, Method, StatusCode, Uri, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use dynamo_global_router::{InFlightTracker, PoolSelector, RequestInput, RoutingRequest};
+use dynamo_global_common::delta::{DELTA_HEADER, MISSING, STATE_HEADER, STORE_HEADER};
+use dynamo_global_router::{InFlightTracker, Pool, PoolSelector, RequestInput, RoutingRequest};
 use dynamo_llm::protocols::common::extensions::session_affinity_from_headers;
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BODY_LIMIT_MB;
 use dynamo_runtime::metrics::prometheus_names::frontend_service::error_type;
@@ -37,6 +39,7 @@ use tokio_util::task::TaskTracker;
 use url::Url;
 
 use crate::PoolSnapshot;
+use crate::delta::{Conversation, Deltas, Upload};
 use crate::metrics::Metrics;
 
 /// The request body limit when `DYN_HTTP_BODY_LIMIT_MB` is unset, as for
@@ -51,6 +54,7 @@ struct Proxy {
     in_flight: Arc<InFlightTracker>,
     http: reqwest::Client,
     metrics: Metrics,
+    deltas: Option<Arc<Deltas>>,
 }
 
 /// The Global Frontend's routes over the pools `pools` publishes.
@@ -59,13 +63,15 @@ struct Proxy {
 /// response ends; selectors and signals that weigh this process's own
 /// requests must read the same tracker. `http` must not set a total request
 /// timeout, because a response streams for as long as the pool generates.
-/// `/metrics` serves `metrics`.
+/// `/metrics` serves `metrics`. With `deltas`, requests that continue a
+/// conversation go to pool frontends that keep requests as deltas.
 pub fn app(
     pools: watch::Receiver<Arc<PoolSnapshot>>,
     selector: Arc<dyn PoolSelector>,
     in_flight: Arc<InFlightTracker>,
     http: reqwest::Client,
     metrics: Metrics,
+    deltas: Option<Arc<Deltas>>,
 ) -> Router {
     let proxy = Arc::new(Proxy {
         pools,
@@ -73,6 +79,7 @@ pub fn app(
         in_flight,
         http,
         metrics,
+        deltas,
     });
     Router::new()
         .route("/v1/models", get(models))
@@ -213,7 +220,9 @@ async fn forward(
     }
     remove_hop_headers(&mut headers);
     headers.remove(header::HOST);
-    headers.insert(header::CONTENT_LENGTH, body.len().into());
+    // Deltas are between this process and the pools, never the client's.
+    headers.remove(DELTA_HEADER);
+    headers.remove(STORE_HEADER);
     let session = session_affinity_from_headers(&headers);
     // Without a named session, the input shows which request this one
     // continues.
@@ -231,31 +240,40 @@ async fn forward(
     };
     let pool = target.pool;
     let in_flight = proxy.in_flight.start(&pool.id);
-    let Some(url) = route_url(target.frontend, &uri) else {
+    let session = session.as_ref().map(|session| session.as_str());
+    let conversation = Conversation::new(session, &prefix);
+    let mut upload = match (&proxy.deltas, conversation) {
+        (Some(deltas), Some(conversation)) => {
+            let authorization = headers.get(header::AUTHORIZATION);
+            let authorization = authorization.map(HeaderValue::as_bytes);
+            let frontend = target.frontend;
+            deltas
+                .upload(conversation, body, authorization, pool, frontend)
+                .await
+        }
+        _ => Upload::whole(target.frontend, body),
+    };
+    let Some(url) = route_url(upload.frontend, &uri) else {
         metrics.rejected(error_type::VALIDATION);
         return error(StatusCode::BAD_REQUEST, "invalid route".to_owned());
     };
-    tracing::debug!(pool = %pool.id, %url, "forwarding request");
-    // A stream body cannot be copied, so reqwest keeps none for redirects,
-    // and the bytes are freed once written to the pool.
-    let upload = reqwest::Body::wrap_stream(futures::stream::once(futures::future::ready(Ok::<
-        _,
-        io::Error,
-    >(
-        body
-    ))));
+    tracing::debug!(pool = %pool.id, %url, kind = upload.kind, "forwarding request");
     // If the client leaves while the pool queues the request, this handler
     // is dropped, which drops the send and closes the pool connection,
     // cancelling the request there, and counts it as cancelled.
     let sending = metrics.sending(pool);
-    let upstream = match proxy
-        .http
-        .request(method, url.clone())
-        .headers(headers)
-        .body(upload)
-        .send()
-        .await
+    // A delta's headers are kept to send the whole request if the pool
+    // lacks its parent.
+    let resend_headers = upload.is_delta().then(|| headers.clone());
+    let mut sent = send(proxy.as_ref(), &method, &url, headers, &mut upload, pool).await;
+    if let (Some(deltas), Some(headers)) = (&proxy.deltas, resend_headers)
+        && sent.as_ref().is_ok_and(lacks_parent)
+        && deltas.resend(&mut upload).await
     {
+        metrics.delta_missed(pool);
+        sent = send(proxy.as_ref(), &method, &url, headers, &mut upload, pool).await;
+    }
+    let upstream = match sent {
         Ok(upstream) => upstream,
         Err(failure) => {
             sending.answered(None);
@@ -274,6 +292,9 @@ async fn forward(
         }
     };
 
+    if let Some(deltas) = &proxy.deltas {
+        deltas.answered(upload, upstream.headers()).await;
+    }
     let status = upstream.status();
     sending.answered(Some(status));
     let mut timing = status
@@ -281,6 +302,7 @@ async fn forward(
         .then(|| metrics.response(pool, received));
     let mut headers = upstream.headers().clone();
     remove_hop_headers(&mut headers);
+    headers.remove(STATE_HEADER);
     // The stream keeps the request counted in flight, and times it, until it
     // ends or the client drops it; dropping it closes the pool connection.
     let body = upstream.bytes_stream().map(move |chunk| {
@@ -294,6 +316,42 @@ async fn forward(
     *response.status_mut() = status;
     *response.headers_mut() = headers;
     response
+}
+
+/// Sends `upload`'s body to `url` with `headers` and the upload's own. A
+/// stream body cannot be copied, so reqwest keeps none for redirects, and
+/// the bytes are freed once written to the pool.
+async fn send(
+    proxy: &Proxy,
+    method: &Method,
+    url: &Url,
+    mut headers: HeaderMap,
+    upload: &mut Upload<'_>,
+    pool: &Pool,
+) -> reqwest::Result<reqwest::Response> {
+    let body = std::mem::take(&mut upload.body);
+    proxy.metrics.uploaded(pool, upload.kind, body.len());
+    headers.insert(header::CONTENT_LENGTH, body.len().into());
+    for (name, value) in &upload.headers {
+        headers.insert(name, value.clone());
+    }
+    let body = futures::stream::once(futures::future::ready(Ok::<_, io::Error>(body)));
+    proxy
+        .http
+        .request(method.clone(), url.clone())
+        .headers(headers)
+        .body(reqwest::Body::wrap_stream(body))
+        .send()
+        .await
+}
+
+/// Whether `response` refuses a delta whose parent the pool does not keep.
+fn lacks_parent(response: &reqwest::Response) -> bool {
+    response.status() == StatusCode::CONFLICT
+        && response
+            .headers()
+            .get(STATE_HEADER)
+            .is_some_and(|state| state == MISSING)
 }
 
 /// `uri`'s path and query below `frontend`, keeping any path the frontend

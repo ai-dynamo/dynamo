@@ -1754,6 +1754,16 @@ impl HttpServiceConfigBuilder {
             }),
             track_inflight_inference,
         ));
+        // Deltas are rebuilt before the in-flight count and the handlers see
+        // the request, and decompressed before that.
+        if let Some(store) = super::delta::DeltaStore::from_env() {
+            inference_router = inference_router
+                .layer(axum::middleware::from_fn_with_state(
+                    store,
+                    super::delta::rebuild_deltas,
+                ))
+                .layer(tower_http::decompression::RequestDecompressionLayer::new());
+        }
 
         // OpenAPI documentation routes (system)
         let (openapi_docs, openapi_route) = super::openapi_docs::openapi_router(

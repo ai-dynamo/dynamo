@@ -11,12 +11,13 @@ use std::time::Duration;
 
 use axum::http::HeaderMap;
 use dynamo_global_common::PoolKey;
-use dynamo_global_frontend::{Metrics, PoolSnapshot};
+use dynamo_global_frontend::{Deltas, Metrics, PoolSnapshot};
 use dynamo_global_router::{
     InFlightTracker, Pool, PoolSelector, PoolTarget, RoundRobinSelector, RoutingRequest,
 };
 use dynamo_llm::endpoint_type::EndpointType;
 use dynamo_llm::engines::{StreamingEngineAdapter, make_echo_engine};
+use dynamo_llm::http::service::delta::{DeltaStore, rebuild_deltas};
 use dynamo_llm::http::service::service_v2::HttpService;
 use futures::StreamExt;
 use reqwest::StatusCode;
@@ -142,6 +143,33 @@ async fn scripted_pool_frontend(sse: &'static str) -> (Server, Arc<Mutex<Vec<Hea
     (pool_frontend(app).await, seen)
 }
 
+/// A pool frontend that keeps requests, as Dynamo's does with
+/// `DYN_HTTP_DELTA_STATE_MB`, and answers each chat request with the request
+/// it rebuilt. It records the headers each request arrived with.
+async fn keeping_pool_frontend() -> (Server, Arc<Mutex<Vec<HeaderMap>>>) {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let recorder = seen.clone();
+    let app = axum::Router::new()
+        .route(
+            "/v1/chat/completions",
+            axum::routing::post(|body: axum::body::Bytes| async move {
+                ([("content-type", "application/json")], body)
+            }),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            DeltaStore::new(1 << 20),
+            rebuild_deltas,
+        ))
+        .layer(tower_http::decompression::RequestDecompressionLayer::new())
+        .layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                recorder.lock().unwrap().push(request.headers().clone());
+                next.run(request)
+            },
+        ));
+    (pool_frontend(app).await, seen)
+}
+
 fn pool(dgd: &str, model: &str, frontend: &Url) -> Pool {
     let key = PoolKey::new("ohio", "dynamo", dgd).unwrap();
     Pool::new(&key, model, REGION, vec![frontend.clone()])
@@ -166,11 +194,29 @@ async fn global_frontend_with(
     selector: Arc<dyn PoolSelector>,
     in_flight: Arc<InFlightTracker>,
 ) -> GlobalFrontend {
+    start_global_frontend(pools, selector, in_flight, None).await
+}
+
+/// A Global Frontend that sends deltas to pools that keep requests, and
+/// follows sessions, named or derived, round robin over `pools`.
+async fn global_frontend_with_deltas(pools: Vec<Pool>) -> GlobalFrontend {
+    let selector = Arc::new(SessionRecorder::default());
+    let in_flight = Arc::new(InFlightTracker::new());
+    let deltas = Arc::new(Deltas::new(Duration::from_secs(60), 1));
+    start_global_frontend(pools, selector, in_flight, Some(deltas)).await
+}
+
+async fn start_global_frontend(
+    pools: Vec<Pool>,
+    selector: Arc<dyn PoolSelector>,
+    in_flight: Arc<InFlightTracker>,
+    deltas: Option<Arc<Deltas>>,
+) -> GlobalFrontend {
     let (sender, receiver) = watch::channel(Arc::new(PoolSnapshot::new(pools)));
     let (listener, url) = bind().await;
     let cancel = CancellationToken::new();
     let metrics = Metrics::new(Some(REGION.to_owned()), in_flight.clone());
-    let app = dynamo_global_frontend::app(receiver, selector, in_flight, client(), metrics);
+    let app = dynamo_global_frontend::app(receiver, selector, in_flight, client(), metrics, deltas);
     tokio::spawn(dynamo_global_frontend::serve(listener, app, cancel.clone()));
     wait_until_ok(&url.join("live").unwrap()).await;
     GlobalFrontend {
@@ -529,6 +575,7 @@ async fn forwards_the_request_as_sent() {
     let response = client()
         .post(global.server.url.join("v1/chat/completions").unwrap())
         .header("x-dynamo-session-id", "session-123")
+        .header("x-dynamo-delta-store", "1")
         .json(&request)
         .send()
         .await
@@ -540,6 +587,9 @@ async fn forwards_the_request_as_sent() {
     let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0]["x-dynamo-session-id"], "session-123");
+    // Except those that ask a pool to keep the request: only the Global
+    // Frontend sends them.
+    assert!(!seen[0].contains_key("x-dynamo-delta-store"));
     assert_eq!(seen[0]["content-type"], "application/json");
     let length = serde_json::to_vec(&request).unwrap().len();
     assert_eq!(seen[0]["content-length"], length.to_string().as_str());
@@ -709,7 +759,7 @@ async fn shutdown_lets_an_open_stream_finish_then_returns() {
     let in_flight = Arc::new(InFlightTracker::new());
     let metrics = Metrics::new(Some(REGION.to_owned()), in_flight.clone());
     let selector = Arc::new(RoundRobinSelector::new());
-    let app = dynamo_global_frontend::app(receiver, selector, in_flight, client(), metrics);
+    let app = dynamo_global_frontend::app(receiver, selector, in_flight, client(), metrics, None);
     let shutdown = CancellationToken::new();
     let serving = tokio::spawn(dynamo_global_frontend::serve(
         listener,
@@ -738,4 +788,108 @@ async fn shutdown_lets_an_open_stream_finish_then_returns() {
         .unwrap()
         .unwrap();
     drop(client);
+}
+
+/// A conversation's turns: each sends the last again with `turns` more
+/// messages.
+fn conversation(turns: usize) -> Vec<Value> {
+    let mut messages = Vec::new();
+    (0..turns)
+        .map(|turn| {
+            if turn > 0 {
+                messages.push(json!({"role": "assistant", "content": format!("answer {turn}")}));
+            }
+            messages.push(json!({"role": "user", "content": format!("question {turn}")}));
+            json!({"model": MODEL, "messages": messages})
+        })
+        .collect()
+}
+
+/// Sends `request` to the Global Frontend, in `session` if any, and returns
+/// what the pool frontend answered.
+async fn chat_in(global: &GlobalFrontend, request: &Value, session: Option<&str>) -> Value {
+    let mut sending = client()
+        .post(global.server.url.join("v1/chat/completions").unwrap())
+        .json(request);
+    if let Some(session) = session {
+        sending = sending.header("x-dynamo-session-id", session);
+    }
+    let response = sending.send().await.unwrap();
+    assert!(!response.headers().contains_key("x-dynamo-delta-state"));
+    ok_json(response).await
+}
+
+#[tokio::test]
+async fn conversations_continue_as_deltas() {
+    let (pool_frontend, seen) = keeping_pool_frontend().await;
+    let global = global_frontend_with_deltas(vec![pool("blue", MODEL, &pool_frontend.url)]).await;
+
+    // A conversation found by its input, and one its client names.
+    for session in [None, Some("session-123")] {
+        seen.lock().unwrap().clear();
+        for request in conversation(3) {
+            // The pool frontend answers with the request it rebuilt.
+            assert_eq!(chat_in(&global, &request, session).await, request);
+        }
+        // The first request goes whole for the pool frontend to keep, and
+        // the rest as compressed deltas against the last.
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 3);
+        assert_eq!(seen[0]["x-dynamo-delta-store"], "1");
+        assert!(!seen[0].contains_key("x-dynamo-delta"));
+        for headers in &seen[1..] {
+            assert!(headers.contains_key("x-dynamo-delta"), "{headers:?}");
+            assert_eq!(headers["content-encoding"], "zstd");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_pool_without_the_parent_gets_the_whole_request() {
+    let (pool_frontend, seen) = keeping_pool_frontend().await;
+    let blue = pool("blue", MODEL, &pool_frontend.url);
+    // Two Global Frontends share a session: each remembers the first turn.
+    let one = global_frontend_with_deltas(vec![blue.clone()]).await;
+    let two = global_frontend_with_deltas(vec![blue]).await;
+    let turns = conversation(2);
+    for global in [&one, &two] {
+        chat_in(global, &turns[0], Some("shared")).await;
+    }
+    // The pool keeps the first one's next turn in place of the first turn,
+    // so the second one's delta has no parent there.
+    chat_in(&one, &turns[1], Some("shared")).await;
+    let mut branch = turns[1].clone();
+    branch["messages"][2]["content"] = json!("another question");
+    assert_eq!(chat_in(&two, &branch, Some("shared")).await, branch);
+
+    {
+        let seen = seen.lock().unwrap();
+        assert!(seen[3].contains_key("x-dynamo-delta"));
+        assert_eq!(seen[4]["x-dynamo-delta-store"], "1");
+        assert_eq!(seen[4]["content-encoding"], "zstd");
+    }
+    let labels = [("pool", "ohio/dynamo/blue")];
+    let metrics = metrics_when(&two.server.url, |metrics| {
+        sample(
+            metrics,
+            "dynamo_global_frontend_delta_misses_total",
+            &labels,
+        )
+        .is_some()
+    })
+    .await;
+    let missed = sample(
+        &metrics,
+        "dynamo_global_frontend_delta_misses_total",
+        &labels,
+    );
+    assert_eq!(missed, Some(1.0));
+    let delta = [("pool", "ohio/dynamo/blue"), ("body", "delta")];
+    assert!(
+        sample(
+            &metrics,
+            "dynamo_global_frontend_upload_bytes_total",
+            &delta
+        ) > Some(0.0)
+    );
 }
