@@ -198,7 +198,7 @@ that exist today.
 | `model_context_length`, `model_kv_cache_block_size`, `model_max_num_seqs` | One `model_info{model, context_length, kv_cache_block_size, max_num_seqs}` with value 1 |
 | `num_prefill_replicas`, `num_decode_replicas` | One `num_replicas{sub_component_type}` |
 | `router_overhead_total_ms`, or a "percent" gauge that holds 0 to 1 | `_seconds` and `_ratio` names |
-| A counter of events above a threshold, next to a histogram with that bucket edge | `increase(x_count[5m]) - increase(x_bucket{le="T"}[5m])` in PromQL, where `T` is an existing bucket edge as exported |
+| A counter of events above a threshold, next to a histogram with that bucket edge | `increase(x_count[5m]) - ignoring(le) increase(x_bucket{le="T"}[5m])` in PromQL, where `T` is an existing bucket edge as exported |
 
 ## Stability and deprecation
 
