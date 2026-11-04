@@ -19,15 +19,17 @@ These three settings apply **per data-parallel (DP) rank**:
 
 | Environment variable | What it limits | Default per rank |
 |---|---|---|
-| `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT` | Admitted requests that have not finished. | Reported `max_num_seqs`; `10000` until reported. |
-| `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT` | Admitted requests awaiting their first generated token or completion. | Reported `max_num_seqs`; `10000` until reported. |
-| `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT` | Requests waiting outside the engine. Set `0` to disable queueing. | `40000 / number_of_dp_ranks`. |
+| `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT` | Admitted requests that have not finished. | Unset: unlimited |
+| `DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT` | Admitted requests awaiting their first generated token or completion. | Unset: unlimited |
+| `DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT` | Requests waiting outside the engine. Set `0` to disable queueing. A positive queue limit requires at least one engine limit; otherwise, worker startup fails. | `0`: no queue |
 
-A request needs room under both engine limits. Otherwise, it waits in the gate queue. If the queue is
-also full, the worker rejects it; overload reaches the client as HTTP 529 by default.
+Setting either engine limit enables admission control; an engine limit left unset stays unlimited.
+When either engine limit is reached, new requests wait in the gate queue. If the queue is full, the
+worker rejects them; overload reaches the client as HTTP 529 by default.
 
-The following `nvidia.com/v1beta1` fragment overrides all three settings. Add these entries to your
-worker container's existing `env` list. Omit an entry to keep its default.
+The following `nvidia.com/v1beta1` fragment enables admission control with the recommended starting
+limits for an engine whose `max_num_seqs` is 256: each engine limit at `max_num_seqs`, and a queue of
+twice that. Add these entries to your worker container's existing `env` list.
 
 ```yaml
 spec:
@@ -42,7 +44,7 @@ spec:
                 - name: DYN_BACKEND_ADMISSION_ENGINE_REQUEST_LIMIT
                   value: "256"
                 - name: DYN_BACKEND_ADMISSION_ENGINE_REQUEST_WAITING_LIMIT
-                  value: "32"
+                  value: "256"
                 - name: DYN_BACKEND_ADMISSION_REQUEST_QUEUE_LIMIT
                   value: "512"
 ```
@@ -52,13 +54,14 @@ the workers, not the frontend. See
 [Configuration](../../developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md#configuration)
 for CLI precedence and aliases, and
 [Best Practices](../../developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md#best-practices)
-for sizing guidance.
+for tuning from the starting limits.
 
 ## Verify the Configuration
 
 Check the worker logs for the effective limits. Under load, use the `dynamo_backend_admission_*`
-metrics to observe engine occupancy, queued requests, rejections, and cancellations. The `dp_rank`
-label identifies the rank; `unspecified` covers unranked requests. Sum over `dp_rank` for worker totals.
+metrics to observe engine occupancy, queued requests, rejections, and cancellations. These metrics
+stay at zero while admission control is disabled. The `dp_rank` label identifies the rank;
+`unspecified` covers unranked requests. Sum over `dp_rank` for worker totals.
 
 See [Metrics](../../developer-guide/knowledge-base/concepts/fault-tolerance/admission-control-architecture.md#metrics)
 for metric names and labels.

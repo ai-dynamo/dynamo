@@ -231,7 +231,8 @@ fn terminal_outcome_for_error_type(error_type: ErrorType) -> TerminalOutcome {
         | ErrorType::NotFound
         | ErrorType::Overload
         | ErrorType::Unavailable
-        | ErrorType::NotImplemented => TerminalOutcome::Rejected,
+        | ErrorType::NotImplemented
+        | ErrorType::UnsupportedModality => TerminalOutcome::Rejected,
         ErrorType::Cancelled => TerminalOutcome::Cancelled,
         ErrorType::ResponseTimeout => TerminalOutcome::TimedOut,
         ErrorType::Internal | ErrorType::None => TerminalOutcome::Failed,
@@ -390,6 +391,110 @@ pub(super) fn metric_error_type_for_class(class: dynamo_runtime::error::ErrorCla
     }
 }
 
+pub(super) struct MediaRefusal {
+    pub(super) status: StatusCode,
+    pub(super) message: String,
+}
+
+/// Refusal for a chat request that carries image, video, or audio content in
+/// any message, current turn or history, when `--reject-media` is set. Callers
+/// run this before routing, so no worker sees the request and a streaming
+/// client receives the status instead of a 200 followed by an error event.
+pub(super) fn media_refusal(
+    state: &service_v2::State,
+    request: &NvCreateChatCompletionRequest,
+) -> Option<MediaRefusal> {
+    media_refusal_for_content_type(state, || {
+        crate::preprocessor::request_media_content_types(&request.inner.messages)
+            .first()
+            .copied()
+    })
+}
+
+/// Keep classification lazy so disabled frontends do not scan request content.
+pub(super) fn media_refusal_for_content_type(
+    state: &service_v2::State,
+    content_type: impl FnOnce() -> Option<&'static str>,
+) -> Option<MediaRefusal> {
+    let config = state.media_rejection();
+    if !config.enabled() {
+        return None;
+    }
+    let content_type = content_type()?;
+    let status =
+        StatusCode::from_u16(config.status_code()).unwrap_or(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    let modality = match content_type {
+        "input_audio" => "audio",
+        other => other.trim_end_matches("_url"),
+    };
+    let message = format!(
+        "Model does not accept {modality} input; received unsupported content type '{content_type}'."
+    );
+    tracing::debug!(status = %status, "Media refused: {message}");
+    Some(MediaRefusal { status, message })
+}
+
+/// OpenAI-shaped [`media_refusal`] for the Chat Completions and Responses
+/// handlers. Labeled `unsupported_modality` in metrics whatever the status, so
+/// a refusal sent with a capacity status is not counted as capacity shedding.
+fn reject_media_if_configured(
+    state: &service_v2::State,
+    request: &NvCreateChatCompletionRequest,
+) -> Result<(), ErrorResponse> {
+    reject_media(media_refusal(state, request))
+}
+
+fn reject_media(refusal: Option<MediaRefusal>) -> Result<(), ErrorResponse> {
+    let Some(MediaRefusal { status, message }) = refusal else {
+        return Ok(());
+    };
+    record_local_failure(ErrorClass::UnsupportedMedia);
+    Err((
+        status,
+        Json(ErrorMessage {
+            message,
+            error_type: status
+                .canonical_reason()
+                .unwrap_or("UnknownError")
+                .to_string(),
+            code: status.as_u16(),
+            details: None,
+            metric_error_type: Some(ErrorType::UnsupportedModality),
+        }),
+    ))
+}
+
+/// Inspect the native input, including image references and non-user history,
+/// before the Responses-to-chat conversion loses or rejects media.
+fn responses_media_content_type(request: &NvCreateResponse) -> Option<&'static str> {
+    use dynamo_protocols::types::responses::{
+        EasyInputContent, FunctionCallOutput, InputContent, InputItem, InputParam, Item,
+        MessageItem,
+    };
+
+    let InputParam::Items(items) = &request.inner.input else {
+        return None;
+    };
+    items.iter().find_map(|item| {
+        let parts = match item {
+            InputItem::EasyMessage(message) => match &message.content {
+                EasyInputContent::ContentList(parts) => parts,
+                EasyInputContent::Text(_) => return None,
+            },
+            InputItem::Item(Item::Message(MessageItem::Input(message))) => &message.content,
+            InputItem::Item(Item::FunctionCallOutput(output)) => match &output.output {
+                FunctionCallOutput::Content(parts) => parts,
+                FunctionCallOutput::Text(_) => return None,
+            },
+            _ => return None,
+        };
+        parts.iter().find_map(|part| match part {
+            InputContent::InputImage(_) => Some("image_url"),
+            _ => None,
+        })
+    })
+}
+
 /// Extract ErrorType from ErrorResponse for metrics
 pub(super) fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
     response
@@ -464,6 +569,10 @@ pub(crate) fn find_invalid_argument_in_chain<'a>(
         current = e.source();
     }
     None
+}
+
+pub(super) fn error_is_invalid_argument(err: &(dyn std::error::Error + 'static)) -> bool {
+    find_invalid_argument_in_chain(err).is_some()
 }
 
 fn find_queue_rejection_in_chain<'a>(
@@ -578,6 +687,23 @@ impl ErrorMessage {
                 code: code.as_u16(),
                 details: None,
                 metric_error_type: Some(ErrorType::Cancelled),
+            }),
+        )
+    }
+
+    /// Invalid request (400). Recorded as an `InvalidRequest` local failure,
+    /// like the other client-error constructors.
+    pub fn bad_request<T: Display>(msg: T) -> ErrorResponse {
+        let code = StatusCode::BAD_REQUEST;
+        record_local_failure(ErrorClass::InvalidRequest);
+        (
+            code,
+            Json(ErrorMessage {
+                message: msg.to_string(),
+                error_type: bad_request_error_type(),
+                code: code.as_u16(),
+                details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -998,21 +1124,20 @@ fn unprocessable_error_message(body: &[u8]) -> (String, bool) {
     }
 }
 
-// Problem: Currently we are using JSON from axum as the request validator. Whenever there is an invalid JSON, it will return a 422.
-// But all the downstream apps that relies on openai based APIs, expects to get 400 for all these cases otherwise they fail badly
-// Solution: Intercept the response from handlers and convert ANY 422 status codes to 400 with the actual error message.
+/// OpenAI clients expect 400 for Axum extraction failures, but handler errors own their status.
 pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> Response {
     let response = next.run(request).await;
 
     if response.status() == StatusCode::UNPROCESSABLE_ENTITY {
-        let (_parts, body) = response.into_parts();
+        let (parts, body) = response.into_parts();
         let body_bytes = axum::body::to_bytes(body, get_body_limit())
             .await
             .unwrap_or_default();
         let (error_message, already_recorded) = unprocessable_error_message(&body_bytes);
-        if !already_recorded {
-            record_local_failure(ErrorClass::InvalidRequest);
+        if already_recorded {
+            return Response::from_parts(parts, Body::from(body_bytes));
         }
+        record_local_failure(ErrorClass::InvalidRequest);
         (
             StatusCode::BAD_REQUEST,
             Json(ErrorMessage {
@@ -2745,7 +2870,7 @@ fn unsupported_media_type_error() -> ErrorResponse {
 
 /// Returns the standard error response for a request body that exceeds the
 /// configured size limit.
-fn payload_too_large_error() -> ErrorResponse {
+pub(super) fn payload_too_large_error() -> ErrorResponse {
     ErrorMessage::from_http_error(
         ErrorClass::PayloadTooLarge,
         HttpError {
@@ -3619,6 +3744,9 @@ async fn chat_completions(
     );
 
     let nvtx_validate = dynamo_nvtx_range!("frontend.http.chat.validate");
+    state
+        .chat_template_defaults()
+        .apply_to_request(&mut request);
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
@@ -3655,6 +3783,11 @@ async fn chat_completions(
 
     // Validate stream_options is only used when streaming (NVBug 5662680)
     if let Err(err_response) = validate_chat_completion_stream_options(&request) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+
+    if let Err(err_response) = reject_media_if_configured(&state, &request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
     }
@@ -3944,6 +4077,7 @@ async fn chat_completions(
             stream_handle,
             activity_rx,
             error_signal,
+            true,
         );
         let terminal = terminal.clone();
         // Arm the cancellation fallback before Axum can take ownership of the
@@ -4365,6 +4499,13 @@ async fn responses(
         return Err(err_response);
     }
 
+    if let Err(err_response) = reject_media(media_refusal_for_content_type(&state, || {
+        responses_media_content_type(&request)
+    })) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+
     // Extract request parameters before into_parts() consumes the request.
     // These are echoed back in the Response object per the OpenAI spec.
     let loaded_tools: Vec<_> =
@@ -4434,6 +4575,9 @@ async fn responses(
     // that the stream converter needs for faithful response reconstruction.
     let responses_ctx = unified_request.responses_context().cloned();
     let mut chat_request = unified_request.into_inner();
+    state
+        .chat_template_defaults()
+        .apply_to_request(&mut chat_request);
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut chat_request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
@@ -6828,8 +6972,9 @@ mod tests {
         headers.insert("x-dynamo-parent-session-id", "parent-456".parse().unwrap());
         headers.insert("x-dynamo-session-final", "true".parse().unwrap());
         let context =
-            preprocessed_context_from_headers(request(), "request-1".to_string(), &headers)
-                .unwrap();
+            preprocessed_context_from_headers(request(), "request-123".into(), &headers).unwrap();
+
+        assert_eq!(context.id(), "request-123");
 
         // The router reads the request field; the context key must carry the same identity.
         let on_request = context
@@ -6855,12 +7000,10 @@ mod tests {
             "session affinity still keyed from the same headers"
         );
 
-        let context = preprocessed_context_from_headers(
-            request(),
-            "request-2".to_string(),
-            &HeaderMap::new(),
-        )
-        .unwrap();
+        let context =
+            preprocessed_context_from_headers(request(), "request-456".into(), &HeaderMap::new())
+                .unwrap();
+        assert_eq!(context.id(), "request-456");
         assert!(context.content().agent_context.is_none());
     }
 
@@ -6993,6 +7136,104 @@ mod tests {
         state.start_draining();
         let response = check_ready(&state).unwrap_err();
         assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    fn media_rejection_state(enabled: bool, status_code: u16) -> Arc<service_v2::State> {
+        service_v2::HttpService::builder()
+            .media_rejection(
+                crate::frontend_config::MediaRejectionConfig::new(enabled, status_code).unwrap(),
+            )
+            .build()
+            .unwrap()
+            .state_clone()
+    }
+
+    fn chat_request_from_json(value: serde_json::Value) -> NvCreateChatCompletionRequest {
+        serde_json::from_value(value).expect("valid chat request")
+    }
+
+    fn chat_request_with_history_image() -> NvCreateChatCompletionRequest {
+        chat_request_from_json(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "look"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+                ]},
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": "now continue"}
+            ]
+        }))
+    }
+
+    #[test]
+    fn test_reject_media_refuses_history_image_with_configured_status() {
+        let state = media_rejection_state(true, 429);
+
+        let (status, Json(body)) =
+            reject_media_if_configured(&state, &chat_request_with_history_image()).unwrap_err();
+
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body.code, 429);
+        assert_eq!(
+            body.message,
+            "Model does not accept image input; received unsupported content type 'image_url'."
+        );
+        assert_eq!(
+            extract_error_type_from_response(&(status, Json(body))),
+            ErrorType::UnsupportedModality
+        );
+    }
+
+    #[test]
+    fn test_reject_media_default_status_is_unsupported_media_type() {
+        let state = media_rejection_state(
+            true,
+            crate::frontend_config::DEFAULT_REJECT_MEDIA_STATUS_CODE,
+        );
+
+        let (status, Json(body)) =
+            reject_media_if_configured(&state, &chat_request_with_history_image()).unwrap_err();
+
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(body.error_type, "Unsupported Media Type");
+    }
+
+    #[test]
+    fn test_reject_media_refuses_media_in_tool_message() {
+        let state = media_rejection_state(true, 415);
+        let request = chat_request_from_json(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "take a screenshot"},
+                {"role": "assistant", "content": null, "tool_calls": [{
+                    "id": "call_1", "type": "function",
+                    "function": {"name": "screenshot", "arguments": "{}"}
+                }]},
+                {"role": "tool", "tool_call_id": "call_1", "content": [
+                    {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}
+                ]}
+            ]
+        }));
+
+        let refusal = media_refusal(&state, &request).expect("tool image is refused");
+        assert!(refusal.message.contains("'image_url'"));
+    }
+
+    #[test]
+    fn test_reject_media_allows_text_only_and_disabled() {
+        let text_only = chat_request_from_json(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+                {"role": "assistant", "content": "hello"},
+                {"role": "user", "content": "bye"}
+            ]
+        }));
+        assert!(reject_media_if_configured(&media_rejection_state(true, 429), &text_only).is_ok());
+
+        let disabled = media_rejection_state(false, 429);
+        assert!(reject_media_if_configured(&disabled, &chat_request_with_history_image()).is_ok());
     }
 
     #[test]
