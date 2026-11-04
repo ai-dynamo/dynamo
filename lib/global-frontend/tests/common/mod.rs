@@ -132,6 +132,7 @@ pub fn state_for_replica(
             }),
         }],
         models: vec![relay::ModelServingLoad {
+            sessions: Vec::new(),
             namespace: "runtime-blue".into(),
             canonical_model_id: "qwen-canonical".into(),
             load: Some(relay::LoadView {

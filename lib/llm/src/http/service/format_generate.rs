@@ -369,6 +369,7 @@ async fn handler(
             Ok(context) => context,
             Err(response) => return reject(adapt_openai_error(format, response)),
         };
+    inflight_guard.request_metrics().observe_session(&context);
     let cancellation_labels = CancellationLabels {
         model: state.manager().metric_model_for(&model).to_string(),
         endpoint: super::metrics::Endpoint::Generate.to_string(),

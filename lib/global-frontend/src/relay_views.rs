@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Instant;
 
 use dynamo_global_common::PoolId;
 use dynamo_global_router::{Pool, PoolSignals, RelaySource, ReportReceipt};
@@ -19,6 +20,7 @@ type Views = PoolViews<RelaySourceKey, PoolId, ReceivedView>;
 #[derive(Clone)]
 struct ReceivedView {
     state: View,
+    serving_received: Option<(u64, Instant)>,
     serving: Option<(u64, ReportReceipt)>,
     kv: Option<(u64, ReportReceipt)>,
 }
@@ -39,6 +41,12 @@ impl ReceivedView {
             None => old,
         };
         Self {
+            serving_received: serving_sequence.map(|sequence| {
+                previous
+                    .and_then(|old| old.serving_received)
+                    .filter(|(old, _)| *old == sequence)
+                    .unwrap_or_else(|| (sequence, Instant::now()))
+            }),
             state,
             serving: retain(serving_sequence, previous.and_then(|old| old.serving)),
             kv: retain(kv_sequence, previous.and_then(|old| old.kv)),
@@ -227,6 +235,27 @@ impl RelayGatedPoolCatalog {
     }
     pub fn subscribe(&self) -> watch::Receiver<Arc<PoolSnapshot>> {
         self.inner.snapshot.subscribe()
+    }
+
+    /// Latest frontend observation from a live, ready Relay view for this pool and model.
+    /// This is a routing hint; it does not establish KV residency or a worker binding.
+    pub fn session_last_seen(&self, pool: &PoolId, model: &str, session: &str) -> Option<u64> {
+        let views = self.inner.views.lock();
+        let discovery = self.inner.discovery.borrow();
+        if !discovery
+            .pools()
+            .iter()
+            .any(|candidate| &candidate.id == pool && candidate.model == model)
+        {
+            return None;
+        }
+        views
+            .pool_views(pool)
+            .filter_map(|(_, view)| {
+                let (_, received) = view.serving_received?;
+                view.state.session_last_seen(model, session, received)
+            })
+            .max()
     }
 }
 
@@ -762,6 +791,115 @@ mod tests {
         assert_eq!(snapshot.borrow().pools().len(), 2);
         guards.pop();
         assert_eq!(snapshot.borrow().pools().len(), 1);
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn session_hints_keep_report_age_and_observation_age_across_updates() {
+        use prost::Message;
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+        let key = PoolKey::new("east", "dynamo", "blue").unwrap();
+        let candidate = Pool::new(
+            &key,
+            "qwen",
+            "east",
+            vec!["http://pool:8000".parse().unwrap()],
+        );
+        let pool = candidate.id.clone();
+        let (_sender, candidates) = watch::channel(Arc::new(PoolSnapshot::new(vec![candidate])));
+        let cancel = CancellationToken::new();
+        let catalog = RelayGatedPoolCatalog::new(candidates, cancel.clone());
+        let mut view = catalog.open(RelaySourceKey {
+            pool: pool.clone(),
+            service: "relay".into(),
+            replica: "1".into(),
+        });
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let mut raw = super::fixtures::state(true, 1, 1, 10);
+        let mut serving = wire::ServingLoadUpdate::decode(raw.serving_load).unwrap();
+        serving.window_ms = 20;
+        serving.models[0].sessions = vec![wire::SessionObservation {
+            session_id: "recent".into(),
+            last_seen_ms: now,
+        }];
+        raw.serving_load = serving.encode_to_vec().into();
+        view.replace_state_snapshot(0, Some(loaded_state(raw.clone())))
+            .unwrap();
+        assert_eq!(
+            catalog.session_last_seen(&pool, "qwen", "recent"),
+            Some(now)
+        );
+        tokio::time::sleep(Duration::from_millis(70)).await;
+        assert_eq!(catalog.session_last_seen(&pool, "qwen", "recent"), None);
+
+        let mut metadata = wire::KvPoolCatalogUpdate::decode(raw.catalog).unwrap();
+        metadata.snapshot.as_mut().unwrap().pools[0].registrations[0]
+            .aliases
+            .push("new-alias".into());
+        raw.catalog = metadata.encode_to_vec().into();
+        view.upsert_state(1, loaded_state(raw.clone())).unwrap();
+        assert_eq!(catalog.session_last_seen(&pool, "qwen", "recent"), None);
+
+        serving.window_sequence += 1;
+        serving.models[0].sessions[0].last_seen_ms = now - wire::SESSION_HINT_RETENTION_MS - 1;
+        raw.serving_load = serving.encode_to_vec().into();
+        view.upsert_state(2, loaded_state(raw.clone())).unwrap();
+        assert_eq!(catalog.session_last_seen(&pool, "qwen", "recent"), None);
+        serving.window_sequence += 1;
+        serving.models[0].sessions[0].last_seen_ms = now;
+        raw.serving_load = serving.encode_to_vec().into();
+        view.upsert_state(3, loaded_state(raw)).unwrap();
+        assert_eq!(
+            catalog.session_last_seen(&pool, "qwen", "recent"),
+            Some(now)
+        );
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn session_hints_ignore_same_model_in_uncataloged_runtime_namespace() {
+        use prost::Message;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let key = PoolKey::new("east", "dynamo", "blue").unwrap();
+        let candidate = Pool::new(
+            &key,
+            "qwen",
+            "east",
+            vec!["http://pool:8000".parse().unwrap()],
+        );
+        let pool = candidate.id.clone();
+        let (_sender, candidates) = watch::channel(Arc::new(PoolSnapshot::new(vec![candidate])));
+        let cancel = CancellationToken::new();
+        let catalog = RelayGatedPoolCatalog::new(candidates, cancel.clone());
+        let mut view = catalog.open(RelaySourceKey {
+            pool: pool.clone(),
+            service: "relay".into(),
+            replica: "1".into(),
+        });
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let mut raw = super::fixtures::state(true, 1, 1, 10);
+        let mut serving = wire::ServingLoadUpdate::decode(raw.serving_load).unwrap();
+        serving.models[0].sessions = vec![wire::SessionObservation {
+            session_id: "owned".into(),
+            last_seen_ms: now,
+        }];
+        let mut foreign = serving.models[0].clone();
+        foreign.namespace = "unrelated-runtime".into();
+        foreign.sessions[0].session_id = "foreign".into();
+        serving.models.push(foreign);
+        raw.serving_load = serving.encode_to_vec().into();
+        view.replace_state_snapshot(0, Some(loaded_state(raw)))
+            .unwrap();
+        assert_eq!(catalog.session_last_seen(&pool, "qwen", "owned"), Some(now));
+        assert_eq!(catalog.session_last_seen(&pool, "qwen", "foreign"), None);
         cancel.cancel();
     }
 }

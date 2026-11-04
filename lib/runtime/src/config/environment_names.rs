@@ -603,6 +603,10 @@ pub mod llm {
     /// request load and router scheduler load. Off unless truthy.
     pub const DYN_SERVING_LOAD_PUBLISH: &str = "DYN_SERVING_LOAD_PUBLISH";
 
+    /// Publish recent frontend session IDs through serving-load frames. Off
+    /// unless truthy; also requires DYN_SERVING_LOAD_PUBLISH.
+    pub const DYN_SESSION_HINTS_PUBLISH: &str = "DYN_SESSION_HINTS_PUBLISH";
+
     /// Metrics configuration
     pub mod metrics {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
@@ -1233,6 +1237,7 @@ mod tests {
             llm::DYN_LORA_PATH,
             llm::DYN_ENABLE_ANTHROPIC_API,
             llm::DYN_SERVING_LOAD_PUBLISH,
+            llm::DYN_SESSION_HINTS_PUBLISH,
             llm::DYN_ENABLE_SYSTEMONE_API,
             llm::DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES,
             llm::DYN_SYSTEMONE_MAX_INPUT_TOKENS,
