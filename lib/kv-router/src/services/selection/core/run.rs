@@ -43,7 +43,9 @@
 //!   `dropped_book_selection_during_routing_record_frees_booking_and_claim`).
 
 use super::super::affinity::{SessionAffinityMode, validate_dispatch_target};
-use super::hint::{KV_HINT_FETCH_ACTION_ID, compose_kv_hint, transfer_hint_payload};
+use super::super::pending::PendingKvFetch;
+use super::hint::compose_kv_hint;
+use crate::kv_hints::{KvFetchSource, kv_fetch_payload};
 use crate::plugins::hint_policy::runtime::ActionInputs;
 
 /// `try_acquire` then `join_initializing` attempts before a commit that finds
@@ -314,10 +316,12 @@ impl SelectionCore {
         };
         // Transfer candidates need a worker in this partition that consumes
         // router hints and an indexer that can retain the matched chain (local,
-        // event-driven, no approximate writes). Bookings use them for the fetch
-        // hint; when the policy scores fetchable prefixes, every selection
-        // retains them so previews score like bookings.
-        let hint_capable_workers = (book || entry.scores_kv_transfer)
+        // event-driven, no approximate writes). When the policy scores fetchable
+        // prefixes, every selection retains them so previews score like bookings.
+        // Otherwise only hint policies that read fetches use them: at booking, or
+        // at the reservation that books a cached selection.
+        let hint_capable_workers = (entry.scores_kv_transfer
+            || ((book || replay_id.is_some()) && entry.hints_read_kv_fetch))
             && entry.hint_capable_workers.load(Ordering::Relaxed);
         let retain_kv_transfer_chain =
             hint_capable_workers && entry.indexer.supports_kv_transfer_chain_retention();
@@ -482,27 +486,24 @@ impl SelectionCore {
             (Some(endpoint), total_kv_blocks)
         };
         let effective_prefill = effective_prefill_tokens(isl_tokens, response.cached_tokens);
-        // The router's own fetch: bookings only, from the source selection chose.
-        let router_fetch = match (
-            book,
-            response.kv_transfer_source,
-            response.kv_transfer_candidates.as_ref(),
-        ) {
-            (true, Some(source), Some(candidates)) => {
-                transfer_hint_payload(&entry.workers_tx.borrow(), source, candidates)
-                    .map(|payload| KvHintAction::fetch(KV_HINT_FETCH_ACTION_ID, payload))
-            }
-            _ => None,
-        };
-        // Hint policies run for bookings only, never for previews.
+        // Hint policies run for bookings only, never for previews, and before the booking is
+        // handed off, so a committed fetch that cannot be delivered still frees it.
         let kv_hint = if book {
+            let configs = entry.workers_tx.borrow();
+            let candidates = response.kv_transfer_candidates.as_ref();
+            let payload = |fetch: &KvFetchSource| {
+                candidates.and_then(|candidates| kv_fetch_payload(&configs, fetch, candidates))
+            };
             let inputs = ActionInputs {
                 request_id: admission.request_id().unwrap_or_default(),
                 worker: response.best_worker,
                 prompt_tokens: isl_tokens,
                 block_size: entry.block_size,
+                committed_kv_fetch: response.committed_kv_fetch,
+                kv_fetch_source: response.kv_fetch_source,
+                kv_fetch_payload: candidates.is_some().then_some(&payload as _),
             };
-            compose_kv_hint(&entry.hint_policies, &inputs, router_fetch)
+            compose_kv_hint(&entry.hint_policies, &inputs)?
         } else {
             None
         };
@@ -537,6 +538,20 @@ impl SelectionCore {
         if let Some((cache_id, sequence_hashes, lora_name, track_prefill_tokens, session_id)) =
             cached_inputs
         {
+            // The reservation that books this selection runs its hint policies with this fetch.
+            let cached_kv_fetch = response
+                .kv_transfer_candidates
+                .as_ref()
+                .filter(|_| {
+                    entry.hints_read_kv_fetch
+                        && (response.committed_kv_fetch.is_some()
+                            || response.kv_fetch_source.is_some())
+                })
+                .map(|candidates| PendingKvFetch {
+                    committed: response.committed_kv_fetch,
+                    source: response.kv_fetch_source,
+                    candidates: candidates.clone(),
+                });
             self.selection_cache.insert(
                 cache_id,
                 PendingSelection {
@@ -550,6 +565,7 @@ impl SelectionCore {
                     lora_name,
                     routing_hashes,
                     session_id,
+                    kv_fetch: cached_kv_fetch,
                 },
                 Instant::now(),
             );

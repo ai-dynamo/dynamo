@@ -16,9 +16,7 @@ use dynamo_kv_router::indexer::{
     KvIndexerInterface, LowerTierIndexers, LowerTierQueryOptions, TieredMatchDetails,
     query_lower_tiers_with_options,
 };
-use dynamo_kv_router::kv_hints::{
-    KvTransferCandidateSource, KvTransferCandidates, KvTransferSourceChoice,
-};
+use dynamo_kv_router::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
 use dynamo_kv_router::plugins::worker_selection::WorkerCapacity;
 use dynamo_kv_router::protocols::{
     BlockHashOptions, KvCacheEventData, PrefillLoadHint, RouterEvent, RoutingConstraints, WorkerId,
@@ -1444,7 +1442,14 @@ impl OfflineReplayRouter {
                 self.block_size,
             ))?;
         let worker_idx = self.scheduler_id(selection.worker)?;
-        let kv_fetch_source = self.kv_fetch_source(selection.kv_transfer_source)?;
+        // Replay cannot configure hint policies, so it models the fetch the `kv_fetch` preset
+        // would send: the committed fetch, or else the selected worker's best source.
+        let kv_fetch_source = self.kv_fetch_source(
+            selection
+                .committed_kv_fetch
+                .or(selection.kv_fetch_source)
+                .map(|fetch| fetch.source()),
+        )?;
         let request_id = request.request_id();
         let prefill_load_hint = self.prefill_load_hint_for(
             request.isl_tokens,
@@ -1506,8 +1511,8 @@ impl OfflineReplayRouter {
     }
 
     /// Replay models no cache owners, so a cache-owner source gives no hint.
-    fn kv_fetch_source(&self, source: Option<KvTransferSourceChoice>) -> Result<Option<usize>> {
-        match source.map(|choice| choice.source) {
+    fn kv_fetch_source(&self, source: Option<KvTransferCandidateSource>) -> Result<Option<usize>> {
+        match source {
             Some(KvTransferCandidateSource::Worker(worker)) => self.scheduler_id(worker).map(Some),
             Some(KvTransferCandidateSource::CacheOwner(_)) | None => Ok(None),
         }
