@@ -15,6 +15,7 @@ from tests.utils.payloads import CachedTokensChatPayload
 
 class SGLangMmRoutingPayload(CachedTokensChatPayload):
     def bind_environment(self, env: dict[str, str]) -> None:
+        """Keep router observations while relaxing the floor on wide-pad builds."""
         # Defer the optional backend import until this test runs.
         from dynamo.sglang._compat import sglang_has_wide_mm_pad_values
 
