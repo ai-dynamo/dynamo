@@ -696,7 +696,9 @@ spec:
                         When omitted, auto-detected as the highest GPU count on any discovered node
                         of the selected GPU type. In clusters whose nodes have different GPU counts,
                         set this explicitly to the node size you intend to schedule on. When this value
-                        differs from the auto-selected shape and totalGpus is omitted, the request is rejected.
+                        differs from the auto-selected shape and totalGpus is omitted, automatic
+                        GPU-budget discovery fails and the DGDR enters phase Failed before a profiling
+                        Job is created; set totalGpus explicitly to use that override.
                       format: int32
                       type: integer
                     rdma:
@@ -724,22 +726,27 @@ spec:
                       description: |-
                         TotalGPUs is the GPU budget for profiling and deployment.
                         The profiler uses this to determine parallelism and replica count.
-                        When omitted, computed by summing GPUs on nodes matching the selected
+                        When omitted, computed by summing GPUs on nodes matching the auto-selected
                         shape: GPU type, GPUs per node, and VRAM per GPU. The result is temporarily
                         capped at 32 to limit profiler search space. For example, same-type nodes
-                        with 8 and 4 GPUs represent 12 GPUs of inventory, while the selected 8-GPU
+                        with 8 and 4 GPUs represent 12 GPUs of inventory, while the auto-selected 8-GPU
                         shape yields an automatic budget of 8. This cap may be removed in a future
-                        release. Set this field explicitly to override the derived budget or use a
-                        numGpusPerNode or vramMb value that differs from the selected shape. A shape
-                        override without an explicit totalGpus is rejected.
+                        release. Set this field explicitly to override the derived budget, use a
+                        different numGpusPerNode, or use a vramMb value more than 10% from the
+                        auto-selected shape's measured VRAM. These shape overrides require an explicit
+                        totalGpus.
                       format: int32
                       type: integer
                     vramMb:
                       description: |-
                         VRAMMB is the VRAM per GPU in MiB.
-                        When omitted, auto-detected from cluster GPU nodes. Nominal values within 10%
-                        of the measured value identify the same shape. When this value differs by more
-                        than 10% from the auto-selected shape and totalGpus is omitted, the request is rejected.
+                        When omitted, auto-detected from cluster GPU nodes. An explicit value within 10%
+                        of the auto-selected shape's measured VRAM permits automatic GPU-budget discovery.
+                        This tolerance applies only to the requested value; aggregating discovered nodes
+                        still requires equal measured VRAM. When this value differs by more than 10%
+                        and totalGpus is omitted, automatic GPU-budget discovery fails and the DGDR
+                        enters phase Failed before a profiling Job is created; set totalGpus explicitly
+                        to use that override.
                       type: number
                   type: object
                 image:
@@ -9610,9 +9617,18 @@ spec:
                         runtime_image, runtime_version_override, derive_runtime_images,
                         num_gpus_per_node, and namespace are operator-owned. Request admission
                         rejects them, and the Run controller enforces its values while lowering the
-                        immutable snapshot. The operator runs the AISimulate version from its
-                        configured planner image; Requests and Runs cannot select a different image
-                        or version.
+                        immutable snapshot. A typed spec.workload.trace is an underlay like the other
+                        typed fields: it supplies the default traffic.source (type trace, format
+                        dynamo and the mounted trace file in paths) and the recorded-arrival
+                        traffic.load. Overrides can replace those values, including
+                        traffic.source.type, format, and paths, and null deletes the named field or
+                        parent object; the Run controller does not restore it. The typed
+                        PersistentVolumeClaim source alone decides the Run Job's trace mount and its
+                        claim dependency, so overriding a native path adds no volume mount.
+                        AISimulate validates the resulting input when the Run's Job starts; admission
+                        does not validate it against the AISimulate schema yet. The operator runs
+                        the AISimulate version from its configured planner image; Requests and Runs
+                        cannot select a different image or version.
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
                   type: object
@@ -9780,20 +9796,22 @@ spec:
                   x-kubernetes-preserve-unknown-fields: true
                 workload:
                   description: |-
-                    Workload defines the synthetic traffic model used for every candidate evaluation.
+                    Workload defines the traffic model used for every candidate evaluation: synthetic static
+                    traffic or a recorded trace.
                     When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10;
                     an explicit empty workload receives the same shape. workload.static: {} opts out of all
-                    traffic defaults. Any other static object is completed with its missing defaults.
+                    traffic defaults. Any other static object is completed with its missing defaults, and a
+                    trace workload receives no static default.
                     spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over
-                    every lowered traffic field it names.
+                    every lowered traffic field it names, including the fields a trace lowers.
                     The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction
                     search. Lowering independently defaults optimizer.max_trials to 320.
                   properties:
                     static:
                       description: |-
-                        Static defines AISimulate synthetic traffic. When omitted, admission supplies the
-                        complete static default. An explicit empty object opts out; any nonempty object is
-                        completed with omitted inputTokens, outputTokens and load defaults.
+                        Static defines AISimulate synthetic traffic. When omitted without a trace, admission
+                        supplies the complete static default. An explicit empty object opts out; any nonempty
+                        object is completed with omitted inputTokens, outputTokens and load defaults.
                       properties:
                         inputTokens:
                           description: InputTokens is the synthetic request input length in tokens.
@@ -9862,7 +9880,83 @@ spec:
                           minimum: 1
                           type: integer
                       type: object
+                    trace:
+                      description: |-
+                        Trace replays a recorded request trace from a PersistentVolumeClaim in the Request
+                        namespace. Admission supplies no static default when it is set. The Run Job mounts only the
+                        trace file, read-only through a subPath of the claim, at /var/run/aisimulate/trace/trace.jsonl,
+                        or trace.jsonl.gz when subPath ends in .gz. The trace lowers to the default traffic.source
+                        and traffic.load, which spec.aisimulate.inputOverrides can replace or delete.
+                      properties:
+                        format:
+                          default: Dynamo
+                          description: Format identifies the trace decoder. Defaults to Dynamo.
+                          enum:
+                            - Dynamo
+                          type: string
+                        replay:
+                          description: Replay configures how the decoded trace is replayed.
+                          properties:
+                            arrivalSpeedupRatio:
+                              description: |-
+                                ArrivalSpeedupRatio multiplies the recorded request-arrival rate. 1.0 preserves it.
+                                When omitted, the recorded arrival times are replayed unchanged.
+                              exclusiveMinimum: true
+                              minimum: 0
+                              type: number
+                          type: object
+                        source:
+                          description: Source identifies the trace artifact.
+                          properties:
+                            persistentVolumeClaim:
+                              description: |-
+                                PersistentVolumeClaim reads the trace from a PersistentVolumeClaim in the Request
+                                namespace.
+                              properties:
+                                claimName:
+                                  description: |-
+                                    ClaimName is the PersistentVolumeClaim, in the Request namespace, that holds the trace.
+                                    The Run Job mounts only the trace file from it, read-only, and only into the AISimulate
+                                    container. Each Run protects the claim with the finalizer `nvidia.com/dgdr-run-<run-uid>`
+                                    until the Run completes or, for a Run deleted before it completes, until no Job of the Run
+                                    is left. Garbage collection deletes the Job of a deleted Run before the Job's pod, so the
+                                    finalizer of a deleted Run can be released while that pod still stops; Kubernetes
+                                    PersistentVolumeClaim protection keeps the claim until no pod uses it. Deleting the claim
+                                    cancels the Runs that read it.
+                                  maxLength: 253
+                                  minLength: 1
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                                  type: string
+                                subPath:
+                                  description: |-
+                                    SubPath names one trace file relative to the root of the claim; the Run Job mounts it as
+                                    the subPath of the claim volume. It is neither a directory nor a glob. It must not start or
+                                    end with '/' and must not contain empty, '.' or '..' segments or a NUL character, which no
+                                    file name can hold. The file must be complete before the Request is created and must never
+                                    be rewritten: every Run of the Request reads it when its Job starts.
+                                  maxLength: 1024
+                                  minLength: 1
+                                  type: string
+                                  x-kubernetes-validations:
+                                    - message: subPath must be relative to the claim root without empty, '.' or '..' segments
+                                      rule: '!self.startsWith(''/'') && !self.endsWith(''/'') && !self.contains(''//'') && !self.matches(''(^|/)[.][.]?(/|$)'')'
+                                    - message: subPath must not contain a NUL character
+                                      rule: '!self.contains(''\u0000'')'
+                              required:
+                                - claimName
+                                - subPath
+                              type: object
+                          type: object
+                          x-kubernetes-validations:
+                            - message: persistentVolumeClaim is required
+                              rule: has(self.persistentVolumeClaim)
+                      required:
+                        - source
+                      type: object
                   type: object
+                  x-kubernetes-validations:
+                    - message: static and trace are mutually exclusive
+                      rule: '!(has(self.static) && has(self.trace))'
               type: object
               x-kubernetes-validations:
                 - message: exactly one of native v1beta2 fields or v1beta1 must be specified

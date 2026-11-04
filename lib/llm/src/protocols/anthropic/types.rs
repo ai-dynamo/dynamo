@@ -127,7 +127,11 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             .tool_choice
             .as_ref()
             .map(convert_anthropic_tool_choice)
-            .transpose()?;
+            .transpose()?
+            // vLLM rejects explicit auto without tools; use the backend default.
+            .filter(|choice| {
+                tools.is_some() || !matches!(choice, ChatCompletionToolChoiceOption::Auto)
+            });
         let parallel_tool_calls = req
             .tool_choice
             .as_ref()
@@ -569,6 +573,14 @@ fn convert_anthropic_tool_choice(
             }
         },
         AnthropicToolChoice::Named(named) => {
+            anyhow::ensure!(
+                named.choice_type == AnthropicToolChoiceMode::Tool,
+                "tool_choice.name: only allowed for type tool"
+            );
+            anyhow::ensure!(
+                !named.name.is_empty(),
+                "tool_choice.name: must be a non-empty string"
+            );
             ChatCompletionToolChoiceOption::Named(ChatCompletionNamedToolChoice {
                 r#type: ChatCompletionToolType::Function,
                 function: FunctionName {
@@ -1453,6 +1465,30 @@ mod tests {
     }
 
     #[test]
+    fn test_tool_choice_conversion_rejects_malformed_discriminators() {
+        for tool_choice in [
+            serde_json::json!({"type": "none", "name": "read"}),
+            serde_json::json!({"type": "auto", "name": "read"}),
+            serde_json::json!({"type": "any", "name": "read"}),
+            serde_json::json!({"type": "tool"}),
+            serde_json::json!({"type": "tool", "name": ""}),
+        ] {
+            let request: AnthropicCreateMessageRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test", "max_tokens": 16,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "tool_choice": tool_choice,
+                }))
+                .unwrap();
+            let error = NvCreateChatCompletionRequest::try_from(request).unwrap_err();
+            assert!(
+                error.to_string().contains("tool_choice.name"),
+                "{tool_choice}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn test_tool_choice_conversion_preserves_request_level_parser_policy() {
         for (label, tool_choice, parsing_enabled) in [
             ("auto", serde_json::json!({"type": "auto"}), true),
@@ -1497,6 +1533,41 @@ mod tests {
                     assert_eq!(named.function.name, "get_weather");
                 }
                 (_, actual) => panic!("unexpected converted tool choice for {label}: {actual:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_tool_choice_without_tools() {
+        for tools in [serde_json::Value::Null, serde_json::json!([])] {
+            for choice in [
+                serde_json::Value::Null,
+                serde_json::json!({"type": "auto"}),
+                serde_json::json!({"type": "none"}),
+            ] {
+                let mut payload = serde_json::json!({
+                    "model": "test-model",
+                    "max_tokens": 100,
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "tool_choice": choice
+                });
+                if !tools.is_null() {
+                    payload["tools"] = tools.clone();
+                }
+                let req: AnthropicCreateMessageRequest = serde_json::from_value(payload).unwrap();
+                let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+                assert!(chat_req.inner.tools.is_none());
+                if choice["type"] == "none" {
+                    assert_eq!(
+                        chat_req.inner.tool_choice,
+                        Some(ChatCompletionToolChoiceOption::None)
+                    );
+                } else {
+                    assert_eq!(
+                        chat_req.inner.tool_choice, None,
+                        "tools={tools}, choice={choice}"
+                    );
+                }
             }
         }
     }

@@ -50,6 +50,7 @@ impl SelectionCore {
                     self.kv_router_config
                         .assume_kv_reuse(req.router_config_override.as_ref()),
                 ),
+                true,
                 false,
                 false,
                 &mut None,

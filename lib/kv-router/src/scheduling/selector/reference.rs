@@ -327,8 +327,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         let device_overlap_blocks = cache.device_overlap_blocks;
         let shared_beyond_device_blocks = context
             .request
-            .shared_cache_hits
-            .as_ref()
+            .and_then(|request| request.shared_cache_hits.as_ref())
             .map_or(0, |hits| {
                 hits.hits_beyond(device_overlap_blocks.round().max(0.0) as u32)
             });
@@ -340,7 +339,9 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             .map_or(0, |source_blocks| {
                 let local_blocks = context
                     .request
-                    .transfer_local_prefix_blocks_for(worker)
+                    .map_or(0, |request| {
+                        request.transfer_local_prefix_blocks_for(worker)
+                    })
                     .saturating_add(cache.disk_overlap_blocks as usize);
                 source_blocks.saturating_sub(u32::try_from(local_blocks).unwrap_or(u32::MAX))
             });
@@ -365,14 +366,10 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
                 1.0
             };
         let effective_overlap_score_credit = weights.overlap_score_credit * overlap_credit_decay;
-        let overlap_credit_blocks = if context.request.prefix_cache_read_allowed == Some(false) {
-            0.0
-        } else {
-            effective_overlap_score_credit * device_overlap_blocks
-                + kv_router_config.host_cache_hit_weight * cache.host_overlap_blocks
-                + kv_router_config.disk_cache_hit_weight * cache.disk_overlap_blocks
-                + shared_overlap_blocks
-        };
+        let overlap_credit_blocks = effective_overlap_score_credit * device_overlap_blocks
+            + kv_router_config.host_cache_hit_weight * cache.host_overlap_blocks
+            + kv_router_config.disk_cache_hit_weight * cache.disk_overlap_blocks
+            + shared_overlap_blocks;
         let decode_cost_blocks = load.decode_cost_blocks;
         let active_request_cost_blocks =
             kv_router_config.decode_active_request_weight * load.active_requests as f64;
@@ -395,7 +392,10 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             // `SchedulerQueueActor` task, so the logging layer cannot attach request identity to
             // it, and this branch returns early without reaching them.
             tracing::debug!(
-                request_id = context.request.mode.request_id().unwrap_or("-"),
+                request_id = context
+                    .request
+                    .and_then(|request| request.mode.request_id())
+                    .unwrap_or("-"),
                 worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
                  = max(0, decode_blocks - overlap_credit_blocks) + active_request_cost_blocks \
@@ -411,10 +411,10 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         let raw_prefill_tokens = if context.track_prefill_tokens {
             if load.available {
                 let cached_tokens = cache.estimated_cached_tokens;
-                let uncached_tokens = context.request.isl_tokens.saturating_sub(cached_tokens);
+                let uncached_tokens = context.isl_tokens.saturating_sub(cached_tokens);
                 (load.active_prefill_tokens + uncached_tokens).saturating_add(cached_tokens)
             } else {
-                context.request.isl_tokens
+                context.isl_tokens
             }
         } else {
             0
@@ -432,7 +432,10 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         // inside the macro so they cost nothing when DEBUG is disabled.
         if remote_blocks > 0 {
             tracing::debug!(
-                request_id = context.request.mode.request_id().unwrap_or("-"),
+                request_id = context
+                    .request
+                    .and_then(|request| request.mode.request_id())
+                    .unwrap_or("-"),
                 worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks, \
                  {} shared or fetchable blocks beyond the local prefix (multiplier={shared_cache_multiplier:.2}): {logit:.3} \
@@ -449,7 +452,10 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             );
         } else {
             tracing::debug!(
-                request_id = context.request.mode.request_id().unwrap_or("-"),
+                request_id = context
+                    .request
+                    .and_then(|request| request.mode.request_id())
+                    .unwrap_or("-"),
                 worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
                  = prefill_load_scale * adjusted_prefill_blocks + decode_blocks + active_request_cost_blocks \
@@ -816,7 +822,6 @@ mod tests {
             (30, SimpleWorkerConfig::default()),
         ]);
         let request = SchedulingRequest {
-            prefix_cache_read_allowed: None,
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1221,7 +1226,6 @@ mod tests {
             },
         )]);
         let request = SchedulingRequest {
-            prefix_cache_read_allowed: None,
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1281,7 +1285,6 @@ mod tests {
             ),
         ]);
         let request = SchedulingRequest {
-            prefix_cache_read_allowed: None,
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1359,7 +1362,6 @@ mod tests {
             decode_blocks.insert(WorkerWithDpRank::from_worker_id(noisy_worker_id), 400_000);
 
             let request = SchedulingRequest {
-                prefix_cache_read_allowed: None,
                 mode: ScheduleMode::QueryOnly {
                     request_id: Some("test".into()),
                 },
@@ -1435,7 +1437,6 @@ mod tests {
         decode_blocks.insert(WorkerWithDpRank::from_worker_id(20), 90);
 
         let request = SchedulingRequest {
-            prefix_cache_read_allowed: None,
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1507,7 +1508,6 @@ mod tests {
         decode_blocks.insert(WorkerWithDpRank::from_worker_id(20), 100);
 
         let request = SchedulingRequest {
-            prefix_cache_read_allowed: None,
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1595,7 +1595,6 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
-            prefix_cache_read_allowed: None,
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1674,7 +1673,6 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
-            prefix_cache_read_allowed: None,
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -1977,7 +1975,6 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
-            prefix_cache_read_allowed: None,
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },
@@ -2083,7 +2080,6 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
-            prefix_cache_read_allowed: None,
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("test".into()),
             },

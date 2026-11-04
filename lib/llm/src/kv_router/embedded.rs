@@ -17,6 +17,7 @@ use dynamo_kv_router::WorkerType;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::identity::RoutingPartitionId;
 use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
 use dynamo_kv_router::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use dynamo_kv_router::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::scheduling::{
@@ -30,7 +31,7 @@ use dynamo_kv_router::services::selection::{
     SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler, SelectionService,
     SelectionServiceBuilder, WorkerCatalogSource, WorkerRequest,
 };
-use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, WorkerSelectionPolicyFactory};
+use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, PrefillLoadEstimator};
 use tokio_util::sync::CancellationToken;
 
 use crate::discovery::RuntimeConfigWatch;
@@ -406,9 +407,18 @@ impl EmbeddedSelection {
     }
 
     /// Run one selection through the shared core.
-    pub(crate) async fn run_selection(&self, operation: SelectionOperation<'_>) -> SelectionRun {
+    pub(crate) async fn run_selection(
+        &self,
+        operation: SelectionOperation<'_>,
+        allow_cache_credit: bool,
+    ) -> SelectionRun {
         // Keep the selection state out of the frontend's nested request future.
-        let run = Box::pin(self.service.core().run_selection(operation)).await;
+        let run = Box::pin(
+            self.service
+                .core()
+                .run_selection_with_cache_credit(operation, allow_cache_credit),
+        )
+        .await;
         self.observe_queue(match &run.result {
             Ok(SelectionOutcome::QueueRejected { rejection }) => Some(rejection),
             _ => None,

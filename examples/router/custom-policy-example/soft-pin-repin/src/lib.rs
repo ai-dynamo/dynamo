@@ -9,16 +9,17 @@
 
 use std::sync::Arc;
 
+use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
+use dynamo_kv_router::plugins::worker_selection::{
+    ScoredWorkerCandidate, WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext,
+    WorkerSelectionPolicy,
+};
 use dynamo_kv_router::protocols::WorkerAffinityTarget;
 use dynamo_kv_router::services::selection::{
-    WorkerSelectionPolicyFactory, WorkerSelectionPolicyParameters,
-    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
+    RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProviderError,
     WorkerSelectionPolicyRegistryError,
 };
-use dynamo_kv_router::{
-    KvRouterConfig, ScoredWorkerCandidate, WorkerInputView, WorkerInputs, WorkerPicker,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
-};
+use dynamo_kv_router::{KvRouterConfig, WorkerSelectionPolicyError};
 
 struct SoftPinRepinPicker {
     max_active_requests: usize,
@@ -33,7 +34,7 @@ impl SoftPinRepinPicker {
 
     fn least_loaded_row(
         candidates: &[ScoredWorkerCandidate],
-        loads: &[dynamo_kv_router::WorkerLoadInput],
+        loads: &[dynamo_kv_router::plugins::worker_selection::WorkerLoadInput],
         excluded_target: Option<WorkerAffinityTarget>,
     ) -> Option<usize> {
         candidates
@@ -54,7 +55,7 @@ impl WorkerPicker for SoftPinRepinPicker {
     }
 
     fn pick(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -113,9 +114,9 @@ fn provider(
 }
 
 pub fn register(
-    registry: &mut WorkerSelectionPolicyRegistry,
+    registry: &mut RouterPluginRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
-    registry.register("soft-pin-repin", Arc::new(provider))
+    registry.register_worker_selection("soft-pin-repin", Arc::new(provider))
 }
 
 #[cfg(test)]
@@ -152,7 +153,6 @@ mod tests {
 
     fn request(affinity_target: Option<WorkerAffinityTarget>) -> SchedulingRequest {
         SchedulingRequest {
-            prefix_cache_read_allowed: None,
             mode: ScheduleMode::QueryOnly { request_id: None },
             token_seq: None,
             isl_tokens: 16,

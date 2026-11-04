@@ -185,6 +185,13 @@ pub const SGLANG_GENERATE_CAPABILITY: &str = "sglang_generate";
 /// Worker-confirmed isolated scheduling for zero-decode candidate scoring.
 pub const SGLANG_SYSTEMONE_SERIAL_V1: &str = "sglang_systemone_serial_v1";
 
+/// Worker-advertised guarantee that disaggregated prefill cancellation is safe
+/// at any point before the prefill stream finishes.
+///
+/// Both prefill and decode workers must advertise this versioned capability.
+/// Absence is conservative and leaves remote prefill cancellation disabled.
+pub const DISAGG_PREFILL_CANCEL_ANYTIME_V1: &str = "disagg_prefill_cancel_anytime_v1";
+
 /// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -482,14 +489,6 @@ impl Default for ModelRuntimeConfig {
 }
 
 impl ModelRuntimeConfig {
-    /// The running worker honors the frontend's typed prefix-cache read decision.
-    pub(crate) fn supports_prefix_cache_read_control(&self) -> bool {
-        self.runtime_data
-            .get("supports_prefix_cache_read_control")
-            .and_then(serde_json::Value::as_bool)
-            == Some(true)
-    }
-
     /// Whether the configured grammar can replay distinct Responses phases.
     pub fn preserves_response_message_phases(&self) -> bool {
         crate::protocols::openai::chat_completions::unified_parser::configured_family(
@@ -902,27 +901,6 @@ mod tests {
     use super::*;
 
     use crate::protocols::openai::chat_completions::tool_parser_v2::V2_FAMILIES;
-
-    #[test]
-    fn prefix_cache_read_capability_requires_explicit_boolean_true() {
-        let mut config = ModelRuntimeConfig::default();
-        assert!(!config.supports_prefix_cache_read_control());
-        for value in [
-            serde_json::json!(null),
-            serde_json::json!(false),
-            serde_json::json!("true"),
-            serde_json::json!(1),
-            serde_json::json!(true),
-        ] {
-            let expected = value == serde_json::json!(true);
-            config
-                .runtime_data
-                .insert("supports_prefix_cache_read_control".to_string(), value);
-            let decoded: ModelRuntimeConfig =
-                serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
-            assert_eq!(decoded.supports_prefix_cache_read_control(), expected);
-        }
-    }
 
     #[test]
     fn structural_tag_config_accepts_future_wire_fields_and_rejects_unknown_input_fields() {

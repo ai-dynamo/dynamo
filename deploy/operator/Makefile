@@ -9,6 +9,7 @@ ENVTEST_ASSETS_CMD = $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN)
 
 CLUSTERTEST_PACKAGES ?= ./internal/testing/clusterenv ./internal/controller/...
 CLUSTERTEST_TIMEOUT ?= 30m
+UPGRADE_TEST_PARALLELISM ?= 2
 CLUSTERTEST_KIND_NAME ?= dynamo-clustertest-v136
 CLUSTERTEST_CONTEXT = kind-$(CLUSTERTEST_KIND_NAME)
 CLUSTERTEST_REUSE ?= true
@@ -23,8 +24,6 @@ CLUSTERTEST_OPERATOR_IMAGE ?= $(DYNAMO_CLUSTERTEST_OPERATOR_IMAGE)
 CLUSTERTEST_PLATFORM ?= linux/$(GOARCH)
 CLUSTERTEST_LWS_VERSION = $(shell go list -m -f '{{.Version}}' sigs.k8s.io/lws)
 CLUSTERTEST_LWS_CRD_DIR = $(shell go env GOMODCACHE)/sigs.k8s.io/lws@$(CLUSTERTEST_LWS_VERSION)/config/crd/bases
-CLUSTERTEST_GROVE_VERSION = $(shell go list -m -f '{{.Version}}' github.com/ai-dynamo/grove/operator/api)
-CLUSTERTEST_GROVE_CRD_DIR = $(shell go env GOMODCACHE)/github.com/ai-dynamo/grove/operator/api@$(CLUSTERTEST_GROVE_VERSION)/core/v1alpha1/crds
 CLUSTERTEST_VOLCANO_VERSION = $(shell go list -m -f '{{.Version}}' volcano.sh/apis)
 CLUSTERTEST_VOLCANO_PODGROUP_CRD_URL = https://raw.githubusercontent.com/volcano-sh/volcano/$(CLUSTERTEST_VOLCANO_VERSION)/config/crd/volcano/bases/scheduling.volcano.sh_podgroups.yaml
 
@@ -343,8 +342,9 @@ setup-clustertest-crds-in-cluster: kubectl ## Install shared CRDs into the expli
 	$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context "$${DYNAMO_CLUSTERTEST_CONTEXT}" apply --server-side -f config/crd/bases
 	go mod download sigs.k8s.io/lws@$(CLUSTERTEST_LWS_VERSION)
 	$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context "$${DYNAMO_CLUSTERTEST_CONTEXT}" apply --server-side -f '$(CLUSTERTEST_LWS_CRD_DIR)'
-	go mod download github.com/ai-dynamo/grove/operator/api@$(CLUSTERTEST_GROVE_VERSION)
-	$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context "$${DYNAMO_CLUSTERTEST_CONTEXT}" apply --server-side -f '$(CLUSTERTEST_GROVE_CRD_DIR)'
+	# Dependency controllers do not run in clustertests; retain the pinned alpha schema without webhook conversion.
+	go run ./hack/prepare_grove_test_crds | \
+		$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context "$${DYNAMO_CLUSTERTEST_CONTEXT}" apply --server-side -f -
 	curl --fail --location --silent --show-error --max-time 60 --retry 3 '$(CLUSTERTEST_VOLCANO_PODGROUP_CRD_URL)' | \
 		$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context "$${DYNAMO_CLUSTERTEST_CONTEXT}" apply --server-side -f -
 	$(KUBECTL) --kubeconfig '$(CLUSTERTEST_KUBECONFIG)' --context "$${DYNAMO_CLUSTERTEST_CONTEXT}" wait --for=condition=Established crd --all --timeout=2m
@@ -385,12 +385,16 @@ integration: envtest setup-clustertest ## Run envtests and clustertests, creatin
 		$(MAKE) clustertest
 
 .PHONY: lint
-lint: golangci-lint ## Run golangci-lint linter & yamllint
+lint: golangci-lint lint-api ## Run golangci-lint linter, the Kubernetes API linter & yamllint
 	$(GOLANGCI_LINT) run
 
 .PHONY: lint-fix
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 	$(GOLANGCI_LINT) run --fix
+
+.PHONY: lint-api
+lint-api: kube-api-linter ## Check the v1beta2 API types against Kubernetes API conventions
+	$(KUBE_API_LINTER) run -c .golangci-kal.yml ./api/v1beta2/...
 
 ##@ Build
 
@@ -579,6 +583,8 @@ YQ_VERSION ?= v4.45.4
 CONTROLLER_TOOLS_VERSION ?= v0.17.3
 ENVTEST_VERSION ?= release-0.19
 GOLANGCI_LINT_VERSION ?= v2.15.0
+# kube-api-linter publishes no tags; this pseudo-version is its 2026-10-12 main.
+KUBE_API_LINTER_VERSION ?= v0.0.0-20261012124120-79b557aa8c8d
 
 ## Tool Binaries
 KUBECTL ?= $(LOCALBIN)/kubectl-$(KUBECTL_VERSION)
@@ -588,6 +594,7 @@ YQ ?= $(LOCALBIN)/yq-$(YQ_VERSION)
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen-$(CONTROLLER_TOOLS_VERSION)
 ENVTEST ?= $(LOCALBIN)/setup-envtest-$(ENVTEST_VERSION)
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
+KUBE_API_LINTER = $(LOCALBIN)/golangci-lint-kube-api-linter-$(KUBE_API_LINTER_VERSION)
 
 ## ---------- Binary download targets ----------
 
@@ -651,6 +658,11 @@ golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,${GOLANGCI_LINT_VERSION})
 
+.PHONY: kube-api-linter
+kube-api-linter: $(KUBE_API_LINTER) ## Build the golangci-lint that includes kube-api-linter locally if necessary.
+$(KUBE_API_LINTER): $(LOCALBIN)
+	$(call go-install-tool,$(KUBE_API_LINTER),sigs.k8s.io/kube-api-linter/cmd/golangci-lint-kube-api-linter,${KUBE_API_LINTER_VERSION})
+
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary (ideally with version)
 # $2 - package url which can be installed
@@ -712,7 +724,7 @@ clustertest-upgrade-contract-in-cluster: ## Replay in an explicitly selected, ex
 	@test -n "$${DYNAMO_CLUSTERTEST_CONTEXT:-}" || { echo "DYNAMO_CLUSTERTEST_CONTEXT is required"; exit 1; }
 	python3 hack/generate_upgrade_fixtures.py --check
 	go test -tags=clustertest ./internal/testing/clusterenv -run '^TestCluster(HistoryStorage|ComponentHistoryBlocksWorkloads)$$' -count=1 -v -timeout=3m
-	go test -tags='clustertest upgradecontract' ./internal/controller -run '^TestClusterOperatorUpgrade$$' -count=1 -v -timeout=15m
+	go test -tags='clustertest upgradecontract' ./internal/controller -run '^TestClusterOperatorUpgrade$$' -parallel=$(UPGRADE_TEST_PARALLELISM) -count=1 -v -timeout=30m
 
 .PHONY: clustertest-upgrade-fixtures-regen clustertest-upgrade-fixtures-regen-in-cluster
 clustertest-upgrade-fixtures-regen: kind kubectl ## Capture a pinned release tree in a fresh exclusive Kind cluster.

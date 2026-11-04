@@ -70,7 +70,6 @@ from .args import (
 )
 from .backend_args import _configured_artifact_router_profile
 from .cache_info import get_configured_kv_event_block_size
-from .cache_read_control import publish_prefix_cache_read_control_capability
 from .capacity import (
     get_metrics_model_name,
     get_spec_decode_runtime_data,
@@ -101,7 +100,7 @@ from .multimodal_utils.models.qwen_video_routing import (
     publish_vllm_qwen_video_processor_contract,
 )
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
-from .snapshot import prepare_snapshot_engine
+from .snapshot import apply_restore_served_model_name, prepare_snapshot_engine
 from .state_agent import (
     StateAgentLifecycle,
     start_attachment_owner,
@@ -273,6 +272,7 @@ async def worker(argv: list[str] | None = None) -> None:
             lambda: parse_snapshot_restore_runtime_config(argv),
         )
         config.gms_shadow_mode = env_bool("DYN_VLLM_GMS_SHADOW_MODE")
+        apply_restore_served_model_name(config)
 
     # HEADLESS MODE: bypass DistributedRuntime entirely.
     # Workers run vLLM only (no NATS, etcd, or dynamo endpoints).
@@ -950,9 +950,6 @@ async def register_vllm_model(
             (list of alternative AND-sets).
     """
     runtime_config = ModelRuntimeConfig()
-    publish_prefix_cache_read_control_capability(
-        runtime_config, model_input, model_type, worker_type
-    )
     publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
     publish_vllm_qwen_video_processor_contract(runtime_config, vllm_config)
     publish_vllm_nemotron_video_processor_contract(runtime_config, vllm_config)

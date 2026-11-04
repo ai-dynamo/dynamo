@@ -22,7 +22,7 @@ impl WorkerScorer for ThunderAgentScorer {
     }
 
     fn score(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -42,7 +42,7 @@ struct ThunderAgentPicker;
 
 impl WorkerPicker for ThunderAgentPicker {
     fn pick(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -104,11 +104,11 @@ pub(crate) fn register(
 mod tests {
     use std::collections::HashMap;
 
+    use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicy;
     use dynamo_kv_router::protocols::{RoutingConstraints, WorkerConfigLike, WorkerWithDpRank};
     use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode, SchedulingRequest};
     use dynamo_kv_router::{
-        KvRouterConfig, WorkerLoadProjection, WorkerSelectionInput, WorkerSelectionPolicy,
-        WorkerSelector,
+        KvRouterConfig, WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
     };
 
     use super::*;
@@ -135,7 +135,6 @@ mod tests {
 
     fn request(target: WorkerWithDpRank) -> SchedulingRequest {
         SchedulingRequest {
-            prefix_cache_read_allowed: None,
             mode: ScheduleMode::QueryOnly {
                 request_id: Some("request".into()),
             },

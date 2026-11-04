@@ -321,7 +321,7 @@ impl RoutingHost {
 
     pub(crate) async fn dispatch_kv_plan(
         &self,
-        mut request: SingleIn<PreprocessedRequest>,
+        request: SingleIn<PreprocessedRequest>,
         plan: RoutePlan,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let RoutePlan {
@@ -332,9 +332,6 @@ impl RoutingHost {
             budget,
             ..
         } = plan;
-        if phase != RequestPhase::Aggregated {
-            request.skip_reading_prefix_cache = None;
-        }
         let guard = self
             .track_planned_selection(&request, &mut selection, phase, cleanup, &budget)
             .await?;
@@ -652,7 +649,6 @@ impl RoutingHost {
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
-        request.skip_reading_prefix_cache = None;
         let plan = self
             .plan_kv_route(
                 &request,

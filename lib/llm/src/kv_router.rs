@@ -10,17 +10,20 @@ use std::{
 
 use anyhow::Result;
 #[cfg(test)]
-use dynamo_kv_router::WorkerSelectionPolicy;
+use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicy;
 use dynamo_kv_router::{
     DEFAULT_ROUTING_GROUP, KvSchedulerError, PrefillLoadEstimator, RoutingPartitionRef,
     SessionPrefixIndexer, SharedKvCache, TrackingHashAlgorithm, TrackingHashContext,
-    TrackingHashScope, WorkerSelectionPolicyFactory,
+    TrackingHashScope,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::{
         ApproximateLruIncarnation, ApproximateLruStats, KvRouterError, RoutingDecisionHashes,
     },
     kv_hints::KvHint,
-    plugins::worker_selection::WorkerInfo,
+    plugins::{
+        request_classifier::{RequestClassifier, RequestClassifierContext},
+        worker_selection::{WorkerInfo, WorkerInputs, WorkerSelectionPolicyFactory},
+    },
     protocols::KV_EVENT_SUBJECT,
     protocols::{
         BlockExtraInfo, BlockHashOptions, PrefillLoadHint, RouterEvent, RouterRequest,
@@ -29,12 +32,10 @@ use dynamo_kv_router::{
     },
     scheduling::{
         CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, PotentialLoad,
-        RejectThresholdsProvider, RequestClassifier, RequestClassifierContext,
-        WorkerAvailabilityProvider, effective_prefill_tokens,
+        RejectThresholdsProvider, WorkerAvailabilityProvider, effective_prefill_tokens,
         overlap::cache_hit_estimates_from_tiered_matches,
         queue::{BookingHandle, SchedulerBookingDescriptor},
     },
-    selector::WorkerInputs,
     services::selection::{
         PromptView, Selected, SelectionAdmission, SelectionError, SelectionOperation,
         SelectionOutcome, SelectionRun, SessionBinding,
@@ -72,13 +73,8 @@ pub mod sequence;
 pub mod shared_cache;
 
 pub use dynamo_kv_router::scheduling::OverlapScoresResponse;
-// TODO(v1.7): Remove these compatibility aliases; use kv_router::plugins instead.
 pub use encoder_router::EncoderRouter;
 pub use indexer::Indexer;
-pub use plugins::{
-    install_router_plugin_registry as install_worker_selection_policy_registry,
-    router_plugin_registry as worker_selection_policy_registry,
-};
 pub use prefill_router::PrefillRouter;
 pub(crate) use request_lease::RequestAttemptRelease;
 pub use routing_host::{
@@ -99,7 +95,7 @@ use crate::{
 #[derive(Clone, Default)]
 pub enum SelectionPolicySource {
     /// The linked policy `KvRouterConfig` names for the worker role, resolved
-    /// from the installed [`worker_selection_policy_registry`]; Dynamo's
+    /// from the installed [`plugins::router_plugin_registry`]; Dynamo's
     /// default scorer and picker when it names none.
     #[default]
     Registry,
@@ -122,7 +118,7 @@ impl SelectionPolicySource {
         match self {
             Self::Factory(factory) => Ok(factory.clone()),
             Self::Prepared(prepared) => Ok(prepared.factory.clone()),
-            Self::Registry => worker_selection_policy_registry()
+            Self::Registry => plugins::router_plugin_registry()
                 .resolve_for_worker_type(config, worker_type)?
                 .ok_or_else(|| {
                     dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError::MissingDefault
@@ -401,13 +397,6 @@ pub(crate) fn to_worker_selection_session_context(
     .with_agent_headers(agent_headers.clone())
 }
 
-/// Whether a policy reads the KV index: its overlaps (`CACHE`) or the prefixes
-/// workers could fetch (`KV_TRANSFER`). Each component still reads only the
-/// inputs it declares.
-pub(crate) fn needs_kv_index(inputs: WorkerInputs) -> bool {
-    inputs.contains(WorkerInputs::CACHE) || inputs.contains(WorkerInputs::KV_TRANSFER)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KvEventSourceRequirement {
     NotRequired,
@@ -422,7 +411,7 @@ impl KvEventSourceRequirement {
         config: &KvRouterConfig,
         inputs: WorkerInputs,
     ) -> Self {
-        if !needs_kv_index(inputs) || config.use_remote_indexer || !config.use_kv_events {
+        if !inputs.reads_kv_index() || config.use_remote_indexer || !config.use_kv_events {
             return Self::NotRequired;
         }
 
@@ -595,7 +584,7 @@ fn cancelled_error(context_id: &str) -> anyhow::Error {
 pub struct KvRouter {
     indexer: Indexer,
     selection: embedded::EmbeddedSelection,
-    required_worker_inputs: dynamo_kv_router::selector::WorkerInputs,
+    required_worker_inputs: dynamo_kv_router::plugins::worker_selection::WorkerInputs,
     workers_with_configs: RuntimeConfigWatch,
     block_size: u32,
     kv_router_config: KvRouterConfig,
@@ -764,6 +753,9 @@ impl KvRouter {
         let session_prefix_index = kv_router_config
             .enable_session_prefix_index
             .then(|| Arc::new(SessionPrefixIndexer::new()));
+        if let (Some(cache), Some(index)) = (shared_cache.as_ref(), session_prefix_index.as_ref()) {
+            cache.attach_session_prefix_index(Arc::clone(index));
+        }
 
         let ingress = indexer::RuntimeIngress::start(indexer::RuntimeIngressArgs {
             endpoint: &endpoint,
@@ -1004,7 +996,9 @@ impl KvRouter {
         self.selection.scheduler().policy_control()
     }
 
-    pub fn required_worker_inputs(&self) -> dynamo_kv_router::selector::WorkerInputs {
+    pub fn required_worker_inputs(
+        &self,
+    ) -> dynamo_kv_router::plugins::worker_selection::WorkerInputs {
         self.required_worker_inputs
     }
 
@@ -1305,7 +1299,7 @@ impl KvRouter {
             allowed_worker_ids,
             routing_constraints,
             FindBestMatchAdmission::WithAdmission,
-            None,
+            false,
         )
         .await
     }
@@ -1331,7 +1325,7 @@ impl KvRouter {
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
         admission: FindBestMatchAdmission,
-        prefix_cache_read_allowed: Option<bool>,
+        needs_uncached_prefill: bool,
     ) -> anyhow::Result<AdmittedFindBestMatchOutcome> {
         let start = Instant::now();
         if update_states && context_id.is_none() {
@@ -1362,36 +1356,38 @@ impl KvRouter {
             lookup,
         } = self
             .selection
-            .run_selection(SelectionOperation {
-                key: self.selection.partition_key().clone(),
-                prompt: PromptView {
-                    token_ids: Some(tokens),
-                    mm_routing_info: None,
-                    block_mm_infos,
-                    block_hashes: None,
-                    sequence_hashes: None,
-                    isl_tokens: None,
-                    lora_name: lora_name.as_deref(),
-                    cache_namespace: cache_namespace.as_deref(),
-                    is_eagle: Some(self.is_eagle),
+            .run_selection(
+                SelectionOperation {
+                    key: self.selection.partition_key().clone(),
+                    prompt: PromptView {
+                        token_ids: Some(tokens),
+                        mm_routing_info: None,
+                        block_mm_infos,
+                        block_hashes: None,
+                        sequence_hashes: None,
+                        isl_tokens: None,
+                        lora_name: lora_name.as_deref(),
+                        cache_namespace: cache_namespace.as_deref(),
+                        is_eagle: Some(self.is_eagle),
+                    },
+                    router_config_override: router_config_override.cloned(),
+                    expected_output_tokens,
+                    priority_jump,
+                    strict_priority,
+                    policy_class,
+                    session_context,
+                    session: SessionBinding::None,
+                    affinity_target,
+                    pinned_worker,
+                    allowed_worker_ids,
+                    routing_constraints,
+                    admission: core_admission,
+                    track_active_blocks: self.kv_router_config.router_track_active_blocks,
+                    return_routing_hashes: return_routing_hashes || session_index_context.is_some(),
+                    replay_id: None,
                 },
-                router_config_override: router_config_override.cloned(),
-                expected_output_tokens,
-                prefix_cache_read_allowed,
-                priority_jump,
-                strict_priority,
-                policy_class,
-                session_context,
-                session: SessionBinding::None,
-                affinity_target,
-                pinned_worker,
-                allowed_worker_ids,
-                routing_constraints,
-                admission: core_admission,
-                track_active_blocks: self.kv_router_config.router_track_active_blocks,
-                return_routing_hashes: return_routing_hashes || session_index_context.is_some(),
-                replay_id: None,
-            })
+                !needs_uncached_prefill,
+            )
             .await;
         if lookup.is_some_and(|lookup| lookup.shared_cache_error)
             && let Some(m) = metrics::RoutingOverheadMetrics::get()
@@ -2023,7 +2019,7 @@ mod tests {
     use tokio::sync::watch;
 
     use crate::local_model::runtime_config::ModelRuntimeConfig;
-    use dynamo_kv_router::selector::{
+    use dynamo_kv_router::plugins::worker_selection::{
         WorkerCandidate, WorkerFilter, WorkerInputView, WorkerPicker, WorkerSelectionContext,
     };
 
@@ -2200,7 +2196,7 @@ mod tests {
         }
 
         fn pick(
-            &mut self,
+            &self,
             _context: &WorkerSelectionContext<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -2223,7 +2219,7 @@ mod tests {
 
     impl WorkerFilter for RejectAll {
         fn keep(
-            &mut self,
+            &self,
             _context: &WorkerSelectionContext<'_>,
             _candidate: WorkerCandidate<'_>,
         ) -> Result<bool, WorkerSelectionPolicyError> {
@@ -2239,7 +2235,7 @@ mod tests {
         }
 
         fn pick(
-            &mut self,
+            &self,
             _context: &WorkerSelectionContext<'_>,
             _input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -2769,7 +2765,7 @@ mod tests {
                     None,
                     RoutingConstraints::default(),
                     admission,
-                    None,
+                    false,
                 )
                 .await
                 .unwrap();
@@ -2955,7 +2951,7 @@ mod tests {
                     None,
                     RoutingConstraints::default(),
                     FindBestMatchAdmission::WithAdmission,
-                    None,
+                    false,
                 )
                 .await
                 .unwrap();
@@ -3104,7 +3100,7 @@ mod tests {
                 None,
                 RoutingConstraints::default(),
                 FindBestMatchAdmission::WithAdmission,
-                None,
+                false,
             )
             .await
             .unwrap();
@@ -3338,7 +3334,7 @@ mod tests {
         }
 
         fn pick(
-            &mut self,
+            &self,
             _context: &WorkerSelectionContext<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -3363,7 +3359,7 @@ mod tests {
             let constructions = Arc::clone(&constructions);
             Arc::new(move |config: &KvRouterConfig, _, _| {
                 constructions.fetch_add(1, Ordering::SeqCst);
-                dynamo_custom_policy_builtin::default_policy(config.clone(), "decode")
+                dynamo_router_policies::default_policy(config.clone(), "decode")
             })
         };
         let config = KvRouterConfig::default();

@@ -40,7 +40,7 @@ RoutingHost
  │   │   ├─ RequestLeaseManager      booking leases, reaper
  │   │   └─ EmbeddedSelection → SelectionService / SelectionCore (lib/kv-router)
  │   │                               classify, queue, score, admit, account load
- │   ├─ Builtin                      round-robin, random, power-of-two, least-loaded
+ │   ├─ Builtin                      round-robin, random, least-loaded
  │   ├─ Direct                       the worker the request names
  │   └─ DeviceAwareWeighted
  ├─ affinity: AffinityCoordinator    session affinity (optional; crate::session_affinity)
@@ -148,14 +148,13 @@ errors, which return to the client.
 | Tokens, multimodal block info | `PreprocessedRequest::block_mm_routing_info` |
 | Pins, DP ranks, priority, LoRA, cache namespace, constraints, allowed workers | `PreprocessedRequest::routing` (`RoutingHints`), from `nvext` and `x-dynamo-*` headers |
 | Scoring and accounting overrides | `PreprocessedRequest::router_config_override` |
-| Prefix-cache read permission | Inverse of `PreprocessedRequest::skip_reading_prefix_cache`, normalized by the aggregated host for capable token-based vLLM pools; absent decisions retain legacy estimates |
+| Aggregated prompt-logprob cache credit | `output_options.prompt_logprobs`: when present, including zero, selection conservatively counts the full prompt without cache credit |
 | Excluded workers, parked classifier lifecycle | `PreprocessedRequest::migration_state` |
 | Staged KV that only this decode can release | `PreprocessedRequest::staged_kv_cleanup` |
 | Query-only selection (KV plane) | annotation `query_instance_id` in `PreprocessedRequest::annotations` |
 
-The Runtime EPP uses the token-only selection API and supplies no normalized cache-read
-permission. Its estimates retain their existing behavior; extending this control to EPP requires
-its own request normalization and worker contract.
+The token-only Runtime EPP selection API has no output options and retains its existing cache
+behavior. Worker sampling options are unaffected by this conservative accounting rule.
 
 ## Admission modes
 

@@ -1126,16 +1126,7 @@ pub struct ModelDeploymentCard {
     tokenizer_id_bound: OnceLock<Option<usize>>,
 }
 
-/// LoRA adapter information for routing decisions
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct LoraInfo {
-    /// LoRA adapter name (e.g., "customer-123-v2")
-    pub name: String,
-
-    /// Maximum number of LoRA adapters that can be loaded at once on a single GPU
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_gpu_lora_count: Option<u32>,
-}
+pub use crate::lora::LoraInfo;
 
 impl ModelDeploymentCard {
     /// Number of typed metadata slots (`model_info`, `tokenizer`,
@@ -1407,6 +1398,15 @@ impl ModelDeploymentCard {
                     &self.runtime_config,
                     VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
                 );
+
+                // Keep workers with different cancellation semantics out of the same
+                // admitted cohort during rolling upgrades. Missing and false stay compatible.
+                if self.runtime_config.runtime_flag_enabled(
+                    crate::local_model::runtime_config::DISAGG_PREFILL_CANCEL_ANYTIME_V1,
+                ) {
+                    bytes_to_hash
+                        .extend_from_slice(b"\0disagg_prefill_cancel_anytime_v1\0true");
+                }
 
                 // TODO: Do we want any other user_data or runtime_config?
 
@@ -3638,21 +3638,6 @@ mod ownership_tests {
     }
 
     #[test]
-    fn prefix_cache_read_capability_preserves_card_cache_identity() {
-        let legacy = ModelDeploymentCard::with_name_only("model");
-        for value in [serde_json::json!(false), serde_json::json!(true)] {
-            let mut card = ModelDeploymentCard::with_name_only("model");
-            card.runtime_config
-                .runtime_data
-                .insert("supports_prefix_cache_read_control".to_string(), value);
-            let decoded: ModelDeploymentCard =
-                serde_json::from_str(&card.to_json().unwrap()).unwrap();
-            assert_eq!(legacy.mdcsum(), decoded.mdcsum());
-            assert_eq!(legacy.local_dir(), decoded.local_dir());
-        }
-    }
-
-    #[test]
     fn tower_connector_lora_runtime_flag_isolates_worker_sets() {
         use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
 
@@ -3908,6 +3893,26 @@ mod ownership_tests {
             nemotron.mdcsum(),
             "88381ff5b5f10389bacc63e1e2bac947a76ffc5b32c4864b7499f0d10928a96e"
         );
+    }
+
+    #[test]
+    fn disagg_prefill_cancel_capability_isolates_worker_sets() {
+        use crate::local_model::runtime_config::DISAGG_PREFILL_CANCEL_ANYTIME_V1;
+
+        let missing = ModelDeploymentCard::with_name_only("model");
+        let mut disabled = ModelDeploymentCard::with_name_only("model");
+        disabled
+            .runtime_config
+            .runtime_data
+            .insert(DISAGG_PREFILL_CANCEL_ANYTIME_V1.to_string(), false.into());
+        let mut enabled = ModelDeploymentCard::with_name_only("model");
+        enabled
+            .runtime_config
+            .runtime_data
+            .insert(DISAGG_PREFILL_CANCEL_ANYTIME_V1.to_string(), true.into());
+
+        assert_eq!(missing.mdcsum(), disabled.mdcsum());
+        assert_ne!(missing.mdcsum(), enabled.mdcsum());
     }
 }
 
