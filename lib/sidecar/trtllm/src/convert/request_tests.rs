@@ -712,6 +712,18 @@ fn empty_visible_stop_tokens_leave_stop_trimming_on() {
 }
 
 #[test]
+fn keeping_stop_text_keeps_ordinary_stop_tokens_in_output() {
+    for (no_stop_trim, retain_model_stop_token_text) in [(Some(true), None), (None, Some(true))] {
+        let mut req = request();
+        req.stop_conditions.stop_token_ids = Some(vec![7]);
+        req.output_options.no_stop_trim = no_stop_trim;
+        req.output_options.retain_model_stop_token_text = retain_model_stop_token_text;
+        let proto = build_generate_request(req, "req", "model", None, AGG).expect("build");
+        assert_eq!(proto.stopping.unwrap().include_stop_in_output, Some(true));
+    }
+}
+
+#[test]
 fn omitted_max_tokens_without_context_length_is_rejected() {
     let mut req = request();
     req.stop_conditions.max_tokens = None;

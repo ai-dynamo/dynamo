@@ -102,7 +102,8 @@ pub(crate) fn build_generate_request_with_routing(
             (allow_dp_rank && rank.is_some()).then_some(request_id)
         })
         .map(str::to_string);
-    let include_stop_in_output = has_visible_stop_tokens(&request).then_some(true);
+    let include_stop_in_output =
+        (keeps_every_stop(&request) || has_visible_stop_tokens(&request)).then_some(true);
     let input = request_input(&mut request, limits)?;
     let sampling = &request.sampling_options;
     let stop = &request.stop_conditions;
@@ -137,8 +138,9 @@ pub(crate) fn build_generate_request_with_routing(
             conditions,
             ignore_eos: stop.ignore_eos,
             // Keeps a matched visible stop token (e.g. Harmony's `<|call|>`) in
-            // the output. A visible token equal to `end_id` finishes as END_ID
-            // and may still be dropped.
+            // the output, or any matched stop when the request keeps stop text.
+            // A stop equal to `end_id` finishes as END_ID and may still be
+            // dropped.
             include_stop_in_output,
         }),
         response: Some(pb::ResponseOptions {
@@ -698,8 +700,20 @@ fn has_visible_stop_tokens(request: &PreprocessedRequest) -> bool {
         .is_some_and(|ids| !ids.is_empty())
 }
 
+/// The frontend needs token IDs through the matched stop when it keeps stop
+/// text (`no_stop_trim` or `retain_model_stop_token_text`); without them it
+/// fails the request or loses the stop text.
+fn keeps_every_stop(request: &PreprocessedRequest) -> bool {
+    let output = &request.output_options;
+    output.no_stop_trim == Some(true) || output.retain_model_stop_token_text == Some(true)
+}
+
 /// Hidden stop IDs to remove when the engine confirms they ended generation.
+/// None when the request keeps stop text.
 fn retained_hidden_stop_ids(request: &PreprocessedRequest) -> BTreeSet<u32> {
+    if keeps_every_stop(request) {
+        return BTreeSet::new();
+    }
     let visible = request
         .stop_conditions
         .stop_token_ids_visible

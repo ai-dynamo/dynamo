@@ -912,6 +912,58 @@ async fn visible_stop_token_is_returned_and_hidden_stop_token_is_not() {
     assert_eq!(terminal.stop_reason, Some(StopReason::Int(42)));
 }
 
+/// Without the matched stop's token ID the frontend fails a `no_stop_trim`
+/// request whose first generated token is the stop.
+#[tokio::test]
+async fn a_matched_stop_token_is_returned_when_the_frontend_keeps_it() {
+    let server = FakeServer::start(FakeTrtllm::default()).await;
+    let engine = engine(&server.endpoint, 1);
+    engine.start(0).await.expect("start");
+    let stop_on_42 = |output_options: OutputOptions| {
+        let mut request = request();
+        request.stop_conditions.stop_token_ids = Some(vec![42]);
+        request.output_options = output_options;
+        request
+    };
+
+    for (keep, output_options) in [
+        (
+            "no_stop_trim",
+            OutputOptions {
+                no_stop_trim: Some(true),
+                ..Default::default()
+            },
+        ),
+        (
+            "retain_model_stop_token_text",
+            OutputOptions {
+                retain_model_stop_token_text: Some(true),
+                ..Default::default()
+            },
+        ),
+    ] {
+        let outputs = collect(&engine, stop_on_42(output_options)).await;
+        let terminal = outputs.last().unwrap();
+        assert_eq!(
+            terminal.token_ids,
+            [42],
+            "{keep}: returned with the terminal"
+        );
+        assert!(terminal.completion_usage.is_some(), "{keep}");
+        assert_eq!(terminal.stop_reason, Some(StopReason::Int(42)), "{keep}");
+    }
+
+    let outputs = collect(&engine, stop_on_42(OutputOptions::default())).await;
+    assert!(
+        outputs.iter().all(|output| output.token_ids.is_empty()),
+        "trimmed by default"
+    );
+    assert_eq!(
+        outputs.last().unwrap().stop_reason,
+        Some(StopReason::Int(42))
+    );
+}
+
 #[tokio::test]
 async fn pool_uses_each_configured_connection() {
     let server = FakeServer::start(FakeTrtllm::default()).await;
