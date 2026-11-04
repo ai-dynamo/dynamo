@@ -251,6 +251,11 @@ impl NvCreateChatCompletionRequest {
 const THINKING_TOGGLES: [&str; 2] = ["thinking", "enable_thinking"];
 const THINKING_KEYS: [&str; 3] = ["thinking", "enable_thinking", "thinking_mode"];
 
+/// A `chat_template_kwargs` key that the normalizer reads as a thinking control.
+pub(crate) fn is_thinking_control_key(key: &str) -> bool {
+    THINKING_KEYS.contains(&key) || key == "reasoning_effort"
+}
+
 fn set_thinking(args: &mut HashMap<String, serde_json::Value>, on: bool) {
     args.insert("thinking".to_string(), serde_json::Value::Bool(on));
     args.insert("enable_thinking".to_string(), serde_json::Value::Bool(on));
