@@ -107,6 +107,9 @@ pub enum KvSchedulerError {
     #[error("pinned worker {worker_id} is not in allowed worker set")]
     PinnedWorkerNotAllowed { worker_id: WorkerId },
 
+    #[error("unknown policy class {0:?}")]
+    UnknownPolicyClass(String),
+
     #[error("endpoint subscriber shutdown")]
     SubscriberShutdown,
 
@@ -120,7 +123,7 @@ pub enum KvSchedulerError {
     RequestClassifierPanicked(String),
 
     #[error("request classifier failed: {0}")]
-    RequestClassifierFailed(Arc<super::ClassifierError>),
+    RequestClassifierFailed(Arc<crate::plugins::request_classifier::ClassifierError>),
 
     #[error("request classifier is already tracking request ID {0:?}")]
     DuplicateClassificationRequestId(String),
