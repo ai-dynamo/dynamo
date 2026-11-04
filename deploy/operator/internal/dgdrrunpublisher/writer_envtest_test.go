@@ -327,8 +327,13 @@ func TestEnvtestCandidatePreparation(t *testing.T) {
 		{name: "wrong type is retained", manifest: "apiVersion: nvidia.com/v1beta1\nkind: DynamoGraphDeployment\nspec:\n  components: not-a-list\n", reason: "ValidationFailed", wantSpec: `"components":"not-a-list"`},
 		{name: "DGD webhook rejects an ambiguous runtime image", manifest: strings.ReplaceAll(validManifest, "runtime:1.6.0", "runtime:custom"), reason: "ValidationFailed", wantSpec: `"image":"registry.example/runtime:custom"`},
 		{name: "shared override applies without recomputing metrics", manifest: validManifest, override: overridePrefix + `"spec":{"components":[{"name":"worker","replicas":3}]}}`, reason: "ValidationSucceeded", wantSpec: `"replicas":3`},
+		{name: "args append directive is materialized before strict dry-run", manifest: strings.ReplaceAll(validManifest, "image: registry.example/runtime:1.6.0", "image: registry.example/runtime:1.6.0\n          args: [--base]"), override: overridePrefix + `"spec":{"components":[{"name":"worker","podTemplate":{"spec":{"containers":[{"name":"main","$patch":{"args":"append"},"args":["--extra"]}]}}}]}}`, reason: "ValidationSucceeded", wantSpec: `"args":["--base","--extra"]`, absentSpec: `"$patch"`},
+		{name: "args append requires an existing container", manifest: validManifest, override: overridePrefix + `"spec":{"components":[{"name":"worker","podTemplate":{"spec":{"containers":[{"name":"missing","$patch":{"args":"append"},"args":["--extra"]}]}}}]}}`, reason: "OverrideFailed", absentSpec: `"name":"missing"`},
+		{name: "ordinary merge can add a named container", manifest: validManifest, override: overridePrefix + `"spec":{"components":[{"name":"worker","podTemplate":{"spec":{"containers":[{"name":"extra","image":"registry.example/sidecar:1.0.0"}]}}}]}}`, reason: "ValidationSucceeded", wantSpec: `"name":"extra"`},
 		{name: "missing target applies nothing", manifest: validManifest, override: overridePrefix + `"spec":{"backendFramework":"sglang","components":[{"name":"missing","replicas":3}]}}`, reason: "OverrideTargetNotFound", wantSpec: `"backendFramework":"vllm"`},
 		{name: "metadata is copied to Candidate", manifest: validManifest, override: overridePrefix + `"metadata":{"labels":{"custom":"kept"},"annotations":{"custom":"kept"}}}`, reason: "ValidationSucceeded", wantLabel: "kept"},
+		{name: "failed override retains only generated metadata", manifest: strings.Replace(validManifest, "\nspec:", "\nmetadata:\n  labels:\n    custom: generated\n  annotations:\n    custom: generated\nspec:", 1), override: overridePrefix + `"metadata":{"labels":{"custom":"discarded"},"annotations":{"custom":"discarded"}},"spec":{"components":[{"name":"missing","replicas":3}]}}`, reason: "OverrideTargetNotFound", wantLabel: "generated"},
+		{name: "failed dry-run retains successfully merged metadata", manifest: strings.ReplaceAll(validManifest, "runtime:1.6.0", "runtime:custom"), override: overridePrefix + `"metadata":{"labels":{"custom":"kept"},"annotations":{"custom":"kept"}}}`, reason: "ValidationFailed", wantLabel: "kept"},
 		{name: "identity override fails atomically", manifest: validManifest, override: overridePrefix + `"metadata":{"namespace":"other"},"spec":{"backendFramework":"sglang"}}`, reason: "OverrideFailed", wantSpec: `"backendFramework":"vllm"`},
 	}
 	for i, test := range tests {
@@ -369,10 +374,8 @@ func TestEnvtestCandidatePreparation(t *testing.T) {
 			if test.absentSpec != "" {
 				require.NotContains(t, string(got.Spec.Raw), test.absentSpec)
 			}
-			if test.wantLabel != "" {
-				require.Equal(t, test.wantLabel, got.Labels["custom"])
-				require.Equal(t, test.wantLabel, got.Annotations["custom"])
-			}
+			require.Equal(t, test.wantLabel, got.Labels["custom"])
+			require.Equal(t, test.wantLabel, got.Annotations["custom"])
 			if i == 0 {
 				var spec map[string]any
 				require.NoError(t, json.Unmarshal(got.Spec.Raw, &spec))

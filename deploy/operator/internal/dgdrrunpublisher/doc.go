@@ -27,14 +27,14 @@
 //     shared emptyDir. On a semantic change it atomically stores the new desired state
 //     (InputStore) and enqueues the key. Unchanged input enqueues nothing and backs the
 //     check interval off; a change resets it.
-//  2. The Reconciler consumes the key. Informer events for the Run, its candidates and
+//  2. The Reconciler consumes the key. Informer events for the Run, its Candidates and
 //     this Pod enqueue the same key. It reads the latest stored input and the cached
-//     cluster state, applies the frozen DGD override atomically, and checks a copy by strict
-//     server-side DGD dry-run. It creates missing candidates with the unpruned payload
-//     from before dry-run mutation and completes their status (parameters, metrics, Valid).
-//     It updates the Run's published-candidate count, progress
-//     time and ordered references only where they differ, and finally deletes obsolete candidates. Failed writes are
-//     retried by the workqueue with backoff.
+//     cluster state, applies the frozen DGD override atomically, and checks a copy by
+//     strict server-side DGD dry-run. It creates missing Candidates with server-side
+//     apply, preserving the unpruned payload from before dry-run mutation, and completes
+//     their status (parameters, metrics, Valid). It updates the Run's published-candidate
+//     count, progress time and ordered references only where they differ, and finally
+//     deletes obsolete Candidates. Failed writes are retried by the workqueue with backoff.
 //
 // The publisher's own writes come back as watch events and the cache can trail them. The
 // Reconciler keeps no record of what it wrote: it decides from the current observations,

@@ -9780,14 +9780,20 @@ spec:
                     dgd:
                       description: |-
                         DGD is one partial nvidia.com/v1beta1 DynamoGraphDeployment applied by the publisher
-                        using the DGD structural merge rules. Other API versions are not supported.
+                        using the DGD schema's Server-Side Apply merge rules. Other API versions are not supported.
+                        Components must already exist; named containers may be added. Atomic lists, including
+                        container command and args, replace the generated lists. The supported customization
+                        $patch: {args: append} on a container appends to its explicit generated args list;
+                        both the container and its args must already exist. No other $patch operation is supported.
                         Application is atomic: a merge failure retains the unchanged generated deployment
                         with Valid=False. A successful merge is checked by strict server-side dry-run;
                         the dry-run response and its defaults are discarded. The Candidate retains the
                         unpruned payload from before the check. Invalid Candidates count toward maxCandidates.
                         Overrides may change any deployment configuration. Evaluation metrics are not
                         recomputed and continue to describe the original AISimulate configuration.
-                        DGD labels and annotations become Candidate labels and annotations. Other metadata
+                        DGD labels and annotations become Candidate labels and annotations. A failed merge
+                        retains only the original generated metadata; a successful merge followed by failed
+                        dry-run validation retains the merged metadata on the invalid Candidate. Other metadata
                         and publisher-owned keys cannot be overridden; such attempts fail atomically.
                       type: object
                       x-kubernetes-embedded-resource: true

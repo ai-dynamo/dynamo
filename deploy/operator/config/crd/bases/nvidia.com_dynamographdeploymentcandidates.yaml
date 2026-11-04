@@ -65,8 +65,15 @@ spec:
               properties:
                 conditions:
                   description: |-
-                    Conditions records the final Valid result. Valid=True means atomic override application
-                    and strict DGD dry-run succeeded at checking time, not that the deployment is Ready.
+                    Conditions records the final Valid result for the Candidate's DGD:
+                    - Valid=True, ValidationSucceeded: atomic override application and strict server-side
+                      dry-run succeeded; the API object is structurally valid and passed admission at checking time.
+                    - Valid=False, OverrideTargetNotFound: an override names a component absent from the generated DGD.
+                    - Valid=False, OverrideFailed: the override could not be applied in full, for example because
+                      it changes reserved metadata or supplies an invalid merge directive. The original DGD is retained.
+                    - Valid=False, ValidationFailed: the resulting DGD was rejected by strict dry-run admission.
+                    Check for Valid=True before using spec as a DGD. An absent condition is not success.
+                    Valid reports API validity, not deployment readiness or successful image pulls and GPU scheduling.
                     Invalid Candidates remain visible and count toward recommendation.maxCandidates.
                   items:
                     description: Condition contains details for one aspect of the current state of this API Resource.
