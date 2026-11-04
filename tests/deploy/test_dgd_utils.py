@@ -283,6 +283,7 @@ def short_backoff(monkeypatch) -> None:
     )
 
 
+@pytest.mark.timeout(30)
 def test_port_forward_replaces_forward_whose_bind_failed(monkeypatch, tmp_path) -> None:
     deployment = managed_deployment(tmp_path)
     short_backoff(monkeypatch)
@@ -312,13 +313,17 @@ def test_port_forward_replaces_forward_whose_bind_failed(monkeypatch, tmp_path) 
     assert pod.portforward.call_count == 2
 
 
+@pytest.mark.timeout(30)
 def test_port_forward_replaces_unreachable_forward_with_new_object(
     monkeypatch, tmp_path
 ) -> None:
     deployment = managed_deployment(tmp_path)
     short_backoff(monkeypatch)
-    unreachable_port = unused_local_port()
-    ready_port = unused_local_port()
+    # Keep the first port reserved so the replacement cannot pick it again.
+    with socket.socket() as holder:
+        holder.bind(("127.0.0.1", 0))
+        unreachable_port = holder.getsockname()[1]
+        ready_port = unused_local_port()
     unreachable = kr8s_port_forward(unreachable_port)
     replacement = kr8s_port_forward(ready_port)
     pod = SimpleNamespace(
