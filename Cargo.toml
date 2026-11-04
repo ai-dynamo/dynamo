@@ -62,13 +62,14 @@ repository = "https://github.com/ai-dynamo/dynamo.git"
 keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
-dynamo-custom-policy-builtin = { path = "lib/router-plugins/builtin", version = "1.7.0" }
+dynamo-router-policies = { path = "lib/router-plugins/builtin", version = "1.7.0" }
 dynamo-generate-format-catalog = { path = "lib/generate-format-catalog", version = "1.7.0" }
 # Published separately by https://github.com/ai-dynamo/aisimulate.
 aisimulate-core = { version = "=0.13.0-dev.202610290000000087" }
 
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.7.0" }
+dynamo-global-discovery-client = { path = "lib/global-discovery-client", version = "1.7.0" }
 dynamo-llm = { path = "lib/llm", version = "1.7.0", default-features = false }
 dynamo-sglang-generate = { path = "lib/generate-formats/sglang", version = "1.7.0" }
 dynamo-vllm-generate = { path = "lib/generate-formats/vllm", version = "1.7.0" }
@@ -92,7 +93,7 @@ dynamo-parsers = { version = "=10.2.2" }
 # Published on crates.io. To see all available versions:
 #   web:          https://crates.io/crates/dynamo-parsers-v2/versions
 #   sparse index: curl https://index.crates.io/dy/na/dynamo-parsers-v2   (one JSON line per release; read the "vers" field)
-dynamo-parsers-v2 = { version = "=0.8.9" }
+dynamo-parsers-v2 = { version = "=0.9.6" }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.7.0" }
 dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.7.0" }
 
