@@ -1330,6 +1330,7 @@ def test_agg_optimizer_synthetic_replay_smoke(monkeypatch) -> None:
             ),
             router_mode="both",
             overlap_credits=[0.0, 1.0],
+            prefill_load_scales=[1.0],
         )
     )
 
@@ -1357,6 +1358,7 @@ def test_agg_optimizer_timed_trace_smoke(tmp_path, monkeypatch) -> None:
             ),
             router_mode="both",
             overlap_credits=[0.0, 1.0],
+            prefill_load_scales=[1.0],
         )
     )
 
@@ -1383,6 +1385,7 @@ def test_optimizer_synthetic_replay_smoke(tmp_path, monkeypatch) -> None:
                 mean_e2e_latency_ms=100000.0,
             ),
             overlap_credits=[0.0, 1.0],
+            prefill_load_scales=[1.0],
         )
     )
 
@@ -1409,6 +1412,7 @@ def test_optimizer_timed_trace_smoke(tmp_path, monkeypatch) -> None:
                 mean_e2e_latency_ms=100000.0,
             ),
             overlap_credits=[0.0, 1.0],
+            prefill_load_scales=[1.0],
         )
     )
 
