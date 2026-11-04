@@ -27,20 +27,22 @@ use super::policy_config::{
 };
 use super::policy_queue::{PolicyQueue, QueueLane, QueueMetadata, QueueReadiness, QueueSnapshot};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
-use super::request_classifier::{ClassificationOverrides, ClassifyRequest};
+use super::request_classifier::ClassificationOverrides;
 use super::selector::{
-    CandidatePreparer, PreparedCandidates, WorkerInputs, WorkerSelectionInput, WorkerSelector,
-    worker_input_rows,
+    CandidatePreparer, PreparedCandidates, WorkerSelectionInput, WorkerSelector, worker_input_rows,
 };
 use super::types::{
     AdvisorySchedulingResponse, AdvisoryWorkerLoad, AttemptId, KvSchedulerError,
     NonMaxOverlapSelection, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider,
     SchedulingContext, SchedulingRequest, SchedulingResponse, WorkerAvailabilityProvider,
 };
+use crate::plugins::request_classifier::ClassifyRequest;
 use crate::plugins::worker_selection::{
     RuntimePolicyConfig, RuntimePolicyError, RuntimePolicyUpdate,
 };
-use crate::plugins::worker_selection::{WorkerCapacity, WorkerInputRows, WorkerLoadInput};
+use crate::plugins::worker_selection::{
+    WorkerCapacity, WorkerInputRows, WorkerInputs, WorkerLoadInput,
+};
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, SelectionTrace, SelectionTraceSpec, WorkerConfigLike,
     WorkerId, WorkerSelectionResult, WorkerWithDpRank,
@@ -2128,6 +2130,7 @@ impl<
                     kv_transfer_candidates: request.kv_transfer_candidates.take(),
                     potential_decode_blocks: selected.selection.potential_decode_blocks,
                     selection_trace: selected.selection_trace,
+                    log_fields: selected.selection.log_fields,
                 },
             })
         })
@@ -2187,6 +2190,7 @@ impl<
             kv_transfer_candidates: request.kv_transfer_candidates.take(),
             potential_decode_blocks: selected.selection.potential_decode_blocks,
             selection_trace: selected.selection_trace,
+            log_fields: selected.selection.log_fields,
         };
         let non_max_overlap_selection = selected.non_max_overlap_selection;
 
@@ -2408,6 +2412,7 @@ mod tests {
     use super::*;
     use crate::kv_hints::KvTransferCandidates;
     use crate::plugins::worker_selection::WorkerCandidates;
+    use crate::plugins::worker_selection::WorkerInputs;
     use crate::protocols::{
         ActiveSequenceEvent, ExternalSequenceBlockHash, WorkerSelectionResult, WorkerWithDpRank,
     };
@@ -2417,7 +2422,7 @@ mod tests {
     use crate::sequences::topology::WorkerDpRange;
     use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher};
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
-    use crate::{DefaultWorkerSelector, WorkerInputs, WorkerSelector};
+    use crate::{DefaultWorkerSelector, WorkerSelector};
 
     fn decay_now() -> Instant {
         Instant::now()
@@ -2594,7 +2599,7 @@ mod tests {
             &self,
             input: WorkerSelectionInput<'_, SimpleWorkerConfig>,
         ) -> Result<WorkerSelectionResult, KvSchedulerError> {
-            let (workers, request, eligibility, block_size) = input.into_configured()?;
+            let (workers, request, eligibility, block_size) = input.into_configured();
             if let Some(rendezvous) = &self.rendezvous {
                 rendezvous.wait_for_peer();
             }
@@ -2637,6 +2642,7 @@ mod tests {
                 potential_decode_blocks: request
                     .potential_decode_blocks_after_admission(worker, block_size),
                 kv_transfer_source: None,
+                log_fields: None,
             })
         }
     }
@@ -4396,7 +4402,7 @@ policy_classes:
     }
 
     struct CountingPreparedPolicy {
-        inner: crate::WorkerSelectionPolicy,
+        inner: crate::plugins::worker_selection::WorkerSelectionPolicy,
         prepared_selections: Arc<AtomicUsize>,
     }
 
@@ -4432,15 +4438,15 @@ policy_classes:
     /// Picks the least-loaded worker; ties go to the lowest worker.
     struct LeastLoaded;
 
-    impl crate::WorkerPicker for LeastLoaded {
+    impl crate::plugins::worker_selection::WorkerPicker for LeastLoaded {
         fn required_worker_inputs(&self) -> WorkerInputs {
             WorkerInputs::LOAD
         }
 
         fn pick(
-            &mut self,
-            _context: &crate::WorkerSelectionContext<'_>,
-            input: crate::WorkerInputView<'_>,
+            &self,
+            _context: &crate::plugins::worker_selection::WorkerSelectionContext<'_>,
+            input: crate::plugins::worker_selection::WorkerInputView<'_>,
         ) -> Result<usize, crate::WorkerSelectionPolicyError> {
             let (candidates, loads) = (input.candidates(), input.load().unwrap());
             Ok((0..candidates.len())
@@ -4454,7 +4460,7 @@ policy_classes:
 
     fn counting_policy(prepared_selections: &Arc<AtomicUsize>) -> CountingPreparedPolicy {
         CountingPreparedPolicy {
-            inner: crate::WorkerSelectionPolicy::new(
+            inner: crate::plugins::worker_selection::WorkerSelectionPolicy::new(
                 crate::KvRouterConfig::default(),
                 "test",
                 vec![],
@@ -6416,6 +6422,7 @@ policy_classes:
                         ExternalSequenceBlockHash(102),
                     ],
                     owner_prefix_blocks: vec![(WorkerWithDpRank::new(1, 0).into(), 2)],
+                    source_intervals: Vec::new(),
                     routing_snapshot: None,
                 }),
                 overlap: OverlapSignals {
@@ -6514,6 +6521,7 @@ policy_classes:
                 kv_transfer_candidates: Some(KvTransferCandidates {
                     block_hashes: vec![ExternalSequenceBlockHash(101)],
                     owner_prefix_blocks: vec![(worker.into(), 1)],
+                    source_intervals: Vec::new(),
                     routing_snapshot: None,
                 }),
                 overlap: OverlapSignals {

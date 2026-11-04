@@ -622,6 +622,7 @@ fn compute_index(endpoint: &Endpoint, request_type: &RequestType, status: &Statu
         Endpoint::Images => todo!(),
         Endpoint::Videos => todo!(),
         Endpoint::Audios => todo!(),
+        Endpoint::Transcriptions => todo!(),
         Endpoint::Generate => todo!(),
         Endpoint::SystemOne | Endpoint::Decisions => {
             unreachable!("this fixture indexes only completion endpoints")
@@ -4034,4 +4035,470 @@ mod zero_top_logprobs {
     async fn streaming_top_zero_preserves_chosen_logprobs() {
         run_case(true).await;
     }
+}
+
+async fn check_reject_media_openai(status: StatusCode) {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .enable_chat_endpoints(true)
+        .enable_responses_endpoints(true)
+        .media_rejection(
+            dynamo_llm::frontend_config::MediaRejectionConfig::new(true, status.as_u16()).unwrap(),
+        )
+        .port(port)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let card = ModelDeploymentCard::with_name_only("text-only");
+    let engine = Arc::new(NvExtCaptureEngine::default());
+    state
+        .manager()
+        .add_chat_completions_model("text-only", card.mdcsum(), engine.clone())
+        .unwrap();
+
+    let url = format!("http://localhost:{port}/v1/chat/completions");
+    let cases = [
+        (
+            "/v1/chat/completions",
+            "image_url",
+            serde_json::json!({
+                "model": "text-only",
+                "stream": true,
+                "messages": [
+                    {"role": "user", "content": [
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+                    ]},
+                    {"role": "assistant", "content": "ok"},
+                    {"role": "user", "content": "continue"}
+                ]
+            }),
+        ),
+        (
+            "/v1/responses",
+            "image_url",
+            serde_json::json!({
+                "model": "text-only",
+                "stream": true,
+                "input": [{"role": "user", "content": [
+                    {"type": "input_image", "image_url": "data:image/png;base64,AAAA"}
+                ]}]
+            }),
+        ),
+        (
+            "/v1/chat/completions",
+            "input_audio",
+            serde_json::json!({
+                "model": "text-only",
+                "stream": true,
+                "messages": [
+                    {"role": "user", "content": [{
+                        "type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}
+                    }]},
+                    {"role": "assistant", "content": "ok"},
+                    {"role": "user", "content": "continue"}
+                ]
+            }),
+        ),
+        (
+            "/v1/chat/completions",
+            "image_url",
+            serde_json::json!({
+                "model": "unregistered-model",
+                "stream": true,
+                "messages": [{"role": "user", "content": [{
+                    "type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}
+                }]}]
+            }),
+        ),
+    ];
+    let url_media_cases = ["image_url", "video_url", "audio_url"]
+        .into_iter()
+        .flat_map(|content_type| {
+            ["user", "tool"].into_iter().map(move |role| {
+                (
+                    "/v1/chat/completions",
+                    content_type,
+                    serde_json::json!({
+                        "model": "text-only",
+                        "stream": true,
+                        "messages": [
+                            {"role": "user", "content": "inspect the media"},
+                            {"role": "assistant", "content": null, "tool_calls": [{
+                                "id": "call_1", "type": "function",
+                                "function": {"name": "inspect", "arguments": "{}"}
+                            }]},
+                            {"role": role, "tool_call_id": "call_1", "content": [{
+                                "type": content_type,
+                                (content_type): {"url": "https://example.com/media"}
+                            }]}
+                        ]
+                    }),
+                )
+            })
+        });
+    let responses_image_cases = [false, true].into_iter().flat_map(|strict| {
+        ["user", "system", "developer", "assistant"]
+            .into_iter()
+            .filter_map(move |role| {
+                if strict && role == "assistant" {
+                    return None;
+                }
+                let mut message = serde_json::json!({"role": role, "content": [
+                    {"type": "input_image", "file_id": "file-image"}
+                ]});
+                if strict {
+                    message["type"] = serde_json::json!("message");
+                }
+                Some((
+                    "/v1/responses",
+                    "image_url",
+                    serde_json::json!({
+                        "model": "text-only", "stream": true,
+                        "input": [message, {"role": "user", "content": "continue"}]
+                    }),
+                ))
+            })
+    });
+    let tool_image_case = (
+        "/v1/responses",
+        "image_url",
+        serde_json::json!({
+            "model": "text-only", "stream": true,
+            "input": [{"type": "function_call_output", "call_id": "call_1", "output": [
+                {"type": "input_image", "file_id": "file-image"}
+            ]}]
+        }),
+    );
+    for (path, content_type, request) in cases
+        .into_iter()
+        .chain(url_media_cases)
+        .chain(responses_image_cases)
+        .chain([tool_image_case])
+    {
+        let metric_model = state
+            .manager()
+            .metric_model_for(request["model"].as_str().unwrap())
+            .to_string();
+        let endpoint = if path == "/v1/responses" {
+            Endpoint::Responses
+        } else {
+            Endpoint::ChatCompletions
+        };
+        let metrics = state.metrics_clone();
+        let refusals_before = metrics.get_request_counter(
+            &metric_model,
+            &endpoint,
+            &RequestType::Stream,
+            &Status::Error,
+            &ErrorType::UnsupportedModality,
+        );
+        let overloads_before = metrics.get_request_counter(
+            &metric_model,
+            &endpoint,
+            &RequestType::Stream,
+            &Status::Error,
+            &ErrorType::Overload,
+        );
+        let response = client
+            .post(format!("http://localhost:{port}{path}"))
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{path}");
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["code"], status.as_u16(), "{path}");
+        assert_eq!(
+            body["message"],
+            format!(
+                "Model does not accept {} input; received unsupported content type '{content_type}'.",
+                if content_type == "input_audio" {
+                    "audio"
+                } else {
+                    content_type.trim_end_matches("_url")
+                }
+            ),
+            "{path}: {content_type}"
+        );
+        compare_counter(
+            &metrics,
+            &metric_model,
+            &endpoint,
+            &RequestType::Stream,
+            &Status::Error,
+            &ErrorType::UnsupportedModality,
+            refusals_before + 1,
+        );
+        compare_counter(
+            &metrics,
+            &metric_model,
+            &endpoint,
+            &RequestType::Stream,
+            &Status::Error,
+            &ErrorType::Overload,
+            overloads_before,
+        );
+        assert!(
+            engine.nvext.lock().unwrap().is_none(),
+            "refused request must not reach the engine: {path}"
+        );
+
+        let response = client
+            .post(format!("http://localhost:{port}{path}"))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["code"], 400, "{path}");
+        assert!(
+            body["message"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
+    }
+
+    let response = client
+        .post(&url)
+        .json(&serde_json::json!({
+            "model": "text-only",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success(), "{}", response.status());
+    assert!(engine.nvext.lock().unwrap().is_some());
+
+    state.start_draining();
+    let response = client
+        .post(format!("http://localhost:{port}/v1/responses"))
+        .json(&serde_json::json!({
+            "model": "text-only",
+            "input": [{"role": "user", "content": [
+                {"type": "input_image", "file_id": "file-image"}
+            ]}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "readiness must precede native media classification"
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+async fn check_reject_media_anthropic(status: StatusCode) {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .enable_anthropic_endpoints(true)
+        .media_rejection(
+            dynamo_llm::frontend_config::MediaRejectionConfig::new(true, status.as_u16()).unwrap(),
+        )
+        .port(port)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let metric_model = state.manager().metric_model_for("unregistered").to_string();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap();
+    // No model is registered: conversion or lookup first would answer 400/404.
+    let image_sources = [
+        serde_json::json!({"type": "base64", "media_type": "image/png", "data": "AAAA"}),
+        serde_json::json!({"type": "url", "url": "https://example.com/a.png"}),
+    ];
+    for source in image_sources {
+        for in_tool_result in [false, true] {
+            let image = serde_json::json!({"type": "image", "source": source});
+            let content = if in_tool_result {
+                serde_json::json!([{"type": "tool_result", "tool_use_id": "call_1", "content": [{"text": "caption"}, image]}])
+            } else {
+                serde_json::json!([image])
+            };
+            let before = state.metrics_clone().get_request_counter(
+                &metric_model,
+                &Endpoint::AnthropicMessages,
+                &RequestType::Unary,
+                &Status::Error,
+                &ErrorType::UnsupportedModality,
+            );
+            let response = client
+                .post(format!("http://localhost:{port}/v1/messages"))
+                .json(&serde_json::json!({
+                    "model": "unregistered", "max_tokens": 16,
+                    "messages": [{"role": "user", "content": content}]
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                status,
+                "tool_result={in_tool_result}, source={source}"
+            );
+            let request_id = response.headers()["request-id"]
+                .to_str()
+                .unwrap()
+                .to_owned();
+            let body: serde_json::Value = response.json().await.unwrap();
+            assert_eq!(body["type"], "error");
+            assert_eq!(body["request_id"], request_id);
+            assert_eq!(body["error"]["type"], "invalid_request_error");
+            assert_eq!(
+                body["error"]["message"],
+                "Model does not accept image input; received unsupported content type 'image_url'."
+            );
+            compare_counter(
+                &state.metrics_clone(),
+                &metric_model,
+                &Endpoint::AnthropicMessages,
+                &RequestType::Unary,
+                &Status::Error,
+                &ErrorType::UnsupportedModality,
+                before + 1,
+            );
+        }
+    }
+
+    for invalid_field in ["model", "max_tokens", "role"] {
+        let mut request = serde_json::json!({
+            "model": "unregistered", "max_tokens": 16,
+            "messages": [{"role": "user", "content": [{
+                "type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}
+            }]}]
+        });
+        match invalid_field {
+            "model" => {
+                request.as_object_mut().unwrap().remove("model");
+            }
+            "max_tokens" => request["max_tokens"] = serde_json::json!(0),
+            _ => request["messages"][0]["role"] = serde_json::json!("invalid"),
+        }
+        let response = client
+            .post(format!("http://localhost:{port}/v1/messages"))
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{invalid_field}"
+        );
+    }
+
+    let response = reqwest::Client::new()
+        .post(format!("http://localhost:{port}/v1/messages"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["type"], "error");
+    assert_eq!(body["error"]["type"], "invalid_request_error");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_reject_media_refuses_streaming_request_before_routing() {
+    check_reject_media_openai(StatusCode::TOO_MANY_REQUESTS).await;
+}
+
+#[tokio::test]
+async fn test_reject_media_preserves_openai_422() {
+    check_reject_media_openai(StatusCode::UNPROCESSABLE_ENTITY).await;
+}
+
+#[tokio::test]
+async fn test_reject_media_anthropic_refuses_before_model_lookup() {
+    check_reject_media_anthropic(StatusCode::TOO_MANY_REQUESTS).await;
+}
+
+#[tokio::test]
+async fn test_reject_media_preserves_anthropic_422() {
+    check_reject_media_anthropic(StatusCode::UNPROCESSABLE_ENTITY).await;
+}
+
+#[tokio::test]
+async fn test_reject_media_preserves_anthropic_default_415() {
+    check_reject_media_anthropic(StatusCode::UNSUPPORTED_MEDIA_TYPE).await;
+}
+
+#[tokio::test]
+async fn test_reject_media_disabled_preserves_anthropic_model_lookup_precedence() {
+    let svc = http_harness::HarnessService::start([]).await;
+    let response = svc
+        .client
+        .post(format!("{}/v1/messages", svc.base_url))
+        .json(&serde_json::json!({
+            "model": "unregistered", "max_tokens": 16,
+            "messages": [{"role": "user", "content": [{
+                "type": "image", "source": {"type": "url", "url": "https://example.com/a.png", "media_type": "image/png", "data": ""}
+            }]}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["type"], "not_found_error");
+    assert!(svc.engine.take_requests().await.is_empty());
+    svc.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_reject_media_disabled_preserves_backend_422_through_http_middleware() {
+    let engine = Arc::new(scripted_chat_engine::ScriptedChatEngine::new([Err(
+        HttpError {
+            code: 422,
+            message: "private backend diagnostic".into(),
+        }
+        .into(),
+    )]));
+    let svc = http_harness::HarnessService::start_with_engine(engine).await;
+    let response = svc
+        .client
+        .post(format!("{}/v1/chat/completions", svc.base_url))
+        .json(&serde_json::json!({
+            "model": http_harness::MODEL,
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["message"], "Unprocessable Entity");
+    assert_eq!(body["code"], 422);
+    assert_eq!(svc.engine.take_requests().await.len(), 1);
+    svc.shutdown().await;
 }
