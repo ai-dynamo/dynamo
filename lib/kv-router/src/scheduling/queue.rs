@@ -2476,7 +2476,7 @@ mod tests {
             &self,
             input: WorkerSelectionInput<'_, SimpleWorkerConfig>,
         ) -> Result<WorkerSelectionResult, KvSchedulerError> {
-            let (workers, request, eligibility, block_size) = input.into_configured()?;
+            let (workers, request, eligibility, block_size) = input.into_configured();
             if let Some(rendezvous) = &self.rendezvous {
                 rendezvous.wait_for_peer();
             }
@@ -3927,7 +3927,7 @@ policy_classes:
         }
 
         fn pick(
-            &mut self,
+            &self,
             _context: &crate::WorkerSelectionContext<'_>,
             input: crate::WorkerInputView<'_>,
         ) -> Result<usize, crate::WorkerSelectionPolicyError> {

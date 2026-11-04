@@ -740,7 +740,7 @@ Router knobs:
 The other router policy parameters are not retunable and are rejected:
 
 - `host_cache_hit_weight` and `disk_cache_hit_weight`: the startup router configuration also uses them to count a request's cached tokens, which a runtime update does not change. A candidate replay would start its router with the candidate's weights and score a router that no applied update can produce.
-- `shared_cache_multiplier`: replay reports no shared cache hits, so every value would score the same.
+- `shared_cache_multiplier`: a router started with it at 0 builds no KV fetch inputs, and a [runtime update](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#runtime-policy-updates) cannot add inputs, so a candidate that raises it could not be applied. Retune keeps its startup value.
 
 Planner knobs:
 
