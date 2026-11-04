@@ -13,6 +13,7 @@ use dynamo_llm::http::service::{Metrics, service_v2::HttpService};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use dynamo_llm::protocols::{Annotated, codec::create_message_stream};
+use dynamo_llm::types::openai::completions::OpenAICompletionsStreamingEngine;
 use dynamo_runtime::CancellationToken;
 use dynamo_runtime::error::DynamoError;
 use futures::StreamExt;
@@ -68,7 +69,23 @@ impl HarnessService {
     }
 
     pub async fn start_with_engine(engine: Arc<ScriptedChatEngine>) -> Self {
-        Self::start_with_engine_and_card(engine, ModelDeploymentCard::with_name_only(MODEL)).await
+        Self::start_with_engines_and_card(engine, ModelDeploymentCard::with_name_only(MODEL), None)
+            .await
+    }
+
+    /// Call `shutdown().await` to wait for service teardown and surface task failures.
+    /// Dropping the harness instead aborts its HTTP task without checking the result.
+    #[allow(dead_code)]
+    pub async fn start_with_engines(
+        engine: Arc<ScriptedChatEngine>,
+        completions: Option<OpenAICompletionsStreamingEngine>,
+    ) -> Self {
+        Self::start_with_engines_and_card(
+            engine,
+            ModelDeploymentCard::with_name_only(MODEL),
+            completions,
+        )
+        .await
     }
 
     /// Start with a model card of the caller's choosing, so handler behavior that depends
@@ -77,6 +94,14 @@ impl HarnessService {
     pub async fn start_with_engine_and_card(
         engine: Arc<ScriptedChatEngine>,
         card: ModelDeploymentCard,
+    ) -> Self {
+        Self::start_with_engines_and_card(engine, card, None).await
+    }
+
+    async fn start_with_engines_and_card(
+        engine: Arc<ScriptedChatEngine>,
+        card: ModelDeploymentCard,
+        completions: Option<OpenAICompletionsStreamingEngine>,
     ) -> Self {
         let client = reqwest::Client::builder()
             .no_proxy()
@@ -100,6 +125,13 @@ impl HarnessService {
             .model_manager()
             .add_chat_completions_model_with_card(MODEL, &checksum, card, engine.clone())
             .expect("failed to register scripted harness model");
+
+        if let Some(completions) = completions {
+            service
+                .model_manager()
+                .add_completions_model(MODEL, &checksum, completions)
+                .expect("failed to register harness completions model");
+        }
 
         let cancel = CancellationToken::new();
         let join = service.spawn_with_listener(cancel.clone(), listener).await;
