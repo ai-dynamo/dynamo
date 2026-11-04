@@ -12,6 +12,7 @@ use url::Url;
 
 use crate::Pool;
 use crate::load::InFlightTracker;
+use crate::prefix_key::PrefixKey;
 
 /// What a selector may know about a request. Routing inputs such as the
 /// client's region become fields here.
@@ -19,8 +20,11 @@ use crate::load::InFlightTracker;
 #[non_exhaustive]
 pub struct RoutingRequest<'a> {
     pub model: &'a str,
-    /// The session the request belongs to, from `X-Dynamo-Session-ID`.
+    /// The session the request belongs to, as its headers name it.
     pub session: Option<&'a str>,
+    /// Keys for each prefix of the request's input, shortest first (see
+    /// [`crate::RequestInput::prefix_keys`]), for requests without a session.
+    pub prefix: &'a [PrefixKey],
 }
 
 impl<'a> RoutingRequest<'a> {
@@ -28,11 +32,17 @@ impl<'a> RoutingRequest<'a> {
         Self {
             model,
             session: None,
+            prefix: &[],
         }
     }
 
     pub fn with_session(mut self, session: Option<&'a str>) -> Self {
         self.session = session;
+        self
+    }
+
+    pub fn with_prefix(mut self, prefix: &'a [PrefixKey]) -> Self {
+        self.prefix = prefix;
         self
     }
 }
@@ -54,6 +64,12 @@ pub trait PoolSelector: Send + Sync {
         request: &RoutingRequest<'_>,
         candidates: &[&'a Pool],
     ) -> Option<PoolTarget<'a>>;
+
+    /// Whether [`RoutingRequest::session`] and [`RoutingRequest::prefix`]
+    /// matter here; if not, callers need not derive them.
+    fn uses_sessions(&self) -> bool {
+        false
+    }
 }
 
 /// Rotates through the pools serving each model, then through the chosen

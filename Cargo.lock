@@ -2572,7 +2572,10 @@ dependencies = [
  "dashmap",
  "dynamo-global-common",
  "parking_lot",
+ "serde",
+ "serde_json",
  "url",
+ "xxhash-rust",
 ]
 
 [[package]]

@@ -3,9 +3,10 @@
 
 //! The Global Frontend's HTTP server. Each `POST /v1/...` request goes, as
 //! received, to the same route on the pool frontend its selector picks, and
-//! the pool's response comes back as sent. Only the request's `model` is
-//! read; the pool frontend validates, preprocesses, and formats everything
-//! else exactly as for a request sent to it directly.
+//! the pool's response comes back as sent. Only the request's `model`, and
+//! for a request whose headers name no session its input, are read; the pool
+//! frontend validates, preprocesses, and formats everything exactly as for a
+//! request sent to it directly.
 
 use std::io;
 use std::pin::pin;
@@ -18,8 +19,8 @@ use axum::http::{HeaderMap, HeaderName, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use dynamo_global_router::{InFlightTracker, PoolSelector, RoutingRequest};
-use dynamo_llm::protocols::agents::HEADER_DYNAMO_SESSION_ID;
+use dynamo_global_router::{InFlightTracker, PoolSelector, RequestInput, RoutingRequest};
+use dynamo_llm::protocols::common::extensions::session_affinity_from_headers;
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BODY_LIMIT_MB;
 use dynamo_runtime::metrics::prometheus_names::frontend_service::error_type;
 use futures::StreamExt;
@@ -28,6 +29,7 @@ use hyper_util::server::conn::auto::Builder;
 use hyper_util::service::TowerToHyperService;
 use serde::Deserialize;
 use serde_json::json;
+use serde_json::value::RawValue;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -162,10 +164,27 @@ fn body_limit() -> usize {
         * 1024
 }
 
-/// The one field read from a request.
+/// The fields read from a request: its model, and the fields that hold its
+/// input (see [`RequestInput`]), borrowed from the body.
 #[derive(Deserialize)]
-struct Model {
+struct Request<'a> {
     model: String,
+    #[serde(borrow)]
+    system: Option<&'a RawValue>,
+    #[serde(borrow)]
+    messages: Option<&'a RawValue>,
+    #[serde(borrow)]
+    input: Option<&'a RawValue>,
+}
+
+impl Request<'_> {
+    fn input(&self) -> RequestInput<'_> {
+        RequestInput {
+            system: self.system,
+            messages: self.messages,
+            input: self.input,
+        }
+    }
 }
 
 async fn forward(
@@ -177,13 +196,14 @@ async fn forward(
 ) -> Response {
     let received = Instant::now();
     let metrics = &proxy.metrics;
-    let Ok(Model { model }) = serde_json::from_slice(&body) else {
+    let Ok(request) = serde_json::from_slice::<Request>(&body) else {
         metrics.rejected(error_type::VALIDATION);
         let message = "the request body must be a JSON object with a string `model`";
         return error(StatusCode::BAD_REQUEST, message.to_owned());
     };
+    let model = &request.model;
     let snapshot = proxy.pools.borrow().clone();
-    let candidates = snapshot.pools_for(&model).collect::<Vec<_>>();
+    let candidates = snapshot.pools_for(model).collect::<Vec<_>>();
     if candidates.is_empty() {
         metrics.rejected(error_type::NOT_FOUND);
         return error(
@@ -194,11 +214,17 @@ async fn forward(
     remove_hop_headers(&mut headers);
     headers.remove(header::HOST);
     headers.insert(header::CONTENT_LENGTH, body.len().into());
-    let session = headers
-        .get(HEADER_DYNAMO_SESSION_ID)
-        .and_then(|session| session.to_str().ok());
-    let request = RoutingRequest::new(&model).with_session(session);
-    let Some(target) = proxy.selector.select(&request, &candidates) else {
+    let session = session_affinity_from_headers(&headers);
+    // Without a named session, the input shows which request this one
+    // continues.
+    let prefix = match session {
+        None if proxy.selector.uses_sessions() => request.input().prefix_keys(model),
+        _ => Vec::new(),
+    };
+    let routing = RoutingRequest::new(model)
+        .with_session(session.as_ref().map(|session| session.as_str()))
+        .with_prefix(&prefix);
+    let Some(target) = proxy.selector.select(&routing, &candidates) else {
         metrics.rejected(error_type::UNAVAILABLE);
         let message = format!("no pool can serve model {model}");
         return error(StatusCode::SERVICE_UNAVAILABLE, message);
@@ -408,19 +434,19 @@ mod tests {
     }
 
     #[test]
-    fn only_the_model_is_read() {
-        let model = |body: &str| {
-            serde_json::from_slice::<Model>(body.as_bytes())
-                .ok()
-                .map(|Model { model }| model)
-        };
-        assert_eq!(
-            model(r#"{"messages":[{"role":"user","content":"hi"}],"model":"qwen","stream":true}"#)
-                .as_deref(),
-            Some("qwen")
-        );
+    fn only_the_model_and_input_are_read() {
+        let read = |body: &'static str| serde_json::from_slice::<Request>(body.as_bytes()).ok();
+        let request =
+            read(r#"{"messages":[{"role":"user","content":"hi"}],"model":"qwen","stream":true}"#)
+                .unwrap();
+        assert_eq!(request.model, "qwen");
+        assert_eq!(request.input().prefix_keys("qwen").len(), 1);
+        // The input is not checked here: a request without usable input is
+        // still forwarded.
+        let request = read(r#"{"model":"qwen","messages":{"role":"user"},"input":7}"#).unwrap();
+        assert!(request.input().prefix_keys("qwen").is_empty());
         for body in [r#"{"messages":[]}"#, r#"{"model":7}"#, "[]", "not json"] {
-            assert_eq!(model(body), None, "{body}");
+            assert!(read(body).is_none(), "{body}");
         }
     }
 }

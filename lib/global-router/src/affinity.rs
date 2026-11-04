@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -11,9 +12,21 @@ use crate::Pool;
 use crate::selector::{Cursors, PoolSelector, PoolTarget, RoutingRequest, reachable, target};
 use crate::signals::PoolSignals;
 
+/// Pins beyond which sessions derived from requests' input are not pinned,
+/// since every request that names no session adds one. Counted at each
+/// sweep, so the table may pass it by the pins added since.
+const MAX_DERIVED_PINS: usize = 1 << 20;
+/// How many of a request's input prefixes, deepest first, are looked up. A
+/// conversation's previous turn is a few messages back.
+const MAX_PREFIX_LOOKUPS: usize = 16;
+
 /// Keeps each session's turns on one pool, so the pool's KV cache for the
 /// session is reused, and moves a session only when another pool has much
 /// more room.
+///
+/// A request's session is the one it names. A request that names none
+/// continues the session of an earlier request whose whole input its own
+/// input begins with, or starts one (see [`crate::RequestInput::prefix_keys`]).
 ///
 /// Pools are compared by how full they are against their own capacity (see
 /// [`PoolSignals::occupancy`]), so pools of any speed or size compare. A
@@ -24,9 +37,9 @@ use crate::signals::PoolSignals;
 /// sends it to the nearest pool with any room, and keeps it if none has
 /// room. The session's pin moves with it.
 ///
-/// Requests without a session ID are placed the same way and pin nothing.
-/// Pins belong to this process and expire after `idle` without a request;
-/// call [`Self::sweep`] periodically to free them.
+/// Requests with neither a session ID nor input are placed the same way and
+/// pin nothing. Pins belong to this process and expire after `idle` without
+/// a request; call [`Self::sweep`] periodically to free them.
 #[derive(Debug)]
 pub struct AffinitySelector {
     signals: Arc<PoolSignals>,
@@ -34,6 +47,8 @@ pub struct AffinitySelector {
     headroom_factor: f64,
     idle: Duration,
     pins: DashMap<String, Pin>,
+    /// Pins left by the last sweep: counting the table locks every shard.
+    swept_pins: AtomicUsize,
     frontends: Cursors<PoolId>,
 }
 
@@ -57,6 +72,7 @@ impl AffinitySelector {
             headroom_factor,
             idle,
             pins: DashMap::new(),
+            swept_pins: AtomicUsize::new(0),
             frontends: Cursors::default(),
         }
     }
@@ -86,6 +102,7 @@ impl AffinitySelector {
     /// path.
     pub fn sweep(&self) {
         self.pins.retain(|_, pin| pin.used.elapsed() <= self.idle);
+        self.swept_pins.store(self.pins.len(), Ordering::Relaxed);
     }
 }
 
@@ -96,7 +113,7 @@ impl PoolSelector for AffinitySelector {
         candidates: &[&'a Pool],
     ) -> Option<PoolTarget<'a>> {
         let placed = place(candidates, &self.region, &self.signals);
-        let pinned = request.session.and_then(|session| {
+        let pinned_in = |session: &str| {
             let pin = self.pins.get(session)?;
             if pin.used.elapsed() > self.idle {
                 return None;
@@ -104,12 +121,32 @@ impl PoolSelector for AffinitySelector {
             placed
                 .iter()
                 .find(|candidate| candidate.pool.id == pin.pool)
-        });
+        };
+        let pinned = match request.session {
+            Some(session) => pinned_in(session),
+            // Only an earlier request's whole input counts, never this
+            // request's own: identical first turns are each placed anew.
+            None => request.prefix.split_last().and_then(|(_, earlier)| {
+                earlier
+                    .iter()
+                    .rev()
+                    .take(MAX_PREFIX_LOOKUPS)
+                    .find_map(|key| pinned_in(&key.session_id()))
+            }),
+        };
         let choice = headroom(&placed, pinned.or(placed.first()), self.headroom_factor)?;
         if let Some(session) = request.session {
             self.pin(session, &choice.pool.id);
+        } else if let Some(key) = request.prefix.last()
+            && self.swept_pins.load(Ordering::Relaxed) < MAX_DERIVED_PINS
+        {
+            self.pin(&key.session_id(), &choice.pool.id);
         }
         target(&self.frontends, choice.pool)
+    }
+
+    fn uses_sessions(&self) -> bool {
+        true
     }
 }
 
@@ -183,6 +220,7 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::load::InFlightTracker;
+    use crate::prefix_key::PrefixKey;
     use crate::selector::tests::regional_pool;
     use crate::signals::{LoadReport, RelaySource};
 
@@ -274,10 +312,26 @@ mod tests {
     }
 
     fn pick(selector: &AffinitySelector, pools: &[Pool], session: Option<&str>) -> String {
+        pick_with(selector, pools, session, &[])
+    }
+
+    fn pick_with(
+        selector: &AffinitySelector,
+        pools: &[Pool],
+        session: Option<&str>,
+        prefix: &[PrefixKey],
+    ) -> String {
         let candidates = pools.iter().collect::<Vec<_>>();
-        let request = RoutingRequest::new("qwen").with_session(session);
+        let request = RoutingRequest::new("qwen")
+            .with_session(session)
+            .with_prefix(prefix);
         let target = selector.select(&request, &candidates).unwrap();
         target.frontend.host_str().unwrap().to_owned()
+    }
+
+    /// Stand-ins for the keys of a conversation's input prefixes.
+    fn keys(prefixes: &[u64]) -> Vec<PrefixKey> {
+        prefixes.iter().copied().map(PrefixKey).collect()
     }
 
     #[test]
@@ -337,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn requests_without_a_session_are_placed_but_not_pinned() {
+    fn requests_without_a_session_or_input_are_placed_but_not_pinned() {
         let (pools, signals) = fleet();
         let selector = selector(&signals, Duration::from_secs(60));
         set_occupancy(&pools, &signals, [0.5, 0.3, 0.9, 0.0]);
@@ -345,6 +399,39 @@ mod tests {
         set_occupancy(&pools, &signals, [0.9, 0.9, 0.9, 0.0]);
         assert_eq!(pick(&selector, &pools, None), "tokyo-a");
         assert_eq!(selector.pinned_sessions(), 0);
+    }
+
+    #[test]
+    fn a_request_that_continues_another_stays_on_its_pool() {
+        let (pools, signals) = fleet();
+        let selector = selector(&signals, Duration::from_secs(60));
+        let first = keys(&[1, 2]);
+        set_occupancy(&pools, &signals, [0.1, 0.5, 0.5, 0.5]);
+        assert_eq!(pick_with(&selector, &pools, None, &first), "ohio-a");
+
+        // Ohio-b is now emptier, but not by twice the room.
+        set_occupancy(&pools, &signals, [0.5, 0.1, 0.5, 0.5]);
+        let second = keys(&[1, 2, 3, 4]);
+        assert_eq!(pick_with(&selector, &pools, None, &second), "ohio-a");
+        // A request that continues neither is placed, and so is one that
+        // repeats the first request's input rather than continuing it.
+        assert_eq!(pick_with(&selector, &pools, None, &keys(&[1, 5])), "ohio-b");
+        assert_eq!(pick_with(&selector, &pools, None, &first), "ohio-b");
+    }
+
+    #[test]
+    fn a_named_session_outranks_the_input() {
+        let (pools, signals) = fleet();
+        let selector = selector(&signals, Duration::from_secs(60));
+        set_occupancy(&pools, &signals, [0.5, 0.1, 0.5, 0.5]);
+        assert_eq!(pick(&selector, &pools, Some("s")), "ohio-b");
+        set_occupancy(&pools, &signals, [0.1, 0.5, 0.5, 0.5]);
+        assert_eq!(pick_with(&selector, &pools, None, &keys(&[1, 2])), "ohio-a");
+
+        set_occupancy(&pools, &signals, [0.3, 0.3, 0.5, 0.5]);
+        let second = keys(&[1, 2, 3, 4]);
+        assert_eq!(pick_with(&selector, &pools, Some("s"), &second), "ohio-b");
+        assert_eq!(pick_with(&selector, &pools, None, &second), "ohio-a");
     }
 
     #[test]

@@ -6,7 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 # Global Frontend
 
 An HTTP entry point that forwards requests to explicitly configured Dynamo pool
-frontends. It reads only each request's `model` and passes the request and the
+frontends. It reads each request's `model`, and under `affinity` the input of a
+request that names no session, and passes the request and the
 pool's response through as they are; the pool frontend owns validation,
 preprocessing, generation, and the response format. Pool identity types live
 in `dynamo-global-common`, and pool selection in `dynamo-global-router`.
@@ -50,12 +51,23 @@ the session is reused. It compares pools by how full they are against their own
 capacity: the fuller of their request slots (requests in flight over the
 requests their workers can run at once) and their KV blocks. So pools of any
 speed or size compare. A request goes to its session's pool, or, for a new
-session or a request without a session ID, to the least full pool in the
-nearest region. It goes elsewhere only when another pool has more than
-`--headroom-factor` (default 2) times that pool's spare capacity, choosing the
-nearest such pool, or when that pool is full, choosing the nearest pool with any
-room. The session's pin moves with it. Pins are per process and expire after
-`--session-idle-secs` (default 1800) without a request.
+session, to the least full pool in the nearest region. It goes elsewhere only
+when another pool has more than `--headroom-factor` (default 2) times that
+pool's spare capacity, choosing the nearest such pool, or when that pool is
+full, choosing the nearest pool with any room. The session's pin moves with it.
+Pins are per process and expire after `--session-idle-secs` (default 1800)
+without a request.
+
+A request's session is the one its headers name: `x-dynamo-session-id`, or a
+coding agent's own header (`x-claude-code-agent-id` or
+`x-claude-code-session-id`, Codex's `thread-id`, OpenCode's `x-session-id`).
+A request that names none continues the session of an earlier request whose
+whole input its own input begins with, as a conversation's next turn does.
+The input is the text of Anthropic's `system`, then each item of `messages` or
+of the Responses `input` (a string `input` being a user message). Field order,
+cache breakpoints, and reasoning do not count, so a client may change them in
+messages it sends again. A request that continues none, such as a
+conversation's first turn, starts a session.
 
 `affinity` needs `--region`, this process's region named as `--pool` names
 clusters. It reads each pool's load from the pool's PoolRelay, given per pool
