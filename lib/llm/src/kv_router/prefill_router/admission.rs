@@ -198,7 +198,8 @@ mod tests {
     use serde_json::json;
 
     use dynamo_runtime::pipeline::{
-        AsyncEngineContext, AsyncEngineContextProvider, Context, ResponseStream, context::Controller,
+        AsyncEngineContext, AsyncEngineContextProvider, Context, ResponseStream,
+        context::Controller,
     };
 
     use super::*;
