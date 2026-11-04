@@ -31,7 +31,6 @@ from tests.deploy.dgd_utils import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_REQUEST_TIMEOUT,
     DEFAULT_TEMPERATURE,
-    MIN_RESPONSE_CONTENT_LENGTH,
     TEST_PROMPT,
     DeploymentSpec,
     ManagedDeployment,
@@ -374,78 +373,59 @@ async def test_deployment(
 @pytest.mark.deploy
 @pytest.mark.post_merge
 @pytest.mark.e2e
-@pytest.mark.timeout(900)
+@pytest.mark.timeout(600)
 @pytest.mark.parametrize(
-    "backend,manifest,workers",
+    "manifest,workers",
     [
-        pytest.param(
-            "vllm",
-            "examples/backends/vllm/deploy/gaie/disagg.yaml",
-            ("prefill", "decode"),
-            id="vllm-disagg",
-        ),
-        pytest.param(
-            "sglang", "tests/deploy/gaie/sglang-agg.yaml", ("worker",), id="sglang-agg"
-        ),
-        pytest.param(
-            "trtllm", "tests/deploy/gaie/trtllm-agg.yaml", ("worker",), id="trtllm-agg"
-        ),
+        pytest.param("agg.yaml", ("worker",), id="vllm-agg"),
+        pytest.param("disagg.yaml", ("prefill", "decode"), id="vllm-disagg"),
     ],
 )
 async def test_gaie_deployment(
-    backend: str,
     manifest: str,
     workers: tuple[str, ...],
-    image: str,
     namespace: str,
     skip_service_restart: bool,
     request,
 ) -> None:
-    """Test a GAIE deployment: an EPP plus workers with frontend sidecars.
+    """Test a vLLM GAIE example through the Gateway, with mocker workers.
 
-    Applies the GAIE DynamoGraphDeployment (with CI-built images) and an
-    HTTPRoute to its InferencePool, then verifies inference works end-to-end
-    through the full Gateway path. ``--image`` holds one backend's runtime, so
-    ``--framework`` selects the case that can run it.
+    Deploys the example's EPP and workers with frontend sidecars, each vLLM
+    engine replaced by a mocker from the frontend image, so the test needs no
+    GPU and no ``--image``. Applies an HTTPRoute to the generated
+    InferencePool, then verifies inference works end-to-end through the full
+    Gateway path.
     """
-    selected_framework = request.config.getoption("--framework")
-    if not selected_framework:
-        pytest.fail("--framework is required: it selects the case --image can run")
-    if selected_framework != backend:
-        pytest.skip(f"--framework={selected_framework} does not select {backend}")
-
     frontend_image = request.config.getoption("--frontend-image")
-    worker_image = image
 
     assert frontend_image, "--frontend-image is required for GAIE deploy test"
-    assert worker_image, "--image is required for GAIE deploy test"
     assert namespace, "--namespace is required for GAIE deploy test"
 
     workspace = _get_workspace_dir()
-    manifest_path = os.path.join(workspace, manifest)
-    # The route has nothing backend-specific, so every case uses the vLLM one.
-    httproute_path = os.path.join(
-        workspace, "examples", "backends", "vllm", "deploy", "gaie", "http-route.yaml"
-    )
+    gaie_dir = os.path.join(workspace, "examples", "backends", "vllm", "deploy", "gaie")
+    manifest_path = os.path.join(gaie_dir, manifest)
+    httproute_path = os.path.join(gaie_dir, "http-route.yaml")
 
-    assert os.path.exists(manifest_path), f"GAIE manifest not found: {manifest_path}"
+    assert os.path.exists(manifest_path), f"{manifest} not found: {manifest_path}"
     assert os.path.exists(
         httproute_path
     ), f"http-route.yaml not found: {httproute_path}"
 
     deployment_spec = DeploymentSpec(manifest_path)
     deployment_spec.namespace = namespace
+    # Both examples name their DGD "qwen"; a name per case keeps one case's
+    # teardown from racing the next case's resources.
+    deployment_spec.name = request.node.callspec.id
 
     logger.info(f"Frontend image: {frontend_image}")
-    logger.info(f"Worker image: {worker_image}")
 
     deployment_spec.set_image(frontend_image, service_name="Epp")
     for worker in workers:
-        deployment_spec.set_image(worker_image, service_name=worker)
+        deployment_spec[worker].use_mocker(frontend_image, GAIE_MODEL_NAME)
         deployment_spec.set_frontend_sidecar_image(frontend_image, service_name=worker)
 
-    # Name the route and its host after the DGD, so a route another case left
-    # on the Gateway never takes this case's requests.
+    # Name the route and its host after the DGD, so no two cases' routes
+    # overlap on the shared Gateway.
     route_hostname = f"{deployment_spec.name}.{namespace}.example.com"
     logger.info(f"HTTPRoute hostname: {route_hostname}")
 
@@ -469,6 +449,16 @@ async def test_gaie_deployment(
     if result.stderr:
         logger.warning(f"HTTPRoute apply stderr: {result.stderr}")
     assert result.returncode == 0, f"Failed to apply HTTPRoute: {result.stderr}"
+    # Deleting the DGD leaves the route on the Gateway.
+    request.addfinalizer(
+        partial(
+            subprocess.run,
+            ["kubectl", "delete", "--ignore-not-found", "-n", namespace, "-f", "-"],
+            input=httproute_yaml,
+            capture_output=True,
+            text=True,
+        )
+    )
 
     # Debug: verify namespace state before creating DGD
     logger.info(f"Namespace: {namespace}")
@@ -518,6 +508,8 @@ async def test_gaie_deployment(
         namespace=namespace,
         skip_service_restart=skip_service_restart,
         frontend_service_name="Epp",
+        # Below the test's timeout, so a stuck rollout fails with pod status.
+        readiness_timeout=420,
     ) as deployment:
         # Debug: check what DGDs exist after creation
         dgd_check = subprocess.run(
@@ -602,10 +594,13 @@ async def test_gaie_deployment(
                 timeout=DEFAULT_REQUEST_TIMEOUT,
             )
 
+            # A mocker replies with random tokens, so check the token count
+            # rather than the length of the text.
             validate_chat_response(
                 response=response,
                 expected_model=GAIE_MODEL_NAME,
-                min_content_length=MIN_RESPONSE_CONTENT_LENGTH,
+                min_content_length=1,
+                max_tokens=DEFAULT_MAX_TOKENS,
             )
 
             data = response.json()

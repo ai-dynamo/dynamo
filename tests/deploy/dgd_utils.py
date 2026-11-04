@@ -475,6 +475,30 @@ class ServiceSpec:
         resources.setdefault("limits", {})["gpu"] = str(value)
         resources.setdefault("requests", {})["gpu"] = str(value)
 
+    # ----- Mocker -----
+    def use_mocker(self, image: str, model: str) -> None:
+        """Run a mocker from ``image`` in place of this worker's engine.
+
+        The mocker serves ``model`` with the engine's ``--block-size`` and
+        ``--disaggregation-mode``, so a router sees the same workers, and it
+        needs no GPU.
+        """
+        if self._schema != SCHEMA_V1BETA1:
+            raise NotImplementedError("use_mocker supports v1beta1 manifests only")
+        engine_args = self._get_args()
+        mocker_args = ["--model-path", model, "--model-name", model]
+        for flag in ("--block-size", "--disaggregation-mode"):
+            if flag in engine_args:
+                mocker_args += [flag, engine_args[engine_args.index(flag) + 1]]
+        container = self._main_container()
+        assert container is not None, f"{self._name} has no main container"
+        container.update(
+            image=image, command=["python3", "-m", "dynamo.mocker"], args=mocker_args
+        )
+        resources = container.get("resources", {})
+        for bucket in ("limits", "requests"):
+            resources.get(bucket, {}).pop("nvidia.com/gpu", None)
+
     @property
     def tensor_parallel_size(self) -> int:
         """Get tensor parallel size from vLLM arguments"""

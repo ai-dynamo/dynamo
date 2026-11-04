@@ -49,6 +49,50 @@ def test_logging_config_reads_existing_v1beta1_env(tmp_path) -> None:
 
 
 @pytest.mark.parametrize(
+    "manifest,engine_args",
+    [
+        ("agg.yaml", {"worker": ["--block-size", "128"]}),
+        (
+            "disagg.yaml",
+            {
+                "prefill": ["--block-size", "16", "--disaggregation-mode", "prefill"],
+                "decode": ["--block-size", "16", "--disaggregation-mode", "decode"],
+            },
+        ),
+    ],
+)
+def test_use_mocker_keeps_engine_role_and_block_size(manifest, engine_args) -> None:
+    """Swap each vLLM engine of a GAIE example for a mocker that needs no GPU."""
+    deployment_spec = DeploymentSpec(
+        f"{dgd_utils._get_workspace_dir()}/examples/backends/vllm/deploy/gaie/{manifest}"
+    )
+
+    for worker, args in engine_args.items():
+        deployment_spec[worker].use_mocker("frontend:tag", "Qwen/Qwen3-0.6B")
+
+        component = next(
+            c
+            for c in deployment_spec.spec()["spec"]["components"]
+            if c["name"] == worker
+        )
+        containers = {
+            c["name"]: c for c in component["podTemplate"]["spec"]["containers"]
+        }
+        main = containers["main"]
+        assert main["image"] == "frontend:tag"
+        assert main["command"] == ["python3", "-m", "dynamo.mocker"]
+        assert main["args"] == [
+            "--model-path",
+            "Qwen/Qwen3-0.6B",
+            "--model-name",
+            "Qwen/Qwen3-0.6B",
+            *args,
+        ]
+        assert "nvidia.com/gpu" not in yaml.safe_dump(main.get("resources", {}))
+        assert containers["sidecar-frontend"]["args"][:2] == ["-m", "dynamo.frontend"]
+
+
+@pytest.mark.parametrize(
     "connection_error",
     [
         httpx.RemoteProtocolError("tunnel disconnected"),

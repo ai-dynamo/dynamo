@@ -55,19 +55,17 @@ python -m pytest tests/deploy/test_deploy_efa_sglang.py \
 ```
 
 `test_gaie_deployment` in `test_dgd.py` is the Gateway API Inference Extension
-lane: each case deploys an EPP plus workers with direct-mode frontend sidecars,
-routes an HTTPRoute to the generated `InferencePool`, and sends a chat
-completion through the Gateway. The vLLM case deploys the disaggregated
-`examples/backends/vllm/deploy/gaie/disagg.yaml`; the SGLang and TensorRT-LLM
-cases deploy the aggregated manifests in `gaie/`. `--image` holds one backend's
-runtime, so `--framework` is required and selects the case to run. The cluster
-needs the Gateway that
-`deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh` installs:
+lane. Its `vllm-agg` and `vllm-disagg` cases deploy
+`examples/backends/vllm/deploy/gaie/agg.yaml` and `disagg.yaml`, with each vLLM
+engine replaced by a mocker from the frontend image, route an HTTPRoute to the
+generated `InferencePool`, and send a chat completion through the Gateway. The
+mockers need no GPU, so the test needs no `--image`. The cluster needs the
+Gateway that `deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh`
+installs:
 
 ```bash
 python -m pytest tests/deploy/test_dgd.py \
-  -m framework_with_gaie --framework=sglang \
-  --image=registry.example/sglang-runtime:tag \
+  -m framework_with_gaie \
   --frontend-image=registry.example/dynamo-frontend:tag \
   --namespace=gaie-test -v -s
 ```
