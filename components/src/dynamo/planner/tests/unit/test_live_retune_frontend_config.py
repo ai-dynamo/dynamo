@@ -1212,7 +1212,7 @@ def minimax_prefill_worker(*router_args: str) -> dict[str, Any]:
     [
         (("--router-mode", "kv"), None, "advertises its own router configuration"),
         (("--router-mode=round-robin",), None, "router mode 'round-robin'"),
-        (("--router-m", "kv", "--no-router-kv-events"), None, "router mode 'kv'"),
+        (("--router-mo", "kv", "--no-router-kv-events"), None, "router mode 'kv'"),
         ((), [{"name": "DYN_ROUTER_MODE", "value": "kv"}], "router mode 'kv'"),
         ((), [{"name": "DYN_ROUTER_MODE", "value": ""}], "router mode ''"),
         (
@@ -1946,7 +1946,7 @@ def test_worker_check_ignores_the_planner_env(monkeypatch):
 WORKER_GOLDEN_CASES = [
     ((), {}),
     (("--router-mode", "kv"), {}),
-    (("--router-m", "random"), {}),
+    (("--router-mo", "random"), {}),
     (("--router-mode=device-aware-weighted",), {}),
     ((), {"DYN_ROUTER_MODE": "kv"}),
     (("--router-mode", "least-loaded"), {"DYN_ROUTER_MODE": "kv"}),
