@@ -2059,7 +2059,7 @@ mod tests {
         assert!(state.programs["session"].marked_for_pause);
     }
 
-    /// Run with `cargo test -p dynamo-custom-policy-builtin --release benchmark_pause_by_rank -- --ignored --nocapture`.
+    /// Run with `cargo test -p dynamo-router-policies --release benchmark_pause_by_rank -- --ignored --nocapture`.
     /// Reports the pause phase only; rebuilding program state and usage is outside the timer.
     #[test]
     #[ignore = "manual CPU benchmark"]
