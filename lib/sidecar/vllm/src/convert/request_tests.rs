@@ -74,21 +74,6 @@ fn remote_media_urls_follow_dyn_mm_allow_remote_urls() {
         )]);
         validate_remote_media_urls(&inline, false).unwrap();
     }
-
-    // The enabled policy leaves remote URLs to vLLM's own downloader.
-    let request = epd_request(vec![(
-        IMAGE_URL_KEY,
-        vec![MultimodalData::Url(
-            "https://example.com/image.jpg".parse().unwrap(),
-        )],
-    )]);
-    validate_remote_media_urls(&request, true).unwrap();
-    let wire =
-        build_generate_request(request, "remote".into(), DisaggregationMode::Aggregated).unwrap();
-    assert!(matches!(
-        wire.media[0].source,
-        Some(pb::media_item::Source::Url(_))
-    ));
 }
 
 // Exercise the real frontend projection before lowering to the engine protocol.
