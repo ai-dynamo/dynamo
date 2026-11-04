@@ -1722,6 +1722,35 @@ def test_build_sampling_params_chat_and_responses_use_remaining_context(
     assert build_sampling_params(request, {"max_tokens": 32}, 100).max_tokens == 32
 
 
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        {"nvext": {"token_in": True}},
+        {"nvext": {"token_in": True}, "request_type": "completions"},
+    ],
+    ids=["chat", "completions"],
+)
+def test_build_sampling_params_rl_token_in_keeps_existing_limit(extra_args):
+    handlers = importlib.import_module("dynamo.vllm.handlers")
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": {},
+        "output_options": {},
+        "extra_args": extra_args,
+    }
+    assert (
+        handlers.build_sampling_params(request, {}, 100, enable_rl=True).max_tokens
+        == 97
+    )
+    assert (
+        handlers.build_sampling_params(
+            request, {"max_tokens": 64}, 100, enable_rl=True
+        ).max_tokens
+        == 64
+    )
+
+
 def _make_dynamo_config(**overrides):
     """Build a minimal fake DynamoConfig for update_engine_config_with_dynamo tests."""
     defaults = {
