@@ -1047,6 +1047,12 @@ func dgdrRunInput(
 		return nil, fmt.Errorf("read effective optimization.target: %w", err)
 	}
 	reserved["is_pareto"] = effectiveTarget == aisimulate.TargetPareto
+	if effectiveTarget == aisimulate.TargetPareto {
+		// Supply the objectives so the adapter can apply Pareto dominance filtering in
+		// on_candidate and on_round without having to parse the full workload config.
+		// Pareto mode always uses the default pair; override-driven Pareto inherits it too.
+		reserved["pareto_objectives"] = []any{"throughput_per_gpu", "throughput_per_user"}
+	}
 	if run.Spec.Hardware != nil && run.Spec.Hardware.NumGPUsPerNode != nil {
 		reserved["num_gpus_per_node"] = int64(*run.Spec.Hardware.NumGPUsPerNode)
 	}

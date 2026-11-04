@@ -179,6 +179,25 @@ def _is_feasible(record: CandidateRecordLike) -> bool:
     return str(getattr(record.status, "value", record.status)) == "feasible"
 
 
+def _pareto_dominates(
+    a: dict[str, float],
+    b: dict[str, float],
+    objectives: list[OptimizationTarget],
+) -> bool:
+    """True iff ``a`` Pareto-dominates ``b``: at least as good on every objective, strictly better on one."""
+    strictly_better = False
+    for t in objectives:
+        av = a.get(t.value) or 0.0
+        bv = b.get(t.value) or 0.0
+        better = av > bv if t.maximize else av < bv
+        worse = av < bv if t.maximize else av > bv
+        if worse:
+            return False
+        if better:
+            strictly_better = True
+    return strictly_better
+
+
 @dataclass(frozen=True)
 class _Retained:
     """One retained point: immutable evaluation facts, no rendering."""
@@ -239,6 +258,10 @@ class DGDRRunOutputConfig(BaseModel):
     # Written by the operator when spec.objective.mode is Pareto; standalone callers
     # may set it when running aisimulate recommend with a Pareto optimization target.
     is_pareto: bool = False
+    # Pareto objectives for live front selection in on_candidate and on_round. The operator
+    # sets ["throughput_per_gpu", "throughput_per_user"] when is_pareto is True; standalone
+    # callers may set it for other Pareto targets. Without this field live selection is disabled.
+    pareto_objectives: list[OptimizationTarget] | None = None
 
     def resolved_num_gpus_per_node(
         self, candidate_parameters: Mapping[str, Any] | None = None
@@ -431,10 +454,42 @@ class DGDRRunOutputAdapter:
             # First observation wins: an evaluated point is immutable, so a
             # re-evaluation of the same point never changes what was published.
             if retained is not None and retained.id not in self._retained:
-                self._retained[retained.id] = retained
-                if len(self._retained) > self._max_candidates:
-                    worst = max(self._retained.values(), key=lambda r: r.rank_key)
-                    del self._retained[worst.id]
+                if self._is_pareto and self._pareto_objectives:
+                    new_obj = retained.metrics.get("objectives") or {}
+                    if new_obj and any(
+                        _pareto_dominates(
+                            ex.metrics.get("objectives") or {},
+                            new_obj,
+                            self._pareto_objectives,
+                        )
+                        for ex in self._retained.values()
+                        if ex.metrics.get("objectives")
+                    ):
+                        pass  # dominated by an existing retained point; excluded
+                    else:
+                        if new_obj:
+                            # Evict any existing retained points now dominated by the new one.
+                            dominated = [
+                                eid
+                                for eid, ex in self._retained.items()
+                                if (exobj := ex.metrics.get("objectives") or {})
+                                and _pareto_dominates(
+                                    new_obj, exobj, self._pareto_objectives
+                                )
+                            ]
+                            for eid in dominated:
+                                del self._retained[eid]
+                        self._retained[retained.id] = retained
+                        if len(self._retained) > self._max_candidates:
+                            worst = max(
+                                self._retained.values(), key=lambda r: r.rank_key
+                            )
+                            del self._retained[worst.id]
+                else:
+                    self._retained[retained.id] = retained
+                    if len(self._retained) > self._max_candidates:
+                        worst = max(self._retained.values(), key=lambda r: r.rank_key)
+                        del self._retained[worst.id]
             self._wake.set()
 
     def on_round(self, round_number: int, candidates: list[Any]) -> None:
@@ -813,17 +868,15 @@ class DGDRRunOutputPlugin:
         workload = getattr(context, "workload", None)
         if workload is None or resolved.snapshot_dir is None:
             return None
-        # Extract the Pareto objectives from the workload so on_round can call
-        # AISimulate's own pareto_front() on the cumulative feasible-candidate payload.
+        # Read the Pareto objectives from the plugin config. The operator sets
+        # pareto_objectives alongside is_pareto; without it live selection is disabled.
         pareto_objectives: list[OptimizationTarget] | None = None
         if resolved.is_pareto:
-            try:
-                smart = SmartSearchConfig.model_validate(workload)
-                pareto_objectives = smart.goal.resolved_pareto_objectives
-            except Exception:
+            pareto_objectives = resolved.pareto_objectives
+            if pareto_objectives is None:
                 logger.warning(
-                    "dgdr_run: could not resolve Pareto objectives from workload; "
-                    "live front size will fall back to len(ordered)"
+                    "dgdr_run: is_pareto is True but pareto_objectives is not set in the "
+                    "plugin config; live Pareto front selection is disabled"
                 )
         adapter = DGDRRunOutputAdapter(
             resolved,

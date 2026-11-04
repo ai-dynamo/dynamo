@@ -1246,6 +1246,138 @@ def test_pareto_on_round_replaces_dominated_points_with_true_front(
     assert snapshot["progress"]["paretoFront"] == 2
 
 
+def test_pareto_on_candidate_does_not_publish_dominated_points_between_rounds(
+    tmp_path: Path,
+    renders: list[str],
+) -> None:
+    """Dominated candidates must not appear in live snapshots between on_candidate and on_round.
+
+    Issue: on_candidate() used scalar eviction, so a dominated point could enter _retained
+    and be published before on_round() repaired it. The fix applies Pareto dominance filtering
+    in on_candidate() so the live snapshot never contains dominated points.
+
+    Uses snapshot_interval_seconds=0 and observes the asynchronous snapshot between the
+    second on_candidate() and the subsequent on_round().
+    """
+    from aisimulate.sweeper.config import OptimizationTarget
+
+    pareto_objectives = [
+        OptimizationTarget.THROUGHPUT_PER_GPU,
+        OptimizationTarget.THROUGHPUT_PER_USER,
+    ]
+    adapter = DGDRRunOutputAdapter(
+        make_config(tmp_path, max_candidates=2, is_pareto=True),
+        workload=None,
+        pareto_objectives=pareto_objectives,
+    )
+    adapter.start()
+
+    # A dominates B on both objectives; A arrives first.
+    adapter.on_candidate(
+        record(
+            "A",
+            100.0,
+            objectives={"throughput_per_gpu": 100.0, "throughput_per_user": 100.0},
+        )
+    )
+    adapter.on_candidate(
+        record(
+            "B", 1.0, objectives={"throughput_per_gpu": 1.0, "throughput_per_user": 1.0}
+        )
+    )
+
+    # Wait until the writer has flushed after the second on_candidate (evaluated=2).
+    # This observes the live snapshot BEFORE any on_round() call.
+    wait_for(
+        lambda: (tmp_path / SNAPSHOT_FILE_NAME).exists()
+        and load(tmp_path)["progress"]["evaluated"] >= 2
+    )
+    between_round = load(tmp_path)
+    between_tags = tags(between_round)
+    assert "A" in between_tags, "A must be in the live snapshot"
+    assert "B" not in between_tags, (
+        "B is dominated by A and must not appear in the live snapshot "
+        "between on_candidate and on_round"
+    )
+
+    adapter.close()
+
+
+def test_subscribe_with_pareto_objectives_in_config_enables_live_selection(
+    tmp_path: Path,
+    renders: list[str],
+) -> None:
+    """pareto_objectives in the plugin config must enable live Pareto front selection.
+
+    This covers the real subscription path: the operator sets pareto_objectives alongside
+    is_pareto in the reserved dgdr_run config fields. Previously, subscribe() tried to
+    extract objectives from the workload (which is a bare Workload, not a SmartSearchConfig),
+    always failing silently and leaving pareto_objectives=None.
+    """
+    from aisimulate.sweeper.config import Candidate as AISCandidate, OptimizationTarget
+
+    plugin = create_adapter()
+    config = {
+        "name": "run",
+        "snapshot_dir": str(tmp_path),
+        "runtime_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.3",
+        "num_gpus_per_node": 8,
+        "max_candidates": 2,
+        "snapshot_interval_seconds": 0,
+        "is_pareto": True,
+        # Objectives are now part of the plugin config contract, not parsed from the workload.
+        "pareto_objectives": ["throughput_per_gpu", "throughput_per_user"],
+    }
+    callbacks = plugin.subscribe(config, context=SimpleNamespace(workload="workload"))
+    assert callbacks is not None
+
+    # A and B: B is dominated by A on both objectives.
+    callbacks.on_candidate(
+        record(
+            "A",
+            100.0,
+            objectives={"throughput_per_gpu": 100.0, "throughput_per_user": 10.0},
+        )
+    )
+    callbacks.on_candidate(
+        record(
+            "B",
+            90.0,
+            objectives={"throughput_per_gpu": 90.0, "throughput_per_user": 9.0},
+        )
+    )
+
+    # Cumulative payload [A, B, C] where C is non-dominated.
+    def ais_cand(tag: str, tpg: float, tpu: float) -> AISCandidate:
+        return AISCandidate(
+            config={"backend": "vllm", "backend_version": "0.1", "tag": tag},
+            used_gpus=8,
+            score=tpg,
+            metrics={},
+            objectives={"throughput_per_gpu": tpg, "throughput_per_user": tpu},
+        )
+
+    callbacks.on_round(
+        1,
+        [
+            ais_cand("A", 100.0, 10.0),
+            ais_cand("B", 90.0, 9.0),
+            ais_cand("C", 80.0, 100.0),
+        ],
+    )
+    callbacks.on_complete()
+
+    snapshot = load(tmp_path)
+    snapshot_tags = tags(snapshot)
+    assert (
+        "B" not in snapshot_tags
+    ), "B is dominated and must not appear via the subscription path"
+    assert "A" in snapshot_tags, "A must be on the front"
+    assert (
+        snapshot["progress"].get("paretoFront") == 2
+    ), "paretoFront must be 2 (A and C) when objectives are supplied via the config contract"
+
+
 def test_pinned_aisimulate_pareto_lifecycle_live_snapshot_reports_front(
     tmp_path: Path,
     renders: list[str],
@@ -1297,6 +1429,9 @@ def test_pinned_aisimulate_pareto_lifecycle_live_snapshot_reports_front(
         **PLUGIN_CONFIG,
         "snapshot_dir": str(tmp_path),
         "is_pareto": True,
+        # Objectives are now supplied through the plugin config contract (not parsed from
+        # the workload), mirroring what the operator writes as reserved dgdr_run fields.
+        "pareto_objectives": ["throughput_per_gpu", "throughput_per_user"],
         # Buffer periodic writes so we can observe the live flush from finish_search().
         "snapshot_interval_seconds": 3600,
     }

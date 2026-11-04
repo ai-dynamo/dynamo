@@ -1559,27 +1559,30 @@ func TestDGDRRunInputResolvesRuntimeVersion(t *testing.T) {
 //   - typed Pareto overridden to a scalar target → is_pareto must be false
 func TestDGDRRunInputIsParetoFollowsEffectiveTarget(t *testing.T) {
 	tests := []struct {
-		name          string
-		objectiveMode nvidiacomv1beta2.ObjectiveMode
-		metric        *nvidiacomv1beta2.ObjectiveMetric
-		overrides     map[string]any
-		wantIsPareto  bool
-		wantTarget    string
+		name                 string
+		objectiveMode        nvidiacomv1beta2.ObjectiveMode
+		metric               *nvidiacomv1beta2.ObjectiveMetric
+		overrides            map[string]any
+		wantIsPareto         bool
+		wantTarget           string
+		wantParetoObjectives []any
 	}{
 		{
-			name:          "typed Optimize overridden to pareto via inputOverrides",
-			objectiveMode: nvidiacomv1beta2.ObjectiveModeOptimize,
-			metric:        objectiveMetric("ThroughputPerGPU"),
-			overrides:     map[string]any{"optimization": map[string]any{"target": "pareto"}},
-			wantIsPareto:  true,
-			wantTarget:    "pareto",
+			name:                 "typed Optimize overridden to pareto via inputOverrides",
+			objectiveMode:        nvidiacomv1beta2.ObjectiveModeOptimize,
+			metric:               objectiveMetric("ThroughputPerGPU"),
+			overrides:            map[string]any{"optimization": map[string]any{"target": "pareto"}},
+			wantIsPareto:         true,
+			wantTarget:           "pareto",
+			wantParetoObjectives: []any{"throughput_per_gpu", "throughput_per_user"},
 		},
 		{
-			name:          "typed Pareto overridden to scalar target via inputOverrides",
-			objectiveMode: nvidiacomv1beta2.ObjectiveModePareto,
-			overrides:     map[string]any{"optimization": map[string]any{"target": "throughput_per_gpu"}},
-			wantIsPareto:  false,
-			wantTarget:    "throughput_per_gpu",
+			name:                 "typed Pareto overridden to scalar target via inputOverrides",
+			objectiveMode:        nvidiacomv1beta2.ObjectiveModePareto,
+			overrides:            map[string]any{"optimization": map[string]any{"target": "throughput_per_gpu"}},
+			wantIsPareto:         false,
+			wantTarget:           "throughput_per_gpu",
+			wantParetoObjectives: nil,
 		},
 	}
 	for _, tt := range tests {
@@ -1606,6 +1609,18 @@ func TestDGDRRunInputIsParetoFollowsEffectiveTarget(t *testing.T) {
 			isPareto, _, _ := unstructured.NestedBool(input, "dgdr_run", "is_pareto")
 			if isPareto != tt.wantIsPareto {
 				t.Errorf("dgdr_run.is_pareto = %v, want %v", isPareto, tt.wantIsPareto)
+			}
+
+			t.Log("Assert dgdr_run.pareto_objectives is set iff is_pareto is true")
+			paretoObjs, found, _ := unstructured.NestedSlice(input, "dgdr_run", "pareto_objectives")
+			if tt.wantParetoObjectives != nil {
+				if !found {
+					t.Error("dgdr_run.pareto_objectives not set for a Pareto run")
+				} else if len(paretoObjs) != len(tt.wantParetoObjectives) {
+					t.Errorf("dgdr_run.pareto_objectives = %v, want %v", paretoObjs, tt.wantParetoObjectives)
+				}
+			} else if found {
+				t.Errorf("dgdr_run.pareto_objectives unexpectedly set for a scalar run: %v", paretoObjs)
 			}
 		})
 	}
