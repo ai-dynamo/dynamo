@@ -108,8 +108,13 @@ The visual check used a 512×512 image with 20 inference steps.
 
 <div className="dynamo-example-variant" data-example-variant="local-vllm-disagg-omni-glm-image-nixl-sh">
 
+Runs across two nodes. Point `NATS_SERVER` and `ETCD_ENDPOINTS` on both nodes at the shared
+services, then run the first command on the AR node, which also starts the frontend, and the second
+on the DiT node.
+
 ```bash
-(cd examples/backends/vllm && bash launch/disagg_omni_glm_image_nixl.sh)
+(cd examples/backends/vllm && ROLE=ar bash launch/disagg_omni_glm_image_nixl.sh)
+(cd examples/backends/vllm && ROLE=dit bash launch/disagg_omni_glm_image_nixl.sh)
 ```
 
 [Source: `disagg_omni_glm_image_nixl.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_omni_glm_image_nixl.sh)
