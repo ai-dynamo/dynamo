@@ -709,7 +709,7 @@ fn keeps_every_stop(request: &PreprocessedRequest) -> bool {
 }
 
 /// Hidden stop IDs to remove when the engine confirms they ended generation.
-/// None when the request keeps stop text.
+/// Empty when the request keeps stop text.
 fn retained_hidden_stop_ids(request: &PreprocessedRequest) -> BTreeSet<u32> {
     if keeps_every_stop(request) {
         return BTreeSet::new();
