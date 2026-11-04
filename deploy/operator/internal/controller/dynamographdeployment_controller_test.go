@@ -326,7 +326,7 @@ func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {
 	tests := []struct {
 		name                 string
 		dgd                  *v1beta1.DynamoGraphDeployment
-		existingAdapters     []v1alpha1.DynamoGraphDeploymentScalingAdapter
+		existingAdapters     []v1beta1.DynamoGraphDeploymentScalingAdapter
 		expectedAdapterCount int
 		expectedAdapters     map[string]int32 // map of adapter name to expected replicas
 		expectDeleted        []string         // adapter names that should be deleted
@@ -403,26 +403,26 @@ func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {
 					},
 				},
 			}),
-			existingAdapters: []v1alpha1.DynamoGraphDeploymentScalingAdapter{
+			existingAdapters: []v1beta1.DynamoGraphDeploymentScalingAdapter{
 				{
 					Name:      "test-dgd-frontend",
 					Namespace: "default",
-					Spec: v1alpha1.DynamoGraphDeploymentScalingAdapterSpec{
+					Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
 						Replicas: 5,
-						DGDRef: v1alpha1.DynamoGraphDeploymentServiceRef{
-							Name:        "test-dgd",
-							ServiceName: "Frontend",
+						DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{
+							Name:          "test-dgd",
+							ComponentName: "Frontend",
 						},
 					},
 				},
 				{
 					Name:      "test-dgd-decode",
 					Namespace: "default",
-					Spec: v1alpha1.DynamoGraphDeploymentScalingAdapterSpec{
+					Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
 						Replicas: 0,
-						DGDRef: v1alpha1.DynamoGraphDeploymentServiceRef{
-							Name:        "test-dgd",
-							ServiceName: "decode",
+						DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{
+							Name:          "test-dgd",
+							ComponentName: "decode",
 						},
 					},
 				},
@@ -476,7 +476,7 @@ func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {
 					},
 				},
 			}),
-			existingAdapters: []v1alpha1.DynamoGraphDeploymentScalingAdapter{
+			existingAdapters: []v1beta1.DynamoGraphDeploymentScalingAdapter{
 				{
 					Name:      "test-dgd-frontend",
 					Namespace: "default",
@@ -485,18 +485,18 @@ func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {
 					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: "nvidia.com/v1alpha1",
+							APIVersion: "nvidia.com/v1beta1",
 							Kind:       "DynamoGraphDeployment",
 							Name:       "test-dgd",
 							UID:        "test-uid",
 							Controller: new(true),
 						},
 					},
-					Spec: v1alpha1.DynamoGraphDeploymentScalingAdapterSpec{
+					Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
 						Replicas: 2,
-						DGDRef: v1alpha1.DynamoGraphDeploymentServiceRef{
-							Name:        "test-dgd",
-							ServiceName: "Frontend",
+						DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{
+							Name:          "test-dgd",
+							ComponentName: "Frontend",
 						},
 					},
 				},
@@ -508,18 +508,18 @@ func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {
 					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: "nvidia.com/v1alpha1",
+							APIVersion: "nvidia.com/v1beta1",
 							Kind:       "DynamoGraphDeployment",
 							Name:       "test-dgd",
 							UID:        "test-uid",
 							Controller: new(true),
 						},
 					},
-					Spec: v1alpha1.DynamoGraphDeploymentScalingAdapterSpec{
+					Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
 						Replicas: 1,
-						DGDRef: v1alpha1.DynamoGraphDeploymentServiceRef{
-							Name:        "test-dgd",
-							ServiceName: "removed",
+						DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{
+							Name:          "test-dgd",
+							ComponentName: "removed",
 						},
 					},
 				},
@@ -545,7 +545,7 @@ func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {
 					},
 				},
 			}),
-			existingAdapters: []v1alpha1.DynamoGraphDeploymentScalingAdapter{
+			existingAdapters: []v1beta1.DynamoGraphDeploymentScalingAdapter{
 				{
 					Name:      "test-dgd-frontend",
 					Namespace: "default",
@@ -554,18 +554,18 @@ func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {
 					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: "nvidia.com/v1alpha1",
+							APIVersion: "nvidia.com/v1beta1",
 							Kind:       "DynamoGraphDeployment",
 							Name:       "test-dgd",
 							UID:        "test-uid",
 							Controller: new(true),
 						},
 					},
-					Spec: v1alpha1.DynamoGraphDeploymentScalingAdapterSpec{
+					Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
 						Replicas: 2,
-						DGDRef: v1alpha1.DynamoGraphDeploymentServiceRef{
-							Name:        "test-dgd",
-							ServiceName: "Frontend",
+						DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{
+							Name:          "test-dgd",
+							ComponentName: "Frontend",
 						},
 					},
 				},
@@ -637,7 +637,7 @@ func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {
 			}
 
 			t.Log("Verify the resulting adapter set")
-			adapterList := &v1alpha1.DynamoGraphDeploymentScalingAdapterList{}
+			adapterList := &v1beta1.DynamoGraphDeploymentScalingAdapterList{}
 			if err := fakeClient.List(ctx, adapterList, client.InNamespace("default")); err != nil {
 				t.Fatalf("Failed to list adapters: %v", err)
 			}
@@ -648,7 +648,7 @@ func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {
 
 			t.Log("Verify expected adapters and replicas")
 			for name, expectedReplicas := range tt.expectedAdapters {
-				adapter := &v1alpha1.DynamoGraphDeploymentScalingAdapter{}
+				adapter := &v1beta1.DynamoGraphDeploymentScalingAdapter{}
 				err := fakeClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, adapter)
 				if err != nil {
 					t.Errorf("Expected adapter %s to exist, but got error: %v", name, err)
@@ -661,7 +661,7 @@ func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {
 
 			t.Log("Verify stale adapters were deleted")
 			for _, name := range tt.expectDeleted {
-				adapter := &v1alpha1.DynamoGraphDeploymentScalingAdapter{}
+				adapter := &v1beta1.DynamoGraphDeploymentScalingAdapter{}
 				err := fakeClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, adapter)
 				if err == nil {
 					t.Errorf("Expected adapter %s to be deleted, but it still exists", name)
@@ -722,11 +722,11 @@ func TestDGDScalingAdaptersReconciler_DeletesOnlyObservedOwnedAdapters(t *testin
 				if disabled {
 					dgd.Spec.Components = []v1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "worker"}}
 				}
-				adapter := &v1alpha1.DynamoGraphDeploymentScalingAdapter{
+				adapter := &v1beta1.DynamoGraphDeploymentScalingAdapter{
 					Name: "test-dgd-worker", Namespace: dgd.Namespace, UID: "adapter-uid",
 					Labels: map[string]string{commonconsts.KubeLabelDynamoGraphDeploymentName: dgd.Name},
-					Spec: v1alpha1.DynamoGraphDeploymentScalingAdapterSpec{
-						DGDRef: v1alpha1.DynamoGraphDeploymentServiceRef{Name: dgd.Name, ServiceName: "worker"},
+					Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
+						DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{Name: dgd.Name, ComponentName: "worker"},
 					},
 				}
 				if tt.ownerUID != "" {

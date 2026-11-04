@@ -489,7 +489,7 @@ spec:
           x-kubernetes-validations:
             - message: nonempty status must use the representation selected by spec
               rule: '!has(self.status) || !(has(self.status.v1beta2) || has(self.status.state) || has(self.status.backend) || has(self.status.observedGeneration) || has(self.status.conditions) || has(self.status.profilingResults) || has(self.status.generatedDeployment) || has(self.status.deployment)) || has(self.spec.v1beta2) == has(self.status.v1beta2)'
-      served: true
+      served: false
       storage: false
       subresources:
         status: {}

@@ -316,6 +316,7 @@ type DynamoComponentDeploymentStatus struct {
 
 // +genclient
 // +kubebuilder:object:root=true
+// +kubebuilder:unservedversion
 // +kubebuilder:subresource:status
 // +kubebuilder:deprecatedversion:warning="nvidia.com/v1alpha1 DynamoComponentDeployment is deprecated; use nvidia.com/v1beta1 DynamoComponentDeployment"
 // +kubebuilder:printcolumn:name="DynamoComponent",type="string",JSONPath=".spec.dynamoComponent",description="Dynamo component"
