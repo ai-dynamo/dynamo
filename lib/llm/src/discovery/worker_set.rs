@@ -31,7 +31,9 @@ use crate::{
             classify::OpenAIClassifyStreamingEngine, completions::OpenAICompletionsStreamingEngine,
             embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
             images::OpenAIImagesStreamingEngine, pooling::OpenAIPoolingStreamingEngine,
-            rerank::OpenAIRerankStreamingEngine, videos::OpenAIVideosStreamingEngine,
+            rerank::OpenAIRerankStreamingEngine,
+            transcriptions::OpenAITranscriptionsStreamingEngine,
+            videos::OpenAIVideosStreamingEngine,
         },
     },
 };
@@ -225,6 +227,7 @@ pub struct WorkerSet {
     pub(crate) image_edit_admission: Option<Arc<super::image_edits::ImageEditAdmission>>,
     pub(crate) videos_engine: Option<OpenAIVideosStreamingEngine>,
     pub(crate) audios_engine: Option<OpenAIAudiosStreamingEngine>,
+    pub(crate) transcriptions_engine: Option<OpenAITranscriptionsStreamingEngine>,
     pub(crate) tensor_engine: Option<TensorStreamingEngine>,
     pub(crate) realtime_engine: Option<RealtimeBidirectionalEngine>,
     pub(crate) generate_engine: Option<GenerateStreamingEngine>,
@@ -306,6 +309,7 @@ impl WorkerSet {
             image_edit_admission: None,
             videos_engine: None,
             audios_engine: None,
+            transcriptions_engine: None,
             tensor_engine: None,
             realtime_engine: None,
             generate_engine: None,
@@ -406,6 +410,10 @@ impl WorkerSet {
         self.audios_engine.is_some()
     }
 
+    pub fn has_transcriptions_engine(&self) -> bool {
+        self.transcriptions_engine.is_some()
+    }
+
     pub fn has_tensor_engine(&self) -> bool {
         self.tensor_engine.is_some()
     }
@@ -445,6 +453,7 @@ impl WorkerSet {
             || self.has_tensor_engine()
             || self.has_videos_engine()
             || self.has_audios_engine()
+            || self.has_transcriptions_engine()
             || self.has_realtime_engine()
             || self.has_generate_engine()
     }
@@ -602,6 +611,7 @@ impl WorkerSet {
         retain_for_requests!(images_engine);
         retain_for_requests!(videos_engine);
         retain_for_requests!(audios_engine);
+        retain_for_requests!(transcriptions_engine);
         retain_for_requests!(tensor_engine);
         retain_for_requests!(realtime_engine);
         retain_for_requests!(generate_engine);
@@ -639,6 +649,7 @@ impl WorkerSet {
             image_edit_admission: self.image_edit_admission.clone(),
             videos_engine: lora_context_engine(&self.videos_engine, &lora_name),
             audios_engine: lora_context_engine(&self.audios_engine, &lora_name),
+            transcriptions_engine: lora_context_engine(&self.transcriptions_engine, &lora_name),
             tensor_engine: lora_context_engine(&self.tensor_engine, &lora_name),
             // Realtime is bidirectional, so the server-streaming LoRA context wrapper cannot
             // inject the adapter identity. Fail closed instead of serving the base weights.
@@ -693,6 +704,9 @@ mod tests {
     use crate::types::openai::images::{NvCreateImageRequest, NvImagesResponse};
     use crate::types::openai::pooling::{NvCreatePoolingRequest, NvCreatePoolingResponse};
     use crate::types::openai::rerank::{NvCreateRerankRequest, NvCreateRerankResponse};
+    use crate::types::openai::transcriptions::{
+        NvAudioTranscriptionResponse, NvCreateAudioTranscriptionRequest,
+    };
     use crate::types::openai::videos::{NvCreateVideoRequest, NvVideosResponse};
     use async_trait::async_trait;
     use dynamo_runtime::engine::AsyncEngine;
@@ -977,6 +991,12 @@ mod tests {
             has_audios_engine,
             StubEngine::<NvCreateAudioSpeechRequest, NvAudioSpeechResponse>::new(),
             "audios"
+        );
+        check!(
+            transcriptions_engine,
+            has_transcriptions_engine,
+            StubEngine::<NvCreateAudioTranscriptionRequest, NvAudioTranscriptionResponse>::new(),
+            "transcriptions"
         );
         check!(
             tensor_engine,
