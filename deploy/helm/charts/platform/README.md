@@ -235,7 +235,9 @@ upgrade.
 **Action:** After upgrading to v1.7.0, add the `runtime` init container to the conductor template,
 as described in
 [Dynamo Sidecar Mode](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-component-deployment.mdx#dynamo-sidecar-mode),
-with an engine image that serves through it. Mount the volume the sidecar uses to reach the
+with an engine image that serves through it. Run the sidecar with the `lpx` subcommand,
+`--grpc-endpoint` set to the engine's endpoint, and `--model-path` set to the model's tokenizer
+directory, such as `$(LPX_MODEL_PATH)/tokenizer`. Mount the volume the sidecar uses to reach the
 engine in both containers. The sidecar takes over the `system` port and the Dynamo environment, so
 probe the engine on its own port and remove references such as `$(DYN_NAMESPACE)` or `$(POD_IP)`
 from `main`. The edit changes the DGD's serving revision, so its other workers also roll once.
