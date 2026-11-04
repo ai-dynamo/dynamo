@@ -18,6 +18,11 @@ use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 const PREFIX_SEED: u64 = const_xxh3_64(b"dynamo.global-router.prefix-key.v1");
 
+/// How many of a request's input prefixes, deepest first, may name the
+/// session it continues. A conversation's previous turn is a few elements
+/// back.
+const MAX_PREFIX_LOOKUPS: usize = 16;
+
 /// Fields that clients change in messages they send again: cache
 /// breakpoints, and reasoning, which they drop from earlier turns.
 const SKIPPED_FIELDS: &[&str] = &["cache_control", "reasoning", "reasoning_content"];
@@ -90,6 +95,14 @@ impl RequestInput<'_> {
             Err(_) => Vec::new(),
         }
     }
+}
+
+/// The prefixes, of a request with `prefix` keys, whose sessions it may
+/// continue, deepest first: only an earlier request's whole input counts,
+/// never this request's own, so identical first turns are each placed anew.
+pub fn continued(prefix: &[PrefixKey]) -> impl Iterator<Item = PrefixKey> + '_ {
+    let earlier = prefix.split_last().map_or(&[][..], |(_, earlier)| earlier);
+    earlier.iter().rev().take(MAX_PREFIX_LOOKUPS).copied()
 }
 
 fn json(value: &RawValue) -> serde_json::Deserializer<serde_json::de::StrRead<'_>> {

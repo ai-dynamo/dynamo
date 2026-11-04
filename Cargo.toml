@@ -197,6 +197,7 @@ uuid = { version = "1.18.1", features = ["v4", "serde"] }
 url = { version = "2.5", features = ["serde"] }
 xxhash-rust = { version = "0.8", features = ["xxh3", "const_xxh3"] }
 zeroize = { version = "1" }
+zstd = { version = "0.13" }
 
 # ext-proc / Envoy gRPC
 prost = { version = "0.13.5" }

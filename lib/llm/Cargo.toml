@@ -73,6 +73,7 @@ required-features = ["media-ffmpeg"]
 [dependencies]
 dynamo-custom-policy-builtin = { workspace = true }
 # repo
+dynamo-global-common = { workspace = true }
 dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols", "standalone-selection"] }
 dynamo-memory = { workspace = true }
 dynamo-mocker = { workspace = true, features = ["zmq-events"] }
@@ -172,7 +173,7 @@ axum = { workspace = true, features = ["multipart"] }
 mime = "0.3"
 hyper-util = { version = "0.1.17", features = ["server-auto", "service", "tokio"] }
 tokio-rustls = { workspace = true }
-tower-http = { workspace = true }
+tower-http = { workspace = true, features = ["decompression-zstd"] }
 tower = { workspace = true }
 utoipa = { version = "5.3", features = ["axum_extras", "rc_schema", "preserve_order"] }
 utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
@@ -258,6 +259,7 @@ serial_test = "3"
 temp-env = { version = "0.3.6", features = ["async_closure"] }
 tempfile = "3.17.1"
 tracing-subscriber = { workspace = true }
+zstd = { workspace = true }
 insta = { version = "1.41", features = [
   "glob",
   "json",

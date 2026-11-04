@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use dynamo_global_common::{PoolIdDeriver, PoolKey, V1PoolIdDeriver};
 use dynamo_global_frontend::{
-    Metrics, PoolSnapshot, app, follow_relays, measure_round_trips, serve,
+    Deltas, Metrics, PoolSnapshot, app, follow_relays, measure_round_trips, serve,
 };
 use dynamo_global_router::{
     AffinitySelector, InFlightTracker, LeastInFlightSelector, Pool, PoolSelector, PoolSignals,
@@ -76,6 +76,16 @@ struct Args {
     /// `affinity`: how long a session keeps its pool without a request.
     #[arg(long, default_value_t = 1800)]
     session_idle_secs: u64,
+    /// `affinity`: send each request that continues a conversation to the
+    /// pool frontend that kept the conversation's last request, as a delta
+    /// against it. Pool frontends keep requests when they set
+    /// `DYN_HTTP_DELTA_STATE_MB`; the others get every request whole.
+    #[arg(long)]
+    deltas: bool,
+    /// `--deltas`: the zstd level of request bodies sent to pool frontends
+    /// that keep requests, or 0 to send them uncompressed.
+    #[arg(long, default_value_t = 1)]
+    compression_level: i32,
 }
 
 fn parse_key(key: &str) -> Result<PoolKey, String> {
@@ -158,6 +168,9 @@ async fn main() -> Result<()> {
     if !(args.headroom_factor >= 1.0 && args.headroom_factor.is_finite()) {
         bail!("--headroom-factor must be at least 1");
     }
+    if args.deltas && args.router_policy != RouterPolicy::Affinity {
+        bail!("--deltas needs --router-policy affinity");
+    }
     if args.router_policy != RouterPolicy::Affinity && !args.pool_relays.is_empty() {
         tracing::warn!("--pool-relay is used only by --router-policy affinity");
     }
@@ -214,7 +227,11 @@ async fn main() -> Result<()> {
             selector
         }
     };
-    let app = app(pools, selector, in_flight, http, metrics);
+    let deltas = args.deltas.then(|| {
+        let idle = Duration::from_secs(args.session_idle_secs);
+        Arc::new(Deltas::new(idle, args.compression_level))
+    });
+    let app = app(pools, selector, in_flight, http, metrics, deltas);
     let address = format!("{}:{}", args.host, args.port);
     let listener = tokio::net::TcpListener::bind(&address)
         .await

@@ -19,7 +19,10 @@
 //! - Global Router replicas ([`RouterReplica`]), and list-and-watch events
 //!   and snapshots ([`WatchEvent`], [`Snapshot`]), which the service's watch
 //!   contract and its clients share.
+//! - Request deltas between the Global Frontend and pool frontends: see
+//!   [`delta`].
 
+pub mod delta;
 mod discovery;
 mod pool;
 mod replicas;

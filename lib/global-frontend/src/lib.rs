@@ -12,12 +12,14 @@
 //! [`measure_round_trips`] from the round trip to each region.
 
 mod catalog;
+mod delta;
 mod metrics;
 mod proxy;
 mod relay;
 mod round_trip;
 
 pub use catalog::PoolSnapshot;
+pub use delta::Deltas;
 pub use metrics::Metrics;
 pub use proxy::{app, serve};
 pub use relay::follow_relays;

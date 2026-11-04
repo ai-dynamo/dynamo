@@ -9,6 +9,7 @@ use dashmap::DashMap;
 use dynamo_global_common::PoolId;
 
 use crate::Pool;
+use crate::prefix_key::continued;
 use crate::selector::{Cursors, PoolSelector, PoolTarget, RoutingRequest, reachable, target};
 use crate::signals::PoolSignals;
 
@@ -16,9 +17,6 @@ use crate::signals::PoolSignals;
 /// since every request that names no session adds one. Counted at each
 /// sweep, so the table may pass it by the pins added since.
 const MAX_DERIVED_PINS: usize = 1 << 20;
-/// How many of a request's input prefixes, deepest first, are looked up. A
-/// conversation's previous turn is a few messages back.
-const MAX_PREFIX_LOOKUPS: usize = 16;
 
 /// Keeps each session's turns on one pool, so the pool's KV cache for the
 /// session is reused, and moves a session only when another pool has much
@@ -124,15 +122,7 @@ impl PoolSelector for AffinitySelector {
         };
         let pinned = match request.session {
             Some(session) => pinned_in(session),
-            // Only an earlier request's whole input counts, never this
-            // request's own: identical first turns are each placed anew.
-            None => request.prefix.split_last().and_then(|(_, earlier)| {
-                earlier
-                    .iter()
-                    .rev()
-                    .take(MAX_PREFIX_LOOKUPS)
-                    .find_map(|key| pinned_in(&key.session_id()))
-            }),
+            None => continued(request.prefix).find_map(|key| pinned_in(&key.session_id())),
         };
         let choice = headroom(&placed, pinned.or(placed.first()), self.headroom_factor)?;
         if let Some(session) = request.session {

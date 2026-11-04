@@ -8,7 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 An HTTP entry point that forwards requests to explicitly configured Dynamo pool
 frontends. It reads each request's `model`, and under `affinity` the input of a
 request that names no session, and passes the request and the
-pool's response through as they are; the pool frontend owns validation,
+pool's response through as they are, unless `--deltas` sends the request as
+a delta the pool frontend rebuilds it from; the pool frontend owns validation,
 preprocessing, generation, and the response format. Pool identity types live
 in `dynamo-global-common`, and pool selection in `dynamo-global-router`.
 
@@ -91,14 +92,42 @@ load is known. The round trip to each region is the median TCP connect time to
 its pools, measured every 30 seconds; the request's own region counts as
 zero.
 
+## Request deltas
+
+With `--deltas`, which needs `affinity`, a request that continues a
+conversation goes to the pool frontend that kept the conversation's last
+request, as a delta against it: the messages after those it keeps of that
+request (`messages`, or a Responses `input` array), and the request's other
+fields only if they changed. The pool frontend rebuilds the request the client
+sent before anything else reads it. A conversation is the session the request
+names, or else the one its input continues, as for `affinity`. A
+conversation's first request, and one whose session is placed on another pool,
+go whole, asking the pool frontend to keep them; kept requests do not move
+between pools.
+
+Pool frontends keep requests when they set `DYN_HTTP_DELTA_STATE_MB`, the
+memory for the last request of each conversation. The least used go first,
+and each goes after 30 minutes without the conversation's next request. The
+Global Frontend sends deltas only to frontends that have kept a request, and
+compresses every body it sends them with zstd at `--compression-level`
+(default 1; 0 sends them uncompressed). A frontend that no longer has a
+delta's parent answers 409, and the Global Frontend sends it the whole
+request. A delta extends only a parent sent with the same `authorization`
+header.
+
+List each pool frontend in `--pool` itself: behind a load balancer, a delta
+reaches the frontend that keeps its parent only by chance, and the others
+answer 409.
+
 ## Metrics
 
 `/metrics`, on the same port, serves the Global Frontend's Prometheus metrics,
 named `dynamo_global_frontend_*`: requests per pool by response status,
 `no_response` when the pool sends no response, or `cancelled` when the client
 leaves before the pool's response headers arrive; requests answered without a
-pool; time to first byte and duration per pool; and requests in flight per
-pool. The `pool` label is the pool's
+pool; time to first byte and duration per pool; requests in flight per pool;
+and, with `--deltas`, request body bytes sent per pool, whole or as deltas, and
+deltas pools refused for lacking their parent. The `pool` label is the pool's
 `<cluster>/<namespace>/<DGD name>` and `region` its region. On requests, `local`
 says whether the pool is in `--region` (`unknown` without it), which gives the
 share of requests kept in the region. Nothing is labelled from the request
@@ -110,7 +139,9 @@ for each family.
 ## Deployment notes
 
 - The Global Frontend holds a request's body, as received, only until it is
-  written to the pool, not while the pool queues it. The body limit is
+  written to the pool, not while the pool queues it. A request sent as a delta
+  is held until the pool answers, to send it whole if the pool lacks its
+  parent. The body limit is
   `DYN_HTTP_BODY_LIMIT_MB` (default 45), as for Dynamo's HTTP service.
 - A client that disconnects closes its connection to the pool, which cancels
   the request there.

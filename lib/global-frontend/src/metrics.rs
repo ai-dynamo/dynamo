@@ -43,6 +43,8 @@ pub struct Metrics {
     time_to_first_byte: HistogramVec,
     duration: HistogramVec,
     in_flight: IntGaugeVec,
+    upload_bytes: IntCounterVec,
+    delta_misses: IntCounterVec,
     /// A scrape resets and refills the gauges, so scrapes must not overlap.
     scrape: Mutex<()>,
 }
@@ -121,6 +123,27 @@ impl Metrics {
                 &POOL_LABELS,
             ),
         );
+        let upload_bytes = register(
+            &registry,
+            IntCounterVec::new(
+                Opts::new(
+                    name("upload_bytes_total"),
+                    "Request body bytes sent to each pool, after compression, by \
+                     whether the body was the whole request or a delta",
+                ),
+                &["pool", "region", "body"],
+            ),
+        );
+        let delta_misses = register(
+            &registry,
+            IntCounterVec::new(
+                Opts::new(
+                    name("delta_misses_total"),
+                    "Deltas a pool refused for lacking their parent, each then sent whole",
+                ),
+                &POOL_LABELS,
+            ),
+        );
         Self {
             registry,
             region,
@@ -131,6 +154,8 @@ impl Metrics {
             time_to_first_byte,
             duration,
             in_flight,
+            upload_bytes,
+            delta_misses,
             scrape: Mutex::new(()),
         }
     }
@@ -160,6 +185,21 @@ impl Metrics {
         };
         self.requests
             .with_label_values(&[&pool.name, &pool.location.region, local, status])
+            .inc();
+    }
+
+    /// Counts `bytes` of a request body sent to `pool`, as `body`: `whole`
+    /// or `delta`.
+    pub(crate) fn uploaded(&self, pool: &Pool, body: &str, bytes: usize) {
+        self.upload_bytes
+            .with_label_values(&[&pool.name, &pool.location.region, body])
+            .inc_by(bytes as u64);
+    }
+
+    /// Counts a delta `pool` refused for lacking its parent.
+    pub(crate) fn delta_missed(&self, pool: &Pool) {
+        self.delta_misses
+            .with_label_values(&[&pool.name, &pool.location.region])
             .inc();
     }
 
