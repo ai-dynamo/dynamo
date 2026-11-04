@@ -45,6 +45,7 @@ pub type ChatEngineFactoryCallback = Arc<
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RouterConfig {
     pub router_mode: RouterMode,
+    #[serde(serialize_with = "serialize_advertised_kv_router_config")]
     pub kv_router_config: KvRouterConfig,
     /// Load threshold configuration for overload detection
     pub load_threshold_config: LoadThresholdConfig,
@@ -55,6 +56,32 @@ pub struct RouterConfig {
     pub session_affinity_ttl_secs: Option<u64>,
     #[serde(default)]
     pub session_affinity_mode: SessionAffinityMode,
+}
+
+fn serialize_advertised_kv_router_config<S>(
+    config: &KvRouterConfig,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if config.enable_decode_to_prefill_reuse || config.enable_decode_to_prefill_gpu_reuse {
+        return config.serialize(serializer);
+    }
+
+    // Pre-v1.7 frontend MDC readers reject unknown, inactive reuse tuning (N-2).
+    // Preserve field order for MDC checksums and leave the live config unchanged.
+    // TODO(v1.9): Remove once pre-v1.7 frontends leave the N-2 window.
+    let defaults = KvRouterConfig::default();
+    let mut advertised = config.clone();
+    advertised.transfer_source_lookup_budget_ms = defaults.transfer_source_lookup_budget_ms;
+    advertised.minimum_transfer_prefix_blocks = defaults.minimum_transfer_prefix_blocks;
+    advertised.minimum_estimated_ttft_saving_ms = defaults.minimum_estimated_ttft_saving_ms;
+    advertised.transfer_source_estimated_block_us = defaults.transfer_source_estimated_block_us;
+    advertised.transfer_source_gpu_estimated_block_us =
+        defaults.transfer_source_gpu_estimated_block_us;
+    advertised.transfer_source_prefill_token_us = defaults.transfer_source_prefill_token_us;
+    advertised.serialize(serializer)
 }
 
 impl RouterConfig {

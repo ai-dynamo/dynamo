@@ -233,6 +233,7 @@ impl KvRouterConfig {
             conditional_disagg_prefill_busy_threshold,
             conditional_disagg_decode_busy_threshold,
             router_predicted_ttl_secs,
+            ..RsKvRouterConfig::default()
         };
         inner.apply_policy_config().map_err(PyValueError::new_err)?;
         validate_kv_router_config(&inner)?;

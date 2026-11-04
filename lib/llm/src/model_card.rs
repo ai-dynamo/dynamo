@@ -3560,6 +3560,94 @@ mod ownership_tests {
         assert_eq!(parsed.mdcsum(), card.mdcsum());
     }
 
+    fn reuse_tuned_router_config() -> dynamo_kv_router::config::KvRouterConfig {
+        dynamo_kv_router::config::KvRouterConfig {
+            router_temperature: 0.75,
+            transfer_source_lookup_budget_ms: 11,
+            minimum_transfer_prefix_blocks: 3,
+            minimum_estimated_ttft_saving_ms: 0.5,
+            transfer_source_estimated_block_us: Some(21.0),
+            transfer_source_gpu_estimated_block_us: Some(31.0),
+            transfer_source_prefill_token_us: Some(1.5),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn inactive_reuse_tuning_preserves_card_wire_and_mdcsum() {
+        use dynamo_runtime::pipeline::RouterMode;
+
+        let defaults = dynamo_kv_router::config::KvRouterConfig {
+            router_temperature: 0.75,
+            ..Default::default()
+        };
+        let legacy_kv_wire = serde_json::to_string(&defaults).unwrap();
+        let mut baseline = ModelDeploymentCard::with_name_only("inactive-reuse-wire");
+        baseline.router_config = Some(RouterConfig::new(RouterMode::KV, defaults));
+
+        let tuned = reuse_tuned_router_config();
+        let internal_before = serde_json::to_value(&tuned).unwrap();
+        assert!(!tuned.enable_decode_to_prefill_reuse);
+        assert!(!tuned.enable_decode_to_prefill_gpu_reuse);
+        for field in [
+            "transfer_source_lookup_budget_ms",
+            "minimum_transfer_prefix_blocks",
+            "minimum_estimated_ttft_saving_ms",
+            "transfer_source_estimated_block_us",
+            "transfer_source_gpu_estimated_block_us",
+            "transfer_source_prefill_token_us",
+        ] {
+            assert!(internal_before.get(field).is_some());
+        }
+        let mut card = ModelDeploymentCard::with_name_only("inactive-reuse-wire");
+        card.router_config = Some(RouterConfig::new(RouterMode::KV, tuned));
+        let router = card.router_config.as_ref().unwrap();
+
+        assert!(
+            serde_json::to_string(router)
+                .unwrap()
+                .contains(&format!("\"kv_router_config\":{legacy_kv_wire}"))
+        );
+        assert_eq!(card.to_json().unwrap(), baseline.to_json().unwrap());
+        assert_eq!(card.mdcsum(), baseline.mdcsum());
+        let parsed = ModelDeploymentCard::load_from_json_str(&card.to_json().unwrap()).unwrap();
+        assert_eq!(parsed.mdcsum(), card.mdcsum());
+        assert_eq!(
+            serde_json::to_value(&router.kv_router_config).unwrap(),
+            internal_before
+        );
+    }
+
+    #[test]
+    fn enabled_reuse_advertisements_preserve_cpu_and_gpu_tuning() {
+        use dynamo_runtime::pipeline::RouterMode;
+
+        for (cpu, gpu) in [(true, false), (false, true), (true, true)] {
+            let mut config = reuse_tuned_router_config();
+            config.enable_decode_to_prefill_reuse = cpu;
+            config.enable_decode_to_prefill_gpu_reuse = gpu;
+            config.validate().unwrap();
+            let internal_before = serde_json::to_value(&config).unwrap();
+            let mut card = ModelDeploymentCard::with_name_only("enabled-reuse-wire");
+            card.router_config = Some(RouterConfig::new(RouterMode::KV, config));
+            let router = card.router_config.as_ref().unwrap();
+            let decoded: RouterConfig =
+                serde_json::from_str(&serde_json::to_string(router).unwrap()).unwrap();
+            assert_eq!(
+                serde_json::to_value(&decoded.kv_router_config).unwrap(),
+                internal_before
+            );
+
+            let parsed = ModelDeploymentCard::load_from_json_str(&card.to_json().unwrap()).unwrap();
+            assert_eq!(parsed.mdcsum(), card.mdcsum());
+            assert_eq!(parsed.to_json().unwrap(), card.to_json().unwrap());
+            assert_eq!(
+                serde_json::to_value(&router.kv_router_config).unwrap(),
+                internal_before
+            );
+        }
+    }
+
     #[test]
     fn context_length_wire_compatibility() {
         let card = ModelDeploymentCard::with_name_only("model");
