@@ -109,7 +109,7 @@ spec:
               --enable-logging-iteration-details \
               --gpu-memory-utilization 0.92 \
               --load-format fastsafetensors \
-              --no-enable-flashinfer-autotune
+              --no-enable-flashinfer-autotune \
               --disaggregation-mode prefill \
               --dyn-reasoning-parser kimi_k3 \
               --dyn-tool-call-parser kimi_k3 \
@@ -212,7 +212,7 @@ spec:
               --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":1024,"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,32,48,64,96,128,192,256,512,1024]}' \
               --gpu-memory-utilization 0.92 \
               --load-format fastsafetensors \
-              --no-enable-flashinfer-autotune
+              --no-enable-flashinfer-autotune \
               --disaggregation-mode decode \
               --dyn-reasoning-parser kimi_k3 \
               --dyn-tool-call-parser kimi_k3 \
