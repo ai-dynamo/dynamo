@@ -931,7 +931,7 @@ def test_diffusion_overview_cards_match_the_dgd_models_and_backends() -> None:
         assert "dynamo-diffusion-experimental" not in header
         (image,) = re.findall(r'<img[^>]+src="([^"]+)"', body)
         assert (page.parent / image).resolve().is_file()
-        experimental = "agg_omni_audio" in source.name or "experimental" in source.parts
+        experimental = "experimental" in source.parts
         assert attributes["data-experimental"] == str(experimental).lower()
         (chips,) = re.findall(
             r'<div className="dynamo-diffusion-chips">(.*?)</div>', body, re.DOTALL

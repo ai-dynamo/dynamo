@@ -11,6 +11,7 @@ import { ExampleSelector } from "@/components/ExampleSelector";
 <ExampleSelector
   variants={[
     {"id": "kubernetes-sglang-agg-yaml", "target": "kubernetes:sglang", "label": "agg.yaml", "description": "Baseline aggregated serving"},
+    {"id": "kubernetes-sglang-agg-xpu-dra-yaml", "target": "kubernetes:sglang", "label": "agg_xpu_dra.yaml", "description": "Aggregated serving on Intel XPU with DRA"},
     {"id": "kubernetes-trtllm-agg-yaml", "target": "kubernetes:trtllm", "label": "agg.yaml", "description": "Baseline aggregated serving"},
     {"id": "kubernetes-trtllm-agg-with-config-yaml", "target": "kubernetes:trtllm", "label": "agg-with-config.yaml", "description": "Aggregated with an external engine ConfigMap (bundles a ConfigMap)"},
     {"id": "kubernetes-vllm-agg-yaml", "target": "kubernetes:vllm", "label": "agg.yaml", "description": "Baseline aggregated serving"},
@@ -27,6 +28,16 @@ import { ExampleSelector } from "@/components/ExampleSelector";
 [Source: `agg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/agg.yaml)
 
 <Code src="../../../../../examples/backends/sglang/deploy/agg.yaml" title="agg.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-sglang-agg-xpu-dra-yaml">
+
+**Prerequisites:** [SGLang Intel XPU setup](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/xpu/README.md)
+
+[Source: `agg_xpu_dra.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/xpu/agg_xpu_dra.yaml)
+
+<Code src="../../../../../examples/backends/sglang/deploy/xpu/agg_xpu_dra.yaml" title="agg_xpu_dra.yaml" language="yaml" maxLines={0} />
 
 </div>
 
