@@ -9,8 +9,7 @@ hide-toc: true
 
 import { DiffusionCatalog } from "@/components/DiffusionCatalog";
 
-Choose a model to open its deployment examples. Experimental entries require the builds and setup
-notes documented on their example pages.
+Choose a model to open its deployment examples.
 
 <DiffusionCatalog>
 
@@ -104,44 +103,6 @@ notes documented on their example pages.
 
 </article>
 
-<article className="dynamo-diffusion-card" data-model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers" data-source="examples/backends/vllm/deploy/experimental/agg_omni_video.yaml" data-case="text-to-video" data-backend="vllm" data-size-gb="28.9" data-experimental="true">
-
-<div className="dynamo-diffusion-card-top">
-<img className="dynamo-diffusion-logo" src="../../../assets/img/recipes/providers/wan-ai.webp" alt="" width="48" height="48" />
-<p className="dynamo-diffusion-provider">Wan</p>
-<h3 className="dynamo-diffusion-name">Wan2.1 T2V 1.3B</h3>
-<span className="dynamo-diffusion-chip dynamo-diffusion-modality"><Icon icon="film" />Text → Video</span>
-</div>
-
-<div className="dynamo-diffusion-chips">
-<span className="dynamo-diffusion-chip dynamo-diffusion-backend">vLLM-Omni</span>
-<span className="dynamo-diffusion-chip dynamo-diffusion-size" title="Approximate checkpoint weights, including pipeline components. Not GPU memory.">28.9 GB</span>
-<span className="dynamo-diffusion-chip dynamo-diffusion-experimental">Experimental</span>
-</div>
-
-<a className="dynamo-diffusion-card-link" href="video-generation.mdx" aria-label="Open Wan2.1 T2V 1.3B with vLLM-Omni">Open Wan2.1 T2V 1.3B example</a>
-
-</article>
-
-<article className="dynamo-diffusion-card" data-model="Wan-AI/Wan2.2-TI2V-5B-Diffusers" data-source="examples/backends/vllm/deploy/experimental/agg_omni_i2v.yaml" data-case="image-to-video" data-backend="vllm" data-size-gb="34.2" data-experimental="true">
-
-<div className="dynamo-diffusion-card-top">
-<img className="dynamo-diffusion-logo" src="../../../assets/img/recipes/providers/wan-ai.webp" alt="" width="48" height="48" />
-<p className="dynamo-diffusion-provider">Wan</p>
-<h3 className="dynamo-diffusion-name">Wan2.2 TI2V 5B</h3>
-<span className="dynamo-diffusion-chip dynamo-diffusion-modality"><Icon icon="film" />Image → Video</span>
-</div>
-
-<div className="dynamo-diffusion-chips">
-<span className="dynamo-diffusion-chip dynamo-diffusion-backend">vLLM-Omni</span>
-<span className="dynamo-diffusion-chip dynamo-diffusion-size" title="Approximate checkpoint weights, including pipeline components. Not GPU memory.">34.2 GB</span>
-<span className="dynamo-diffusion-chip dynamo-diffusion-experimental">Experimental</span>
-</div>
-
-<a className="dynamo-diffusion-card-link" href="video-generation.mdx" aria-label="Open Wan2.2 TI2V 5B with vLLM-Omni">Open Wan2.2 TI2V 5B example</a>
-
-</article>
-
 </DiffusionCatalog>
 
 Model sizes are approximate checkpoint weights in decimal GB, including text encoders, VAE, or
@@ -157,6 +118,8 @@ Additional local launch scripts and FastVideo deployments are available on the s
 | Text-to-video | FastVideo | `FastVideo/FastWan2.1-T2V-1.3B-Diffusers` | [Local script and two existing DGDs](fastvideo.mdx); experimental custom worker |
 | Text-to-video | SGLang | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` or `Wan-AI/Wan2.1-T2V-14B-Diffusers` | [Video Generation](video-generation.mdx): `text-to-video-diffusion.sh`; local only |
 | Text-to-video | TensorRT-LLM | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` | [Video Generation](video-generation.mdx): `agg_video_diffusion.sh`; local only |
+| Text-to-video | vLLM-Omni | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` | [Video Generation](video-generation.mdx): `agg_omni_video.sh`; local only |
+| Image-to-video | vLLM-Omni | `Wan-AI/Wan2.2-TI2V-5B-Diffusers` | [Video Generation](video-generation.mdx): `agg_omni_i2v.sh`; local only |
 | Text-to-video with audio | vLLM-Omni | `MiniMaxAI/MiniMax-H3` | [Video Generation](video-generation.mdx): `agg_omni_minimax_h3.sh`; local only, four B200 GPUs |
 | Text-to-video and image-to-video | vLLM-Omni | `nvidia/Cosmos3-Nano` | [Video Generation](video-generation.mdx): `agg_omni_cosmos3_video.sh` and `agg_omni_cosmos3_i2v.sh`; local only, experimental |
 | Text-to-audio | vLLM-Omni | `nvidia/Nemotron-Labs-Audex-2B` or `nvidia/Nemotron-Labs-Audex-30B-A3B` | [Audio Generation](audio-generation.mdx): `agg_omni_audio.sh --model`; local only |
