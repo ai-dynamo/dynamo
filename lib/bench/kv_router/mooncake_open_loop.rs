@@ -5,8 +5,6 @@ use std::collections::BTreeMap;
 use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
-#[cfg(not(target_os = "linux"))]
-use std::time::Duration;
 use std::time::Instant;
 
 use dynamo_kv_router::LocalBlockHash;
@@ -18,6 +16,7 @@ use dynamo_kv_router::protocols::{KvCacheEventData, RouterEvent, StorageTier};
 use serde::Serialize;
 use tokio::sync::oneshot;
 
+use dynamo_bench::kv_router_common::clock::{BenchmarkClock, elapsed_ns};
 use dynamo_bench::kv_router_common::fixed_lane::{EMPTY_OPERATION_ID, FixedLane, LaneOverflow};
 pub use dynamo_bench::kv_router_common::issuer::parse_cpu_list;
 use dynamo_bench::kv_router_common::issuer::{contiguous_worker_issuer, pin_current_thread};
@@ -1631,103 +1630,6 @@ fn nearest_rank(values: &[u64], numerator: usize, denominator: usize) -> u64 {
         .div_ceil(denominator)
         .max(1);
     values[rank.saturating_sub(1).min(values.len() - 1)]
-}
-
-fn elapsed_ns(epoch: Instant) -> u64 {
-    epoch.elapsed().as_nanos().min(u64::MAX as u128) as u64
-}
-
-struct BenchmarkClock {
-    epoch: Instant,
-    spin_ns: u64,
-    #[cfg(target_os = "linux")]
-    monotonic_epoch_ns: u64,
-}
-
-impl BenchmarkClock {
-    fn new(spin_ns: u64) -> anyhow::Result<Self> {
-        #[cfg(target_os = "linux")]
-        let monotonic_epoch_ns = monotonic_now_ns()?;
-        Ok(Self {
-            epoch: Instant::now(),
-            spin_ns,
-            #[cfg(target_os = "linux")]
-            monotonic_epoch_ns,
-        })
-    }
-
-    fn epoch(&self) -> Instant {
-        self.epoch
-    }
-
-    fn now_ns(&self) -> u64 {
-        elapsed_ns(self.epoch)
-    }
-
-    fn wait_until(&self, target_ns: u64) {
-        let sleep_target = target_ns.saturating_sub(self.spin_ns);
-        let now = self.now_ns();
-        #[cfg(target_os = "linux")]
-        if sleep_target > now {
-            sleep_until_monotonic(self.monotonic_epoch_ns.saturating_add(sleep_target));
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            if sleep_target > now {
-                std::thread::sleep(Duration::from_nanos(sleep_target - now));
-            }
-        }
-        while self.now_ns() < target_ns {
-            std::hint::spin_loop();
-        }
-    }
-
-    fn timer_name(&self) -> &'static str {
-        if cfg!(target_os = "linux") {
-            "clock_nanosleep_monotonic_absolute"
-        } else {
-            "portable_sleep_spin_non_authoritative"
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn monotonic_now_ns() -> anyhow::Result<u64> {
-    let mut timestamp = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    let rc = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut timestamp) };
-    if rc != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    Ok((timestamp.tv_sec as u64)
-        .saturating_mul(1_000_000_000)
-        .saturating_add(timestamp.tv_nsec as u64))
-}
-
-#[cfg(target_os = "linux")]
-fn sleep_until_monotonic(target_ns: u64) {
-    let request = libc::timespec {
-        tv_sec: (target_ns / 1_000_000_000) as libc::time_t,
-        tv_nsec: (target_ns % 1_000_000_000) as libc::c_long,
-    };
-    loop {
-        let rc = unsafe {
-            libc::clock_nanosleep(
-                libc::CLOCK_MONOTONIC,
-                libc::TIMER_ABSTIME,
-                &request,
-                std::ptr::null_mut(),
-            )
-        };
-        if rc == 0 {
-            return;
-        }
-        if rc != libc::EINTR {
-            return;
-        }
-    }
 }
 
 fn thread_cpu_time_ns() -> u64 {

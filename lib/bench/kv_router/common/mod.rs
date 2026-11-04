@@ -7,6 +7,12 @@
     feature = "router-test-support"
 ))]
 pub mod args;
+#[cfg(any(
+    feature = "active-sequences",
+    feature = "mooncake",
+    feature = "router-test-support"
+))]
+pub mod clock;
 #[cfg(any(feature = "dc-ckf-consumer", feature = "dc-ckf-relay"))]
 pub mod dc_ckf_metadata;
 #[cfg(feature = "dc-ckf-relay")]
