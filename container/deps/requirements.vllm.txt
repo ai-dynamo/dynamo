@@ -55,6 +55,10 @@ pillow>=13.0.0,<14
 # and the runtime templates; tests/dependencies/test_pynvvideocodec_spec.py
 # enforces that.
 pip==26.2.2
+# The upstream vllm-openai base bundles pyasn1 at an older patch release. Floor
+# it so the --no-deps install moves it to the current patch line. pyasn1 has no
+# dependencies.
+pyasn1>=0.6.5,<0.7
 # The upstream vllm-openai base bundles pydantic above the ceiling that
 # ai-dynamo-runtime declares and the test image installs; pin both packages,
 # since pydantic requires an exact pydantic-core and this install is --no-deps.

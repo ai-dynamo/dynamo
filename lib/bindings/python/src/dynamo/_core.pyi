@@ -2836,6 +2836,8 @@ class PoolRelay:
         connection_revision: Optional[str] = None,
         global_discovery_url: Optional[str] = None,
         routing_pool: Optional[str] = None,
+        routing_pool_region: Optional[str] = None,
+        routing_pool_frontends: Optional[List[str]] = None,
     ) -> None:
         ...
 
@@ -3196,6 +3198,7 @@ class EntrypointArgs:
         batch_gateway_url: Optional[str] = None,
         reject_media: Optional[bool] = None,
         reject_media_status_code: Optional[int] = None,
+        default_chat_template_kwargs: Optional[Mapping[str, Any]] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3237,6 +3240,8 @@ class EntrypointArgs:
             batch_gateway_url: Internal Batch Gateway URL for the files and batch APIs.
             reject_media: Optional override: refuse chat requests carrying image, video, or audio content before routing
             reject_media_status_code: Optional 4xx/5xx status for a request refused by reject_media (default 415)
+            default_chat_template_kwargs: Chat template kwargs that the frontend applies
+                under each request's own kwargs, for every discovered model
         """
         ...
 
