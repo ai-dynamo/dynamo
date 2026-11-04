@@ -1030,8 +1030,7 @@ class SglangProcessor:
 
                 raw_finish_reason = engine_response.get("finish_reason")
                 # Backend errors (structured or legacy "error: ..." strings)
-                # end the stream before OpenAI finish-reason projection, with or
-                # without a pending terminal chunk.
+                # end the stream before OpenAI finish-reason projection.
                 error_message = _finish_reason_error_message(raw_finish_reason)
                 if error_message is not None:
                     logger.error(
