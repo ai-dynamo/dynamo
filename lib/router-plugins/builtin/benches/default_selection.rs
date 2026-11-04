@@ -373,6 +373,7 @@ fn kv_transfer(c: &mut Criterion) {
                             .map(dynamo_kv_router::protocols::ExternalSequenceBlockHash)
                             .collect(),
                         owner_prefix_blocks: sources,
+                        source_intervals: Vec::new(),
                         routing_snapshot: None,
                     });
             }

@@ -197,6 +197,13 @@ impl WorkerInputs {
         self.0 & other.0 == other.0
     }
 
+    /// Whether a policy reads the KV index: its overlaps (`CACHE`) or the
+    /// prefixes workers could fetch (`KV_TRANSFER`). Each component still reads
+    /// only the inputs it declares.
+    pub const fn reads_kv_index(self) -> bool {
+        self.contains(Self::CACHE) || self.contains(Self::KV_TRANSFER)
+    }
+
     pub(crate) fn without(self, other: Self) -> Self {
         Self(self.0 & !other.0)
     }
