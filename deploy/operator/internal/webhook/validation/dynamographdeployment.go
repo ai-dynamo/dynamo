@@ -994,17 +994,20 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSharedSpe
 	oldPowerLimit, oldHasPowerLimit := dgdPowerLimit(oldComponent)
 
 	// Allow only existing worker cap values within the supported graph boundary.
-	if newHasPowerLimit != oldHasPowerLimit ||
-		(newHasPowerLimit && newPowerLimit != oldPowerLimit && (capUpdateDetail != "" || !dynamo.IsWorkerComponent(string(oldComponent.ComponentType)) || !dynamo.IsWorkerComponent(string(newComponent.ComponentType)))) {
+	annotationPath := fldPath.Child("podTemplate", "metadata", "annotations").Key(consts.KubeAnnotationGPUPowerLimit)
+	if newHasPowerLimit != oldHasPowerLimit {
 		var invalidValue any
 		if newHasPowerLimit {
 			invalidValue = newPowerLimit
 		}
-		allErrs = append(allErrs, field.Invalid(
-			fldPath.Child("podTemplate", "metadata", "annotations").Key(consts.KubeAnnotationGPUPowerLimit),
-			invalidValue,
-			powerCapUpdateError(capUpdateDetail),
-		))
+		allErrs = append(allErrs, field.Invalid(annotationPath, invalidValue, apivalidation.FieldImmutableErrorMsg))
+	} else if newHasPowerLimit && newPowerLimit != oldPowerLimit {
+		switch {
+		case !dynamo.IsWorkerComponent(string(oldComponent.ComponentType)) || !dynamo.IsWorkerComponent(string(newComponent.ComponentType)):
+			allErrs = append(allErrs, field.Invalid(annotationPath, newPowerLimit, apivalidation.FieldImmutableErrorMsg))
+		case capUpdateDetail != "":
+			allErrs = append(allErrs, field.Invalid(annotationPath, newPowerLimit, capUpdateDetail))
+		}
 	}
 
 	if oldHasPowerLimit {

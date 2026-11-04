@@ -92,6 +92,7 @@ func testLivePowerCaps(t *testing.T, provider string) {
 	}
 	require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
 	initialHash := dgd.Annotations[consts.AnnotationCurrentWorkerHashV2]
+	initialDCDs := workerDCDIdentities(t, ctx, c, dgd)
 	var templates any
 	if provider == "grove" {
 		pcs := &grovev1alpha1.PodCliqueSet{}
@@ -114,6 +115,7 @@ func testLivePowerCaps(t *testing.T, provider string) {
 	}
 	require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
 	require.Equal(t, initialHash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
+	requireNoWorkerReplacement(t, ctx, c, dgd, initialDCDs)
 	if provider == "grove" {
 		pcs := &grovev1alpha1.PodCliqueSet{}
 		require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(dgd), pcs))
@@ -198,6 +200,31 @@ func testLivePowerCaps(t *testing.T, provider string) {
 		}
 	}
 	waitForPowerCaps(t, ctx, c, dgd, "350")
+	requireNoWorkerReplacement(t, ctx, c, dgd, initialDCDs)
+}
+
+// workerDCDIdentities records every DCD of the graph; Grove graphs legitimately have none.
+func workerDCDIdentities(t *testing.T, ctx context.Context, c client.Client, dgd *v1beta1.DynamoGraphDeployment) map[types.UID]string {
+	t.Helper()
+	dcds := &v1beta1.DynamoComponentDeploymentList{}
+	require.NoError(t, c.List(ctx, dcds, client.InNamespace(dgd.Namespace), client.MatchingLabels{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name}))
+	identities := map[types.UID]string{}
+	for _, dcd := range dcds.Items {
+		identities[dcd.UID] = dcd.Name
+	}
+	return identities
+}
+
+// requireNoWorkerReplacement fails if a replacement DCD exists or a managed rollout is pending,
+// so propagation to old Pods cannot mask an incorrect cap-triggered rollout.
+func requireNoWorkerReplacement(t *testing.T, ctx context.Context, c client.Client, dgd *v1beta1.DynamoGraphDeployment, initial map[types.UID]string) {
+	t.Helper()
+	require.Equal(t, initial, workerDCDIdentities(t, ctx, c, dgd), "cap edit must not create or replace worker DCDs")
+	current := &v1beta1.DynamoGraphDeployment{}
+	require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(dgd), current))
+	if rollout := current.Status.RollingUpdate; rollout != nil {
+		require.Contains(t, []v1beta1.RollingUpdatePhase{"", v1beta1.RollingUpdatePhaseNone, v1beta1.RollingUpdatePhaseCompleted}, rollout.Phase, "cap edit must not start a managed rollout")
+	}
 }
 
 func waitForPowerCaps(t *testing.T, ctx context.Context, c client.Client, dgd *v1beta1.DynamoGraphDeployment, cap string) []corev1.Pod {

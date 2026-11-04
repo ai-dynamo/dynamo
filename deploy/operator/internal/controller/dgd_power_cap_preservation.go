@@ -25,8 +25,9 @@ type componentPowerCapPreservation struct {
 }
 
 // resolvePowerCapPreservation proves the exception from owned live DCDs and their owned Deployments.
-// dgd must be non-nil; restart may be nil when no restart is requested.
-func (r *componentWorkloadsReconciler) resolvePowerCapPreservation(ctx context.Context, dgd *v1beta1.DynamoGraphDeployment, restart *dynamo.RestartState, checkpoints map[string]*checkpoint.CheckpointInfo) (*componentPowerCapPreservation, error) {
+// It renders without a new restart: restarts stamp the retained DCDs in place and are not worker identity.
+// dgd must be non-nil.
+func (r *componentWorkloadsReconciler) resolvePowerCapPreservation(ctx context.Context, dgd *v1beta1.DynamoGraphDeployment, checkpoints map[string]*checkpoint.CheckpointInfo) (*componentPowerCapPreservation, error) {
 	if len(desiredWorkerPowerCaps(dgd)) == 0 || powerCapRolloutBlocked(dgd.Status.RollingUpdate) {
 		return nil, nil
 	}
@@ -42,7 +43,7 @@ func (r *componentWorkloadsReconciler) resolvePowerCapPreservation(ctx context.C
 	if err != nil {
 		return nil, err
 	}
-	desired, err := dynamo.GenerateDynamoComponentsDeployments(dgd, restart, restarts, dynamo.RollingUpdateContext{NewWorkerHash: hash})
+	desired, err := dynamo.GenerateDynamoComponentsDeployments(dgd, nil, restarts, dynamo.RollingUpdateContext{NewWorkerHash: hash})
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +65,9 @@ func (r *componentWorkloadsReconciler) resolvePowerCapPreservation(ctx context.C
 
 // resolveWorkerPowerCapPreservation compares every worker's DCD intent with its live DCD.
 // A preserved DCD worker spec means the cap-only edit adds no change to the Deployment's desired template,
-// so the API-server-defaulted stored template is never compared. dgd and desired worker entries must be non-nil.
+// so the API-server-defaulted stored template is never compared.
+// It aligns each desired worker entry in place (checkpoint startup policy and retained cap) before comparing.
+// dgd and desired worker entries must be non-nil.
 func (r *componentWorkloadsReconciler) resolveWorkerPowerCapPreservation(ctx context.Context, dgd *v1beta1.DynamoGraphDeployment, desired map[string]*v1beta1.DynamoComponentDeployment, checkpoints map[string]*checkpoint.CheckpointInfo, hash string) (*componentPowerCapPreservation, error) {
 	retained := &componentPowerCapPreservation{hash: hash, caps: map[string]string{}}
 	changed := false

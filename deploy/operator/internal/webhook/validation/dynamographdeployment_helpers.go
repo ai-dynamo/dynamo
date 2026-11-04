@@ -436,9 +436,12 @@ func difference(a, b map[string]struct{}) []string {
 }
 
 // livePowerCapUpdateDetail derives graph-wide admission context without changing shared DCD validation.
+// An empty result admits an existing worker cap value change; otherwise it is the rejection message.
 func livePowerCapUpdateDetail(newDGD, oldDGD *nvidiacomv1beta1.DynamoGraphDeployment) string {
-	if !dynamo.SupportsLivePowerCaps(oldDGD) || !dynamo.SupportsLivePowerCaps(newDGD) {
-		return apivalidation.FieldImmutableErrorMsg
+	for _, dgd := range []*nvidiacomv1beta1.DynamoGraphDeployment{oldDGD, newDGD} {
+		if reason, supported := dynamo.LivePowerCapSupport(dgd); !supported {
+			return apivalidation.FieldImmutableErrorMsg + ": " + reason
+		}
 	}
 	if oldDGD.Status.RollingUpdate != nil {
 		switch phase := oldDGD.Status.RollingUpdate.Phase; phase {
@@ -446,12 +449,12 @@ func livePowerCapUpdateDetail(newDGD, oldDGD *nvidiacomv1beta1.DynamoGraphDeploy
 			return fmt.Sprintf("cannot change power cap while rolling update is %s: workers may span generations; resolve the rollout and retry after Completed or None", phase)
 		}
 	}
-	return ""
-}
 
-func powerCapUpdateError(detail string) string {
-	if detail != "" {
-		return detail
+	// Preservation requires the additive v2 worker hash; the legacy sentinel graduates only through a rollout.
+	_, hasV1 := oldDGD.Annotations[consts.AnnotationCurrentWorkerHash]
+	_, hasV2 := oldDGD.Annotations[consts.AnnotationCurrentWorkerHashV2]
+	if hasV1 && !hasV2 {
+		return "cannot change power cap until the operator records " + consts.AnnotationCurrentWorkerHashV2 + ": worker hash migration is incomplete; retry after the DGD is reconciled"
 	}
-	return apivalidation.FieldImmutableErrorMsg
+	return ""
 }

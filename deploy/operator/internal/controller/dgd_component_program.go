@@ -25,7 +25,6 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
@@ -70,27 +69,21 @@ func (p *componentProgram) Reconcile(
 	req workloadProgramRequest,
 ) (programResult workloadProgramResult, retErr error) {
 	programResult = newWorkloadProgramResult(req.DGD)
-	incomingGeneration := programResult.Status.ObservedGeneration
 	caps := desiredWorkerPowerCaps(req.DGD)
-	var capClient client.Client
-	if len(caps) > 0 {
-		capClient = p.rollout.Client
-	}
 
-	// Finalize propagation before classifying any final failure or acknowledging the generation.
+	// Classify workload failures, then report cap propagation without changing workload readiness.
 	defer func() {
 		if errors.Is(retErr, reconcile.TerminalError(nil)) {
 			return
 		}
-		retErr = errors.Join(retErr, reconcilePowerCaps(ctx, capClient, req.DGD, caps, &programResult))
 		if retErr != nil {
-			programResult.Status.ObservedGeneration = incomingGeneration
 			reason := reasonFailedToReconcileResources
 			if classified, ok := workloadProgramFailureReason(retErr); ok {
 				reason = classified
 			}
 			programResult.Fail(req.DGD.Generation, reason, retErr)
 		}
+		reconcilePowerCaps(ctx, p.rollout.Client, req.DGD, caps, false, &programResult)
 	}()
 	clearComponentGPUShapes(programResult.Status.Components)
 	clearComponentRuntimeStatuses(programResult.Status.Components)
@@ -141,11 +134,10 @@ func (p *componentProgram) Reconcile(
 		)
 		return programResult, failWorkloadProgram(reasonNoMultinodeOrchestrator, err)
 	}
-	// Preview restart-derived templates without committing restart status before rollout.
+	// Resolve the cap exception before rollout; restart then applies in place to retained workers.
 	var retained *componentPowerCapPreservation
 	if len(caps) > 0 {
-		preview := p.restart.Resolve(ctx, req.DGD, &programResult.Status, p.restartProgress.Resolve)
-		retained, err = p.workloads.resolvePowerCapPreservation(ctx, req.DGD, preview.State, checkpoints.Infos)
+		retained, err = p.workloads.resolvePowerCapPreservation(ctx, req.DGD, checkpoints.Infos)
 		if err != nil {
 			return programResult, err
 		}

@@ -40,6 +40,8 @@ import (
 type groveWorkloadResult struct {
 	ReconcileResult
 	ScalingDeferred bool
+	// PowerCapPending retains a cap-only edit until Grove acknowledges and finishes its PCS update.
+	PowerCapPending bool
 }
 
 // groveWorkloadsReconciler owns the complete provider workload sequence while
@@ -114,8 +116,10 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	// Converge the ordinary PCS before rollout or readiness observation.
 	syncedPodCliqueSet, pcsWasWritten, err := r.reconcilePodCliqueSet(ctx, req.DGD, renderedPodCliqueSet)
 	if err != nil {
-		return groveWorkloadResult{}, fmt.Errorf("failed to reconcile the Grove PodCliqueSet: %w", err)
+		// A failed sync may still have written the PCS, which Grove has then not acknowledged.
+		return groveWorkloadResult{PowerCapPending: renderedPodCliqueSet.powerCapPreserved}, fmt.Errorf("failed to reconcile the Grove PodCliqueSet: %w", err)
 	}
+	powerCapPending := renderedPodCliqueSet.powerCapPreserved && (pcsWasWritten || renderedPodCliqueSet.powerCapPending)
 
 	// Defer commit if the PCS was written this reconcile; the informer hasn't caught up yet.
 	if workerHashTransition.needsCommit() && !pcsWasWritten && !renderedPodCliqueSet.powerCapPreserved {
@@ -125,14 +129,14 @@ func (r *groveWorkloadsReconciler) Reconcile(
 			!podCliqueSetUsesGroveWorkerHashSuffix(req, renderedPodCliqueSet.existing)
 		observed, err := podCliqueSetObservesWorkerHash(req, renderedPodCliqueSet.existing, isLegacyUnsuffixed)
 		if err != nil {
-			return groveWorkloadResult{}, failWorkloadProgram(
+			return groveWorkloadResult{PowerCapPending: powerCapPending}, failWorkloadProgram(
 				reasonRollingUpdateFailed,
 				fmt.Errorf("observe Grove worker hash before projection: %w", err),
 			)
 		}
 		if observed {
 			if err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, req.DGD, workerHashTransition, true); err != nil {
-				return groveWorkloadResult{}, failWorkloadProgram(
+				return groveWorkloadResult{PowerCapPending: powerCapPending}, failWorkloadProgram(
 					reasonRollingUpdateFailed,
 					fmt.Errorf("project observed Grove worker hash: %w", err),
 				)
@@ -150,7 +154,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	// Preserve readiness and component observations even when a scale write fails.
 	stableResources, err := r.stableResources.Reconcile(ctx, req, syncedPodCliqueSet)
 	if err != nil {
-		return groveWorkloadResult{}, errors.Join(scaleErr, err)
+		return groveWorkloadResult{PowerCapPending: powerCapPending}, errors.Join(scaleErr, err)
 	}
 	podCliqueSetResource, readiness, err := r.observePodCliqueSetReadiness(
 		ctx,
@@ -158,7 +162,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		syncedPodCliqueSet,
 	)
 	if err != nil {
-		return groveWorkloadResult{}, errors.Join(scaleErr, err)
+		return groveWorkloadResult{PowerCapPending: powerCapPending}, errors.Join(scaleErr, err)
 	}
 
 	resources := append(stableResources, podCliqueSetResource)
@@ -166,7 +170,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	applyComponentGPUShapes(result.ComponentStatus, renderedPodCliqueSet.gpuShapes)
 	applyComponentRuntimeStatuses(result.ComponentStatus, renderedPodCliqueSet.runtimeStatuses)
 
-	return groveWorkloadResult{ReconcileResult: result, ScalingDeferred: scalingDeferred}, scaleErr
+	return groveWorkloadResult{ReconcileResult: result, ScalingDeferred: scalingDeferred, PowerCapPending: powerCapPending}, scaleErr
 }
 
 // reconcilePodCliqueSet returns the current PCS and whether it was created or updated.

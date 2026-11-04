@@ -6,8 +6,9 @@ package controller
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -21,10 +22,24 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-const powerCapPropagationCondition = "PowerCapPropagationReady"
-const powerCapRetry = 2 * time.Second
+const (
+	powerCapPropagationCondition = "PowerCapPropagationReady"
+	// powerCapRetry re-observes expected convergence: repairs, cache lag, conflicts, and pending Grove updates.
+	powerCapRetry = 2 * time.Second
+	// powerCapFailureRetry re-attempts failed Pod observation or repair without failing workload readiness.
+	powerCapFailureRetry = 10 * time.Second
+)
+
+// powerCapConditionRank orders outcomes so one Pod's result never hides a worse one in the same pass.
+var powerCapConditionRank = map[string]int{
+	"PodAnnotationsMatch":   0,
+	"PodAnnotationMismatch": 1,
+	"PodObservationFailed":  2,
+	"PodPatchFailed":        3,
+}
 
 func powerCapRolloutBlocked(status *v1beta1.RollingUpdateStatus) bool {
 	return rollingUpdateInProgress(status) || (status != nil && status.Phase == v1beta1.RollingUpdatePhaseFailed)
@@ -32,7 +47,7 @@ func powerCapRolloutBlocked(status *v1beta1.RollingUpdateStatus) bool {
 
 // desiredWorkerPowerCaps bounds all feature-specific reads to supported annotated graphs.
 func desiredWorkerPowerCaps(dgd *v1beta1.DynamoGraphDeployment) map[string]string {
-	if !dynamo.SupportsLivePowerCaps(dgd) {
+	if _, supported := dynamo.LivePowerCapSupport(dgd); !supported {
 		return nil
 	}
 	caps := map[string]string{}
@@ -48,72 +63,94 @@ func desiredWorkerPowerCaps(dgd *v1beta1.DynamoGraphDeployment) map[string]strin
 }
 
 // reconcilePowerCaps reports the observation before writes; a subsequent observation proves convergence.
-// dgd and result must be non-nil. It deliberately leaves template-derived component status unchanged.
-func reconcilePowerCaps(ctx context.Context, c client.Client, dgd *v1beta1.DynamoGraphDeployment, caps map[string]string, result *workloadProgramResult) error {
+// Propagation outcomes are reported only through its condition and a retry, so workload readiness,
+// State, and the acknowledged generation stay owned by ordinary reconciliation. A waiting Grove update
+// defers all Pod reads and writes. dgd and result must be non-nil; c may be nil only when caps is empty.
+func reconcilePowerCaps(ctx context.Context, c client.Client, dgd *v1beta1.DynamoGraphDeployment, caps map[string]string, waiting bool, result *workloadProgramResult) {
 	if len(caps) == 0 {
 		meta.RemoveStatusCondition(&result.Status.Conditions, powerCapPropagationCondition)
-		return nil
+		return
 	}
 	condition := metav1.Condition{Type: powerCapPropagationCondition, ObservedGeneration: dgd.Generation, Status: metav1.ConditionTrue, Reason: "PodAnnotationsMatch", Message: "No live workers were observed"}
 	defer func() { meta.SetStatusCondition(&result.Status.Conditions, condition) }()
-	pods := &corev1.PodList{}
-	if err := c.List(ctx, pods, client.InNamespace(dgd.Namespace), client.MatchingLabels{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name}); err != nil {
-		condition.Status, condition.Reason, condition.Message = metav1.ConditionUnknown, "PodObservationFailed", err.Error()
-		return err
+	if waiting {
+		condition.Status, condition.Reason, condition.Message = metav1.ConditionFalse, "WaitingForWorkerUpdate", "Worker Pod annotations wait until Grove acknowledges and finishes the PodCliqueSet update"
+		requeuePowerCaps(result, powerCapRetry)
+		return
 	}
+	logger := log.FromContext(ctx)
 
-	// Aggregate errors so a failed patch cannot be hidden by another Pod's pending observation.
-	var repairErrors []error
-	for i := range pods.Items {
-		pod := &pods.Items[i]
-		cap, relevant := caps[pod.Labels[consts.KubeLabelDynamoComponent]]
-		if !relevant || isTerminalPhase(pod.Status.Phase) || !dynamo.IsWorkerComponent(pod.Labels[consts.KubeLabelDynamoComponentType]) {
+	// Observe only the indexed Pods of each capped component, in a stable order.
+	for _, component := range slices.Sorted(maps.Keys(caps)) {
+		cap := caps[component]
+		pods := &corev1.PodList{}
+		if err := c.List(ctx, pods, client.InNamespace(dgd.Namespace), client.MatchingFields{dgdComponentPodIndex: dgdComponentPodIndexValue(dgd.Name, component)}); err != nil {
+			logger.Error(err, "Failed to observe power-cap worker Pods", "component", component)
+			degradePowerCapCondition(&condition, metav1.ConditionUnknown, "PodObservationFailed", err.Error())
+			requeuePowerCaps(result, powerCapFailureRetry)
 			continue
 		}
-		owned, pending, err := powerCapPodOwned(ctx, c, dgd, pod)
-		if err != nil || pending {
-			if condition.Reason != "PodPatchFailed" {
-				condition.Status, condition.Reason, condition.Message = metav1.ConditionUnknown, "PodObservationFailed", "Waiting to observe the worker ownership chain"
+		for i := range pods.Items {
+			pod := &pods.Items[i]
+			if isTerminalPhase(pod.Status.Phase) || !dynamo.IsWorkerComponent(pod.Labels[consts.KubeLabelDynamoComponentType]) {
+				continue
 			}
+			owned, pending, err := powerCapPodOwned(ctx, c, dgd, pod)
 			if err != nil {
-				repairErrors = append(repairErrors, err)
+				logger.Error(err, "Failed to observe power-cap worker Pod ownership", "pod", pod.Name)
+				degradePowerCapCondition(&condition, metav1.ConditionUnknown, "PodObservationFailed", err.Error())
+				requeuePowerCaps(result, powerCapFailureRetry)
+				continue
 			}
-			requeuePowerCaps(result)
-			continue
-		}
-		if !owned {
-			continue
-		}
-		if pod.Annotations[consts.KubeAnnotationGPUPowerLimit] == cap {
-			if condition.Status == metav1.ConditionTrue {
-				condition.Message = "All owned live worker Pod annotations match"
+			if pending {
+				degradePowerCapCondition(&condition, metav1.ConditionUnknown, "PodObservationFailed", "Waiting to observe the worker ownership chain")
+				requeuePowerCaps(result, powerCapRetry)
+				continue
 			}
-			continue
-		}
-		if condition.Status == metav1.ConditionTrue {
-			condition.Status, condition.Reason, condition.Message = metav1.ConditionFalse, "PodAnnotationMismatch", "Worker Pod annotations are converging"
-		}
+			if !owned {
+				continue
+			}
+			if pod.Annotations[consts.KubeAnnotationGPUPowerLimit] == cap {
+				if condition.Status == metav1.ConditionTrue {
+					condition.Message = "All owned live worker Pod annotations match"
+				}
+				continue
+			}
+			degradePowerCapCondition(&condition, metav1.ConditionFalse, "PodAnnotationMismatch", "Worker Pod annotations are converging")
 
-		// UID and resourceVersion protect against deletion/name reuse and concurrent edits.
-		patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"uid": pod.UID, "resourceVersion": pod.ResourceVersion, "annotations": map[string]string{consts.KubeAnnotationGPUPowerLimit: cap}}})
-		if err != nil {
-			return err
-		}
-		if err := c.Patch(ctx, pod, client.RawPatch(types.MergePatchType, patch)); err != nil && !apierrors.IsNotFound(err) {
-			condition.Status, condition.Reason, condition.Message = metav1.ConditionFalse, "PodPatchFailed", err.Error()
-			// Concurrent Pod updates need a fresh observation, not a workload readiness failure.
-			if !apierrors.IsConflict(err) {
-				repairErrors = append(repairErrors, err)
+			// UID and resourceVersion protect against deletion/name reuse and concurrent edits.
+			patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"uid": pod.UID, "resourceVersion": pod.ResourceVersion, "annotations": map[string]string{consts.KubeAnnotationGPUPowerLimit: cap}}})
+			if err == nil {
+				err = c.Patch(ctx, pod, client.RawPatch(types.MergePatchType, patch))
+			}
+			switch {
+			case err == nil || apierrors.IsNotFound(err):
+				requeuePowerCaps(result, powerCapRetry)
+			case apierrors.IsConflict(err):
+				// A concurrent Pod update needs a fresh observation, not a slower failure retry.
+				degradePowerCapCondition(&condition, metav1.ConditionFalse, "PodPatchFailed", err.Error())
+				requeuePowerCaps(result, powerCapRetry)
+			default:
+				logger.Error(err, "Failed to repair power-cap worker Pod annotation", "pod", pod.Name)
+				degradePowerCapCondition(&condition, metav1.ConditionFalse, "PodPatchFailed", err.Error())
+				requeuePowerCaps(result, powerCapFailureRetry)
 			}
 		}
-		requeuePowerCaps(result)
 	}
-	return errors.Join(repairErrors...)
 }
 
-func requeuePowerCaps(result *workloadProgramResult) {
-	if result.RequeueAfter == 0 || result.RequeueAfter > powerCapRetry {
-		result.RequeueAfter = powerCapRetry
+// degradePowerCapCondition records an outcome only when it outranks the condition's current reason.
+// condition must be non-nil.
+func degradePowerCapCondition(condition *metav1.Condition, status metav1.ConditionStatus, reason, message string) {
+	if powerCapConditionRank[reason] > powerCapConditionRank[condition.Reason] {
+		condition.Status, condition.Reason, condition.Message = status, reason, message
+	}
+}
+
+// requeuePowerCaps keeps the earliest retry when several causes, including the program's own, coincide.
+func requeuePowerCaps(result *workloadProgramResult, after time.Duration) {
+	if result.RequeueAfter == 0 || result.RequeueAfter > after {
+		result.RequeueAfter = after
 	}
 }
 

@@ -29,7 +29,6 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
@@ -126,30 +125,23 @@ func (p *groveProgram) Reconcile(
 		IsDelegated: (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController,
 	}
 	programResult = newWorkloadProgramResult(req.DGD)
-	incomingGeneration := programResult.Status.ObservedGeneration
 	caps := desiredWorkerPowerCaps(req.DGD)
-	var capClient client.Client
-	if len(caps) > 0 {
-		capClient = p.rollout.Client
-	}
+	powerCapPending := false
 
-	// Include propagation failures before acknowledging this generation or classifying readiness.
+	// Classify workload failures, report cap propagation without changing readiness, then topology.
 	defer func() {
 		if errors.Is(retErr, reconcile.TerminalError(nil)) {
 			return
 		}
-		retErr = errors.Join(retErr, reconcilePowerCaps(ctx, capClient, req.DGD, caps, &programResult))
 		if retErr != nil {
-			programResult.Status.ObservedGeneration = incomingGeneration
 			reason := reasonFailedToReconcileResources
 			if classified, ok := workloadProgramFailureReason(retErr); ok {
 				reason = classified
 			}
 			programResult.Fail(req.DGD.Generation, reason, retErr)
 		}
-		if p.gate.Enabled(features.Grove) {
-			p.topology.Reconcile(ctx, req, &programResult)
-		}
+		reconcilePowerCaps(ctx, p.rollout.Client, req.DGD, caps, powerCapPending, &programResult)
+		p.topology.Reconcile(ctx, req, &programResult)
 	}()
 	clearComponentGPUShapes(programResult.Status.Components)
 	clearComponentRuntimeStatuses(programResult.Status.Components)
@@ -203,6 +195,7 @@ func (p *groveProgram) Reconcile(
 		restart.State,
 		checkpoints.Infos,
 	)
+	powerCapPending = groveResult.PowerCapPending
 
 	result := groveResult.ReconcileResult
 

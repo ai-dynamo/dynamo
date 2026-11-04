@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"testing"
 	"time"
 
@@ -53,6 +54,11 @@ func powerCapTestScheme(t *testing.T) *runtime.Scheme {
 	scheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	return scheme
+}
+
+// powerCapTestClient registers the production per-component Pod index that propagation queries.
+func powerCapTestClient(scheme *runtime.Scheme) *fake.ClientBuilder {
+	return fake.NewClientBuilder().WithScheme(scheme).WithIndex(&corev1.Pod{}, dgdComponentPodIndex, dgdComponentPodIndexValues)
 }
 
 // powerCapTestOwners constructs fresh complete owner chains for each test.
@@ -107,7 +113,7 @@ func TestPowerCapPropagation(t *testing.T) {
 				if scenario != "empty" {
 					objects = append(objects, pod)
 				}
-				c := fake.NewClientBuilder().WithScheme(powerCapTestScheme(t)).WithObjects(objects...).WithInterceptorFuncs(interceptor.Funcs{
+				c := powerCapTestClient(powerCapTestScheme(t)).WithObjects(objects...).WithInterceptorFuncs(interceptor.Funcs{
 					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 						if scenario == "owner-error" {
 							return errors.New("owner read denied")
@@ -135,48 +141,45 @@ func TestPowerCapPropagation(t *testing.T) {
 				}).Build()
 				result := newWorkloadProgramResult(dgd)
 				meta.SetStatusCondition(&result.Status.Conditions, metav1.Condition{Type: powerCapPropagationCondition, Status: metav1.ConditionTrue, Reason: "PodAnnotationsMatch", ObservedGeneration: dgd.Generation})
-				err := reconcilePowerCaps(context.Background(), c, dgd, desiredWorkerPowerCaps(dgd), &result)
+				reconcilePowerCaps(context.Background(), c, dgd, desiredWorkerPowerCaps(dgd), false, &result)
 				condition := meta.FindStatusCondition(result.Status.Conditions, powerCapPropagationCondition)
 				require.Equal(t, dgd.Generation, condition.ObservedGeneration)
 				switch scenario {
 				case "list-error", "owner-error":
-					require.Error(t, err)
+					require.Equal(t, metav1.ConditionUnknown, condition.Status)
 					require.Equal(t, "PodObservationFailed", condition.Reason)
+					require.Equal(t, powerCapFailureRetry, result.RequeueAfter)
 				case "patch-error":
-					require.Error(t, err)
+					require.Equal(t, metav1.ConditionFalse, condition.Status)
 					require.Equal(t, "PodPatchFailed", condition.Reason)
+					require.Equal(t, powerCapFailureRetry, result.RequeueAfter)
 				case "conflict":
-					require.NoError(t, err)
 					require.Equal(t, "PodPatchFailed", condition.Reason)
 					require.Equal(t, metav1.ConditionFalse, condition.Status)
 					require.Equal(t, powerCapRetry, result.RequeueAfter)
 				case "missing-parent", "parent-arrives":
-					require.NoError(t, err)
 					require.Equal(t, metav1.ConditionUnknown, condition.Status)
 					require.Equal(t, powerCapRetry, result.RequeueAfter)
 					if lateParent != nil {
 						t.Log("The cache later observes the parent and a retry repairs the Pod")
 						require.NoError(t, c.Create(context.Background(), lateParent))
-						require.NoError(t, reconcilePowerCaps(context.Background(), c, dgd, desiredWorkerPowerCaps(dgd), &result))
+						reconcilePowerCaps(context.Background(), c, dgd, desiredWorkerPowerCaps(dgd), false, &result)
 						require.Equal(t, "PodAnnotationMismatch", meta.FindStatusCondition(result.Status.Conditions, powerCapPropagationCondition).Reason)
 					}
 				case "deleted", "direct-grove":
-					require.NoError(t, err)
 					require.Equal(t, "PodAnnotationMismatch", condition.Reason)
 					require.Equal(t, powerCapRetry, result.RequeueAfter)
 				case "repair":
-					require.NoError(t, err)
 					require.Equal(t, "PodAnnotationMismatch", condition.Reason)
 					require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(pod), pod))
 					require.Equal(t, "350", pod.Annotations[consts.KubeAnnotationGPUPowerLimit])
 					require.Equal(t, "retained", pod.Annotations["other"])
 					t.Log("A later observation establishes convergence and stops feature retries")
 					result.RequeueAfter = 0
-					require.NoError(t, reconcilePowerCaps(context.Background(), c, dgd, desiredWorkerPowerCaps(dgd), &result))
+					reconcilePowerCaps(context.Background(), c, dgd, desiredWorkerPowerCaps(dgd), false, &result)
 					require.Equal(t, metav1.ConditionTrue, meta.FindStatusCondition(result.Status.Conditions, powerCapPropagationCondition).Status)
 					require.Zero(t, result.RequeueAfter)
 				default:
-					require.NoError(t, err)
 					require.Equal(t, metav1.ConditionTrue, condition.Status)
 					require.Zero(t, result.RequeueAfter)
 				}
@@ -191,7 +194,7 @@ func TestPowerCapNoPowerFastPathAndEventFiltering(t *testing.T) {
 	delete(dgd.Spec.Components[0].PodTemplate.Annotations, consts.KubeAnnotationGPUPowerLimit)
 	result := newWorkloadProgramResult(dgd)
 	meta.SetStatusCondition(&result.Status.Conditions, metav1.Condition{Type: powerCapPropagationCondition, Status: metav1.ConditionTrue, Reason: "PodAnnotationsMatch"})
-	require.NoError(t, reconcilePowerCaps(context.Background(), nil, dgd, desiredWorkerPowerCaps(dgd), &result))
+	reconcilePowerCaps(context.Background(), nil, dgd, desiredWorkerPowerCaps(dgd), false, &result)
 	require.Nil(t, meta.FindStatusCondition(result.Status.Conditions, powerCapPropagationCondition))
 	require.Zero(t, result.RequeueAfter)
 
@@ -203,7 +206,7 @@ func TestPowerCapNoPowerFastPathAndEventFiltering(t *testing.T) {
 	pod.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
 	require.True(t, dgdWorkerPodEventPredicate().Update(event.UpdateEvent{ObjectOld: before, ObjectNew: pod}))
 	result.RequeueAfter = time.Millisecond
-	requeuePowerCaps(&result)
+	requeuePowerCaps(&result, powerCapRetry)
 	require.Equal(t, time.Millisecond, result.RequeueAfter)
 }
 
@@ -224,7 +227,7 @@ func testPowerCapComponentPreservation(t *testing.T, hashKey string) {
 	dcd := dcds["worker"]
 	dcd.UID = "dcd-uid"
 	dcd.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)}
-	c := fake.NewClientBuilder().WithScheme(powerCapTestScheme(t)).WithObjects(dgd, dcd).Build()
+	c := powerCapTestClient(powerCapTestScheme(t)).WithObjects(dgd, dcd).Build()
 	renderer := newDCDWorkloadRenderer(c, &configv1alpha1.OperatorConfiguration{}, &commoncontroller.RuntimeConfig{}, &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }})
 	template, err := renderer.generatePodTemplateSpec(context.Background(), dcd, dynamo.RoleMain, renderer.containerGPUCount(context.Background(), dcd))
 	require.NoError(t, err)
@@ -232,7 +235,7 @@ func testPowerCapComponentPreservation(t *testing.T, hashKey string) {
 	require.NoError(t, c.Create(context.Background(), deployment))
 	workloads := newComponentWorkloadsReconciler(c, nil, newDGDWorkerRolloutReconciler(c, nil))
 	t.Log("An unchanged graph needs no exception on an operator-only upgrade")
-	unchanged, err := workloads.resolvePowerCapPreservation(t.Context(), dgd, nil, nil)
+	unchanged, err := workloads.resolvePowerCapPreservation(t.Context(), dgd, nil)
 	require.NoError(t, err)
 	require.Nil(t, unchanged)
 
@@ -241,7 +244,7 @@ func testPowerCapComponentPreservation(t *testing.T, hashKey string) {
 		dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = cap
 		dgd.Spec.Components[0].Replicas = new(int32(3))
 		before := dgd.DeepCopy()
-		retained, err := workloads.resolvePowerCapPreservation(context.Background(), dgd, nil, nil)
+		retained, err := workloads.resolvePowerCapPreservation(context.Background(), dgd, nil)
 		require.NoError(t, err)
 		require.NotNil(t, retained)
 		require.Equal(t, hash, retained.hash)
@@ -251,7 +254,7 @@ func testPowerCapComponentPreservation(t *testing.T, hashKey string) {
 	}
 
 	t.Log("The production DCD writer scales the retained generation and repairs new owned Pods")
-	retained, err := workloads.resolvePowerCapPreservation(t.Context(), dgd, nil, nil)
+	retained, err := workloads.resolvePowerCapPreservation(t.Context(), dgd, nil)
 	require.NoError(t, err)
 	_, err = workloads.Reconcile(t.Context(), dgd, nil, nil, retained)
 	require.NoError(t, err)
@@ -269,7 +272,7 @@ func testPowerCapComponentPreservation(t *testing.T, hashKey string) {
 	require.NoError(t, c.Create(t.Context(), survivor))
 	require.NoError(t, c.Create(t.Context(), newPod))
 	result := newWorkloadProgramResult(dgd)
-	require.NoError(t, reconcilePowerCaps(t.Context(), c, dgd, desiredWorkerPowerCaps(dgd), &result))
+	reconcilePowerCaps(t.Context(), c, dgd, desiredWorkerPowerCaps(dgd), false, &result)
 	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(newPod), newPod))
 	require.Equal(t, "325", newPod.Annotations[consts.KubeAnnotationGPUPowerLimit])
 	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(survivor), survivor))
@@ -278,7 +281,7 @@ func testPowerCapComponentPreservation(t *testing.T, hashKey string) {
 
 	t.Log("An unrelated worker edit follows ordinary rollout instead")
 	dgd.Spec.Components[0].PodTemplate.Spec.Containers[0].Image = "different:v2"
-	retained, err = workloads.resolvePowerCapPreservation(context.Background(), dgd, nil, nil)
+	retained, err = workloads.resolvePowerCapPreservation(context.Background(), dgd, nil)
 	require.NoError(t, err)
 	require.Nil(t, retained)
 	if hashKey == consts.AnnotationCurrentWorkerHash {
@@ -312,7 +315,7 @@ func TestPowerCapGrovePreservation(t *testing.T) {
 				hash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 				require.NoError(t, err)
 				dgd.Annotations[consts.AnnotationCurrentWorkerHashV2] = hash
-				c := fake.NewClientBuilder().WithScheme(powerCapTestScheme(t)).WithRESTMapper(groveScaleRESTMapper()).WithInterceptorFuncs(groveScaleInterceptor(interceptor.Funcs{}, nil)).WithObjects(dgd).Build()
+				c := powerCapTestClient(powerCapTestScheme(t)).WithRESTMapper(groveScaleRESTMapper()).WithInterceptorFuncs(groveScaleInterceptor(interceptor.Funcs{}, nil)).WithObjects(dgd).Build()
 				config := &configv1alpha1.OperatorConfiguration{}
 				runtimeConfig := &commoncontroller.RuntimeConfig{}
 				secrets := &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }}
@@ -362,9 +365,23 @@ func TestPowerCapGrovePreservation(t *testing.T) {
 					require.Equal(t, beforePCS, pcs)
 				}
 
+				t.Log("A rollout-policy edit keeps preservation and still reaches the written PCS")
+				nextStrategy := grovev1alpha1.OnDeleteStrategy
+				if strategy == string(grovev1alpha1.OnDeleteStrategy) {
+					nextStrategy = grovev1alpha1.CoherentStrategy
+				}
+				previousAnnotations := maps.Clone(dgd.Annotations)
+				dgd.Annotations[consts.KubeAnnotationGroveUpdateStrategy] = string(nextStrategy)
+				rendered, err := renderer.Render(context.Background(), req, nil, nil, true)
+				require.NoError(t, err)
+				require.True(t, rendered.powerCapPreserved)
+				require.Equal(t, nextStrategy, rendered.desired.Spec.UpdateStrategy.Type)
+				require.Equal(t, "300", rendered.desired.Spec.Template.Cliques[0].Annotations[consts.KubeAnnotationGPUPowerLimit])
+				dgd.Annotations = previousAnnotations
+
 				t.Log("An independently reconciled frontend image edit keeps worker identity and retained cap")
 				dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Image = "frontend:v2"
-				rendered, err := renderer.Render(context.Background(), req, nil, nil, true)
+				rendered, err = renderer.Render(context.Background(), req, nil, nil, true)
 				require.NoError(t, err)
 				require.True(t, rendered.powerCapPreserved)
 				require.Equal(t, pcs.Spec.Template.Cliques[0].Name, rendered.desired.Spec.Template.Cliques[0].Name)
@@ -390,7 +407,7 @@ func TestPowerCapGrovePreservation(t *testing.T) {
 					require.NoError(t, c.Create(t.Context(), survivor))
 					require.NoError(t, c.Create(t.Context(), newPod))
 					result := newWorkloadProgramResult(dgd)
-					require.NoError(t, reconcilePowerCaps(t.Context(), c, dgd, desiredWorkerPowerCaps(dgd), &result))
+					reconcilePowerCaps(t.Context(), c, dgd, desiredWorkerPowerCaps(dgd), false, &result)
 					require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(newPod), newPod))
 					require.Equal(t, "325", newPod.Annotations[consts.KubeAnnotationGPUPowerLimit])
 					require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(survivor), survivor))
@@ -434,7 +451,7 @@ func TestPowerCapTerminalProgramSkipsPropagation(t *testing.T) {
 				dgd.Spec.Components = append(dgd.Spec.Components, unsupported)
 			}
 			podLists, podPatches := 0, 0
-			c := fake.NewClientBuilder().WithScheme(powerCapTestScheme(t)).WithInterceptorFuncs(interceptor.Funcs{
+			c := powerCapTestClient(powerCapTestScheme(t)).WithInterceptorFuncs(interceptor.Funcs{
 				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 					if _, ok := list.(*corev1.PodList); ok {
 						podLists++
@@ -471,49 +488,163 @@ func TestPowerCapTerminalProgramSkipsPropagation(t *testing.T) {
 	}
 }
 
-func TestPowerCapProgramFailureFinalization(t *testing.T) {
+func TestPowerCapPropagationPreservesWorkloadStatus(t *testing.T) {
+	type outcome struct {
+		err                string
+		state              v1beta1.DGDState
+		ready              metav1.ConditionStatus
+		readyReason        string
+		observedGeneration int64
+	}
 	for _, provider := range []string{"component", "grove"} {
 		for _, earlyFailure := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/early=%t", provider, earlyFailure), func(t *testing.T) {
-				t.Log("Seed a previously successful power condition and a worker requiring repair")
-				dgd := powerCapTestDGD(t, provider)
-				dgd.Status.ObservedGeneration = 1
-				meta.SetStatusCondition(&dgd.Status.Conditions, metav1.Condition{Type: powerCapPropagationCondition, Status: metav1.ConditionTrue, Reason: "PodAnnotationsMatch", ObservedGeneration: dgd.Generation})
-				dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
-				owners, pod := powerCapTestOwners(dgd, provider)
-				scheme := powerCapTestScheme(t)
-				require.NoError(t, rbacv1.AddToScheme(scheme))
-				objects := append(owners, dgd, pod)
-				c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).WithStatusSubresource(dgd).WithInterceptorFuncs(interceptor.Funcs{
-					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-						if _, ok := obj.(*corev1.Pod); ok {
-							return errors.New("power patch denied")
-						}
-						return c.Patch(ctx, obj, patch, opts...)
-					},
-				}).Build()
-				config := &configv1alpha1.OperatorConfiguration{Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendEtcd}}
-				if !earlyFailure {
-					config.Namespace.Restricted = "default"
-				}
-				root := &DynamoGraphDeploymentReconciler{Client: c, Config: config, RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true}}, DockerSecretRetriever: &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }}}
-				var program workloadProgram = root.newComponentProgram()
-				if provider == "grove" {
-					program = root.newGroveProgram()
-				}
+				var baseline outcome
+				for _, failure := range []string{"none", "patch-denied", "list-denied", "owner-denied"} {
+					t.Logf("Reconcile a worker requiring repair with propagation failure %q", failure)
+					dgd := powerCapTestDGD(t, provider)
+					dgd.Status.ObservedGeneration = 1
+					meta.SetStatusCondition(&dgd.Status.Conditions, metav1.Condition{Type: powerCapPropagationCondition, Status: metav1.ConditionTrue, Reason: "PodAnnotationsMatch", ObservedGeneration: dgd.Generation})
+					dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
+					owners, pod := powerCapTestOwners(dgd, provider)
+					scheme := powerCapTestScheme(t)
+					require.NoError(t, rbacv1.AddToScheme(scheme))
+					objects := append(owners, dgd, pod)
+					c := powerCapTestClient(scheme).WithObjects(objects...).WithStatusSubresource(dgd).WithInterceptorFuncs(interceptor.Funcs{
+						Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+							if failure == "owner-denied" && (key.Name == "rs" || key.Name == "clique") {
+								return errors.New("power owner read denied")
+							}
+							return c.Get(ctx, key, obj, opts...)
+						},
+						List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+							if _, ok := list.(*corev1.PodList); ok && failure == "list-denied" {
+								return errors.New("power Pod list denied")
+							}
+							return c.List(ctx, list, opts...)
+						},
+						Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+							if _, ok := obj.(*corev1.Pod); ok && failure == "patch-denied" {
+								return errors.New("power patch denied")
+							}
+							return c.Patch(ctx, obj, patch, opts...)
+						},
+					}).Build()
+					config := &configv1alpha1.OperatorConfiguration{Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendEtcd}}
+					if !earlyFailure {
+						config.Namespace.Restricted = "default"
+					}
+					root := &DynamoGraphDeploymentReconciler{Client: c, Config: config, RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true}}, DockerSecretRetriever: &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }}}
+					var program workloadProgram = root.newComponentProgram()
+					if provider == "grove" {
+						program = root.newGroveProgram()
+					}
+					result, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
+					got := outcome{state: result.Status.State, observedGeneration: result.Status.ObservedGeneration}
+					if err != nil {
+						got.err = err.Error()
+					}
+					if ready := meta.FindStatusCondition(result.Status.Conditions, "Ready"); ready != nil {
+						got.ready, got.readyReason = ready.Status, ready.Reason
+					}
+					condition := meta.FindStatusCondition(result.Status.Conditions, powerCapPropagationCondition)
+					require.Equal(t, dgd.Generation, condition.ObservedGeneration)
 
-				t.Log("Fail propagation after either an early workload error or otherwise successful workload reconciliation")
-				result, err := program.Reconcile(context.Background(), workloadProgramRequest{DGD: dgd})
-				require.ErrorContains(t, err, "power patch denied")
-				require.Equal(t, int64(1), result.Status.ObservedGeneration)
-				require.Equal(t, metav1.ConditionFalse, meta.FindStatusCondition(result.Status.Conditions, "Ready").Status)
-				require.Equal(t, "PodPatchFailed", meta.FindStatusCondition(result.Status.Conditions, powerCapPropagationCondition).Reason)
-				if !earlyFailure {
-					require.EqualError(t, err, "power patch denied", "ordinary workload reconciliation must have succeeded before the late failure")
-					require.Equal(t, dgd.Generation, meta.FindStatusCondition(result.Status.Conditions, powerCapPropagationCondition).ObservedGeneration)
+					t.Log("Propagation reports only through its condition and retry; workload status is unchanged")
+					if failure == "none" {
+						baseline = got
+						require.Equal(t, "PodAnnotationMismatch", condition.Reason)
+						if earlyFailure {
+							require.Error(t, err, "the early workload failure must remain a program error")
+							require.Equal(t, int64(1), got.observedGeneration)
+						} else {
+							require.NoError(t, err)
+							require.Equal(t, dgd.Generation, got.observedGeneration)
+							require.Equal(t, powerCapRetry, result.RequeueAfter)
+						}
+						continue
+					}
+					require.Equal(t, baseline, got)
+					require.NotContains(t, got.err, "power")
+					switch failure {
+					case "patch-denied":
+						require.Equal(t, metav1.ConditionFalse, condition.Status)
+						require.Equal(t, "PodPatchFailed", condition.Reason)
+					default:
+						require.Equal(t, metav1.ConditionUnknown, condition.Status)
+						require.Equal(t, "PodObservationFailed", condition.Reason)
+					}
+					if !earlyFailure {
+						require.Equal(t, powerCapFailureRetry, result.RequeueAfter)
+					}
 				}
 			})
 		}
+	}
+}
+
+func TestPowerCapMixedPodOutcomes(t *testing.T) {
+	for _, scenario := range []string{"conflict-and-denied", "denied-only", "waiting"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Log("Observe several owned workers whose repairs end differently in one pass")
+			dgd := powerCapTestDGD(t, "component")
+			dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
+			owners, conflicting := powerCapTestOwners(dgd, "component")
+			denied := conflicting.DeepCopy()
+			denied.Name, denied.UID = "denied-pod", "denied-uid"
+			matching := conflicting.DeepCopy()
+			matching.Name, matching.UID = "matching-pod", "matching-uid"
+			matching.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
+			pods := []client.Object{denied, matching}
+			if scenario == "conflict-and-denied" {
+				pods = append(pods, conflicting)
+			}
+			podReads, podPatches := 0, 0
+			c := powerCapTestClient(powerCapTestScheme(t)).WithObjects(append(append(owners, dgd), pods...)...).WithInterceptorFuncs(interceptor.Funcs{
+				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if _, ok := list.(*corev1.PodList); ok {
+						podReads++
+					}
+					return c.List(ctx, list, opts...)
+				},
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					podPatches++
+					switch obj.GetName() {
+					case conflicting.Name:
+						return apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, obj.GetName(), errors.New("concurrent update"))
+					case denied.Name:
+						return errors.New("patch denied")
+					}
+					return c.Patch(ctx, obj, patch, opts...)
+				},
+			}).Build()
+			result := newWorkloadProgramResult(dgd)
+			meta.SetStatusCondition(&result.Status.Conditions, metav1.Condition{Type: powerCapPropagationCondition, Status: metav1.ConditionTrue, Reason: "PodAnnotationsMatch", ObservedGeneration: dgd.Generation})
+			reconcilePowerCaps(t.Context(), c, dgd, desiredWorkerPowerCaps(dgd), scenario == "waiting", &result)
+			condition := meta.FindStatusCondition(result.Status.Conditions, powerCapPropagationCondition)
+
+			t.Log("A failed repair outranks a matching Pod and the shortest retry wins")
+			switch scenario {
+			case "waiting":
+				require.Zero(t, podReads)
+				require.Zero(t, podPatches)
+				require.Equal(t, metav1.ConditionFalse, condition.Status)
+				require.Equal(t, "WaitingForWorkerUpdate", condition.Reason)
+				require.Equal(t, powerCapRetry, result.RequeueAfter)
+			case "conflict-and-denied":
+				require.Equal(t, metav1.ConditionFalse, condition.Status)
+				require.Equal(t, "PodPatchFailed", condition.Reason)
+				require.Equal(t, powerCapRetry, result.RequeueAfter)
+			case "denied-only":
+				require.Equal(t, metav1.ConditionFalse, condition.Status)
+				require.Equal(t, "PodPatchFailed", condition.Reason)
+				require.Equal(t, powerCapFailureRetry, result.RequeueAfter)
+				t.Log("An earlier program retry is never delayed by a slower propagation retry")
+				result.RequeueAfter = time.Second
+				reconcilePowerCaps(t.Context(), c, dgd, desiredWorkerPowerCaps(dgd), false, &result)
+				require.Equal(t, time.Second, result.RequeueAfter)
+			}
+		})
 	}
 }
 
@@ -528,7 +659,7 @@ func TestPowerCapProgramConflictRetriesWithoutFailure(t *testing.T) {
 			scheme := powerCapTestScheme(t)
 			require.NoError(t, rbacv1.AddToScheme(scheme))
 			objects := append(owners, dgd, pod)
-			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).WithStatusSubresource(dgd).WithInterceptorFuncs(interceptor.Funcs{
+			c := powerCapTestClient(scheme).WithObjects(objects...).WithStatusSubresource(dgd).WithInterceptorFuncs(interceptor.Funcs{
 				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 					if _, ok := obj.(*corev1.Pod); ok {
 						return apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, obj.GetName(), errors.New("concurrent update"))
@@ -573,7 +704,7 @@ func TestPowerCapComponentRolloutSupersedesRestart(t *testing.T) {
 			dgd.Spec.Components[0].PodTemplate.Spec.Containers[0].Image = "different:v2"
 			scheme := powerCapTestScheme(t)
 			require.NoError(t, rbacv1.AddToScheme(scheme))
-			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dgd, dcd).WithStatusSubresource(dgd).Build()
+			c := powerCapTestClient(scheme).WithObjects(dgd, dcd).WithStatusSubresource(dgd).Build()
 			config := &configv1alpha1.OperatorConfiguration{}
 			config.Namespace.Restricted = "default"
 			root := &DynamoGraphDeploymentReconciler{Client: c, Config: config, RuntimeConfig: &commoncontroller.RuntimeConfig{}, DockerSecretRetriever: &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }}}
@@ -603,7 +734,7 @@ func TestPowerCapWholeProgramIsolation(t *testing.T) {
 			scheme := powerCapTestScheme(t)
 			require.NoError(t, rbacv1.AddToScheme(scheme))
 			podReads := 0
-			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dgd).WithStatusSubresource(dgd).WithInterceptorFuncs(interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			c := powerCapTestClient(scheme).WithObjects(dgd).WithStatusSubresource(dgd).WithInterceptorFuncs(interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 				if _, ok := list.(*corev1.PodList); ok {
 					podReads++
 					return errors.New("unexpected power Pod read")
@@ -638,9 +769,9 @@ func TestPowerCapMultipleCaps(t *testing.T) {
 	second := pod.DeepCopy()
 	second.Name, second.UID = "second-pod", "second-uid"
 	second.Labels[consts.KubeLabelDynamoComponent] = "second"
-	c := fake.NewClientBuilder().WithScheme(powerCapTestScheme(t)).WithObjects(append(owners, dgd, pod, second)...).Build()
+	c := powerCapTestClient(powerCapTestScheme(t)).WithObjects(append(owners, dgd, pod, second)...).Build()
 	result := newWorkloadProgramResult(dgd)
-	require.NoError(t, reconcilePowerCaps(t.Context(), c, dgd, desiredWorkerPowerCaps(dgd), &result))
+	reconcilePowerCaps(t.Context(), c, dgd, desiredWorkerPowerCaps(dgd), false, &result)
 	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
 	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(second), second))
 	require.Equal(t, "350", pod.Annotations[consts.KubeAnnotationGPUPowerLimit])
@@ -650,7 +781,7 @@ func TestPowerCapMultipleCaps(t *testing.T) {
 func TestPowerCapGroveScalingGroupDefaults(t *testing.T) {
 	for _, strategy := range []grovev1alpha1.UpdateStrategyType{grovev1alpha1.CoherentStrategy, grovev1alpha1.RollingRecreateStrategy, grovev1alpha1.OnDeleteStrategy} {
 		t.Run(string(strategy), func(t *testing.T) {
-			t.Log("Compare explicit webhook-defaulted scaling groups, retaining user budgets")
+			t.Log("Compare explicit webhook-defaulted scaling groups")
 			source := &grovev1alpha1.PodCliqueSet{Spec: grovev1alpha1.PodCliqueSetSpec{UpdateStrategy: &grovev1alpha1.PodCliqueSetUpdateStrategy{Type: strategy}, Template: grovev1alpha1.PodCliqueSetTemplateSpec{
 				Cliques:                      []*grovev1alpha1.PodCliqueTemplateSpec{{Name: "worker", Labels: map[string]string{consts.KubeLabelDynamoComponentType: "worker"}, Spec: grovev1alpha1.PodCliqueSpec{Replicas: 2}}},
 				PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{{Name: "group", CliqueNames: []string{"worker"}, Replicas: new(int32(3)), MinAvailable: new(int32(2)), ScaleConfig: &grovev1alpha1.AutoScalingConfig{}}},
@@ -666,10 +797,18 @@ func TestPowerCapGroveScalingGroupDefaults(t *testing.T) {
 				observed.Spec.Template.PodCliqueScalingGroupConfigs[0].RollingUpdate = &grovev1alpha1.RollingUpdateConfiguration{MaxUnavailable: &value}
 			}
 			require.Equal(t, grovePowerCapWorkerSpec(source), grovePowerCapWorkerSpec(observed))
-			require.Nil(t, grovePowerCapWorkerSpec(observed).Template.Cliques[0].RollingUpdate, "member cliques must not receive standalone budgets")
 			require.Equal(t, before, source)
+
+			t.Log("Rollout policy edits are excluded like the worker hash excludes them")
+			observed.Spec.UpdateStrategy = &grovev1alpha1.PodCliqueSetUpdateStrategy{Type: grovev1alpha1.OnDeleteStrategy}
 			observed.Spec.Template.PodCliqueScalingGroupConfigs[0].RollingUpdate = &grovev1alpha1.RollingUpdateConfiguration{MaxUnavailable: new(int32(7))}
-			require.NotEqual(t, grovePowerCapWorkerSpec(source), grovePowerCapWorkerSpec(observed), "authored budget drift must remain visible")
+			observed.Spec.Template.Cliques[0].RollingUpdate = &grovev1alpha1.RollingUpdateConfiguration{MaxUnavailable: new(int32(5))}
+			require.Equal(t, grovePowerCapWorkerSpec(source), grovePowerCapWorkerSpec(observed))
+			require.NotNil(t, observed.Spec.UpdateStrategy, "only the comparison copy drops rollout policy")
+
+			t.Log("MinAvailable is not treated as rollout policy and its drift stays visible")
+			observed.Spec.Template.PodCliqueScalingGroupConfigs[0].MinAvailable = new(int32(1))
+			require.NotEqual(t, grovePowerCapWorkerSpec(source), grovePowerCapWorkerSpec(observed))
 		})
 	}
 }
@@ -687,7 +826,7 @@ func TestPowerCapComponentPreservationBoundaries(t *testing.T) {
 			dgd.Annotations[consts.AnnotationCurrentWorkerHashV2] = hash
 			generated, err := dynamo.GenerateDynamoComponentsDeployments(dgd, nil, nil, dynamo.RollingUpdateContext{NewWorkerHash: hash})
 			require.NoError(t, err)
-			c := fake.NewClientBuilder().WithScheme(powerCapTestScheme(t)).WithObjects(dgd).Build()
+			c := powerCapTestClient(powerCapTestScheme(t)).WithObjects(dgd).Build()
 			renderer := newDCDWorkloadRenderer(c, &configv1alpha1.OperatorConfiguration{}, &commoncontroller.RuntimeConfig{}, &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }})
 			deployments := map[string]*appsv1.Deployment{}
 			for name, dcd := range generated {
@@ -702,7 +841,7 @@ func TestPowerCapComponentPreservationBoundaries(t *testing.T) {
 			}
 			dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
 			workloads := newComponentWorkloadsReconciler(c, nil, newDGDWorkerRolloutReconciler(c, nil))
-			preserved, err := workloads.resolvePowerCapPreservation(t.Context(), dgd, nil, nil)
+			preserved, err := workloads.resolvePowerCapPreservation(t.Context(), dgd, nil)
 			require.NoError(t, err)
 			require.NotNil(t, preserved, "an unchanged second worker must not prevent cap-only preservation")
 			switch scenario {
@@ -719,7 +858,7 @@ func TestPowerCapComponentPreservationBoundaries(t *testing.T) {
 				dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Image = "second:v2"
 			}
 			before := dgd.DeepCopy()
-			preserved, err = workloads.resolvePowerCapPreservation(t.Context(), dgd, nil, nil)
+			preserved, err = workloads.resolvePowerCapPreservation(t.Context(), dgd, nil)
 			require.NoError(t, err)
 			require.Nil(t, preserved, "missing resources, already-current templates or any worker drift must use normal identity reconciliation")
 			require.Equal(t, before, dgd)

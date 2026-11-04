@@ -105,6 +105,7 @@ component. Mixed GPU generations within one component, dynamic cap retargeting,
 and GPU allocation through DRA resource claims are not supported by this
 projection.
 
-Live cap updates without worker restarts are supported only for no-Planner DGDs
-using Grove or single-node component workloads. That mode does not refresh Planner
+Live cap updates without worker restarts are supported only for DGDs without a
+Planner or LPX components that use Grove or single-node component workloads and
+set each cap on the worker's own pod template. That mode does not refresh Planner
 budgets and does not apply to this example.

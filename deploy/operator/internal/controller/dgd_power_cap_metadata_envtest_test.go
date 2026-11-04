@@ -99,7 +99,7 @@ func TestPowerCapComponentPreservationIgnoresAPIServerDefaults(t *testing.T) {
 	t.Log("A cap-only edit keeps the observed generation and its creation cap")
 	dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
 	workloads := newComponentWorkloadsReconciler(c, nil, newDGDWorkerRolloutReconciler(c, nil))
-	retained, err := workloads.resolvePowerCapPreservation(t.Context(), dgd, nil, nil)
+	retained, err := workloads.resolvePowerCapPreservation(t.Context(), dgd, nil)
 	require.NoError(t, err)
 	require.NotNil(t, retained)
 	require.Equal(t, hash, retained.hash)

@@ -265,13 +265,27 @@ The operator maintains observed state under `status`.
   Latest observed conditions, merged by type. Includes `Available` and `DynamoComponentReady`.
 
   `PowerCapPropagationReady` reports live Pod annotation convergence for graphs with
-  power-annotated workers, no component with `type: planner`, and the `grove` workload
-  provider or the `component` provider without multinode components. Compare its
-  `observedGeneration` with the DGD generation. It reports `PodAnnotationsMatch` when
-  every owned nonterminal worker Pod matches, including an empty live Pod set;
-  `PodAnnotationMismatch` while repairing annotations; `PodObservationFailed` for an
-  unknown observation; and `PodPatchFailed` for a failed repair. The condition is
-  removed when the graph leaves this scope. It does not prove GPU hardware enforcement.
+  power-annotated workers that use the `grove` workload provider or the `component`
+  provider without multinode components, and that have no `type: planner` or
+  `type: lpx` component and no cap in `spec.annotations`. Compare its
+  `observedGeneration` with the DGD generation. Reasons:
+
+  - `PodAnnotationsMatch` (`True`): every owned nonterminal worker Pod matches,
+    including an empty live Pod set.
+  - `PodAnnotationMismatch` (`False`): annotations are being repaired.
+  - `WaitingForWorkerUpdate` (`False`): a cap-only edit waits for Grove to
+    acknowledge and finish a `PodCliqueSet` update; no Pods are patched.
+  - `PodObservationFailed` (`Unknown`): worker Pods or their owners could not be
+    observed.
+  - `PodPatchFailed` (`False`): a repair failed, including a conflicting
+    concurrent Pod update.
+
+  When Pods disagree, the condition reports the most severe reason. The operator
+  retries conflicts and pending observations after about 2 seconds, and other
+  observation or repair failures after about 10 seconds. These outcomes never
+  change the DGD's `Ready` condition, state, or `observedGeneration`. The condition
+  is removed when the graph leaves this scope. It does not prove GPU hardware
+  enforcement.
 
   <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/apis/meta/v1#Condition" target="_blank">metav1.Condition</a>
 </ParamField>

@@ -38,7 +38,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -60,6 +59,7 @@ type grovePodCliqueSetRender struct {
 	gpuShapes         map[string]dynamo.GPUShape
 	runtimeStatuses   map[string]dynamo.ComponentRuntimeStatus
 	powerCapPreserved bool
+	powerCapPending   bool
 }
 
 func newGroveWorkloadRenderer(
@@ -120,7 +120,8 @@ func (r *groveWorkloadRenderer) Render(
 	)
 
 	// Prove cap-only divergence against the observed PCS before choosing its generation identity.
-	preserved := false
+	// While Grove has not acknowledged or finished an update, the retained render defers propagation too.
+	preserved, pending := false, false
 	if len(desiredWorkerPowerCaps(req.DGD)) > 0 && !powerCapRolloutBlocked(req.DGD.Status.RollingUpdate) && existingPodCliqueSet != nil && metav1.IsControlledBy(existingPodCliqueSet, req.DGD) {
 		retained, applicable := retainedGrovePowerCaps(req, existingPodCliqueSet)
 		if applicable {
@@ -140,7 +141,7 @@ func (r *groveWorkloadRenderer) Render(
 				return nil, err
 			}
 			if apiequality.Semantic.DeepEqual(grovePowerCapWorkerSpec(comparisonCandidate), grovePowerCapWorkerSpec(existingPodCliqueSet)) {
-				desired, preserved = candidate, true
+				desired, preserved, pending = candidate, true, groveUpdateUnacknowledged(existingPodCliqueSet)
 			}
 		}
 	}
@@ -155,19 +156,25 @@ func (r *groveWorkloadRenderer) Render(
 		gpuShapes:         gpuShapes,
 		runtimeStatuses:   dynamo.ResolveGroveComponentRuntimeStatuses(req.DGD, desired),
 		powerCapPreserved: preserved,
+		powerCapPending:   pending,
 	}, nil
 }
 
+// groveUpdateUnacknowledged reports a PCS spec Grove has not observed or an update it has not finished.
+// A missing observedGeneration is unacknowledged. pcs must be non-nil.
+func groveUpdateUnacknowledged(pcs *grovev1alpha1.PodCliqueSet) bool {
+	if pcs.Status.ObservedGeneration == nil || *pcs.Status.ObservedGeneration != pcs.Generation {
+		return true
+	}
+	return pcs.Status.UpdateProgress != nil && pcs.Status.UpdateProgress.UpdateEndedAt == nil
+}
+
 // grovePowerCapWorkerSpec compares worker intent using the pinned Grove alpha.15 admission defaults.
-// It retains common PCS settings but excludes independently reconciled nonworker cliques.
+// It retains common PCS settings but excludes independently reconciled nonworker cliques. Rollout policy
+// is excluded like the worker hash excludes it; only this comparison copy drops it, never the written PCS.
 func grovePowerCapWorkerSpec(pcs *grovev1alpha1.PodCliqueSet) grovev1alpha1.PodCliqueSetSpec {
 	spec := *pcs.Spec.DeepCopy()
-	if spec.UpdateStrategy == nil {
-		spec.UpdateStrategy = &grovev1alpha1.PodCliqueSetUpdateStrategy{}
-	}
-	if spec.UpdateStrategy.Type == "" {
-		spec.UpdateStrategy.Type = grovev1alpha1.RollingRecreateStrategy
-	}
+	spec.UpdateStrategy = nil
 	if spec.Template.TerminationDelay == nil {
 		spec.Template.TerminationDelay = &metav1.Duration{Duration: 4 * time.Hour}
 	}
@@ -175,8 +182,8 @@ func grovePowerCapWorkerSpec(pcs *grovev1alpha1.PodCliqueSet) grovev1alpha1.PodC
 		spec.Template.HeadlessServiceConfig = &grovev1alpha1.HeadlessServiceConfig{PublishNotReadyAddresses: true}
 	}
 
-	// Scaling groups own rolling settings for their member cliques.
-	workers, grouped := map[string]bool{}, map[string]bool{}
+	// Keep only scaling groups with worker members.
+	workers := map[string]bool{}
 	for _, clique := range spec.Template.Cliques {
 		workers[clique.Name] = dynamo.IsWorkerComponent(clique.Labels[commonconsts.KubeLabelDynamoComponentType])
 	}
@@ -184,7 +191,6 @@ func grovePowerCapWorkerSpec(pcs *grovev1alpha1.PodCliqueSet) grovev1alpha1.PodC
 	for _, group := range spec.Template.PodCliqueScalingGroupConfigs {
 		hasWorker := false
 		for _, name := range group.CliqueNames {
-			grouped[name] = true
 			hasWorker = hasWorker || workers[name]
 		}
 		if !hasWorker {
@@ -196,7 +202,7 @@ func grovePowerCapWorkerSpec(pcs *grovev1alpha1.PodCliqueSet) grovev1alpha1.PodC
 		if group.ScaleConfig != nil && group.ScaleConfig.MinReplicas == nil {
 			group.ScaleConfig.MinReplicas = new(*group.Replicas)
 		}
-		group.RollingUpdate = defaultPowerCapGroveRollingUpdate(group.RollingUpdate, spec.UpdateStrategy.Type, ptr.Deref(group.MinAvailable, 1))
+		group.RollingUpdate = nil
 		groups = append(groups, group)
 	}
 	spec.Template.PodCliqueScalingGroupConfigs = groups
@@ -213,9 +219,7 @@ func grovePowerCapWorkerSpec(pcs *grovev1alpha1.PodCliqueSet) grovev1alpha1.PodC
 		if clique.Spec.ScaleConfig != nil && clique.Spec.ScaleConfig.MinReplicas == nil {
 			clique.Spec.ScaleConfig.MinReplicas = new(clique.Spec.Replicas)
 		}
-		if !grouped[clique.Name] {
-			clique.RollingUpdate = defaultPowerCapGroveRollingUpdate(clique.RollingUpdate, spec.UpdateStrategy.Type, ptr.Deref(clique.Spec.MinAvailable, clique.Spec.Replicas))
-		}
+		clique.RollingUpdate = nil
 		template := &corev1.PodTemplateSpec{Spec: clique.Spec.PodSpec}
 		defaultPowerCapTemplate(template)
 		clique.Spec.PodSpec = template.Spec
@@ -223,27 +227,6 @@ func grovePowerCapWorkerSpec(pcs *grovev1alpha1.PodCliqueSet) grovev1alpha1.PodC
 	}
 	spec.Template.Cliques = cliques
 	return spec
-}
-
-// defaultPowerCapGroveRollingUpdate applies only defaults owned by Grove's pinned webhook.
-func defaultPowerCapGroveRollingUpdate(config *grovev1alpha1.RollingUpdateConfiguration, strategy grovev1alpha1.UpdateStrategyType, minAvailable int32) *grovev1alpha1.RollingUpdateConfiguration {
-	if config != nil && config.MaxUnavailable != nil {
-		return config
-	}
-	var unavailable int32
-	switch strategy {
-	case grovev1alpha1.CoherentStrategy:
-		unavailable = minAvailable
-	case grovev1alpha1.RollingRecreateStrategy:
-		unavailable = 1
-	default:
-		return config
-	}
-	if config == nil {
-		config = &grovev1alpha1.RollingUpdateConfiguration{}
-	}
-	config.MaxUnavailable = new(unavailable)
-	return config
 }
 
 // retainedGrovePowerCaps requires one coherent active worker identity and at least one cap difference.
@@ -265,10 +248,12 @@ func retainedGrovePowerCaps(req groveReconcileRequest, pcs *grovev1alpha1.PodCli
 			if source.ComponentName != component {
 				continue
 			}
-			if source.PodTemplate == nil {
-				return retained, false
+			// Role-template workers have no component template and therefore no explicit cap.
+			var want string
+			var wantPresent bool
+			if source.PodTemplate != nil {
+				want, wantPresent = source.PodTemplate.Annotations[commonconsts.KubeAnnotationGPUPowerLimit]
 			}
-			want, wantPresent := source.PodTemplate.Annotations[commonconsts.KubeAnnotationGPUPowerLimit]
 			old, oldPresent := clique.Annotations[commonconsts.KubeAnnotationGPUPowerLimit]
 			if wantPresent != oldPresent {
 				return retained, false
