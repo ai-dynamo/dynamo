@@ -27,6 +27,9 @@ spec:
         - jsonPath: .status.conditions[?(@.type=="Completed")].status
           name: Completed
           type: string
+        - jsonPath: .status.conditions[?(@.type=="Published")].status
+          name: Published
+          type: string
         - jsonPath: .status.progress.candidates.published
           name: Candidates
           type: integer

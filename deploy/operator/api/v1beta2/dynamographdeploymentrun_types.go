@@ -203,6 +203,7 @@ type DynamoGraphDeploymentRunStatus struct {
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.spec) || self.spec == oldSelf.spec",message="spec is immutable"
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Completed",type=string,JSONPath=`.status.conditions[?(@.type=="Completed")].status`
+// +kubebuilder:printcolumn:name="Published",type=string,JSONPath=`.status.conditions[?(@.type=="Published")].status`
 // +kubebuilder:printcolumn:name="Candidates",type=integer,JSONPath=`.status.progress.candidates.published`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
