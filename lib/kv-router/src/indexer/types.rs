@@ -169,10 +169,11 @@ pub enum WorkerKvQueryResponse {
     },
     /// Events served from the circular buffer with original event IDs. The batch
     /// is recovery-equivalent to replaying the requested `start_event_id` through
-    /// the current buffered tail. If the rank stream contains one or more `Cleared`
-    /// all-domain `Cleared` events, the source may omit events before the latest such
-    /// clear while preserving that clear event and all following events. Domain-scoped
-    /// clears remain ordinary ordered events. `last_event_id` is taken from the same
+    /// the current buffered tail. A source with no independent retained-GPU
+    /// inventory may omit events before its last legacy all-domain clear.
+    /// Otherwise tier clears remain ordinary ordered events: neither a native
+    /// Device clear nor a retained-GPU clear supersedes the other lifetime.
+    /// `last_event_id` is taken from the same
     /// buffer snapshot and should be used as the recovery watermark after applying the
     /// batch.
     Events {

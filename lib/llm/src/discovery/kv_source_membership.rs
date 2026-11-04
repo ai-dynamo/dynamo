@@ -236,8 +236,9 @@ pub enum KvSourceMembershipError {
 /// - Supported multi-node restarts preserve the logical worker/rank key but create a new rank
 ///   publisher and recovery target.
 /// - Independently replacing an engine publisher beneath a surviving Dynamo publisher is
-///   unsupported. A future backend that does so must emit an ordered rank-scoped `Cleared`
-///   barrier before later mutations or recreate the Dynamo publisher with a fresh ID.
+///   unsupported. A future backend must explicitly revoke every affected tier
+///   before later mutations or recreate the Dynamo publisher with a fresh ID.
+///   A native Device clear alone preserves independent retained GPU inventory.
 #[derive(Debug, Clone)]
 pub struct KvSourceMembership<S = KvEventSource> {
     advertisements: HashMap<KvSourceKey, HashMap<PublisherId, S>>,
