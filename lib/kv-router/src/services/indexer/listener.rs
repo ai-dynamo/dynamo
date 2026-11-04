@@ -438,7 +438,9 @@ impl ListenerLoop {
     }
 
     async fn drain_buffered(&mut self) -> Result<(), String> {
-        while let Some(message) = self.live_socket.try_recv_multipart()
+        while let Some(message) = self
+            .live_socket
+            .try_recv_multipart()
             .map_err(|error| format!("ZMQ buffered recv failed: {error}"))?
         {
             self.handle_message(message).await?;
