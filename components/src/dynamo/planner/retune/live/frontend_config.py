@@ -1437,7 +1437,7 @@ def _worker_router_mode(
     hidden_flag = _opaque_flag_position(remainder, value_options=_WORKER_VALUE_OPTIONS)
     if hidden_flag is None:
         return None
-    reference = _opaque_reference(hidden_flag)
+    reference = _opaque_reference(hidden_flag) or ""
     note = _env_from_note(reference, opaque, env_from_prefixes)
     if hidden_flag.startswith("-"):
         return (
