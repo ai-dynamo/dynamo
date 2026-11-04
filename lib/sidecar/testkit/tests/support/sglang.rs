@@ -6,6 +6,9 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use dynamo_backend_common::{BackendError, DisaggregationMode, PreprocessedRequest};
+use dynamo_llm::local_model::runtime_config::{
+    TOKEN_BUDGET_RUNTIME_KEY, TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY, TokenBudget,
+};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::protocols::common::preprocessor::RoutingHints;
 use dynamo_mocker::common::protocols::EngineType;
@@ -25,8 +28,8 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
 use super::{
-    FixtureConfig, GenerateOpening, HandoffFixture, ProcessFixture, SidecarFixture, WireFixture,
-    fast_engine_args, sidecar_command, wait_scheduler_idle,
+    DiscoveryFixture, FixtureConfig, GenerateOpening, HandoffFixture, ProcessFixture,
+    SidecarFixture, WireFixture, fast_engine_args, sidecar_command, wait_scheduler_idle,
 };
 
 pub struct Fixture {
@@ -231,6 +234,7 @@ impl WireFixture for Fixture {
             .stop_token_ids
             .iter()
             .chain(&request.stop_conditions.stop_token_ids_hidden)
+            .chain(&request.stop_conditions.stop_token_ids_visible)
             .flatten()
             .copied()
             .collect::<std::collections::BTreeSet<_>>();
@@ -512,7 +516,7 @@ impl Protocol for Adapter {
     }
 }
 
-impl ProcessFixture for Fixture {
+impl DiscoveryFixture for Fixture {
     fn set_served_model_name(&self, name: &str) {
         self.override_discovery(
             Value::Null,
@@ -537,12 +541,14 @@ impl ProcessFixture for Fixture {
     fn assert_unhealthy_startup(logs: &str) {
         assert!(logs.contains("did not become healthy"), "{logs}");
     }
+}
 
+impl ProcessFixture for Fixture {
     fn endpoint(&self) -> String {
         self.server.endpoint()
     }
 
-    fn command() -> Command {
+    fn command(_model: &str) -> Command {
         let mut command = sidecar_command("dynamo-sglang-sidecar", "DYNAMO_SGLANG_SIDECAR");
         command.env("SGLANG_DISAGGREGATION_BOOTSTRAP_HOST", "127.0.0.1");
         command
@@ -572,10 +578,27 @@ impl ProcessFixture for Fixture {
         assert!(card.runtime_config.tool_call_parser.is_none());
         assert!(card.runtime_config.reasoning_parser.is_none());
         assert_eq!(card.effective_context_length(), 32_768);
+        assert_eq!(
+            card.runtime_config
+                .get_engine_specific::<TokenBudget>(TOKEN_BUDGET_RUNTIME_KEY)
+                .unwrap(),
+            Some(TokenBudget {
+                combined_limit: 32_768,
+                reject_prompt_overflow: true,
+                reject_total_overflow: true,
+            })
+        );
+        assert!(
+            !card
+                .runtime_config
+                .runtime_data
+                .contains_key(TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY)
+        );
     }
 }
 
 impl HandoffFixture for Fixture {
+    const KV_BLOCK_SIZE: u32 = 4;
     const HAS_BOOTSTRAP: bool = true;
 
     fn assert_handoff(
@@ -754,8 +777,9 @@ pub mod http {
         let mut body = vec![0; length];
         reader.read_exact(&mut body).await?;
         let request: Value = serde_json::from_slice(&body)?;
+        let native_id = request["rid"].as_str().unwrap();
         if is_abort {
-            let id = Adapter::request_id(&request);
+            let id = native_id;
             assert_eq!(request, json!({"rid": id, "abort_all": false}));
             aborted.send_modify(|ids| ids.push(id.to_string()));
             reader
@@ -771,22 +795,25 @@ pub mod http {
             received = reader.read(&mut eof) => {
                 assert_eq!(received?, 0, "unexpected bytes after /generate body");
                 assert!(
-                    has_terminal || aborted.borrow().iter().any(|id| id == Adapter::request_id(&request)),
+                    has_terminal || aborted.borrow().iter().any(|id| id == native_id),
                     "unfinished generation disconnected before its abort request"
                 );
             }
             result = async {
                 let opened = control.open(&request).await?;
                 writer.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").await?;
-                let responses = if let Some(gate) = gate {
+                let mut responses = if let Some(gate) = gate {
                     let empty = json!({"output_ids": [], "text": "", "meta_info": {"finish_reason": null}});
                     writer.write_all(format!("data: {empty}\n\n").as_bytes()).await?;
                     gate.empty_sent.send_replace(true);
                     gate.release.notified().await;
                     gate.responses.clone()
                 } else {
-                    responses(Adapter::request_id(&request)).into()
+                    responses(native_id).into()
                 };
+                for response in &mut responses {
+                    response["meta_info"]["id"] = json!(native_id);
+                }
                 let source = futures::stream::iter(responses.into_iter().map(Ok));
                 let mut stream = opened.wrap(Box::pin(source));
                 while let Some(response) = stream.next().await {
@@ -807,6 +834,15 @@ pub mod http {
         ]
     }
 
+    pub fn logical_request_id(native_id: &str) -> &str {
+        let (id, attempt) = native_id
+            .rsplit_once('-')
+            .expect("dispatch-specific engine ID");
+        assert_eq!(attempt.len(), 8);
+        assert!(attempt.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        id
+    }
+
     pub struct Adapter;
 
     impl Protocol for Adapter {
@@ -815,7 +851,7 @@ pub mod http {
         type Error = io::Error;
 
         fn request_id(request: &Value) -> &str {
-            request["rid"].as_str().unwrap()
+            logical_request_id(request["rid"].as_str().unwrap())
         }
 
         fn record_tokens(response: &Value, tokens: &mut Vec<u32>) -> bool {

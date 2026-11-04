@@ -52,11 +52,26 @@ struct KeepAllFilter;
 
 impl WorkerFilter for KeepAllFilter {
     fn keep(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         _candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         Ok(true)
+    }
+}
+
+/// Reads every worker's static info and keeps the workers that report KV blocks.
+struct CapacityFilter;
+
+impl WorkerFilter for CapacityFilter {
+    fn keep(
+        &self,
+        _context: &WorkerSelectionContext<'_>,
+        candidate: WorkerCandidate<'_>,
+    ) -> Result<bool, WorkerSelectionPolicyError> {
+        let info = candidate.info();
+        Ok(info.total_kv_blocks().is_some_and(|blocks| blocks > 0)
+            && info.max_num_batched_tokens() != Some(0))
     }
 }
 
@@ -68,7 +83,7 @@ impl WorkerScorer for BenchScorer {
     }
 
     fn score(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -102,7 +117,7 @@ impl WorkerScorer for IgnoringPreferenceScorer {
     }
 
     fn score(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -129,7 +144,7 @@ struct LowestCostPicker;
 
 impl WorkerPicker for LowestCostPicker {
     fn pick(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -286,9 +301,16 @@ fn custom_worker_selection(c: &mut Criterion) {
         Box::new(LowestCostPicker),
     );
     let custom_keep_all_filter = WorkerSelectionPolicy::new_with_filters(
-        config,
+        config.clone(),
         "prefill",
         vec![Box::new(KeepAllFilter)],
+        vec![Box::new(BenchScorer)],
+        Box::new(LowestCostPicker),
+    );
+    let custom_capacity_filter = WorkerSelectionPolicy::new_with_filters(
+        config,
+        "prefill",
+        vec![Box::new(CapacityFilter)],
         vec![Box::new(BenchScorer)],
         Box::new(LowestCostPicker),
     );
@@ -316,6 +338,20 @@ fn custom_worker_selection(c: &mut Criterion) {
         b.iter(|| {
             black_box(
                 custom_keep_all_filter
+                    .select_worker(WorkerSelectionInput::configured(
+                        black_box(&workers),
+                        black_box(&request),
+                        request.eligibility(),
+                        black_box(16),
+                    ))
+                    .unwrap(),
+            )
+        })
+    });
+    group.bench_function("custom_capacity_filter", |b| {
+        b.iter(|| {
+            black_box(
+                custom_capacity_filter
                     .select_worker(WorkerSelectionInput::configured(
                         black_box(&workers),
                         black_box(&request),

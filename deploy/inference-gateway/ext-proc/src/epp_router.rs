@@ -40,11 +40,10 @@ use crate::picker::{
     resolve_cache_namespace,
 };
 use crate::pod_discovery::PodDiscovery;
+use crate::render_client::RenderClient;
 use crate::render_http::RenderError;
 use crate::selector::{SelectRequest, Selector};
-use crate::sglang_renderer_client::SglangRendererClient;
 use crate::topology_adapter::{RegistrationDefaults, TopologyAdapter};
-use crate::vllm_render_client::VllmRenderClient;
 
 /// Resolve the request's scheduling policy class from the Dynamo metadata
 /// headers. Goes through the frontend's metadata extractor (rather than a
@@ -59,24 +58,10 @@ pub(crate) fn requested_policy_class(
     Ok(metadata.get("policy-class").cloned())
 }
 
-/// Protocol-dispatched render client for the standalone EPP.
-enum RenderClient {
-    Vllm(VllmRenderClient),
-    Sglang(SglangRendererClient),
-}
-
-impl RenderClient {
-    async fn render_chat(&self, body: bytes::Bytes) -> Result<Vec<u32>, RenderError> {
-        match self {
-            Self::Vllm(c) => c.render_chat(body).await,
-            Self::Sglang(c) => c.render_chat(body).await,
-        }
-    }
-}
-
 /// Standalone endpoint picker backed by the standalone selection service.
 pub struct EppRouter {
     renderer: RenderClient,
+    renderer_protocol: RendererProtocol,
     reflector: Arc<PodDiscovery>,
     selector: Arc<Selector>,
     // Kept alive for the lifetime of the router; the reconcile loop runs on it.
@@ -99,6 +84,7 @@ struct TokenizeResult {
     strict_priority: Option<u32>,
     cache_namespace: Option<String>,
     expected_output_tokens: Option<u32>,
+    strip_nvext: bool,
 }
 
 impl EppRouter {
@@ -108,20 +94,12 @@ impl EppRouter {
         policy_registry: WorkerSelectionPolicyRegistry,
     ) -> Result<Self> {
         let selector = Arc::new(Selector::new(&cfg, policy_registry).await?);
-        let timeout = Duration::from_millis(cfg.tokenization_timeout_ms);
-        let max_response_bytes = cfg.tokenizer_max_response_bytes;
-        let renderer = match cfg.renderer_protocol {
-            RendererProtocol::VllmRender => RenderClient::Vllm(VllmRenderClient::new(
-                &cfg.tokenizer_service_url,
-                timeout,
-                max_response_bytes,
-            )?),
-            RendererProtocol::SglangRenderer => RenderClient::Sglang(SglangRendererClient::new(
-                &cfg.tokenizer_service_url,
-                timeout,
-                max_response_bytes,
-            )?),
-        };
+        let renderer = RenderClient::new(
+            cfg.renderer_protocol,
+            &cfg.tokenizer_service_url,
+            Duration::from_millis(cfg.tokenization_timeout_ms),
+            cfg.tokenizer_max_response_bytes,
+        )?;
         let (reflector, reflector_ready) = PodDiscovery::spawn(&cfg).await?;
         let reflector = Arc::new(reflector);
         let defaults = RegistrationDefaults::from_config(&cfg);
@@ -133,6 +111,7 @@ impl EppRouter {
         // ready immediately and returns 503 per-request until capacity appears.
         Ok(Self {
             renderer,
+            renderer_protocol: cfg.renderer_protocol,
             reflector,
             selector,
             _adapter: adapter,
@@ -160,26 +139,25 @@ impl EppRouter {
         // a valid chat request is caught by the renderer below.
         let hints: RoutingHints =
             serde_json::from_slice(&request_body).map_err(TokenizeError::InvalidBody)?;
+        // An `extra="forbid"` engine rejects the key even when it is `null`.
+        let strip_nvext = hints.nvext.is_some();
+        let nvext = hints.nvext.as_ref().and_then(|n| n.as_ref());
         let priority_header = first_header(headers, HEADER_REQUEST_PRIORITY);
         let strict_priority_header = first_header(headers, HEADER_REQUEST_STRICT_PRIORITY);
         let resolved = resolve_request_priority(
-            hints.nvext.as_ref().and_then(|n| n.agent_hints.as_ref()),
+            nvext.and_then(|n| n.agent_hints.as_ref()),
             priority_header,
             strict_priority_header,
         );
-        let expected_output_tokens = hints
-            .nvext
-            .as_ref()
+        let expected_output_tokens = nvext
             .and_then(|n| n.agent_hints.as_ref())
             .and_then(|h| h.osl);
         let cache_namespace = resolve_cache_namespace(
             headers,
-            hints
-                .nvext
-                .as_ref()
-                .and_then(|nvext| nvext.cache_namespace.as_deref()),
+            nvext.and_then(|n| n.cache_namespace.as_deref()),
             hints.cache_namespace.as_deref(),
         );
+        check_cache_salt_support(self.renderer_protocol, cache_namespace.as_deref())?;
         // Moves the `Bytes` into reqwest (zero-copy) rather than copying.
         let token_ids = self
             .renderer
@@ -192,6 +170,7 @@ impl EppRouter {
             strict_priority: resolved.strict_priority,
             expected_output_tokens,
             cache_namespace,
+            strip_nvext,
         })
     }
 
@@ -237,11 +216,20 @@ pub(crate) fn endpoint_in_subset(
 /// Unknown fields are ignored (no `deny_unknown_fields`).
 #[derive(Deserialize)]
 struct RoutingHints {
-    #[serde(default)]
-    nvext: Option<RoutingNvExt>,
+    #[serde(default, deserialize_with = "present")]
+    nvext: Option<Option<RoutingNvExt>>,
     /// Native vLLM top-level `cache_salt`.
     #[serde(default, rename = "cache_salt")]
     cache_namespace: Option<String>,
+}
+
+/// Distinguishes a missing key (`None`) from an explicit `null` (`Some(None)`).
+fn present<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -346,6 +334,7 @@ impl EndpointPicker for EppRouter {
             strict_priority,
             cache_namespace,
             expected_output_tokens,
+            strip_nvext,
         } = self
             .tokenize(req.body.clone(), &req.headers)
             .await
@@ -414,8 +403,9 @@ impl EndpointPicker for EppRouter {
             // Worker re-tokenizes the forwarded request (llm-d parity); no inject.
             token_ids: None,
             cache_namespace,
-            // Native vLLM has no Dynamo handler to tag the salt; the EPP does.
-            cache_salt_forwarding: CacheSaltForwarding::NativeVllm,
+            // Raw engines have no Dynamo handler to tag the salt; the EPP does.
+            cache_salt_forwarding: CacheSaltForwarding::RawEngine,
+            strip_nvext,
             // Booking id for the server's lifecycle callbacks (no shared map).
             reservation_id: Some(reservation_id),
             ..Default::default()
@@ -492,11 +482,31 @@ impl<R: ReservationReleaser> Drop for ReservationGuard<R> {
     }
 }
 
+/// Client-visible reason a salted request is refused on a TensorRT-LLM pool.
+pub const CACHE_SALT_UNSUPPORTED_MESSAGE: &str = "cache_salt is not supported with TensorRT-LLM \
+     workers: TensorRT-LLM KV events carry no salt, so salted requests cannot be routed; remove \
+     x-tenant-id, nvext.cache_salt, and cache_salt";
+
+/// TensorRT-LLM's streaming KV events carry no cache salt, so the index could
+/// neither credit the salted request nor keep its blocks from being credited to
+/// unsalted ones. Refuse up front instead of routing blind.
+fn check_cache_salt_support(
+    protocol: RendererProtocol,
+    cache_namespace: Option<&str>,
+) -> Result<(), TokenizeError> {
+    match (protocol, cache_namespace) {
+        (RendererProtocol::TrtllmRender, Some(_)) => Err(TokenizeError::UnsupportedCacheSalt),
+        _ => Ok(()),
+    }
+}
+
 /// Why tokenizing a request for routing failed. Kept typed so the picker can map
 /// each cause to the correct HTTP status instead of collapsing everything to 400.
 enum TokenizeError {
     /// The request body could not be parsed — a genuine client (400) error.
     InvalidBody(serde_json::Error),
+    /// The request carries a cache salt the configured engine cannot route (400).
+    UnsupportedCacheSalt,
     /// The renderer call failed; the specific variant decides the status.
     Render(RenderError),
 }
@@ -510,6 +520,9 @@ impl TokenizeError {
             // internals, so it is safe to surface as a 400.
             TokenizeError::InvalidBody(e) => {
                 PickError::InvalidRequest(format!("invalid request body: {e}"))
+            }
+            TokenizeError::UnsupportedCacheSalt => {
+                PickError::InvalidRequest(CACHE_SALT_UNSUPPORTED_MESSAGE.to_string())
             }
             TokenizeError::Render(e) => {
                 tracing::warn!(request_id, error = %e, "Tokenization render failed");
@@ -641,6 +654,47 @@ mod tests {
             map(StatusCode::SERVICE_UNAVAILABLE),
             PickError::TokenizerUnavailable
         ));
+    }
+
+    #[test]
+    fn salted_requests_are_refused_only_on_trtllm_pools() {
+        assert!(matches!(
+            check_cache_salt_support(RendererProtocol::TrtllmRender, Some("tenant-a")),
+            Err(TokenizeError::UnsupportedCacheSalt)
+        ));
+        assert!(check_cache_salt_support(RendererProtocol::TrtllmRender, None).is_ok());
+        assert!(check_cache_salt_support(RendererProtocol::VllmRender, Some("tenant-a")).is_ok());
+        assert!(
+            check_cache_salt_support(RendererProtocol::SglangRenderer, Some("tenant-a")).is_ok()
+        );
+
+        // Surfaces as a client 400 carrying the reason.
+        match TokenizeError::UnsupportedCacheSalt.into_pick_error("req-1") {
+            PickError::InvalidRequest(message) => {
+                assert_eq!(message, CACHE_SALT_UNSUPPORTED_MESSAGE)
+            }
+            other => panic!("expected InvalidRequest, got {other}"),
+        }
+    }
+
+    #[test]
+    fn routing_hints_distinguish_absent_null_and_object_nvext() {
+        let parse = |body: &str| serde_json::from_str::<RoutingHints>(body).unwrap();
+
+        let hints = parse(r#"{"model":"m","messages":[]}"#);
+        assert!(hints.nvext.is_none());
+
+        let hints = parse(r#"{"model":"m","nvext":null}"#);
+        assert!(matches!(hints.nvext, Some(None)));
+
+        let hints = parse(r#"{"model":"m","nvext":{"agent_hints":{"osl":32},"cache_salt":"t"}}"#);
+        let nvext = hints
+            .nvext
+            .as_ref()
+            .and_then(|n| n.as_ref())
+            .expect("object");
+        assert_eq!(nvext.agent_hints.as_ref().and_then(|h| h.osl), Some(32));
+        assert_eq!(nvext.cache_namespace.as_deref(), Some("t"));
     }
 
     #[test]

@@ -113,7 +113,7 @@ func TestLPUConfigVolumePreservesAuthoredSource(t *testing.T) {
 	}{
 		{name: "generated default"},
 		{name: "authored ConfigMap", source: &corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-			LocalObjectReference: corev1.LocalObjectReference{Name: "other-config"},
+			Name: "other-config",
 		}}},
 		{name: "other volume source", source: &corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 	} {
@@ -121,7 +121,7 @@ func TestLPUConfigVolumePreservesAuthoredSource(t *testing.T) {
 			t.Log("Keep an authored runtime mount and unrelated storage")
 			spec := corev1.PodSpec{
 				Containers: []corev1.Container{{Name: "main", VolumeMounts: []corev1.VolumeMount{{Name: "config", MountPath: "/runtime/partitions", ReadOnly: true}}}},
-				Volumes:    []corev1.Volume{{Name: "storage", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
+				Volumes:    []corev1.Volume{{Name: "storage", EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 			}
 			if test.source != nil {
 				spec.Volumes = append(spec.Volumes, corev1.Volume{Name: lpuConfigVolumeName, VolumeSource: *test.source})
@@ -130,9 +130,9 @@ func TestLPUConfigVolumePreservesAuthoredSource(t *testing.T) {
 			if test.source == nil {
 				want.Volumes = append(want.Volumes, corev1.Volume{
 					Name: lpuConfigVolumeName,
-					VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-						LocalObjectReference: corev1.LocalObjectReference{Name: "generated-config"},
-					}},
+					ConfigMap: &corev1.ConfigMapVolumeSource{
+						Name: "generated-config",
+					},
 				})
 			}
 

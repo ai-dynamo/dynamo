@@ -126,7 +126,7 @@ func normalizeV1Beta1JSON(raw []byte, rootType reflect.Type) ([]byte, error) {
 	return json.Marshal(v)
 }
 
-var runtimeObjectType = reflect.TypeOf((*k8sruntime.Object)(nil)).Elem()
+var runtimeObjectType = reflect.TypeFor[k8sruntime.Object]()
 
 // ensureRuntimeObjectMetadata restores the top-level metadata envelope after
 // empty-struct normalization. Kubernetes API objects must return metadata from
@@ -242,8 +242,7 @@ func jsonFieldsOf(t reflect.Type) map[string]reflect.StructField {
 
 func collectFields(t reflect.Type, out map[string]reflect.StructField) {
 	var anonymous []reflect.StructField
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
+	for f := range t.Fields() {
 		if !f.IsExported() {
 			continue
 		}
@@ -252,8 +251,8 @@ func collectFields(t reflect.Type, out map[string]reflect.StructField) {
 			continue
 		}
 		name := tag
-		if comma := strings.IndexByte(tag, ','); comma >= 0 {
-			name = tag[:comma]
+		if before, _, ok := strings.Cut(tag, ","); ok {
+			name = before
 		}
 		if name == "" && f.Anonymous {
 			ft := f.Type
@@ -309,7 +308,7 @@ func (d DynamoGraphDeployment) MarshalJSON() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return normalizeV1Beta1JSON(raw, reflect.TypeOf(DynamoGraphDeployment{}))
+	return normalizeV1Beta1JSON(raw, reflect.TypeFor[DynamoGraphDeployment]())
 }
 
 type dynamoComponentDeploymentForMarshal DynamoComponentDeployment
@@ -321,7 +320,7 @@ func (d DynamoComponentDeployment) MarshalJSON() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return normalizeV1Beta1JSON(raw, reflect.TypeOf(DynamoComponentDeployment{}))
+	return normalizeV1Beta1JSON(raw, reflect.TypeFor[DynamoComponentDeployment]())
 }
 
 type dynamoGraphDeploymentRequestForMarshal DynamoGraphDeploymentRequest
@@ -337,5 +336,5 @@ func (d DynamoGraphDeploymentRequest) MarshalJSON() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return normalizeV1Beta1JSON(raw, reflect.TypeOf(DynamoGraphDeploymentRequest{}))
+	return normalizeV1Beta1JSON(raw, reflect.TypeFor[DynamoGraphDeploymentRequest]())
 }

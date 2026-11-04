@@ -24,6 +24,7 @@ use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::extensions::{NvExt, NvExtProvider, routing_constraints_to_kv};
 use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
+use dynamo_llm::worker_type::WorkerType;
 use dynamo_protocols::types::Prompt;
 use dynamo_runtime::discovery::{
     DiscoveryInstance, DiscoveryQuery, hash_container_name, hash_pod_name,
@@ -830,10 +831,7 @@ async fn fetch_preprocessor_from_discovery(
             let actual_namespace = namespace.clone();
             match instance.deserialize_model::<ModelDeploymentCard>() {
                 Ok(card) => {
-                    if card.model_type.supports_prefill()
-                        && !card.model_type.supports_chat()
-                        && !card.model_type.supports_completions()
-                    {
+                    if card.effective_worker_type() == WorkerType::Prefill {
                         continue;
                     }
                     model_card = Some((card, actual_namespace));
@@ -1282,10 +1280,7 @@ fn spawn_prefill_discovery_watcher(
                             Err(_) => continue,
                         };
 
-                        if !card.model_type.supports_prefill()
-                            || card.model_type.supports_chat()
-                            || card.model_type.supports_completions()
-                        {
+                        if card.effective_worker_type() != WorkerType::Prefill {
                             continue;
                         }
 
@@ -1628,6 +1623,7 @@ impl EndpointPicker for Router {
             cache_namespace,
             // The Dynamo runtime encodes salt itself so leave the forwarded body's salt alone.
             cache_salt_forwarding: CacheSaltForwarding::Preserve,
+            strip_nvext: false,
             reservation_id: Some(reservation_id),
         })
     }

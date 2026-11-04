@@ -3,7 +3,8 @@
 
 [package]
 name = "kvbm-logical"
-version = "1.6.0"
+version = "1.7.0"
+description = "Logical block lifecycle management for KVBM"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

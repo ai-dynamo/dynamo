@@ -100,6 +100,8 @@ func buildFromGbuildDeploymentV1(buildRef string, manifest deploymentcapnpv1.Dep
 		return nil, err
 	}
 
+	checkpoint, checkpointErr := checkpointFromDeploymentV1(manifest)
+
 	build := &Build{
 		path:                      buildRef,
 		selectedPropSyncChains:    chains,
@@ -107,6 +109,8 @@ func buildFromGbuildDeploymentV1(buildRef string, manifest deploymentcapnpv1.Dep
 		supportsCPUEmbeddings:     program.SupportsCpuEmbeddings(),
 		ioFPGACount:               ioFPGACount,
 		ioFanoutFactor:            ioFanoutFactor,
+		checkpoint:                checkpoint,
+		checkpointErr:             checkpointErr,
 	}
 
 	// Complete the normalized build with scheduler-facing LPU artifacts.

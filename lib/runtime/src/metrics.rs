@@ -31,8 +31,8 @@ use std::collections::HashMap;
 
 // Import commonly used items to avoid verbose prefixes
 use prometheus_names::{
-    build_component_metric_name, labels, name_prefix, sanitize_prometheus_label,
-    sanitize_prometheus_name, work_handler,
+    build_metric_name, labels, name_prefix, sanitize_prometheus_label, sanitize_prometheus_name,
+    work_handler,
 };
 
 // Pipeline imports for endpoint creation
@@ -246,6 +246,50 @@ pub fn create_metric<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
     buckets: Option<Vec<f64>>,
     const_labels: Option<&[&str]>,
 ) -> anyhow::Result<T> {
+    create_metric_with_options(
+        hierarchy,
+        MetricOptions::default(),
+        metric_name,
+        metric_desc,
+        labels,
+        buckets,
+        const_labels,
+    )
+}
+
+/// How [`create_metric_with_options`] names and registers a metric. The
+/// default is what [`create_metric`] does.
+#[derive(Clone, Copy, Debug)]
+pub struct MetricOptions {
+    /// The metric is named `{prefix}_{metric_name}`. Only this prefix is ever
+    /// used: none is inferred from the metric name.
+    pub prefix: &'static str,
+    /// When the hierarchy's registry refuses the metric, log a warning and
+    /// return it unregistered, still usable but not exposed, instead of
+    /// failing.
+    pub warn_on_registration_failure: bool,
+}
+
+impl Default for MetricOptions {
+    fn default() -> Self {
+        Self {
+            prefix: name_prefix::COMPONENT,
+            warn_on_registration_failure: false,
+        }
+    }
+}
+
+/// [`create_metric`] under explicit [`MetricOptions`]: the same validation,
+/// auto-labels from the hierarchy, construction and registration.
+pub fn create_metric_with_options<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
+    hierarchy: &H,
+    options: MetricOptions,
+    metric_name: &str,
+    metric_desc: &str,
+    labels: &[(&str, &str)],
+    buckets: Option<Vec<f64>>,
+    const_labels: Option<&[&str]>,
+) -> anyhow::Result<T> {
     // Validate that user-provided labels don't have duplicate keys
     validate_no_duplicate_label_keys(labels)?;
     // Note: stored labels functionality has been removed
@@ -258,7 +302,7 @@ pub fn create_metric<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
         parent_hierarchies.iter().map(|p| p.basename()).collect();
     hierarchy_names.push(basename.clone());
 
-    let metric_name = build_component_metric_name(metric_name);
+    let metric_name = build_metric_name(options.prefix, metric_name);
 
     // Build updated_labels: auto-labels first, then `labels` + stored labels
     let mut updated_labels: Vec<(String, String)> = Vec::new();
@@ -450,7 +494,12 @@ pub fn create_metric<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
     };
 
     let collector: Box<dyn prometheus::core::Collector> = Box::new(prometheus_metric.clone());
-    hierarchy.get_metrics_registry().add_metric(collector)?;
+    let registry = hierarchy.get_metrics_registry();
+    if options.warn_on_registration_failure {
+        registry.add_metric_or_warn(collector, &metric_name);
+    } else {
+        registry.add_metric(collector)?;
+    }
 
     Ok(prometheus_metric)
 }
@@ -1310,6 +1359,7 @@ mod test_helpers {
 
 #[cfg(test)]
 mod test_metricsregistry_units {
+    use super::prometheus_names::build_component_metric_name;
     use super::*;
 
     #[test]
@@ -1468,6 +1518,163 @@ mod test_metricsregistry_units {
             let results = registry.execute_update_callbacks();
             assert_eq!(results.len(), 0);
         }
+    }
+}
+
+#[cfg(test)]
+mod test_create_metric_with_options {
+    use super::*;
+    use prometheus::core::Collector;
+
+    /// A hierarchy level without a runtime, with a registry of its own.
+    struct Level {
+        name: &'static str,
+        parents: Vec<Level>,
+        registry: MetricsRegistry,
+        connection_id: Option<u64>,
+    }
+
+    impl Level {
+        fn new(name: &'static str, parents: Vec<Level>, connection_id: Option<u64>) -> Self {
+            Self {
+                name,
+                parents,
+                registry: MetricsRegistry::new(),
+                connection_id,
+            }
+        }
+
+        /// Component `comp` of namespace `ns-1`, on connection `0x1a`.
+        fn component() -> Self {
+            let root = Self::new("", Vec::new(), None);
+            let namespace = Self::new("ns-1", Vec::new(), None);
+            Self::new("comp", vec![root, namespace], Some(0x1a))
+        }
+    }
+
+    impl MetricsHierarchy for Level {
+        fn basename(&self) -> String {
+            self.name.to_string()
+        }
+
+        fn parent_hierarchies(&self) -> Vec<&dyn MetricsHierarchy> {
+            self.parents
+                .iter()
+                .map(|parent| parent as &dyn MetricsHierarchy)
+                .collect()
+        }
+
+        fn get_metrics_registry(&self) -> &MetricsRegistry {
+            &self.registry
+        }
+
+        fn connection_id(&self) -> Option<u64> {
+            self.connection_id
+        }
+    }
+
+    const CUSTOM: MetricOptions = MetricOptions {
+        prefix: "dynamo_custom",
+        warn_on_registration_failure: false,
+    };
+
+    /// A metric's name and its constant labels, as sorted `name=value` pairs.
+    fn described(metric: &impl Collector) -> (String, Vec<String>) {
+        let desc = metric.desc()[0];
+        let labels = desc
+            .const_label_pairs
+            .iter()
+            .map(|pair| format!("{}={}", pair.name(), pair.value()))
+            .collect();
+        (desc.fq_name.clone(), labels)
+    }
+
+    /// A prefix applies only when passed explicitly, and a metric named under
+    /// one carries the same hierarchy labels as one named by default.
+    #[test]
+    fn an_explicit_prefix_names_the_metric_and_keeps_the_hierarchy_labels() {
+        let component = Level::component();
+        let custom: prometheus::IntCounterVec = create_metric_with_options(
+            &component,
+            CUSTOM,
+            "requests_total",
+            "help",
+            &[],
+            None,
+            Some(&["dp_rank"]),
+        )
+        .unwrap();
+        let default = component
+            .metrics()
+            .create_intcountervec("requests_total", "help", &["dp_rank"], &[])
+            .unwrap();
+        // A name that merely looks prefixed is still named by default.
+        let lookalike: prometheus::IntCounter =
+            create_metric(&component, "dynamo_custom_total", "help", &[], None, None).unwrap();
+
+        let (name, labels) = described(&custom);
+        assert_eq!(name, "dynamo_custom_requests_total");
+        assert_eq!(
+            labels,
+            [
+                "dynamo_component=comp",
+                "dynamo_namespace=ns_1",
+                "worker_id=1a"
+            ]
+        );
+        assert_eq!(
+            described(&default),
+            ("dynamo_component_requests_total".to_string(), labels)
+        );
+        assert_eq!(
+            described(&lookalike).0,
+            "dynamo_component_dynamo_custom_total"
+        );
+    }
+
+    /// Explicit options keep every label check, and choose what a registry's
+    /// refusal does: fail, or keep the metric unregistered with a warning.
+    #[test]
+    fn explicit_options_keep_validation_and_choose_how_a_refusal_ends() {
+        let component = Level::component();
+        let gauge = |options, labels: &[(&str, &str)], label_names: &[&str]| {
+            create_metric_with_options::<prometheus::IntGaugeVec, _>(
+                &component,
+                options,
+                "depth",
+                "help",
+                labels,
+                None,
+                Some(label_names),
+            )
+        };
+        assert!(gauge(CUSTOM, &[("worker_id", "7")], &["dp_rank"]).is_err());
+        assert!(gauge(CUSTOM, &[], &["dynamo_namespace"]).is_err());
+        assert!(gauge(CUSTOM, &[("a", "1"), ("a", "2")], &["dp_rank"]).is_err());
+
+        let first = gauge(CUSTOM, &[], &["dp_rank"]).unwrap();
+        assert!(gauge(CUSTOM, &[], &["dp_rank"]).is_err());
+        let warn = MetricOptions {
+            warn_on_registration_failure: true,
+            ..CUSTOM
+        };
+        let refused = gauge(warn, &[], &["dp_rank"]).unwrap();
+        first.with_label_values(&["0"]).set(3);
+        refused.with_label_values(&["0"]).set(5);
+
+        // The registry exposes only the first; the refused one still counts.
+        let exposed = component.registry.prometheus_expfmt_combined().unwrap();
+        let samples: Vec<&str> = exposed
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .collect();
+        assert_eq!(
+            samples,
+            [
+                r#"dynamo_custom_depth{dp_rank="0",dynamo_component="comp",dynamo_namespace="ns_1",worker_id="1a"} 3"#
+            ]
+        );
+        assert_eq!(refused.with_label_values(&["0"]).get(), 5);
     }
 }
 

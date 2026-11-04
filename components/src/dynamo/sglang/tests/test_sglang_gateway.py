@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -78,6 +79,42 @@ def test_decode_gateway_parent_freezes_gc_before_children(
         if enabled
         else ["children", "shutdown"]
     )
+
+
+@pytest.mark.parametrize(
+    ("is_gateway_child", "child_index", "engine_freezes", "local_events"),
+    [
+        (False, 0, 1, []),
+        (True, 0, 1, []),
+        (True, 1, 0, ["collect", "freeze"]),
+    ],
+)
+def test_worker_gc_freeze_only_reaches_shared_engine_once(
+    monkeypatch, is_gateway_child, child_index, engine_freezes, local_events
+):
+    from dynamo.sglang import init_llm
+
+    freeze_engine = AsyncMock()
+    engine = SimpleNamespace(tokenizer_manager=SimpleNamespace(freeze_gc=freeze_engine))
+    actual_local_events = []
+    monkeypatch.setattr(init_llm, "gateway_child_index", lambda: child_index)
+    monkeypatch.setattr(
+        init_llm.gc,
+        "collect",
+        lambda: actual_local_events.append("collect") or 0,
+    )
+    monkeypatch.setattr(
+        init_llm.gc, "freeze", lambda: actual_local_events.append("freeze")
+    )
+
+    asyncio.run(
+        init_llm._freeze_worker_gc_after_init(
+            True, engine, is_gateway_child=is_gateway_child
+        )
+    )
+
+    assert freeze_engine.await_count == engine_freezes
+    assert actual_local_events == local_events
 
 
 def test_effective_count_from_either_flag(not_a_child):

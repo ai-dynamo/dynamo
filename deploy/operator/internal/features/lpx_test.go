@@ -47,13 +47,13 @@ func TestResolveLPX(t *testing.T) {
 				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(status)
-				var response any = metav1.Status{TypeMeta: metav1.TypeMeta{Kind: "Status", APIVersion: "v1"}, Status: metav1.StatusFailure, Code: int32(status), Message: http.StatusText(status)}
+				var response any = metav1.Status{Kind: "Status", APIVersion: "v1", Status: metav1.StatusFailure, Code: int32(status), Message: http.StatusText(status)}
 				if status == http.StatusOK {
 					resources := []metav1.APIResource{}
 					if resource != "" {
 						resources = append(resources, metav1.APIResource{Name: resource})
 					}
-					response = metav1.APIResourceList{TypeMeta: metav1.TypeMeta{Kind: "APIResourceList", APIVersion: "v1"}, GroupVersion: strings.TrimPrefix(r.URL.Path, "/apis/"), APIResources: resources}
+					response = metav1.APIResourceList{Kind: "APIResourceList", APIVersion: "v1", GroupVersion: strings.TrimPrefix(r.URL.Path, "/apis/"), APIResources: resources}
 				}
 				if err := json.NewEncoder(w).Encode(response); err != nil {
 					t.Errorf("write discovery response: %v", err)
