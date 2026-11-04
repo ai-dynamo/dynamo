@@ -225,6 +225,16 @@ def _validate_benchmark_rank_payload(data: dict, path: Path) -> str:
     status = data.get("status", "complete" if data.get("valid") is True else "failed")
 
     def invalid(reason: str) -> RuntimeError:
+        skipped_entries = data.get("skipped_points")
+        if isinstance(skipped_entries, list) and any(
+            isinstance(entry, dict)
+            and entry.get("reason") == "fake_prefix_cache_validation_failed"
+            for entry in skipped_entries
+        ):
+            reason += (
+                " (synthetic prefix blocks never hit the prefix cache on this "
+                "KV-cache layout; set DYN_BENCH_PREFILL_REAL_SEED=on)"
+            )
         return RuntimeError(
             f"Self-benchmark produced incomplete results at {path}: {reason}; "
             f"coverage={data.get('coverage')} "
