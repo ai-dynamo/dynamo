@@ -141,7 +141,6 @@ ignore:
   # image-build or deploy job yet.
   - 'container/Dockerfile.global-discovery-service'
   - 'container/global-discovery-service.yaml'
-  - 'container/global-discovery-service-dynamodb.yaml'
   - 'container/run.sh'
   - 'container/use-sccache.sh'
   - 'container/dev/**'

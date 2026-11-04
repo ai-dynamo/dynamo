@@ -33,9 +33,8 @@ use url::Url;
 
 use crate::common::{ClockHandle, lease};
 
-/// Where dynamodb-local listens, from `GDS_TEST_DYNAMODB_ENDPOINT`
-/// (`scripts/dynamodb-local.sh up` prints it). `None` when it is unset or
-/// empty.
+/// Where DynamoDB Local listens, from `GDS_TEST_DYNAMODB_ENDPOINT`.
+/// `None` when it is unset or empty.
 pub fn dynamodb_endpoint() -> Option<Url> {
     let value = std::env::var("GDS_TEST_DYNAMODB_ENDPOINT").ok()?;
     let value = value.trim();
@@ -56,8 +55,7 @@ macro_rules! skip_without_dynamodb {
             Some(endpoint) => endpoint,
             None => {
                 eprintln!(
-                    "skipping: GDS_TEST_DYNAMODB_ENDPOINT is not set \
-                     (scripts/dynamodb-local.sh up prints it)"
+                    "skipping: set GDS_TEST_DYNAMODB_ENDPOINT to a running DynamoDB Local instance"
                 );
                 return;
             }

@@ -97,7 +97,6 @@
 /lib/global-view-broadcaster/                                                                           @ai-dynamo/dynamo-global-router-codeowners
 /components/src/dynamo/pool_relay/                                                                      @ai-dynamo/dynamo-global-router-codeowners
 /container/global-discovery-service.yaml                                                                @ai-dynamo/dynamo-global-router-codeowners
-/container/global-discovery-service-dynamodb.yaml                                                       @ai-dynamo/dynamo-global-router-codeowners
 
 # === backend-vllm  (@ai-dynamo/dynamo-backend-vllm-codeowners) ===
 /lib/sidecar/vllm/                                                                                      @ai-dynamo/dynamo-backend-vllm-codeowners

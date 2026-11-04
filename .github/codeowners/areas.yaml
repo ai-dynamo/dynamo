@@ -78,7 +78,6 @@ areas:
   - lib/global-view-broadcaster/
   - components/src/dynamo/pool_relay/
   - container/global-discovery-service.yaml
-  - container/global-discovery-service-dynamodb.yaml
   - lib/global-view-receiver/
   - docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
   - lib/global-*/**

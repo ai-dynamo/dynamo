@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The DynamoDB store against dynamodb-local. Every test but the last skips
-//! unless `GDS_TEST_DYNAMODB_ENDPOINT` is set (`scripts/dynamodb-local.sh`).
+//! unless `GDS_TEST_DYNAMODB_ENDPOINT` points to a running DynamoDB Local instance.
 //! Each test makes its own table, and moves its own `ManualClock`.
 
 mod common;
