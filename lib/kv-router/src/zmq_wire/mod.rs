@@ -423,8 +423,8 @@ impl ZmqEventNormalizer {
         worker: WorkerWithDpRank,
     ) -> Result<(), ZmqEventFilterReason> {
         // vLLM's CPU offload tier republishes device hashes without their salt
-        // (#18052). Such a store is a lower-tier copy of the same block, not a
-        // second unsalted one, so it must not demote the device namespace.
+        // (#18052). Its stores and evictions refer to a lower-tier copy of the
+        // device block, so they must not demote or drop the device namespace.
         let host_pinned = storage_tier_of(raw) == Some(StorageTier::HostPinned);
         match raw {
             RawKvEvent::BlockStored {
@@ -501,6 +501,7 @@ impl ZmqEventNormalizer {
                     }
                 }
             }
+            RawKvEvent::BlockRemoved { .. } if host_pinned => {}
             RawKvEvent::BlockRemoved { block_hashes, .. } => {
                 for block_hash in block_hashes.iter() {
                     let key = (worker, (*block_hash).into_u64());
