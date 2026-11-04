@@ -2835,6 +2835,7 @@ class PoolRelay:
         sources_file: Optional[str] = None,
         connection_revision: Optional[str] = None,
         global_discovery_url: Optional[str] = None,
+        routing_pool: Optional[str] = None,
     ) -> None:
         ...
 
