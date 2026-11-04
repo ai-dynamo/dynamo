@@ -1070,9 +1070,8 @@ async fn reasoning_gate_reaches_only_servers_reporting_proto_0_6() {
     }
 }
 
-// Regression: vLLM downloads URL media itself, so with
-// DYN_MM_ALLOW_REMOTE_URLS=0 the sidecar must reject remote sources before
-// they reach the engine, while inline data: media still goes through.
+// Regression: vLLM downloads URL media itself, so DYN_MM_ALLOW_REMOTE_URLS=0
+// must block remote sources before dispatch; inline data: media still passes.
 #[tokio::test]
 async fn remote_media_urls_are_rejected_before_dispatch_when_disabled() {
     let image = |source: &str| {
