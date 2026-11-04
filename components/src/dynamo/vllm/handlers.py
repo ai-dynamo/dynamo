@@ -414,6 +414,10 @@ async def _deferred_abort_guard(
                     registry.pop(request_id, None)
 
 
+# vLLM's sleep at level >= 1 puts both tags to sleep.
+_VLLM_SLEEP_TAGS = frozenset({"weights", "kv_cache"})
+
+
 class VllmEnginePauseController:
     def __init__(
         self,
@@ -425,6 +429,12 @@ class VllmEnginePauseController:
         self._prepare_for_process_checkpoint = prepare_for_process_checkpoint
         self._is_paused = False
         self._generation_paused = False
+        # Mirrors vLLM's sleeping tags while paused, so a sleep after a
+        # partial wake knows what it can put back to sleep.
+        self._asleep_tags: set[str] = set()
+        # Set when a re-sleep failed midway: vLLM's tags may no longer match
+        # its memory, so partial wakes and sleeps are refused until a full wake.
+        self._needs_full_wake = False
 
     @property
     def is_paused(self) -> bool:
@@ -460,23 +470,82 @@ class VllmEnginePauseController:
         # checkpoint_restore with no matching prepare.
         if self._prepare_for_process_checkpoint:
             await self._engine_client.checkpoint_prepare()
+        self._asleep_tags = set(_VLLM_SLEEP_TAGS)
         self._is_paused = True
         return True
 
     async def resume(self, tags: list[str] | None = None) -> bool:
+        """Wake the engine and resume generation.
+
+        Returns False when nothing resumed: the engine was not paused, or a
+        partial wake left some memory asleep.
+        """
         if not self._is_paused and not self._generation_paused:
             return False
 
         if self._is_paused:
+            if self._needs_full_wake and tags is not None:
+                raise RuntimeError(
+                    "A sleep failed midway; wake_up without tags to restore all memory"
+                )
             if self._prepare_for_process_checkpoint:
                 await self._engine_client.checkpoint_restore()
             if tags is None:
-                await self._engine_client.wake_up()
+                fully_awake = await self._engine_client.wake_up()
             else:
-                await self._engine_client.wake_up(tags)
+                fully_awake = await self._engine_client.wake_up(tags)
+            if fully_awake is None:
+                # vLLM < 0.32 returns nothing from wake_up.
+                fully_awake = not await self._engine_client.is_sleeping()
+            if not fully_awake:
+                # vLLM keeps scheduling paused until every sleeping tag is
+                # awake; resuming generation now would run forward passes
+                # against unmapped memory.
+                woken = {tag for tag in tags or () if tag != "scheduling"}
+                # vLLM ignores the whole call if any tag is not asleep.
+                if woken <= self._asleep_tags:
+                    self._asleep_tags -= woken
+                return False
+            self._asleep_tags.clear()
+            self._needs_full_wake = False
         if self._generation_paused:
             await self._engine_client.resume_generation()
             self._generation_paused = False
+        return True
+
+    async def sleep_after_partial_wake(self, *args: object) -> bool:
+        """Put the memory a partial wake brought back to sleep again.
+
+        Returns False unless the engine is partially awake.
+        """
+        partially_awake = self._asleep_tags and self._asleep_tags != _VLLM_SLEEP_TAGS
+        if not self._is_paused or not partially_awake:
+            return False
+        if self._needs_full_wake:
+            # A level 2 retry would copy model buffers out of unmapped memory.
+            raise RuntimeError(
+                "A sleep failed midway; wake_up without tags to restore all memory"
+            )
+        level = args[0] if args else None
+        if level is not None and (not isinstance(level, int) or level < 1):
+            raise RuntimeError("Sleep after a partial wake needs level 1 or higher")
+        if "weights" in self._asleep_tags:
+            # vLLM's executor ignores sleep while the weights are asleep.
+            raise RuntimeError(
+                "Weights still asleep; wake_up the remaining tags before sleeping"
+            )
+        try:
+            if level is None:
+                await self._engine_client.sleep()
+            else:
+                await self._engine_client.sleep(level)
+        except Exception:
+            # The sleep may have released memory that vLLM did not record as
+            # asleep (always with --load-format gms). vLLM still records the
+            # rest as asleep, so a full wake remaps everything.
+            self._needs_full_wake = True
+            raise
+        self._asleep_tags = set(_VLLM_SLEEP_TAGS)
         return True
 
     def mark_resumed(self) -> None:
@@ -1537,6 +1606,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         level = body.get("level", 1)
         async with self._pause_lock:
             if self._pause_controller.is_paused:
+                try:
+                    if await self._pause_controller.sleep_after_partial_wake(level):
+                        return {
+                            "status": "ok",
+                            "message": f"Engine slept (level={level})",
+                        }
+                except Exception as e:
+                    logger.error("Failed to sleep engine: %s", e)
+                    return {"status": "error", "message": str(e)}
                 return {
                     "status": "ok",
                     "message": "Engine already sleeping",
@@ -1956,7 +2034,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
             try:
                 # Step 1: Wake engine first - must be ready before accepting requests
-                await self._pause_controller.resume(tags)
+                if not await self._pause_controller.resume(tags):
+                    # Partial wake: stay paused and unregistered until a later
+                    # wake_up brings back the remaining tags.
+                    return {
+                        "status": "ok",
+                        "message": "Engine partially awake",
+                        "is_sleeping": True,
+                    }
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.register_endpoint_instance()
                     logger.info(
@@ -2110,6 +2195,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # re-enable generation while an update's collective_rpc is still
         # mutating weights (dynamo-ops).
         async with self._pause_lock:
+            if self._pause_controller.is_paused:
+                # Asleep, possibly partially: resuming vLLM now would schedule
+                # requests against unmapped memory. wake_up resumes generation
+                # once all memory is back.
+                self._paused = False
+                return {
+                    "status": "ok",
+                    "message": "Engine asleep; generation resumes on wake_up",
+                    "is_sleeping": True,
+                }
             try:
                 await self.engine_client.resume_generation()
                 self._paused = False
