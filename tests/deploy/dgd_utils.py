@@ -1872,12 +1872,17 @@ class ManagedDeployment:
                         max_connection_attempts,
                     )
 
+                # kr8s sets local_port before it binds; servers is non-empty only
+                # once the listener exists.
                 self._logger.warning(
-                    "Port forward %d/%d on local port %s failed for pod %s",
+                    "Port forward %d/%d on local port %s failed for pod %s "
+                    "(listening: %s, thread alive: %s)",
                     forward_attempt,
                     max_port_forwards,
                     port_forward.local_port,
                     pod.name,
+                    bool(port_forward.servers),
+                    thread.is_alive(),
                 )
                 # A forward whose bind failed has no servers, so stop() is a no-op.
                 try:
