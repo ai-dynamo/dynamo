@@ -114,7 +114,10 @@ visible to the writing region within milliseconds). Each page's items are
 decoded, expired ones dropped, and the result is
 `Snapshot { items, completeness }`, where `completeness` is `Estimated` until a
 lease has passed since the store was made (see "Why"), and `Exact` after
-that. A decode failure of one item is
+that. A failed call to the table, a read or a write, makes it `Estimated`
+again until a lease has passed since the next successful read: no PoolRelay
+could renew while the table could not be reached, so items may have lapsed
+until their PoolRelays register again. The time a read began decides. A decode failure of one item is
 logged and that item skipped, so one bad write cannot take the list down. Any
 SDK error (throttling, access denied, transport, missing table) becomes
 `DiscoveryError::Unavailable`, which the HTTP layer maps to 503, so `/healthz`
@@ -137,9 +140,12 @@ sends a `Resync(Exact)`, once. Local
 `register` calls update the view and emit `Upserted` at once, so the next
 poll does not emit the same change again. A poll whose `Query` began before a
 local registration may not see it, so for that poll the pool keeps its
-registered state; the next poll decides. A failed poll emits nothing and
-leaves the stream open; the poller logs it (warn, then debug) and waits twice
-as long each time, up to 30 s. The poller stops when the store is dropped,
+registered state; the next poll decides. A failed poll leaves the stream
+open, sends `Removed` for each pool whose lease has lapsed on this replica's
+clock (nobody can renew while the table cannot be reached), and a
+`Resync(Estimated)` if watchers had an `Exact` view; the poller logs it
+(warn, then debug) and waits twice as long each time, up to 30 s. The first
+successful poll a lease after reads recovered sends `Resync(Exact)` again. The poller stops when the store is dropped,
 which also ends every stream; a caller's `CancellationToken` ends its own.
 Polling rather than DynamoDB Streams keeps the store to one table and one IAM
 policy. With `--pool-discovery registrations` nothing consumes the watch yet:

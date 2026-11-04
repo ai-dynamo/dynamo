@@ -236,13 +236,17 @@ Query another replica, or delete a Pod, and the same pools appear. With `--pool-
 `relay_identities` is empty because registrations do not carry relay identities. With `karmada` or
 `mcs`, MCS supplies them, and a pool is listed only while MCS also imports a Ready Pool Relay for it.
 
-`GET /healthz` returns 200 while the table answers a read. It returns 503 when the table is unreachable,
-when the Pod cannot read it, or when the table does not exist. The readiness probe in the example
-manifest uses it, so the Pod leaves the Service until the table is back.
+`GET /healthz` is for readiness. Until the startup check has passed, nothing listens, so the probe
+fails and the Pod stays out of the Service. After that, `GET /healthz` returns 200 without calling
+DynamoDB. A DynamoDB outage then shows in the answers to requests instead, so it does not take every
+replica out of the Service at once:
 
-Readiness covers reads only. A Pod whose role lacks `dynamodb:UpdateItem`, or has it only for another
-region's replica, stays Ready while every `POST /pools` returns 503, and the pools drop out as their
-leases lapse. Check that the policy grants all three actions in every region the service runs in.
+- `POST /pools` returns 503, and Pool Relays register again on their next heartbeat.
+- With `--pool-discovery registrations`, `GET /pools` returns 503.
+- With `karmada` or `mcs`, `GET /pools` keeps answering with `complete: false`, and drops each pool
+  whose lease lapses, since no Pool Relay can renew meanwhile.
+- After the table is back, `complete` stays `false` for one more lease, until every Pool Relay has
+  registered again.
 
 ## Operate
 
@@ -254,9 +258,10 @@ leases lapse. Check that the policy grants all three actions in every region the
   different registrations, and each Pool Relay keeps registering with the replica it is connected to. A
   new replica reports `complete: false` for only one lease, so replace all replicas at once
   (`strategy: Recreate`). Every Pool Relay then registers with the new table within one heartbeat.
-- **Throttling and outages.** A failed DynamoDB call returns 503 from the endpoint that made it. A
-  Pool Relay registers again on its next heartbeat, and pools stay listed while their leases last. On-demand
-  capacity absorbs the expected write rate, roughly `pools x relay replicas / heartbeat interval`, for
-  example 80 writes per second for 200 pools with two relay replicas at a 5 second heartbeat.
+- **Throttling and outages.** A failed DynamoDB call returns 503 from the endpoint that made it, and
+  `GET /pools` reports `complete: false` until a lease after the table answers again (see Verify). A
+  Pool Relay registers again on its next heartbeat. On-demand capacity absorbs the expected write rate,
+  roughly `pools x relay replicas / heartbeat interval`, for example 80 writes per second for 200 pools
+  with two relay replicas at a 5 second heartbeat.
 - **Corrupt items.** An item that cannot be decoded is logged and skipped. The rest of the list is served.
 - **Scale limit.** All items share one partition key. That is sized for tens to hundreds of pools.

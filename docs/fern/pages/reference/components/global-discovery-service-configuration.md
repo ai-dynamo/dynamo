@@ -46,7 +46,8 @@ the `global-discovery-service` binary. For choosing and setting up a registratio
 | `--router-port-name <name>` | Required | The router Service's named port for state streams. |
 
 These modes join EndpointSlices that MCS imports with registrations from `POST /pools`. A pool is
-listed while MCS imports a Ready Pool Relay endpoint for it and its registration lease lasts.
+listed while MCS imports a Ready Pool Relay endpoint for it and its registration lease lasts. While a
+DynamoDB table cannot be read, leases lapse on the service's clock, since no Pool Relay can renew.
 The registration's `cluster_id` must match the MCS cluster ID or Karmada member cluster name.
 MCS supplies relay identities and frontend addresses; the registration supplies the model,
 capabilities, capacity, and location. Export each pool's frontend Service to supply its addresses.
@@ -85,7 +86,7 @@ All bodies are JSON. A reader ignores fields it does not know.
 | `POST /pools` | Register a pool and renew its lease. | 200 with a lease | 400 for malformed JSON, 413 for a body over 64 KiB, 415 without `Content-Type: application/json`, 422 for an invalid registration or one the store cannot keep, 503 when the store is unreachable |
 | `GET /pools` | List live pools. | 200 with a pool list | 503 when the backend is unreachable |
 | `GET /routers` | List Global Router replicas. | 200 with a router list | 503 when the backend is unreachable |
-| `GET /healthz` | Readiness: the backend answers a read. It does not check that registrations can be written. | 200 | 503 when the backend is unreachable |
+| `GET /healthz` | Readiness: the backend has answered once. With DynamoDB, that follows the startup check that the table can be read and written. Later backend failures show in the answers to requests, not here. | 200 | 503 until the backend has answered |
 
 ### `POST /pools`
 
@@ -137,7 +138,7 @@ In `karmada` and `mcs` modes, the listed frontend addresses come from MCS; the r
 | --- | --- |
 | `pools[].model` | `null` when the service does not know the pool's model. |
 | `pools[].relay_identities` | The identities of the Pool Relay allowed to stream the pool's state, such as `ip:10.43.66.175`. Empty in `registrations` mode. |
-| `complete` | `true` when the service lists every pool. With either store it is `false` until one lease has passed after the service starts: a `memory` store has only the registrations it received, and while a rollout moves the service to a DynamoDB table, Pool Relays may still register with the old replicas. In `karmada` and `mcs` modes, both the imported and registered pool lists must be complete. |
+| `complete` | `true` when the service lists every pool. With either store it is `false` until one lease has passed after the service starts: a `memory` store has only the registrations it received, and while a rollout moves the service to a DynamoDB table, Pool Relays may still register with the old replicas. With `dynamodb` it is also `false` while the table cannot be reached, and for one lease after, since Pool Relays could not renew meanwhile. In `karmada` and `mcs` modes, both the imported and registered pool lists must be complete. |
 
 ### `GET /routers`
 
@@ -182,7 +183,7 @@ Grant them on the table ARN, in each region where the service runs a replica of 
 
 | Condition | Result |
 | --- | --- |
-| DynamoDB error, throttling, transport failure, or missing table while serving | 503 from the endpoint, and `GET /healthz` fails. |
+| DynamoDB error, throttling, transport failure, or missing table while serving | 503 from the endpoint that called DynamoDB. `GET /pools` is `complete: false` until a lease after the table answers again. `GET /healthz` stays 200. |
 | A pool key whose sort key is over 1,024 bytes | 422 from `POST /pools`, with the reason. Nothing is written. |
 | An item that fails to decode | Logged and skipped. The rest of the list is served. |
 | `--dynamodb-table` missing with `dynamodb` | Startup error. |

@@ -62,8 +62,9 @@ spec:
           ports:
             - name: http
               containerPort: 8080
-          # /healthz queries the table, and a read that the SDK retries can
-          # take longer than the default 1 s timeout. It checks reads only.
+          # Nothing listens until the service has checked that it can read and
+          # write the table. The first /healthz then queries the table once,
+          # which with the SDK's retries can take longer than the default 1 s.
           readinessProbe:
             httpGet:
               path: /healthz

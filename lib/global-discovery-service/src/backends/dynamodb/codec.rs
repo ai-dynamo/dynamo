@@ -26,10 +26,15 @@ pub const GC_AFTER: Duration = Duration::from_secs(7 * 86_400);
 /// seconds is live at `now_ms`, allowing `skew` between the writer's clock
 /// and the reader's.
 pub fn is_live(renewed_at_ms: u64, lease_s: u64, skew: Duration, now_ms: u64) -> bool {
+    live_until_ms(renewed_at_ms, lease_s, skew) >= now_ms
+}
+
+/// The last Unix millisecond at which a pool registered at `renewed_at_ms`
+/// with a lease of `lease_s` seconds is live, allowing `skew`.
+pub fn live_until_ms(renewed_at_ms: u64, lease_s: u64, skew: Duration) -> u64 {
     renewed_at_ms
         .saturating_add(lease_s.saturating_mul(1_000))
         .saturating_add(millis(skew))
-        >= now_ms
 }
 
 /// blake3 hex of a registration's JSON.
@@ -124,6 +129,12 @@ pub(super) struct Stored {
 impl Stored {
     pub fn is_live(&self, skew: Duration, now_ms: u64) -> bool {
         is_live(self.renewed_at_ms, self.lease_s, skew, now_ms)
+    }
+
+    /// The last Unix millisecond at which this pool is live, unless it is
+    /// renewed.
+    pub fn live_until_ms(&self, skew: Duration) -> u64 {
+        live_until_ms(self.renewed_at_ms, self.lease_s, skew)
     }
 }
 

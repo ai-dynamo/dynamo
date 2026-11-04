@@ -29,7 +29,8 @@
 //!
 //! With DynamoDB registration storage, a replica lists every pool at once
 //! but calls the list partial for one lease after it starts, in case a
-//! PoolRelay still registers elsewhere.
+//! PoolRelay still registers elsewhere, and while and for one lease after
+//! the table cannot be reached, since PoolRelays cannot renew meanwhile.
 
 mod pools;
 mod registrar;
