@@ -11,10 +11,14 @@ publish = false
 # Keep this a real external consumer, separate from Dynamo's serving dependencies.
 [workspace]
 
-[dev-dependencies]
+[dependencies]
 anyhow = "1"
-dynamo-conformance-fixtures-v2 = { version = "=0.1.0", git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "8095dc76a8620cec0b65845b8fef05c675375ab9" }
-dynamo-parsers-v2 = { version = "=0.9.6", git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "8095dc76a8620cec0b65845b8fef05c675375ab9" }
+dynamo-conformance-fixtures-v2 = { version = "=0.1.0", git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "7e9ef9ed36d97d4e1bfab371cbf714aa611e17a7" }
+dynamo-parsers-v2 = { version = "=0.9.9", git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "7e9ef9ed36d97d4e1bfab371cbf714aa611e17a7" }
+
+[[bin]]
+name = "dynamo-conformance"
+path = "conformance.rs"
 
 [[test]]
 name = "native_parser"
