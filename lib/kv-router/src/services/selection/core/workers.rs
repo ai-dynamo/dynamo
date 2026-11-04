@@ -296,6 +296,26 @@ impl SelectionCore {
                 );
                 // Instantiate before any partition task starts, so a rejected policy leaves nothing.
                 let hint_policies = self.partition_hint_policies(&key)?;
+                let selector = (self.worker_selection_policy_factory)(
+                    &self.kv_router_config,
+                    self.worker_type,
+                    key.as_ref(),
+                );
+                // A committed fetch must have exactly one hint policy to deliver it.
+                let delivering = hint_policies
+                    .iter()
+                    .filter(|slot| slot.requirements.delivers_committed_kv_fetch())
+                    .count();
+                if selector.commits_kv_fetch() && delivering != 1 {
+                    return Err(SelectionError::BadRequest(format!(
+                        "the {} worker-selection policy commits KV fetches, so exactly one hint policy must declare with_committed_kv_fetch; found {delivering}",
+                        self.worker_type.as_str()
+                    )));
+                }
+                let hints_read_kv_fetch = hint_policies.iter().any(|slot| {
+                    slot.requirements.reads_kv_fetch_sources()
+                        || slot.requirements.delivers_committed_kv_fetch()
+                });
                 let worker_label = self.worker_type.as_str();
                 let slots = Arc::new(ActiveSequencesMultiWorker::new_with_options(
                     scoped_replica_sync
@@ -340,11 +360,6 @@ impl SelectionCore {
                         block_size,
                     ))
                 });
-                let selector = (self.worker_selection_policy_factory)(
-                    &self.kv_router_config,
-                    self.worker_type,
-                    key.as_ref(),
-                );
                 let scores_kv_transfer =
                     WorkerSelector::<SelectionWorkerConfig>::required_worker_inputs(&selector)
                         .contains(WorkerInputs::KV_TRANSFER);
@@ -385,6 +400,7 @@ impl SelectionCore {
                     replica_config: self.replica_config.clone(),
                     affinity_replication: self.session_binding_sink(&key),
                     hint_policies,
+                    hints_read_kv_fetch,
                 }))
             })?
             .clone();
@@ -434,9 +450,10 @@ impl SelectionCore {
         Ok(instances
             .into_iter()
             .filter_map(|instance| {
-                let (name, policy) = instance.into_parts();
+                let (name, requirements, policy) = instance.into_parts();
                 Some(HintPolicySlot {
                     name,
+                    requirements,
                     policy: policy?,
                 })
             })
