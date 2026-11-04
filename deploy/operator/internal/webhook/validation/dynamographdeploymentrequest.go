@@ -297,7 +297,8 @@ func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRe
 			return v.validateDynamoGraphDeploymentRequestSpecV1beta2(typedSpec, field.NewPath("spec"))
 		}
 
-		// Decode both represented specs before applying the typed update rules.
+		// Stored carriers originate from typed conversion. A decode failure is a data-consistency
+		// error and must fail the update; only the AISimulate input-schema check may be ratcheted.
 		oldTypedSpec, err := decodeDynamoGraphDeploymentRequestSpecV1beta2(oldSpec.V1Beta2)
 		if err != nil {
 			return field.ErrorList{field.InternalError(fldPath.Child("v1beta2"), fmt.Errorf("decode previous v1beta2 spec: %w", err))}

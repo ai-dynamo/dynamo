@@ -10,6 +10,7 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/aisimulate"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
@@ -38,6 +39,12 @@ func Setup(mgr ctrl.Manager, opts Options) error {
 	if opts.RuntimeConfig == nil {
 		return fmt.Errorf("runtime configuration is required")
 	}
+
+	// Fail startup before registering webhooks if the bundled input schema cannot compile.
+	if _, err := aisimulate.LoadInputSchema(); err != nil {
+		return fmt.Errorf("unable to compile bundled AISimulate input schema: %w", err)
+	}
+
 	cfg := opts.Config
 	runtimeConfig := opts.RuntimeConfig
 	gate := opts.Gate

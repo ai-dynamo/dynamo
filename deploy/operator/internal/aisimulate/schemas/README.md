@@ -7,8 +7,11 @@ SPDX-License-Identifier: Apache-2.0
 
 Each JSON file is generated from the exact pinned wheel's
 `aisimulate.config.CoreRecommendationConfig.model_json_schema(mode="validation")`.
-The operator embeds the schema selected by the generated `SchemaVersion` constant.
-Keep historical snapshots when updating the pin; Requests cannot select an older version.
+The operator embeds only `latest.json`, which the generator refreshes together with
+the versioned snapshot and the `SchemaVersion` constant. Webhook setup compiles it
+before registering handlers, so an invalid schema fails startup rather than admission.
+Keep historical snapshots when updating the pin; they are not embedded, and Requests
+cannot select an older version.
 
 The generator preserves JSON Schema 2020-12, including local references and unions.
 It extends only the root envelope with object-valued sections registered by Dynamo's
@@ -27,8 +30,8 @@ make -C deploy/operator generate-aisimulate-schema
 make -C deploy/operator check-aisimulate-schema
 ```
 
-The check compares a fresh export with the committed schema and version registration.
-Missing snapshots, changed upstream schemas, inconsistent pins, and an installed
-version different from the pin fail the check. Operator CI runs it for pin-only
-changes too. `make check` verifies rather than regenerating these external artifacts,
+The check compares a fresh export with `latest.json`, the versioned snapshot, and the
+version registration. Missing snapshots, changed upstream schemas, inconsistent pins,
+and an installed version different from the pin fail the check. Operator CI runs it for
+pin-only changes too. `make check` verifies rather than regenerating these external artifacts,
 so dependency bumpers must review and commit the schema change explicitly.

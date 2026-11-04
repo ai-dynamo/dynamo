@@ -45,7 +45,7 @@ type Discoverer struct {
 	NodeLabels func() bool
 }
 
-// Discover returns the discovered GPUs, restricted to filterSKU when it is set. An error
+// Discover returns non-nil GPUInfo on success, restricted to filterSKU when it is set. An error
 // means no backend produced a result. d and ctx must not be nil; Reader may be nil.
 func (d *Discoverer) Discover(ctx context.Context, filterSKU nvidiacomv1beta1.GPUSKUType) (*GPUInfo, error) {
 	logger := log.FromContext(ctx)

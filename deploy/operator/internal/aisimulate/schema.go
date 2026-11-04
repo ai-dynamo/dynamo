@@ -7,25 +7,22 @@ package aisimulate
 
 import (
 	"bytes"
-	"embed"
+	_ "embed"
 	"fmt"
 	"sync"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
-// The snapshots retain the upstream JSON Schema dialect and are regenerated from
-// the exact Python dependency pin, rather than maintaining AISimulate rules in Go.
+// Only the active snapshot is embedded; versioned snapshots remain repository history.
 //
-//go:embed schemas/*.json
-var inputSchemas embed.FS
+//go:embed schemas/latest.json
+var inputSchemaJSON []byte
 
-var recommendationSchema = sync.OnceValues(func() (*jsonschema.Schema, error) {
-	raw, err := inputSchemas.ReadFile("schemas/" + SchemaVersion + ".json")
-	if err != nil {
-		return nil, fmt.Errorf("read AISimulate %s schema: %w", SchemaVersion, err)
-	}
-	document, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
+// LoadInputSchema compiles the bundled schema once and caches the schema or error.
+// Webhook setup loads it before registration; admission reuses the same compiled schema.
+var LoadInputSchema = sync.OnceValues(func() (*jsonschema.Schema, error) {
+	document, err := jsonschema.UnmarshalJSON(bytes.NewReader(inputSchemaJSON))
 	if err != nil {
 		return nil, fmt.Errorf("decode AISimulate %s schema: %w", SchemaVersion, err)
 	}
@@ -45,7 +42,7 @@ var recommendationSchema = sync.OnceValues(func() (*jsonschema.Schema, error) {
 // model validators. Adapter-owned sections have object shape only; their detailed
 // validation remains with the registered Python adapters.
 func ValidateInput(input map[string]any) error {
-	schema, err := recommendationSchema()
+	schema, err := LoadInputSchema()
 	if err != nil {
 		return err
 	}

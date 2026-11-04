@@ -164,6 +164,7 @@ func Underlay(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 	b.setTraceWorkload(spec.Workload)
 
 	if objective := spec.Objective; objective != nil {
+		// CRD enum and CEL rules admit only scalar Optimize; Pareto lowering is intentionally absent.
 		if objective.Metric != nil {
 			target, err := publicMetric(*objective.Metric)
 			if err != nil {

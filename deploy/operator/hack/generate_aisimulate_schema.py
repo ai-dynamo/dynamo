@@ -84,6 +84,7 @@ def generated_files(root: Path) -> dict[Path, str]:
         json.dumps(schema, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
     )
     return {
+        output / "schemas" / "latest.json": schema_text,
         output / "schemas" / f"{pinned}.json": schema_text,
         output
         / "schema_version.go": (

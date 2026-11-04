@@ -63,7 +63,9 @@ func (v *sharedValidation) validateNativeSearchInput(spec *nvidiacomv1beta2.Nati
 }
 
 // validateNativeSearchInputUpdate preserves metadata/status updates across upstream schema changes.
-// newSpec, oldSpec, and fldPath must not be nil. Typed guards still run for unchanged specs.
+// newSpec, oldSpec, and fldPath must not be nil. Only the upstream schema check is ratcheted;
+// typed API and operator-owned execution-field invariants still apply to unchanged specs.
+// CRD admission serializes RawExtension objects with canonical JSON map-key ordering.
 func (v *sharedValidation) validateNativeSearchInputUpdate(newSpec, oldSpec *nvidiacomv1beta2.NativeSearchInput, fldPath *field.Path) field.ErrorList {
 	return v.validateNativeSearchInput(newSpec, fldPath, !apiequality.Semantic.DeepEqual(newSpec, oldSpec))
 }
