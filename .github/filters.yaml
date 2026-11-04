@@ -495,6 +495,7 @@ frontend:
 
 rust:
   - '.github/workflows/pre-merge.yml'
+  - '.github/actions/setup-rust-ci/**'
   - '**/*.rs'
   - '**/Cargo.toml'
   - '**/Cargo.lock'
