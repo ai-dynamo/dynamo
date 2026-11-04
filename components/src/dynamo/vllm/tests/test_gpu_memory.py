@@ -157,6 +157,97 @@ def test_rank_bank_group_rejects_invalid_catalog_before_allocation(fake_banks, d
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
+def test_worker_import_selects_rank_then_checks_actual_gpu(
+    bank_group, fake_banks, monkeypatch
+):
+    monkeypatch.setattr(gpu_memory, "_OWNED_GPU_REGIONS", {})
+    imported = []
+    marker = object()
+
+    def import_selected(data, engine_id, shape, *domains):
+        imported.append((data, engine_id, shape, domains))
+        return marker
+
+    monkeypatch.setattr(gpu_memory, "import_fabric", import_selected)
+    # The final rank maps to device zero; rank is not a CUDA device ordinal.
+    result = gpu_memory.open_region(
+        "rank-bank-test",
+        (4, 24),
+        rank=bank_group.world_size - 1,
+        world_size=bank_group.world_size,
+        gpu_transport="mnnvl",
+        base_domain="test-layout",
+        compatibility_domain=bank_group.compatibility_domain,
+        fabric_domain=bank_group.fabric_domain,
+    )
+    assert result is marker
+    assert len(imported) == 1
+    assert imported[0][0]["gpu_uuid"] == fake_banks.identity(0).gpu_uuid
+    assert imported[0][2] == (4, 24)
+    with pytest.raises(ValueError, match="same physical GPU"):
+        gpu_memory.open_region(
+            "rank-bank-test",
+            (4, 24),
+            rank=0,
+            world_size=bank_group.world_size,
+            gpu_transport="mnnvl",
+            base_domain="test-layout",
+            compatibility_domain=bank_group.compatibility_domain,
+            fabric_domain=bank_group.fabric_domain,
+        )
+    assert len(imported) == 1
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parametrize(
+    "change",
+    ["rank", "width", "hash", "owner", "extra", "missing", "world", "device", "uuid"],
+)
+def test_group_mismatch_rejects_before_any_handle_import(
+    bank_group, monkeypatch, change
+):
+    manifest = json.loads((bank_group.path / "group.json").read_bytes())
+    if change == "rank":
+        manifest["banks"][-1]["rank"] = 0
+    elif change == "width":
+        manifest["banks"][-1]["shape"][1] += 1
+    elif change == "hash":
+        manifest["banks"][0]["descriptor_sha256"] = "0" * 64
+    elif change == "owner":
+        manifest["owner_start_ticks"] += 1
+    elif change == "extra":
+        manifest["arbitrary_path"] = "untrusted"
+    elif change == "missing":
+        manifest["banks"].pop()
+    elif change == "world":
+        manifest["world_size"] += 1
+    elif change == "device":
+        manifest["banks"][-1]["device"] = manifest["banks"][0]["device"]
+    else:
+        manifest["banks"][-1]["gpu_uuid"] = manifest["banks"][0]["gpu_uuid"]
+    (bank_group.path / "group.json").write_text(json.dumps(manifest))
+    monkeypatch.setattr(gpu_memory, "_OWNED_GPU_REGIONS", {})
+    monkeypatch.setattr(
+        gpu_memory,
+        "import_fabric",
+        lambda *args: pytest.fail("Invalid group must fail before handle import"),
+    )
+    with pytest.raises(ValueError):
+        gpu_memory.open_region(
+            "rank-bank-test",
+            (4, 24),
+            rank=bank_group.world_size - 1,
+            world_size=bank_group.world_size,
+            gpu_transport="mnnvl",
+            base_domain="test-layout",
+            compatibility_domain=bank_group.compatibility_domain,
+            fabric_domain=bank_group.fabric_domain,
+        )
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
 @pytest.mark.parametrize("world_size", [2, 3, 4, 8])
 def test_partial_allocation_never_publishes_group_and_cleans_ready_bank(
     fake_banks, monkeypatch, world_size
@@ -249,6 +340,26 @@ def test_failed_cleanup_retains_bank_owner_and_withdraws_group(bank_group, monke
         gpu_memory._OWNED_GPU_REGIONS[other.path] is other for other in bank_group.banks
     )
     monkeypatch.setattr(bank, "cleanup", original_cleanup)
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parametrize(
+    "rank,world_size",
+    [(True, 3), (-1, 3), (3, 3), (1.0, 3), (0, True), (0, 0), (0, -1), (0, 3.0)],
+)
+def test_invalid_rank_or_world_size_fails_before_descriptor_read(
+    monkeypatch, rank, world_size
+):
+    monkeypatch.setattr(
+        gpu_memory,
+        "_read_private_json",
+        lambda *args: pytest.fail("Invalid rank must fail before descriptor access"),
+    )
+    with pytest.raises(ValueError):
+        gpu_memory.open_region(
+            "invalid-rank", (4, 24), rank=rank, world_size=world_size
+        )
 
 
 @pytest.mark.pre_merge
