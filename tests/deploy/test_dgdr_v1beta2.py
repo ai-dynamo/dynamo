@@ -209,8 +209,12 @@ async def test_dgdr_v1beta2_publishes_candidate(namespace: str) -> None:
             custom, namespace, "dynamographdeploymentcandidates", refs[0]["name"]
         )
         _assert_owned_by(candidate, run)
+        assert any(
+            condition["type"] == "Valid" and condition["status"] == "True"
+            for condition in candidate["status"]["conditions"]
+        ), candidate["status"]
         assert candidate["spec"]["components"]
-        assert candidate["spec"]["parameters"]["backend"] == "vllm"
+        assert candidate["status"]["parameters"]["backend"] == "vllm"
         assert 0 < candidate["status"]["metrics"]["usedGpus"] <= 8
         assert isinstance(candidate["status"]["metrics"]["score"], (int, float))
         logger.info("Published Candidate: %s", json.dumps(candidate))
