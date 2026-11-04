@@ -2193,7 +2193,7 @@ mod tests {
         }
 
         fn pick(
-            &mut self,
+            &self,
             _context: &WorkerSelectionContext<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -2216,7 +2216,7 @@ mod tests {
 
     impl WorkerFilter for RejectAll {
         fn keep(
-            &mut self,
+            &self,
             _context: &WorkerSelectionContext<'_>,
             _candidate: WorkerCandidate<'_>,
         ) -> Result<bool, WorkerSelectionPolicyError> {
@@ -2232,7 +2232,7 @@ mod tests {
         }
 
         fn pick(
-            &mut self,
+            &self,
             _context: &WorkerSelectionContext<'_>,
             _input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -3328,7 +3328,7 @@ mod tests {
         }
 
         fn pick(
-            &mut self,
+            &self,
             _context: &WorkerSelectionContext<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -3353,7 +3353,7 @@ mod tests {
             let constructions = Arc::clone(&constructions);
             Arc::new(move |config: &KvRouterConfig, _, _| {
                 constructions.fetch_add(1, Ordering::SeqCst);
-                dynamo_custom_policy_builtin::default_policy(config.clone(), "decode")
+                dynamo_router_policies::default_policy(config.clone(), "decode")
             })
         };
         let config = KvRouterConfig::default();

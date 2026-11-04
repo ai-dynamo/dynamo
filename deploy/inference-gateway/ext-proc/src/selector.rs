@@ -113,7 +113,7 @@ impl Selector {
         let mut builder = SelectionServiceBuilder::new(
             kv_router_config,
             WorkerType::Aggregated,
-            policy_registry.with_default_factory(dynamo_custom_policy_builtin::default_factory()),
+            dynamo_router_policies::with_defaults(policy_registry),
         )
         .indexer_threads(cfg.selector_threads);
         if let Some(peer_replication) = peer_replication {
@@ -288,7 +288,7 @@ mod tests {
 
     impl WorkerPicker for ExpectedOutputRecorder {
         fn pick(
-            &mut self,
+            &self,
             context: &WorkerSelectionContext<'_>,
             input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -459,7 +459,7 @@ models:
 
         impl WorkerPicker for FirstEligiblePicker {
             fn pick(
-                &mut self,
+                &self,
                 _context: &WorkerSelectionContext<'_>,
                 input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
