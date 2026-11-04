@@ -4461,8 +4461,7 @@ async fn ttft_includes_session_affinity_wait() {
             let metrics = router.request_metrics.clone();
             let coordinator = router.affinity.as_ref().unwrap().clone();
             let session_id = SessionAffinityId::new("ttft-contended-session");
-            let Hold::Initialize(holder) =
-                coordinator.acquire(&session_id, None).await.unwrap()
+            let Hold::Initialize(holder) = coordinator.acquire(&session_id, None).await.unwrap()
             else {
                 panic!("the first acquisition must initialize the session");
             };
