@@ -2,10 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import gc
 import logging
 import os
 import time
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import sglang as sgl
 from sglang.srt.observability.trace import set_global_trace_level
@@ -17,6 +18,7 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.gateway import (
     attached_engine_load_time,
+    gateway_child_index,
     gateway_worker_count,
     serve_via_gateway_children,
 )
@@ -44,6 +46,28 @@ async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
     from dynamo.sglang._disagg import warmup_prefill_engine
 
     await warmup_prefill_engine(engine, server_args.disaggregation_bootstrap_port)
+
+
+def _freeze_gc_after_init(enabled: bool) -> None:
+    if enabled:
+        collected = gc.collect()
+        gc.freeze()
+        logging.info("Froze SGLang worker GC objects after collecting %d", collected)
+
+
+async def _freeze_worker_gc_after_init(
+    enabled: bool, engine: Any, *, is_gateway_child: bool
+) -> None:
+    if not enabled:
+        return
+
+    # Child 0 freezes its tokenizer and the shared scheduler/detokenizer.
+    # The remaining gateway children only need to freeze their local heaps.
+    if is_gateway_child and gateway_child_index() != 0:
+        _freeze_gc_after_init(True)
+        return
+
+    await engine.tokenizer_manager.freeze_gc()
 
 
 async def init_decode(
@@ -94,6 +118,7 @@ async def init_decode(
         # engine.tokenizer_manager is SGLang's MultiTokenizerRouter here and cannot
         # serve requests; gateway children do, this process keeps the engine alive.
         try:
+            _freeze_gc_after_init(dynamo_args.freeze_gc_after_init)
             await serve_via_gateway_children(
                 engine, gateway_count, shutdown_event, load_time=load_time
             )
@@ -166,6 +191,12 @@ async def init_decode(
         health_check_payload = SglangHealthCheckPayload(
             engine, use_text_input=dynamo_args.use_sglang_tokenizer
         ).to_dict()
+
+    await _freeze_worker_gc_after_init(
+        dynamo_args.freeze_gc_after_init,
+        engine,
+        is_gateway_child=attached_engine is not None,
+    )
 
     logging.info(f"Registering model with endpoint types: {dynamo_args.endpoint_types}")
     if dynamo_args.custom_jinja_template and "chat" not in dynamo_args.endpoint_types:
