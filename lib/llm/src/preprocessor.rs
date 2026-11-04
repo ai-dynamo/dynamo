@@ -2848,7 +2848,22 @@ impl OpenAIPreprocessor {
         let tokenizer = mdc.tokenizer()?;
         let PromptFormatter::OAI(formatter) = embedding_prompt_formatter(&mdc)?;
         let embedding_tokenizers = EmbeddingTokenizerState::new(&mdc)?;
-        Self::new_with_parts_inner(mdc, formatter, tokenizer, Some(embedding_tokenizers), None)
+        Self::new_with_parts_inner(
+            mdc,
+            formatter,
+            tokenizer,
+            Some(embedding_tokenizers),
+            None,
+            false,
+        )
+    }
+
+    pub(crate) fn new_for_completions(
+        mdc: ModelDeploymentCard,
+        tokenizer: crate::tokenizers::Tokenizer,
+    ) -> Result<Arc<Self>> {
+        let PromptFormatter::OAI(formatter) = PromptFormatter::no_op();
+        Self::new_with_parts_inner(mdc, formatter, tokenizer, None, None, false)
     }
 
     pub fn new_with_parts(
@@ -2866,7 +2881,14 @@ impl OpenAIPreprocessor {
         tokenizer: crate::tokenizers::Tokenizer,
         speculative_prefill_cancel: Option<CancellationToken>,
     ) -> Result<Arc<Self>> {
-        Self::new_with_parts_inner(mdc, formatter, tokenizer, None, speculative_prefill_cancel)
+        Self::new_with_parts_inner(
+            mdc,
+            formatter,
+            tokenizer,
+            None,
+            speculative_prefill_cancel,
+            true,
+        )
     }
 
     fn new_with_parts_inner(
@@ -2875,7 +2897,9 @@ impl OpenAIPreprocessor {
         tokenizer: crate::tokenizers::Tokenizer,
         embedding_tokenizers: Option<EmbeddingTokenizerState>,
         speculative_prefill_cancel: Option<CancellationToken>,
+        validate_chat_parsers: bool,
     ) -> Result<Arc<Self>> {
+        let validate_chat_parsers = validate_chat_parsers && mdc.model_type.supports_chat();
         let mdcsum = mdc.mdcsum().to_string();
         let tokenizer: Arc<dyn Tokenizer> = (*tokenizer).clone();
         let lora_name = mdc.lora.as_ref().map(|l| l.name.clone());
@@ -2895,7 +2919,7 @@ impl OpenAIPreprocessor {
         });
         let token_id_bound = token_id_bound(model_info.vocab_size(), tokenizer_id_bound);
         let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
-        if mdc.model_type.supports_chat() {
+        if validate_chat_parsers {
             crate::protocols::openai::chat_completions::tool_parser_v2::validate_parser_version(
                 tool_call_parser.as_deref(),
                 mdc.runtime_config.reasoning_parser.as_deref(),
@@ -9112,6 +9136,113 @@ mod token_data_tests {
                 Box::pin(stream::empty()),
                 context.context(),
             ))
+        }
+    }
+
+    #[test]
+    fn completions_ignore_chat_selectors_without_changing_model_identity() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::completions_ignore_chat_selectors_without_changing_model_identity"
+            ),
+            &[("DYN_PARSER_VERSION", "auto")],
+        ) {
+            return;
+        }
+        let mut card = ModelDeploymentCard::load_from_disk(LLAMA_DIR, None).unwrap();
+        card.model_type =
+            crate::model_type::ModelType::Chat | crate::model_type::ModelType::Completions;
+        card.runtime_config.tool_call_parser = Some("engine_native_tool".to_string());
+        card.runtime_config.reasoning_parser = Some("openai_gptoss".to_string());
+        let tokenizer = card.tokenizer().unwrap();
+        for model_type in [crate::model_type::ModelType::empty(), card.model_type] {
+            let mut completion_card = card.clone();
+            completion_card.model_type = model_type;
+            let checksum = completion_card.mdcsum().to_string();
+            let preprocessor =
+                OpenAIPreprocessor::new_for_completions(completion_card, tokenizer.clone())
+                    .unwrap();
+            assert_eq!(preprocessor.mdcsum, checksum);
+        }
+        let checksum = card.mdcsum().to_string();
+        let preprocessor =
+            OpenAIPreprocessor::new_for_completions(card.clone(), tokenizer.clone()).unwrap();
+        assert_eq!(preprocessor.mdcsum, checksum);
+        assert_eq!(
+            preprocessor.runtime_config.tool_call_parser,
+            card.runtime_config.tool_call_parser
+        );
+        assert_eq!(
+            preprocessor.runtime_config.reasoning_parser,
+            card.runtime_config.reasoning_parser
+        );
+        let PromptFormatter::OAI(formatter) = PromptFormatter::no_op();
+        assert!(OpenAIPreprocessor::new_with_parts(card, formatter, tokenizer).is_err());
+    }
+
+    #[test]
+    fn completions_preserve_card_derived_decode_defaults() {
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::completions_preserve_card_derived_decode_defaults"
+            ),
+            &[("DYN_PARSER_VERSION", "auto")],
+        ) {
+            return;
+        }
+        use crate::model_type::ModelType;
+
+        let base = ModelDeploymentCard::load_from_disk(LLAMA_DIR, None).unwrap();
+        let tokenizer = base.tokenizer().unwrap();
+        for (tool, reasoning) in [
+            (None, None),
+            (Some("harmony"), Some("gpt_oss")),
+            (None, Some("gpt_oss")),
+            (Some("kimi_k2"), Some("kimi_k25")),
+            (Some("gemma4"), Some("gemma4")),
+            (Some("muse_glimmer"), Some("muse_glimmer")),
+            (Some("deepseek_v41"), Some("deepseek_v41")),
+            (Some("beam"), Some("beam")),
+        ] {
+            for model_type in [
+                ModelType::Chat | ModelType::Completions,
+                ModelType::Completions,
+            ] {
+                let mut card = base.clone();
+                card.model_type = model_type;
+                card.runtime_config.tool_call_parser = tool.map(str::to_string);
+                card.runtime_config.reasoning_parser = reasoning.map(str::to_string);
+                let preprocessor =
+                    OpenAIPreprocessor::new_for_completions(card, tokenizer.clone()).unwrap();
+                for skip in [None, Some(true), Some(false)] {
+                    let mut request = serde_json::json!({"model": "test-model", "prompt": "hello"});
+                    if let Some(skip) = skip {
+                        request["skip_special_tokens"] = serde_json::json!(skip);
+                    }
+                    let request: NvCreateCompletionRequest =
+                        serde_json::from_value(request).unwrap();
+                    let output = preprocessor
+                        .builder_with_lora(&request, None)
+                        .unwrap()
+                        .token_ids(vec![])
+                        .build()
+                        .unwrap();
+                    let preserves =
+                        model_type.supports_chat() && (tool.is_some() || reasoning.is_some());
+                    assert_eq!(
+                        output.output_options.skip_special_tokens,
+                        skip.or(preserves.then_some(false)),
+                        "tool={tool:?}, model_type={model_type:?}, skip={skip:?}"
+                    );
+                    assert_eq!(
+                        output.output_options.retain_model_stop_token_text,
+                        (model_type.supports_chat() && tool == Some("beam")).then_some(true),
+                        "tool={tool:?}, model_type={model_type:?}"
+                    );
+                }
+            }
         }
     }
 
