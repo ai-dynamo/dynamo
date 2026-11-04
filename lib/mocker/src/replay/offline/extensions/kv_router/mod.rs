@@ -25,8 +25,8 @@ use dynamo_kv_router::protocols::{
     WorkerWithDpRank, compute_block_hash_for_seq,
 };
 use dynamo_kv_router::scheduling::{
-    OverlapAnalysis, OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot,
-    ScheduleMode, SchedulingContext, WorkerPlacement,
+    OverlapAnalysis, OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueMetadata,
+    QueueSnapshot, ScheduleMode, SchedulingContext, WorkerPlacement,
 };
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::services::selection::affinity::{
@@ -1046,16 +1046,24 @@ impl OfflineReplayRouter {
                         .map(|rank| WorkerWithDpRank::new(target.worker_id, rank))
                 })
                 .map_or(WorkerPlacement::Any, WorkerPlacement::Exact);
+            let metadata = QueueMetadata {
+                class_index,
+                snapshot,
+                due_at: None,
+                // Replay requests carry no explicit deadline. A class budget counts from the
+                // virtual time the request reaches the scheduler, as the live router counts it
+                // from scheduler ingress, after any affinity wait.
+                class_due_at: class.slo_ttft_due_at(decay_now),
+                arrival_offset_secs: now_ms.max(0.0) / 1000.0,
+            };
             let priority_jump = pending.priority_jump;
             let strict_priority = pending.strict_priority;
             self.pending
-                .enqueue(
-                    class_index,
+                .enqueue_with_due_at(
+                    metadata,
                     self.workers_with_configs
                         .len()
                         .saturating_mul(self.dp_size as usize),
-                    snapshot,
-                    now_ms.max(0.0) / 1000.0,
                     priority_jump,
                     strict_priority,
                     placement,
@@ -2967,6 +2975,60 @@ policy_classes:
             .map(|request| request.uuid)
             .collect::<Vec<_>>();
         assert_eq!(pending, vec![Uuid::from_u128(3), Uuid::from_u128(2)]);
+    }
+
+    #[test]
+    fn edf_offline_queue_orders_by_virtual_due_time_without_priority_modifiers() {
+        let path = std::env::temp_dir().join(format!("dynamo-replay-edf-{}.yaml", Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            r#"
+policy_classes:
+  - name: standard
+    quantum: 64
+    slo_ttft_ms: 250
+    prefill_busy_threshold_frac: 0.5
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(path.display().to_string()),
+            ..KvRouterConfig::default()
+        };
+        let mut router = OfflineReplayRouter::new(&queueing_args(), Some(config), None, 1).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(router.profile.class(0).queue_policy, RouterQueuePolicy::Edf);
+
+        router
+            .on_request_arrival(&request(1, 1), None, 0.0)
+            .unwrap();
+        // Each class due time counts from the virtual arrival, so later arrivals keep their
+        // order; soft and strict priority do not move them ahead.
+        for (uuid, priority, strict_priority, now_ms) in
+            [(2, 0, 0, 10.0), (3, 1_000_000, 9, 20.0), (4, 0, 0, 30.0)]
+        {
+            router
+                .on_request_arrival(
+                    &request_with_priorities(uuid, uuid as u32, 64, priority, strict_priority),
+                    None,
+                    now_ms,
+                )
+                .unwrap();
+        }
+        let pending = router
+            .debug_snapshot(30.0)
+            .pending
+            .into_iter()
+            .map(|request| request.uuid.as_u128())
+            .collect::<Vec<_>>();
+        assert_eq!(pending, [2, 3, 4]);
+
+        // A passed class budget neither rejects nor delays a queued request.
+        let admitted = router
+            .on_request_completed(Uuid::from_u128(1), 10_000.0)
+            .unwrap();
+        assert_eq!(admitted_uuids(admitted), [Uuid::from_u128(2)]);
+        assert_eq!(router.pending_count(), 2);
     }
 
     #[test]
