@@ -223,14 +223,14 @@ type ObjectiveSpec struct {
 
 	// SLA defines per-request latency bounds used to calculate goodput. Admission defaults an
 	// omitted SLA to TTFT 2000 ms and ITL 30 ms. An explicit empty object opts out of those
-	// defaults. spec.aisimulate.inputOverrides.evaluation.sla overrides the bounds it names.
+	// defaults. spec.aisim.inputOverrides.evaluation.sla overrides the bounds it names.
 	// +optional
 	SLA *ObjectiveSLASpec `json:"sla,omitempty"`
 }
 
-// AISimulateSpec supplies public recommendation input to the AISimulate version in the operator's configured
+// AISimSpec supplies public recommendation input to the AISimulate version in the operator's configured
 // planner image.
-type AISimulateSpec struct {
+type AISimSpec struct {
 	// InputOverrides is an RFC 7386 JSON Merge Patch over the input lowered from
 	// the typed fields. It uses the upstream AISimulate JSON contract, including
 	// snake_case names. Values here take precedence, and null deletes a lowered
@@ -283,7 +283,7 @@ type NativeSearchInput struct {
 	// When omitted, admission supplies 1024 input tokens, 128 output tokens and concurrency 10;
 	// an explicit empty workload receives the same shape. workload.static: {} opts out of all
 	// traffic defaults. Any other static object is completed with its missing defaults.
-	// spec.aisimulate.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over
+	// spec.aisim.inputOverrides is applied as an RFC 7386 JSON Merge Patch and wins over
 	// every lowered traffic field it names.
 	// The default evaluates a fixed concurrency, so it does not create a KV-capacity-fraction
 	// search. Lowering independently defaults optimizer.max_trials to 320.
@@ -296,9 +296,9 @@ type NativeSearchInput struct {
 	// +optional
 	Objective *ObjectiveSpec `json:"objective,omitempty"`
 
-	// AISimulate supplies public recommendation input to the operator's AISimulate execution bundle.
+	// AISim supplies public recommendation input to the operator's AISimulate execution bundle.
 	// +optional
-	AISimulate *AISimulateSpec `json:"aisimulate,omitempty"`
+	AISim *AISimSpec `json:"aisim,omitempty"`
 
 	// Recommendation controls bounded projection into DGDC resources.
 	// +optional
@@ -313,7 +313,7 @@ type DynamoGraphDeploymentRequestNativeSpec struct {
 // DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
 // Native v1beta2 fields and the V1Beta1 conversion envelope are mutually exclusive.
 // +kubebuilder:validation:XValidation:rule="has(self.v1beta1) != has(self.model)",message="exactly one of native v1beta2 fields or v1beta1 must be specified"
-// +kubebuilder:validation:XValidation:rule="!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisimulate) || has(self.recommendation))",message="v1beta1 is mutually exclusive with native v1beta2 fields"
+// +kubebuilder:validation:XValidation:rule="!has(self.v1beta1) || !(has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.aisim) || has(self.recommendation))",message="v1beta1 is mutually exclusive with native v1beta2 fields"
 // +kubebuilder:validation:XValidation:rule="has(self.v1beta1) == has(oldSelf.v1beta1) && (!has(self.v1beta1) || self.v1beta1 == oldSelf.v1beta1)",message="the conversion carrier is immutable"
 type DynamoGraphDeploymentRequestSpec struct {
 	DynamoGraphDeploymentRequestNativeSpec `json:",inline"`

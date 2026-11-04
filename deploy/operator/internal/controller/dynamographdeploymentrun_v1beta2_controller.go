@@ -1189,7 +1189,7 @@ func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileRunStatus(
 			"update Run status: effective AISimulate input is missing")}
 	}
 	original := run.DeepCopy()
-	run.Status.AISimulate = &nvidiacomv1beta2.AISimulateRunStatus{Input: execution.Input.DeepCopy()}
+	run.Status.AISim = &nvidiacomv1beta2.AISimRunStatus{Input: execution.Input.DeepCopy()}
 	run.Status.JobRef = &nvidiacomv1beta2.ResourceReference{Name: job.Name, UID: job.UID}
 	run.Status.Phase = nvidiacomv1beta2.DGDRRunPhasePending
 	reason, message := dgdrRunReasonPending, dgdrRunMessagePending

@@ -194,7 +194,7 @@ func dynamoFuzzerFuncs(_ runtimeserializer.CodecFactory) []any {
 		fuzzBeta2DGDRNativeStatus,
 		fuzzBeta2DGDRSpec,
 		fuzzBeta2DGDRStatus,
-		fuzzAISimulateSpec,
+		fuzzAISimSpec,
 		fuzzBetaDGDROverrides,
 		// PlacementStatus (v1alpha1 + v1beta1): pick admissible values so the
 		// round-trip fuzzer exercises Placement without producing shapes the CRD
@@ -667,7 +667,7 @@ type fuzzAISimulateWorkload struct {
 	Custom       map[string]string `json:"custom,omitempty"`
 }
 
-func fuzzAISimulateSpec(s *v1beta2.AISimulateSpec, c randfill.Continue) {
+func fuzzAISimSpec(s *v1beta2.AISimSpec, c randfill.Continue) {
 	c.FillNoCustom(s)
 
 	// Exercise both absent and typed object input override payloads.
