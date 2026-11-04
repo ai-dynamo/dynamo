@@ -486,7 +486,8 @@ jobs:
         cargo fmt --manifest-path tests/parity/unified/Cargo.toml -- --check
         cargo deny --locked --manifest-path tests/parity/unified/Cargo.toml -L error check licenses bans --config deny.toml
         cargo clippy --locked --manifest-path tests/parity/unified/Cargo.toml --all-targets --no-deps -- -D warnings
-        cargo test --locked --manifest-path tests/parity/unified/Cargo.toml --tests
+        cargo test --locked --manifest-path tests/parity/unified/Cargo.toml --all-targets
+        tests/parity/unified/run.sh list-v2-parsers
     - name: Generate frontend OpenAPI specification
       if: matrix.dir == '.'
       # The preceding integration-test build also builds the normal binary.
