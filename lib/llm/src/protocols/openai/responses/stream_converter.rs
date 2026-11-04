@@ -1841,6 +1841,38 @@ mod tests {
         );
     }
 
+    /// The V1 tool jail can send late scores on an empty-delta choice after `finish_reason`.
+    /// Responses carries no chat logprobs, so that choice must not change the output.
+    #[test]
+    fn post_finish_score_only_choice_emits_no_events() {
+        let mut score_only = finish_chunk(FinishReason::Stop);
+        let choice = &mut score_only.inner.choices[0];
+        *choice = crate::protocols::openai::chat_completions::unified_parser::empty_choice(0);
+        choice.logprobs = Some(
+            serde_json::from_value(serde_json::json!({
+                "content": [{"token": "eos", "logprob": -0.5, "bytes": [], "top_logprobs": []}],
+                "refusal": null
+            }))
+            .unwrap(),
+        );
+
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+        conv.process_chunk(&text_chunk("hi"));
+        conv.process_chunk(&finish_chunk(FinishReason::Stop));
+
+        assert!(conv.process_chunk(&score_only).is_empty());
+        assert_eq!(
+            event_types(&conv.emit_end_events()),
+            [
+                "response.output_text.done",
+                "response.content_part.done",
+                "response.output_item.done",
+                "response.completed",
+            ]
+        );
+        assert_eq!(conv.completed_output().len(), 1);
+    }
+
     /// Parseable arguments remain open until an explicit tool-call finish reason.
     #[test]
     fn test_complete_tool_call_closes_on_finish_reason() {

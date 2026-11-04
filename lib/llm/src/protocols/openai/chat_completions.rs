@@ -251,6 +251,11 @@ impl NvCreateChatCompletionRequest {
 const THINKING_TOGGLES: [&str; 2] = ["thinking", "enable_thinking"];
 const THINKING_KEYS: [&str; 3] = ["thinking", "enable_thinking", "thinking_mode"];
 
+/// A `chat_template_kwargs` key that the normalizer reads as a thinking control.
+pub(crate) fn is_thinking_control_key(key: &str) -> bool {
+    THINKING_KEYS.contains(&key) || key == "reasoning_effort"
+}
+
 fn set_thinking(args: &mut HashMap<String, serde_json::Value>, on: bool) {
     args.insert("thinking".to_string(), serde_json::Value::Bool(on));
     args.insert("enable_thinking".to_string(), serde_json::Value::Bool(on));
@@ -322,6 +327,15 @@ pub struct NvCreateChatCompletionResponse {
 }
 
 /// Parser lifecycle evidence carried between serving components, never to OpenAI clients.
+///
+/// Evidence is keyed by choice and tool index. It may repeat or arrive without
+/// a matching choice or tool-call delta.
+///
+/// In unified-parser output, `complete` reflects parser state after processing
+/// the source chunk. Multiple rewritten children can carry that final state,
+/// including a name-only child before its argument fragments. It is not an
+/// argument-delivery barrier: consumers must not infer that all arguments have
+/// arrived, or interpret empty arguments as a parameterless call, from it alone.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallCompletion {
     pub choice_index: u32,

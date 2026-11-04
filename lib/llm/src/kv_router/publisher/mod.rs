@@ -85,6 +85,11 @@ pub enum KvEventSourceConfig {
         /// Expected source rank and negotiated heartbeat timeout.
         /// Cannot be combined with `recovery`.
         liveness: Option<(u32, std::time::Duration)>,
+        /// The source derives multimodal pad values from engine identities
+        /// (SGLang after sgl-project/sglang#43043), so every event token at or
+        /// above `MM_PAD_SHIFT_VALUE` is excluded from the index. Otherwise only
+        /// values that do not fit in `u32` are excluded.
+        engine_owned_mm_identity: bool,
         /// Opt-in replay recovery that gates readiness on verified continuity.
         /// Cannot be combined with `liveness`.
         recovery: Option<ZmqRecoveryConfig>,
@@ -148,6 +153,7 @@ impl KvEventSource {
                 video_token_id,
                 expected_rank,
                 liveness,
+                engine_owned_mm_identity,
                 recovery,
             } => {
                 anyhow::ensure!(
@@ -171,6 +177,7 @@ impl KvEventSource {
                             video_token_id,
                             expected_rank,
                             liveness,
+                            engine_owned_mm_identity,
                             recovery,
                         ));
                 let listener_abort_handle = listener_handle.abort_handle();
