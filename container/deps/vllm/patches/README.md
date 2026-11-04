@@ -26,6 +26,8 @@ The region-key port preserves the newer `route_packed_layers` handling. The
 range-load port reuses the existing `cdiv` import and advances the native NIXL
 connector version from 13 to 14 to keep the new protocol distinguishable.
 All workers participating in a transfer must use the same patched protocol.
+The CUDA dev and local-dev images retain the unpatched protocol 13. Do not pair
+one of these workers with a patched runtime worker (protocol 14).
 
 Validation: zero-fuzz application to the exact source commit, Python 3.12
 syntax checks, CPU source probes for pull/push signatures, token-window slicing,
