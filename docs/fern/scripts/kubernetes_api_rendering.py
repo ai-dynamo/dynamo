@@ -85,14 +85,16 @@ _WARNING = (
 _VALUELESS_MARKER_RE = re.compile(
     r"\b(Optional|Required|EmbeddedResource|Schemaless):\s*(?:\\\{\\\}|\{\s*\})"
 )
-_INLINE_CODE_RE = re.compile(r"(`+)(?:.+?)\1", re.DOTALL)
+# Inline code spans and ``Enum: [...]`` value lists may contain marker-like
+# literals that are real values, so they are left untouched.
+_PROTECTED_SPAN_RE = re.compile(r"(`+)(?:.+?)\1|\[[^\]]*\]", re.DOTALL)
 
 
 def _drop_valueless_markers(text: str) -> str:
-    """Strip valueless-marker braces outside inline code spans."""
+    """Strip valueless-marker braces outside inline code and value lists."""
     out: list[str] = []
     pos = 0
-    for match in _INLINE_CODE_RE.finditer(text):
+    for match in _PROTECTED_SPAN_RE.finditer(text):
         out.append(_VALUELESS_MARKER_RE.sub(r"\1", text[pos : match.start()]))
         out.append(match.group(0))
         pos = match.end()

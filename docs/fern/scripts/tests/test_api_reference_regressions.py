@@ -874,6 +874,14 @@ def test_kubernetes_valueless_marker_strip_skips_multiline_inline_code() -> None
     assert stripped.endswith("Optional")
 
 
+def test_kubernetes_valueless_marker_strip_skips_enum_values() -> None:
+    """A marker-like value inside ``Enum: [...]`` is an allowed value, not a marker."""
+    raw = "Enum: [Optional: {} b]  Optional: {}"
+    stripped = kubernetes_api_rendering._drop_valueless_markers(raw)
+    assert "Enum: [Optional: {} b]" in stripped
+    assert stripped.endswith("Optional")
+
+
 def test_kubernetes_table_parser_preserves_literal_pipes() -> None:
     row = r"| `field` _string_ | uses `a|b` and x \| y |  | Required: {} |"
 
