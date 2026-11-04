@@ -59,7 +59,7 @@ jobs:
   test:
     name: Upstream TRT-LLM image integration (1 GPU)
     needs: build
-    runs-on: dynamo-gpu-1-amd64-v1
+    runs-on: [gpu-1, amd64, runner-version-v1, gpu-generic, us-west-2]
     timeout-minutes: 30
     container:
       image: ${{ needs.build.outputs.image }}
