@@ -5162,8 +5162,9 @@ fn spawn_admission(
 
 /// In disaggregated KV routing the prefill hop's queue is the only gate for a class's
 /// decode wait limit: it holds new requests while the decode pool is past the limit and
-/// releases them when decode frees KV, while the decode hop books every decode-phase
-/// request at once.
+/// releases them when decode frees KV, while the decode hop books every decode leg with
+/// staged KV at once. A conditional-disagg bypass, which never passed the prefill hop,
+/// keeps the class gate at the decode hop.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
 async fn disagg_decode_wait_limit_gates_the_prefill_hop_and_never_the_decode_hop() {
@@ -5223,21 +5224,14 @@ async fn disagg_decode_wait_limit_gates_the_prefill_hop_and_never_the_decode_hop
     }
     assert_eq!(decode.kv_router().selection.scheduler().pending_count(), 0);
 
-    // A conditional-disagg bypass is decode-phase with nothing staged. The decode
-    // queue holds nothing in disagg, so it books at once too.
-    let bypass = tokio::time::timeout(
-        Duration::from_secs(5),
-        spawn_admission(
-            &decode,
-            request_in_phase("bypass", RequestPhase::Decode, 1, false).await,
-            RequestPhase::Decode,
-        ),
-    )
-    .await
-    .expect("a conditional-disagg bypass must never wait at the decode hop")
-    .unwrap();
-    assert_eq!(bypass, DECODE_WORKER);
-    assert_eq!(decode.kv_router().selection.scheduler().pending_count(), 0);
+    // A conditional-disagg bypass is decode-phase with nothing staged and never passed
+    // the prefill queue, so it waits at the decode hop while the decode pool is full.
+    let bypass = spawn_admission(
+        &decode,
+        request_in_phase("bypass", RequestPhase::Decode, 1, false).await,
+        RequestPhase::Decode,
+    );
+    wait_for_pending(&decode, 1).await;
 
     // A new request waits at the prefill hop even though the prefill worker is idle.
     let new_request = spawn_admission(
@@ -5250,12 +5244,18 @@ async fn disagg_decode_wait_limit_gates_the_prefill_hop_and_never_the_decode_hop
     assert!(!new_request.is_finished());
 
     // Releasing the legs frees decode KV; that signal alone wakes the prefill queue.
+    assert!(!bypass.is_finished());
     drop(legs);
     let prefill_worker = tokio::time::timeout(Duration::from_secs(5), new_request)
         .await
         .expect("freed decode KV must release the prefill hop")
         .unwrap();
     assert_eq!(prefill_worker, PREFILL_WORKER);
+    let bypass_worker = tokio::time::timeout(Duration::from_secs(5), bypass)
+        .await
+        .expect("freed decode KV must release the bypass at the decode hop")
+        .unwrap();
+    assert_eq!(bypass_worker, DECODE_WORKER);
 
     drop(prefill);
     drop(decode);

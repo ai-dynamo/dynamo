@@ -381,7 +381,7 @@ impl PrefillRouter {
                 .await?;
             // The prefill hop is the only admission gate in KV-routed disagg: its queue
             // judges each class's decode wait limit on the decode pool, and the decode
-            // hop books every decode-phase request without waiting.
+            // hop books every decode leg with staged KV without waiting.
             if context.decode_router_mode.is_kv_routing()
                 && !kv_chooser.set_paired_pool(Arc::clone(&context.decode_room) as _)
             {

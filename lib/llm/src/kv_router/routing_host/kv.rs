@@ -21,14 +21,16 @@ impl RoutingHost {
     ) -> Result<SelectionOutcome, Error> {
         let context_id = request.context().id().to_string();
         let staged_kv = StagedKv::for_request(request.content());
-        // In disaggregated serving the prefill hop's queue is the only admission gate:
-        // it judges each class's prefill and decode limits before anything dispatches.
-        // The decode queue holds nothing, so every decode-phase request books here
-        // without waiting: a leg whose prefill is running (holding it would strand that
-        // prefill's KV) and a conditional-disagg bypass alike. Reject thresholds still
-        // apply at selection.
+        // In disaggregated serving the prefill hop's queue is the only admission gate
+        // for remote-prefill requests: it judges each class's prefill and decode limits
+        // before anything dispatches. A decode leg whose prefill already ran (staged KV)
+        // books here without waiting: holding it would strand that prefill's KV. A
+        // conditional-disagg bypass has nothing staged and never passed the prefill
+        // queue, so it keeps the class gate. Reject thresholds still apply at selection.
         let admission = match admission {
-            FindBestMatchAdmission::WithAdmission if phase == RequestPhase::Decode => {
+            FindBestMatchAdmission::WithAdmission
+                if phase == RequestPhase::Decode && staged_kv == StagedKv::Present =>
+            {
                 FindBestMatchAdmission::AdmittedUpstream
             }
             admission => admission,
