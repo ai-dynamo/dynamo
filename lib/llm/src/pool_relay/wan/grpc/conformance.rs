@@ -47,6 +47,172 @@ use crate::pool_relay::topology::TopologyPublisher;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const WORKER_ID: u64 = 7;
 
+#[derive(Clone)]
+struct GlobalReceiverProbe(
+    tokio::sync::mpsc::UnboundedSender<Option<dynamo_global_common::grpc::PoolViewFrame>>,
+);
+
+struct ProbeClosed(GlobalReceiverProbe);
+
+impl Drop for ProbeClosed {
+    fn drop(&mut self) {
+        let _ = self.0.0.send(None);
+    }
+}
+
+#[tonic::async_trait]
+impl dynamo_global_common::grpc::pool_view_receiver_server::PoolViewReceiver
+    for GlobalReceiverProbe
+{
+    async fn publish(
+        &self,
+        request: tonic::Request<Streaming<dynamo_global_common::grpc::PoolViewFrame>>,
+    ) -> Result<tonic::Response<dynamo_global_common::grpc::PublishResult>, tonic::Status> {
+        let _closed = ProbeClosed(self.clone());
+        let mut stream = request.into_inner();
+        while let Some(frame) = stream.message().await? {
+            if self.0.send(Some(frame)).is_err() {
+                return Err(tonic::Status::cancelled("test ended"));
+            }
+        }
+        Ok(tonic::Response::new(
+            dynamo_global_common::grpc::PublishResult {
+                accepted_revision: 0,
+            },
+        ))
+    }
+}
+
+async fn global_receiver_probe() -> (
+    dynamo_global_common::RouterReplica,
+    tokio::sync::mpsc::UnboundedReceiver<Option<dynamo_global_common::grpc::PoolViewFrame>>,
+    tokio_util::task::AbortOnDropHandle<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let server = tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(
+                dynamo_global_common::grpc::pool_view_receiver_server::PoolViewReceiverServer::new(
+                    GlobalReceiverProbe(sender),
+                ),
+            )
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+            .await
+            .unwrap();
+    });
+    (
+        dynamo_global_common::RouterReplica {
+            replica: dynamo_global_common::RouterReplicaId(address.to_string()),
+            url: format!("http://{address}").parse().unwrap(),
+        },
+        receiver,
+        tokio_util::task::AbortOnDropHandle::new(server),
+    )
+}
+
+async fn captured_state(
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<
+        Option<dynamo_global_common::grpc::PoolViewFrame>,
+    >,
+    snapshot: bool,
+    mut matches: impl FnMut(&dynamo_global_common::grpc::PoolState) -> bool,
+) -> dynamo_global_common::grpc::PoolState {
+    tokio::time::timeout(IO_TIMEOUT, async {
+        loop {
+            use dynamo_global_common::grpc::pool_view_frame::Event;
+            let frame = receiver.recv().await.unwrap().unwrap();
+            let state = match frame.event.unwrap() {
+                Event::Snapshot(frame) => frame.state,
+                Event::Upsert(frame) if !snapshot => frame.state,
+                _ => None,
+            };
+            if let Some(state) = state
+                && matches(&state)
+            {
+                return state;
+            }
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn global_view_sender_follows_directory_and_reconnects_with_live_state() {
+    use dynamo_global_common::PoolKey as RoutingPoolKey;
+    use prost::Message;
+
+    let mut fixture = RelayFixture::start(|config| config.load_window_ms = 10).await;
+    let (first, mut first_frames, _first_server) = global_receiver_probe().await;
+    let (second, mut second_frames, _second_server) = global_receiver_probe().await;
+    let (directory, routers) = watch::channel(HashSet::from([first.clone(), second.clone()]));
+    fixture.transport.broadcast_global_views(
+        RoutingPoolKey::new("east", "dynamo", "blue").unwrap(),
+        routers,
+    );
+    for frames in [&mut first_frames, &mut second_frames] {
+        let initial = captured_state(frames, true, |_| true).await;
+        let catalog = proto::KvPoolCatalogUpdate::decode(initial.catalog).unwrap();
+        let readiness = proto::ServingReadinessUpdate::decode(initial.readiness).unwrap();
+        assert_eq!(catalog.snapshot.unwrap().pools.len(), 1);
+        assert!(!readiness.entries.is_empty());
+    }
+    // Dropping one directory endpoint closes its receiving stream, without
+    // affecting the other router.
+    directory.send_replace(HashSet::from([second.clone()]));
+    tokio::time::timeout(IO_TIMEOUT, async {
+        while first_frames.recv().await.unwrap().is_some() {}
+    })
+    .await
+    .unwrap();
+    fixture.replace_pool().await;
+    let revision = fixture.registry.catalog().revision();
+    fixture
+        .serving_load
+        .send_replace(Some(Arc::new(ServingLoadSnapshot {
+            pools: fixture
+                .registry
+                .serving_pool_loads(&HashMap::new(), std::time::Instant::now()),
+            models: Vec::new(),
+        })));
+    let state = captured_state(&mut second_frames, false, |state| {
+        proto::KvPoolCatalogUpdate::decode(state.catalog.clone())
+            .unwrap()
+            .revision
+            == revision
+            && !state.serving_load.is_empty()
+            && !state.kv_load.is_empty()
+    })
+    .await;
+    let serving = proto::ServingLoadUpdate::decode(state.serving_load).unwrap();
+    let kv = proto::KvPoolLoadUpdate::decode(state.kv_load).unwrap();
+    assert_eq!(serving.relay, kv.relay);
+    assert_eq!(serving.pools.len(), 1);
+    directory.send_replace(HashSet::from([first, second]));
+    let fresh = captured_state(&mut first_frames, true, |state| {
+        proto::KvPoolCatalogUpdate::decode(state.catalog.clone())
+            .unwrap()
+            .revision
+            == revision
+    })
+    .await;
+    assert_eq!(
+        proto::KvPoolCatalogUpdate::decode(fresh.catalog)
+            .unwrap()
+            .revision,
+        revision
+    );
+    drop(directory);
+    tokio::time::timeout(IO_TIMEOUT, async {
+        while second_frames.recv().await.unwrap().is_some() {}
+    })
+    .await
+    .unwrap();
+    fixture.shutdown().await;
+}
+
 static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(1);
 
 struct RelayFixture {
@@ -459,12 +625,28 @@ async fn heartbeat_follows_complete_chunked_snapshot_without_advancing_sequence(
 }
 
 #[tokio::test]
+async fn accepted_relay_connections_disable_nagle() {
+    let fixture = RelayFixture::start(|_| {}).await;
+    let connection = TcpStream::connect(fixture.address).await.unwrap();
+    let nodelay =
+        tokio::time::timeout(IO_TIMEOUT, fixture.transport.wait_for_accepted_connection())
+            .await
+            .expect("Relay did not accept the connection");
+    assert!(nodelay, "accepted Relay connection kept Nagle enabled");
+
+    drop(connection);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
 async fn shutdown_force_closes_connections_with_an_unread_grpc_stream() {
     let fixture = RelayFixture::start(|_| {}).await;
     let connection = TcpStream::connect(fixture.address).await.unwrap();
-    tokio::time::timeout(IO_TIMEOUT, fixture.transport.wait_for_accepted_connection())
-        .await
-        .expect("Relay did not accept the idle connection");
+    let nodelay =
+        tokio::time::timeout(IO_TIMEOUT, fixture.transport.wait_for_accepted_connection())
+            .await
+            .expect("Relay did not accept the idle connection");
+    assert!(nodelay, "accepted idle connection kept Nagle enabled");
 
     let mut client = fixture.client().await;
     let (catalog_stream, producer) = initial_catalog(&mut client).await;
