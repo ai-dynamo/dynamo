@@ -2836,6 +2836,8 @@ class PoolRelay:
         connection_revision: Optional[str] = None,
         global_discovery_url: Optional[str] = None,
         routing_pool: Optional[str] = None,
+        routing_pool_region: Optional[str] = None,
+        routing_pool_frontends: Optional[List[str]] = None,
     ) -> None:
         ...
 

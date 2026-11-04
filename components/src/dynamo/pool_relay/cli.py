@@ -55,6 +55,8 @@ class PoolRelayCliConfig:
     connection_revision: str | None = None
     global_discovery_url: str | None = None
     routing_pool: str | None = None
+    routing_pool_region: str | None = None
+    routing_pool_frontends: tuple[str, ...] = ()
 
 
 class RelayShutdownWaiter(Protocol):
@@ -172,6 +174,14 @@ def parse_args(
     parser.add_argument(
         "--routing-pool",
         help="Publish this DGD's state to Global Routers as <cluster>/<namespace>/<DGD>",
+    )
+    parser.add_argument(
+        "--routing-pool-region",
+        help="Region to register the routing pool in with Global Discovery",
+    )
+    parser.add_argument(
+        "--routing-pool-frontends",
+        help="Comma-separated HTTP(S) frontend URLs Global Routers send the routing pool's requests to",
     )
 
     parsed = parser.parse_args(argv)
@@ -306,6 +316,30 @@ def parse_args(
             parser.error("--routing-pool cluster must match --cluster-id")
         if global_discovery_url is None or bind is None:
             parser.error("--routing-pool requires --global-discovery-url and --bind")
+    routing_pool_region = _string_value(
+        parsed.routing_pool_region, environment, "DYN_RELAY_ROUTING_POOL_REGION"
+    )
+    routing_pool_frontends_value = _string_value(
+        parsed.routing_pool_frontends, environment, "DYN_RELAY_ROUTING_POOL_FRONTENDS"
+    )
+    routing_pool_frontends = (
+        _csv_values(routing_pool_frontends_value, "--routing-pool-frontends", parser)
+        if routing_pool_frontends_value is not None
+        else ()
+    )
+    if routing_pool is None:
+        if routing_pool_region is not None or routing_pool_frontends:
+            parser.error(
+                "--routing-pool-region and --routing-pool-frontends require --routing-pool"
+            )
+    elif (
+        routing_pool_region is None
+        or not routing_pool_region
+        or routing_pool_region != routing_pool_region.strip()
+    ):
+        parser.error(
+            "--routing-pool requires a --routing-pool-region without surrounding whitespace"
+        )
 
     tuning: list[tuple[str, int]] = []
     for key in TUNING_KEYS:
@@ -338,6 +372,8 @@ def parse_args(
         connection_revision=connection_revision,
         global_discovery_url=global_discovery_url,
         routing_pool=routing_pool,
+        routing_pool_region=routing_pool_region,
+        routing_pool_frontends=routing_pool_frontends,
     )
 
 
