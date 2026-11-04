@@ -38,12 +38,15 @@ pub const SPEC_DECODE_RUNTIME_KEY: &str = "spec_decode";
 /// exclude reasoning and manages grammar activation around reasoning itself.
 ///
 /// Absence means `false` for compatibility with workers that expect the
-/// frontend's structural tag to model an already-opened reasoning block.
+/// frontend's structural tag to model an already-opened reasoning block. For bare
+/// structured responses, only an explicit `false` proves immediate grammar activation.
 pub const TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY: &str =
     "tool_call_structural_tag_excludes_reasoning";
 
 /// A backend consumes the reasoning prefix only when `require_reasoning` is true
-/// on the request. Missing metadata leaves reasoning in the frontend grammar.
+/// on the request. An explicit `false` means no engine-side reasoning gate.
+/// Missing metadata leaves reasoning in the frontend grammar and does not prove
+/// immediate activation for bare structured responses.
 pub const TOOL_CALL_STRUCTURAL_TAG_REASONING_GATE_RUNTIME_KEY: &str =
     "tool_call_structural_tag_reasoning_gate";
 
