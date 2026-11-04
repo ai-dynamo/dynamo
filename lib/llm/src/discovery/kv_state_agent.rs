@@ -100,6 +100,9 @@ pub struct KvStateAttachmentIntent {
     pub image_token_id: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_token_id: Option<u32>,
+    /// The raw source uses SGLang's wide multimodal pad format.
+    #[serde(default)]
+    pub engine_owned_mm_identity: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router_hint_source: Option<RouterHintSourceMetadata>,
 }

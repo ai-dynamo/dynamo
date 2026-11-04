@@ -69,7 +69,7 @@ spec:
       advisory: true
 ```
 
-Advisory mode is suggestion-only. The Planner computes recommended replica counts, logs them, exports them as diagnostics, and shows them in HTML reports. The recommendations are not applied as scaling decisions: the Planner does not execute scaling actions or change the deployment. Planner-in-the-loop replay honors it too: the replay keeps the simulated deployment fixed, reports the recommendations, and records [retune](#periodic-retune-experimental) decisions, which run only in simulation, without applying them; see [Replay in Advisory Mode](aisimulate-planner-replay.mdx#replay-in-advisory-mode).
+Advisory mode is suggestion-only. The Planner computes recommended replica counts, logs them, exports them as diagnostics, and shows them in HTML reports. The recommendations are not applied as scaling decisions: the Planner does not execute scaling actions or change the deployment. Planner-in-the-loop replay honors it too: the replay keeps the simulated deployment fixed, reports the recommendations, and records [retune](#periodic-retune-experimental) decisions without applying them; see [Replay in Advisory Mode](aisimulate-planner-replay.mdx#replay-in-advisory-mode).
 
 ### Optimization Target
 
@@ -328,9 +328,12 @@ spec:
 ## Periodic Retune (Experimental)
 
 > [!WARNING]
-> **Experimental.** In this release, retune runs only in offline simulation:
-> `aisimulate predict --stack dynamo` and `dynamo.replay.run_trace_replay`. A live Planner rejects a
-> configuration that sets `retune` at startup.
+> **Experimental.** `retune.executor` selects where retune runs. With `local`, the default, it runs
+> only in offline simulation: `aisimulate predict --stack dynamo` and
+> `dynamo.replay.run_trace_replay`, and a live Planner rejects it at startup. With `dgdr`, a live
+> Planner on Kubernetes retunes three KV router knobs with fixed replicas through DGDR v1beta2
+> Requests; it is for development clusters only. See
+> [Planner Live Retune](../../../../kubernetes/auto-deployment/planner-live-retune.md).
 
 Retune lets the Planner tune its own runtime parameters from the traffic it served. Every
 `retune.interval_seconds`, it takes the window of the request trace that just ended and replays it
@@ -375,8 +378,11 @@ A candidate that changes decisions is judged on one replay of one window, so
 This minimal fixed-replica configuration searches the 108-point default router domain every six
 hours. It is a `PlannerConfig` for the `planner_config` argument of `dynamo.replay.run_trace_replay`
 (see [Run Retune from Python](aisimulate-planner-replay.mdx#run-retune-from-python)), not a DGDR
-`spec.features.planner` fragment: a live Planner rejects it. In `aisimulate predict`, the `planner`
-section takes `retune` and the two scaling flags, and `mode` comes from `engine.mode`; see
+`spec.features.planner` fragment: a live Planner rejects it, because it uses the default
+`executor: local`. For a live Planner, see
+[Planner Live Retune](../../../../kubernetes/auto-deployment/planner-live-retune.md).
+In `aisimulate predict`, the `planner` section takes `retune` and the two scaling flags, and `mode`
+comes from `engine.mode`; see
 [Scenario 1](aisimulate-planner-replay.mdx#scenario-1-fixed-replicas-router-only).
 
 ```yaml
@@ -389,11 +395,12 @@ retune:
 ```
 
 To run retune and read its decisions, see
-[Simulate Retune](aisimulate-planner-replay.mdx#simulate-retune-experimental). For windows,
-candidates, scoring, and decision timing, see
-[Planner Design](planner-design.md#retune-experimental-simulation-only). For every field and the
+[Simulate Retune](aisimulate-planner-replay.mdx#simulate-retune-experimental), and to run it on a
+live deployment, see [Planner Live Retune](../../../../kubernetes/auto-deployment/planner-live-retune.md).
+For windows, candidates, scoring, and decision timing, see
+[Planner Design](planner-design.md#retune-experimental). For every field and the
 search-domain syntax, see the
-[`retune` reference](../../../../reference/components/planner-configuration.mdx#retune-experimental-simulation-only).
+[`retune` reference](../../../../reference/components/planner-configuration.mdx#retune-experimental).
 
 ## Integration with Profiler
 
