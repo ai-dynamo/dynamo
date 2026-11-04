@@ -46,6 +46,7 @@ from dynamo.common.backend.logprobs import (
     extract_from_sglang_meta,
     extract_prompt_logprobs_from_sglang_meta,
 )
+from dynamo.common.token_budget import TokenBudget, publish_token_budget
 from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
     SglangStreamingPostProcessor,
@@ -73,7 +74,9 @@ from dynamo.frontend.sglang_processor import (
     _normalize_eos_token_ids,
     _preprocess_worker,
     _runtime_config_parser_name,
+    _runtime_token_budget,
     _tokenizer_eos_token_ids,
+    _validate_requested_token_budget,
 )
 from dynamo.frontend.utils import (
     PreprocessError,
@@ -2975,6 +2978,214 @@ class TestRuntimeConfigParserName:  # FRONTEND.2 — parser name resolution from
                 return {"tool_call_parser": "hermes"}
 
         assert _runtime_config_parser_name(FakeMdc(), "tool_call_parser") == "hermes"
+
+
+@pytest.mark.core
+class TestTokenBudgetValidation:
+    def test_reads_worker_published_budget(self):
+        """Read a valid token budget from worker runtime metadata."""
+
+        class FakeMdc:
+            def runtime_config(self):
+                """Return worker metadata containing a valid token budget."""
+                return {
+                    "runtime_data": {
+                        "token_budget": {
+                            "combined_limit": 1024,
+                            "reject_prompt_overflow": True,
+                            "reject_total_overflow": False,
+                        }
+                    }
+                }
+
+        assert _runtime_token_budget(FakeMdc()) == TokenBudget(1024, True, False)
+
+    def test_reads_serialized_budget_published_by_worker(self):
+        """Read the serialized form emitted by the worker publisher."""
+
+        class FakeRuntimeConfig:
+            def __init__(self):
+                """Create an empty fake runtime configuration."""
+                self.runtime_data = {}
+
+            def set_engine_specific(self, key, value):
+                """Store worker-published engine metadata."""
+                self.runtime_data[key] = value
+
+        runtime_config = FakeRuntimeConfig()
+        expected = TokenBudget(2048, False, True)
+        publish_token_budget(runtime_config, expected)
+
+        class FakeMdc:
+            def runtime_config(self):
+                """Expose the serialized worker runtime metadata."""
+                return {"runtime_data": runtime_config.runtime_data}
+
+        assert _runtime_token_budget(FakeMdc()) == expected
+
+    def test_invalid_worker_budget_delegates_to_backend(self, caplog):
+        """Delegate overflow checks when worker metadata is malformed."""
+
+        class FakeMdc:
+            def runtime_config(self):
+                """Return malformed worker token-budget metadata."""
+                return {
+                    "runtime_data": {
+                        "token_budget": {
+                            "combined_limit": "1024",
+                            "reject_prompt_overflow": True,
+                            "reject_total_overflow": True,
+                        }
+                    }
+                }
+
+        assert _runtime_token_budget(FakeMdc()) is None
+        assert "delegated to the backend" in caplog.text
+
+    @pytest.mark.parametrize(
+        ("prompt_len", "max_tokens", "reject_prompt", "reject_total", "rejected"),
+        [
+            (3, 7, True, True, False),
+            (3, 8, True, True, True),
+            (10, None, True, True, True),
+            (3, 8, True, False, False),
+            (10, 8, False, True, False),
+        ],
+    )
+    def test_policy_matrix(
+        self,
+        prompt_len,
+        max_tokens,
+        reject_prompt,
+        reject_total,
+        rejected,
+    ):
+        """Apply the worker's prompt and total-overflow rejection flags."""
+
+        budget = TokenBudget(10, reject_prompt, reject_total)
+        if rejected:
+            with pytest.raises(InvalidArgument):
+                _validate_requested_token_budget(prompt_len, max_tokens, budget)
+        else:
+            _validate_requested_token_budget(prompt_len, max_tokens, budget)
+
+    def test_rejects_before_routed_engine_dispatch(self, tokenizer):
+        """Reject a known text overflow before dispatching to a worker."""
+
+        engine = FakeRoutedEngine()
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Say hello."}],
+            "max_tokens": 4,
+        }
+        prompt_len = len(
+            preprocess_chat_request(
+                request,
+                tokenizer=tokenizer,
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+            ).prompt_token_ids
+        )
+        processor = SglangProcessor(
+            tokenizer,
+            engine,
+            None,
+            None,
+            None,
+            token_budget=TokenBudget(prompt_len + 3, True, True),
+        )
+
+        async def collect():
+            """Collect the processor stream for the rejection assertion."""
+            return [item async for item in processor.generator(request)]
+
+        with pytest.raises(InvalidArgument, match="combined input and output tokens"):
+            asyncio.run(collect())
+        assert not engine.requests
+
+    def test_configured_budget_allows_missing_stop_conditions(self, tokenizer):
+        """Use the default output allowance when stop conditions are absent."""
+        engine = FakeRoutedEngine(items=[{"token_ids": [65], "finish_reason": "stop"}])
+        processor = SglangProcessor(
+            tokenizer,
+            engine,
+            None,
+            None,
+            None,
+            token_budget=TokenBudget(32, True, True),
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+        )
+
+        async def collect():
+            """Collect a stream whose preprocessing omitted stop conditions."""
+            return [
+                item
+                async for item in processor._generate_and_stream(
+                    "req-budget-default",
+                    {"model": "test-model"},
+                    {},
+                    [1],
+                    post,
+                )
+            ]
+
+        assert asyncio.run(collect())
+        assert len(engine.requests) == 1
+
+
+@pytest.mark.multimodal
+def test_multimodal_token_overflow_is_delegated_to_backend():
+    """Leave multimodal overflow validation to the backend."""
+
+    class MultimodalTokenizer:
+        chat_template = ""
+
+        def apply_chat_template(self, messages, **kwargs):
+            """Return a minimal tokenized multimodal prompt."""
+            return [1]
+
+        def decode(self, token_ids, *, skip_special_tokens):
+            """Decode the fake token stream into text."""
+            del skip_special_tokens
+            return "".join(chr(token_id) for token_id in token_ids)
+
+    engine = FakeRoutedEngine(items=[{"token_ids": [65], "finish_reason": "stop"}])
+    processor = SglangProcessor(
+        MultimodalTokenizer(),
+        engine,
+        None,
+        None,
+        None,
+        token_budget=TokenBudget(1, True, True),
+    )
+    request = {
+        "model": "test",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this image"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://example.com/image.png"},
+                    },
+                ],
+            }
+        ],
+        "max_tokens": 1,
+    }
+
+    async def collect():
+        """Collect the multimodal processor stream."""
+        return [item async for item in processor.generator(request)]
+
+    assert asyncio.run(collect())
+    assert len(engine.requests) == 1
+    assert engine.requests[0]["multi_modal_data"] == {
+        "image_url": [{"Url": "https://example.com/image.png"}]
+    }
 
 
 # ---------------------------------------------------------------------------

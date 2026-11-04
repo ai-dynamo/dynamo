@@ -262,7 +262,7 @@ impl PrefillTask {
     }
 }
 
-/// Cancel only an explicit decode admission refusal, which has no receiver
+/// Cancel only an explicit decode request or admission refusal, which has no receiver
 /// waiting for staged KV. Ambiguous transport errors retain the existing
 /// independent-prefill transfer cleanup behavior.
 fn cancel_prefill_on_decode_rejection(
@@ -272,10 +272,13 @@ fn cancel_prefill_on_decode_rejection(
     let mut current = Some(error);
     while let Some(cause) = current {
         if let Some(error) = cause.downcast_ref::<DynamoError>()
-            && error.class() == ErrorClass::CapacityExhausted
+            && matches!(
+                error.class(),
+                ErrorClass::InvalidRequest | ErrorClass::CapacityExhausted
+            )
         {
             tracing::debug!(request_id = %prefill_context.id(), %error,
-                "Cancelling remote prefill after decode admission rejection");
+                "Cancelling remote prefill after explicit decode rejection");
             prefill_context.stop_generating();
             return true;
         }
@@ -813,13 +816,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn decode_admission_rejection_cancels_prefill() {
+    async fn explicit_decode_dispatch_rejection_cancels_prefill() {
         for output in [
             PrefillNeed::None,
             PrefillNeed::BeforeLast,
             PrefillNeed::BeforeFirst,
         ] {
             for error_type in [
+                ErrorType::InvalidArgument,
+                ErrorType::Backend(BackendError::InvalidArgument),
                 ErrorType::WorkerOverloaded,
                 ErrorType::ResourceExhausted,
                 ErrorType::CapacityExhausted,
@@ -831,13 +836,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn decode_stream_admission_rejection_cancels_prefill() {
+    async fn explicit_decode_stream_rejection_cancels_prefill() {
         for output in [
             PrefillNeed::None,
             PrefillNeed::BeforeLast,
             PrefillNeed::BeforeFirst,
         ] {
             for error_type in [
+                ErrorType::InvalidArgument,
+                ErrorType::Backend(BackendError::InvalidArgument),
                 ErrorType::WorkerOverloaded,
                 ErrorType::ResourceExhausted,
                 ErrorType::CapacityExhausted,

@@ -201,6 +201,9 @@ newer booking that reused the same request id and worker.
   staged for it. The stages it still runs share one `CleanupBudget`, which starts the first
   time a stage sees the stopped context. When the budget runs out, the stage gives up and logs
   that the staged blocks will sit until they expire.
+- An explicit decode request rejection (`InvalidRequest` or `CapacityExhausted`) cancels its
+  paired prefill immediately because no decode receiver will consume the staged KV. Ambiguous
+  transport failures preserve the independent prefill cleanup path.
 - A request that took the conditional bypass reached decode without staged KV, so it cancels
   normally.
 

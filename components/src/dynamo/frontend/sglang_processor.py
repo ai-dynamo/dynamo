@@ -22,6 +22,7 @@ from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo._internal import ModelDeploymentCard
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
+from dynamo.common.token_budget import TOKEN_BUDGET_RUNTIME_KEY, TokenBudget
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
@@ -251,6 +252,92 @@ def _runtime_config_parser_name(
         return None
     value = runtime_config.get(key)
     return value if isinstance(value, str) and value else None
+
+
+def _runtime_token_budget(mdc: ModelDeploymentCard) -> TokenBudget | None:
+    """Read the worker-published token-overflow contract, if valid."""
+    runtime_config = mdc.runtime_config()
+    if not isinstance(runtime_config, dict):
+        return None
+    runtime_data = runtime_config.get("runtime_data")
+    if not isinstance(runtime_data, dict):
+        return None
+    value = runtime_data.get(TOKEN_BUDGET_RUNTIME_KEY)
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            value = None
+    if not isinstance(value, dict):
+        logger.warning(
+            "Ignoring invalid %s runtime metadata; token overflow handling "
+            "will be delegated to the backend",
+            TOKEN_BUDGET_RUNTIME_KEY,
+        )
+        return None
+
+    combined_limit = value.get("combined_limit")
+    reject_prompt_overflow = value.get("reject_prompt_overflow")
+    reject_total_overflow = value.get("reject_total_overflow")
+    if (
+        not isinstance(combined_limit, int)
+        or isinstance(combined_limit, bool)
+        or combined_limit < 0
+        or combined_limit > _U32_MAX
+        or not isinstance(reject_prompt_overflow, bool)
+        or not isinstance(reject_total_overflow, bool)
+    ):
+        logger.warning(
+            "Ignoring invalid %s runtime metadata; token overflow handling "
+            "will be delegated to the backend",
+            TOKEN_BUDGET_RUNTIME_KEY,
+        )
+        return None
+    return TokenBudget(
+        combined_limit=combined_limit,
+        reject_prompt_overflow=reject_prompt_overflow,
+        reject_total_overflow=reject_total_overflow,
+    )
+
+
+def _validate_requested_token_budget(
+    prompt_len: int,
+    max_tokens: int | None,
+    token_budget: TokenBudget | None,
+) -> None:
+    """Reject known context overflows before routing creates worker-side effects."""
+    if token_budget is None:
+        return
+
+    combined_limit = token_budget.combined_limit
+    if prompt_len >= combined_limit:
+        if not token_budget.reject_prompt_overflow:
+            return
+        raise InvalidArgument(
+            f"This model configuration accepts at most {combined_limit} tokens in the "
+            f"prompt. However, your request has {prompt_len} input tokens. Please reduce "
+            "the length of the prompt."
+        )
+
+    requested_tokens = prompt_len + (max_tokens if max_tokens is not None else 1)
+    if requested_tokens > combined_limit and token_budget.reject_total_overflow:
+        if max_tokens is None:
+            request_description = (
+                f"your request has {prompt_len} input tokens and requires room for at "
+                f"least one output token ({requested_tokens} tokens minimum)"
+            )
+        else:
+            request_description = (
+                f"your request has {prompt_len} input tokens and asks for {max_tokens} "
+                f"output tokens ({requested_tokens} tokens total)"
+            )
+        raise InvalidArgument(
+            f"This model configuration accepts at most {combined_limit} combined input "
+            f"and output tokens. However, {request_description}. Please reduce the input "
+            "length or requested output length."
+        )
 
 
 def _guided_json_is_content(preproc: dict[str, Any]) -> bool:
@@ -565,7 +652,9 @@ class SglangProcessor:
         structural_tag_mode: str = "off",
         structural_tag_scope: str = "auto",
         structural_tag_schema: str = "auto",
+        token_budget: TokenBudget | None = None,
     ):
+        """Initialize chat processing with the worker's token-budget contract."""
         self.tokenizer = tokenizer
         # Detect force_reasoning once from the chat template, matching
         # sglang's template_manager. Per-request overrides still apply
@@ -592,6 +681,7 @@ class SglangProcessor:
         self.structural_tag_mode = structural_tag_mode
         self.structural_tag_scope = structural_tag_scope
         self.structural_tag_schema = structural_tag_schema
+        self.token_budget = token_budget
         self.preprocess_pool = preprocess_pool
         if preprocess_pool is not None:
             self._worker_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
@@ -826,6 +916,20 @@ class SglangProcessor:
         context: Any | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Shared streaming logic for both single-process and pool paths."""
+        # Media expansion is backend-owned on this path, so only text-only
+        # requests have an exact frontend-visible prompt length.
+        if self.token_budget is not None and not dynamo_preproc.get("multi_modal_data"):
+            stop_conditions = dynamo_preproc.get("stop_conditions")
+            max_tokens = (
+                stop_conditions.get("max_tokens")
+                if isinstance(stop_conditions, dict)
+                else None
+            )
+            _validate_requested_token_budget(
+                len(tokens),
+                max_tokens,
+                self.token_budget,
+            )
         token_count = 0
         post_proc_total_ms = 0.0
         created_ts = int(time.time())
@@ -1300,6 +1404,7 @@ class SglangEngineFactory:
             structural_tag_mode=structural_tag_mode,
             structural_tag_scope=structural_tag_scope,
             structural_tag_schema=structural_tag_schema,
+            token_budget=_runtime_token_budget(mdc),
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none
