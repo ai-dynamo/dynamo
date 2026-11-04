@@ -2069,7 +2069,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-global-common"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "blake3",
  "serde",
@@ -2079,7 +2079,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-global-discovery-client"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "dynamo-global-common",
  "reqwest 0.12.28",
@@ -2094,7 +2094,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-kv-hashing"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "derive_builder",
  "dynamo-tokens",
@@ -2105,7 +2105,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-kv-router"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2150,7 +2150,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "aligned-vec",
  "anyhow",
@@ -2258,7 +2258,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -2275,7 +2275,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-mocker"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "aisimulate-core",
  "anyhow",
@@ -2386,7 +2386,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-rl"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2401,7 +2401,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-router-policies"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "async-trait",
  "dynamo-kv-router",
@@ -2416,7 +2416,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2531,7 +2531,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "bs58",
  "bytemuck",
@@ -2546,7 +2546,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-truthy"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
 ]
@@ -4358,7 +4358,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-py3"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "anyhow",
  "cudarc",
