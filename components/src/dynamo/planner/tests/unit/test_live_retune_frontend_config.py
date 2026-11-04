@@ -874,6 +874,14 @@ def test_router_fields_are_all_covered():
                 conditional_disagg_eff_isl_ratio_threshold=0.5,
                 conditional_disagg_prefill_busy_threshold=0.5,
                 conditional_disagg_decode_busy_threshold=0.5,
+                enable_decode_to_prefill_reuse=True,
+                enable_decode_to_prefill_gpu_reuse=True,
+                transfer_source_lookup_budget_ms=12,
+                minimum_transfer_prefix_blocks=4,
+                minimum_estimated_ttft_saving_ms=2.5,
+                transfer_source_estimated_block_us=20.0,
+                transfer_source_gpu_estimated_block_us=8.0,
+                transfer_source_prefill_token_us=3.0,
             ).to_json()
         )
     )
