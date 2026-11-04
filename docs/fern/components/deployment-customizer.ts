@@ -753,6 +753,8 @@ export interface ManifestInfo {
   modelPvc: ModelPvc | null;
   claims: string[];
   templateVars: string[];
+  /** Template variables that appear only as whole image tags, mapped to the images that use them. */
+  imageTagVars: Record<string, string[]>;
 }
 
 const MODEL_FLAGS = new Set(["--model", "--model-path", "--served-model-name", "--model-name"]);
@@ -762,6 +764,7 @@ const MODEL_LOADERS = new Set(["worker", "prefill", "decode"]);
 const MODEL_ID = /^[A-Za-z0-9][\w.-]*\/[\w.-]+$/;
 const MODEL_IN_COMMAND = /(?:^|\s)--(?:model|model-path|served-model-name|model-name)[ =]+["']?([\w./-]+)/g;
 const TEMPLATE_VAR = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
+const TAG_VAR = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/;
 
 export function isModelId(value: string): boolean {
   return MODEL_ID.test(value) && !value.includes("..");
@@ -831,10 +834,12 @@ export function analyzeManifest(source: string): ManifestInfo {
     modelPvc: null,
     claims: [],
     templateVars: [],
+    imageTagVars: {},
   };
   const modelCounts = new Map<string, number>();
   const secretCounts = new Map<string, number>();
   const images = new Set<string>();
+  const tagVarUses = new Map<string, string[]>();
 
   docs.forEach((doc, docIndex) => {
     const root = doc.root;
@@ -842,6 +847,8 @@ export function analyzeManifest(source: string): ManifestInfo {
       if (key === "image" && node.kind === "scalar") {
         const value = text(node);
         if (value) images.add(value);
+        const tagVar = value && node.style !== "block" ? parseImage(value)?.tag?.match(TAG_VAR)?.[1] : undefined;
+        if (tagVar && value) tagVarUses.set(tagVar, [...(tagVarUses.get(tagVar) ?? []), value]);
       }
       if (node.kind === "map") {
         for (const ref of ["secretRef", "secretKeyRef"]) {
@@ -942,16 +949,18 @@ export function analyzeManifest(source: string): ManifestInfo {
   }
 
   const blocks = blockContentLines(docs);
-  const vars = new Set<string>();
+  const vars = new Map<string, number>();
   lines.forEach((line, i) => {
     if (blocks.has(i) || line.trimStart().startsWith("#")) return;
-    for (const match of line.matchAll(TEMPLATE_VAR)) vars.add(match[1]);
+    for (const match of line.matchAll(TEMPLATE_VAR)) vars.set(match[1], (vars.get(match[1]) ?? 0) + 1);
   });
 
   info.images = [...images];
   info.models = ranked(modelCounts);
   info.secret = ranked(secretCounts)[0] ?? null;
-  info.templateVars = [...vars];
+  info.templateVars = [...vars.keys()];
+  // A variable used anywhere besides an image tag stays a plain template variable.
+  info.imageTagVars = Object.fromEntries([...tagVarUses].filter(([name, refs]) => vars.get(name) === refs.length));
   return info;
 }
 
@@ -999,12 +1008,14 @@ export interface ImageRef {
 }
 
 export function parseImage(ref: string): ImageRef | null {
-  if (!ref || /\s|\$\{/.test(ref)) return null;
+  if (!ref || /\s/.test(ref)) return null;
   const [name, digest] = ref.split("@", 2);
   const slash = name.lastIndexOf("/");
   const colon = name.lastIndexOf(":");
   const tag = colon > slash ? name.slice(colon + 1) : null;
   const path = colon > slash ? name.slice(0, colon) : name;
+  // A template variable may stand in for the whole tag, as in `:${DYNAMO_VERSION}`.
+  if (path.includes("${") || digest?.includes("${") || (tag?.includes("${") && !TAG_VAR.test(tag))) return null;
   const parts = path.split("/");
   const repo = parts.pop() ?? "";
   if (!repo) return null;
@@ -1042,8 +1053,18 @@ export function hasPlaceholderImages(images: string[], defaultRegistry: string):
   return images.some((ref) => {
     const image = parseImage(ref);
     if (!image || image.digest || !isDynamoImage(image, defaultRegistry)) return false;
-    return PLACEHOLDER_REGISTRIES.includes(image.registry) || PLACEHOLDER_TAGS.includes(image.tag ?? "latest");
+    const tag = image.tag ?? "latest";
+    return PLACEHOLDER_REGISTRIES.includes(image.registry) || PLACEHOLDER_TAGS.includes(tag) || TAG_VAR.test(tag);
   });
+}
+
+/** Image-tag template variables that the image settings fill in, so they need no separate value. */
+export function resolvedImageTagVars(info: ManifestInfo, settings: ImageSettings): Set<string> {
+  return new Set(
+    Object.entries(info.imageTagVars)
+      .filter(([name, refs]) => refs.every((ref) => !rewriteImage(ref, settings).includes(`\${${name}}`)))
+      .map(([name]) => name),
+  );
 }
 
 /** Rewrites Dynamo images to the selected registry and tag; digests and other images stay. */
