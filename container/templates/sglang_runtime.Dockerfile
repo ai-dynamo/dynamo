@@ -105,7 +105,7 @@ COPY --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/py
 
 # Install RDMA libraries required for UCX to find RDMA devices. UCX is built
 # --with-verbs for xpu but the published XPU base ships none, so the verbs
-# transports are compiled in yet cannot load. Matches vllm_runtime.Dockerfile.
+# transports are compiled in yet cannot load.
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libibverbs1 \
@@ -199,10 +199,9 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
     pip install --break-system-packages --no-deps $(grep -E '^nvtx==' /tmp/requirements.common.txt)
 
 # The upstream SGLang base ships a uv binary outside any Python distribution, so
-# requirements.sglang.txt cannot refresh it. Replace it with the release carrying
-# the current fix line, wherever the base put it: the cuda base installs it to
-# /usr/local/bin, the xpu base to /root/.local/bin. Overwriting each copy found
-# on PATH covers both and keeps the version assertion below satisfiable.
+# requirements.sglang.txt cannot refresh it. Replace it with the pinned uv
+# wherever the base put it: the cuda base installs it to /usr/local/bin, the xpu
+# base to /root/.local/bin.
 # Nothing on the runtime path runs uv.
 RUN --mount=type=bind,from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }},source=/,target=/tmp/uv-image \
     for u in $(which -a uv uvx); do \
@@ -231,9 +230,8 @@ RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compl
 # mooncake and PyNvVideoCodec are CUDA-only. The mooncake floor names the CUDA 13
 # distribution, and PyNvVideoCodec decodes on NVDEC through libnvcuvid, so both
 # are inert on the XPU image and neither is present in its base. The diffusers pin
-# is stripped too: the published XPU base installs its own diffusion extra (0.38.0
-# via pyproject_xpu.toml's .[dev,diffusion]), and this pin is tested on CUDA only.
-# The patterns are
+# is stripped too: the published XPU base installs its own diffusion extra, and
+# this pin is tested on CUDA only. The patterns are
 # anchored to the line start so they cannot match inside another requirement, and
 # the checks fail the build if either package arrives by another route -- a filter
 # that silently stopped matching would otherwise look like success. Both checks
