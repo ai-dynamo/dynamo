@@ -27,8 +27,9 @@ Router reads `GET /pools` for the pools it can route to and `GET /routers` for i
 
 - `memory` (default): in the process. Run one replica. A restart loses the registrations, and
   `GET /pools` reports `complete: false` until one lease has passed.
-- `dynamodb`: in a DynamoDB table, so any number of replicas serve the same pools, a restart loses
-  nothing, and `complete` is `true` at once. A Global Table extends it across regions.
+- `dynamodb`: in a DynamoDB table, so any number of replicas serve the same pools, and a restart loses
+  nothing. As with `memory`, `complete` is `false` for one lease after a replica starts. A Global
+  Table extends it across regions.
 
 The DynamoDB design (item layout, leases, multi-region behavior, errors) is in
 [`docs/dynamodb-store.md`](docs/dynamodb-store.md).

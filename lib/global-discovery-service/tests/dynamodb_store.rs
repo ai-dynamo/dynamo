@@ -47,22 +47,8 @@ conforms!(
     registering_again_only_renews,
     a_missed_lease_hides_then_removes_the_pool,
     only_the_pool_that_missed_its_lease_expires,
+    lists_are_exact_once_a_lease_has_passed,
 );
-
-#[tokio::test]
-async fn lists_are_exact_once_a_lease_has_passed() {
-    let endpoint = skip_without_dynamodb!();
-    let fixture = Fixture::new(&endpoint).await;
-    let store = fixture.store();
-    // A shared store is exact from the start.
-    conformance::lists_are_exact_once_a_lease_has_passed(
-        store.clone(),
-        store,
-        fixture.clock_handle(),
-        Completeness::Exact,
-    )
-    .await;
-}
 
 /// The attributes of the item for `dgd` of cluster `west`, read directly.
 async fn raw_item(
@@ -140,7 +126,8 @@ async fn two_stores_over_one_table_list_each_others_pools() {
     let _ = b.register(mocker("from-b", "m1")).await.unwrap();
     for store in [&a, &b] {
         let snapshot = store.list().await.unwrap();
-        assert_eq!(snapshot.completeness, Completeness::Exact);
+        // Until a lease has passed, a PoolRelay may still register elsewhere.
+        assert_eq!(snapshot.completeness, Completeness::Estimated);
         let mut names: Vec<_> = snapshot
             .items
             .iter()
@@ -149,11 +136,17 @@ async fn two_stores_over_one_table_list_each_others_pools() {
         names.sort();
         assert_eq!(names, ["from-a", "from-b"]);
     }
-    // A fresh replica is exact at once, with every pool.
+    // A fresh replica lists every pool at once.
     let fresh = fixture.store();
-    let snapshot = fresh.list().await.unwrap();
-    assert_eq!(snapshot.completeness, Completeness::Exact);
-    assert_eq!(snapshot.items.len(), 2);
+    assert_eq!(fresh.list().await.unwrap().items.len(), 2);
+
+    // A lease later, every replica is exact, and the pools are still live.
+    fixture.advance(lease().duration());
+    for store in [&a, &b, &fresh] {
+        let snapshot = store.list().await.unwrap();
+        assert_eq!(snapshot.completeness, Completeness::Exact);
+        assert_eq!(snapshot.items.len(), 2);
+    }
 }
 
 #[tokio::test]
@@ -171,7 +164,8 @@ async fn two_stores_see_each_other_through_the_watch() {
     let Some(Ok(WatchEvent::Resync(snapshot))) = watch.next().await else {
         panic!("expected the first Resync");
     };
-    assert_eq!(snapshot.completeness, Completeness::Exact);
+    // `Exact` only once a lease has passed since B was made.
+    assert_eq!(snapshot.completeness, Completeness::Estimated);
     assert_eq!(snapshot.items.len(), 1);
 
     // Within a few polls, B learns what A registers.

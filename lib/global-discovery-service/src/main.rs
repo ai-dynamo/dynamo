@@ -248,7 +248,8 @@ enum RegistrationStorage {
     /// receives.
     Memory,
     /// In the DynamoDB table `--dynamodb-table`, which every replica shares.
-    /// Lists are complete from the start.
+    /// As with `memory`, lists are complete one lease after the service
+    /// starts.
     Dynamodb,
 }
 

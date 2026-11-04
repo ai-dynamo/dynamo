@@ -8,10 +8,15 @@
 //! Each pool is one item ([`keys`]) holding its registration, when it was
 //! last renewed, and the lease its writer granted ([`codec`]). A reader
 //! decides on its own clock which pools are live, so the store never expires
-//! anything; DynamoDB's TTL removes items nobody has renewed for a week. Every
-//! replica reads the same items, so lists are `Exact` from the start. The
-//! store keeps registrations for every kind of pool discovery; router
-//! replicas come from configuration or MCS, not from this store.
+//! anything; DynamoDB's TTL removes items nobody has renewed for a week.
+//!
+//! Every replica reads the same items, so a new replica lists every pool at
+//! once. Its lists are still `Estimated` for one lease after it starts, as
+//! with the memory store: while a rollout moves the service to this table,
+//! from memory or from another table, PoolRelays that still register with the
+//! old replicas are missing from it. The store keeps registrations for every
+//! kind of pool discovery; router replicas come from configuration or MCS,
+//! not from this store.
 
 pub mod codec;
 pub mod keys;
@@ -39,7 +44,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use super::clock::{Clock, SystemClock};
+use super::clock::{Clock, SystemClock, millis};
 use super::memory::{listing, sorted};
 use super::stream::{EVENT_BUFFER, watch_stream};
 use codec::Encoded;
@@ -110,6 +115,9 @@ struct Shared {
     table: String,
     clock: Arc<dyn Clock>,
     lease_skew: Duration,
+    /// When lists become `Exact`, in Unix milliseconds on `clock`: one lease
+    /// after the store was made.
+    complete_at_ms: u64,
     watched: Mutex<Watched>,
     /// One refresh at a time, so each applies a newer read than the last.
     refreshing: tokio::sync::Mutex<()>,
@@ -127,6 +135,8 @@ struct Watched {
     /// Counts this replica's registrations, so a poll can tell the ones it
     /// may have read too early to see.
     writes: u64,
+    /// Watchers have been told that the view is complete.
+    exact: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -143,8 +153,22 @@ impl Watched {
         let pools = self.pools.as_ref()?;
         Some(Snapshot {
             items: pools.values().map(|seen| seen.listing.clone()).collect(),
-            completeness: Completeness::Exact,
+            completeness: if self.exact {
+                Completeness::Exact
+            } else {
+                Completeness::Estimated
+            },
         })
+    }
+
+    /// Marks the view complete. The first time, once there is a view,
+    /// returns the `Resync` that tells watchers.
+    fn complete(&mut self) -> Option<PoolEvent> {
+        if self.exact || self.pools.is_none() {
+            return None;
+        }
+        self.exact = true;
+        self.snapshot().map(WatchEvent::Resync)
     }
 
     /// Replaces the pools with the live ones a poll read, and returns the
@@ -227,13 +251,15 @@ impl DynamoDbPoolStore {
     }
 
     /// For tests: a store over an existing client and clock. It neither
-    /// creates nor checks the table.
+    /// creates nor checks the table. Its lists are `Estimated` until a lease
+    /// has passed on `clock`.
     pub fn with_client(
         lease: Lease,
         config: DynamoDbConfig,
         client: Client,
         clock: Arc<dyn Clock>,
     ) -> Arc<Self> {
+        let complete_at_ms = clock.now_ms().saturating_add(millis(lease.duration()));
         Arc::new(Self {
             lease,
             poll_interval: config.poll_interval.max(MIN_POLL_INTERVAL),
@@ -242,6 +268,7 @@ impl DynamoDbPoolStore {
                 table: config.table,
                 clock,
                 lease_skew: config.lease_skew,
+                complete_at_ms,
                 watched: Mutex::default(),
                 refreshing: tokio::sync::Mutex::new(()),
                 events: broadcast::channel(EVENT_BUFFER).0,
@@ -292,6 +319,16 @@ async fn client(config: &DynamoDbConfig) -> anyhow::Result<Client> {
 impl Shared {
     fn lock(&self) -> MutexGuard<'_, Watched> {
         self.watched.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// `Exact` once a lease has passed since the store was made: by then
+    /// every PoolRelay that registers with this table has written to it.
+    fn completeness(&self, now_ms: u64) -> Completeness {
+        if now_ms >= self.complete_at_ms {
+            Completeness::Exact
+        } else {
+            Completeness::Estimated
+        }
     }
 
     fn unavailable<E>(&self, doing: &str, error: E) -> DiscoveryError
@@ -367,7 +404,8 @@ impl Shared {
         Ok(stored)
     }
 
-    /// Reads the table and tells watchers what changed since the last read.
+    /// Reads the table and tells watchers what changed since the last read,
+    /// and, once, that the view is complete.
     async fn refresh(&self) -> Result<(), DiscoveryError> {
         let _one_at_a_time = self.refreshing.lock().await;
         let began = self.lock().writes;
@@ -384,8 +422,14 @@ impl Shared {
                 (item.registration.key, seen)
             })
             .collect();
+        let exact = self.completeness(self.clock.now_ms()) == Completeness::Exact;
         let mut watched = self.lock();
-        for event in watched.apply_poll(live, began) {
+        let mut events = watched.apply_poll(live, began);
+        if exact {
+            // After the poll's changes, so the `Resync` holds the new view.
+            events.extend(watched.complete());
+        }
+        for event in events {
             // No subscribers is not an error.
             let _ = self.events.send(event);
         }
@@ -479,8 +523,9 @@ impl PoolRegistrar for DynamoDbPoolStore {
 
 #[async_trait]
 impl Directory<PoolListing, PoolKey> for DynamoDbPoolStore {
-    /// The live pools in the table, `Exact`. Fails while the table cannot be
-    /// read.
+    /// The live pools in the table: `Estimated` until a lease has passed
+    /// since the store was made, then `Exact`. Fails while the table cannot
+    /// be read.
     async fn list(&self) -> Result<Snapshot<PoolListing>, DiscoveryError> {
         let live = self.shared.live().await?;
         Ok(Snapshot {
@@ -488,14 +533,15 @@ impl Directory<PoolListing, PoolKey> for DynamoDbPoolStore {
                 .iter()
                 .map(|item| listing(&item.registration))
                 .collect(),
-            completeness: Completeness::Exact,
+            completeness: self.shared.completeness(self.shared.clock.now_ms()),
         })
     }
 
     /// Reads the table, then follows it by polling every
     /// [`DynamoDbConfig::poll_interval`], and this replica's registrations at
-    /// once. Fails if the first read does; later failed polls leave the
-    /// stream open and quiet until a poll succeeds.
+    /// once. The first poll after a lease has passed since the store was made
+    /// sends a `Resync` that is `Exact`. Fails if the first read does; later
+    /// failed polls leave the stream open and quiet until a poll succeeds.
     async fn list_and_watch(
         &self,
         cancel_token: Option<CancellationToken>,
@@ -592,7 +638,7 @@ mod tests {
         let second = watched.apply_poll(polled(&[("a", "m1"), ("b", "m2"), ("d", "m1")]), 0);
         assert_eq!(described(&second), set(&["+b/m2", "-c", "+d/m1"]));
         let snapshot = watched.snapshot().unwrap();
-        assert_eq!(snapshot.completeness, Completeness::Exact);
+        assert_eq!(snapshot.completeness, Completeness::Estimated);
         let mut listed: Vec<String> = snapshot
             .items
             .iter()
@@ -604,6 +650,29 @@ mod tests {
         // The same view again publishes nothing.
         let third = watched.apply_poll(polled(&[("a", "m1"), ("b", "m2"), ("d", "m1")]), 0);
         assert!(third.is_empty());
+    }
+
+    #[test]
+    fn watchers_learn_once_that_the_view_is_complete() {
+        let mut watched = Watched::default();
+        // Before the first poll there is no view to tell about.
+        assert!(watched.complete().is_none());
+        let _ = watched.apply_poll(polled(&[("a", "m1")]), 0);
+        assert_eq!(
+            watched.snapshot().unwrap().completeness,
+            Completeness::Estimated
+        );
+
+        let Some(WatchEvent::Resync(complete)) = watched.complete() else {
+            panic!("expected a Resync");
+        };
+        assert_eq!(complete.completeness, Completeness::Exact);
+        assert_eq!(complete.items.len(), 1);
+        assert_eq!(
+            watched.snapshot().unwrap().completeness,
+            Completeness::Exact
+        );
+        assert!(watched.complete().is_none());
     }
 
     #[test]
@@ -679,6 +748,17 @@ mod tests {
             Client::from_conf(config),
             Arc::new(ManualClock::new(1_000)),
         )
+    }
+
+    /// While a rollout moves the service to a table, PoolRelays that still
+    /// register with the old replicas are missing from it.
+    #[tokio::test]
+    async fn lists_are_estimated_for_a_lease_after_the_store_is_made() {
+        // The store's clock starts at 1 s, and its lease is 15 s.
+        let store = unreachable_store();
+        assert_eq!(store.shared.completeness(1_000), Completeness::Estimated);
+        assert_eq!(store.shared.completeness(15_999), Completeness::Estimated);
+        assert_eq!(store.shared.completeness(16_000), Completeness::Exact);
     }
 
     #[tokio::test]

@@ -137,7 +137,7 @@ In `karmada` and `mcs` modes, the listed frontend addresses come from MCS; the r
 | --- | --- |
 | `pools[].model` | `null` when the service does not know the pool's model. |
 | `pools[].relay_identities` | The identities of the Pool Relay allowed to stream the pool's state, such as `ip:10.43.66.175`. Empty in `registrations` mode. |
-| `complete` | `true` when the service lists every pool. With the `memory` store it is `false` until one lease has passed after start. With `dynamodb` it is `true` at once. In `karmada` and `mcs` modes, both the imported and registered pool lists must be complete. |
+| `complete` | `true` when the service lists every pool. With either store it is `false` until one lease has passed after the service starts: a `memory` store has only the registrations it received, and while a rollout moves the service to a DynamoDB table, Pool Relays may still register with the old replicas. In `karmada` and `mcs` modes, both the imported and registered pool lists must be complete. |
 
 ### `GET /routers`
 

@@ -90,10 +90,11 @@ async fn a_pool_registered_on_one_replica_is_listed_by_another() {
     let (a, shutdown_a) = start(fixture.store()).await;
     let (b, shutdown_b) = start(fixture.store()).await;
 
-    // Both replicas start exact and empty: the table is the shared state.
+    // Both replicas start empty. The table is the shared state, but for a
+    // lease after they start, a PoolRelay may still register elsewhere.
     let (status, pools) = get_json(&b, "/pools").await;
     assert_eq!(status, reqwest::StatusCode::OK);
-    assert_eq!(pools, json!({"pools": [], "complete": true}));
+    assert_eq!(pools, json!({"pools": [], "complete": false}));
 
     let (status, granted) = post_pool(&a, &registration()).await;
     assert_eq!(status, reqwest::StatusCode::OK);
@@ -102,26 +103,28 @@ async fn a_pool_registered_on_one_replica_is_listed_by_another() {
         json!({"heartbeat_interval_s": 5, "lease_duration_s": 15})
     );
 
-    let expected = json!({
-        "pools": [{
-            "key": {"cluster_id": "aws-west", "namespace": "dynamo", "dgd_name": "mocker-west-1"},
-            "location": {
-                "region": "us-west-2",
-                "availability_zone": null,
-                "datacenter": null
-            },
-            "model": "Qwen/Qwen3-0.6B",
-            "capabilities": ["aggregated"],
-            "frontends": ["http://10.43.1.2:8000/"],
-            "capacity": [{"sku": "H100", "workers": 8}],
-            "relay_identities": []
-        }],
-        "complete": true
-    });
+    let expected = |complete: bool| {
+        json!({
+            "pools": [{
+                "key": {"cluster_id": "aws-west", "namespace": "dynamo", "dgd_name": "mocker-west-1"},
+                "location": {
+                    "region": "us-west-2",
+                    "availability_zone": null,
+                    "datacenter": null
+                },
+                "model": "Qwen/Qwen3-0.6B",
+                "capabilities": ["aggregated"],
+                "frontends": ["http://10.43.1.2:8000/"],
+                "capacity": [{"sku": "H100", "workers": 8}],
+                "relay_identities": []
+            }],
+            "complete": complete
+        })
+    };
     for base in [&b, &a] {
         let (status, pools) = get_json(base, "/pools").await;
         assert_eq!(status, reqwest::StatusCode::OK);
-        assert_eq!(pools, expected);
+        assert_eq!(pools, expected(false));
     }
     let (status, _) = get_json(&b, "/healthz").await;
     assert_eq!(status, reqwest::StatusCode::OK);
@@ -131,12 +134,16 @@ async fn a_pool_registered_on_one_replica_is_listed_by_another() {
         json!({"routers": [{"replica": "aws-ohio/global-router-0", "url": "http://10.42.0.5:50051/"}]})
     );
 
-    // Past the lease with no heartbeat, both replicas drop it.
-    fixture.advance(
-        Lease::new(5, 15).unwrap().duration()
-            + dynamodb_support::SKEW
-            + std::time::Duration::from_secs(1),
-    );
+    // A lease later, both lists are complete, and the pool is still live.
+    let lease = Lease::new(5, 15).unwrap().duration();
+    fixture.advance(lease);
+    for base in [&b, &a] {
+        let (_, pools) = get_json(base, "/pools").await;
+        assert_eq!(pools, expected(true));
+    }
+
+    // Past the lease and the skew with no heartbeat, both replicas drop it.
+    fixture.advance(dynamodb_support::SKEW + std::time::Duration::from_secs(1));
     for base in [&a, &b] {
         let (_, pools) = get_json(base, "/pools").await;
         assert_eq!(pools, json!({"pools": [], "complete": true}));

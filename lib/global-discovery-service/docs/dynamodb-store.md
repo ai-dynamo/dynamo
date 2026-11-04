@@ -20,9 +20,15 @@ comes from `--router` or MCS. Only where registrations live changes.
 
 The memory store documents its limits: run one replica, because each process
 keeps only the registrations it receives, and a restarted process lists
-`Estimated` until one lease has passed. A shared store removes both: every
-replica reads the same items, and a fresh replica is `Exact` at once because
-`Completeness::Exact` means "read from a shared store".
+nothing until PoolRelays register again. A shared store removes both: every
+replica reads the same items, so a fresh replica lists every pool at once.
+
+A fresh replica still lists `Estimated` for one lease after it starts, as the
+memory store does. The table cannot tell whether every PoolRelay writes to
+it: while a rollout moves the service to this table, from memory or from
+another table, PoolRelays still register with the old replicas. A replica
+that answered `Exact` then would make routers that follow the contract drop
+those live pools until the rollout ends.
 
 ## What is stored
 
@@ -106,7 +112,9 @@ Why not `PutItem`: `UpdateItem` keeps `created_at` without a read.
 (a Global Table is eventually consistent anyway, and a just-written item is
 visible to the writing region within milliseconds). Each page's items are
 decoded, expired ones dropped, and the result is
-`Snapshot { items, completeness: Exact }`. A decode failure of one item is
+`Snapshot { items, completeness }`, where `completeness` is `Estimated` until a
+lease has passed since the store was made (see "Why"), and `Exact` after
+that. A decode failure of one item is
 logged and that item skipped, so one bad write cannot take the list down. Any
 SDK error (throttling, access denied, transport, missing table) becomes
 `DiscoveryError::Unavailable`, which the HTTP layer maps to 503, so `/healthz`
@@ -121,9 +129,11 @@ heartbeat interval where something watches: with `karmada` and `mcs`) the
 poller runs the same `Query`, diffs the live set
 against the view by `PoolKey` and `hash`, and emits `Upserted` for new or
 changed pools and `Removed` for pools that are gone or expired. The stream
-starts with one `Upserted` per pool in the view followed by a
-`Resync(Exact)`, as the memory store does, through the same `watch_stream`
-helper (it snapshots the view and subscribes under one lock). Local
+starts with one `Upserted` per pool in the view followed by a `Resync`, as
+the memory store does, through the same `watch_stream` helper (it snapshots
+the view and subscribes under one lock). The first `Resync` is `Estimated`
+until a lease has passed since the store was made; the first poll after that
+sends a `Resync(Exact)`, once. Local
 `register` calls update the view and emit `Upserted` at once, so the next
 poll does not emit the same change again. A poll whose `Query` began before a
 local registration may not see it, so for that poll the pool keeps its
@@ -288,8 +298,9 @@ Pod stays unready meanwhile.
   are tolerated; a stopped endpoint turns `list` into `Unavailable`.
 - HTTP: the existing `service.rs` tests run unchanged against the memory
   store; one new test wires `DynamoDbPoolStore` behind the router against
-  dynamodb-local and asserts `POST /pools` then `GET /pools` with
-  `complete: true` on a second store instance.
+  dynamodb-local and asserts `POST /pools` then `GET /pools` on a second
+  store instance, with `complete: false` until a lease has passed and `true`
+  after that.
 
 ## Follow-ups (not in this change)
 

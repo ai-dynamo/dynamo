@@ -19,7 +19,7 @@ verify the service. For every flag and endpoint, see
 | --- | --- | --- |
 | Replicas | One. Each replica keeps only the registrations it receives. | Any number. Every replica reads the same table. |
 | Restart | State is lost. | State survives. |
-| `complete` in `GET /pools` | `false` until one lease has passed after start. | `true` at once. |
+| `complete` in `GET /pools` | `false` until one lease has passed after start. | The same, though a new replica lists every pool at once. |
 | Regions | One. | One, or several through a DynamoDB Global Table. |
 | Extra setup | None. | A table, IAM permissions, and AWS credentials for the pods. |
 
@@ -217,8 +217,8 @@ kubectl -n global-discovery port-forward deploy/global-discovery-service 8080:80
 curl -s localhost:8080/pools
 ```
 
-With a registered Pool Relay, the response lists the pool, and `complete` is `true` even right after a
-restart:
+With a registered Pool Relay, the response lists the pool, even right after a restart. `complete` is
+`false` for one lease after the Pod starts, and `true` after that:
 
 ```json
 {"pools": [{"key": {"cluster_id": "aws-west", "namespace": "dynamo", "dgd_name": "mocker-west-1"},
@@ -240,8 +240,12 @@ uses it, so the Pod leaves the Service until the table is back.
 
 - **Replicas.** Put any number of replicas behind one Kubernetes Service. Any replica accepts
   `POST /pools` and any replica answers `GET /pools`.
-- **Rolling restarts.** Nothing special is needed. A new replica lists every live pool at once, and Pool
-  Relays keep heartbeating through the Service.
+- **Rolling restarts.** Nothing special is needed. A new replica lists every live pool at once, with
+  `complete: false` for one lease, and Pool Relays keep heartbeating through the Service.
+- **Moving to DynamoDB, or to another table.** During a rolling update, old and new replicas keep
+  different registrations, and each Pool Relay keeps registering with the replica it is connected to. A
+  new replica reports `complete: false` for only one lease, so replace all replicas at once
+  (`strategy: Recreate`). Every Pool Relay then registers with the new table within one heartbeat.
 - **Throttling and outages.** A failed DynamoDB call returns 503 from the endpoint that made it. A
   Pool Relay registers again on its next heartbeat, and pools stay listed while their leases last. On-demand
   capacity absorbs the expected write rate, roughly `pools x relay replicas / heartbeat interval`, for

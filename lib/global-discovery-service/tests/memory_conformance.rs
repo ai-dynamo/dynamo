@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use common::{ClockHandle, conformance, lease};
 use dynamo_global_discovery_service::backends::memory::MemoryPoolStore;
-use dynamo_global_discovery_service::pool_discovery::{Completeness, PoolDirectory, PoolRegistrar};
+use dynamo_global_discovery_service::pool_discovery::{PoolDirectory, PoolRegistrar};
 
 /// The store, seen as the two traits the cases use. The caller keeps the
 /// returned `Arc`s alive: dropping the last one stops the store's sweep.
@@ -37,17 +37,5 @@ conforms!(
     registering_again_only_renews,
     a_missed_lease_hides_then_removes_the_pool,
     only_the_pool_that_missed_its_lease_expires,
+    lists_are_exact_once_a_lease_has_passed,
 );
-
-#[tokio::test(start_paused = true)]
-async fn lists_are_exact_once_a_lease_has_passed() {
-    let (registrar, pools, clock) = store();
-    // A memory store that just started has only the registrations it got.
-    conformance::lists_are_exact_once_a_lease_has_passed(
-        registrar,
-        pools,
-        clock,
-        Completeness::Estimated,
-    )
-    .await;
-}

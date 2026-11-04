@@ -341,26 +341,38 @@ pub mod conformance {
         assert_eq!(pools.list().await.unwrap().items.len(), 1);
     }
 
-    /// `lists_are_exact_once_a_lease_has_passed`. `at_first` is what a store
-    /// that has just started lists as: `Estimated` for the memory store, which
-    /// only knows the registrations it received, and `Exact` for a shared one.
+    /// `lists_are_exact_once_a_lease_has_passed`. A store that has just
+    /// started may miss pools whose PoolRelays have not registered with it
+    /// yet: the memory store knows only the registrations it received, and a
+    /// shared table lacks the PoolRelays that still register with old
+    /// replicas while a rollout moves the service to it.
     pub async fn lists_are_exact_once_a_lease_has_passed(
         _registrar: Arc<dyn PoolRegistrar>,
         pools: Arc<PoolDirectory>,
         clock: ClockHandle,
-        at_first: Completeness,
     ) {
         let mut watch = pools.list_and_watch(None).await.unwrap();
         let Some(Ok(WatchEvent::Resync(first))) = watch.next().await else {
             panic!("expected the first Resync");
         };
-        assert_eq!(first.completeness, at_first);
-        assert_eq!(pools.list().await.unwrap().completeness, at_first);
+        assert_eq!(first.completeness, Completeness::Estimated);
+        assert_eq!(
+            pools.list().await.unwrap().completeness,
+            Completeness::Estimated
+        );
 
         clock.advance(lease().duration()).await;
         assert_eq!(
             pools.list().await.unwrap().completeness,
             Completeness::Exact
         );
+        // Watchers learn it too. With no pools nothing else is published.
+        let next = tokio::time::timeout(Duration::from_secs(30), watch.next())
+            .await
+            .expect("timed out waiting for the Resync");
+        let Some(Ok(WatchEvent::Resync(complete))) = next else {
+            panic!("expected a Resync");
+        };
+        assert_eq!(complete.completeness, Completeness::Exact);
     }
 }

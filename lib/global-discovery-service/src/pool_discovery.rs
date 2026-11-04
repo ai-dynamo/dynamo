@@ -27,8 +27,9 @@
 //! - A router that's just starting and knows no pools should still use a
 //!   partial list. Some pools beat none.
 //!
-//! With DynamoDB registration storage (planned), partial lists will be rare,
-//! but this rule is extra insurance.
+//! With DynamoDB registration storage, a replica lists every pool at once
+//! but calls the list partial for one lease after it starts, in case a
+//! PoolRelay still registers elsewhere.
 
 mod pools;
 mod registrar;
