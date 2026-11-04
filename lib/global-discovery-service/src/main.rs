@@ -125,19 +125,25 @@ struct Args {
     #[arg(
         long,
         required_if_eq("registration_storage", "dynamodb"),
+        value_parser = NonEmptyStringValueParser::new(),
         help_heading = WITH_DYNAMODB
     )]
     dynamodb_table: Option<String>,
     /// The region of the DynamoDB table (replica) to use. By default the AWS
     /// SDK's: `AWS_REGION`, then the shared config.
-    #[arg(long, help_heading = WITH_DYNAMODB)]
+    #[arg(
+        long,
+        value_parser = NonEmptyStringValueParser::new(),
+        help_heading = WITH_DYNAMODB
+    )]
     dynamodb_region: Option<String>,
     /// Send DynamoDB requests here instead of to the region's endpoint, for
-    /// example to dynamodb-local.
-    #[arg(long, help_heading = WITH_DYNAMODB)]
+    /// example to dynamodb-local at `http://localhost:8000`.
+    #[arg(long, value_parser = parse_dynamodb_endpoint, help_heading = WITH_DYNAMODB)]
     dynamodb_endpoint: Option<Url>,
-    /// How often a watch reads the DynamoDB table again. Less than the
-    /// heartbeat interval.
+    /// How often a watch reads the DynamoDB table again. Only the join with
+    /// MCS watches it, so with `--pool-discovery karmada` or `mcs` this must
+    /// be less than the heartbeat interval.
     #[arg(
         long,
         default_value_t = 2,
@@ -253,18 +259,26 @@ fn parse_router(value: &str) -> Result<RouterReplica, String> {
     if id.is_empty() {
         return Err("the replica id is empty".to_owned());
     }
-    let url = Url::parse(url).map_err(|error| error.to_string())?;
-    // Without `http://`, `Url` reads a host such as `localhost:50051` as the
-    // scheme.
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(format!(
-            "expected an http or https URL, such as http://10.42.0.5:50051, not {url}"
-        ));
-    }
     Ok(RouterReplica {
         replica: RouterReplicaId(id.to_owned()),
-        url,
+        url: http_url(url, "http://10.42.0.5:50051")?,
     })
+}
+
+fn parse_dynamodb_endpoint(value: &str) -> Result<Url, String> {
+    http_url(value, "http://localhost:8000")
+}
+
+/// An http or https URL. Without `http://`, `Url` reads a host such as
+/// `localhost:8000` as the scheme, which would fail only later.
+fn http_url(value: &str, example: &str) -> Result<Url, String> {
+    let url = Url::parse(value).map_err(|error| error.to_string())?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!(
+            "expected an http or https URL, such as {example}, not {url}"
+        ));
+    }
+    Ok(url)
 }
 
 /// Parses the flags. A flag set under the `--help` heading of another
@@ -309,6 +323,22 @@ where
         return Err(command.error(
             ErrorKind::ValueValidation,
             format!("check --heartbeat-interval-secs and --lease-duration-secs: {error}"),
+        ));
+    }
+    // Only the join with MCS watches the DynamoDB table. Polling it more
+    // often than PoolRelays register sees each change before the next
+    // heartbeat. With `registrations`, the service only lists and registers.
+    if parsed.registration_storage == RegistrationStorage::Dynamodb
+        && parsed.pool_discovery.mcs().is_some()
+        && parsed.dynamodb_poll_interval_secs >= parsed.heartbeat_interval_secs
+    {
+        return Err(command.error(
+            ErrorKind::ValueValidation,
+            format!(
+                "--dynamodb-poll-interval-secs {} must be less than --heartbeat-interval-secs {} \
+                 with --pool-discovery karmada or mcs, which watch the table",
+                parsed.dynamodb_poll_interval_secs, parsed.heartbeat_interval_secs
+            ),
         ));
     }
     let mut ids = HashSet::new();
@@ -459,20 +489,11 @@ async fn registrations_backend(args: &Args) -> Result<PoolDiscoveryBackend> {
     })
 }
 
-/// The DynamoDB flags as the store's configuration. A watch polls more often
-/// than PoolRelays register, so it sees each change before the next
-/// heartbeat.
+/// The DynamoDB flags as the store's configuration.
 fn dynamodb_config(args: &Args) -> Result<DynamoDbConfig> {
     let Some(table) = args.dynamodb_table.clone() else {
         bail!("--registration-storage dynamodb needs --dynamodb-table");
     };
-    if args.dynamodb_poll_interval_secs >= args.heartbeat_interval_secs {
-        bail!(
-            "--dynamodb-poll-interval-secs {} must be less than --heartbeat-interval-secs {}",
-            args.dynamodb_poll_interval_secs,
-            args.heartbeat_interval_secs
-        );
-    }
     Ok(DynamoDbConfig {
         table,
         region: args.dynamodb_region.clone(),
@@ -774,8 +795,42 @@ mod tests {
                 "{args:?}"
             );
         }
-        assert!(parse_args(dynamodb(&["--dynamodb-endpoint", "localhost"])).is_err());
         assert!(parse_args(dynamodb(&["--dynamodb-poll-interval-secs", "0"])).is_err());
+    }
+
+    #[test]
+    fn dynamodb_flags_are_checked_when_parsed() {
+        // Without `http://`, a host would be read as the URL's scheme, and
+        // the SDK would fail only later.
+        for endpoint in ["localhost", "localhost:8000", "dynamodb-local:8000"] {
+            let error = parse_args(dynamodb(&["--dynamodb-endpoint", endpoint])).unwrap_err();
+            assert_eq!(
+                error.kind(),
+                ErrorKind::ValueValidation,
+                "{endpoint}: {error}"
+            );
+        }
+        assert!(
+            parse_args(dynamodb(&[
+                "--dynamodb-endpoint",
+                "https://dynamodb.local:8000"
+            ]))
+            .is_ok()
+        );
+        // An empty table or region is a usage error. An empty region would
+        // otherwise pass the SDK's "no region" check.
+        for args in [
+            vec![
+                "gds",
+                "--registration-storage",
+                "dynamodb",
+                "--dynamodb-table=",
+            ],
+            dynamodb(&["--dynamodb-region="]),
+        ] {
+            let error = parse_args(args.clone()).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidValue, "{args:?}: {error}");
+        }
     }
 
     #[test]
@@ -811,17 +866,31 @@ mod tests {
 
     #[test]
     fn a_dynamodb_watch_polls_faster_than_relays_register() {
-        let config = |poll: &str| {
-            dynamodb_config(
-                &parse_args(dynamodb(&["--dynamodb-poll-interval-secs", poll])).unwrap(),
-            )
+        // The join with MCS watches the table.
+        let with_karmada = |poll: &str| {
+            parse_args(karmada(&[
+                "--registration-storage",
+                "dynamodb",
+                "--dynamodb-table",
+                "pools",
+                "--dynamodb-poll-interval-secs",
+                poll,
+            ]))
         };
-        assert!(config("4").is_ok());
-        let error = config("5").unwrap_err().to_string();
+        assert!(with_karmada("4").is_ok());
+        let error = with_karmada("5").unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ValueValidation, "{error}");
+        assert_eq!(error.exit_code(), 2);
         assert!(
-            error.contains("must be less than --heartbeat-interval-secs 5"),
+            error
+                .to_string()
+                .contains("must be less than --heartbeat-interval-secs 5"),
             "{error}"
         );
+        // With registrations, nothing watches the table, so the interval
+        // does not matter, even with a 1 s heartbeat.
+        assert!(parse_args(dynamodb(&["--dynamodb-poll-interval-secs", "5"])).is_ok());
+        assert!(parse_args(dynamodb(&["--heartbeat-interval-secs", "1"])).is_ok());
     }
 
     #[test]

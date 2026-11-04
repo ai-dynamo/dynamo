@@ -116,8 +116,9 @@ fails when the table is unreachable.
 its watchers: the live pools of the last poll, plus this replica's
 registrations since. Each call first runs the `Query` (and fails with
 `Unavailable` if it does), then starts one poller per store if none runs.
-Every `--dynamodb-poll-interval-secs` (default 2 s, must be below the
-heartbeat interval) the poller runs the same `Query`, diffs the live set
+Every `--dynamodb-poll-interval-secs` (default 2 s, which must be below the
+heartbeat interval where something watches: with `karmada` and `mcs`) the
+poller runs the same `Query`, diffs the live set
 against the view by `PoolKey` and `hash`, and emits `Upserted` for new or
 changed pools and `Removed` for pools that are gone or expired. The stream
 starts with one `Upserted` per pool in the view followed by a
@@ -163,8 +164,8 @@ since they work with every `--pool-discovery` value:
 | `--registration-storage dynamodb` | `memory` | select the store |
 | `--dynamodb-table <name>` | none, required with `dynamodb` | table name |
 | `--dynamodb-region <region>` | SDK default chain (`AWS_REGION`) | region of the table replica this process uses |
-| `--dynamodb-endpoint <url>` | none | endpoint override for dynamodb-local |
-| `--dynamodb-poll-interval-secs <n>` | 2 | watch poll period; must be less than `--heartbeat-interval-secs` |
+| `--dynamodb-endpoint <url>` | none | endpoint override for dynamodb-local; an `http` or `https` URL |
+| `--dynamodb-poll-interval-secs <n>` | 2 | watch poll period; with `karmada` and `mcs`, which watch, must be less than `--heartbeat-interval-secs` |
 | `--dynamodb-ensure-table` | off | create the table if it does not exist (development; needs `CreateTable`) |
 | `--lease-skew-secs <n>` | 2 | clock skew allowed when evaluating leases |
 
@@ -255,7 +256,8 @@ heading or works everywhere.
 | SDK service error, throttling, transport, missing table | `DiscoveryError::Unavailable` (503) |
 | Item that fails to decode | skipped with a warning; the rest of the list is served |
 | `--dynamodb-table` missing with `dynamodb` | startup error |
-| `--dynamodb-poll-interval-secs >= --heartbeat-interval-secs` | startup error |
+| `--dynamodb-poll-interval-secs >= --heartbeat-interval-secs` with `karmada` or `mcs` | usage error |
+| An empty `--dynamodb-table` or `--dynamodb-region`, or a `--dynamodb-endpoint` that is not `http` or `https` | usage error |
 | A `--dynamodb-*` flag or `--lease-skew-secs` without `--registration-storage dynamodb` | startup error |
 | No region from `--dynamodb-region` or the SDK chain | startup error (`ConnectError::Config`) |
 | Table absent at startup without `--dynamodb-ensure-table` | logged, naming the table and the create-table command, and retried (`ConnectError::Table`) |

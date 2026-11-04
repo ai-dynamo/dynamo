@@ -165,8 +165,8 @@ The service checks the table at startup with `DescribeTable`. While the check fa
 a DynamoDB outage or before the table is created, the service logs why, names the table, and tries again
 after a backoff of up to 30 seconds. It serves nothing until the check passes, so the Pod stays unready
 rather than restarting. A configuration that cannot work, such as no AWS region, stops the service at
-once. `--dynamodb-poll-interval-secs` (default 2) must be less than `--heartbeat-interval-secs`
-(default 5), or the service refuses to start.
+once. With `--pool-discovery karmada` or `mcs`, which watch the table, `--dynamodb-poll-interval-secs`
+(default 2) must be less than `--heartbeat-interval-secs` (default 5), or the service refuses to start.
 
 ### Local development
 

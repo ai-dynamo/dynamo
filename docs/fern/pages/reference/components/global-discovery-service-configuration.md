@@ -62,8 +62,8 @@ These flags work with every `--pool-discovery` value: in each mode the service k
 | `--lease-skew-secs <n>` | `2` | Clock skew allowed when evaluating leases. |
 | `--dynamodb-table <name>` | None | Table name. Required with `--registration-storage dynamodb`. |
 | `--dynamodb-region <region>` | SDK default chain (`AWS_REGION`) | Region of the table replica this process uses. |
-| `--dynamodb-endpoint <url>` | Unset | Endpoint override, for DynamoDB Local. |
-| `--dynamodb-poll-interval-secs <n>` | `2` | How often the store polls the table for changes. Must be less than `--heartbeat-interval-secs`. |
+| `--dynamodb-endpoint <url>` | Unset | Endpoint override, for DynamoDB Local. Must be an `http` or `https` URL. |
+| `--dynamodb-poll-interval-secs <n>` | `2` | How often the store polls the table for changes. Only `--pool-discovery karmada` and `mcs` watch the table, and with them it must be less than `--heartbeat-interval-secs`. |
 | `--dynamodb-ensure-table` | Off | Create the table if it does not exist. For development. Needs `dynamodb:CreateTable` and `dynamodb:UpdateTimeToLive`. |
 
 The `--dynamodb-*` flags and `--lease-skew-secs` apply only with `--registration-storage dynamodb`; giving one with the memory store is a startup error.
@@ -184,7 +184,8 @@ Grant them on the table ARN, in each region where the service runs a replica of 
 | DynamoDB error, throttling, transport failure, or missing table while serving | 503 from the endpoint, and `GET /healthz` fails. |
 | An item that fails to decode | Logged and skipped. The rest of the list is served. |
 | `--dynamodb-table` missing with `dynamodb` | Startup error. |
-| `--dynamodb-poll-interval-secs` not below `--heartbeat-interval-secs` | Startup error. |
+| `--dynamodb-poll-interval-secs` not below `--heartbeat-interval-secs`, with `karmada` or `mcs` | Startup error. |
+| An empty `--dynamodb-table` or `--dynamodb-region`, or a `--dynamodb-endpoint` that is not an `http` or `https` URL | Startup error. |
 | Table absent at startup without `--dynamodb-ensure-table` | Logged with the table name and the create-table command, then retried. The service does not serve until the table exists. |
 | DynamoDB or STS unreachable, or access denied, at startup | Logged and retried with a backoff of up to 30 seconds. The service does not serve until the check passes. |
 | A `--dynamodb-*` flag or `--lease-skew-secs` without `--registration-storage dynamodb` | Startup error. |
