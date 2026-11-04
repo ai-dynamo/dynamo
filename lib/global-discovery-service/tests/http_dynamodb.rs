@@ -162,11 +162,13 @@ async fn a_pool_registered_on_one_replica_is_listed_by_another() {
     }
 
     // Past the lease and the skew with no heartbeat, both replicas drop it at
-    // once.
+    // once, and call the list complete again when a poll shows that it was
+    // not renewed elsewhere.
     fixture.advance(dynamodb_support::SKEW + Duration::from_secs(1));
     for base in [&a, &b] {
         let (_, pools) = get_json(base, "/pools").await;
-        assert_eq!(pools, json!({"pools": [], "complete": true}));
+        assert_eq!(pools["pools"], json!([]));
+        pools_soon(base, &json!({"pools": [], "complete": true})).await;
     }
     shutdown_a.cancel();
     shutdown_b.cancel();

@@ -270,8 +270,9 @@ impl Watched {
     /// What `list` serves from the view at `now_ms`; `None` before the first
     /// poll. A pool whose lease has lapsed since the last poll is left out
     /// at once, as a read of the table would. The list is `Exact` only while
-    /// watchers were told so, no call to the table has failed since, and no
-    /// pool is listed past its own lease.
+    /// watchers were told so, no call to the table has failed since, no pool
+    /// is listed past its own lease, and no pool has lapsed since the last
+    /// poll, which may have missed its renewal.
     fn listed(&self, now_ms: u64) -> Option<Snapshot<PoolListing>> {
         let pools = self.pools.as_ref()?;
         let mut on_trust = false;
@@ -283,7 +284,10 @@ impl Watched {
                 seen.listing.clone()
             })
             .collect();
-        let exact = self.exact && !self.failing && !on_trust;
+        // Renewals through other replicas show only at the next poll, so a
+        // pool that lapsed since the last one may still be live.
+        let lapsed = pools.values().any(|seen| seen.live_until_ms < now_ms);
+        let exact = self.exact && !self.failing && !on_trust && !lapsed;
         Some(Snapshot {
             items,
             completeness: if exact {
@@ -1197,6 +1201,27 @@ mod tests {
         // A failed call makes the list incomplete at once, before any poll.
         watched.failed();
         let listed = watched.listed(17_000).unwrap();
+        assert_eq!(listed.completeness, Completeness::Estimated);
+    }
+
+    /// Renewals through other replicas reach the view only through polls.
+    /// While a poll hangs, a pool can lapse in the view although it still
+    /// renews elsewhere, so a list that leaves it out is not complete.
+    #[test]
+    fn a_pool_that_lapses_between_polls_makes_the_list_estimated() {
+        let mut watched = Watched::default();
+        let mut view = polled(&[("renewing", "m1"), ("other", "m1")]);
+        let seen = view.get_mut(&key("renewing")).unwrap();
+        seen.live_until_ms = 17_000;
+        seen.lease_until_ms = 17_000;
+        let _ = watched.apply_poll(view, 0);
+        let _ = watched.set_completeness(Completeness::Exact);
+        assert_eq!(
+            watched.listed(17_000).unwrap().completeness,
+            Completeness::Exact
+        );
+        let listed = watched.listed(17_001).unwrap();
+        assert_eq!(listed.items.len(), 1);
         assert_eq!(listed.completeness, Completeness::Estimated);
     }
 
