@@ -23,12 +23,9 @@ static NEXT_CLASSIFICATION_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_LIFECYCLE_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) use crate::plugins::request_classifier::ClassificationOverrides;
-use crate::plugins::request_classifier::{RequestProgress, RequestProgressUpdater};
-
-// TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
-pub use crate::plugins::request_classifier::{
-    AbortCause, ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
-    RequestClassifierContext,
+use crate::plugins::request_classifier::{
+    AbortCause, ClassifyEvent, ClassifyRequest, RequestClassifier, RequestProgress,
+    RequestProgressUpdater,
 };
 
 /// One live lifecycle's bookkeeping. `generation` fences `classify_with`
@@ -545,6 +542,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+    use crate::plugins::request_classifier::{ClassifierError, ClassifyFuture};
     use crate::plugins::worker_selection::WorkerCandidates;
     use crate::protocols::WorkerWithDpRank;
     use crate::scheduling::KvSchedulerError;

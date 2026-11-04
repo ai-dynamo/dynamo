@@ -144,7 +144,7 @@ impl WorkerPicker for TwoTierCostFnPicker {
     }
 
     fn pick(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
