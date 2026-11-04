@@ -2157,18 +2157,19 @@ def test_systemone_serial_profile_covers_pinned_sglang_version(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("serial", "opt_in", "installed"),
+    ("serial", "opt_in", "installed", "sglang_tokenizer"),
     [
-        (False, False, "0.5.19"),
-        (False, True, "0.5.19"),
-        (True, False, "0.5.19"),
-        (True, True, "0.5.19"),
-        (True, True, "0.5.22+cu130"),
-        (True, True, "0.5.23"),
+        (False, False, "0.5.19", False),
+        (False, True, "0.5.19", False),
+        (True, False, "0.5.19", False),
+        (True, True, "0.5.19", False),
+        (True, True, "0.5.22+cu130", False),
+        (True, True, "0.5.23", False),
+        (True, True, "0.5.22+cu130", True),
     ],
 )
 async def test_systemone_serial_capability_published_only_when_isolated(
-    monkeypatch, caplog, serial, opt_in, installed
+    monkeypatch, caplog, serial, opt_in, installed, sglang_tokenizer
 ):
     if sglang_register is None:
         pytest.skip("dynamo.sglang.register is unavailable")
@@ -2196,7 +2197,7 @@ async def test_systemone_serial_capability_published_only_when_isolated(
         speculative_algorithm=None,
     )
     dynamo_args = SimpleNamespace(
-        use_sglang_tokenizer=False,
+        use_sglang_tokenizer=sglang_tokenizer,
         custom_jinja_template=None,
         model_source_uri=None,
         systemone_serial=opt_in,
@@ -2210,13 +2211,16 @@ async def test_systemone_serial_capability_published_only_when_isolated(
             worker_type=sglang_register.WorkerType.Aggregated,
         )
     # An eligible worker keeps its legacy checksum cohort unless it opts in.
-    published_serial = serial and opt_in
-    assert published["sglang_generate"] == "true"
+    # The SGLang tokenizer makes the worker text-input, so it is ineligible.
+    published_serial = serial and opt_in and not sglang_tokenizer
+    assert published.get("sglang_generate") == (None if sglang_tokenizer else "true")
     assert published.get("sglang_systemone_serial_v1") == (
         "true" if published_serial else None
     )
     assert ("including chat and completions" in caplog.text) is published_serial
-    assert ("--systemone-serial is ignored" in caplog.text) is (opt_in and not serial)
+    assert ("--systemone-serial is ignored" in caplog.text) is (
+        opt_in and not published_serial
+    )
     if published_serial:
         assert f"Published SGLang {installed} System One capability" in caplog.text
         assert "separate served-model name or namespace-scoped frontend" in caplog.text
@@ -2354,6 +2358,7 @@ async def test_register_model_preserves_source_with_sglang_modelexpress(
         use_sglang_tokenizer=False,
         frontend_decoding=False,
         custom_jinja_template=None,
+        systemone_serial=False,
     )
 
     result = await sglang_register._register_model_with_runtime_config(
@@ -2406,6 +2411,7 @@ async def test_register_model_uses_engine_managed_path_for_runai_object_storage(
         use_sglang_tokenizer=False,
         frontend_decoding=False,
         custom_jinja_template=None,
+        systemone_serial=False,
     )
     engine = SimpleNamespace(
         tokenizer_manager=SimpleNamespace(

@@ -209,8 +209,8 @@ class DynamoSGLangArgGroup(ArgGroup):
                 "(sglang_systemone_serial_v1) so the frontend Decisions API can "
                 "select this worker. The worker must still be aggregated with "
                 "--max-running-requests 1, --disable-overlap-schedule, DP1, PP1, "
-                "no speculative decoding or priority preemption, and a qualified "
-                "SGLang version. Advertising the profile changes the worker's "
+                "no speculative or dLLM decoding, no priority preemption, no "
+                "--use-sglang-tokenizer, and a qualified SGLang version. Advertising the profile changes the worker's "
                 "model checksum, so it only joins other opted-in workers."
             ),
         )
