@@ -7,7 +7,11 @@ subtitle: Configure Dynamo's built-in reasoning parsers for models that emit thi
 
 Some models emit reasoning separately from their final response. Dynamo can split that output into `reasoning_content` and normal assistant `content` by configuring `--dyn-reasoning-parser` on the backend worker. This page covers Dynamo-native parsing; if your model is not listed, use [engine fallback](chat-processors.mdx), which also explains valid combinations of `--dyn-reasoning-parser`, `--dyn-chat-processor`, and `--dyn-tool-call-parser`.
 
+See [Parser Generation Routing](troubleshooting-tool-calls.md#parser-generation-routing) for version selection and compatible names.
+
 ## Configure Reasoning Parsing
+
+Set `DYN_PARSER_VERSION` in the frontend and backend worker environments before startup: `1` selects legacy V1 parsing, `2` requires a compatible unified V2 parser, and unset or `auto` prefers compatible V2 with V1 fallback. See [Parser Generation Routing](troubleshooting-tool-calls.md#parser-generation-routing) for supported configurations and family exceptions.
 
 <Steps>
   <Step title="Launch Dynamo backend">
@@ -44,12 +48,13 @@ Some models emit reasoning separately from their final response. Dynamo can spli
     - MiniMax M2 style outputs: `--dyn-tool-call-parser minimax_m2 --dyn-reasoning-parser minimax_m2`
     - MiniMax M3 style outputs: `--dyn-tool-call-parser minimax_m3 --dyn-reasoning-parser minimax_m3`
 
-    > [!WARNING]
-    > `minimax_append_think` is deprecated for MiniMax M2 tool-calling deployments. Use `--dyn-reasoning-parser minimax_m2` with `--dyn-tool-call-parser minimax_m2` so Dynamo can separate reasoning and pass MiniMax XML tool calls to the tool parser.
+    <Warning>
+    `minimax_append_think` is deprecated for MiniMax M2 tool-calling deployments. Use `--dyn-reasoning-parser minimax_m2` with `--dyn-tool-call-parser minimax_m2` so Dynamo can separate reasoning and pass MiniMax XML tool calls to the tool parser.
+    </Warning>
 
     </details>
 
-    Reasoning parsing happens before tool call parsing. See [Tool Call Parsing (Dynamo)](tool-call-parsing.mdx) for supported `--dyn-tool-call-parser` values.
+    On Unified routes one parser preserves reasoning, text, and tool order. The legacy split route extracts reasoning before tool parsing. See [Tool Call Parsing (Dynamo)](tool-call-parsing.mdx) for supported `--dyn-tool-call-parser` values.
   </Step>
 
   <Step title="Start the Frontend">
@@ -142,6 +147,8 @@ Thinking controls use this precedence order:
 2. `--dyn-default-thinking-mode` or `DYN_DEFAULT_THINKING_MODE`
 3. The model or chat template's native default
 
+Kimi K3 overrides this precedence for named calls: `--dyn-tool-call-parser kimi_k3` (or `kimi-k3`) forces thinking off, even if requested. The reasoning selector alone does not apply this override.
+
 Explicit request controls include root-level `thinking`, top-level
 `reasoning_effort`, and the `thinking`, `enable_thinking`, `thinking_mode`, or
 `reasoning_effort` fields in `chat_template_args` or
@@ -165,30 +172,37 @@ Dynamo normalizes this request to `thinking_mode=adaptive` and removes any
 explicit request control, it takes precedence over an `enabled` or `disabled`
 deployment default.
 
-> [!NOTE]
-> This option controls chat-template rendering. It does not force the inference
-> engine or model to follow the requested mode. Models that ignore their
-> template's thinking control may still emit reasoning.
+<Note>
+This option controls chat-template rendering. It does not force the inference
+engine or model to follow the requested mode. Models that ignore their
+template's thinking control may still emit reasoning.
+</Note>
 
 ## Supported Reasoning Parsers
 
 Choose a model family, then expand the matching model option to see its parser name and configuration details.
 
-The **Upstream name** column shows where the vLLM or SGLang parser name differs from Dynamo's. This is relevant for engine fallback and when configuring the native structured-output reasoning gate. A blank upstream column means the same name works everywhere. `Dynamo-only` means no upstream parser exists for this format.
+The **Upstream name** column lists engine names that differ from Dynamo's, for engine fallback and native reasoning gates. Names vary by engine version; `Dynamo-only` describes this catalog, not every engine release.
 
-Parsers marked **Force-reasoning: Yes** emit reasoning content from token one without requiring an explicit opening tag such as `<think>`. All others require the opening tag in the model output.
+Parsers marked **Force-reasoning: Yes** start reasoning without an opening tag. Other parsers can start from a generated opener or supported prompt-prefilled state. Prompt prefill and force-reasoning are separate mechanisms.
 
 <AccordionGroup>
   <Accordion title="Kimi">
     <AccordionGroup>
+      <Accordion title="Kimi K3">
+        **Parser:** `kimi_k3` (Unified alias `kimi-k3`)
+
+        **Notes:** XTML thinking and response channels, including prompt-prefilled reasoning. See [Tool Call Parsing](tool-call-parsing.mdx) for the K3 named-tool thinking override.
+      </Accordion>
+
       <Accordion title="Kimi K2.5 / Kimi K2.6 format-compatible thinking models">
         **Parser:** `kimi_k25`
 
         **Upstream name:** <Badge intent="note" minimal>Dynamo-only</Badge>
 
-        **Force-reasoning:** <Badge intent="success" minimal>Yes</Badge>
+        **Force-reasoning:** <Badge intent="success" minimal>Yes (V1)</Badge>
 
-        **Notes:** `<think>...</think>` with force-reasoning
+        **Notes:** V1 forces reasoning from the start. The default Unified Kimi K2 route begins as visible text unless an opening marker or supported prompt-prefilled reasoning state selects reasoning.
       </Accordion>
 
       <Accordion title="Kimi K2 Instruct / Thinking with Unicode delimiters">
@@ -202,8 +216,9 @@ Parsers marked **Force-reasoning: Yes** emit reasoning content from token one wi
       </Accordion>
     </AccordionGroup>
 
-    > [!WARNING]
-    > Kimi K2.7 may ignore `chat_template_kwargs.thinking=false` and continue to generate reasoning. Dynamo can separate emitted reasoning when a compatible parser is configured, but it cannot force the model to disable reasoning. Treat the request flag as best-effort for Kimi K2.7.
+    <Warning>
+    Kimi K2.7 may ignore `chat_template_kwargs.thinking=false` and continue to generate reasoning. Dynamo can separate emitted reasoning when a compatible parser is configured, but it cannot force the model to disable reasoning. Treat the request flag as best-effort for Kimi K2.7.
+    </Warning>
   </Accordion>
 
   <Accordion title="MiniMax">
@@ -225,7 +240,7 @@ Parsers marked **Force-reasoning: Yes** emit reasoning content from token one wi
 
         **Force-reasoning:** <Badge intent="note" minimal>No</Badge>
 
-        **Notes:** `<mm:think>...</mm:think>`; recovers a prompt-prefilled opener
+        **Notes:** `<mm:think>...</mm:think>`. Explicit V2 supports prompt-prefilled reasoning; auto uses V1, with an explicit-guided decoding exception described in [routing exceptions](troubleshooting-tool-calls.md#parser-generation-routing). Alias: `minimax-m3`
       </Accordion>
 
       <Accordion title="MiniMax M2 / M2.1 (legacy)">
@@ -242,6 +257,12 @@ Parsers marked **Force-reasoning: Yes** emit reasoning content from token one wi
 
   <Accordion title="DeepSeek">
     <AccordionGroup>
+      <Accordion title="DeepSeek V4.1">
+        **Parser:** `deepseek_v41`
+
+        **Notes:** Unified V4.1 reasoning and tool grammar; use V2/auto with matching selectors. Not available in V1.
+      </Accordion>
+
       <Accordion title="DeepSeek V4 Pro / Flash">
         **Parser:** `deepseek_v4`
 
@@ -259,7 +280,7 @@ Parsers marked **Force-reasoning: Yes** emit reasoning content from token one wi
 
         **Force-reasoning:** <Badge intent="success" minimal>Yes</Badge>
 
-        **Notes:** Pass explicitly for V3.1/V3.2 (no alias)
+        **Notes:** V1 also accepts `deepseek_v3`, `deepseek_v3_1`, and `deepseek_v3_2` as reasoning aliases. These names do not identify a Unified family.
       </Accordion>
     </AccordionGroup>
   </Accordion>
@@ -283,11 +304,47 @@ Parsers marked **Force-reasoning: Yes** emit reasoning content from token one wi
       <Accordion title="GLM-4.5 and GLM-4.7">
         **Parser:** `glm45`
 
-        **Upstream name:** <Badge intent="note" minimal>Dynamo-only</Badge>
+        **Upstream name:** vLLM: `glm45`; SGLang: `glm45`
 
         **Force-reasoning:** <Badge intent="note" minimal>No</Badge>
 
-        **Notes:** Alias for `nemotron_deci`. `<think>...</think>`
+        **Notes:** `<think>...</think>`. With the default V2 parser, `glm45` selects
+        the `glm47` unified family; `glm47` is also accepted as a Dynamo selector.
+        With `DYN_PARSER_VERSION=1`, `glm45` uses the legacy `nemotron_deci`
+        implementation.
+
+        GLM does not assume reasoning by default. If the chat template already
+        ends the generation prompt with `<think>`, Dynamo starts parsing inside
+        reasoning without requiring the model to repeat the opening tag.
+
+        Thinking controls such as `chat_template_kwargs: {"enable_thinking": false}`
+        or `chat_template_kwargs: {"thinking": false}` affect the model's chat
+        template, not response visibility. If a GLM model still generates
+        reasoning, Dynamo keeps it in `reasoning_content` and returns the answer
+        in `content`.
+
+        For the default V2 parser on SGLang or vLLM, configure Dynamo's
+        `--dyn-reasoning-parser glm45` (or `glm47`) and the engine's native
+        `--reasoning-parser glm45`. Dynamo reconciles its reasoning state with
+        the rendered generation prompt, even if the request supplied a false
+        thinking flag:
+
+        - An open `<think>` defers JSON answer constraints and required/named-tool
+          constraints until `</think>`.
+        - A closed reasoning block starts in the answer phase, so those
+          constraints apply from the first generated token.
+        - With no generation prompt or no recognized open/closed reasoning
+          suffix, Dynamo retains the request-based decision.
+
+        A `max_thinking_tokens` budget also enables the reasoning gate when the
+        rendered prompt leaves reasoning open, even without JSON or
+        required/named-tool constraints. The budget caps reasoning tokens;
+        JSON and tool constraints still apply in the answer phase. Plain chat
+        without constraints or a thinking budget does not request this gate.
+
+        TensorRT-LLM also supports Dynamo's reasoning/content separation. The
+        native grammar-gate behavior described here is specific to SGLang and
+        vLLM; it does not configure TensorRT-LLM guided decoding.
       </Accordion>
     </AccordionGroup>
   </Accordion>
@@ -301,7 +358,7 @@ Parsers marked **Force-reasoning: Yes** emit reasoning content from token one wi
 
         **Force-reasoning:** <Badge intent="success" minimal>Yes</Badge>
 
-        **Notes:** Alias for `deepseek_r1`. Also accepts `nemotron_v3`
+        **Notes:** Auto pairs `qwen3_coder` tools with `nemotron_v3` / `nemotron3` reasoning on Unified; reasoning-only auto stays on V1. Explicit V2 selects Unified. V1 forces think-tag reasoning with tool boundaries.
       </Accordion>
 
       <Accordion title="Nemotron-Super / -Ultra / -Deci and Llama-Nemotron">
@@ -408,6 +465,24 @@ Parsers marked **Force-reasoning: Yes** emit reasoning content from token one wi
         **Notes:** `<think>...</think>`
       </Accordion>
     </AccordionGroup>
+  </Accordion>
+
+  <Accordion title="Muse Glimmer">
+    **Parser:** `muse_glimmer` (Dynamo alias `muse`)
+
+    **Notes:** Unified recipient-routed channels; `to=self` carries reasoning. No V1 reasoning parser exists.
+  </Accordion>
+
+  <Accordion title="Muse Spark">
+    **Parser:** `muse_spark` (alias `muse_spark_open`)
+
+    **Notes:** Unified recipient-routed channels: `to=self` carries reasoning and `commentary` remains visible text. No V1 reasoning parser exists.
+  </Accordion>
+
+  <Accordion title="Inkling">
+    **Parser:** `inkling`
+
+    **Notes:** V1 block/channel reasoning parser. This name does not select a Unified family; auto uses the legacy route and explicit V2 rejects it.
   </Accordion>
 
   <Accordion title="Generic">

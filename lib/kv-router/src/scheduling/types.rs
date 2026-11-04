@@ -120,7 +120,7 @@ pub enum KvSchedulerError {
     RequestClassifierPanicked(String),
 
     #[error("request classifier failed: {0}")]
-    RequestClassifierFailed(Arc<super::ClassifierError>),
+    RequestClassifierFailed(Arc<crate::plugins::request_classifier::ClassifierError>),
 
     #[error("request classifier is already tracking request ID {0:?}")]
     DuplicateClassificationRequestId(String),

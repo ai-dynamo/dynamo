@@ -23,7 +23,7 @@ and the booking lifecycle these rules protect.
   and response cleanup for one worker set.
   - `routing_host/kv.rs`: the KV path: preview, plan, select, track, dispatch.
   - `routing_host/kv_selection.rs`: turns a request's routing inputs into a `KvRouter` call.
-  - `routing_host/builtin.rs`, `routing_host/occupancy.rs`: non-KV modes (random, round-robin,
+  - `routing_host/hosted.rs`, `routing_host/occupancy.rs`: non-KV modes (random, round-robin,
     load-based) and Direct mode.
   - `routing_host/request_guard.rs`: tracks a dispatched request's progress and releases its
     booking.
