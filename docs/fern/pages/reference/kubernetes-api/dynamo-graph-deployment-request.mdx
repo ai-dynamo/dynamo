@@ -77,6 +77,190 @@ spec:
           max_candidate_gpus: 8
 ```
 
+### v1beta2 DGD Overrides
+
+**Experimental; for development only.** Enable `dynamo-operator.dgdrV1Beta2.enabled`
+in the platform Helm chart to use `spec.overrides.dgd`. It accepts one partial
+`nvidia.com/v1beta1` DGD, applied to every selected Candidate across backends and topologies.
+Other DGD API versions are not accepted here.
+
+Overrides follow the DGD schema's [Server-Side Apply merge rules](https://kubernetes.io/docs/reference/using-api/server-side-apply/#merge-strategy).
+For example, components and named containers merge by name; container `command` and
+`args` are atomic lists and replace the entire generated list. These are examples:
+the schema's map, set, and atomic markers determine how all fields merge. Omitted
+fields retain their generated values.
+
+The existing DGD `$patch: {args: append}` customization is also supported on a named
+container. It appends the supplied arguments to an explicit generated `args` list and
+removes the directive before validation. Both the target container and its `args`
+must already exist. This is the only supported `$patch` operation.
+
+```yaml
+apiVersion: nvidia.com/v1beta2
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: custom-worker-image
+spec:
+  model:
+    name: Qwen/Qwen3-0.6B
+  backends: [vllm] # OPTIONAL; restricts results to this backend.
+  overrides: # OPTIONAL; omitted means no DGD override.
+    dgd: # OPTIONAL; partial DGD resource.
+      apiVersion: nvidia.com/v1beta1 # REQUIRED when dgd is set.
+      kind: DynamoGraphDeployment # REQUIRED when dgd is set.
+      metadata:
+        labels:
+          workload: customized
+      spec:
+        components:
+          - name: worker
+            podTemplate:
+              spec:
+                containers:
+                  - name: main
+                    image: registry.example/runtime:1.7.0
+```
+
+The override is frozen into the immutable Run spec and applied atomically: if a target
+component is absent or any part cannot be applied, the Candidate retains the unchanged
+generated DGD spec and reports `Valid=False`. A new named container can be added to an
+existing component through the normal merge; `$patch: {args: append}` requires an
+existing container instead.
+For example, a `decode` override can fail for an aggregated Candidate whose topology
+contains only `worker`. No subset of a failed override is applied.
+
+Choose target names that exist in the results you want to keep. Restricting `backends`
+can avoid engine-specific mismatches, but does not guarantee a particular topology.
+A shared `decode` override can invalidate every aggregated result, including the entire
+result set. Invalid Candidates still count toward `recommendation.maxCandidates` and
+do not trigger replacement searches.
+
+After a successful merge, a copy of the DGD undergoes strict server-side dry-run creation,
+including DGD defaults, schema, CEL, and validating webhooks. The dry-run response is
+discarded; the stored payload remains the one from before the check.
+Unknown fields and incorrect field types remain visible on invalid Candidates;
+`Valid=False` records the failure. Infrastructure failures are retried instead of being
+recorded as an invalid deployment.
+
+Retryable Candidate preparation errors are visible on the Run as `Published=False`,
+reason `PublicationBlocked`, with the error in the condition's message. This includes
+HTTP 403 from a DGD dry-run: RBAC changes propagate asynchronously, and a permission or
+policy configuration can be repaired. The publisher keeps retrying and preserves the
+already published Candidate references and progress. Once publication succeeds, it sets
+`Published=True` with reason `PublicationSucceeded`. `Published` is owned by the publisher;
+the Run controller independently owns `Completed`. Changing the request's spec stops the
+old Run and its publisher before starting the replacement Run.
+
+For example, the Run can report this status while retrying a denied DGD dry-run:
+
+```yaml
+status:
+  conditions:
+    - type: Published
+      status: "False"
+      reason: PublicationBlocked
+      message: "DGD dry-run forbidden: exceeded namespace quota"
+      observedGeneration: 1
+      lastTransitionTime: "2026-11-04T18:00:00Z"
+```
+
+`Candidate.spec` contains exactly the DGD spec, including `backendFramework`.
+DGD labels and annotations are copied to Candidate metadata. If an override fails to
+apply, only the original generated labels and annotations are copied; metadata from
+the failed override is discarded. If the merge succeeds but dry-run validation fails,
+the override's labels and annotations remain on the invalid Candidate.
+An override that makes the complete Candidate metadata invalid is rejected in full.
+The total annotation-size limit includes generated annotations and the reserved
+annotations added to the Candidate.
+
+Candidate identity, including name, namespace, and owner references, cannot be overridden.
+The following metadata is also reserved; attempts to override it fail atomically:
+
+- Labels `nvidia.com/dgdr-run-uid` and `nvidia.com/dgdr-candidate-id`.
+- Annotation `dgdr.nvidia.com/additional-resources`.
+- Annotations with the `nvidia.com/dgd-` conversion-bookkeeping prefix.
+
+Evaluation parameters, metrics, and the final `Valid` condition belong to Candidate status.
+The condition's statuses and reasons are documented on
+[`DynamoGraphDeploymentCandidateStatus.conditions`](full-api-reference.mdx#dynamographdeploymentcandidatestatus).
+
+<Warning>
+  A Candidate can retain an invalid DGD, including unknown fields or incorrect field types.
+  Check for `status.conditions` with `type: Valid` and `status: "True"` before using its
+  `spec` as a DGD. A missing condition does not mean validation succeeded.
+</Warning>
+
+```yaml
+apiVersion: nvidia.com/v1beta2
+kind: DynamoGraphDeploymentCandidate
+metadata:
+  name: example-candidate
+spec: # Immutable, opaque DGD spec; preserved even when validation fails.
+  backendFramework: vllm
+  components:
+    - name: frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0
+    - name: worker
+      type: worker
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.7.0
+              args: [--model, Qwen/Qwen3-0.6B]
+status:
+  parameters: # Original resolved simulation inputs.
+    tp: 2
+  metrics: # Original simulation results; not recomputed after overrides.
+    throughput: 12.5
+  conditions:
+    - type: Valid
+      status: "True"
+      reason: ValidationSucceeded
+      message: Strict DGD dry-run succeeded
+      observedGeneration: 1
+      lastTransitionTime: "2026-10-30T12:00:00Z"
+```
+
+<ParamField path="status.conditions" type="Condition[]">
+  The `Valid` condition reports whether the Candidate's DGD passed override application
+  and strict API admission. Its absence does not indicate success.
+
+  | Type | Status | Reason | Meaning |
+  | --- | --- | --- | --- |
+  | `Valid` | `True` | `ValidationSucceeded` | The override was applied in full and the DGD passed strict dry-run admission. |
+  | `Valid` | `False` | `OverrideTargetNotFound` | An override names a component absent from the generated DGD; the original DGD is retained. |
+  | `Valid` | `False` | `OverrideFailed` | The override could not be applied in full, for example because it changes reserved metadata or has an invalid merge directive; the original DGD is retained. |
+  | `Valid` | `False` | `ValidationFailed` | The resulting DGD was rejected by strict dry-run admission. |
+
+  `Valid=True` means the API object is structurally valid and passed strict DGD admission
+  at checking time. It does not indicate a running or Ready deployment, or prove image
+  availability, GPU capacity, or successful workload scheduling.
+</ParamField>
+
+Overrides may change model, backend, GPU allocation, parallelism, images, or arguments.
+The original simulation parameters and metrics are not a performance prediction for
+the overridden DGD.
+
+List only Candidates with `Valid=True` in the current namespace (requires `jq`):
+
+```bash
+kubectl get dynamographdeploymentcandidates -o json \
+  | jq -r '.items[] | select(any(.status.conditions[]?; .type == "Valid" and .status == "True")) | .metadata.name'
+```
+
+Invalid Candidates count toward `recommendation.maxCandidates` and retain their original
+search order in Run references. They do not trigger replacement searches. A successful
+Run requires a successful search and at least one `Valid=True` Candidate; when all
+selected Candidates are invalid, the Run fails and keeps them for diagnosis.
+
 ## Spec reference
 
 Only `model` is unconditionally required by the schema. Admission rejects a new DGDR whose supplied `spec.image` has no parseable semantic-version tag unless `spec.runtimeVersionOverride` is set. When `spec.image` is omitted, the operator supplies a versioned default as described below.
@@ -1183,7 +1367,8 @@ These values are an underlay, like every value lowered from a typed field:
 `spec.aisim.inputOverrides` is applied last as a JSON Merge Patch and can replace any of them,
 including `traffic.source.type`, `traffic.source.format`, and `traffic.source.paths`. A `null`
 override deletes the named field or parent object, and the operator does not restore it. For
-example, this override deletes the lowered source:
+example, this override deletes the lowered source and admission rejects the resulting input because
+`traffic.source` is required:
 
 ```yaml
 spec:
@@ -1194,9 +1379,10 @@ spec:
 ```
 
 The typed `persistentVolumeClaim` source alone decides which claim the Run's Job mounts and which
-claim the Run protects. Overriding `traffic.source.paths` adds no volume mount. AISimulate validates
-the resulting input when the Run's Job starts, and an input it rejects fails the Run; admission does
-not validate it against the AISimulate schema yet.
+claim the Run protects. Overriding `traffic.source.paths` adds no volume mount. Request and Run
+creation validate the merged input against the bundled AISimulate schema. Request spec changes
+require the same check; unchanged specs remain metadata-updatable after a bundled schema upgrade.
+Admission does not read the trace file or prove that the configured paths are mounted and readable.
 
 ### Trace claim lifecycle
 
