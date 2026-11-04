@@ -616,13 +616,8 @@ for package, expected in zip(("transformers", "tokenizers"), sys.argv[1:]):
 PY
 
 {% endif -%}
-# vLLM 0.32.0's vllm-rs starts its managed engine without VLLM_USE_RUST_FRONTEND
-# (fixed upstream in vllm-project/vllm#61586, first released in v0.32.1rc0 and
-# v0.33.0). Without it, models that normalize images on the device (Qwen2-VL,
-# Qwen2.5-VL, Qwen3-VL and others) normalize vllm-rs's already-normalized pixels
-# again and see black images. The vllm-rs binary itself does not read the
-# variable, so the wrapper only affects its engine. Drop the export once the
-# pinned vLLM includes that fix.
+# vLLM 0.32.0's vllm-rs omits VLLM_USE_RUST_FRONTEND for its engine, so VL models normalize
+# images twice and see black. Drop the export once pinned vLLM has vllm-project/vllm#61586.
 {% if device == "cuda" %}
 # Omni's soxr dependency is only needed for unsupported Breeze voice cloning.
 RUN python3 -m pip uninstall --yes soxr
