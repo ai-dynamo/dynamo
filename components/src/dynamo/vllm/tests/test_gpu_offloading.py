@@ -10,6 +10,7 @@ import base64
 import os
 import subprocess
 import sys
+import threading
 import uuid
 import weakref
 from contextlib import nullcontext
@@ -23,15 +24,38 @@ from kvbm.vllm_integration.gpu_memory import GPUCacheRegion, GPUCacheWorker, imp
 from kvbm.vllm_integration.gpu_offloading import (
     GPUKVCRSecondaryTierManager,
     GPUOffloadingConnector,
+    GPUPrimaryManager,
     GPURetainedLoadStoreSpec,
+    GPUTieringManager,
+    _GPUFrameworkPinAdapter,
 )
-from kvcr.types import BlockKey
+from kvcr.backends.remote_fw_dram import _RemoteFWDram
+from kvcr.types import BlockKey, QueryStatus
 from vllm.distributed.kv_events import BlockRemoved
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+    OffloadingWorkerMetadata,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
+    OffloadingEventGroupSpec,
+    OffloadingEventsTracker,
+    _OffloadEventMetadata,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+    OffloadingConnectorScheduler,
+    TransferJobStatus,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
-from vllm.v1.kv_offload.base import GPULoadStoreSpec, ReqContext, make_offload_key
+from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
+from vllm.v1.kv_offload.base import (
+    GPULoadStoreSpec,
+    LookupResult,
+    Medium,
+    ReqContext,
+    make_offload_key,
+)
 
 pytestmark = [
     pytest.mark.post_merge,
@@ -152,6 +176,130 @@ def test_gpu_inventory_has_its_own_medium(monkeypatch):
     result = list(connector.take_events())
     assert result[0].medium == "gpu_direct"
     assert event.medium == "CPU"
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_gpu_reset_does_not_release_native_owned_slots():
+    manager = GPUTieringManager.__new__(GPUTieringManager)
+    manager._gpu_lock = threading.RLock()
+    manager._jobs = {}
+    manager.primary_tier = SimpleNamespace(
+        _num_allocated_chunks=2,
+        _free_list=[],
+        _num_evictable_cache_chunks=1,
+    )
+    manager.secondary_tiers = [SimpleNamespace(_hazard_ops=set())]
+    with pytest.raises(RuntimeError, match="own its slots"):
+        manager.reset_cache()
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_failed_native_shutdown_preserves_primary_gpu_owner():
+    manager = GPUTieringManager.__new__(GPUTieringManager)
+    manager._gpu_lock = threading.RLock()
+    manager._gpu_stop = threading.Event()
+    manager._gpu_thread = SimpleNamespace(
+        join=lambda **kwargs: None, is_alive=lambda: False
+    )
+    released = []
+    manager.primary_tier = SimpleNamespace(shutdown=lambda: released.append(True))
+
+    def failed_shutdown():
+        raise RuntimeError("native transfer has not quiesced")
+
+    manager.secondary_tiers = [
+        SimpleNamespace(tier_type="gpu_kvcr", shutdown=failed_shutdown)
+    ]
+    with pytest.raises(RuntimeError, match="not quiesced"):
+        manager.shutdown()
+    assert released == []
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_gpu_reset_revokes_published_keys_and_drops_unpublished_stores():
+    spec = SimpleNamespace(
+        num_chunks=4,
+        extra_config={},
+        kv_events_config=SimpleNamespace(enable_kv_cache_events=True),
+    )
+    manager = GPUPrimaryManager(spec, SimpleNamespace())
+    published = make_offload_key(b"published", 0)
+    pending = make_offload_key(b"pending", 0)
+    request = ReqContext("gpu-reset")
+    manager.prepare_store([published], request)
+    manager.complete_store([published], request)
+    stored = list(manager.take_events())
+    assert len(stored) == 1 and stored[0].keys == [published]
+    assert not stored[0].removed
+    manager.prepare_store([pending], request)
+    manager.complete_store([pending], request)
+    # Both are physically ready, but only one was published to the router.
+    assert manager.lookup(pending, request) == LookupResult.HIT
+    manager.reset_cache()
+    manager.reset_cache()  # Must not drop the first queued revocation.
+    events = list(manager.take_events())
+    assert len(events) == 1
+    assert events[0].removed and events[0].keys == [published]
+    assert manager.lookup(published, ReqContext("after-reset")) == LookupResult.MISS
+    assert manager.lookup(pending, ReqContext("after-reset")) == LookupResult.MISS
+    manager.reset_cache()
+    assert list(manager.take_events()) == []
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_gpu_connector_reset_revokes_every_hash_in_a_published_chunk():
+    events_config = SimpleNamespace(
+        enable_kv_cache_events=True, self_describing_kv_events=True
+    )
+    spec = SimpleNamespace(
+        num_chunks=4, extra_config={}, kv_events_config=events_config
+    )
+    manager = GPUPrimaryManager(spec, SimpleNamespace())
+    tracker = OffloadingEventsTracker(events_config)
+    hashes = tuple(value.to_bytes(8, "big") for value in (11, 12))
+    key = make_offload_key(hashes[-1], 0)
+    pending_key = make_offload_key(b"unpublished", 0)
+    metadata = _OffloadEventMetadata(
+        block_hashes=hashes,
+        parent_block_hash=None,
+        token_ids=tuple(range(32)),
+        block_size=16,
+        lora_id=None,
+        lora_name=None,
+        extra_keys=None,
+        group_idx=0,
+        kv_cache_spec=OffloadingEventGroupSpec("full_attention", None),
+        active_residencies={(Medium.CPU, None)},
+    )
+    tracker._pending_event_metadata.update({key: metadata, pending_key: metadata})
+    request = ReqContext("chunk-reset")
+    manager.prepare_store([key], request)
+    manager.complete_store([key], request)
+
+    def reset_scheduler():
+        manager.reset_cache()
+        tracker.reset()
+
+    connector = GPUOffloadingConnector.__new__(GPUOffloadingConnector)
+    connector.connector_scheduler = SimpleNamespace(
+        manager=SimpleNamespace(primary_tier=manager),
+        _events_tracker=tracker,
+        reset_cache=reset_scheduler,
+        take_events=lambda: tracker.take_events(manager.take_events()),
+    )
+    stored = list(connector.take_events())
+    assert len(stored) == 1 and len(stored[0].block_hashes) == 2
+    assert connector.reset_cache() is True
+    assert pending_key not in tracker._pending_event_metadata
+    removed = list(connector.take_events())
+    assert len(removed) == 1 and isinstance(removed[0], BlockRemoved)
+    assert removed[0].medium == "gpu_direct"
+    assert removed[0].block_hashes == stored[0].block_hashes
+    assert tracker._pending_event_metadata == {}
 
 
 @pytest.mark.pre_merge
@@ -402,6 +550,52 @@ def test_gpu_key_adapter_preserves_group_keys_separately_from_router_hashes():
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
+def test_gpu_lookup_and_delivery_keep_framework_keys_through_router_hint_gate():
+    tier, deliveries = _multipart_tier()
+    block_hash = BlockHash(bytes(range(32)))
+    framework_key = make_offload_key(block_hash, 7)
+    canonical = BlockKey(framework_key)
+    router_key = maybe_convert_block_hash(block_hash)
+    assert canonical != router_key
+    hint = SimpleNamespace(
+        source="donor", failed=False, missing_keys=set(), block_hashes={router_key}
+    )
+    backend = _RemoteFWDram.__new__(_RemoteFWDram)
+    backend._options = SimpleNamespace(opportunistic_query=False)
+    backend._key_adapter = tier._key_adapter
+    backend._request_hints = {"load": hint}
+
+    def query(keys, request_id):
+        assert keys == (canonical,)
+        status = (
+            QueryStatus.FETCHABLE
+            if backend.query(keys[0], request_id)
+            else QueryStatus.MISS
+        )
+        return [(status, None)]
+
+    tier._kvcr.query = query
+    context = ReqContext("load")
+    assert tier.lookup(framework_key, context) is LookupResult.HIT
+    tier.submit_load(
+        SimpleNamespace(
+            job_id=8, keys=[framework_key], chunk_ids=[1], req_context=context
+        )
+    )
+    assert len(deliveries) == 1
+    blocks, kwargs = deliveries[0]
+    assert set(blocks) == {canonical}
+    assert kwargs == {"request_id": "load"}
+    assert [(ref.label, ref.element_index) for ref in blocks[canonical]] == [
+        (":rank0", 1),
+        (":rank1", 1),
+    ]
+    hint.block_hashes = {canonical}
+    assert tier.lookup(framework_key, context) is LookupResult.MISS
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
 @pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
 def test_tp_delivers_every_rank_part_in_one_logical_operation(tp_size):
     tier, calls = _multipart_tier(tp_size)
@@ -431,3 +625,115 @@ def test_tp2_descriptor_bounds_fail_before_native_transfer(slot):
     with pytest.raises(ValueError, match="outside"):
         tier._make_descriptors(slot)
     assert calls == []
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+def test_tp_source_pin_holds_one_primary_job_for_all_rank_parts(tp_size):
+    tier, _ = _multipart_tier(tp_size)
+    adapter = _GPUFrameworkPinAdapter(tier)
+    key, missing = BlockKey(b"present"), BlockKey(b"missing")
+    jobs, finished = [], []
+    parent = SimpleNamespace(
+        on_new_request=lambda ctx: None,
+        lookup=lambda candidate, ctx: LookupResult.HIT
+        if candidate == key
+        else LookupResult.MISS,
+        create_store_job=lambda keys, ctx: jobs.append(tuple(keys))
+        or SimpleNamespace(job_id=17, keys=keys, chunk_ids=[3]),
+        on_request_finished=lambda ctx: finished.append(ctx),
+    )
+    pin, descriptors = adapter._resolve_pin(parent, [key, missing])
+    assert jobs == [(key,)] and len(finished) == 1
+    assert descriptors[missing] is None
+    assert [(ref.label, ref.element_index) for ref in descriptors[key]] == [
+        (f":rank{rank}", 3) for rank in range(tp_size)
+    ]
+    assert adapter.has_active_pins()
+    assert adapter.take_pin_job_results() == []
+    adapter.release_pin(pin)
+    adapter.release_pin(pin)
+    results = adapter.take_pin_job_results()
+    assert len(results) == 1 and results[0].job_id == 17
+    assert not adapter.has_active_pins()
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+def test_tp_pin_expansion_failure_releases_the_primary_job(tp_size):
+    tier, _ = _multipart_tier(tp_size)
+    adapter = _GPUFrameworkPinAdapter(tier)
+    key = BlockKey(b"present")
+    parent = SimpleNamespace(
+        on_new_request=lambda ctx: None,
+        lookup=lambda candidate, ctx: LookupResult.HIT,
+        create_store_job=lambda keys, ctx: SimpleNamespace(
+            job_id=17, keys=keys, chunk_ids=[4]
+        ),
+        on_request_finished=lambda ctx: None,
+    )
+    with pytest.raises(ValueError, match="outside"):
+        adapter._resolve_pin(parent, [key])
+    assert not adapter.has_active_pins()
+    assert [result.job_id for result in adapter.take_pin_job_results()] == [17]
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_gpu_adapter_preserves_the_typed_vllm_hint_envelope():
+    tier, _ = _multipart_tier()
+    submitted = []
+    tier._kvcr.submit_hint = lambda **kwargs: submitted.append(kwargs)
+    hint = KvHintsEnvelope(
+        "0.1", "message", [KvHintAction("action", "kv.fetch_gpu", "1.0", {})]
+    )
+    tier.on_new_request(ReqContext("request", kv_hints=hint))
+    assert submitted == [{"request_id": "request", "hints": hint}]
+    assert submitted[0]["hints"] is hint
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parametrize("tp_size", [2, 3, 4, 8])
+def test_tp_retained_inventory_waits_for_every_worker_completion(tp_size):
+    primary = GPUPrimaryManager(
+        SimpleNamespace(
+            num_chunks=4,
+            extra_config={},
+            kv_events_config=SimpleNamespace(enable_kv_cache_events=True),
+        ),
+        SimpleNamespace(),
+    )
+    context = ReqContext("store")
+    key = make_offload_key(b"all-ranks", 0)
+    primary.prepare_store([key], context)
+    scheduler = OffloadingConnectorScheduler.__new__(OffloadingConnectorScheduler)
+    scheduler.manager = primary
+    scheduler._jobs = {
+        7: TransferJobStatus(
+            req_id="store", pending_count=tp_size, keys={key}, is_store=True
+        )
+    }
+    scheduler._req_status = {
+        "store": SimpleNamespace(
+            req_context=context, transfer_jobs={7}, finished_signaled=False
+        )
+    }
+    scheduler._stale_job_threshold = 0
+    scheduler._block_id_to_pending_jobs = {}
+    scheduler._chunks_being_loaded = set()
+    scheduler._manager_locked = nullcontext
+    output = SimpleNamespace(
+        kv_connector_worker_meta=OffloadingWorkerMetadata(completed_jobs={7: 1})
+    )
+    for pending in range(tp_size - 1, 0, -1):
+        scheduler.update_connector_output(output)
+        assert primary.lookup(key, context) is LookupResult.HIT_PENDING
+        assert list(primary.take_events()) == []
+        assert scheduler._jobs[7].pending_count == pending
+    scheduler.update_connector_output(output)
+    assert primary.lookup(key, context) is LookupResult.HIT
+    assert [event.keys for event in primary.take_events()] == [[key]]
+    assert scheduler._jobs == {}

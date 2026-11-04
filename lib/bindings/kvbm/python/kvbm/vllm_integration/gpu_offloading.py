@@ -8,9 +8,12 @@ and loads are D2D copies; the remote leg is a GPU-only KVCR instance. This raw
 layout requires an explicit identical model/layout compatibility domain.
 """
 
+import functools
 import logging
 import socket
+import threading
 import time
+import types
 import uuid
 
 import msgspec
@@ -37,6 +40,10 @@ from vllm.v1.kv_offload.tiering.base import JobResult, SecondaryTierManager
 from vllm.v1.kv_offload.tiering.kvcr.manager import (
     KVCRSecondaryTierManager,
     _FrameworkPinAdapter,
+)
+from vllm.v1.kv_offload.tiering.manager import (
+    TieringOffloadingManager,
+    _SecondaryTierFacingParent,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
@@ -361,6 +368,81 @@ class GPUKVCRSecondaryTierManager(KVCRSecondaryTierManager):
         except BaseException:
             _RETAINED_FAILED_GPU_MANAGERS.append(self)
             raise
+
+
+def _serialized(method):
+    @functools.wraps(method)
+    def call(self, *args, **kwargs):
+        with self._gpu_lock:
+            result = method(self, *args, **kwargs)
+            return tuple(result) if isinstance(result, types.GeneratorType) else result
+
+    return call
+
+
+class GPUTieringManager(TieringOffloadingManager):
+    """Serialize policy access while servicing peers between model steps."""
+
+    def __init__(self, primary, tier):
+        self._gpu_lock = threading.RLock()
+        self._gpu_stop = threading.Event()
+        super().__init__(primary_tier=primary, secondary_tiers=[tier])
+        self._gpu_thread = threading.Thread(target=self._poll_gpu, daemon=True)
+        self._gpu_thread.start()
+
+    def _poll_gpu(self):
+        while not self._gpu_stop.wait(0.001):
+            if not self._gpu_lock.acquire(timeout=0.1):
+                continue
+            try:
+                self._processed_jobs_this_step = False
+                self._maybe_process_finished_jobs()
+                self.secondary_tiers[0].serve_external_requests(
+                    _SecondaryTierFacingParent(self, 0)
+                )
+            except Exception:
+                logger.exception(
+                    "GPU KV peer progress failed; retaining outstanding leases"
+                )
+                self._gpu_stop.set()
+            finally:
+                self._gpu_lock.release()
+
+    lookup = _serialized(TieringOffloadingManager.lookup)
+    get_load_source = _serialized(TieringOffloadingManager.get_load_source)
+    prepare_load = _serialized(TieringOffloadingManager.prepare_load)
+    complete_load = _serialized(TieringOffloadingManager.complete_load)
+    prepare_store = _serialized(TieringOffloadingManager.prepare_store)
+    complete_store = _serialized(TieringOffloadingManager.complete_store)
+    touch = _serialized(TieringOffloadingManager.touch)
+    create_store_job = _serialized(TieringOffloadingManager.create_store_job)
+    on_new_request = _serialized(TieringOffloadingManager.on_new_request)
+    on_request_finished = _serialized(TieringOffloadingManager.on_request_finished)
+    on_schedule_end = _serialized(TieringOffloadingManager.on_schedule_end)
+    take_events = _serialized(TieringOffloadingManager.take_events)
+    get_stats = _serialized(TieringOffloadingManager.get_stats)
+    has_pending_work = _serialized(TieringOffloadingManager.has_pending_work)
+
+    @_serialized
+    def reset_cache(self):
+        primary = self.primary_tier
+        active = (
+            primary._num_allocated_chunks
+            - len(primary._free_list)
+            - primary._num_evictable_cache_chunks
+        )
+        if self._jobs or active or self.secondary_tiers[0]._hazard_ops:
+            raise RuntimeError("Cannot reset GPU cache while transfers own its slots")
+        return super().reset_cache()
+
+    def shutdown(self):
+        self._gpu_stop.set()
+        self._gpu_thread.join(timeout=5)
+        if self._gpu_thread.is_alive():
+            _RETAINED_FAILED_GPU_MANAGERS.append(self)
+            raise RuntimeError("GPU peer progress did not stop; retaining GPU buffers")
+        with self._gpu_lock:
+            super().shutdown()
 
 
 class GPUOffloadingConnector(OffloadingConnector):
