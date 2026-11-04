@@ -932,6 +932,95 @@ func TestGroveWorkloadsReconciler_DefersHashCommitUntilPCSWriteObserved(t *testi
 	}
 }
 
+func TestGroveWorkloadsReconciler_PreservesUnpublishedAcceptedNamespace(t *testing.T) {
+	ctx := context.Background()
+	t.Log("Keep A in DGD status while Grove has already accepted B")
+	dgd := createTestDGD("graph", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"prefill": {
+			ComponentType: consts.ComponentTypePrefill,
+			Envs:          []corev1.EnvVar{{Name: "WORKER_VERSION", Value: "C"}},
+		},
+	})
+	component := dgd.GetComponentByName("prefill")
+	base := dgd.GetDynamoNamespaceForComponent(component)
+	dgd.Status.Components = map[string]nvidiacomv1beta1.ComponentReplicaStatus{
+		"prefill": {RuntimeNamespace: base + "-A"},
+	}
+	pcs := &grovev1alpha1.PodCliqueSet{
+		Name: dynamo.PCSNameForDGD(dgd, nil), Namespace: dgd.Namespace, Generation: 1,
+		OwnerReferences: []metav1.OwnerReference{
+			*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
+		},
+		Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+			Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{
+				Labels: map[string]string{consts.KubeLabelDynamoComponent: "prefill", consts.KubeLabelDynamoWorkerHash: "B"},
+			}},
+		}},
+		Status: grovev1alpha1.PodCliqueSetStatus{
+			ObservedGeneration: new(int64(1)), CurrentGenerationHash: new("revision-B"),
+		},
+	}
+
+	t.Log("Model API-server generation changes while retaining Grove's previous acknowledgement")
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+		WithObjects(dgd, pcs).
+		WithStatusSubresource(dgd, pcs).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, writer client.WithWatch, object client.Object, opts ...client.UpdateOption) error {
+				if isGrovePodCliqueSetObject(object) {
+					object.SetGeneration(object.GetGeneration() + 1)
+				}
+				return writer.Update(ctx, object, opts...)
+			},
+		}).Build()
+	workloads := newGroveWorkloadsReconciler(
+		kubeClient, events.NewFakeRecorder(10), newDGDWorkerRolloutReconciler(kubeClient, nil),
+		&configv1alpha1.OperatorConfiguration{}, &commoncontroller.RuntimeConfig{},
+		&mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }},
+	)
+	req := groveReconcileRequest{DGD: dgd}
+	wantStatus := dgd.Status.DeepCopy()
+
+	t.Log("Write C before B has ever appeared in DGD status")
+	result, err := workloads.Reconcile(ctx, req, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, *wantStatus, dgd.Status, "the workload reconciler must not mutate input status")
+	require.Equal(t, base+"-A", result.ComponentStatus["prefill"].RuntimeNamespace)
+	require.Equal(t, []string{base + "-A", base + "-B"}, result.ComponentStatus["prefill"].RuntimeNamespaces)
+	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+	require.Greater(t, pcs.Generation, *pcs.Status.ObservedGeneration)
+
+	t.Log("Once Grove accepts C, keep A, B and C until cutover")
+	dgd.Status.Components = result.ComponentStatus
+	require.NoError(t, kubeClient.Status().Update(ctx, dgd))
+	pcs.Status.ObservedGeneration = new(pcs.Generation)
+	pcs.Status.CurrentGenerationHash = new("revision-C")
+	require.NoError(t, kubeClient.Status().Update(ctx, pcs))
+	result, err = workloads.Reconcile(ctx, req, nil, nil)
+	require.NoError(t, err)
+	workerHash := podCliqueSetCliqueForComponent(pcs, "prefill").Labels[consts.KubeLabelDynamoWorkerHash]
+	wantNamespace := base + "-" + workerHash
+	require.ElementsMatch(t, []string{base + "-A", base + "-B", wantNamespace}, result.ComponentStatus["prefill"].RuntimeNamespaces)
+
+	t.Log("Drop historical namespaces only after the accepted workers complete")
+	dgd.Status.Components = result.ComponentStatus
+	require.NoError(t, kubeClient.Status().Update(ctx, dgd))
+	child := &grovev1alpha1.PodClique{
+		Name: dynamo.GroveComponentResourceName(pcs.Name, "prefill"), Namespace: dgd.Namespace, Generation: 1,
+		Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1},
+		Status: grovev1alpha1.PodCliqueStatus{
+			Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1, ObservedGeneration: new(int64(1)),
+			CurrentPodCliqueSetGenerationHash: new("revision-C"),
+		},
+	}
+	require.NoError(t, kubeClient.Create(ctx, child))
+	result, err = workloads.Reconcile(ctx, req, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, wantNamespace, result.ComponentStatus["prefill"].RuntimeNamespace)
+	require.Empty(t, result.ComponentStatus["prefill"].RuntimeNamespaces)
+}
+
 func isGrovePodCliqueSetObject(object client.Object) bool {
 	if _, ok := object.(*grovev1alpha1.PodCliqueSet); ok {
 		return true

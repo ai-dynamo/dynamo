@@ -371,6 +371,37 @@ func (p groveRuntimeNamespacePlan) acceptedRuntimeNamespace(
 	return ComponentRuntimeNamespace(baseNamespace, string(component.ComponentType), p.workerHash)
 }
 
+// GroveAcceptedWorkerRuntimeNamespaces resolves worker namespaces from an accepted
+// PCS snapshot. A nil or unaccepted PCS yields no namespaces; newly added and
+// delegated components are not projected.
+func GroveAcceptedWorkerRuntimeNamespaces(
+	dgd *v1beta1.DynamoGraphDeployment,
+	isDelegated func(*v1beta1.DynamoComponentDeploymentSharedSpec) bool,
+	pcs *grovev1alpha1.PodCliqueSet,
+) map[string]string {
+	if getAcceptedPCSRevisionHash(pcs) == nil {
+		return nil
+	}
+
+	// Read identities from the observed templates, never the desired worker hash.
+	namespaces := make(map[string]string)
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		if isDelegatedComponent(component, isDelegated) || !IsWorkerComponent(string(component.ComponentType)) {
+			continue
+		}
+		clique := grovePodCliqueSetCliqueForComponent(pcs, component.ComponentName)
+		if clique == nil {
+			continue
+		}
+		namespaces[component.ComponentName] = ComponentRuntimeNamespace(
+			dgd.GetDynamoNamespaceForComponent(component), string(component.ComponentType),
+			clique.Labels[commonconsts.KubeLabelDynamoWorkerHash],
+		)
+	}
+	return namespaces
+}
+
 func groveWorkersCompletedAcceptedPCSRevision(
 	dgd *v1beta1.DynamoGraphDeployment,
 	isDelegated func(*v1beta1.DynamoComponentDeploymentSharedSpec) bool,

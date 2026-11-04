@@ -163,6 +163,16 @@ func (r *groveWorkloadsReconciler) Reconcile(
 
 	resources := append(stableResources, podCliqueSetResource)
 	result := checkGroveResourcesReadiness(resources, readiness.Classification)
+
+	// Preserve an accepted revision that was superseded before DGD status recorded it.
+	if pcsWasWritten {
+		for componentName, namespace := range dynamo.GroveAcceptedWorkerRuntimeNamespaces(req.DGD, req.IsDelegated, renderedPodCliqueSet.existing) {
+			status := result.ComponentStatus[componentName]
+			status.RuntimeNamespaces = dynamo.StatusRuntimeNamespaces(status.RuntimeNamespace, append(status.RuntimeNamespaces, namespace)...)
+			result.ComponentStatus[componentName] = status
+		}
+	}
+
 	applyComponentGPUShapes(result.ComponentStatus, renderedPodCliqueSet.gpuShapes)
 	applyComponentRuntimeStatuses(result.ComponentStatus, renderedPodCliqueSet.runtimeStatuses)
 
