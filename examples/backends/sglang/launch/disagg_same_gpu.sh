@@ -119,13 +119,23 @@ python3 -m "$WORKER_MODULE" \
   --max-running-requests "$MAX_RUNNING_REQUESTS" \
   --enable-metrics \
   "${EXTRA_ARGS[@]}" &
+PREFILL_PID=$!
 
 # Wait for prefill worker to initialize before starting decode worker.
 # Both workers share one GPU with --delete-ckpt-after-loading; without this
 # wait they compete for GPU memory during model loading and the scheduler OOMs.
-# || true: don't let set -e kill the script on timeout (wait_for_ready returns 1).
+# A timeout still starts decode, but a prefill worker that already exited
+# (e.g. CUDA OOM at startup) must end the script here: bash reports and drops
+# a job that dies during this poll loop, so wait_any_exit below would never
+# see it and the script would hang with only decode running.
 PREFILL_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}"
-wait_for_ready "http://localhost:${PREFILL_SYSTEM_PORT}/health" 45 || true
+if ! wait_for_ready "http://localhost:${PREFILL_SYSTEM_PORT}/health" 45 \
+    && ! kill -0 "$PREFILL_PID" 2>/dev/null; then
+    PREFILL_RC=0
+    wait "$PREFILL_PID" || PREFILL_RC=$?
+    echo "Prefill worker exited with code $PREFILL_RC before becoming ready" >&2
+    exit "$PREFILL_RC"
+fi
 
 # run decode worker with metrics on port 8082
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
