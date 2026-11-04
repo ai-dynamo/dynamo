@@ -18,6 +18,8 @@ from kvbm.vllm_integration.gpu_memory import (
     GPUCacheWorker,
     GPUMultiRankCacheRegion,
 )
+from kvbm.vllm_integration.gpu_offloading import GPURetainedLoadStoreSpec
+from vllm.v1.kv_offload.base import GPULoadStoreSpec
 
 pytestmark = [
     pytest.mark.post_merge,
@@ -447,3 +449,72 @@ def test_rank_descriptor_symlink_is_rejected_before_read(fake_banks, tmp_path):
     link.symlink_to(target)
     with pytest.raises(OSError):
         gpu_memory._read_private_json(link)
+
+
+@pytest.mark.gpu_2
+@pytest.mark.timeout(60)
+def test_two_rank_local_d2d_roundtrip_shared_slots_without_peer_copy():
+    engine_id = f"two-rank-local-copy-{uuid.uuid4()}"
+    group = GPUMultiRankCacheRegion(
+        engine_id, 6, 48, gpu_rank_devices=[1, 0], gpu_transport="cuda_ipc"
+    )
+    workers = []
+    try:
+        for rank, device in enumerate((1, 0)):
+            with torch.cuda.device(device):
+                originals = [
+                    torch.full(
+                        (8, width),
+                        11 + rank + index * 20,
+                        dtype=torch.int8,
+                        device="cuda",
+                    )
+                    for index, width in enumerate((8, 16))
+                ]
+                expected = [tensor.clone() for tensor in originals]
+                caches = SimpleNamespace(
+                    tensors=[
+                        SimpleNamespace(tensor=tensor, page_size_bytes=tensor.shape[1])
+                        for tensor in originals
+                    ],
+                    group_data_refs=[
+                        [SimpleNamespace(tensor_idx=0, page_size_bytes=8)],
+                        [SimpleNamespace(tensor_idx=1, page_size_bytes=16)],
+                    ],
+                )
+                spec = SimpleNamespace(
+                    config=SimpleNamespace(
+                        engine_id=engine_id,
+                        parallel=SimpleNamespace(rank=rank, world_size=2),
+                    ),
+                    gpu_transport="cuda_ipc",
+                    num_chunks=6,
+                    row_bytes=48,
+                    blocks_per_chunk=2,
+                )
+                worker = GPUCacheWorker(spec, caches)
+                workers.append((device, worker))
+                source = GPULoadStoreSpec([2, 0, 3, 1], [2, 2], [0, 0])
+                slots = GPURetainedLoadStoreSpec([4, 1])
+                assert worker.submit_store(1, source, slots)
+                worker.wait({1})
+                assert [result.job_id for result in worker.get_finished()] == [1]
+                if rank == 0:
+                    with torch.cuda.device(0):
+                        assert bool(torch.all(group.banks[1].tensor == 0).item())
+                originals[0][4:6].zero_()
+                originals[1][6:8].zero_()
+                target = GPULoadStoreSpec([5, 4, 6, 7], [2, 2], [0, 0])
+                assert worker.submit_load(2, slots, target)
+                worker.wait({2})
+                assert [result.job_id for result in worker.get_finished()] == [2]
+                assert torch.equal(originals[0][5], expected[0][2])
+                assert torch.equal(originals[0][4], expected[0][0])
+                assert torch.equal(originals[1][6], expected[1][3])
+                assert torch.equal(originals[1][7], expected[1][1])
+                assert bool(torch.all(group.banks[rank].tensor[0] == 0).item())
+    finally:
+        for device, worker in workers:
+            with torch.cuda.device(device):
+                worker.shutdown()
+        group.cleanup()

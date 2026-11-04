@@ -16,10 +16,19 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from kvbm.vllm_integration import gpu_memory, gpu_mnnvl
+from kvbm.vllm_integration import gpu_memory, gpu_mnnvl, gpu_offloading
 from kvbm.vllm_integration.gpu_memory import GPUCacheRegion, GPUCacheWorker, import_ipc
-from kvbm.vllm_integration.gpu_offloading import GPURetainedLoadStoreSpec
-from vllm.v1.kv_offload.base import GPULoadStoreSpec
+from kvbm.vllm_integration.gpu_offloading import (
+    GPUOffloadingConnector,
+    GPURetainedLoadStoreSpec,
+)
+from kvcr.types import BlockKey
+from vllm.distributed.kv_events import BlockRemoved
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
+    OffloadingConnector,
+)
+from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
+from vllm.v1.kv_offload.base import GPULoadStoreSpec, make_offload_key
 
 pytestmark = [
     pytest.mark.post_merge,
@@ -27,6 +36,17 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.core,
 ]
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_gpu_inventory_has_its_own_medium(monkeypatch):
+    event = BlockRemoved(block_hashes=[123], medium="CPU")
+    monkeypatch.setattr(OffloadingConnector, "take_events", lambda self: iter([event]))
+    connector = GPUOffloadingConnector.__new__(GPUOffloadingConnector)
+    result = list(connector.take_events())
+    assert result[0].medium == "gpu_direct"
+    assert event.medium == "CPU"
 
 
 @pytest.mark.pre_merge
@@ -241,3 +261,20 @@ def test_local_fabric_descriptor_mismatch_fails_before_importing_any_gpu_handle(
             gpu_memory.import_fabric(
                 {**original, **change}, "fixture", (2, 8), base, domain, identity.domain
             )
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_gpu_key_adapter_preserves_group_keys_separately_from_router_hashes():
+    adapter = gpu_offloading._VllmKeyAdapter()
+    block_hash = BlockHash(bytes(range(32)))
+    keys = [make_offload_key(block_hash, group) for group in (0, 7)]
+    canonical = [adapter.decode_from_framework(key) for key in keys]
+    assert canonical == [BlockKey(key) for key in keys]
+    assert len(set(canonical)) == 2
+    assert [adapter.encode_to_framework(key) for key in canonical] == keys
+    router_key = maybe_convert_block_hash(block_hash)
+    assert router_key not in canonical
+    assert [adapter.encode_to_router(key) for key in canonical] == [router_key] * 2
+    with pytest.raises(NotImplementedError, match="group identity"):
+        adapter.decode_from_router(router_key)
