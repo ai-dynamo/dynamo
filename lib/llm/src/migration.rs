@@ -3595,6 +3595,16 @@ mod tests {
     /// struct state is exactly what does *not* catch the off-by-one.
     #[tokio::test]
     async fn test_migration_exhausted_reports_the_attempt_that_failed() {
+        // Isolate the tracing registry from sibling tests. The child must run this test.
+        if crate::test_utils::run_isolated(
+            concat!(
+                module_path!(),
+                "::test_migration_exhausted_reports_the_attempt_that_failed"
+            ),
+            &[],
+        ) {
+            return;
+        }
         use std::sync::Mutex;
         use tracing::field::{Field, Visit};
         use tracing_subscriber::layer::{Context as LayerContext, Layer, SubscriberExt};

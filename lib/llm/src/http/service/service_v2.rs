@@ -175,7 +175,7 @@ async fn track_inflight_inference(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    use futures::StreamExt;
+    use http_body_util::BodyExt;
     let state = &readiness.state;
 
     // Requests rejected during draining should not extend the drain window.
@@ -193,13 +193,12 @@ async fn track_inflight_inference(
 
     let response = next.run(request).await;
     let (parts, body) = response.into_parts();
-    // Keep the permit alive until the full response body, including streams,
-    // finishes or is dropped.
-    let stream = body.into_data_stream().map(move |result| {
+    // Preserve body framing and trailers while retaining the inflight permit.
+    let body = body.map_err(move |error| {
         let _permit = &permit;
-        result
+        error
     });
-    Response::from_parts(parts, Body::from_stream(stream))
+    Response::from_parts(parts, Body::new(body))
 }
 
 /// HTTP service shared state
@@ -3035,6 +3034,128 @@ mod tests {
         assert_eq!(health["instances"].as_array().unwrap().len(), 1);
 
         handle.abort();
+    }
+
+    fn inflight_test_router(router: axum::Router) -> (axum::Router, Arc<State>) {
+        let state = HttpService::builder().build().unwrap().state_clone();
+        let readiness = Arc::new(InferenceReadinessState {
+            state: state.clone(),
+            mounted_protocols: HashMap::new(),
+        });
+        (
+            router.layer(axum::middleware::from_fn_with_state(
+                readiness,
+                track_inflight_inference,
+            )),
+            state,
+        )
+    }
+
+    #[tokio::test]
+    async fn track_inflight_body_preserves_fixed_and_empty_framing() {
+        use axum::body::HttpBody;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        for content in ["ready", ""] {
+            let (router, state) = inflight_test_router(axum::Router::new().route(
+                "/",
+                axum::routing::get(move || async move { Body::from(content) }),
+            ));
+            let response = router
+                .oneshot(axum::http::Request::new(Body::empty()))
+                .await
+                .unwrap();
+            assert_eq!(state.inflight_count(), 1);
+            let body = response.into_body();
+            assert_eq!(body.size_hint().exact(), Some(content.len() as u64));
+            assert_eq!(body.is_end_stream(), content.is_empty());
+            assert_eq!(body.collect().await.unwrap().to_bytes(), content);
+            assert_eq!(state.inflight_count(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn track_inflight_body_preserves_trailers() {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (router, state) = inflight_test_router(axum::Router::new().route(
+            "/",
+            axum::routing::get(|| async {
+                let mut trailers = axum::http::HeaderMap::new();
+                trailers.insert("x-checksum", "complete".parse().unwrap());
+                Body::new(
+                    http_body_util::Full::new(bytes::Bytes::from_static(b"payload"))
+                        .with_trailers(async { Some(Ok(trailers)) }),
+                )
+            }),
+        ));
+        let response = router
+            .oneshot(axum::http::Request::new(Body::empty()))
+            .await
+            .unwrap();
+        let mut body = response.into_body();
+        let data = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        assert_eq!(data, "payload");
+        assert_eq!(state.inflight_count(), 1);
+        let trailers = body.frame().await.expect("trailer frame").unwrap();
+        assert_eq!(trailers.into_trailers().unwrap()["x-checksum"], "complete");
+        assert!(body.frame().await.is_none());
+        assert_eq!(state.inflight_count(), 1);
+        drop(body);
+        assert_eq!(state.inflight_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn track_inflight_body_releases_permit_on_unpolled_drop() {
+        use tower::ServiceExt;
+
+        let (router, state) = inflight_test_router(axum::Router::new().route(
+            "/",
+            axum::routing::get(|| async {
+                Body::from_stream(futures::stream::pending::<
+                    Result<bytes::Bytes, std::io::Error>,
+                >())
+            }),
+        ));
+        let response = router
+            .oneshot(axum::http::Request::new(Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(state.inflight_count(), 1);
+        drop(response);
+        assert_eq!(state.inflight_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn track_inflight_body_preserves_error_and_permit_lifetime() {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (router, state) = inflight_test_router(axum::Router::new().route(
+            "/",
+            axum::routing::get(|| async {
+                Body::from_stream(futures::stream::once(async {
+                    Err::<bytes::Bytes, _>(std::io::Error::other("response body failed"))
+                }))
+            }),
+        ));
+        let response = router
+            .oneshot(axum::http::Request::new(Body::empty()))
+            .await
+            .unwrap();
+        let mut body = response.into_body();
+        let error = body.frame().await.unwrap().unwrap_err();
+        let mut cause: &(dyn std::error::Error + 'static) = &error;
+        while let Some(source) = cause.source() {
+            cause = source;
+        }
+        assert_eq!(cause.to_string(), "response body failed");
+        assert!(cause.is::<std::io::Error>());
+        assert_eq!(state.inflight_count(), 1);
+        drop(body);
+        assert_eq!(state.inflight_count(), 0);
     }
 
     #[tokio::test]
