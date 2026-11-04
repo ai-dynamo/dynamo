@@ -26,7 +26,12 @@ pytestmark = [
 ]
 
 ROOT = Path(__file__).resolve().parents[2]
-LEGACY_DISTRIBUTIONS = {"aiconfigurator", "aiconfigurator-core"}
+LEGACY_DISTRIBUTIONS = {
+    "aiconfigurator",
+    "aiconfigurator-core",
+    "aisimulate",
+    "aisimulate-core",
+}
 CARGO_LOCKFILES = (
     ROOT / "Cargo.lock",
     ROOT / "lib/bindings/python/Cargo.lock",
@@ -133,13 +138,11 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
         with lockfile.open("rb") as handle:
             packages = tomllib.load(handle)["package"]
         assert all(package["name"] != "aiconfigurator-core" for package in packages)
-    assert features["ais-forward-pass"] == ["dep:aisimulate-core"]
+    assert features["ais-forward-pass"] == ["dep:aisim-core"]
     assert "aic-forward-pass" not in features
     with (ROOT / "Cargo.toml").open("rb") as handle:
-        canonical_core = tomllib.load(handle)["workspace"]["dependencies"][
-            "aisimulate-core"
-        ]
-    assert dependencies["aisimulate-core"] == {
+        canonical_core = tomllib.load(handle)["workspace"]["dependencies"]["aisim-core"]
+    assert dependencies["aisim-core"] == {
         **canonical_core,
         "optional": True,
         "features": ["python"],
@@ -147,7 +150,7 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
     requirement = next(
         Requirement(item)
         for item in root_project["dependencies"]
-        if canonicalize_name(Requirement(item).name) == "aisimulate"
+        if canonicalize_name(Requirement(item).name) == "aisim"
     )
     if "git" in canonical_core:
         assert requirement.url == (
@@ -165,7 +168,7 @@ def test_aisimulate_wheel_uses_canonical_import_namespaces() -> None:
     if sys.version_info < (3, 11) or sys.version_info >= (3, 14):
         pytest.skip("AISimulate supports Python 3.11 through 3.13")
 
-    release = metadata.distribution("aisimulate")
+    release = metadata.distribution("aisim")
     release_requirements = _requirement_names(release.requires or [])
     release_files = {str(path) for path in release.files or []}
 

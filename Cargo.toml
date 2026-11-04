@@ -65,7 +65,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 dynamo-router-policies = { path = "lib/router-plugins/builtin", version = "1.7.0" }
 dynamo-generate-format-catalog = { path = "lib/generate-format-catalog", version = "1.7.0" }
 # Published separately by https://github.com/ai-dynamo/aisimulate.
-aisimulate-core = { version = "=0.13.0-dev.202610290000000087" }
+aisim-core = { version = "=0.14.0" }
 
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.7.0" }
@@ -237,3 +237,7 @@ lto = "thin"
 inherits = "release"
 debug = true
 strip = false
+
+# Release-only AISim 0.14.0 RC0 source pin for Dynamo 1.7.0.
+[patch.crates-io]
+aisim-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "74dcdfcde184070d39e813ba24424b32e9627f00" }
