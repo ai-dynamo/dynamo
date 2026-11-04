@@ -834,4 +834,201 @@ mod integration_tests {
         drop(source);
         runtime.shutdown();
     }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn existing_prefill_prefix_and_full_transfer_cost_prevent_unprofitable_replacement() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let (target, _, _) =
+            Box::pin(host(&distributed, "prefill", WorkerType::Prefill, true)).await;
+        let (source, source_id, _) =
+            Box::pin(host(&distributed, "decode", WorkerType::Decode, true)).await;
+        let input = request();
+        seed_host_prefix(&source, source_id, &input.token_ids, 3).await;
+        let mut selection = selected(&target, &input).await;
+        let expected = same_role_hint(3);
+        selection.kv_hint = Some(expected.clone());
+        target
+            .enrich_prefill_transfer_hint(&input, &mut selection, Some(&source))
+            .await;
+        assert_eq!(selection.kv_hint, Some(expected));
+        assert_no_decode_bookings(&source).await;
+        drop(target);
+        drop(source);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn cross_role_bridge_preserves_admitted_target_topology_policy() {
+        use dynamo_kv_router::protocols::KvTransferEnforcement::{Preferred, Required};
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let (source, source_id, _) = Box::pin(host_with_topology(
+            &distributed,
+            "topology-decode",
+            WorkerType::Decode,
+            true,
+            Some(("zone", Some("near"), Required)),
+        ))
+        .await;
+        let seed = request();
+        seed_host_prefix(&source, source_id, &seed.token_ids, 3).await;
+        for (name, island, enforcement, expected) in [
+            ("required-near", Some("near"), Required, true),
+            ("required-far", Some("far"), Required, false),
+            ("required-missing", None, Required, false),
+            ("preferred-far", Some("far"), Preferred, true),
+        ] {
+            let (target, _, _) = Box::pin(host_with_topology(
+                &distributed,
+                name,
+                WorkerType::Prefill,
+                true,
+                Some(("zone", island, enforcement)),
+            ))
+            .await;
+            let input = request();
+            let mut selection = selected(&target, &input).await;
+            target
+                .enrich_prefill_transfer_hint(&input, &mut selection, Some(&source))
+                .await;
+            assert_eq!(selection.kv_hint.is_some(), expected, "{name}");
+            drop(target);
+        }
+        assert_no_decode_bookings(&source).await;
+        drop(source);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn gpu_retained_hint_reaches_opted_in_prefill_dispatch_without_decode_booking() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let (target, target_id, dispatch) = Box::pin(host_with_gpu_options(
+            &distributed,
+            "gpu-prefill",
+            WorkerType::Prefill,
+            true,
+            None,
+            true,
+            0.0,
+        ))
+        .await;
+        let (source, source_id, _) = Box::pin(host_with_gpu_options(
+            &distributed,
+            "gpu-decode",
+            WorkerType::Decode,
+            true,
+            None,
+            true,
+            0.0,
+        ))
+        .await;
+        let request = request();
+        let expected = seed_prefix(
+            &source,
+            source_id,
+            &request.token_ids,
+            3,
+            StorageTier::GpuDirect,
+        )
+        .await;
+        let PrefillDispatch { mut stream, .. } =
+            Box::pin(
+                target.select_and_dispatch_prefill(request, Some(&source), |_, target| Ok(target)),
+            )
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        {
+            let calls = dispatch.0.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].0, target_id);
+            let action = &calls[0].1.as_ref().expect("explicit GPU hint").actions[0];
+            assert_eq!(action.action_type, "kv.fetch_gpu");
+            let payload: dynamo_kv_router::kv_hints::KvGpuSourceLocationsPayload =
+                serde_json::from_value(serde_json::to_value(&action.payload).unwrap()).unwrap();
+            assert_eq!(payload.block_hashes, expected);
+            assert_eq!(payload.source_control_endpoint, "tcp://gpu-decode:9010");
+            assert_eq!(payload.compatibility_domain, "certified-test-layout");
+        }
+        assert_no_decode_bookings(&source).await;
+        drop(target);
+        drop(source);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn gpu_local_retained_baseline_prevents_false_prefill_savings_after_native_eviction() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let (target, target_id, dispatch) = Box::pin(host_with_gpu_options(
+            &distributed,
+            "retained-prefill",
+            WorkerType::Prefill,
+            true,
+            None,
+            true,
+            3000.0,
+        ))
+        .await;
+        let (source, source_id, _) = Box::pin(host_with_gpu_options(
+            &distributed,
+            "retained-decode",
+            WorkerType::Decode,
+            true,
+            None,
+            true,
+            0.0,
+        ))
+        .await;
+        let request = request();
+        seed_prefix(
+            &target,
+            target_id,
+            &request.token_ids,
+            2,
+            StorageTier::GpuDirect,
+        )
+        .await;
+        seed_prefix(
+            &source,
+            source_id,
+            &request.token_ids,
+            3,
+            StorageTier::GpuDirect,
+        )
+        .await;
+        // The target has no native Device blocks but already retains two GPU
+        // rows. Only one new row is saved: 1600ms < the fixture's 3000ms margin.
+        // Incorrectly crediting all three donor rows would admit this hint.
+        let PrefillDispatch { mut stream, .. } =
+            Box::pin(
+                target.select_and_dispatch_prefill(request, Some(&source), |_, target| Ok(target)),
+            )
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        assert!(dispatch.0.lock().unwrap()[0].1.is_none());
+        assert_no_decode_bookings(&source).await;
+        drop(target);
+        drop(source);
+        runtime.shutdown();
+    }
 }

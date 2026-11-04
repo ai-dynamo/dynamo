@@ -6,6 +6,7 @@ The CUDA tests run only on allocated GPUs. They compare GPU tensors directly;
 only scalar verdicts return to the host. Remote KVCR/NIXL tests are separate.
 """
 
+import base64
 import os
 import subprocess
 import sys
@@ -15,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from kvbm.vllm_integration import gpu_memory
+from kvbm.vllm_integration import gpu_memory, gpu_mnnvl
 from kvbm.vllm_integration.gpu_memory import GPUCacheRegion, GPUCacheWorker, import_ipc
 from kvbm.vllm_integration.gpu_offloading import GPURetainedLoadStoreSpec
 from vllm.v1.kv_offload.base import GPULoadStoreSpec
@@ -182,3 +183,61 @@ def test_mixed_bank_d2d_roundtrip_preserves_permuted_slots_and_guards():
     finally:
         worker.shutdown()
         region.cleanup()
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_local_fabric_descriptor_mismatch_fails_before_importing_any_gpu_handle(
+    monkeypatch,
+):
+    identity = gpu_mnnvl.FabricIdentity(
+        "GPU-00000000-0000-0000-0000-000000000001", "1" * 32, 0
+    )
+    base = "test-gpu-layout-v1"
+    domain = gpu_mnnvl.effective_domain(base, identity.domain)
+    monkeypatch.setattr(gpu_memory.torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(gpu_mnnvl, "observe_fabric", lambda device: identity)
+    monkeypatch.setattr(gpu_memory, "_process_start_ticks", lambda pid: 17)
+    monkeypatch.setattr(
+        gpu_mnnvl,
+        "FabricAllocation",
+        lambda *args, **kwargs: pytest.fail(
+            "Invalid descriptor must not import a handle"
+        ),
+    )
+    original = {
+        "schema": "dynamo-gpu-fabric-v1",
+        "gpu_transport": "mnnvl",
+        "engine_id": "fixture",
+        "owner_pid": os.getpid(),
+        "owner_start_ticks": 17,
+        "gpu_uuid": identity.gpu_uuid,
+        "fabric_domain": identity.domain,
+        "base_domain": base,
+        "compatibility_domain": domain,
+        "shape": [2, 8],
+        "stride": [8, 1],
+        "logical_bytes": 16,
+        "allocation_bytes": 16,
+        "fabric_handle": base64.b64encode(b"x" * 64).decode(),
+    }
+    for change in (
+        {"schema": 1},
+        {"gpu_transport": "cuda_ipc"},
+        {"engine_id": "other"},
+        {"gpu_uuid": "GPU-00000000-0000-0000-0000-000000000002"},
+        {"fabric_domain": "mnnvl:" + "2" * 32 + ":0"},
+        {"base_domain": "other-layout"},
+        {"compatibility_domain": "other-domain"},
+        {"shape": [True, 8]},
+        {"stride": [8, True]},
+        {"owner_start_ticks": 18},
+        {"logical_bytes": True},
+        {"allocation_bytes": True},
+        {"fabric_handle": base64.b64encode(b"x" * 63).decode()},
+        {"unexpected": "value"},
+    ):
+        with pytest.raises(ValueError):
+            gpu_memory.import_fabric(
+                {**original, **change}, "fixture", (2, 8), base, domain, identity.domain
+            )
