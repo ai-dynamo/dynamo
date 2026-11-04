@@ -154,6 +154,25 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			wantWebhook: []string{`spec.overrides.dgd.status: Forbidden: DGD status cannot be overridden`},
 		},
 		{
+			name:       "v1beta2 update rejects an alpha override",
+			oldRequest: beta2DGDRForAdmission(setBeta2AdmissionHardware),
+			request: beta2DGDRForAdmission(func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				setBeta2AdmissionHardware(request)
+				request.Spec.Overrides = &nvidiacomv1beta2.OverridesSpec{DGD: &runtime.RawExtension{Raw: []byte(`{"apiVersion":"nvidia.com/v1alpha1","kind":"DynamoGraphDeployment","spec":{}}`)}}
+			}),
+			discovered:  discoveredH100,
+			wantWebhook: []string{`spec.overrides.dgd.apiVersion: Unsupported value: "nvidia.com/v1alpha1": supported values: "nvidia.com/v1beta1"`},
+		},
+		{
+			name:       "v1beta2 update accepts a beta override",
+			oldRequest: beta2DGDRForAdmission(setBeta2AdmissionHardware),
+			request: beta2DGDRForAdmission(func(request *nvidiacomv1beta2.DynamoGraphDeploymentRequest) {
+				setBeta2AdmissionHardware(request)
+				request.Spec.Overrides = &nvidiacomv1beta2.OverridesSpec{DGD: &runtime.RawExtension{Raw: []byte(`{"apiVersion":"nvidia.com/v1beta1","kind":"DynamoGraphDeployment","spec":{"components":[{"name":"worker","replicas":2}]}}`)}}
+			}),
+			discovered: discoveredH100,
+		},
+		{
 			name: "v1beta1 empty native representation is rejected by envelope validation",
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Spec.Model = ""
