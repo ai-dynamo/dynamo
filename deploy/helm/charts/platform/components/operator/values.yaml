@@ -22,24 +22,6 @@
 # the cluster-wide operator.
 upgradeCRD: true
 
-# External Grove validation runs before Helm install/upgrade and Argo CD sync.
-grovePreflight:
-  # Disable only when compatibility is checked by a separate deployment gate.
-  enabled: true
-  # Python standard library only; override with an internal mirror for restricted clusters.
-  image: docker.io/library/python:3.12-slim
-  imagePullSecrets: []
-  activeDeadlineSeconds: 120
-  # Independent of controller affinity: the Job runs before the controller exists.
-  affinity: {}
-  # Null uses runAsNonRoot=true, runAsUser=65532, seccompProfile.type=RuntimeDefault.
-  # A map replaces the entire context; omit runAsUser on OpenShift for admission to assign it.
-  podSecurityContext: null
-  # Empty namespace discovers the controller across all namespaces.
-  namespace: ""
-  # Requires namespace; empty discovers Deployments containing containerName.
-  deploymentName: ""
-
 # The LPX scheduler and its CRDs must be installed separately.
 lpx:
   # -- EXPERIMENTAL: Enable the Dynamo operator's LPX integration. Startup requires the
@@ -49,13 +31,14 @@ lpx:
   modelRegistryURL: ""
 
 dgdrV1Beta2:
-  # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Install the unfinished DGDR v1beta2
-  # API schemas. DynamoGraphDeploymentRun and DynamoGraphDeploymentCandidate objects
-  # created through these schemas are persisted in etcd. Incompatible schema changes
-  # may make stored objects unreadable or block future CRD upgrades. When false, the
-  # CRD init container omits those resources and removes v1beta2 from
-  # DynamoGraphDeploymentRequest before installation. The operator does not reconcile
-  # v1beta2 resources.
+  # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: Serve the unfinished DGDR v1beta2
+  # Request API with conversion and install the Run and Candidate APIs. Run and
+  # Candidate objects are persisted in etcd; incompatible schema changes may make
+  # them unreadable or block future CRD upgrades. When false, the CRD init container
+  # installs the legacy Request schemas without v1beta2 conversion envelopes and
+  # omits Run and Candidate. When true, the operator reconciles v1beta2
+  # Requests into Runs and executes each Run as an AISimulate planner Job with
+  # a publisher sidecar that persists deployment Candidates.
   enabled: false
 
 # Environment variables to pass to operator Deployment.
@@ -130,9 +113,9 @@ controllerManager:
       repository: nvcr.io/nvidia/ai-dynamo/kubernetes-operator
       # tag is optional - if not set, will use Chart.AppVersion
       tag: ""
-    # Default DGDR profiler image, put into DGDR spec.image when unset. Empty
-    # derives dynamo-planner:<chart appVersion>, which only exists for GA
-    # releases.
+    # Planner image used to execute v1beta2 DGDR Runs and default v1beta1
+    # spec.image. Empty derives dynamo-planner:<chart appVersion>, which only
+    # exists for GA releases.
     dgdrDefaultImage: ""
     resources:
       limits:

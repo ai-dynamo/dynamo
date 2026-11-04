@@ -36,6 +36,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang._compat import (
     ConfigArgumentMerger,
     add_sglang_cli_compat,
+    kv_events_config_with_dynamo_format,
     resolved_server_args,
     sglang_default_mla_attention_backend,
     sglang_uses_mla_backend,
@@ -170,6 +171,31 @@ def _diffusion_generator_kwargs(server_args: Any) -> dict[str, Any]:
         kwargs["master_port"] = master_port
 
     return kwargs
+
+
+CUDA_COREDUMP_WAIT_ENV = "SGLANG_CUDA_COREDUMP_BEFORE_CRASH_WAIT_SECS"
+
+
+def _default_cuda_coredump_wait(server_args: Any) -> None:
+    """Skip SGLang's pre-crash coredump wait when no coredump can be triggered.
+
+    On SIGQUIT (e.g. a dead detokenizer) SGLang's TokenizerManager tries a CUDA
+    user-triggered coredump and then sleeps this many seconds (default 60) even
+    when the trigger was a no-op, delaying worker exit and pod restart. Leave an
+    explicit value, CUDA_ENABLE_USER_TRIGGERED_COREDUMP=1, or --crash-dump-folder
+    (which makes SGLang enable user-triggered coredumps) untouched.
+    """
+    if CUDA_COREDUMP_WAIT_ENV in os.environ:
+        return
+    if os.environ.get("CUDA_ENABLE_USER_TRIGGERED_COREDUMP") == "1":
+        return
+    if getattr(server_args, "crash_dump_folder", None):
+        return
+    os.environ[CUDA_COREDUMP_WAIT_ENV] = "0"
+    logging.info(
+        "CUDA user-triggered coredumps are disabled; setting %s=0",
+        CUDA_COREDUMP_WAIT_ENV,
+    )
 
 
 def _unsupported_fpm_trace_role(dynamo_config: DynamoConfig) -> Optional[str]:
@@ -877,7 +903,11 @@ async def parse_args(args: list[str]) -> Config:
         gateway_count = effective_gateway_workers(parsed_args, dynamo_config)
         if gateway_count > 1 and parsed_args.tokenizer_worker_num != gateway_count:
             parsed_args.tokenizer_worker_num = gateway_count
+        parsed_args.kv_events_config = kv_events_config_with_dynamo_format(
+            parsed_args.kv_events_config
+        )
         server_args = ServerArgs.from_cli_args(parsed_args)
+        _default_cuda_coredump_wait(server_args)
 
     if getattr(server_args, "schedule_low_priority_values_first", False):
         raise ValueError(

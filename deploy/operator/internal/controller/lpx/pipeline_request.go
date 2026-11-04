@@ -21,6 +21,7 @@ import (
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	grovev1beta1 "github.com/ai-dynamo/grove/operator/api/core/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -84,14 +85,12 @@ func resolvePipelineRequests(
 			digest := pipelineRequestIdentityDigest(deployment.Namespace, deployment.Name, deployment.UID, groupName, projection.Model(), replica)
 
 			request := &lpxv1alpha1.LPUPipelineRequest{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: pipelineRequestName(deployment.Name, digest), Namespace: deployment.Namespace,
-					Annotations: map[string]string{
-						lpx.DeploymentNameAnnotation:                 deployment.Name,
-						pipelineRequestModelAnnotation:               projection.Model(),
-						lpx.WorkloadDigestAnnotation:                 projection.Digest().String(),
-						lpxv1alpha1.CompilerSnapshotDigestAnnotation: projection.CompilerSnapshotDigest(),
-					},
+				Name: pipelineRequestName(deployment.Name, digest), Namespace: deployment.Namespace,
+				Annotations: map[string]string{
+					lpx.DeploymentNameAnnotation:                 deployment.Name,
+					pipelineRequestModelAnnotation:               projection.Model(),
+					lpx.WorkloadDigestAnnotation:                 projection.Digest().String(),
+					lpxv1alpha1.CompilerSnapshotDigestAnnotation: projection.CompilerSnapshotDigest(),
 				},
 				Spec: projection.RequestSpec(replicaPlan, replicaPlan.Agents[index].CliqueName),
 			}
@@ -240,11 +239,11 @@ func pipelineRequestCommitted(request *lpxv1alpha1.LPUPipelineRequest) bool {
 	return request.Status != nil && request.Status.Committed != nil
 }
 
-// removeReleasedAgentPods removes journaled Agent Pods for matching, still-desired
-// requests. The Dynamo operator's LPX controller owns this cleanup; Grove recreates
-// the Pods, and the LPX scheduler completes release and replanning.
-// pcsgs contains owned observations. Requests are owned observations, or unpublished
-// desired objects with nil status.
+// removeReleasedAgentPods removes journaled Agent Pods for observed requests with
+// an eligible release. Grove recreates the Pods, and the LPX scheduler completes
+// release and replanning. The caller must complete DGD handoff and owned Grove-resource
+// observation checks first. pcsgs and requests contain owned observations, rather than
+// derived desired requests. Both maps may be nil before initial PCS creation.
 func (r *graphReconciler) removeReleasedAgentPods(ctx context.Context, pcsgs map[string]*grovev1alpha1.PodCliqueScalingGroup, requests map[string]*lpxv1alpha1.LPUPipelineRequest) error {
 	var cleanupErr error
 	for _, request := range requests {
@@ -310,7 +309,10 @@ func (r *graphReconciler) removeReleasedAgentPod(ctx context.Context, pcsgs map[
 	}
 
 	cliqueOwner := metav1.GetControllerOf(pod)
-	if cliqueOwner == nil || cliqueOwner.APIVersion != grovev1alpha1.SchemeGroupVersion.String() || cliqueOwner.Kind != "PodClique" {
+	// Converted children can carry either served Grove version in owner references.
+	if cliqueOwner == nil ||
+		(cliqueOwner.APIVersion != grovev1alpha1.SchemeGroupVersion.String() && cliqueOwner.APIVersion != grovev1beta1.SchemeGroupVersion.String()) ||
+		cliqueOwner.Kind != "PodClique" {
 		return fmt.Errorf("released Agent Pod %q has no PodClique controller", pod.Name)
 	}
 	clique := &grovev1alpha1.PodClique{}
@@ -322,7 +324,9 @@ func (r *graphReconciler) removeReleasedAgentPod(ctx context.Context, pcsgs map[
 	}
 
 	groupOwner := metav1.GetControllerOf(clique)
-	if groupOwner == nil || groupOwner.APIVersion != grovev1alpha1.SchemeGroupVersion.String() || groupOwner.Kind != "PodCliqueScalingGroup" {
+	if groupOwner == nil ||
+		(groupOwner.APIVersion != grovev1alpha1.SchemeGroupVersion.String() && groupOwner.APIVersion != grovev1beta1.SchemeGroupVersion.String()) ||
+		groupOwner.Kind != "PodCliqueScalingGroup" {
 		return fmt.Errorf("released Agent Pod %q's PodClique has no PodCliqueScalingGroup controller", pod.Name)
 	}
 	if group := pcsgs[groupOwner.Name]; group == nil || group.UID != groupOwner.UID {

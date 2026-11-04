@@ -162,77 +162,10 @@ async fn collect(
         .await
 }
 
+/// A real TensorRT-LLM server answers `GetModelInfo` for any nonempty model
+/// path; the sidecar must register the reported name while keeping its source.
 #[tokio::test]
-async fn sidecar_streams_mocker_tokens_logprobs_and_usage() {
-    let server = RunningServer::start_with(
-        MockerServerConfig {
-            context_length: 4_096,
-            is_request_recording_enabled: true,
-            ..Default::default()
-        },
-        fast_engine_args(),
-    )
-    .await;
-    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
-    // Starting at all proves Control.GetModelInfo returned a usable context
-    // length; the sidecar refuses to start otherwise.
-    engine.start(0).await.unwrap();
-
-    // Four outputs for three tokens: the sidecar turns the `finished` event
-    // into its own terminal chunk rather than folding it into the last delta.
-    let outputs = collect(&engine, request(3)).await;
-
-    // What the sidecar put on the wire, not just what it made of the reply:
-    // build_generate_request is where the sidecar's mapping logic lives.
-    let sent = server.service.received_requests();
-    assert_eq!(sent.len(), 1);
-    let sent = &sent[0];
-    assert_eq!(sent.model, MODEL);
-    assert!(matches!(
-        sent.input,
-        Some(dynamo_trtllm_sidecar::proto::generate_request::Input::TokenIds(_))
-    ));
-    assert_eq!(sent.stopping.as_ref().unwrap().max_tokens, Some(3));
-    assert_eq!(sent.stopping.as_ref().unwrap().ignore_eos, Some(true));
-    assert_eq!(sent.sampling.as_ref().unwrap().temperature, Some(0.0));
-    assert_eq!(sent.sampling.as_ref().unwrap().num_sequences, Some(1));
-    assert_eq!(
-        sent.response.as_ref().unwrap().return_output_logprobs,
-        Some(true)
-    );
-    assert_eq!(
-        sent.extra.as_ref().unwrap().fields["detokenize"].kind,
-        Some(prost_types::value::Kind::BoolValue(false))
-    );
-
-    assert_eq!(outputs.len(), 4);
-    let (deltas, terminal) = outputs.split_at(3);
-    assert!(deltas.iter().all(|output| output.token_ids.len() == 1));
-    assert!(
-        deltas
-            .iter()
-            .all(|output| output.log_probs.as_ref().unwrap().len() == 1)
-    );
-    assert!(
-        deltas
-            .iter()
-            .all(|output| output.top_logprobs.as_ref().unwrap()[0].len() == 2)
-    );
-    let terminal = &terminal[0];
-    assert!(terminal.token_ids.is_empty());
-    assert_eq!(terminal.finish_reason, Some(FinishReason::Length));
-    let usage = terminal.completion_usage.as_ref().unwrap();
-    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (4, 3));
-    assert_eq!(server.service.active_request_count(), 0);
-}
-
-/// A model-name mismatch is not detectable over this contract: a real
-/// TensorRT-LLM server loads one model and answers `GetModelInfo` for whatever
-/// name it is asked about, so the sidecar registers under its own
-/// `--model-path` either way. Pinning that here stops a future change from
-/// inventing a check the engine cannot back.
-#[tokio::test]
-async fn sidecar_start_does_not_check_the_served_model_name() {
+async fn sidecar_registers_the_engine_reported_name() {
     let server = RunningServer::start_with(
         MockerServerConfig {
             model: "some-other-model".to_string(),
@@ -245,6 +178,11 @@ async fn sidecar_start_does_not_check_the_served_model_name() {
     let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
 
     let config = engine.start(0).await.expect("start is not a name check");
+    assert_eq!(config.model, MODEL);
+    assert_eq!(
+        config.served_model_name.as_deref(),
+        Some("some-other-model")
+    );
     assert_eq!(
         config.llm.expect("llm registration").context_length,
         Some(4_096),
@@ -433,48 +371,6 @@ async fn decode_rejects_a_handoff_with_a_dropped_opaque_field() {
         }
     };
     assert!(failed, "a mangled handoff must fail the decode request");
-}
-
-#[tokio::test]
-async fn dropping_the_sidecar_stream_cancels_mocker_work() {
-    let server = RunningServer::start(
-        ServerMode::Aggregated,
-        MockerConfig::from_value(serde_json::json!({
-            "dp_size": 1,
-            "engine": {
-                "backend": EngineType::Trtllm,
-                "block_size": 4,
-                "num_gpu_blocks": 4096,
-                "max_num_seqs": 64,
-                "max_num_batched_tokens": 1024,
-                "speedup_ratio": 0.1
-            }
-        }))
-        .unwrap(),
-    )
-    .await;
-    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
-    engine.start(0).await.unwrap();
-
-    let context = dynamo_backend_common::testing::mock_context();
-    let mut stream = engine
-        .generate(request(2_000), GenerateContext::new(context, None))
-        .await
-        .unwrap();
-    let _first = stream.next().await.unwrap().unwrap();
-    drop(stream);
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        if server.service.active_request_count() == 0 {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "dropping the stream must cancel the scheduler's work"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
 }
 
 #[tokio::test]

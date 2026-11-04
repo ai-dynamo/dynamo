@@ -40,6 +40,7 @@ from dynamo.sglang.engine_generate import (
     native_generate_stream,
     new_sglang_request_id,
 )
+from dynamo.sglang.kv_hints import kv_hint_kwargs
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
@@ -67,6 +68,7 @@ _SAMPLING_OPTION_FIELDS = (
     "top_p",
     "top_k",
     "min_p",
+    "logit_bias",
 )
 BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
 _MAX_ABORT_MESSAGE_LENGTH = 8192
@@ -191,6 +193,21 @@ def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
     return False
 
 
+def _is_token_in_request(request: Dict[str, Any]) -> bool:
+    """An RL token-in request (``nvext.token_data`` or ``nvext.token_in``), as
+    Dynamo's vLLM worker detects it."""
+    extra_args = request.get("extra_args")
+    for source in (
+        request.get("nvext"),
+        extra_args.get("nvext") if isinstance(extra_args, dict) else None,
+    ):
+        if isinstance(source, dict) and (
+            source.get("token_data") or source.get("token_in")
+        ):
+            return True
+    return False
+
+
 def _kv_cache_hit_engine_data(meta_info: Mapping[str, Any]) -> Dict[str, Any]:
     """Build the final-chunk cache-hit report read by the KV router.
 
@@ -259,6 +276,36 @@ def _has_parallel_prefix_warmup(sampling_params: Any) -> bool:
     if not isinstance(sampling_params, Mapping):
         return False
     return (sampling_params.get("n") or 1) > 1
+
+
+def _model_default_sampling_params(engine: Any) -> Dict[str, Any]:
+    """The model's generation_config.json sampling defaults, as SGLang's OpenAI
+    server applies them (empty unless ``--sampling-defaults model``, the default)."""
+    model_config = getattr(
+        getattr(engine, "tokenizer_manager", None), "model_config", None
+    )
+    get_defaults = getattr(model_config, "get_default_sampling_params", None)
+    if not callable(get_defaults):
+        return {}
+    return {
+        key: value
+        for key, value in (get_defaults() or {}).items()
+        if key in _SAMPLING_OPTION_FIELDS and value is not None
+    }
+
+
+def _apply_model_default_sampling_params(
+    sampling_params: Dict[str, Any],
+    request: Dict[str, Any],
+    defaults: Dict[str, Any],
+    enable_rl: bool,
+) -> None:
+    """Fill fields the request left unset from the model's defaults. RL token-in
+    requests keep SGLang's plain defaults, as in the vLLM worker."""
+    if enable_rl and _is_token_in_request(request):
+        return
+    for key, value in defaults.items():
+        sampling_params.setdefault(key, value)
 
 
 def _sampling_option_params(values: Dict[str, Any]) -> Dict[str, Any]:
@@ -483,6 +530,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             self._image_loader = ImageLoader(enable_frontend_decoding=True)
             self._video_loader = VideoLoader(enable_frontend_decoding=True)
         self._mm_hashes_supported: bool = self._resolve_mm_hashes_supported(self.engine)
+        # Without these, requests that leave top_k/top_p unset sample the full
+        # vocabulary, unlike sglang.launch_server, and decode more slowly.
+        self._default_sampling_params = _model_default_sampling_params(self.engine)
+        if self._default_sampling_params:
+            logging.info(
+                "Using default sampling params from model generation config: %s",
+                self._default_sampling_params,
+            )
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
                 "Decode worker handler initialized (disaggregated decode mode)"
@@ -591,6 +646,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         sampling_params = {
             k: v for k, v in param_mapping.items() if v is not None or k in keep_if_none
         }
+        _apply_model_default_sampling_params(
+            sampling_params,
+            request,
+            self._default_sampling_params,
+            self.config.dynamo_args.enable_rl,
+        )
         return apply_thinking_budget(
             request,
             sampling_params,
@@ -602,7 +663,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     def _build_logprob_kwargs(request: Dict[str, Any]) -> Dict[str, Any]:
         return _shared_logprobs.build_sglang_logprob_kwargs(
             request.get("output_options", {}) or {},
-            allow_top_logprobs=_shared_logprobs.sglang_top_logprobs_allowed(),
         )
 
     @staticmethod
@@ -657,6 +717,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             prefill_dp_rank=routing.get("prefill_dp_rank"),
             lora_path=self._resolve_lora(request),
             cache_salt=request_cache_salt(request),
+            kv_hint=request.get("kv_hint"),
         )
         return native_generate_stream(self.engine, native_request)
 
@@ -822,6 +883,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **logprob_kwargs,
                 **priority_kwargs,
                 **agent_session_kwargs(self.engine, request),
+                **kv_hint_kwargs(self.engine, request),
             )
             if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(
@@ -924,6 +986,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **logprob_kwargs,
                 **priority_kwargs,
                 **agent_session_kwargs(self.engine, request),
+                **kv_hint_kwargs(self.engine, request),
             )
             if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(

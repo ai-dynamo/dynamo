@@ -38,11 +38,9 @@ func (p *PlannerDefaults) GetBaseContainer(context ComponentContext) (corev1.Con
 	}
 
 	container.LivenessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{
-				Path: "/live",
-				Port: intstr.FromString(commonconsts.DynamoSystemPortName),
-			},
+		HTTPGet: &corev1.HTTPGetAction{
+			Path: "/live",
+			Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 		},
 		PeriodSeconds:    5,
 		TimeoutSeconds:   4,
@@ -50,11 +48,9 @@ func (p *PlannerDefaults) GetBaseContainer(context ComponentContext) (corev1.Con
 	}
 
 	container.ReadinessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{
-				Path: "/health",
-				Port: intstr.FromString(commonconsts.DynamoSystemPortName),
-			},
+		HTTPGet: &corev1.HTTPGetAction{
+			Path: "/health",
+			Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 		},
 		PeriodSeconds:    10,
 		TimeoutSeconds:   4,
@@ -65,11 +61,9 @@ func (p *PlannerDefaults) GetBaseContainer(context ComponentContext) (corev1.Con
 	// services to become ready before it can initialise, so it needs more
 	// time than a typical worker.
 	container.StartupProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{
-				Path: "/live",
-				Port: intstr.FromString(commonconsts.DynamoSystemPortName),
-			},
+		HTTPGet: &corev1.HTTPGetAction{
+			Path: "/live",
+			Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 		},
 		PeriodSeconds:    10,
 		TimeoutSeconds:   5,

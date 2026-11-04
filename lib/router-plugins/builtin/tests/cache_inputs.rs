@@ -56,7 +56,7 @@ impl InputProbe {
     fn check(&self, context: &WorkerSelectionContext<'_>) {
         self.calls.fetch_add(1, Ordering::Relaxed);
         // Ordinary request context stays available without CACHE.
-        assert_eq!(context.prompt_tokens(), 17);
+        assert_eq!(context.isl_tokens(), 17);
     }
 
     fn check_cache(&self, cache: WorkerCacheInput<'_>) {
@@ -83,7 +83,7 @@ impl WorkerFilter for InputProbe {
     }
 
     fn keep(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
@@ -99,7 +99,7 @@ impl WorkerScorer for InputProbe {
     }
 
     fn score(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -125,7 +125,7 @@ impl WorkerPicker for InputProbe {
     }
 
     fn pick(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {

@@ -29,9 +29,9 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	disaggregatedsetv1 "sigs.k8s.io/lws/api/disaggregatedset/v1"
@@ -251,63 +251,10 @@ func (r *disaggregatedSetWorkloadsReconciler) computeRestartStatus(
 		}
 	}
 	if dynamo.IsParallelRestart(dgd) {
-		return r.computeParallelRestartStatus(ctx, dgd)
+		// The DisaggregatedSet path does not log restart progress.
+		return computeParallelRestartStatus(ctx, logr.Discard(), dgd, r.restartProgress.Resolve)
 	}
 	return r.computeSequentialRestartStatus(ctx, dgd, dynamo.GetRestartOrder(dgd))
-}
-
-func (r *disaggregatedSetWorkloadsReconciler) computeParallelRestartStatus(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) *nvidiacomv1beta1.RestartStatus {
-	specID := dgd.Spec.Restart.ID
-	var componentsToCheck []string
-	if isNewRestartRequest(dgd) {
-		componentsToCheck = make([]string, 0, len(dgd.Spec.Components))
-		for i := range dgd.Spec.Components {
-			componentsToCheck = append(componentsToCheck, dgd.Spec.Components[i].ComponentName)
-		}
-		sort.Strings(componentsToCheck)
-		if len(componentsToCheck) > 0 {
-			return &nvidiacomv1beta1.RestartStatus{
-				ObservedID: specID,
-				Phase:      nvidiacomv1beta1.RestartPhaseRestarting,
-				InProgress: componentsToCheck,
-			}
-		}
-	} else if dgd.Status.Restart != nil && len(dgd.Status.Restart.InProgress) > 0 {
-		componentsToCheck = dgd.Status.Restart.InProgress
-	} else {
-		componentsToCheck = make([]string, 0, len(dgd.Spec.Components))
-		for i := range dgd.Spec.Components {
-			componentsToCheck = append(componentsToCheck, dgd.Spec.Components[i].ComponentName)
-		}
-		sort.Strings(componentsToCheck)
-	}
-
-	if len(componentsToCheck) == 0 {
-		return &nvidiacomv1beta1.RestartStatus{
-			ObservedID: specID,
-			Phase:      nvidiacomv1beta1.RestartPhaseCompleted,
-		}
-	}
-
-	updatedInProgress := r.restartProgress.Resolve(
-		ctx,
-		dgd,
-		componentsToCheck,
-	)
-	if len(updatedInProgress) == 0 {
-		return &nvidiacomv1beta1.RestartStatus{
-			ObservedID: specID,
-			Phase:      nvidiacomv1beta1.RestartPhaseCompleted,
-		}
-	}
-	return &nvidiacomv1beta1.RestartStatus{
-		ObservedID: specID,
-		Phase:      nvidiacomv1beta1.RestartPhaseRestarting,
-		InProgress: updatedInProgress,
-	}
 }
 
 func (r *disaggregatedSetWorkloadsReconciler) computeSequentialRestartStatus(
@@ -429,7 +376,7 @@ func (r *disaggregatedSetWorkloadsReconciler) applyDisaggregatedSetCheckpointSta
 			return false, fmt.Errorf("generated DynamoComponentDeployment missing for selected component %q", componentName)
 		}
 		if gateSelectedRoles {
-			component.Replicas = ptr.To(int32(0))
+			component.Replicas = new(int32(0))
 		}
 		selection.desiredReplicas[componentName] = desiredComponentReplicas(component)
 	}

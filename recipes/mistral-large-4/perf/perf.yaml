@@ -1,0 +1,158 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# AgentX trace replay (aiperf scenario inferencex-agentx-mvp, SemiAnalysis Claude-Code traces) with a
+# 60-minute measured window. Set ENDPOINT, CONCURRENCY and the podAffinity DGD name for the target deployment.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mistral-large-4-agentx-aiperf-config
+data:
+  run.sh: |
+    set -euo pipefail
+    : "${ENDPOINT:?Set the frontend base URL, for example http://mistral-large-4-vllm-vr-agg-agentic-frontend:8000}"
+    : "${CONCURRENCY:?Set the benchmark concurrency}"
+    : "${ARTIFACT_DIR:?Set a unique artifact directory}"
+    CACHE_SALT="${CACHE_SALT:-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')}"
+    if [ -e "$ARTIFACT_DIR" ]; then
+      echo "Use a new ARTIFACT_DIR for each run: $ARTIFACT_DIR" >&2
+      exit 1
+    fi
+    # Wait for a real completion, not just /v1/models: workers can register after the frontend answers.
+    until python3 - <<'PY'
+    import json, os, urllib.request
+    r = urllib.request.Request(os.environ["ENDPOINT"] + "/v1/chat/completions",
+        json.dumps({"model": os.environ["TARGET_MODEL"], "messages": [{"role": "user", "content": "hi"}], "max_tokens": 4}).encode(),
+        {"Content-Type": "application/json"})
+    raise SystemExit(0 if urllib.request.urlopen(r, timeout=120).status == 200 else 1)
+    PY
+    do echo "waiting for a completion from $ENDPOINT"; sleep 30; done
+    # Per-trajectory session affinity for the Dynamo router.
+    export AIPERF_HTTP_X_DYNAMO_SESSION_ID_FROM_CORRELATION_ID=1
+    export AIPERF_DATASET_CONFIGURATION_TIMEOUT=1200
+    export AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT=1200
+    exec aiperf profile \
+      --scenario inferencex-agentx-mvp \
+      --model "$TARGET_MODEL" \
+      --tokenizer "$TOKENIZER" \
+      --url "$ENDPOINT" \
+      --endpoint-type chat \
+      --streaming \
+      --use-server-token-count \
+      --public-dataset semianalysis_cc_traces_weka_062126 \
+      --max-context-length "$MAX_CONTEXT_LENGTH" \
+      --concurrency "$CONCURRENCY" \
+      --workers-max "$CONCURRENCY" \
+      --benchmark-duration "$BENCHMARK_DURATION" \
+      --warmup-grace-period "$WARMUP_GRACE_PERIOD" \
+      --trajectory-start-min-ratio 0.25 \
+      --trajectory-start-max-ratio 0.75 \
+      --random-seed 42 \
+      --request-timeout-seconds "$REQUEST_TIMEOUT_SECONDS" \
+      --failed-request-threshold 0.1 \
+      --extra-inputs ignore_eos:true \
+      --extra-inputs "cache_salt:${CACHE_SALT}" \
+      --artifact-dir "$ARTIFACT_DIR" \
+      --ui none
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mistral-large-4-agentx-aiperf
+  labels:
+    app: mistral-large-4-agentx-aiperf
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: mistral-large-4-agentx-aiperf
+    spec:
+      restartPolicy: Never
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchExpressions:
+              - key: nvidia.com/dynamo-graph-deployment-name
+                operator: In
+                values:
+                - mistral-large-4-vllm-vr-agg-agentic
+      containers:
+      - name: aiperf
+        image: nvcr.io/nvidia/ai-dynamo/aiperf:0.13.0
+        imagePullPolicy: IfNotPresent
+        command: ["bash", "/etc/aiperf/run.sh"]
+        env:
+        # The public dataset is cached under HF_HOME; keep it off the (possibly read-only) checkpoint PVC.
+        - name: HF_HOME
+          value: /hf-cache
+        - name: TARGET_MODEL
+          value: mistral-large-4
+        # The tokenizer is the checkpoint directory on the shared-model-cache PVC.
+        - name: TOKENIZER
+          value: /shared-model-cache/mistral-large-4-nvfp4
+        - name: ENDPOINT
+          value: http://mistral-large-4-vllm-vr-agg-agentic-frontend:8000
+        # Concurrency is per deployment: re-run at several values to find where the decode tok/s/user
+        # and TTFT gates hold. A disaggregated 1P1D deployment serves a higher concurrency than one
+        # aggregated worker.
+        - name: CONCURRENCY
+          value: '64'
+        # 60-minute measured window after the warmup phase, which is allowed up to WARMUP_GRACE_PERIOD seconds.
+        - name: BENCHMARK_DURATION
+          value: '3600'
+        - name: WARMUP_GRACE_PERIOD
+          value: '1800'
+        - name: REQUEST_TIMEOUT_SECONDS
+          value: '7200'
+        - name: MAX_CONTEXT_LENGTH
+          value: '1048576'
+        - name: ARTIFACT_DIR
+          value: /shared-model-cache/perf-artifacts/agentx-c64
+        # Leave empty to generate a fresh salt per run; a repeated salt reuses prefix-cache state from an earlier run.
+        - name: CACHE_SALT
+          value: ''
+        - name: AIPERF_DATASET_MMAP_BASE_PATH
+          value: /mmap
+        resources:
+          requests:
+            cpu: '8'
+            memory: 32Gi
+        volumeMounts:
+        - name: aiperf-config
+          mountPath: /etc/aiperf
+          readOnly: true
+        - name: shared-model-cache
+          mountPath: /shared-model-cache
+        - name: mmap
+          mountPath: /mmap
+        - name: hf-cache
+          mountPath: /hf-cache
+      volumes:
+      - name: aiperf-config
+        configMap:
+          name: mistral-large-4-agentx-aiperf-config
+      - name: shared-model-cache
+        persistentVolumeClaim:
+          claimName: shared-model-cache
+      - name: mmap
+        emptyDir:
+          medium: Memory
+          sizeLimit: 24Gi
+      - name: hf-cache
+        emptyDir:
+          sizeLimit: 10Gi
