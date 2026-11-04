@@ -60,7 +60,7 @@ spec:
       advisory: true
 ```
 
-advisory 模式仅提供建议。Planner 会计算建议副本数、记录日志、将其导出为诊断信息，并显示在 HTML 报告中。这些建议不会作为扩缩容决策应用：Planner 不会执行扩缩容操作，也不会更改部署。planner-in-the-loop replay 也遵循此设置：模拟部署保持不变，只报告建议，retune 决策（retune 目前仅在离线仿真中运行）也只记录、不应用。
+advisory 模式仅提供建议。Planner 会计算建议副本数、记录日志、将其导出为诊断信息，并显示在 HTML 报告中。这些建议不会作为扩缩容决策应用：Planner 不会执行扩缩容操作，也不会更改部署。planner-in-the-loop replay 也遵循此设置：模拟部署保持不变，只报告建议，retune 决策（`executor: local` 的 retune 仅在离线仿真中运行；线上部署使用 `executor: dgdr`，目前为实验功能）也只记录、不应用。
 
 ### 优化目标
 

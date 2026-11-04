@@ -1,0 +1,77 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cosmos3-nano-reasoner-model-download
+  labels:
+    app.kubernetes.io/name: cosmos3-nano-reasoner
+    app.kubernetes.io/component: model-download
+spec:
+  backoffLimit: 3
+  completions: 1
+  parallelism: 1
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cosmos3-nano-reasoner
+        app.kubernetes.io/component: model-download
+    spec:
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: model-download
+          image: nvcr.io/nim/nvidia/cosmos3:2.1.0@sha256:2add946b316a0baf72a15be4da85132d127c34da22d2fe4e9c4bd146ad8c4020
+          imagePullPolicy: IfNotPresent
+          workingDir: /opt/nim
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              selection_env="$(mktemp)"
+              cleanup() { rm -f "$selection_env"; }
+              trap cleanup EXIT
+
+              /opt/nim/.venv/bin/python -m profile_selection.startup \
+                --output "$selection_env"
+              # shellcheck disable=SC1090
+              . "$selection_env"
+              export BACKEND_TYPE NIM_MODEL_PROFILE COSMOS_MODEL_TYPE
+
+              /opt/nim/.venv/bin/python -c \
+                'from nimlib import nimutils; nimutils.download_models(nimutils.get_model_manifest())'
+              echo "Cosmos3 Nano Reasoner artifacts are present in $NIM_CACHE_PATH"
+          envFrom:
+            - secretRef:
+                name: ngc-api-secret
+          env:
+            - name: NIM_MODEL_TYPE
+              value: reasoner
+            - name: NIM_DYNAMO_WORKER
+              value: "true"
+            - name: NIM_MODEL_SIZE
+              value: nano
+            - name: NIM_PRECISION
+              value: fp8
+            - name: NIM_CACHE_PATH
+              value: /shared-model-cache
+          resources:
+            requests:
+              cpu: "4"
+              memory: 16Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "8"
+              memory: 32Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: shared-model-cache
+              mountPath: /shared-model-cache
+      volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache

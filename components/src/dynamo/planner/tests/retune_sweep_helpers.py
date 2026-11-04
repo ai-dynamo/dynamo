@@ -114,6 +114,7 @@ def sweep_request(trace_paths, candidates, baseline, **overrides):
         "replicas": {"aggregated": 2},
         "base_planner": None,
         "predictor_candidates": None,
+        "objective": "GoodputPerGPU",
         "sla_ttft_ms": 500.0,
         "sla_itl_ms": 30.0,
         "max_parallel": 2,
@@ -134,6 +135,7 @@ def fake_evaluator(
     sla_ttft_ms,
     sla_itl_ms,
     window_s,
+    objective,
 ):
     if params.router.get("router_temperature") == HANG:
         time.sleep(600)

@@ -1193,6 +1193,18 @@ class KubernetesConnector(PlannerConnector):
 
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
         deployment_ready = self.kube_api.is_deployment_ready(deployment)
+        # A stuck Frontend Pod keeps the DGD unready but does not affect
+        # worker scaling, so treat that case as ready.
+        frontend_only_unready = (
+            not deployment_ready and self.kube_api.only_frontend_unready(deployment)
+        )
+        if frontend_only_unready:
+            logger.info(
+                "Deployment %s is not Ready only because of Frontend components; "
+                "scaling workers anyway",
+                self.graph_deployment_name,
+            )
+            deployment_ready = True
         ready = deployment_ready
 
         # Validate the DGD snapshot before reading an authoritative adapter on
@@ -1227,14 +1239,32 @@ class KubernetesConnector(PlannerConnector):
         startup_pods: Optional[list] = None
         with self._startup_scale_down_lock:
             scale_down_pending = bool(self._startup_scale_down_targets)
-        if not ready or scale_down_pending or reducing:
+        # The Frontend exception relaxes only DGD Ready, never the Pod lifecycle
+        # checks: status can read settled while old worker Pods still terminate.
+        if not ready or frontend_only_unready or scale_down_pending or reducing:
             startup_pods = self._list_startup_pods()
+            if startup_pods is not None and frontend_only_unready:
+                # Gate only on worker Pods; a terminating Frontend must not
+                # block worker scaling.
+                frontends = {
+                    name
+                    for name, spec in get_components_by_name(deployment).items()
+                    if get_component_type(spec) == "frontend"
+                }
+                startup_pods = [
+                    pod
+                    for pod in startup_pods
+                    if (pod.metadata.labels or {}).get(DYNAMO_COMPONENT_LABEL)
+                    not in frontends
+                ]
             if startup_pods is None:
                 # Keep ordinary Ready-deployment scaling working with old RBAC.
                 # Never release an accepted startup reversal without observing
-                # its drain, or use the startup exception to scale an unready DGD.
+                # its drain, or use the startup or Frontend exception to scale
+                # an unready DGD.
                 ready = (
                     ready
+                    and not frontend_only_unready
                     and not scale_down_pending
                     and self.kube_api.non_planner_components_stable(deployment)[0]
                 )
@@ -1300,6 +1330,18 @@ class KubernetesConnector(PlannerConnector):
             else:
                 with self._startup_scale_down_lock:
                     self._startup_read_warnings.discard("scale")
+
+        if ready and frontend_only_unready:
+            # Zero-to-positive writes keep the bootstrap Pod check the unready
+            # recovery path applies.
+            for plan in mutations:
+                if plan.current_replicas != 0:
+                    continue
+                rejection = self._unready_recovery_pod_rejection(
+                    deployment, plan, startup_pods
+                )
+                if rejection is not None:
+                    return self._reject_not_ready_scaling(rejection)
 
         if not ready and not startup_reduction:
             if deployment_ready:
@@ -1379,7 +1421,13 @@ class KubernetesConnector(PlannerConnector):
         if not deployment_ready and not mutations:
             return
 
-        if blocking:
+        if blocking and frontend_only_unready:
+            # DGD Ready may stay False on the Frontend; wait on workers only.
+            await self.kube_api.wait_for_graph_deployment_ready(
+                self.graph_deployment_name,
+                include_planner=False,
+            )
+        elif blocking:
             await self.kube_api.wait_for_graph_deployment_ready(
                 self.graph_deployment_name,
             )

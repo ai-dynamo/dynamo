@@ -124,6 +124,7 @@ FROM test_distroless AS test_planner
 # installs the AISimulate wheel, so its test image can execute the optional
 # Dynamo replay and Sweeper integration contracts.
 USER root
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/aisimulate/tests/ /workspace/components/src/dynamo/aisimulate/tests/
 COPY --chmod=775 --chown=dynamo:0 lib/bindings/python/tests/replay/ /workspace/lib/bindings/python/tests/replay/
 COPY --chmod=664 --chown=dynamo:0 components/src/dynamo/mocker/config.py /workspace/components/src/dynamo/mocker/config.py
 # Give the isolated copy a unique basename so pytest cannot alias it with

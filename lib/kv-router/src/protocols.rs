@@ -68,15 +68,15 @@ fn hash_block_no_mm(chunk: &[u32], seed: u64, scratch_bytes: &mut Vec<u8>) -> Lo
     }
 }
 
-/// sglang's `MultimodalItem._compute_pad_value` constants — must track upstream;
-/// if they drift, MM routing silently degrades to text-prefix. Pinned by
-/// `pad_value_matches_sglang_protocol`.
+/// Routing pad constants. SGLang builds before sgl-project/sglang#43043 derive
+/// the same pad from a caller hash; later builds use wide pads, which the KV
+/// event normalizer excludes.
 pub const MM_PAD_SHIFT_VALUE: u64 = 1_000_000;
 pub const MM_PAD_HASH_MASK: u64 = (1 << 30) - 1;
 
 /// Canonical per-image pad_value from a routing-side `mm_hash`, called by both
 /// the frontend and the kv-router so request- and event-side hashes agree.
-/// Keeps the low 30 bits only (sglang's limit).
+/// Keeps the low 30 bits for compatibility with Dynamo's u32 token protocol.
 pub fn pad_value_for_mm_hash(mm_hash: u64) -> u32 {
     (MM_PAD_SHIFT_VALUE + (mm_hash & MM_PAD_HASH_MASK)) as u32
 }
@@ -590,7 +590,7 @@ fn update_cache_owner_hash(hasher: &mut blake3::Hasher, owner: CacheOwnerId) {
     hasher.update(&[domain.cache_semantics().source() as u8]);
     hasher.update(&domain.routing_scope().digest());
     hasher.update(&[domain.routing_scope().source() as u8]);
-    hasher.update(&owner.pool().dc_id().get().to_be_bytes());
+    hasher.update(&owner.pool().cluster_id().get().to_be_bytes());
     hasher.update(&owner.slot().digest());
     hasher.update(&[owner.slot().source() as u8]);
 }
@@ -1118,6 +1118,30 @@ pub struct WorkerSelectionResult {
     /// The source the selected worker fetches its KV prefix from, chosen with
     /// the same rule that credited the fetch during selection.
     pub kv_transfer_source: Option<KvTransferSourceChoice>,
+
+    /// Fields for the routing task's "Selected worker" log line. Set by
+    /// [`crate::WorkerSelectionPolicy`]; `None` from selectors that do not log
+    /// their selection.
+    pub log_fields: Option<SelectionLogFields>,
+}
+
+/// The selection facts the "Selected worker" log line reports beyond the
+/// scheduling response's own fields. The scheduler actor copies them so the
+/// routing task can format the line after the scheduler replies.
+#[derive(Debug, Clone, Copy)]
+pub struct SelectionLogFields {
+    /// The policy's worker label, e.g. `"decode"` or `"prefill"`.
+    pub worker_type: &'static str,
+    /// The selected candidate's cost.
+    pub logit: f64,
+    /// Whether the request pinned the selected worker and rank.
+    pub pinned: bool,
+    /// Host-pinned overlap reported for the selected rank, in blocks.
+    pub host_pinned_blocks: usize,
+    /// Disk overlap reported for the selected rank, in blocks.
+    pub disk_blocks: usize,
+    /// The selected worker's KV capacity as its configuration reports it.
+    pub total_kv_blocks: Option<u64>,
 }
 
 /// How many candidates a selection trace retains: the `top_k` lowest-cost rows

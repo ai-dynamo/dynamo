@@ -909,6 +909,68 @@ mod tests {
     }
 
     #[test]
+    fn sglang_single_rank_omits_dp_rank_label() {
+        let (registry, _) = register_for_test(EngineType::Sglang, 1, "unified");
+        for name in [
+            "sglang:num_running_reqs",
+            "sglang:num_queue_reqs",
+            "sglang:cache_hit_rate",
+        ] {
+            let family = gather_family(&registry, name);
+            assert_eq!(family.get_metric().len(), 1);
+            assert_eq!(
+                metric_labels(&family.get_metric()[0]),
+                label_set(&[
+                    "model_name",
+                    "engine_type",
+                    "tp_rank",
+                    "pp_rank",
+                    "moe_ep_rank"
+                ])
+            );
+        }
+        let requests = gather_family(&registry, "sglang:num_requests_total");
+        assert_eq!(
+            metric_labels(&requests.get_metric()[0]),
+            label_set(&["model_name", "engine_type", "is_streaming"])
+        );
+    }
+
+    #[test]
+    fn sglang_cache_hit_rate_is_tracked_per_rank() {
+        let (registry, metrics) = register_for_test(EngineType::Sglang, 2, "unified");
+        let assert_values = |name: &str, expected: [f64; 2]| {
+            let family = gather_family(&registry, name);
+            assert_eq!(family.get_metric().len(), 2);
+            for (rank, value) in expected.into_iter().enumerate() {
+                assert_eq!(
+                    gauge_value(metric_with_label(&family, "dp_rank", &rank.to_string())),
+                    value,
+                    "{name}, rank={rank}"
+                );
+            }
+        };
+        assert_values("sglang:num_running_reqs", [0.0, 0.0]);
+        assert_values("sglang:num_queue_reqs", [0.0, 0.0]);
+        assert_values("sglang:cache_hit_rate", [0.0, 0.0]);
+
+        metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(0, 0, 10, 1, 3, 0, 5, 10));
+        metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(1, 0, 10, 4, 5, 0, 3, 12));
+        assert_values("sglang:num_running_reqs", [1.0, 4.0]);
+        assert_values("sglang:num_queue_reqs", [3.0, 5.0]);
+        assert_values("sglang:cache_hit_rate", [0.5, 0.25]);
+
+        metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(0, 0, 10, 2, 1, 0, 0, 0));
+        metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(1, 0, 10, 7, 2, 0, 0, 0));
+        assert_values("sglang:num_running_reqs", [2.0, 7.0]);
+        assert_values("sglang:num_queue_reqs", [1.0, 2.0]);
+        assert_values("sglang:cache_hit_rate", [0.5, 0.25]);
+
+        metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(0, 0, 10, 0, 0, 0, 0, 8));
+        assert_values("sglang:cache_hit_rate", [0.0, 0.25]);
+    }
+
+    #[test]
     fn sglang_scrape_contract_uses_scheduler_and_request_label_sets() {
         let (registry, metrics) = register_for_test(EngineType::Sglang, 2, "unified");
         metrics.update_scheduler_snapshot(&MockerMetrics::from_parts(0, 2, 10, 1, 3, 0, 2, 4));
