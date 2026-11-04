@@ -42,6 +42,34 @@ impl<P: Eq + Hash, V> Frame<P, V> {
     }
 }
 
+/// Owns a frame channel and, when applicable, the transport task consuming it.
+/// Dropping the connection aborts its RPC even if the peer stops reading.
+pub struct RouterConnection<P: Eq + Hash, V> {
+    sender: mpsc::Sender<Frame<P, V>>,
+    _transport: Option<AbortOnDropHandle<()>>,
+}
+
+impl<P: Eq + Hash, V> RouterConnection<P, V> {
+    pub fn with_transport(
+        sender: mpsc::Sender<Frame<P, V>>,
+        transport: tokio::task::JoinHandle<()>,
+    ) -> Self {
+        Self {
+            sender,
+            _transport: Some(AbortOnDropHandle::new(transport)),
+        }
+    }
+}
+
+impl<P: Eq + Hash, V> From<mpsc::Sender<Frame<P, V>>> for RouterConnection<P, V> {
+    fn from(sender: mpsc::Sender<Frame<P, V>>) -> Self {
+        Self {
+            sender,
+            _transport: None,
+        }
+    }
+}
+
 struct State<P, V> {
     revision: u64,
     pools: HashMap<P, V>,
@@ -134,11 +162,12 @@ where
 
     /// Open one outbound connection from the relay to each router in the directory.
     /// Closing the directory stops every task.
-    pub async fn run<R, C, F, E>(&self, mut directory: watch::Receiver<HashSet<R>>, attach: C)
+    pub async fn run<R, C, F, E, S>(&self, mut directory: watch::Receiver<HashSet<R>>, attach: C)
     where
         R: Clone + Debug + Eq + Hash + Send + Sync + 'static,
         C: Fn(R) -> F + Send + Sync + 'static,
-        F: Future<Output = Result<mpsc::Sender<Frame<P, V>>, E>> + Send + 'static,
+        F: Future<Output = Result<S, E>> + Send + 'static,
+        S: Into<RouterConnection<P, V>> + Send + 'static,
         E: Display + Send + 'static,
     {
         let attach = Arc::new(attach);
@@ -167,19 +196,20 @@ where
         }
     }
 
-    async fn forward_to_router<R, C, F, E>(&self, router: R, attach: Arc<C>)
+    async fn forward_to_router<R, C, F, E, S>(&self, router: R, attach: Arc<C>)
     where
         R: Clone + Debug,
         C: Fn(R) -> F,
-        F: Future<Output = Result<mpsc::Sender<Frame<P, V>>, E>>,
+        F: Future<Output = Result<S, E>>,
+        S: Into<RouterConnection<P, V>>,
         E: Display,
     {
         let mut retry_delay = RECONNECT_DELAY;
         loop {
-            let sink = match attach(router.clone()).await {
+            let connection = match attach(router.clone()).await {
                 Ok(sink) => {
                     retry_delay = RECONNECT_DELAY;
-                    sink
+                    sink.into()
                 }
                 Err(error) => {
                     tracing::warn!(?router, error = %error, "Global view attach failed");
@@ -188,8 +218,10 @@ where
                     continue;
                 }
             };
+            let sink = &connection.sender;
             let (mut updates, snapshot) = self.snapshot_and_subscribe();
             if sink.send_timeout(snapshot, SEND_TIMEOUT).await.is_err() {
+                drop(connection);
                 tokio::time::sleep(RECONNECT_DELAY).await;
                 continue;
             }
@@ -214,6 +246,7 @@ where
                     }
                 }
             }
+            drop(connection);
             tokio::time::sleep(RECONNECT_DELAY).await;
         }
     }
