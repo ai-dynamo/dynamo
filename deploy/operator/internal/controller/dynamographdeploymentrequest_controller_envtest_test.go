@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -3007,13 +3008,13 @@ spec:
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
-			GinkgoT().Log("creating two eight-GPU nodes for node-label discovery")
+			GinkgoT().Log("creating eight-GPU and four-GPU nodes for node-label discovery")
 			gpuNodes := make([]*corev1.Node, 0, 2)
-			for _, nodeName := range []string{"gpu-worker-budget-1", "gpu-worker-budget-2"} {
+			for i, count := range []string{"8", "4"} {
 				node := &corev1.Node{
-					Name: nodeName,
+					Name: fmt.Sprintf("gpu-worker-budget-%d", i),
 					Labels: map[string]string{
-						gpu.LabelGPUCount:   "8",
+						gpu.LabelGPUCount:   count,
 						gpu.LabelGPUProduct: "H200-SXM5-141GB",
 						gpu.LabelGPUMemory:  "141312",
 					},
@@ -3042,7 +3043,7 @@ spec:
 			Expect(k8sClient.Get(ctx, request.NamespacedName, &persisted)).Should(Succeed())
 			Expect(persisted.Spec.Hardware).NotTo(BeNil())
 			Expect(persisted.Spec.Hardware.TotalGPUs).NotTo(BeNil())
-			Expect(*persisted.Spec.Hardware.TotalGPUs).To(Equal(int32(16)))
+			Expect(*persisted.Spec.Hardware.TotalGPUs).To(Equal(int32(8)))
 
 			GinkgoT().Log("creating the profiling Job from the persisted DGDR")
 			_, err = reconciler.Reconcile(ctx, request)
@@ -3106,10 +3107,12 @@ spec:
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
 			mockGPU := &gpu.GPUInfo{
-				GPUsPerNode:   8,
-				VRAMPerGPU:    81920,
-				System:        "h100_sxm",
-				NodesWithGPUs: 1,
+				GPUsPerNode:       8,
+				VRAMPerGPU:        81920,
+				System:            "h100_sxm",
+				NodesWithGPUs:     1,
+				TotalGPUs:         8,
+				SelectedShapeGPUs: 8,
 			}
 			cache := gpu.NewGPUDiscoveryCache()
 			cache.Set("", mockGPU, 10*time.Minute)
@@ -3220,10 +3223,12 @@ spec:
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
 			mockGPU := &gpu.GPUInfo{
-				GPUsPerNode:   8,
-				VRAMPerGPU:    81920,
-				System:        "h100_sxm",
-				NodesWithGPUs: 1,
+				GPUsPerNode:       8,
+				VRAMPerGPU:        81920,
+				System:            "h100_sxm",
+				NodesWithGPUs:     1,
+				TotalGPUs:         8,
+				SelectedShapeGPUs: 8,
 			}
 			cache := gpu.NewGPUDiscoveryCache()
 			cache.Set("", mockGPU, 10*time.Minute)
@@ -3335,10 +3340,12 @@ spec:
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
 			mockGPU := &gpu.GPUInfo{
-				GPUsPerNode:   8,
-				VRAMPerGPU:    81920,
-				System:        "h100_sxm",
-				NodesWithGPUs: 1,
+				GPUsPerNode:       8,
+				VRAMPerGPU:        81920,
+				System:            "h100_sxm",
+				NodesWithGPUs:     1,
+				TotalGPUs:         8,
+				SelectedShapeGPUs: 8,
 			}
 			cache := gpu.NewGPUDiscoveryCache()
 			cache.Set("", mockGPU, 10*time.Minute)
@@ -3957,10 +3964,12 @@ spec:
 
 			// Mock GPU discovery so validation and enrichment succeed.
 			mockGPU := &gpu.GPUInfo{
-				GPUsPerNode:   8,
-				VRAMPerGPU:    81920,
-				System:        "a100_sxm",
-				NodesWithGPUs: 1,
+				GPUsPerNode:       8,
+				VRAMPerGPU:        81920,
+				System:            "a100_sxm",
+				NodesWithGPUs:     1,
+				TotalGPUs:         8,
+				SelectedShapeGPUs: 8,
 			}
 			cache := gpu.NewGPUDiscoveryCache()
 			cache.Set("", mockGPU, 10*time.Minute)

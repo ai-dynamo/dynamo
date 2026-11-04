@@ -15,7 +15,7 @@ pub mod context;
 pub mod error;
 pub mod network;
 pub use crate::routing_policy::{
-    BuiltinRoutePicker, OccupancyReservation, OccupancySelection, RouteTarget,
+    InstanceSelector, ModeSelectors, OccupancyReservation, OccupancySelection, RouteTarget,
     RoutingOccupancyState,
 };
 pub use network::egress::addressed_router::{
@@ -23,7 +23,8 @@ pub use network::egress::addressed_router::{
     propagate_first_response_guard,
 };
 pub use network::egress::push_router::{
-    MultimodalCacheIndex, MultimodalCacheKeyExtractor, PushRouter, RouterMode, WorkerLoadMonitor,
+    MultimodalCacheIndex, MultimodalCacheKeyExtractor, PushRouter, PushRouterOptions, RouterMode,
+    WorkerLoadMonitor,
 };
 pub mod registry;
 

@@ -24,7 +24,12 @@ from dynamo.common.configuration.groups.kv_router_args import (
     KvRouterArgGroup,
     KvRouterConfigBase,
 )
-from dynamo.common.configuration.utils import add_argument, nullable_float, nullable_int
+from dynamo.common.configuration.utils import (
+    ArgEnv,
+    add_argument,
+    nullable_float,
+    nullable_int,
+)
 
 if TYPE_CHECKING:
     from dynamo.llm import RouterConfig
@@ -38,6 +43,12 @@ _ROUTER_FIELDS: tuple[str, ...] = (
     "active_prefill_tokens_threshold_frac",
     "session_affinity_ttl_secs",
     "session_affinity_mode",
+)
+
+# TODO(v1.7): Remove --active-prefill-tokens-threshold.
+_ABSOLUTE_PREFILL_THRESHOLD_DEPRECATION = (
+    "--active-prefill-tokens-threshold is deprecated and will be removed in v1.7; "
+    "use --active-prefill-tokens-threshold-frac"
 )
 
 _ENFORCE_DISAGG_DEPRECATION = (
@@ -58,7 +69,14 @@ _ADMISSION_CONTROL_FLAG_REMOVAL_WARNING = (
 )
 
 
-class _IgnoredAdmissionControlAction(argparse.Action):
+class _IgnoredAction(argparse.Action):
+    """Store nothing, so the namespace never carries the value."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        return None
+
+
+class _IgnoredAdmissionControlAction(_IgnoredAction):
     """Warn and store nothing, so the namespace never carries the value."""
 
     def __call__(self, parser, namespace, values, option_string=None):
@@ -159,6 +177,8 @@ class RouterArgGroup(ArgGroup):
             consumes. ``--router-min-initial-workers`` gates frontend startup
             and is not carried on the model card, so a worker registering it
             would ship a flag that does nothing.
+        env: Another process's env (see ``ArgEnv``); the removed and
+            deprecated flags then parse without their notices.
     """
 
     def __init__(
@@ -166,15 +186,18 @@ class RouterArgGroup(ArgGroup):
         *,
         default_router_mode: Optional[str],
         include_frontend_only: bool,
+        env: Optional[ArgEnv] = None,
     ) -> None:
         self.default_router_mode = default_router_mode
         self.include_frontend_only = include_frontend_only
+        self.env = env
 
     def add_arguments(self, parser) -> None:
-        if "DYN_ADMISSION_CONTROL" in os.environ:
-            logger.warning(_ADMISSION_CONTROL_REMOVAL_WARNING)
-        if "DYN_ENFORCE_DISAGG" in os.environ:
-            logger.warning(_ENFORCE_DISAGG_DEPRECATION, "DYN_ENFORCE_DISAGG")
+        if self.env is None:
+            if "DYN_ADMISSION_CONTROL" in os.environ:
+                logger.warning(_ADMISSION_CONTROL_REMOVAL_WARNING)
+            if "DYN_ENFORCE_DISAGG" in os.environ:
+                logger.warning(_ENFORCE_DISAGG_DEPRECATION, "DYN_ENFORCE_DISAGG")
 
         g = parser.add_argument_group("Router Options")
 
@@ -189,7 +212,11 @@ class RouterArgGroup(ArgGroup):
             g.add_argument(
                 "--admission-control",
                 choices=("token-capacity", "none"),
-                action=_IgnoredAdmissionControlAction,
+                action=(
+                    _IgnoredAdmissionControlAction
+                    if self.env is None
+                    else _IgnoredAction
+                ),
                 default=argparse.SUPPRESS,
                 help=argparse.SUPPRESS,
             )
@@ -204,7 +231,12 @@ class RouterArgGroup(ArgGroup):
                     "readiness are determined from registered worker types."
                 ),
                 arg_type=None,
-                action=_DeprecatedEnforceDisaggAction,
+                action=(
+                    _DeprecatedEnforceDisaggAction
+                    if self.env is None
+                    else argparse.BooleanOptionalAction
+                ),
+                env=self.env,
             )
             add_argument(
                 g,
@@ -219,6 +251,7 @@ class RouterArgGroup(ArgGroup):
                 ),
                 arg_type=int,
                 dest="min_initial_workers",
+                env=self.env,
             )
 
         add_argument(
@@ -227,22 +260,21 @@ class RouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_MODE",
             default=self.default_router_mode,
             help=(
-                "How to route the request. power-of-two picks 2 random workers and "
-                "routes to the one with fewer in-flight requests. least-loaded routes to "
-                "the worker with the fewest active requests. device-aware-weighted routes "
-                "based on worker device type (CPU/CUDA). In disaggregated prefill mode, "
-                "both power-of-two and least-loaded skip bootstrap optimization and fall "
-                "back to the synchronous prefill path."
+                "How to route the request. least-loaded routes to the worker with the "
+                "fewest active requests. device-aware-weighted routes based on worker "
+                "device type (CPU/CUDA). In disaggregated prefill mode, least-loaded "
+                "skips bootstrap optimization and falls back to the synchronous prefill "
+                "path."
             ),
             choices=[
                 "round-robin",
                 "random",
-                "power-of-two",
                 "kv",
                 "direct",
                 "least-loaded",
                 "device-aware-weighted",
             ],
+            env=self.env,
         )
         add_argument(
             g,
@@ -257,6 +289,7 @@ class RouterArgGroup(ArgGroup):
             ),
             arg_type=int,
             dest="session_affinity_ttl_secs",
+            env=self.env,
         )
         add_argument(
             g,
@@ -270,6 +303,7 @@ class RouterArgGroup(ArgGroup):
             ),
             choices=("hard", "soft"),
             dest="session_affinity_mode",
+            env=self.env,
         )
         add_argument(
             g,
@@ -282,6 +316,7 @@ class RouterArgGroup(ArgGroup):
                 "Unset by default; pass 'None' to disable it."
             ),
             arg_type=nullable_float,
+            env=self.env,
         )
         add_argument(
             g,
@@ -289,6 +324,7 @@ class RouterArgGroup(ArgGroup):
             env_var="DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
             default=None,
             help=(
+                "Deprecated; will be removed in v1.7. Use --active-prefill-tokens-threshold-frac. "
                 "Literal token count threshold for determining when a worker is considered busy "
                 "based on prefill token utilization. When active prefill tokens exceed this "
                 "threshold, the worker is marked as busy. Setting a numeric value enables this "
@@ -296,6 +332,7 @@ class RouterArgGroup(ArgGroup):
                 "with --active-prefill-tokens-threshold-frac."
             ),
             arg_type=nullable_int,
+            env=self.env,
         )
         add_argument(
             g,
@@ -309,6 +346,7 @@ class RouterArgGroup(ArgGroup):
                 "OR logic with --active-prefill-tokens-threshold."
             ),
             arg_type=nullable_float,
+            env=self.env,
         )
 
 
@@ -316,7 +354,6 @@ class RouterArgGroup(ArgGroup):
 ROUTER_MODE_MAP: dict[str, str] = {
     "round-robin": "RoundRobin",
     "random": "Random",
-    "power-of-two": "PowerOfTwoChoices",
     "kv": "KV",
     "direct": "Direct",
     "least-loaded": "LeastLoaded",
@@ -337,16 +374,19 @@ class WorkerRouterConfig(RouterConfigBase, KvRouterConfigBase):
     enforce_disagg: bool = False
 
 
-def add_worker_router_arguments(parser: argparse.ArgumentParser) -> None:
+def add_worker_router_arguments(
+    parser: argparse.ArgumentParser, *, env: Optional[ArgEnv] = None
+) -> None:
     """Register the worker-side router flags.
 
     ``--router-mode`` defaults to ``None``: a worker that omits it advertises
-    nothing and inherits the frontend's configuration.
+    nothing and inherits the frontend's configuration. ``env`` is another
+    process's env (see ``ArgEnv``).
     """
-    RouterArgGroup(default_router_mode=None, include_frontend_only=False).add_arguments(
-        parser
-    )
-    KvRouterArgGroup().add_arguments(parser)
+    RouterArgGroup(
+        default_router_mode=None, include_frontend_only=False, env=env
+    ).add_arguments(parser)
+    KvRouterArgGroup(env=env).add_arguments(parser)
 
 
 def parse_worker_router_config(
@@ -412,6 +452,15 @@ def build_router_config(
     if router_mode is None:
         return None
 
+    router_kwargs = config.router_kwargs()
+    # TODO(v1.7): Remove with --active-prefill-tokens-threshold.
+    # Warned here rather than in frontend validation: every advertisement, the
+    # frontend's and each worker's (vLLM, SGLang, TRT-LLM, mocker), is built
+    # here, so the notice reaches each process exactly once and only when the
+    # deprecated value is actually forwarded.
+    if router_kwargs["active_prefill_tokens_threshold"] is not None:
+        logger.warning(_ABSOLUTE_PREFILL_THRESHOLD_DEPRECATION)
+
     # Imported lazily so that importing a backend's argument definitions does
     # not pull in the compiled bindings.
     from dynamo.llm import KvRouterConfig, RouterConfig, RouterMode
@@ -430,4 +479,4 @@ def build_router_config(
     kv_router_config = (
         KvRouterConfig(**config.kv_router_kwargs()) if mode == RouterMode.KV else None
     )
-    return RouterConfig(mode, kv_router_config, **config.router_kwargs())
+    return RouterConfig(mode, kv_router_config, **router_kwargs)

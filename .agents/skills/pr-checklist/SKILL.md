@@ -20,7 +20,7 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Usage
 
-Use this skill when making a pull request to Dynamo or reviewing one. Run the review with multiple agents that investigate each section below, plus an adversarial agent that presses on the weakest areas. Report what needs to change. Keep the PR description up to date as new commits change the PR or address review comments.
+Use this skill when making a pull request to Dynamo or reviewing one. Work through each section below and report what needs to change. For medium- or high-complexity changes (see Complexity), run the review with multiple agents, one per section. Keep the PR description up to date as new commits change the PR or address review comments.
 
 ## 1. Design Fit
 
@@ -46,6 +46,8 @@ Use this skill when making a pull request to Dynamo or reviewing one. Run the re
 
 Exclude tests, documentation, comments, and whitespace from this count, as they typically do not contribute significantly to the complexity of the main change.
 
+**Modularity.** Dynamo is moving toward smaller, modular crates. Add as few dependencies as possible, and justify every new package, such as an added Rust crate, in the PR description.
+
 **Correctness and compatibility.** The change must stay correct for every path that shares the changed code: each backend (vLLM, SGLang, TensorRT-LLM), aggregated and disaggregated serving, and Python callers through the bindings. State what the change makes worse, such as performance on another configuration or a feature it no longer supports, and justify any breaking change to a user-facing contract (request fields, CLI flags, environment variables, metrics, CRD fields) in the PR description.
 
 **Area review guidance.** Apply the review guidance for each area the change touches:
@@ -66,7 +68,7 @@ Check any change to the hot path (code that runs per token, KV block, KV event, 
 
 Every change must be validated: bug fixes on a reproducer, and features and performance changes end to end.
 
-**Coverage and effectiveness.** Add tests only where the change is prone to errors or regressions, and recommend deleting redundant or trivial tests. A test must exercise the new path, not a fallback, and a bug-fix test must fail without the fix. Avoid excessive mock objects, especially ones coupled to internal logic.
+**Coverage and effectiveness.** Add tests only where the change is prone to errors or regressions, and recommend deleting redundant or trivial tests. A test must exercise the new path, not a fallback, and a bug-fix test must fail without the fix. Avoid excessive mock objects, especially ones coupled to internal logic. Don't test the test: scope tests to Dynamo functionality, not to test helpers, fixtures, or harness logic. Test the behavior Dynamo should have, not whatever the code does today; mark behavior that doesn't work yet as `xfail` (pytest) or `#[ignore = "..."]` (Rust).
 
 **Reliability and speed.** Tests must not be flaky: avoid bit-exact floating-point assertions, dependence on test order or shared state, and hardcoded ports or paths. Tests must also be fast: no fixed or long sleeps or waits, and a proper timeout on every wait. Dynamo has three test levels. E2E tests generally live under `tests/` and use pytest; other Rust and Python tests are unit or integration tests. As a rule of thumb:
 

@@ -16,11 +16,14 @@ import (
 // the dedicated dynamo-planner image.
 const defaultImage = "nvcr.io/nvidia/ai-dynamo/dynamo-planner"
 
-func (d *DGDRDefaulter) defaultImageFor() string {
-	if d.DefaultImage != "" {
-		return d.DefaultImage
+// PlannerImageFor returns explicitImage when set, else the planner image with a canonical
+// operator-version tag, or an empty string when the version cannot be parsed. The same resolved
+// image defaults v1beta1 Requests and executes v1beta2 Runs.
+func PlannerImageFor(operatorVersion, explicitImage string) string {
+	if explicitImage != "" {
+		return explicitImage
 	}
-	version, err := semver.NewVersion(d.OperatorVersion)
+	version, err := semver.NewVersion(operatorVersion)
 	if err != nil {
 		return ""
 	}

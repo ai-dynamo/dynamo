@@ -36,8 +36,15 @@ dgdrV1Beta2:
   # Candidate objects are persisted in etcd; incompatible schema changes may make
   # them unreadable or block future CRD upgrades. When false, the CRD init container
   # installs the legacy Request schemas without v1beta2 conversion envelopes and
-  # omits Run and Candidate. The operator does not reconcile v1beta2 requests.
+  # omits Run and Candidate. When true, the operator reconciles v1beta2
+  # Requests into Runs and executes each Run as an AISimulate planner Job with
+  # a publisher sidecar that persists deployment Candidates.
   enabled: false
+  # -- EXPERIMENTAL, DEVELOPMENT CLUSTERS ONLY: With dgdrV1Beta2.enabled, grant every
+  # Planner ServiceAccount what Planner live retune (retune.executor: dgdr) needs:
+  # create, read and delete DGDR v1beta2 Requests, read their Runs and Candidates,
+  # and read, create, update and delete any Lease in the namespace.
+  plannerLiveRetune: false
 
 # Environment variables to pass to operator Deployment.
 env: []
@@ -111,9 +118,9 @@ controllerManager:
       repository: nvcr.io/nvidia/ai-dynamo/kubernetes-operator
       # tag is optional - if not set, will use Chart.AppVersion
       tag: ""
-    # Default DGDR profiler image, put into DGDR spec.image when unset. Empty
-    # derives dynamo-planner:<chart appVersion>, which only exists for GA
-    # releases.
+    # Planner image used to execute v1beta2 DGDR Runs and default v1beta1
+    # spec.image. Empty derives dynamo-planner:<chart appVersion>, which only
+    # exists for GA releases.
     dgdrDefaultImage: ""
     resources:
       limits:

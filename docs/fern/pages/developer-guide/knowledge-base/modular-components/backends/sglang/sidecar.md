@@ -26,7 +26,19 @@ for the architecture.
 | Aggregated | Yes |
 | Disaggregated | Yes |
 | KV routing | Yes |
-| Kubernetes multinode TP and attention-DP | Experimental; explicit leader and worker PodTemplates |
+| Kubernetes multinode tensor parallelism (TP) and attention data parallelism (attention-DP) | Yes |
+| Image, video, and audio input | Yes; disaggregated serving is untested |
+
+The sidecar sends a media kind only when the SGLang gRPC server lists it in
+`grpc_features` (`image_inputs`, `video_inputs`, or `audio_inputs`), and returns
+400 for other media requests.
+
+> [!WARNING]
+> SGLang downloads `http://` and `https://` media URLs itself, from any host by
+> default, including `127.0.0.1` and its own HTTP API. Start SGLang with
+> `--allowed-media-domains` to limit the hosts it fetches.
+
+Media-aware KV routing on wide-token SGLang builds is not supported by the sidecar; see the [multimodal compatibility limits](multimodal.md#wide-token-sglang-builds).
 
 ## Launch Locally
 
@@ -62,52 +74,17 @@ kubectl apply -f lib/sidecar/sglang/deploy/agg.yaml -n <namespace>
 kubectl port-forward -n <namespace> svc/sglang-sidecar-agg-frontend 8000:8000
 ```
 
-Multinode deployments require `backendFramework: sglang` and complete `leader` and
-`worker` role PodTemplates. The templates own the native engine commands and
+Multinode deployments require complete `leader` and `worker` role PodTemplates. Set
+`backendFramework: sglang` as the examples do; the operator does not infer a backend from
+a native engine launch. The templates own the native engine commands and
 sidecar placement. See the [TP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_tp.yaml) and
 [attention-DP example](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/multinode_dp.yaml). Attention-DP requires SGLang 0.5.22 or later and a Dynamo sidecar
 with matching attention-DP metadata support. Engine-failure KV recovery remains
 incomplete and is tracked in [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
 
-### Migrate an existing DGD to multinode sidecars
-
-The multinode examples use `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`. The operator
-injects these variables only into DGDs originally created by operator 1.6.0 or
-later. Upgrading the operator or switching to sidecar mode does not enable them
-for older DGDs.
-
-For a DGD created before operator 1.6.0, choose one of these options:
-
-- Delete and recreate the DGD after upgrading the operator, then use the examples
-  with their existing topology arguments.
-- Keep the DGD and replace the `--node-rank` and `--dist-init-addr` arguments in
-  the `main` container of both the leader and worker role templates with the
-  provider-specific arguments below.
-
-For Grove, use these arguments. The group-wide pod index requires Grove
-`v0.1.0-alpha.15` or later and matching CRDs.
-
-```yaml
-- --node-rank
-- $(GROVE_PCSG_POD_INDEX)
-- --dist-init-addr
-- $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-sglangworker-ldr-0.$(GROVE_HEADLESS_SERVICE):29500
-```
-
-Here, `sglangworker` is the example component name, `SGLangWorker`, in lowercase.
-Replace it with your component name in lowercase if you rename the component.
-
-For LeaderWorkerSet, use these arguments:
-
-```yaml
-- --node-rank
-- $(LWS_WORKER_INDEX)
-- --dist-init-addr
-- $(LWS_LEADER_ADDRESS):29500
-```
-
-Kubernetes expands these variable references in container arguments. No shell
-wrapper is needed.
+The examples use `DYNAMO_RANK` and `DYNAMO_LEADER_ADDRESS`, which exist only in
+DGDs created by operator 1.6.0 or later. For an older DGD, see
+[Use the variables in a DGD created before 1.6.0](../../../../../kubernetes/installation/multinode-orchestration.md#use-the-variables-in-a-dgd-created-before-160).
 
 ## Topologies
 

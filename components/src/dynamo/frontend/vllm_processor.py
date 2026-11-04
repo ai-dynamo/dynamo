@@ -20,6 +20,7 @@ from msgspec.structs import replace as msgspec_replace
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
 from vllm.exceptions import VLLMClientError
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.renderers.chat_utils import load_chat_template
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import GENERATION_TASKS
 from vllm.tokenizers import TokenizerLike
@@ -61,7 +62,6 @@ from .utils import (
     random_uuid,
     resolve_chat_template,
 )
-from .vllm_protocol import load_chat_template
 
 logger = logging.getLogger(__name__)
 
@@ -1643,6 +1643,11 @@ class EngineFactory:
                 "from runtime_config.context_length",
                 context_length,
             )
+        # Preserve vLLM defaults when optional frontend arguments are absent.
+        for name in ("renderer_num_workers", "mm_processor_cache_gb"):
+            value = getattr(self.flags, name, None)
+            if value is not None:
+                model_config_kwargs[name] = value
         model_config = ModelConfig(**model_config_kwargs)
         # Use processor_only cache so tensor data persists across requests.
         # The default "lru" sender cache drops tensor data on cache hits

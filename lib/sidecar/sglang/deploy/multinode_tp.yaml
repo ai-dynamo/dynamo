@@ -1,13 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# EXPERIMENTAL: multinode SGLang TP with explicit leader and worker templates
-# This example uses DYNAMO_RANK and DYNAMO_LEADER_ADDRESS, which require a
-# DGD originally created by operator 1.6.0 or later. Upgrading the operator
-# does not enable these variables for an existing older DGD.
-# For older DGDs, delete and recreate after upgrading, or replace the
-# topology arguments in both role templates with Grove/LWS variables.
-# See ../README.md#deploy-on-kubernetes for migration guidance.
+# Replace <tag> with a supported SGLang image tag before deploying.
+# EXPERIMENTAL: multinode SGLang tensor parallelism (TP) with explicit leader and worker templates.
+# For a DGD created before operator 1.6.0, see docs/fern/pages/kubernetes/installation/multinode-orchestration.md#use-the-variables-in-a-dgd-created-before-160.
 
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -50,7 +46,7 @@ spec:
                 optional: true
           containers:
           - name: main
-            image: lmsysorg/sglang:v0.5.22
+            image: lmsysorg/sglang:<tag>
             startupProbe:
               exec:
                 command:
@@ -118,7 +114,7 @@ spec:
         spec:
           containers:
           - name: main
-            image: lmsysorg/sglang:v0.5.22
+            image: lmsysorg/sglang:<tag>
             envFrom:
             - secretRef:
                 name: hf-token-secret

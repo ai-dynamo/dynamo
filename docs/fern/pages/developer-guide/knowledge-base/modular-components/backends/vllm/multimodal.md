@@ -20,17 +20,28 @@ This page describes multimodal inference with the Dynamo vLLM backend.
 | Modality | Aggregated | P/D | Separate encode worker |
 | --- | --- | --- | --- |
 | **Image** | Yes | Yes | Yes |
-| **Video** | Yes, H.264/H.265 | Yes, H.264/H.265 | Processed by the language-model worker |
+| **Video** | Yes; codec support depends on the decode path below | Yes, with backend decoding | Processed by the language-model worker |
 | **Audio** | Yes | Yes, with decode reload | Not routed to the separate encoder |
 
 > [!IMPORTANT]
-> **Video input is limited to H.264 and H.265.** The runtime images ship no software
-> video decoder, so these codecs are decoded on the GPU by NVDEC and no other codec
-> (VP8, VP9, AV1) has a decoder available. NVDEC decode requires a GPU with a video
-> decode engine and a container granted the `video` driver capability — see
-> [Video Decode GPU Requirements](../../../../../use-cases/multimodal-serving/video-decode-gpu-requirements.md).
-> `http`, `https`, `file://` and `data:` sources are all hardware-decoded; `file://`
-> additionally requires `DYN_MM_LOCAL_PATH` to permit local reads.
+> Video codec support depends on where decoding runs:
+>
+> - **Backend decoding:** shipped CUDA images use NVDEC for H.264 and H.265.
+>   This requires a GPU with a video decode engine and the container's `video`
+>   driver capability. See [Video Decode GPU Requirements](../../../../../use-cases/multimodal-serving/video-decode-gpu-requirements.md).
+> - **Rust frontend decoding:** aggregated workers with `--frontend-decoding`
+>   can receive VP8/VP9 frames decoded on the CPU by the in-tree FFmpeg.
+>   The shipped FFmpeg build does not decode H.264, H.265, or AV1. Installing
+>   Python decoder packages does not extend this path; additional codecs require
+>   a different FFmpeg build.
+>
+> **Backend software decoding** can support additional codecs without rebuilding
+> Dynamo. Explicitly install the backend's Python decoder packages using
+> [Additional Media Decoders](../../../../../use-cases/multimodal-serving/additional-media-decoders.md).
+> The installer extends backend decoding only, not Rust frontend decoding.
+> These paths depend on the deployed image and configuration; an older pinned
+> image may not provide the frontend decoder. Local `file://` reads additionally
+> require `DYN_MM_LOCAL_PATH`.
 
 ### Supported URL Formats
 
@@ -49,8 +60,13 @@ This page describes multimodal inference with the Dynamo vLLM backend.
 > [!NOTE]
 > Media URLs are validated against a default-deny policy. `https://` and `data:` sources
 > pass; plain `http://` and hostnames that resolve to private or loopback addresses are
-> refused. To fetch media over the cluster's internal network, set
-> `DYN_MM_ALLOW_INTERNAL=1` on the worker that loads it.
+> refused. Two settings change this:
+>
+> - `DYN_MM_ALLOW_INTERNAL=1`, on the worker that loads the media, allows `http://` and
+>   internal hosts.
+> - `DYN_MM_ALLOW_REMOTE_URLS=0`, on the frontend and the workers, refuses every remote
+>   media URL and takes precedence over `DYN_MM_ALLOW_INTERNAL`. See
+>   [Runtime Configuration](../../../../../reference/components/runtime-configuration.mdx#multimodal-and-media-output).
 
 ## Deployment Patterns
 
@@ -71,6 +87,12 @@ The aggregated vLLM worker can load an author-provided vision tower in process, 
 ## Multimodal KV Routing
 
 vLLM supports two multimodal KV-routing paths. Both give the router and vLLM the same media identity so requests can be placed on workers that already cache the image or video's KV blocks.
+
+Video inference, backend prefix-cache reuse, and media-aware worker selection are
+separate capabilities. A successful video response or a backend cache hit does not
+prove that video identity influenced routing. Exact video affinity also requires
+KV-aware routing, matching worker KV events, and an eligible request on one of
+the paths below.
 
 ### Choose a Routing Path
 

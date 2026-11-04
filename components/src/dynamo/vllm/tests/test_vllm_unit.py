@@ -567,6 +567,31 @@ def test_vllm_publishes_structural_tag_reasoning_policy(
 
 
 @pytest.mark.parametrize(
+    "tool_parser,reasoning_parser,expected",
+    [
+        ("muse_spark_open", None, True),
+        ("muse_spark", None, True),
+        (None, "muse_spark_open", True),
+        (None, "muse_spark", True),
+        ("qwen3_coder", "muse_spark_open", False),
+        (None, None, False),
+    ],
+)
+def test_muse_grammar_owns_reasoning_before_engine_launch(
+    tool_parser, reasoning_parser, expected
+):
+    vllm_main = _load_vllm_main()
+    config = SimpleNamespace(
+        dyn_tool_call_parser=tool_parser, dyn_reasoning_parser=reasoning_parser
+    )
+    outputs = SimpleNamespace(enable_in_reasoning=False)
+    vllm_main.configure_muse_structural_tag_reasoning(
+        config, SimpleNamespace(structured_outputs_config=outputs)
+    )
+    assert outputs.enable_in_reasoning is expected
+
+
+@pytest.mark.parametrize(
     ("hf_config", "expected"),
     [
         (SimpleNamespace(video_token_id=101, video_token_index=202), 101),
@@ -718,6 +743,8 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
         engine_args=FakeEngineArgs(),
         embedding_worker=False,
         embedding_worker_processes=1,
+        dyn_tool_call_parser=None,
+        dyn_reasoning_parser=None,
         gms_shadow_mode=False,
         multimodal_embedding_cache_capacity_gb=0,
         route_to_encoder=False,
@@ -1699,6 +1726,7 @@ def _make_dynamo_config(**overrides):
         "enable_local_indexer": True,
         "embedding_worker": False,
         "classify_worker": False,
+        "transcription_worker": False,
         "headless": False,
         "enable_multimodal": False,
         "fpm_trace": False,
@@ -1769,6 +1797,24 @@ class TestPoolingWorkerPrefixCachingDefault:
     def test_generative_worker_still_defaults_to_enabled(self):
         dynamo_cfg = _make_dynamo_config()
         engine_cfg = _make_engine_config_with_runner(enable_prefix_caching=None)
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.enable_prefix_caching is True
+
+
+class TestTranscriptionWorkerPrefixCachingDefault:
+    def test_transcription_defaults_to_disabled(self):
+        dynamo_cfg = _make_dynamo_config(transcription_worker=True)
+        engine_cfg = _make_engine_config_with_runner(enable_prefix_caching=None)
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.enable_prefix_caching is False
+
+    def test_explicit_enable_is_preserved(self):
+        dynamo_cfg = _make_dynamo_config(transcription_worker=True)
+        engine_cfg = _make_engine_config_with_runner(enable_prefix_caching=True)
 
         update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
 
@@ -1941,6 +1987,7 @@ class TestForwardPassMetricsActivation:
         [
             ({"embedding_worker": True}, "embedding"),
             ({"classify_worker": True}, "classify"),
+            ({"transcription_worker": True}, "transcription"),
             ({"headless": True}, "headless"),
             (
                 {"disaggregation_mode": DisaggregationMode.ENCODE},
