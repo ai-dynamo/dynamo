@@ -31,6 +31,7 @@ from dynamo.vllm.kv_connector_protocols import (
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -578,3 +579,30 @@ def test_real_vllm_mooncake_helper_signature_is_compatible():
         f"get_mooncake_bootstrap_addr signature changed: expected at least 1 "
         f"positional arg, got {sig}"
     )
+
+
+@pytest.mark.parametrize("reverse_children", [False, True])
+def test_pd_kvcr_prefix_provider_keeps_nixl_handoff_protocol(reverse_children):
+    """KVCR prefix reuse never becomes a second P/D parameter producer."""
+    children = [
+        {
+            "kv_connector": "OffloadingConnector",
+            "kv_connector_extra_config": {
+                "secondary_tiers": [
+                    {"type": "kvcr", "router_capabilities": ["router_hint"]}
+                ]
+            },
+        },
+        {"kv_connector": "NixlConnector", "engine_id": "handoff-engine"},
+    ]
+    proto = make_kv_connector_protocol(
+        _config(
+            "PdConnector",
+            kv_connector_extra_config={
+                "connectors": list(reversed(children)) if reverse_children else children
+            },
+        )
+    )
+    assert isinstance(proto, NixlConnectorProtocol)
+    assert proto._vllm_config.kv_transfer_config.engine_id == "handoff-engine"
+    assert proto.prefill_request_kv_transfer_params()["do_remote_decode"] is True
