@@ -52,7 +52,7 @@ Engine type for Dynamo workers
 from dynamo.llm import EngineType
 ```
 
-[`lib/bindings/python/src/dynamo/_core.pyi#L3147`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3147)
+[`lib/bindings/python/src/dynamo/_core.pyi#L3148`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3148)
 </Accordion>
 
 <Accordion id="api-dynamo-core-entrypointargs" title="EntrypointArgs (class)">
@@ -66,7 +66,7 @@ from dynamo.llm import EntrypointArgs
 EntrypointArgs(engine_type: EngineType, model_path: Optional[str] = None, model_name: Optional[str] = None, endpoint_id: Optional[str] = None, template_file: Optional[str] = None, router_config: Optional[RouterConfig] = None, kv_cache_block_size: Optional[int] = None, http_host: Optional[str] = None, http_port: Optional[int] = None, http_metrics_port: Optional[int] = None, tls_cert_path: Optional[str] = None, tls_key_path: Optional[str] = None, extra_engine_args: Optional[str] = None, mocker_engine_args: Optional[Mapping[str, Any]] = None, runtime_config: Optional[ModelRuntimeConfig] = None, namespace: Optional[str] = None, namespace_prefix: Optional[str] = None, is_prefill: bool = False, is_decode: bool = False, migration_limit: int = 0, migration_max_seq_len: Optional[int] = None, chat_engine_factory: Optional[Callable] = None, ais_perf_config: Optional[AisPerfConfig] = None, *, tls_client_ca_cert_path: Optional[str] = None, metrics_prefix: Optional[str] = None, enable_anthropic_api: Optional[bool] = None, enable_systemone_api: Optional[bool] = None, strip_anthropic_preamble: Optional[bool] = None, enable_streaming_tool_dispatch: Optional[bool] = None, enable_streaming_reasoning_dispatch: Optional[bool] = None, tokenizer_backend: Optional[str] = None, tokenizer_fallback: Optional[bool] = None, batch_gateway_url: Optional[str] = None, reject_media: Optional[bool] = None, reject_media_status_code: Optional[int] = None) -> None
 ```
 
-[`lib/bindings/python/src/dynamo/_core.pyi#L3154`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3154)
+[`lib/bindings/python/src/dynamo/_core.pyi#L3155`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3155)
 
 **Public methods**
 
@@ -187,7 +187,7 @@ Optional override: refuse chat requests carrying image, video, or audio content 
 Optional 4xx/5xx status for a request refused by reject_media (default 415)
 </ParamField>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3160)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3161)
 </Accordion>
 
 <Accordion id="api-dynamo-core-fpmdirectpublisher" title="FpmDirectPublisher (class)">
@@ -1102,7 +1102,7 @@ from dynamo.llm import KvRouter
 KvRouter(endpoint: Endpoint, block_size: int, kv_router_config: KvRouterConfig, ais_perf_config: Optional[AisPerfConfig] = None, session_affinity_ttl_secs: Optional[int] = None, *, load_threshold_config: Optional[LoadThresholdConfig] = None, session_affinity_mode: str = 'hard') -> None
 ```
 
-[`lib/bindings/python/src/dynamo/_core.pyi#L2895`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2895)
+[`lib/bindings/python/src/dynamo/_core.pyi#L2896`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2896)
 
 **Public methods**
 
@@ -1138,7 +1138,7 @@ Optional overload-admission thresholds; all checks are disabled when omitted
 Session binding behavior: ``hard`` or ``soft``
 </ParamField>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2900)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2901)
 
 <h4 id="api-dynamo-core-kvrouter-generate">generate</h4>
 
@@ -1218,7 +1218,7 @@ multiple replicas (data_parallel_size &gt; 1).
 - This is different from query_instance_id which doesn't route the request.
 </Note>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2925)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2926)
 
 <h4 id="api-dynamo-core-kvrouter-generate-from-request">generate_from_request</h4>
 
@@ -1235,7 +1235,7 @@ Pass context to preserve request metadata, cancellation, and distributed
 tracing across the Python/Rust boundary.
 Returns an async iterator yielding generation responses.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2986)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2987)
 
 <h4 id="api-dynamo-core-kvrouter-best-worker">best_worker</h4>
 
@@ -1282,7 +1282,7 @@ configured default family before cache-bucket resolution.
 
 - `Tuple[int, int, int]` — A tuple of (worker_id, dp_rank, overlap_blocks) where: - worker_id: The ID of the best matching worker - dp_rank: The data parallel rank of the selected worker - overlap_blocks: The number of overlapping blocks found
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3004)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3005)
 
 <h4 id="api-dynamo-core-kvrouter-get-potential-loads">get_potential_loads</h4>
 
@@ -1315,7 +1315,7 @@ Each (worker_id, dp_rank) pair is returned as a separate entry.
 If you need aggregated loads per worker_id, sum the values manually.
 </Note>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3046)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3047)
 
 <h4 id="api-dynamo-core-kvrouter-get-overlap-scores">get_overlap_scores</h4>
 
@@ -1350,7 +1350,7 @@ Whether to query the configured shared cache.
 - `Dict[str, Any]` — workers. Each worker row is keyed by worker_id and dp_rank and
 - `Dict[str, Any]` — reports device, host-pinned, disk, and shared-cache overlap blocks.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3077)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3078)
 
 <h4 id="api-dynamo-core-kvrouter-dump-events">dump_events</h4>
 
@@ -1364,7 +1364,7 @@ Dump all events from the KV router's indexer.
 
 - `str` — A JSON string containing all indexer events
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3104)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3105)
 
 <h4 id="api-dynamo-core-kvrouter-mark-prefill-complete">mark_prefill_complete</h4>
 
@@ -1389,7 +1389,7 @@ This is typically called automatically by the router when using the
 `best_worker()` with `request_id` for custom routing.
 </Note>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3113)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3114)
 
 <h4 id="api-dynamo-core-kvrouter-free">free</h4>
 
@@ -1414,7 +1414,7 @@ This is typically called automatically by the router when using the
 `best_worker()` with `request_id` for custom routing.
 </Note>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3130)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3131)
 </Accordion>
 
 <Accordion id="api-dynamo-core-kvrouterconfig" title="KvRouterConfig (class)">
@@ -1672,7 +1672,7 @@ from dynamo.llm import KvStateAgentHost
 KvStateAgentHost(endpoint: Endpoint, max_slots: int = 8, slots_per_socket: int = 1) -> None
 ```
 
-[`lib/bindings/python/src/dynamo/_core.pyi#L2865`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2865)
+[`lib/bindings/python/src/dynamo/_core.pyi#L2866`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2866)
 
 **Public methods**
 
@@ -1684,7 +1684,7 @@ __init__(endpoint: Endpoint, max_slots: int = 8, slots_per_socket: int = 1) -> N
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2866)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2867)
 
 <h4 id="api-dynamo-core-kvstateagenthost-start">start</h4>
 
@@ -1694,7 +1694,7 @@ start() -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2871)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2872)
 
 <h4 id="api-dynamo-core-kvstateagenthost-status">status</h4>
 
@@ -1704,7 +1704,7 @@ status() -> Dict[str, Any]
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2874)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2875)
 
 <h4 id="api-dynamo-core-kvstateagenthost-shutdown">shutdown</h4>
 
@@ -1714,7 +1714,7 @@ shutdown() -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2877)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2878)
 
 <h4 id="api-dynamo-core-kvstateagenthost-wait-terminated">wait_terminated</h4>
 
@@ -1724,7 +1724,7 @@ wait_terminated() -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2880)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2881)
 </Accordion>
 
 <Accordion id="api-dynamo-core-kvstateattachmentowner" title="KvStateAttachmentOwner (class)">
@@ -1738,7 +1738,7 @@ from dynamo.llm import KvStateAttachmentOwner
 KvStateAttachmentOwner(endpoint: Endpoint, worker_id: int, descriptors: List[Dict[str, Any]]) -> None
 ```
 
-[`lib/bindings/python/src/dynamo/_core.pyi#L2883`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2883)
+[`lib/bindings/python/src/dynamo/_core.pyi#L2884`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2884)
 
 **Public methods**
 
@@ -1750,7 +1750,7 @@ __init__(endpoint: Endpoint, worker_id: int, descriptors: List[Dict[str, Any]]) 
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2884)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2885)
 
 <h4 id="api-dynamo-core-kvstateattachmentowner-start">start</h4>
 
@@ -1760,7 +1760,7 @@ start() -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2889)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2890)
 
 <h4 id="api-dynamo-core-kvstateattachmentowner-close">close</h4>
 
@@ -1770,7 +1770,7 @@ close() -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2892)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2893)
 </Accordion>
 
 <Accordion id="api-dynamo-llm-unary-llmunaryclient" title="LLMUnaryClient (class)">
@@ -2276,7 +2276,7 @@ from dynamo.llm import PoolRelay
 ```
 
 ```python
-PoolRelay(endpoint: Endpoint, cluster_id: str, namespace_filter: Optional[str] = None, endpoint_prefix: Optional[str] = None, publication_threshold: int = 16, publication_delay_ms: int = 1, recovery_attempt_timeout_ms: int = 30000, *, namespaces: Optional[List[str]] = None, endpoint_prefixes: Optional[List[str]] = None, watch_all: Optional[bool] = None, expected_unique_blocks: int = 1048576, bind: Optional[str] = None, tuning: Optional[Dict[str, int]] = None, sources_file: Optional[str] = None, connection_revision: Optional[str] = None, global_discovery_url: Optional[str] = None) -> None
+PoolRelay(endpoint: Endpoint, cluster_id: str, namespace_filter: Optional[str] = None, endpoint_prefix: Optional[str] = None, publication_threshold: int = 16, publication_delay_ms: int = 1, recovery_attempt_timeout_ms: int = 30000, *, namespaces: Optional[List[str]] = None, endpoint_prefixes: Optional[List[str]] = None, watch_all: Optional[bool] = None, expected_unique_blocks: int = 1048576, bind: Optional[str] = None, tuning: Optional[Dict[str, int]] = None, sources_file: Optional[str] = None, connection_revision: Optional[str] = None, global_discovery_url: Optional[str] = None, routing_pool: Optional[str] = None) -> None
 ```
 
 [`lib/bindings/python/src/dynamo/_core.pyi#L2818`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2818)
@@ -2286,7 +2286,7 @@ PoolRelay(endpoint: Endpoint, cluster_id: str, namespace_filter: Optional[str] =
 <h4 id="api-dynamo-core-poolrelay-init">__init__</h4>
 
 ```python
-__init__(endpoint: Endpoint, cluster_id: str, namespace_filter: Optional[str] = None, endpoint_prefix: Optional[str] = None, publication_threshold: int = 16, publication_delay_ms: int = 1, recovery_attempt_timeout_ms: int = 30000, *, namespaces: Optional[List[str]] = None, endpoint_prefixes: Optional[List[str]] = None, watch_all: Optional[bool] = None, expected_unique_blocks: int = 1048576, bind: Optional[str] = None, tuning: Optional[Dict[str, int]] = None, sources_file: Optional[str] = None, connection_revision: Optional[str] = None, global_discovery_url: Optional[str] = None) -> None
+__init__(endpoint: Endpoint, cluster_id: str, namespace_filter: Optional[str] = None, endpoint_prefix: Optional[str] = None, publication_threshold: int = 16, publication_delay_ms: int = 1, recovery_attempt_timeout_ms: int = 30000, *, namespaces: Optional[List[str]] = None, endpoint_prefixes: Optional[List[str]] = None, watch_all: Optional[bool] = None, expected_unique_blocks: int = 1048576, bind: Optional[str] = None, tuning: Optional[Dict[str, int]] = None, sources_file: Optional[str] = None, connection_revision: Optional[str] = None, global_discovery_url: Optional[str] = None, routing_pool: Optional[str] = None) -> None
 ```
 
 No summary available.
@@ -2301,7 +2301,7 @@ start() -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2841)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2842)
 
 <h4 id="api-dynamo-core-poolrelay-health">health</h4>
 
@@ -2311,7 +2311,7 @@ health() -> Dict[str, Any]
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2844)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2845)
 
 <h4 id="api-dynamo-core-poolrelay-stats">stats</h4>
 
@@ -2321,7 +2321,7 @@ stats() -> Dict[str, Any]
 
 Available only in builds with the ckf-diagnostics Cargo feature.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2847)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2848)
 
 <h4 id="api-dynamo-core-poolrelay-snapshot">snapshot</h4>
 
@@ -2331,7 +2331,7 @@ snapshot(serving_endpoint: str) -> Dict[str, Any]
 
 Available only in builds with the ckf-diagnostics Cargo feature.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2851)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2852)
 
 <h4 id="api-dynamo-core-poolrelay-flush">flush</h4>
 
@@ -2341,7 +2341,7 @@ flush() -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2855)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2856)
 
 <h4 id="api-dynamo-core-poolrelay-shutdown">shutdown</h4>
 
@@ -2351,7 +2351,7 @@ shutdown() -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2858)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2859)
 
 <h4 id="api-dynamo-core-poolrelay-wait-for-shutdown">wait_for_shutdown</h4>
 
@@ -2361,7 +2361,7 @@ wait_for_shutdown() -> None
 
 Resolve once the relay has stopped, whether by shutdown() or a terminal host failure.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2861)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L2862)
 </Accordion>
 
 <Accordion id="api-dynamo-core-pythonasyncengine" title="PythonAsyncEngine (class)">
@@ -2603,7 +2603,7 @@ A policy-class queue cap rejected the request.
 from dynamo.llm import RouterQueueLimitExceeded
 ```
 
-[`lib/bindings/python/src/dynamo/_core.pyi#L3309`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3309)
+[`lib/bindings/python/src/dynamo/_core.pyi#L3310`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3310)
 </Accordion>
 
 <Accordion id="api-dynamo-core-routingconstraints" title="RoutingConstraints (class)">
@@ -2971,7 +2971,7 @@ The worker temporarily cannot admit another request.
 from dynamo.llm import WorkerOverloaded
 ```
 
-[`lib/bindings/python/src/dynamo/_core.pyi#L3357`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3357)
+[`lib/bindings/python/src/dynamo/_core.pyi#L3358`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L3358)
 </Accordion>
 
 <Accordion id="api-dynamo-core-workertype" title="WorkerType (class)">
