@@ -155,10 +155,15 @@ fn duration_nanos(age: Duration) -> u64 {
     u64::try_from(age.as_nanos()).unwrap_or(u64::MAX)
 }
 
-fn parse_max_age(max_age_seconds: f64) -> PyResult<Duration> {
+/// A freshness window of ``max_age_seconds``; ``None`` unless finite and positive.
+fn max_age_from_secs(max_age_seconds: f64) -> Option<Duration> {
     Duration::try_from_secs_f64(max_age_seconds)
         .ok()
         .filter(|age| !age.is_zero())
+}
+
+fn parse_max_age(max_age_seconds: f64) -> PyResult<Duration> {
+    max_age_from_secs(max_age_seconds)
         .ok_or_else(|| PyValueError::new_err("max_age_seconds must be finite and positive"))
 }
 
@@ -1166,12 +1171,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_max_age_rejects_non_positive_and_non_finite() {
-        assert_eq!(parse_max_age(1.5).unwrap(), Duration::from_millis(1500));
-        assert!(parse_max_age(0.0).is_err());
-        assert!(parse_max_age(-1.0).is_err());
-        assert!(parse_max_age(f64::NAN).is_err());
-        assert!(parse_max_age(f64::INFINITY).is_err());
+    fn max_age_rejects_non_positive_and_non_finite() {
+        // The pure parser: a PyErr in the test binary would need libpython,
+        // which the extension-module build does not link.
+        assert_eq!(max_age_from_secs(1.5), Some(Duration::from_millis(1500)));
+        assert_eq!(max_age_from_secs(0.0), None);
+        assert_eq!(max_age_from_secs(-1.0), None);
+        assert_eq!(max_age_from_secs(f64::NAN), None);
+        assert_eq!(max_age_from_secs(f64::INFINITY), None);
     }
 
     fn active_worker(ranks: Range<u32>, now: Instant) -> WorkerFpm {
