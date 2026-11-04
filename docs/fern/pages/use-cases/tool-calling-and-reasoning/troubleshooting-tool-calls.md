@@ -137,7 +137,7 @@ Set `DYN_PARSER_VERSION` on the frontend running the `dynamo` processor and on w
 
 | `DYN_PARSER_VERSION` | Compatible Unified configuration | Unavailable or incompatible configuration |
 | --- | --- | --- |
-| Unset or `auto` | V2, except reasoning-only Qwen/Nemotron and MiniMax M3 below | V1 if each configured name exists in its V1 registry; otherwise reject |
+| Unset or `auto` | V2, except reasoning-only Qwen/Nemotron below | V1 if each configured name exists in its V1 registry; otherwise reject |
 | `1` | V1 if each configured name exists in its V1 registry | Reject names unavailable in V1 |
 | `2` | V2 | Reject; no V1 configuration fallback |
 
@@ -173,7 +173,7 @@ A single tool selector such as `qwen3_coder`, or reasoning selector such as `dee
 
 **Reasoning-only exceptions:** without a tool selector, auto stays on V1 for `qwen3`, `nemotron_v3`, or `nemotron3` reasoning. Qwen thinking/QwQ models can emit Hermes JSON tools rather than Coder XML; a Nemotron reasoning name alone does not identify its tool grammar. Explicit `2` selects the corresponding Unified grammar; use it only for matching output.
 
-**MiniMax M3:** auto stays on V1, including with both selectors configured, because Unified explicit-guided output uses `reasoning_content` instead of `content`. Select `2` to opt into Unified.
+**MiniMax M3:** auto uses Unified for compatible M3 selectors. Use `1` to select legacy parsing.
 
 **Deprecated setting:** replace `DYN_ENABLE_EXPERIMENTAL_PARSERS_V2` with `DYN_PARSER_VERSION`. Legacy `true` means explicit V2; `false` means auto, which now prefers compatible V2. Conflicting pairs (`true` + `1`, `false` + `2`) and malformed booleans reject. For rollback, unset the old variable and use `1` if both selectors exist in V1. Muse Glimmer, Muse Spark, Beam, and DeepSeek V4.1 are Unified-only.
 
@@ -181,7 +181,7 @@ Unified emits reasoning, text, and tools in source order. V1 extracts reasoning 
 
 Unified resolves prompt-prefilled reasoning after template rendering: an opener in the prompt need not recur in generated text. Kimi K3's `<|open|>think<|sep|>` suffix, including supported whitespace between markers, starts reasoning. This is separate from force-reasoning defaults and engine grammar gates.
 
-For MiniMax M3, explicit `guided_json`, `guided_regex`, `guided_choice`, or `guided_grammar` disables thinking by default when no explicit thinking control is supplied. When the rendered prompt ends in `<mm:think>`, both parser routes start in reasoning: reasoning streams before `</mm:think>` arrives and remains `reasoning_content` if truncated. Configure dynamo.vllm with `--reasoning-parser minimax_m3`, or dynamo.sglang with `--reasoning-parser minimax-m3`, to defer the answer grammar until reasoning ends; dynamo.frontend also sends SGLang's `require_reasoning` signal for these prompt-open requests. The frontend does not infer grammar timing from generated text. Adaptive/M3.1 templates that leave reasoning unopened receive no additional gate.
+For MiniMax M3, explicit `guided_json`, `guided_regex`, `guided_choice`, or `guided_grammar` disables thinking by default when no explicit thinking control is supplied. Explicit-guided requests that enable reasoning require `--dyn-reasoning-parser minimax_m3`; a tool parser alone does not activate guided-reasoning support. When the rendered prompt ends in `<mm:think>`, both parser routes start in reasoning: reasoning streams before `</mm:think>` arrives and remains `reasoning_content` if truncated. Configure dynamo.vllm with `--reasoning-parser minimax_m3`, or dynamo.sglang with `--reasoning-parser minimax-m3`, to defer the answer grammar until reasoning ends; dynamo.frontend also sends SGLang's `require_reasoning` signal for these prompt-open requests. The frontend does not infer grammar timing from generated text. Adaptive/M3.1 templates that leave reasoning unopened receive no additional gate.
 
 Forced choices can install guided JSON or family-native structural tags. A mode requiring the V1 jail cannot silently fall back under explicit V2; unsupported combinations are rejected. See [Structural Tags](structural-tag.md) for builder availability and backend activation.
 

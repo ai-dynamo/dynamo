@@ -18030,6 +18030,25 @@ responses_tools: None,
                 );
                 assert_eq!(trip.message, (answer.to_string(), "Plan.".to_string()));
                 assert_eq!(minimax_m3_streamed_text(&trip.chunks), trip.message);
+                let mut options = crate::protocols::openai::ParsingOptions::new(
+                    Some("minimax_m3".into()),
+                    Some("minimax_m3".into()),
+                );
+                options.reasoning_disabled = mode == "disabled";
+                let response = crate::protocols::openai::chat_completions::aggregator::DeltaAggregator::apply_for_selected_unified_parser(
+                    stream::iter(trip.chunks.into_iter().map(Annotated::from_data)), options,
+                ).await.unwrap();
+                assert_eq!(
+                    response.inner.choices[0]
+                        .message
+                        .reasoning_content
+                        .as_deref(),
+                    Some("Plan.")
+                );
+                assert_eq!(
+                    response.inner.choices[0].message.content,
+                    Some(ChatCompletionMessageContent::Text(answer.to_string()))
+                );
                 for thought in ["Plan.", "[plan]", "[plan]</mm:th"] {
                     for end in [
                         MiniMaxM3StreamEnd::Length,
@@ -18095,6 +18114,73 @@ responses_tools: None,
                     .is_err()
                 );
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m3_unopened_guidance_preserves_stream_placement() {
+        if ["auto", "1", "2"].into_iter().all(|version| {
+            crate::test_utils::run_isolated(
+                concat!(
+                    module_path!(),
+                    "::test_minimax_m3_unopened_guidance_preserves_stream_placement"
+                ),
+                &[(
+                    dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION,
+                    version,
+                )],
+            )
+        }) {
+            return;
+        }
+        for template in [
+            MiniMaxM3Template::RendersThinkingMode,
+            MiniMaxM3Template::IgnoresThinkingMode,
+        ] {
+            for adaptive in [false, true] {
+                let mut body = serde_json::json!({"guided_regex": "Paris|London"});
+                if adaptive {
+                    body["chat_template_kwargs"] = serde_json::json!({"thinking_mode": "adaptive"});
+                }
+                let trip = minimax_m3_round_trip_on(
+                    template,
+                    body,
+                    &["Par", "is"],
+                    MiniMaxM3StreamEnd::Stop,
+                )
+                .await;
+                let expected = if adaptive && !minimax_m3_uses_unified_parser() {
+                    vec![
+                        (String::new(), String::new(), false),
+                        (String::new(), String::new(), false),
+                        ("Paris".into(), String::new(), true),
+                    ]
+                } else {
+                    vec![
+                        ("Par".into(), String::new(), false),
+                        ("is".into(), String::new(), false),
+                        (String::new(), String::new(), true),
+                    ]
+                };
+                assert_eq!(
+                    minimax_m3_chunk_placement(&trip.chunks),
+                    expected,
+                    "{template:?} adaptive={adaptive}"
+                );
+                assert_eq!(trip.message, ("Paris".into(), String::new()));
+            }
+            let trip = minimax_m3_round_trip_on(
+                template,
+                serde_json::json!({"guided_regex": "Paris|London", "chat_template_kwargs": {"thinking_mode": "adaptive"}}),
+                &["<mm:think>Plan.", "</mm:think>", "Paris"],
+                MiniMaxM3StreamEnd::Stop,
+            ).await;
+            assert_eq!(trip.message, ("Paris".into(), "Plan.".into()));
+            assert_eq!(minimax_m3_streamed_text(&trip.chunks), trip.message);
+            assert_eq!(
+                minimax_m3_chunk_placement(&trip.chunks).first(),
+                Some(&(String::new(), "Plan.".into(), false))
+            );
         }
     }
 
