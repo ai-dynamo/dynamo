@@ -13,15 +13,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
-use kube::{
-    Api, Client as KubeClient, CustomResource,
-    api::{Patch, PatchParams, PostParams},
-};
+use kube::{Api, Client as KubeClient, CustomResource, api::PostParams};
 use serde::{Deserialize, Serialize};
 
 use crate::discovery::{DiscoveryMetadata, EventScope};
 
-/// Field manager name for server-side apply - identifies this client as the owner of fields it sets
+/// Field manager name for discovery snapshot writes.
 const FIELD_MANAGER: &str = "dynamo-worker";
 const WRITE_ID_ANNOTATION: &str = "nvidia.com/discovery-write-id";
 const APPLY_ATTEMPTS: u32 = 3;
@@ -177,36 +174,34 @@ pub async fn apply_cr(
         .name
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("CR must have a name"))?;
+    let write_id = uuid::Uuid::new_v4().to_string();
     let mut candidate = cr.clone();
     candidate
         .metadata
         .annotations
         .get_or_insert_default()
-        .insert(WRITE_ID_ANNOTATION.into(), uuid::Uuid::new_v4().to_string());
+        .insert(WRITE_ID_ANNOTATION.into(), write_id.clone());
 
-    for attempt in 1..=APPLY_ATTEMPTS {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
         let result = tokio::time::timeout(APPLY_ATTEMPT_TIMEOUT, async {
-            let current = api.get_opt(cr_name).await?;
-            candidate.metadata.resource_version = current
-                .as_ref()
-                .and_then(|current| current.metadata.resource_version.clone());
-            if current.is_some() {
-                api.patch(
-                    cr_name,
-                    &PatchParams::apply(FIELD_MANAGER).force(),
-                    &Patch::Apply(&candidate),
-                )
-                .await
+            let params = PostParams {
+                field_manager: Some(FIELD_MANAGER.into()),
+                ..Default::default()
+            };
+            if let Some(mut current) = api.get_opt(cr_name).await? {
+                current.spec = candidate.spec.clone();
+                current.metadata.owner_references = candidate.metadata.owner_references.clone();
+                current
+                    .metadata
+                    .annotations
+                    .get_or_insert_default()
+                    .insert(WRITE_ID_ANNOTATION.into(), write_id.clone());
+                api.replace(cr_name, &params, &current).await
             } else {
                 // A delayed create cannot overwrite a newer, already-created snapshot.
-                api.create(
-                    &PostParams {
-                        field_manager: Some(FIELD_MANAGER.into()),
-                        ..Default::default()
-                    },
-                    &candidate,
-                )
-                .await
+                api.create(&params, &candidate).await
             }
         })
         .await;
@@ -250,7 +245,6 @@ pub async fn apply_cr(
         tracing::warn!(namespace, cr_name, attempt, error = %error, "Retrying discovery persistence");
         tokio::time::sleep(APPLY_RETRY_DELAY).await;
     }
-    unreachable!("at least one persistence attempt")
 }
 
 #[cfg(test)]
