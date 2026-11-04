@@ -331,6 +331,9 @@ impl SelectionCore {
 
                 let KvIndexSource::Owned(ingress) = &self.host.cache.index;
                 let indexer = ingress.open(&self.indexer_registry, &key, block_size);
+                let transfer_source_slots = Arc::new(tokio::sync::Semaphore::new(
+                    transfer_sources::MAX_IN_FLIGHT_TRANSFER_SOURCE_LOOKUPS,
+                ));
                 let overlap_refresh = indexer.supports_overlap_refresh().then(|| {
                     Arc::new(TieredOverlapRefresher::new(
                         indexer.clone(),
@@ -374,6 +377,7 @@ impl SelectionCore {
                     block_size,
                     is_eagle,
                     indexer,
+                    transfer_source_slots,
                     workers_tx,
                     hint_capable_workers: AtomicBool::new(false),
                     scores_kv_transfer,

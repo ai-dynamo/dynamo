@@ -147,6 +147,54 @@ impl LowerTierIndexers {
         self.indexers.read().unwrap().get(&storage_tier).cloned()
     }
 
+    /// Root-aligned prefixes backed entirely by host inventory. Starting at
+    /// the root, rather than extending the device match, prevents GPU-only or
+    /// disk-only blocks from being advertised to the CPU KVCR adapter.
+    #[cfg(feature = "standalone-selection")]
+    pub(crate) fn host_transfer_candidates(
+        &self,
+        sequence: &[LocalBlockHash],
+    ) -> Option<KvTransferCandidates> {
+        self.transfer_candidates_for_tier(StorageTier::HostPinned, sequence)
+    }
+
+    /// GPU-only retained-cache inventory, independently published after its
+    /// producer copy completes. Native Device, host and disk blocks cannot
+    /// satisfy this lookup, and it is not part of ordinary cache-hit scoring.
+    #[cfg(feature = "standalone-selection")]
+    pub(crate) fn gpu_direct_transfer_candidates(
+        &self,
+        sequence: &[LocalBlockHash],
+    ) -> Option<KvTransferCandidates> {
+        self.transfer_candidates_for_tier(StorageTier::GpuDirect, sequence)
+    }
+
+    #[cfg(feature = "standalone-selection")]
+    fn transfer_candidates_for_tier(
+        &self,
+        tier: StorageTier,
+        sequence: &[LocalBlockHash],
+    ) -> Option<KvTransferCandidates> {
+        let indexer = self.get(tier)?;
+        let snapshot = self.routing_snapshot.load_full();
+        let first_hash = *sequence.first()?;
+        let continuations: FxHashMap<_, _> = indexer
+            .backend()
+            .root_workers(first_hash, snapshot.projection())
+            .into_iter()
+            .map(|worker| (worker, crate::indexer::LowerTierContinuation::from_root(0)))
+            .collect();
+        let mut matches = indexer
+            .backend()
+            .query_match_details_with_options_and_snapshot(
+                sequence,
+                &continuations,
+                true,
+                &snapshot,
+            );
+        merge_kv_transfer_tier_candidates(None, &mut matches, snapshot)
+    }
+
     pub fn record_unsupported_residency_event(&self, event: &RouterEvent) {
         record_unsupported_residency_event(self.metrics.as_deref(), event);
     }

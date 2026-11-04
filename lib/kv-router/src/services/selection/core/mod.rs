@@ -69,10 +69,7 @@ pub use operation::{
     LookupTimings, Selected, SelectionAdmission, SelectionOperation, SelectionOutcome,
     SelectionRun, SessionBinding,
 };
-
-pub use transfer_sources::{
-    TransferSourceMemoryKind, TransferSourceQuery, TransferSourceResult, transfer_source_for_target,
-};
+pub use transfer_sources::{TransferSourceMemoryKind, TransferSourceQuery, TransferSourceResult};
 
 use super::affinity::{
     AcquireStep, AffinityError, AffinityLease, Hold, SessionAffinity, SessionAffinityConfig,
@@ -131,6 +128,8 @@ struct SelectionEntry {
     block_size: u32,
     is_eagle: bool,
     indexer: Indexer,
+    /// Optional donor lookups must not build an unbounded blocking-task queue.
+    transfer_source_slots: Arc<tokio::sync::Semaphore>,
     workers_tx: watch::Sender<HashMap<WorkerId, SelectionWorkerConfig>>,
     /// Whether a worker in `workers_tx` consumes router hints, set on publish.
     hint_capable_workers: AtomicBool,

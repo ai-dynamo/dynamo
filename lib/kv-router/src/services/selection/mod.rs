@@ -35,7 +35,6 @@ pub use core::{
     SelectionAdmission, SelectionCore, SelectionHost, SelectionOperation, SelectionOutcome,
     SelectionPartition, SelectionRun, SelectionScheduler, SelectionServiceConfig, SessionBinding,
     TransferSourceMemoryKind, TransferSourceQuery, TransferSourceResult,
-    transfer_source_for_target,
 };
 pub use error::SelectionError;
 pub use ingress::KvEventIngress;

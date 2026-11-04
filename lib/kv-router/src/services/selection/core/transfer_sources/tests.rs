@@ -12,6 +12,66 @@ use crate::protocols::{
 };
 use crate::services::selection::PromptRequest;
 
+#[test]
+fn owned_lookup_prompt_preserves_hash_precedence_and_options() {
+    use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo};
+    use crate::services::selection::input::MmRoutingInfoRequest;
+
+    let multimodal = PromptRequest {
+        token_ids: Some((21..=29).collect()),
+        mm_routing_info: Some(MmRoutingInfoRequest {
+            routing_token_ids: (1..=9).collect(),
+            block_mm_infos: vec![Some(BlockExtraInfo {
+                mm_objects: vec![BlockMmObjectInfo {
+                    mm_hash: 42,
+                    offsets: vec![(0, 1)],
+                }],
+            })],
+        }),
+        block_mm_infos: Some(vec![None]),
+        block_hashes: Some(vec![99]),
+        sequence_hashes: None,
+        isl_tokens: None,
+        lora_name: Some("adapter".into()),
+        cache_namespace: Some("conversation".into()),
+        is_eagle: Some(true),
+    };
+    let mut raw = multimodal.clone();
+    raw.mm_routing_info
+        .as_mut()
+        .unwrap()
+        .routing_token_ids
+        .clear();
+    let hashes = PromptRequest {
+        block_hashes: Some(vec![-1]),
+        sequence_hashes: Some(vec![-1]),
+        isl_tokens: Some(4),
+        ..Default::default()
+    };
+    for prompt in [multimodal, raw, hashes] {
+        let original = prompt.view();
+        let owned = owned_indexer_prompt(original);
+        assert!(owned.mm_routing_info.is_none());
+        assert_eq!(
+            owned.view().block_hashes_for_indexer(4, false).unwrap(),
+            original.block_hashes_for_indexer(4, false).unwrap()
+        );
+    }
+    let missing = PromptRequest::default();
+    assert_eq!(
+        owned_indexer_prompt(missing.view())
+            .view()
+            .block_hashes_for_indexer(4, false)
+            .unwrap_err()
+            .to_string(),
+        missing
+            .view()
+            .block_hashes_for_indexer(4, false)
+            .unwrap_err()
+            .to_string()
+    );
+}
+
 fn config() -> SelectionWorkerConfig {
     SelectionWorkerConfig {
         endpoint: "http://donor:8000".to_string(),

@@ -4,7 +4,31 @@
 //! Advisory transfer-source lookup, independent of execution admission.
 
 use super::*;
+use crate::indexer::LowerTierIndexers;
 use crate::protocols::KvTransferEnforcement;
+use crate::services::selection::PromptRequest;
+
+pub(super) const MAX_IN_FLIGHT_TRANSFER_SOURCE_LOOKUPS: usize = 8;
+
+fn owned_indexer_prompt(prompt: PromptView<'_>) -> PromptRequest {
+    if let Some((tokens, mm_infos)) = prompt.routing_tokens_and_mm_infos() {
+        PromptRequest {
+            token_ids: Some(tokens.to_vec()),
+            block_mm_infos: mm_infos.map(<[_]>::to_vec),
+            lora_name: prompt.lora_name.map(str::to_owned),
+            cache_namespace: prompt.cache_namespace.map(str::to_owned),
+            is_eagle: prompt.is_eagle,
+            ..Default::default()
+        }
+    } else {
+        PromptRequest {
+            block_hashes: prompt.block_hashes.map(<[_]>::to_vec),
+            sequence_hashes: prompt.sequence_hashes.map(<[_]>::to_vec),
+            isl_tokens: prompt.isl_tokens,
+            ..Default::default()
+        }
+    }
+}
 
 /// Inventory and endpoint protocol must agree. Host is the existing CPU path;
 /// GPU uses only producer-published GpuDirect blocks and a GPU-only pin endpoint.
@@ -46,9 +70,120 @@ pub struct TransferSourceResult {
     pub payload: KvSourceLocationsPayload,
 }
 
-/// Filter rooted inventory using certified endpoint, role and topology facts.
-/// This pure eligibility check does not admit or dispatch execution.
-pub fn transfer_source_for_target(
+impl SelectionCore {
+    /// Query inventory without selecting, queuing, booking or dispatching work.
+    /// Missing partitions and expired advisory deadlines yield no donor.
+    pub async fn query_transfer_sources(
+        &self,
+        query: TransferSourceQuery<'_>,
+    ) -> Result<Option<TransferSourceResult>, SelectionError> {
+        self.ensure_running()?;
+        let key = RoutingPartitionId::new(query.model_name, query.routing_group);
+        let Some(partition) = self.partition(&key) else {
+            return Ok(None);
+        };
+        let result = partition.query_transfer_sources(query).await;
+        self.ensure_running()?;
+        result
+    }
+}
+
+impl SelectionPartition {
+    pub async fn query_transfer_sources(
+        &self,
+        query: TransferSourceQuery<'_>,
+    ) -> Result<Option<TransferSourceResult>, SelectionError> {
+        let memory_kind = query.memory_kind;
+        let Some(candidates) = self
+            .query_transfer_inventory(&query, move |lower_tier, hashes| match memory_kind {
+                TransferSourceMemoryKind::Host => lower_tier.host_transfer_candidates(hashes),
+                TransferSourceMemoryKind::Gpu => lower_tier.gpu_direct_transfer_candidates(hashes),
+            })
+            .await?
+            .flatten()
+        else {
+            return Ok(None);
+        };
+        // Re-read membership after inventory lookup; no departed endpoint is authoritative.
+        let result = transfer_source_for_target(&self.0.workers_tx.borrow(), &query, &candidates);
+        Ok((Instant::now() < query.deadline)
+            .then_some(result)
+            .flatten())
+    }
+
+    async fn query_transfer_inventory<T, F>(
+        &self,
+        query: &TransferSourceQuery<'_>,
+        lookup: F,
+    ) -> Result<Option<T>, SelectionError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&LowerTierIndexers, &[LocalBlockHash]) -> T + Send + 'static,
+    {
+        let entry = &self.0;
+        if Instant::now() >= query.deadline
+            || entry.key.model_name != query.model_name
+            || entry.key.routing_group != query.routing_group
+            || entry.block_size != query.target_block_size
+            || entry.is_eagle != query.target_is_eagle
+            || query
+                .prompt
+                .is_eagle
+                .is_some_and(|value| value != entry.is_eagle)
+            || query.target_worker_type != "prefill"
+            || (query.memory_kind == TransferSourceMemoryKind::Gpu && !query.target_gpu_direct)
+            || query
+                .target_transfer_domain
+                .is_none_or(|domain| domain.trim().is_empty())
+            || !entry.indexer.supports_kv_transfer_chain_retention()
+        {
+            return Ok(None);
+        }
+        // Admission is immediate and independent of execution admission. Keep
+        // the permit inside the blocking closure so expiry/cancellation cannot
+        // free capacity while its abandoned walk is still queued or running.
+        let Ok(permit) = entry.transfer_source_slots.clone().try_acquire_owned() else {
+            return Ok(None);
+        };
+        let lower_tier = match &entry.indexer {
+            Indexer::Single { lower_tier, .. } | Indexer::Concurrent { lower_tier, .. } => {
+                lower_tier.clone()
+            }
+            Indexer::Remote { .. } | Indexer::None => return Ok(None),
+        };
+        let prompt = owned_indexer_prompt(query.prompt);
+        let block_size = entry.block_size;
+        let is_eagle = entry.is_eagle;
+        let deadline = query.deadline;
+        // Retained GPU inventory is independent of native execution Device
+        // events. Both walks stay off the executor and hold the permit through
+        // abandoned/expired work; neither walk can acquire a GPU memory lease.
+        let task = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            let hashes = prompt
+                .view()
+                .block_hashes_for_indexer(block_size, is_eagle)?;
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            Ok::<_, SelectionError>(Some(lookup(&lower_tier, &hashes)))
+        });
+        let result = match tokio::time::timeout_at(query.deadline.into(), task).await {
+            Ok(Ok(result)) => result?,
+            Ok(Err(error)) => return Err(SelectionError::Internal(error.to_string())),
+            Err(_) => return Ok(None),
+        };
+        if Instant::now() >= query.deadline {
+            return Ok(None);
+        }
+        Ok(result)
+    }
+}
+
+fn transfer_source_for_target(
     configs: &HashMap<WorkerId, SelectionWorkerConfig>,
     query: &TransferSourceQuery<'_>,
     candidates: &KvTransferCandidates,
