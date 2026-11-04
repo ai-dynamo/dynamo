@@ -831,7 +831,7 @@ def test_kubernetes_validation_drops_valueless_optional_required_braces() -> Non
         "MaxLength: 63  Optional: {}  Required: {}  Enum: [a, b]",
         r"MaxLength: 63 <br />Optional: \{\} <br />Required: \{\} <br />Enum: [a, b]",
     ):
-        rendered = kubernetes_api_rendering._prose(raw)
+        rendered = kubernetes_api_rendering._validation(raw)
         assert "Optional" in rendered
         assert "Required" in rendered
         assert "{}" not in rendered
@@ -846,7 +846,7 @@ def test_kubernetes_validation_drops_embedded_and_schemaless_braces() -> None:
         "EmbeddedResource: {}  Optional: {}",
         r"Schemaless: \{\} <br />Type: object <br />Optional: \{\}",
     ):
-        rendered = kubernetes_api_rendering._prose(raw)
+        rendered = kubernetes_api_rendering._validation(raw)
         assert "&#123;" not in rendered
         assert "&#125;" not in rendered
         assert "{}" not in rendered
@@ -855,9 +855,15 @@ def test_kubernetes_validation_drops_embedded_and_schemaless_braces() -> None:
 def test_kubernetes_valueless_marker_strip_skips_inline_code() -> None:
     """Literal ``Optional: {}`` inside an inline code span is left intact."""
     raw = "Set `Optional: {}` to opt in. Optional: {}"
-    rendered = kubernetes_api_rendering._prose(raw)
+    rendered = kubernetes_api_rendering._validation(raw)
     assert "`Optional: {}`" in rendered
     assert rendered.endswith("Optional")
+
+
+def test_kubernetes_description_keeps_valueless_marker_braces() -> None:
+    """Marker cleanup applies to validation cells only, not descriptions."""
+    rendered = kubernetes_api_rendering._prose("Use Required: {} to opt in.")
+    assert "Required: &#123;&#125;" in rendered
 
 
 def test_kubernetes_valueless_marker_strip_skips_multiline_inline_code() -> None:

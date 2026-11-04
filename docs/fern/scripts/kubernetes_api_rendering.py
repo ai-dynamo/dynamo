@@ -102,7 +102,12 @@ def _drop_valueless_markers(text: str) -> str:
 
 def _prose(text: str) -> str:
     """Escape crd-ref-docs prose for MDX, collapsing its ``<br />`` wraps."""
-    return escape_mdx_prose(_drop_valueless_markers(BR_RE.sub(" ", text)))
+    return escape_mdx_prose(BR_RE.sub(" ", text))
+
+
+def _validation(text: str) -> str:
+    """Like ``_prose``, but also strips valueless-marker braces."""
+    return _prose(_drop_valueless_markers(text))
 
 
 def render_mdx(reference: KubernetesReference) -> str:
@@ -197,7 +202,7 @@ def _type_metadata(type_: KubernetesType, valid_anchors: set[str]) -> list[str]:
     if type_.underlying_type:
         lines.append(f"**Underlying type:** `{_plain(type_.underlying_type)}`")
     if type_.validation:
-        lines.append(f"**Validation:** {_prose(type_.validation)}")
+        lines.append(f"**Validation:** {_validation(type_.validation)}")
     refs = dict.fromkeys(ref for ref in type_.appears_in if ref.anchor in valid_anchors)
     if refs:
         joined = ", ".join(f"[{ref.name}](#{ref.anchor})" for ref in refs)
@@ -232,7 +237,7 @@ def _field_footnotes(field: KubernetesField, valid_anchors: set[str]) -> list[st
     if links:
         lines.append(f"See {', '.join(links)}.")
     if field.validation:
-        lines.append(f"**Validation:** {_prose(field.validation)}")
+        lines.append(f"**Validation:** {_validation(field.validation)}")
     return lines
 
 
