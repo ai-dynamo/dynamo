@@ -609,6 +609,7 @@ mod tests {
             tool_choice: None,
             cache_control: None,
             thinking: Some(ThinkingConfig {
+                display: None,
                 thinking_type: "enabled".to_string(),
                 budget_tokens: Some(4096),
                 display: None,

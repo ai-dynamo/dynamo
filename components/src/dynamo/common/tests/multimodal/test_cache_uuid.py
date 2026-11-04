@@ -3,7 +3,10 @@
 
 import pytest
 
-from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
+from dynamo.common.multimodal.cache_uuid import (
+    reject_unsupported_json_multimodal_data,
+    reject_unsupported_multimodal_uuids,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -31,6 +34,13 @@ def test_rejects_request_with_cache_uuid() -> None:
         match="supported only by the vLLM backend",
     ):
         reject_unsupported_multimodal_uuids({"image_url": [None, "cached-image"]})
+
+
+def test_json_guard_rejects_opaque_payloads_but_allows_existing_media() -> None:
+    reject_unsupported_json_multimodal_data({"image_url": [{"Url": "https://image"}]})
+    reject_unsupported_json_multimodal_data(None)
+    with pytest.raises(ValueError, match="supported only by the vLLM backend"):
+        reject_unsupported_json_multimodal_data({"image": [{"Json": None}]})
 
 
 @pytest.mark.parametrize(
