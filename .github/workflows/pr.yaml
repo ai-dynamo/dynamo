@@ -1443,12 +1443,12 @@ jobs:
 
   # ============================================================================
   # TEMPORARY: GAIE DEPLOY TEST ON EVERY PUSH (PR #17477)
-  # Runs the GAIE deploy test on each push to the PR, to test it before merge.
   # Remove this job, and its entries in deploy-cleanup and deploy-status-check,
   # before merging: post-merge-ci.yml calls the same workflow. It runs only on
   # this PR's CI branch, so a copy merged by mistake is skipped.
   # ============================================================================
   deploy-test-gaie:
+    name: GAIE Deploy Test
     needs: [changed-files, deploy-operator, frontend-copy-to-acr]
     if: |
       github.ref_name == 'pull-request/17477' &&
@@ -1984,7 +1984,7 @@ jobs:
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always()
-    # TEMPORARY (PR #17477): deploy-test-gaie.
+    # TEMPORARY (PR #17477): remove deploy-test-gaie with the job.
     needs: [changed-files, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-dgdr, deploy-test-gaie]
     runs-on: prod-deploy-tester-v1
     steps:

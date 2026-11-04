@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import secrets
+import subprocess
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -135,6 +136,18 @@ def _get_workspace_dir() -> str:
 
     # Fallback: assume workspace is 3 levels up from tests/deploy/
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def kubectl(*args: str, input_: str | None = None) -> subprocess.CompletedProcess[str]:
+    """Run kubectl without a shell and retain stdout/stderr for assertions."""
+
+    return subprocess.run(
+        ["kubectl", *args],
+        input=input_,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
 
 
 # Supported DynamoGraphDeployment CRD schemas. v1alpha1 uses ``spec.services``
@@ -475,30 +488,6 @@ class ServiceSpec:
         resources.setdefault("limits", {})["gpu"] = str(value)
         resources.setdefault("requests", {})["gpu"] = str(value)
 
-    # ----- Mocker -----
-    def use_mocker(self, image: str, model: str) -> None:
-        """Run a mocker from ``image`` in place of this worker's engine.
-
-        The mocker serves ``model`` with the engine's ``--block-size`` and
-        ``--disaggregation-mode``, so a router sees the same workers, and it
-        needs no GPU.
-        """
-        if self._schema != SCHEMA_V1BETA1:
-            raise NotImplementedError("use_mocker supports v1beta1 manifests only")
-        engine_args = self._get_args()
-        mocker_args = ["--model-path", model, "--model-name", model]
-        for flag in ("--block-size", "--disaggregation-mode"):
-            if flag in engine_args:
-                mocker_args += [flag, engine_args[engine_args.index(flag) + 1]]
-        container = self._main_container()
-        assert container is not None, f"{self._name} has no main container"
-        container.update(
-            image=image, command=["python3", "-m", "dynamo.mocker"], args=mocker_args
-        )
-        resources = container.get("resources", {})
-        for bucket in ("limits", "requests"):
-            resources.get(bucket, {}).pop("nvidia.com/gpu", None)
-
     @property
     def tensor_parallel_size(self) -> int:
         """Get tensor parallel size from vLLM arguments"""
@@ -525,6 +514,35 @@ class ServiceSpec:
         args.extend(["--tensor-parallel-size", str(value)])
         self._set_args(args)
         self.gpus = value
+
+    # ----- Mocker -----
+    def use_mocker(self, image: str, model: str) -> None:
+        """Replace this worker's engine with a mocker from ``image``.
+
+        The mocker serves ``model`` and keeps the engine's ``--block-size`` and
+        ``--disaggregation-mode``, in either ``--flag value`` or ``--flag=value``
+        form, so the router sees the same block size and worker role. Removes
+        the container's GPU request. v1beta1 only.
+        """
+        if self._schema != SCHEMA_V1BETA1:
+            raise NotImplementedError("use_mocker supports v1beta1 manifests only")
+        container = self._main_container()
+        if container is None:
+            raise ValueError(f"{self._name} has no main container")
+        engine_args = self._get_args()
+        mocker_args = ["--model-path", model, "--model-name", model]
+        for flag in ("--block-size", "--disaggregation-mode"):
+            for i, arg in enumerate(engine_args):
+                if arg == flag and i + 1 < len(engine_args):
+                    mocker_args += [flag, engine_args[i + 1]]
+                elif arg.startswith(f"{flag}="):
+                    mocker_args.append(arg)
+        container.update(
+            image=image, command=["python3", "-m", "dynamo.mocker"], args=mocker_args
+        )
+        resources = container.get("resources", {})
+        for bucket in ("limits", "requests"):
+            resources.get(bucket, {}).pop("nvidia.com/gpu", None)
 
 
 class DeploymentSpec:

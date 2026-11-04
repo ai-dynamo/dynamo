@@ -11,7 +11,6 @@ import hashlib
 import json
 import logging
 import os
-import subprocess
 import time
 from dataclasses import dataclass
 from functools import partial
@@ -22,6 +21,7 @@ import yaml
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
 
+from tests.deploy.dgd_utils import kubectl
 from tests.deploy.vcluster_utils import (
     VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS,
     retry_vcluster_api_async,
@@ -306,18 +306,6 @@ def total_worker_gpus(dgd: dict[str, Any]) -> int:
             limits = container.get("resources", {}).get("limits", {})
             total += replicas * int(limits.get("nvidia.com/gpu", 0))
     return total
-
-
-def kubectl(*args: str, input_: str | None = None) -> subprocess.CompletedProcess[str]:
-    """Run kubectl without a shell and retain stdout/stderr for assertions."""
-
-    return subprocess.run(
-        ["kubectl", *args],
-        input=input_,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
 
 
 class DGDRCleanupError(RuntimeError):

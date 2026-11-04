@@ -1556,6 +1556,7 @@ jobs:
   # GAIE DEPLOY TEST
   # ============================================================================
   deploy-test-gaie:
+    name: GAIE Deploy Test
     needs: [deploy-operator, frontend-copy-to-acr]
     uses: $/.github/workflows/shared-gaie-deploy-test.yml
     with:

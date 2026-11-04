@@ -35,10 +35,12 @@ from tests.deploy.dgd_utils import (
     DeploymentSpec,
     ManagedDeployment,
     _get_workspace_dir,
+    kubectl,
     validate_chat_response,
 )
 from tests.utils.client import send_request, wait_for_model_availability
 from tests.utils.output_paths import resolve_test_output_path
+from tests.utils.router_nvext import require_router_worker_id, router_nvext_extra_body
 
 logger = logging.getLogger(__name__)
 
@@ -393,8 +395,8 @@ async def test_gaie_deployment(
     Deploys the example's EPP and workers with frontend sidecars, each vLLM
     engine replaced by a mocker from the frontend image, so the test needs no
     GPU and no ``--image``. Applies an HTTPRoute to the generated
-    InferencePool, then verifies inference works end-to-end through the full
-    Gateway path.
+    InferencePool, sends a chat completion through the Gateway, and checks
+    which workers served it.
     """
     frontend_image = request.config.getoption("--frontend-image")
 
@@ -413,9 +415,11 @@ async def test_gaie_deployment(
 
     deployment_spec = DeploymentSpec(manifest_path)
     deployment_spec.namespace = namespace
-    # Both examples name their DGD "qwen"; a name per case keeps one case's
-    # teardown from racing the next case's resources.
-    deployment_spec.name = request.node.callspec.id
+    # Both examples name their DGD "qwen". A name per case keeps one case's
+    # teardown from racing the next, and the prefix keeps it apart from the
+    # vllm-agg and vllm-disagg DGDs that the vLLM deploy lane runs in the same
+    # namespace at the same time.
+    deployment_spec.name = f"gaie-{request.node.callspec.id}"
 
     logger.info(f"Frontend image: {frontend_image}")
 
@@ -438,27 +442,27 @@ async def test_gaie_deployment(
     pool_ref["name"] = f"{deployment_spec.name}-pool"
     httproute_yaml = yaml.safe_dump(httproute_spec)
 
+    def delete_httproute() -> None:
+        # Deleting the DGD leaves the route on the Gateway.
+        result = kubectl(
+            "delete",
+            "--ignore-not-found",
+            "-n",
+            namespace,
+            "-f",
+            "-",
+            input_=httproute_yaml,
+        )
+        if result.returncode != 0:
+            logger.warning(f"Failed to delete HTTPRoute: {result.stderr}")
+
     logger.info("Applying GAIE HTTPRoute...")
-    result = subprocess.run(
-        ["kubectl", "apply", "-n", namespace, "-f", "-"],
-        input=httproute_yaml,
-        capture_output=True,
-        text=True,
-    )
+    request.addfinalizer(delete_httproute)
+    result = kubectl("apply", "-n", namespace, "-f", "-", input_=httproute_yaml)
     logger.info(f"HTTPRoute apply stdout: {result.stdout}")
     if result.stderr:
         logger.warning(f"HTTPRoute apply stderr: {result.stderr}")
     assert result.returncode == 0, f"Failed to apply HTTPRoute: {result.stderr}"
-    # Deleting the DGD leaves the route on the Gateway.
-    request.addfinalizer(
-        partial(
-            subprocess.run,
-            ["kubectl", "delete", "--ignore-not-found", "-n", namespace, "-f", "-"],
-            input=httproute_yaml,
-            capture_output=True,
-            text=True,
-        )
-    )
 
     # Debug: verify namespace state before creating DGD
     logger.info(f"Namespace: {namespace}")
@@ -508,8 +512,8 @@ async def test_gaie_deployment(
         namespace=namespace,
         skip_service_restart=skip_service_restart,
         frontend_service_name="Epp",
-        # Below the test's timeout, so a stuck rollout fails with pod status.
-        readiness_timeout=420,
+        # Half the test's timeout, so a stuck rollout fails with pod status.
+        readiness_timeout=300,
     ) as deployment:
         # Debug: check what DGDs exist after creation
         dgd_check = subprocess.run(
@@ -570,7 +574,10 @@ async def test_gaie_deployment(
                 endpoint=endpoint,
                 model=GAIE_MODEL_NAME,
                 logger=logger,
-                max_attempts=30,
+                # At most about 200 s, so a Gateway that never routes fails
+                # here, inside the test's timeout.
+                max_attempts=12,
+                attempt_timeouts=[10] * 12,
                 headers=headers,
             )
             assert model_ready, (
@@ -585,6 +592,7 @@ async def test_gaie_deployment(
                 "max_tokens": DEFAULT_MAX_TOKENS,
                 "temperature": DEFAULT_TEMPERATURE,
                 "stream": False,
+                **router_nvext_extra_body(["worker_id"]),
             }
             logger.info(f"Sending inference request to {url}")
             response = requests.post(
@@ -594,8 +602,10 @@ async def test_gaie_deployment(
                 timeout=DEFAULT_REQUEST_TIMEOUT,
             )
 
-            # A mocker replies with random tokens, so check the token count
-            # rather than the length of the text.
+            # A mocker's random tokens give text of unpredictable length, so
+            # require only non-empty text within max_tokens, and check where
+            # the request ran: one worker for both phases in the aggregated
+            # case, separate prefill and decode workers in the disaggregated one.
             validate_chat_response(
                 response=response,
                 expected_model=GAIE_MODEL_NAME,
@@ -604,6 +614,19 @@ async def test_gaie_deployment(
             )
 
             data = response.json()
+            worker_ids = require_router_worker_id(data, context=deployment_spec.name)
+            prefill_id = worker_ids.get("prefill_worker_id")
+            decode_id = worker_ids.get("decode_worker_id")
+            if "prefill" in workers:
+                assert (
+                    None not in (prefill_id, decode_id) and prefill_id != decode_id
+                ), f"Expected separate prefill and decode workers, got {dict(worker_ids)}"
+            else:
+                assert prefill_id in (
+                    None,
+                    decode_id,
+                ), f"Expected one worker for both phases, got {dict(worker_ids)}"
+
             content = data["choices"][0]["message"]["content"]
             logger.info(
                 f"GAIE deployment test PASSED | "
