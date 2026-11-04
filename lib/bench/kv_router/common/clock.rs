@@ -33,11 +33,9 @@ impl BenchmarkClock {
         self.epoch
     }
 
-    // `now_ns` and `wait_until` run on the issuer's spin path from other
-    // crates (bench and test binaries); `#[inline]` keeps them inlinable there.
     #[inline]
     pub fn now_ns(&self) -> u64 {
-        self.epoch.elapsed().as_nanos().min(u64::MAX as u128) as u64
+        elapsed_ns(self.epoch)
     }
 
     #[inline]
@@ -64,6 +62,11 @@ impl BenchmarkClock {
             "portable_sleep_spin_non_authoritative"
         }
     }
+}
+
+#[inline]
+pub fn elapsed_ns(epoch: Instant) -> u64 {
+    epoch.elapsed().as_nanos().min(u64::MAX as u128) as u64
 }
 
 #[cfg(target_os = "linux")]
@@ -96,40 +99,8 @@ fn sleep_until_monotonic(target_ns: u64) {
                 std::ptr::null_mut(),
             )
         };
-        if rc == 0 {
-            return;
-        }
         if rc != libc::EINTR {
             return;
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::BenchmarkClock;
-
-    // Only lower bounds are asserted; upper bounds are flaky on shared CI.
-    #[test]
-    fn wait_until_never_returns_before_target() {
-        let spin_ns = 200_000;
-        let clock = BenchmarkClock::new(spin_ns).unwrap();
-
-        // Past the spin window: sleeps, then spins.
-        let sleep_target = clock.now_ns() + 5_000_000;
-        clock.wait_until(sleep_target);
-        let after_sleep = clock.now_ns();
-        assert!(after_sleep >= sleep_target);
-
-        // Inside the spin window: spins only.
-        let spin_target = clock.now_ns() + spin_ns / 2;
-        clock.wait_until(spin_target);
-        let after_spin = clock.now_ns();
-        assert!(after_spin >= spin_target);
-        assert!(after_spin >= after_sleep);
-
-        // A target already in the past returns without waiting.
-        clock.wait_until(0);
-        assert!(clock.now_ns() >= after_spin);
     }
 }

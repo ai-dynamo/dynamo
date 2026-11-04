@@ -16,7 +16,7 @@ use dynamo_kv_router::protocols::{KvCacheEventData, RouterEvent, StorageTier};
 use serde::Serialize;
 use tokio::sync::{Notify, oneshot};
 
-use dynamo_bench::kv_router_common::clock::BenchmarkClock;
+use dynamo_bench::kv_router_common::clock::{BenchmarkClock, elapsed_ns};
 pub use dynamo_bench::kv_router_common::issuer::parse_cpu_list;
 use dynamo_bench::kv_router_common::issuer::{contiguous_worker_issuer, pin_current_thread};
 
@@ -1672,10 +1672,6 @@ fn nearest_rank(values: &[u64], numerator: usize, denominator: usize) -> u64 {
         .div_ceil(denominator)
         .max(1);
     values[rank.saturating_sub(1).min(values.len() - 1)]
-}
-
-fn elapsed_ns(epoch: Instant) -> u64 {
-    epoch.elapsed().as_nanos().min(u64::MAX as u128) as u64
 }
 
 fn thread_cpu_time_ns() -> u64 {
