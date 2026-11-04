@@ -414,6 +414,17 @@ class RetuneController:
         if self._pending is None:
             self._last_k = min(self._last_k, int(last_decided_k))
 
+    def discard_planner_changes(self, changes: Mapping[str, Any]) -> None:
+        """Forget ``changes`` of an ``applied`` decision the host could not
+        apply (a live Planner's predictor warmup failed, say): the current
+        point is the running configuration again."""
+
+        for key, value in changes.items():
+            if key in self._pending_planner and _same_value(
+                self._pending_planner[key], value
+            ):
+                del self._pending_planner[key]
+
     def restore_desired(self, flat: Mapping[str, float]) -> None:
         """Re-install persisted desired router values (live re-election).
 
@@ -602,6 +613,16 @@ class RetuneController:
             return None
         return dict(chosen)
 
+    def _covering_counts(self, time_s: float) -> dict[str, int] | None:
+        """The ready counts recorded last at or before ``time_s``."""
+
+        covering: dict[str, int] | None = None
+        for at_s, counts in self._history:
+            if at_s > time_s + _EPSILON:
+                break
+            covering = counts
+        return covering
+
     def _due_window(self, now_s: float) -> int:
         """Latest window ``k`` whose launch time ``L_k`` is at or before now."""
 
@@ -692,16 +713,25 @@ class RetuneController:
         """``(replicas, verified, mismatch)`` for a window launch.
 
         Without ``spec_replicas`` (replay), the ready counts at window start,
-        verified. With them (live), every ready count recorded over the
-        window, including the one in effect at its start, must equal the
-        spec; a mismatch is reported. The spec replicas are used either way,
-        unverified when no recorded count covers the window start (the
-        window began before this controller started).
+        verified. With them (live), a planner that scales starts each
+        candidate's inner planner from the ready counts recorded at the
+        window start, as replay does, and the spec replicas stand in,
+        unverified, when no recorded count covers it. With fixed replicas,
+        every ready count recorded over the window, including the one in
+        effect at its start, must equal the spec; a mismatch is reported.
+        The spec replicas are used either way, unverified when no recorded
+        count covers the window start (the window began before this
+        controller started).
         """
 
         if spec_replicas is None:
             return self._replicas_at(start_s), True, None
         spec = {key: int(value) for key, value in spec_replicas.items()}
+        if self._config.scaling_enabled():
+            at_start = self._covering_counts(start_s)
+            if at_start is None or any(value < 1 for value in at_start.values()):
+                return spec, False, None
+            return dict(at_start), True, None
         covering: dict[str, int] | None = None
         observed: list[dict[str, int]] = []
         for at_s, counts in self._history:
@@ -831,7 +861,12 @@ class RetuneController:
                 for key, values in self._router_domain_values.items()
             },
             "deadline_s": as_of_s + self._retune.effective_timeout_seconds,
-            "spec_replicas": None if spec_replicas is None else dict(spec_replicas),
+            # A scaling planner's sweep starts from SweepRequest.replicas.
+            "spec_replicas": (
+                None
+                if spec_replicas is None or self._config.scaling_enabled()
+                else dict(spec_replicas)
+            ),
             "replicas_verified": verified,
         }
 

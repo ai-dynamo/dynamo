@@ -571,6 +571,64 @@ async def test_window_started_before_the_controller_launches_unverified():
     assert request.replicas == SPEC
 
 
+def _scaling_config():
+    # Scenario 2: load scaling (easy mode) with the default sensitivities.
+    return PlannerConfig(
+        namespace="test-ns",
+        mode="agg",
+        enable_throughput_scaling=False,
+        retune={
+            "interval_seconds": INTERVAL,
+            "grace_seconds": GRACE,
+            "router": ROUTER,
+            "planner": "default",
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("start", "replicas", "verified"),
+    [
+        # Ready counts recorded from before the window: its start's count.
+        (T0 - INTERVAL - 2 * STEP, {"aggregated": 3}, True),
+        # The window began before the controller: the spec stands in.
+        (T0 - INTERVAL / 2, SPEC, False),
+    ],
+    ids=["recorded", "unrecorded"],
+)
+async def test_a_scaling_planner_sweeps_from_the_ready_counts_at_window_start(
+    start, replicas, verified
+):
+    # The planner scales within the window: 3 workers at its start, 1 in
+    # the middle, 2 (the spec) at its end. That is not replicas_changed.
+    sweeps = FakeSweeps()
+    sweeps.default = _flat()
+
+    def counts(now):
+        if now < T0 - INTERVAL / 2:
+            return 3
+        return 1 if now < T0 - STEP else 2
+
+    controller = _live(sweeps, start=start, config=_scaling_config())
+    try:
+        decisions = await _run_window(controller, counts, start=start, until=L_K)
+    finally:
+        controller.close()
+
+    assert decisions == []
+    (request,) = _requests_for_k(sweeps)
+    assert request.replicas == replicas
+    assert request.replicas_verified is verified
+    # The executor starts each inner planner from SweepRequest.replicas.
+    assert request.spec_replicas is None
+    assert request.base_planner is not None
+    assert {c.planner["load_scaling_down_sensitivity"] for c in request.candidates} == {
+        70,
+        80,
+        90,
+    }
+
+
 # ---------------------------------------------------------------------------
 # restore_desired
 # ---------------------------------------------------------------------------

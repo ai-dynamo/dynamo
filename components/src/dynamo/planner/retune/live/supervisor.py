@@ -1281,12 +1281,47 @@ class LiveRetuneSupervisor:
             return False
         self._initialized = True
         self._rollback_since = None
+        self._warn_planner_reset(plan.state)
         if self._background:
             self._outbox_task = asyncio.create_task(
                 self._outbox_loop(), name="planner-retune-outbox"
             )
         self._outbox_wake.set()
         return True
+
+    def _warn_planner_reset(self, state: RetuneState) -> None:
+        """Report applied Planner changes a restart did not restore.
+
+        Router parameters live in the frontends and survive a Planner
+        restart; Planner fields live in this process, which starts from its
+        configuration. Retune does not restore them (restoring a predictor
+        needs a warmup): the next window's baseline is the running
+        configuration, and a later sweep may choose the change again.
+        """
+
+        config = getattr(self._host, "config", None)
+        if config is None:
+            return
+        last = next(
+            (
+                item
+                for item in reversed(state.history)
+                if item.get("outcome") == "applied" and item.get("planner")
+            ),
+            None,
+        )
+        if last is None:
+            return
+        planner = last["planner"]
+        running = {key: getattr(config, key, None) for key in planner}
+        if running != planner:
+            logger.warning(
+                "retune: Planner fields %s of decision %s are not restored after "
+                "the restart; the Planner runs %s",
+                planner,
+                last.get("decision_id"),
+                running,
+            )
 
     async def _read_own_snapshot(self) -> Optional[StateSnapshot]:
         """Read the state; drop a snapshot of another DGD uid.
@@ -1538,6 +1573,10 @@ class LiveRetuneSupervisor:
             item["by_wt"] = entry.router_parameters
         elif decision.outcome == "advisory":
             item["by_wt"] = self._resolve_by_wt(flat)
+        if decision.planner_changes and decision.outcome in ("applied", "advisory"):
+            # The Planner fields the decision changes (or recommends). A
+            # restarted Planner does not restore them (_warn_planner_reset).
+            item["planner"] = dict(decision.planner_changes)
         details = decision.details
         image = {
             key: details[key]

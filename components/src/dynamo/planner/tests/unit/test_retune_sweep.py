@@ -575,7 +575,7 @@ def test_a_predictor_winner_is_prepared_in_the_sweep(tmp_path, monkeypatch):
 
     def run_with_winner(fields):
         presweep = {"winner": "w", "fields": fields, "losses": {"w": 0.1}}
-        monkeypatch.setattr(sweep_module, "_run_presweeps", lambda *_: presweep)
+        monkeypatch.setattr(sweep_module, "run_presweeps", lambda *_: presweep)
         tasks.clear()
         return sweep_module.run_sweep(request, evaluator=evaluator)
 
@@ -792,7 +792,9 @@ def test_presweep_dispatch_does_not_wait_for_workers_that_are_not_reading(tmp_pa
     timer.start()
     try:
         with pytest.raises(sweep_module._SweepInterrupted, match="cancelled"):
-            sweep_module._run_presweeps(request, pool, inputs, [60])
+            sweep_module.run_presweeps(
+                request, pool, inputs.observations, inputs.observations_paths, [60]
+            )
     finally:
         timer.cancel()
         pool.close()

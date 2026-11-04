@@ -42,6 +42,7 @@ the window fails. Any other failed shard only leaves its points unscored.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import functools
 import hashlib
 import itertools
@@ -50,14 +51,17 @@ import logging
 import math
 import os
 import re
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal, NoReturn, Optional
 
 from dynamo.planner.config.planner_config import (
     DGDR_MAX_SHARD_POINTS,
+    DGDR_MAX_WARMUP_BUCKETS,
     DgdrExecutorConfig,
     RetuneConfig,
     balanced_shard_parts,
@@ -88,12 +92,23 @@ from dynamo.planner.retune.live.contracts import (
     WindowCutter,
 )
 from dynamo.planner.retune.live.reconciler import trace_pvc_source
+from dynamo.planner.retune.live.window_cut import bucket_history
 from dynamo.planner.retune.sweep import (
+    SweepInterrupted,
     SweepRequest,
     SweepResult,
     SweepStatus,
+    WorkerPool,
+    evaluated_params,
+    predictor_swap_errors,
+    predictor_swap_tasks,
+    run_presweeps,
+    scales_on_throughput,
     score_summary,
+    sweep_throughput_intervals,
+    write_observations,
 )
+from dynamo.planner.simulation.config import retune_sweep_base
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +126,13 @@ ROWS_ANNOTATION = LABEL_PREFIX + "rows"
 REQUEST_GENERATION_ANNOTATION = "nvidia.com/dgdr-request-generation"
 TRACE_MOUNT_PATH = "/var/run/aisimulate/trace"
 ROUTER_ADAPTER = "dynamo.router"
+PLANNER_ADAPTER = "dynamo.planner"
+# The planner adapter's live retune sweep section
+# (``simulation.provider.RETUNE_SWEEP``). A Candidate's planner parameters
+# are the section narrowed to its one point.
+RETUNE_SWEEP = "retune_sweep"
+# The shard axis of the planner points (sorts after every router knob).
+_PLANNER_AXIS = "~planner"
 _ROLES = ("aggregated", "prefill", "decode")
 _TEMPERATURE = DGDR_ROUTER_KNOBS["temperature"]
 # spec.objective.metric -> AISimulate optimization.target (operator lowering).
@@ -142,20 +164,43 @@ class Shard:
 
     ``choices`` maps each live router knob to the values the shard spans;
     ``points`` is their Cartesian product (live names). A ``point`` or
-    ``probe`` shard has one value per knob.
+    ``probe`` shard has one value per knob. ``planners`` are the planner
+    points (``PlannerConfig`` fields) the shard crosses with them when its
+    candidates replay an inner planner (Scenario 2; ``({},)`` when no
+    planner field is searched), and ``()`` with fixed replicas.
     """
 
     id: str
     kind: ShardKind
     choices: dict[str, tuple[float, ...]]
     points: tuple[dict[str, float], ...]
+    planners: tuple[dict[str, Any], ...] = ()
 
     @property
     def size(self) -> int:
-        return len(self.points)
+        return len(self.points) * max(1, len(self.planners))
 
-    def contains(self, point: Mapping[str, float]) -> bool:
-        return all(point.get(key) in values for key, values in self.choices.items())
+    def contains(
+        self, point: Mapping[str, float], planner: Optional[Mapping[str, Any]] = None
+    ) -> bool:
+        if not all(point.get(key) in values for key, values in self.choices.items()):
+            return False
+        return (
+            planner is None
+            or not self.planners
+            or any(_same_planner(planner, option) for option in self.planners)
+        )
+
+    @property
+    def searches_planner(self) -> bool:
+        """Whether the shard's candidates replay an inner planner."""
+        return bool(self.planners)
+
+
+def _same_planner(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    return set(left) == set(right) and all(
+        _same_json(left[key], right[key]) for key in left
+    )
 
 
 def plan_shards(
@@ -166,6 +211,9 @@ def plan_shards(
     max_shards: int,
     parallelism: int,
     probe: bool = True,
+    planner_points: Sequence[Mapping[str, Any]] = (),
+    baseline_planner: Optional[Mapping[str, Any]] = None,
+    startup_planner: Optional[Mapping[str, Any]] = None,
 ) -> list[Shard]:
     """Split ``router_domain`` (live knob -> values) into Request shards.
 
@@ -182,6 +230,13 @@ def plan_shards(
     middle value of each knob, a positive temperature when the grid has
     one) to check common random numbers across Runs. Raises ``ValueError``
     when no split fits or a point does not cover the domain's knobs.
+
+    ``planner_points`` (distinct planner points, in order) add one more
+    dimension, cut into contiguous chunks like a router knob, so a shard
+    crosses its router sub-grid with a chunk of planner points. The
+    baseline and startup points then also carry their planner parts
+    (``baseline_planner``, ``startup_planner``), and the probe takes the
+    middle planner point.
     """
 
     if not router_domain:
@@ -204,7 +259,10 @@ def plan_shards(
                 f"router domain {list(keys)}"
             )
 
+    planners = tuple(dict(point) for point in planner_points)
     sizes = [len(axes[key]) for key in keys]
+    if planners:
+        sizes.append(len(planners))
     parts = balanced_shard_parts(sizes, max_shards, parallelism=parallelism)
     largest = largest_shard_points(sizes, parts)
     if largest > DGDR_MAX_SHARD_POINTS:
@@ -216,7 +274,11 @@ def plan_shards(
         )
 
     shards: list[Shard] = []
-    chunked = [_chunks(axes[key], part) for key, part in zip(keys, parts)]
+    chunked: list[list[Any]] = [
+        _chunks(axes[key], part) for key, part in zip(keys, parts)
+    ]
+    if planners:
+        chunked.append(_chunks(planners, parts[-1]))
     for index, combo in enumerate(itertools.product(*chunked)):
         choices = dict(zip(keys, combo))
         shards.append(
@@ -225,41 +287,56 @@ def plan_shards(
                 kind="grid",
                 choices=choices,
                 points=_product(choices),
+                planners=tuple(combo[len(keys)]) if planners else (),
             )
         )
 
-    def in_grid(point: Mapping[str, float]) -> bool:
-        return all(float(point[key]) in axes[key] for key in keys)
+    def in_grid(point: Mapping[str, float], planner: Mapping[str, Any]) -> bool:
+        return all(float(point[key]) in axes[key] for key in keys) and (
+            not planners or any(_same_planner(planner, p) for p in planners)
+        )
 
-    def single(shard_id: str, kind: ShardKind, point: Mapping[str, float]) -> Shard:
+    def single(
+        shard_id: str,
+        kind: ShardKind,
+        point: Mapping[str, float],
+        planner: Mapping[str, Any],
+    ) -> Shard:
         values = {key: float(point[key]) for key in keys}
         return Shard(
             id=shard_id,
             kind=kind,
             choices={key: (value,) for key, value in values.items()},
             points=(values,),
+            planners=(dict(planner),) if planners else (),
         )
 
     baseline_point = {key: float(baseline[key]) for key in keys}
     startup_point = {key: float(startup[key]) for key in keys}
-    if not in_grid(baseline_point):
-        shards.append(single("point-baseline", "point", baseline_point))
-    if not in_grid(startup_point) and startup_point != baseline_point:
-        shards.append(single("point-startup", "point", startup_point))
+    base_planner = dict(baseline_planner or {})
+    start_planner = dict(startup_planner or {})
+    if not in_grid(baseline_point, base_planner):
+        shards.append(single("point-baseline", "point", baseline_point, base_planner))
+    if not in_grid(startup_point, start_planner) and (
+        startup_point != baseline_point
+        or not _same_planner(start_planner, base_planner)
+    ):
+        shards.append(single("point-startup", "point", startup_point, start_planner))
     if probe:
-        shards.append(single("probe", "probe", _probe_point(axes)))
+        middle = planners[len(planners) // 2] if planners else {}
+        shards.append(single("probe", "probe", _probe_point(axes), middle))
     return shards
 
 
-def _chunks(values: tuple[float, ...], count: int) -> list[tuple[float, ...]]:
+def _chunks(values: Sequence[Any], count: int) -> list[tuple[Any, ...]]:
     """``values`` cut into ``count`` contiguous chunks whose sizes differ by <= 1."""
 
     base, extra = divmod(len(values), count)
-    chunks: list[tuple[float, ...]] = []
+    chunks: list[tuple[Any, ...]] = []
     start = 0
     for index in range(count):
         end = start + base + (1 if index < extra else 0)
-        chunks.append(values[start:end])
+        chunks.append(tuple(values[start:end]))
         start = end
     return chunks
 
@@ -365,6 +442,8 @@ def build_request(
     spec_replicas: Mapping[str, int],
     backend: str,
     attempt: int,
+    planner_base: Optional[Mapping[str, Any]] = None,
+    planner_warmup: Optional[Mapping[str, Any]] = None,
 ) -> dict:
     """The DGDR v1beta2 Request that replays one shard of a window.
 
@@ -379,6 +458,13 @@ def build_request(
     is the one the configuration check (P5) accepted. Raises
     ``ValueError`` for ``spec_replicas`` or a shard the Request cannot
     express.
+
+    A shard with planner points (Scenario 2) adds the planner adapter's
+    ``retune_sweep`` section: ``planner_base`` (the live config's
+    ``retune_sweep_base``), the shard's points, and ``planner_warmup``
+    (history rows by throughput interval). ``spec_replicas`` are then the
+    ready counts at the window start, where each candidate's inner planner
+    starts scaling.
     """
 
     engine = _pinned_engine(cfg.engine, spec_replicas, backend)
@@ -428,6 +514,19 @@ def build_request(
                     "candidate_timeout_seconds": cfg.run.candidate_timeout_seconds,
                 },
                 "optimization": {"strict_sla": False},
+                **(
+                    {
+                        "planner": {
+                            RETUNE_SWEEP: {
+                                "base": copy.deepcopy(dict(planner_base or {})),
+                                "points": [dict(point) for point in shard.planners],
+                                "warmup": copy.deepcopy(dict(planner_warmup or {})),
+                            }
+                        }
+                    }
+                    if shard.searches_planner
+                    else {}
+                ),
                 # The planner reads only each Candidate's parameters and
                 # score, never its DGD. The direct generator keeps retune
                 # Runs independent of the AIC generator, whose rendering can
@@ -696,6 +795,10 @@ class DgdrContext:
     now: Callable[[], float] = time.time
     sleep: Optional[Callable[[float], None]] = None
     poll_interval_s: float = 5.0
+    # Scenario 2: the history reader and the pre-sweep's worker pool
+    # (window_cut.bucket_history and sweep.WorkerPool; tests replace them).
+    bucket_history: Callable[..., Any] = field(default=bucket_history)
+    worker_pool: Callable[..., Any] = field(default=WorkerPool)
 
 
 def run_dgdr_sweep(
@@ -883,6 +986,17 @@ class _DgdrSweep:
         }
         self.k8s_errors = 0
         self.runtime: dict[str, Any] = {}
+        # Scenario 2 (set by _prepare_planner): what each candidate replays
+        # as, the planner points and warmup the Requests carry, and the
+        # pre-sweep and swap inputs the decision reads.
+        self.evaluated: dict[str, RetuneParams] = {}
+        self.planner_points: list[dict[str, Any]] = []
+        self.planner_base: Optional[dict[str, Any]] = None
+        self.planner_warmup: Optional[dict[str, Any]] = None
+        self.presweep: Optional[dict[str, Any]] = None
+        self.interval_observations: dict[int, tuple[Any, ...]] = {}
+        self.warmup_errors: dict[int, str] = {}
+        self.base_interval: Optional[int] = None
 
     # ------------------------------------------------------------ driver
 
@@ -948,16 +1062,28 @@ class _DgdrSweep:
         details["shards"] = {key: run.summary() for key, run in self.shards.items()}
         details["k8s_errors"] = self.k8s_errors
         details.update(self.runtime)
+        base_interval = self.base_interval
         return SweepResult(
             status=status,
             num_requests=self.num_requests,
             row_counts=dict(self.row_counts),
             scores=scores or {},
             metrics=metrics or {},
+            predictor_presweep=self.presweep,
+            warmup_observations=(
+                None
+                if base_interval is None
+                else self.interval_observations.get(base_interval)
+            ),
+            predictor_warmup_error=(
+                None if base_interval is None else self.warmup_errors.get(base_interval)
+            ),
             wall_s=max(0.0, self._now() - self.started),
             error=error,
             failure_reason=failure_reason,
             details=details,
+            interval_observations=dict(self.interval_observations),
+            predictor_warmup_errors=dict(self.warmup_errors),
         )
 
     # ----------------------------------------------------------- helpers
@@ -1040,24 +1166,39 @@ class _DgdrSweep:
         domain = request.router_domain
         if not domain:
             self._fail("invalid_request", "the sweep request has no router domain")
-        if any(candidate.planner for candidate in request.candidates):
+        if request.base_planner is None and any(
+            candidate.planner for candidate in request.candidates
+        ):
             self._fail(
                 "invalid_request",
-                "a DGDR sweep searches router parameters only (Scenario 1)",
+                "planner candidates need the inner planner's base configuration",
             )
         keys = set(domain)
-        startup = self._startup_point(domain)
+        if request.base_planner is not None:
+            self._prepare_planner()
+        startup = self._startup_candidate(domain)
+        baseline = self._evaluated(request.baseline)
+        planner_points = self.planner_points
         try:
             shards = plan_shards(
                 domain,
-                baseline=request.baseline.router,
-                startup=startup,
+                baseline=baseline.router,
+                startup=startup.router,
                 max_shards=self.cfg.run.max_shards,
                 parallelism=self.cfg.run.parallelism,
+                planner_points=planner_points,
+                baseline_planner=baseline.planner,
+                startup_planner=startup.planner,
             )
         except (KeyError, ValueError) as error:
             self._fail("invalid_domain", str(error))
-        replicas = request.spec_replicas or request.replicas
+        # A scaling planner starts each candidate from the ready counts at
+        # the window start (SweepRequest.replicas); a fixed one from the spec.
+        replicas = (
+            request.replicas
+            if request.base_planner is not None
+            else request.spec_replicas or request.replicas
+        )
         self.details["replicas"] = dict(replicas)
         probe = next((shard for shard in shards if shard.kind == "probe"), None)
         for shard in shards:
@@ -1075,6 +1216,8 @@ class _DgdrSweep:
                     spec_replicas=replicas,
                     backend=self.ctx.backend,
                     attempt=1,
+                    planner_base=self.planner_base,
+                    planner_warmup=self.planner_warmup,
                 )
             except (KeyError, TypeError, ValueError) as error:
                 self._fail("invalid_engine", f"shard {shard.id}: {error}")
@@ -1082,8 +1225,13 @@ class _DgdrSweep:
             # the probe is compared with.
             critical = (
                 shard.kind == "probe"
-                or shard.contains(request.baseline.router)
-                or (probe is not None and shard.contains(probe.points[0]))
+                or shard.contains(baseline.router, baseline.planner)
+                or (
+                    probe is not None
+                    and shard.contains(
+                        probe.points[0], probe.planners[0] if probe.planners else None
+                    )
+                )
             )
             self.shards[shard.id] = _ShardRun(
                 shard=shard,
@@ -1092,32 +1240,190 @@ class _DgdrSweep:
                 digest=body["metadata"]["labels"][LABEL_SPEC],
             )
         uncovered = [
-            candidate.router
+            candidate.to_dict()
             for candidate in request.candidates
             if set(candidate.router) != keys
-            or not any(
-                run.shard.kind != "probe" and run.shard.contains(candidate.router)
-                for run in self.shards.values()
-            )
+            or not self._covered(self._evaluated(candidate))
         ]
         if uncovered:
             self.details["uncovered_candidates"] = uncovered[:10]
 
-    def _startup_point(self, domain: Mapping[str, Sequence[float]]) -> dict[str, float]:
+    def _covered(self, point: RetuneParams) -> bool:
+        return any(
+            run.shard.kind != "probe"
+            and run.shard.contains(point.router, point.planner)
+            for run in self.shards.values()
+        )
+
+    def _evaluated(self, candidate: RetuneParams) -> RetuneParams:
+        """The point a candidate replays as (``sweep.evaluated_params``)."""
+
+        return self.evaluated.get(candidate.key(), candidate)
+
+    def _startup_candidate(self, domain: Mapping[str, Sequence[float]]) -> RetuneParams:
         """The off-grid candidate other than the baseline, else the baseline.
 
         The controller's candidates are the grid plus the startup point and
-        the baseline, so an off-grid candidate is one of those two.
+        the baseline, so an off-grid candidate is one of those two. A
+        candidate is off the grid when its router point is; planner points
+        are the distinct points of every candidate, so they never are.
         """
 
-        baseline = self.request.baseline
+        baseline = self._evaluated(self.request.baseline)
         for candidate in self.request.candidates:
             router = candidate.router
-            if candidate == baseline or set(router) != set(domain):
+            if candidate == self.request.baseline or set(router) != set(domain):
                 continue
             if not all(float(router[key]) in domain[key] for key in domain):
-                return dict(router)
-        return dict(baseline.router)
+                return self._evaluated(candidate)
+        return baseline
+
+    def _prepare_planner(self) -> None:
+        """Bucket the history, run the predictor pre-sweep and fix the
+        planner points each Request carries (Scenario 2).
+
+        Within ``cut_budget_seconds`` of the deadline, before any Request is
+        planned, because the points and the warmup are part of every
+        Request's spec: the history before the window (and the window
+        itself, for the pre-sweep) is read from the trace segments at each
+        throughput interval a candidate scales at; the pre-sweep picks a
+        predictor per interval; each candidate is mapped to the point it
+        replays as (``evaluated_params``); and every predictor a decision
+        could swap in is prepared on the same observations, as replay
+        retune does, so the decision can check it.
+        """
+
+        request = self.request
+        budget = min(self.cfg.cut_budget_seconds, self.deadline - self._now())
+        if budget <= 0:
+            self._fail("launch_too_late", "no time left to read the history", "timeout")
+        deadline_s = self._now() + budget
+        intervals = sweep_throughput_intervals(request)
+        observations: dict[int, tuple[Any, ...]] = {}
+        warmups: dict[int, tuple[Any, ...]] = {}
+        if intervals:
+            history = self._bucket_history(intervals, deadline_s)
+            observations = dict(history.observations)
+            warmups = dict(history.warmups)
+            self.details["history"] = {
+                "start_ms": int(round(request.history_start_ms)),
+                "requests": history.history_requests,
+                "dropped_members": history.dropped_members,
+                "intervals": list(intervals),
+            }
+        presweep = None
+        warmup_errors: dict[int, str] = {}
+        # The configuration the Runs replay (only its scaling fields): the
+        # live dump may hold settings, such as non-advisory batch
+        # scheduling, that need what a dump leaves out.
+        inner_base = {
+            **retune_sweep_base(request.base_planner or {}),
+            "retune": None,
+            "advisory": False,
+            "report_interval_hours": None,
+            "live_dashboard_port": 0,
+        }
+        with tempfile.TemporaryDirectory(prefix="retune-dgdr-planner-") as work:
+            work_dir = Path(work)
+            paths = {
+                interval: write_observations(
+                    work_dir / f"observations-{interval}.json", rows
+                )
+                for interval, rows in observations.items()
+            }
+            pool = self.ctx.worker_pool(
+                self.ctx.retune.max_parallel,
+                time.monotonic() + (deadline_s - self._now()),
+                self.stop,
+                work,
+            )
+            try:
+                if request.predictor_candidates and intervals:
+                    presweep = run_presweeps(
+                        request, pool, observations, paths, intervals
+                    )
+                for candidate in request.candidates:
+                    self.evaluated[candidate.key()] = evaluated_params(
+                        candidate, request.baseline, presweep, request.base_planner
+                    )
+                tasks = predictor_swap_tasks(
+                    request,
+                    list(self.evaluated.values()),
+                    inner_base,
+                    observations,
+                    paths,
+                    work_dir,
+                )
+                if tasks:
+                    warmup_errors = predictor_swap_errors(pool.run(tasks))
+            except SweepInterrupted as interrupted:
+                self._check_interrupt()
+                self._fail(
+                    "window_cut_timeout",
+                    f"history and predictor pre-sweep: {interrupted}",
+                    "timeout",
+                )
+            finally:
+                pool.close()
+        planners: dict[str, dict[str, Any]] = {}
+        for point in self.evaluated.values():
+            planners.setdefault(
+                RetuneParams(planner=point.planner).key(), point.planner
+            )
+        self.planner_points = [planners[key] for key in sorted(planners)]
+        self.planner_base = retune_sweep_base(request.base_planner or {})
+        self.planner_warmup = {
+            str(interval): [list(dataclasses.astuple(row)) for row in rows]
+            for interval, rows in warmups.items()
+        }
+        oversized = {
+            interval: len(rows)
+            for interval, rows in warmups.items()
+            if len(rows) > DGDR_MAX_WARMUP_BUCKETS
+        }
+        if oversized:
+            self._fail(
+                "invalid_request",
+                f"the history warmup has {oversized} buckets by interval, more "
+                f"than {DGDR_MAX_WARMUP_BUCKETS} per interval a Request carries",
+            )
+        self.presweep = presweep
+        self.interval_observations = observations
+        self.warmup_errors = warmup_errors
+        running = {**(request.base_planner or {}), **request.baseline.planner}
+        self.base_interval = scales_on_throughput({}, running)
+        self.details["planner"] = {
+            "points": len(self.planner_points),
+            "presweep": presweep,
+            "warmup_errors": {str(k): v for k, v in warmup_errors.items()},
+        }
+
+    def _bucket_history(self, intervals: Sequence[int], deadline_s: float) -> Any:
+        request = self.request
+        try:
+            return self.ctx.bucket_history(
+                self._segments_root(),
+                int(round(request.history_start_ms)),
+                self.window_start_ms,
+                self.window_end_ms,
+                self.as_of_ms,
+                intervals,
+                deadline_s=deadline_s,
+                cancel=self.stop,
+            )
+        except Exception as error:
+            self._check_interrupt()
+            reason = getattr(error, "reason", None)
+            if reason not in ("window_cut_timeout", "trace_corrupt"):
+                reason = "window_cut_failed"
+            self._fail(reason, f"history read: {type(error).__name__}: {error}")
+
+    def _segments_root(self) -> str:
+        if self.request.trace_paths:
+            return self.request.trace_paths[0]
+        return os.path.join(
+            self.cfg.mount_path, self.cfg.segments_dir, self.ctx.dgd.name
+        )
 
     def _build(self, run: _ShardRun) -> dict:
         body = build_request(
@@ -1133,6 +1439,8 @@ class _DgdrSweep:
             spec_replicas=self.details["replicas"],
             backend=self.ctx.backend,
             attempt=run.attempt,
+            planner_base=self.planner_base,
+            planner_warmup=self.planner_warmup,
         )
         rows = {"num_requests": self.num_requests, "row_counts": self.row_counts}
         body["metadata"]["annotations"] = {
@@ -1342,13 +1650,7 @@ class _DgdrSweep:
         """Cut the window file; an empty window ends the sweep as ``empty``."""
 
         self._check_interrupt()
-        segments_root = (
-            self.request.trace_paths[0]
-            if self.request.trace_paths
-            else os.path.join(
-                self.cfg.mount_path, self.cfg.segments_dir, self.ctx.dgd.name
-            )
-        )
+        segments_root = self._segments_root()
         budget = min(self.cfg.cut_budget_seconds, self.deadline - self._now())
         if budget <= 0:
             self._fail("launch_too_late", "no time left to cut the window", "timeout")
@@ -1712,7 +2014,7 @@ class _DgdrSweep:
                 name = (candidate.get("metadata") or {}).get("name", "")
                 parameters = _get(candidate, ("spec", "parameters"))
                 try:
-                    point, signature = _map_parameters(parameters, run.shard)
+                    point, planner, signature = _map_parameters(parameters, run.shard)
                 except _Unmapped as error:
                     if error.fatal:
                         self._fail("engine_not_pinned", f"Candidate {name}: {error}")
@@ -1726,13 +2028,14 @@ class _DgdrSweep:
                         f"Candidates {signature_source} and {name} differ in "
                         "non-router parameters",
                     )
-                key = RetuneParams(router=point).key()
+                params = RetuneParams(router=point, planner=planner)
+                key = params.key()
                 target = probe_results if run.shard.kind == "probe" else results
                 if key in target:
                     continue
                 metrics = _get(candidate, ("status", "metrics"), {}) or {}
                 entry: dict[str, Any] = {
-                    "params": RetuneParams(router=point).to_dict(),
+                    "params": params.to_dict(),
                     "shard": run.shard.id,
                     "candidate": name,
                 }
@@ -1755,15 +2058,16 @@ class _DgdrSweep:
         missing = 0
         for candidate in request.candidates:
             key = candidate.key()
-            found = results.get(key)
+            evaluated = self._evaluated(candidate)
+            found = results.get(evaluated.key())
             if found is not None and set(candidate.router) == domain_keys:
                 scores[key] = found.score
                 metrics_out[key] = found.entry
             else:
                 scores[key] = None
                 metrics_out[key] = {
-                    "params": candidate.to_dict(),
-                    "error": self._missing_reason(candidate.router),
+                    "params": evaluated.to_dict(),
+                    "error": self._missing_reason(evaluated),
                 }
             if scores[key] is None:
                 missing += 1
@@ -1780,9 +2084,11 @@ class _DgdrSweep:
     def _list_candidates(self, selector: str) -> list[dict]:
         return self.ctx.kube.list_candidates(selector, timeout_s=self._timeout())
 
-    def _missing_reason(self, point: Mapping[str, float]) -> str:
+    def _missing_reason(self, point: RetuneParams) -> str:
         for run in self.shards.values():
-            if run.shard.kind != "probe" and run.shard.contains(point):
+            if run.shard.kind != "probe" and run.shard.contains(
+                point.router, point.planner
+            ):
                 if run.state == "missing":
                     return f"shard {run.shard.id} {run.reason}: {run.message}"
                 return f"not published by Run {run.run_name} (infeasible or failed)"
@@ -1795,7 +2101,8 @@ class _DgdrSweep:
         if probe is None:
             return
         point = probe.shard.points[0]
-        key = RetuneParams(router=point).key()
+        planner = probe.shard.planners[0] if probe.shard.planners else {}
+        key = RetuneParams(router=point, planner=planner).key()
         grid = results.get(key)
         repeat = probe_results.get(key)
         grid_score = None if grid is None else grid.score
@@ -1831,13 +2138,17 @@ class _Unmapped(Exception):
         self.fatal = fatal
 
 
-def _map_parameters(parameters: Any, shard: Shard) -> tuple[dict[str, float], str]:
-    """A Candidate's live router point and its non-router signature.
+def _map_parameters(
+    parameters: Any, shard: Shard
+) -> tuple[dict[str, float], dict[str, Any], str]:
+    """A Candidate's live router point, planner point and other signature.
 
     The signature is the canonical JSON of the parameters without the three
-    searched knobs; every Candidate of a window must share it. Raises
-    ``_Unmapped`` for parameters that name no point of ``shard``, fatally
-    for a router other than the pinned ``kv_router`` without a load model.
+    searched router knobs and the planner point; every Candidate of a
+    window must share it. The planner point is ``{}`` for a shard without
+    planner points. Raises ``_Unmapped`` for parameters that name no point
+    of ``shard``, fatally for a router other than the pinned ``kv_router``
+    without a load model.
     """
 
     if not isinstance(parameters, Mapping):
@@ -1869,15 +2180,40 @@ def _map_parameters(parameters: Any, shard: Shard) -> tuple[dict[str, float], st
                 f"router knob {public}={value!r} is not one of the shard's values"
             )
         point[live] = snapped
-    rest = dict(parameters)
-    rest["adapters"] = {
+    planner: dict[str, Any] = {}
+    rest_adapters = {
         **adapters,
         ROUTER_ADAPTER: {
             key: value for key, value in router.items() if key not in DGDR_ROUTER_KNOBS
         },
     }
+    if shard.searches_planner:
+        section = adapters.get(PLANNER_ADAPTER)
+        if not isinstance(section, Mapping):
+            raise _Unmapped(f"spec.parameters.adapters[{PLANNER_ADAPTER!r}] is missing")
+        sweep = section.get(RETUNE_SWEEP)
+        points = sweep.get("points") if isinstance(sweep, Mapping) else None
+        chosen = points[0] if isinstance(points, list) and len(points) == 1 else None
+        if not isinstance(chosen, Mapping):
+            raise _Unmapped(
+                f"spec.parameters.adapters[{PLANNER_ADAPTER!r}].{RETUNE_SWEEP} "
+                "does not name one planner point"
+            )
+        match = next(
+            (option for option in shard.planners if _same_planner(chosen, option)),
+            None,
+        )
+        if match is None:
+            raise _Unmapped(f"planner point {dict(chosen)} is not one of the shard's")
+        planner = dict(match)
+        # The base and warmup are the Request's; only the point varies.
+        rest_adapters[PLANNER_ADAPTER] = {
+            key: value for key, value in section.items() if key != RETUNE_SWEEP
+        }
+    rest = dict(parameters)
+    rest["adapters"] = rest_adapters
     signature = json.dumps(rest, sort_keys=True, separators=(",", ":"), default=str)
-    return point, signature
+    return point, planner, signature
 
 
 def _snap(value: float, values: Sequence[float]) -> Optional[float]:

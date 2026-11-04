@@ -579,6 +579,8 @@ class FakeHost:
             retune_inputs=inputs,
             retune_hooks=hooks,
         )
+        # The Planner's live configuration, as NativePlannerBase.config.
+        self.config = self._engine._config
         if self.controller is not None:
             # What the adapter's initial_tick does.
             self.controller.start(world.clock.time(), hooks.phase_s)
@@ -1309,6 +1311,34 @@ async def test_restart_restores_the_persisted_point() -> None:
     state = world.shared_state()
     assert state.leader_term == second.sup.term and state.deploy_seq == 2
     assert second.sup.target().desired_by_wt == by_wt("a", chosen)
+
+
+async def test_planner_changes_are_recorded_but_not_restored_after_a_restart(
+    caplog,
+) -> None:
+    world = World()
+    first = await leading(world)
+    chosen = {CREDIT: 0.5, SCALE: 1.0, TEMP: 0.2}
+    first.controller.restore_desired(chosen)
+    decision = dataclasses.replace(
+        make_decision(K0 + 1, "applied", chosen=chosen),
+        planner_changes={"load_scaling_down_sensitivity": 70},
+    )
+    enqueue(first, decision)
+    await first.sup.outbox_round()
+    assert world.shared_state().history[-1]["planner"] == {
+        "load_scaling_down_sensitivity": 70
+    }
+    await first.sup.stop()
+
+    with caplog.at_level(logging.WARNING, logger="dynamo.planner.retune.live"):
+        second = await leading(world, "p2")
+
+    # The router point is restored; the Planner field runs its configured
+    # value, and the restart says so.
+    assert second.controller.current_point().router == chosen
+    assert "load_scaling_down_sensitivity': 70} of decision" in caplog.text
+    assert "are not restored after the restart" in caplog.text
 
 
 async def test_fingerprint_change_resets_with_a_two_phase_rollback() -> None:

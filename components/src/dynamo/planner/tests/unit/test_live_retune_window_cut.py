@@ -1242,3 +1242,57 @@ def test_interrupt_kills_child_and_removes_its_temp_file(tmp_path, interrupt):
     assert caught.value.reason == expected
     assert time.monotonic() - started < 20
     assert not temp.exists()
+
+
+# ---------------------------------------------------------------- history
+
+
+def test_history_is_bucketed_at_each_interval_from_the_segments(tmp_path):
+    # One row a second from 0 to 15 s, plus one in the window that completes
+    # after as_of; a damaged member between two good ones is skipped.
+    root = tmp_path / "segments"
+    rows = [_envelope(_row(f"r{i}", 1000 * i)) for i in range(15)]
+    censored = _envelope(_row("late", 14_900, total_ms=1000.0))
+    _write(
+        root / "pod-a" / "req.000001.jsonl.gz",
+        _member(rows[:8]),
+        b"\x1f\x8b\x08 not a member",
+        _member([*rows[8:], censored]),
+    )
+
+    history = window_cut.bucket_history_inprocess(
+        str(root), 1000, START, END, AS_OF, [2, 5]
+    )
+
+    # 1..4 s of history; the window's rows count only toward observations.
+    assert history.history_requests == 4
+    assert history.dropped_members == 1
+    num_req = {
+        interval: [obs.num_req for obs in rows]
+        for interval, rows in history.observations.items()
+    }
+    assert num_req == {2: [2.0] * 7, 5: [4.0, 5.0, 5.0]}
+    warmups = {
+        interval: [obs.num_req for obs in rows]
+        for interval, rows in history.warmups.items()
+    }
+    # Buckets end at the window start: no window request is warmup.
+    assert warmups == {2: [2.0, 2.0], 5: [4.0]}
+    assert {obs.duration_s for obs in history.observations[5]} == {5.0}
+
+
+def test_history_runs_in_a_child_that_the_deadline_stops(tmp_path):
+    root = tmp_path / "segments"
+    _write(
+        root / "pod-a" / "req.000001.jsonl.gz", _member([_envelope(_row("r", 6000))])
+    )
+
+    history = window_cut.bucket_history(
+        str(root), START, START, END, AS_OF, [5], deadline_s=time.time() + 60
+    )
+    assert [obs.num_req for obs in history.observations[5]] == [1.0, 0.0]
+    with pytest.raises(WindowCutError) as caught:
+        window_cut.bucket_history(
+            str(root), START, START, END, AS_OF, [5], deadline_s=time.time() - 1
+        )
+    assert caught.value.reason == "window_cut_timeout"

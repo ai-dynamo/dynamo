@@ -15,7 +15,7 @@ import asyncio
 import importlib
 import logging
 import time
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Iterable, Sequence
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, Optional, Protocol
 
@@ -39,6 +39,7 @@ from dynamo.planner.core.types import (
     EngineCapabilities,
     FpmObservations,
     PlannerEffects,
+    RetuneDecision,
     ScheduledTick,
     TickDiagnostics,
     TickInput,
@@ -54,8 +55,12 @@ from dynamo.planner.monitoring.live_dashboard import start_live_dashboard
 from dynamo.planner.monitoring.planner_metrics import PlannerPrometheusMetrics
 from dynamo.planner.offline.trace_data import extract_traffic_observations_from_trace
 from dynamo.planner.reconfiguration import (
+    PREPARATION_TIMEOUT_SECONDS,
     PlannerReconfiguration,
+    candidate_config,
     live_retune_sla_errors,
+    predictor_rebuild_required,
+    prepare_predictor,
     runtime_candidate_errors,
     runtime_configuration_errors,
 )
@@ -263,6 +268,8 @@ class NativePlannerBase:
         self._legacy_retune_task: Optional[asyncio.Task[None]] = None
         self._legacy_retune_cleanup: Optional[RetuneCleanupHandle] = None
         self._retune_lease_found = asyncio.Event()
+        # Background applications of live retune Planner changes.
+        self._retune_apply_tasks: set[asyncio.Task[None]] = set()
 
     async def _async_init(self) -> None:
         # Shutdown is safe for a partially initialized environment and is
@@ -442,6 +449,11 @@ class NativePlannerBase:
         """Release initialized planner resources after normal or failed startup."""
 
         await self.reconfiguration.close()
+        applying = list(self._retune_apply_tasks)
+        for task in applying:
+            task.cancel()
+        if applying:
+            await asyncio.gather(*applying, return_exceptions=True)
 
         if not self._diagnostics_finalized:
             self._diagnostics_finalized = True
@@ -624,6 +636,71 @@ class NativePlannerBase:
         if getattr(provider, "max_fpm_age_seconds", None) != age:
             setter(age)
             logger.info("FPM freshness window is now %.1fs", age)
+
+    def _schedule_retune_planner_changes(
+        self, decisions: Sequence[RetuneDecision]
+    ) -> None:
+        """Apply each ``applied`` live retune decision's Planner fields.
+
+        In the background, through the runtime reconfiguration path: a new
+        load predictor is prepared off the event loop on the decision's
+        warmup, then the candidate activates under the effect admission and
+        configuration locks, as a control API update does.
+        """
+
+        for decision in decisions:
+            if decision.outcome != "applied" or not decision.planner_changes:
+                continue
+            task = asyncio.create_task(
+                self._apply_retune_planner_changes(decision),
+                name=f"planner-retune-apply-{decision.decision_id}",
+            )
+            self._retune_apply_tasks.add(task)
+            task.add_done_callback(self._retune_apply_tasks.discard)
+
+    async def _apply_retune_planner_changes(self, decision: RetuneDecision) -> None:
+        changes = dict(decision.planner_changes)
+        try:
+            async with self._config_lock:
+                candidate = candidate_config(self.config, changes)
+                self.validate_runtime_candidate(candidate)
+                rebuild = predictor_rebuild_required(self.config, candidate)
+            predictor = None
+            if rebuild:
+                predictor = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        prepare_predictor,
+                        candidate,
+                        self._build_worker_capabilities(),
+                        decision.predictor_warmup,
+                    ),
+                    PREPARATION_TIMEOUT_SECONDS,
+                )
+            async with self._effect_admission_lock:
+                async with self._config_lock:
+                    candidate = candidate_config(self.config, changes)
+                    self.validate_runtime_candidate(candidate)
+                    if predictor_rebuild_required(self.config, candidate) != rebuild:
+                        raise ValueError(
+                            "the configuration changed while the predictor was "
+                            "prepared"
+                        )
+                    self.apply_runtime_candidate(candidate, changes.keys(), predictor)
+            logger.info(
+                "Retune %s applied planner changes %s",
+                decision.decision_id,
+                changes,
+            )
+        except Exception:
+            logger.exception(
+                "Retune %s could not apply planner changes %s; the Planner keeps "
+                "its configuration",
+                decision.decision_id,
+                changes,
+            )
+            controller = getattr(self._engine, "retune_controller", None)
+            if controller is not None:
+                controller.discard_planner_changes(changes)
 
     @asynccontextmanager
     async def _bounded_config_lock(self) -> AsyncIterator[None]:
@@ -1303,6 +1380,7 @@ class NativePlannerBase:
                 self._live_retune.on_effects(effects)
             except Exception:
                 logger.exception("Live retune failed to take the tick's effects")
+            self._schedule_retune_planner_changes(effects.retune_decisions)
         await self._submit_effects(effects, config_generation)
         emit_diagnostics = self._should_emit_tick_diagnostics(tick, effects)
         if emit_diagnostics:

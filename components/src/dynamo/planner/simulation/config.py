@@ -382,6 +382,71 @@ _PLANNER_LIVE_NAME_HINTS = {
 }
 
 
+# ``PlannerConfig`` fields a live retune sweep (``retune.executor: dgdr``)
+# sends as the base of each candidate's inner planner, in the
+# ``planner.retune_sweep`` section of a DGDR Request: the fields that decide
+# scaling. Connections, credentials, file paths, ports, reports, the
+# Kubernetes wiring and the performance-model sources stay in the live
+# Planner; the Run's replay brings its own performance model.
+PLANNER_RETUNE_SWEEP_BASE_FIELDS = frozenset(
+    {
+        "mode",
+        "optimization_target",
+        "ttft_ms",
+        "itl_ms",
+        "enable_throughput_scaling",
+        "enable_load_scaling",
+        "throughput_adjustment_interval_seconds",
+        "load_adjustment_interval_seconds",
+        "max_throughput_scaling_replicas",
+        "max_gpu_budget",
+        "min_gpu_budget",
+        "min_endpoint",
+        "prefill_min_endpoint",
+        "decode_min_endpoint",
+        "load_predictor",
+        "load_predictor_log1p",
+        "prophet_window_size",
+        "kalman_q_level",
+        "kalman_q_trend",
+        "kalman_r",
+        "kalman_min_points",
+        "max_num_fpm_samples",
+        "fpm_sample_bucket_size",
+        "load_scaling_down_sensitivity",
+        "load_min_observations",
+        "prefill_scale_up_queue_tokens",
+        "prefill_scale_down_queue_tokens",
+        "decode_scale_up_kv_rate",
+        "decode_scale_down_kv_rate",
+        "speculative_nextn",
+        "throughput_metrics_source",
+        "scheduling",
+    }
+)
+# ``scheduling`` keys a retune sweep base keeps: the tick cadence. Plugins,
+# the registration gateway and the live tick deadline stay in the Planner.
+PLANNER_RETUNE_SWEEP_SCHEDULING_FIELDS = frozenset({"scale_interval_seconds"})
+
+
+def retune_sweep_base(planner: Mapping[str, Any]) -> dict[str, Any]:
+    """The ``planner.retune_sweep.base`` of a live Planner config dump."""
+
+    base = {
+        key: value
+        for key, value in planner.items()
+        if key in PLANNER_RETUNE_SWEEP_BASE_FIELDS and key != "scheduling"
+    }
+    scheduling = planner.get("scheduling")
+    if isinstance(scheduling, Mapping):
+        base["scheduling"] = {
+            key: value
+            for key, value in scheduling.items()
+            if key in PLANNER_RETUNE_SWEEP_SCHEDULING_FIELDS
+        }
+    return base
+
+
 class PlannerRetuneConfig(PlannerRecommendationConfig):
     """``retune.planner``: the recommendation schema, restricted to what a
     running planner can change.

@@ -204,6 +204,47 @@ def test_trace_runner_preserves_current_replay_arguments(
     assert report.metadata["planner_total_ticks"] == 7
 
 
+def test_planner_hook_warmup_reaches_the_inner_planner(monkeypatch) -> None:
+    # A live retune sweep's candidate warms its load predictor with the
+    # history rows its planner hook carries.
+    seen = {}
+
+    def fake_run_trace_replay(**kwargs):
+        seen.update(kwargs)
+        return _report({"goodput_output_throughput_tok_s": 40.0}, total_ticks=1)
+
+    monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
+    rows = [[180.0, 12.0, 100.0, 20.0, None, None], [180.0, 9.0, 90.0, 25.0, 0.5, None]]
+    spec = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload={"trace_path": "window.jsonl.gz", "trace_format": "dynamo"},
+        goal={"target": "goodput", "sla": {"ttft_ms": 100.0, "itl_ms": 20.0}},
+        adapters={
+            "dynamo.planner": AdapterReplaySpec(
+                runtime_hooks=(
+                    RuntimeHookSpec(
+                        provider="dynamo.planner",
+                        kind="scaling_policy",
+                        api_version=1,
+                        config={
+                            "planner_config": {"mode": "agg"},
+                            "warmup_observations": rows,
+                        },
+                    ),
+                )
+            )
+        },
+    )
+
+    simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+
+    warmup = seen["_planner_warmup_observations"]
+    assert [(obs.duration_s, obs.num_req, obs.kv_hit_rate) for obs in warmup] == [
+        (180.0, 12.0, None),
+        (180.0, 9.0, 0.5),
+    ]
+
+
 def test_trace_paths_only_workload_routes_to_trace_replay(monkeypatch) -> None:
     seen = {}
 

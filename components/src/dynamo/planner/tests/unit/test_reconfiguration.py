@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import dataclasses
 import gzip
 import json
 import threading
@@ -845,3 +846,79 @@ async def test_run_loop_polls_at_the_current_load_interval(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await planner.run()
     assert sleeps == [1.0, 2.0]
+
+
+def _applied(changes, warmup=None):
+    from dynamo.planner.core.types import RetuneDecision, RetuneParams
+
+    return RetuneDecision(
+        decision_id="retune-w1",
+        outcome="applied",
+        window_index=0,
+        window_start_s=0.0,
+        window_end_s=60.0,
+        as_of_s=65.0,
+        launched_at_s=65.0,
+        decided_at_s=70.0,
+        num_requests=10,
+        num_candidates=2,
+        previous=RetuneParams(),
+        chosen=RetuneParams(planner=dict(changes)),
+        baseline_score=1.0,
+        best_score=2.0,
+        planner_changes=dict(changes),
+        predictor_warmup=warmup,
+    )
+
+
+async def _apply_decisions(planner, decisions):
+    planner._schedule_retune_planner_changes(decisions)
+    await asyncio.gather(*planner._retune_apply_tasks)
+
+
+async def test_live_retune_applies_planner_changes_through_runtime_reconfiguration():
+    planner = sla_planner(enable_load_scaling=True)
+    engine = planner._ensure_engine()
+    advisory = dataclasses.replace(
+        _applied({"load_scaling_down_sensitivity": 70}), outcome="advisory"
+    )
+
+    await _apply_decisions(
+        planner, [advisory, _applied({"load_scaling_down_sensitivity": 90})]
+    )
+
+    # The advisory decision changes nothing; the applied one is a new revision.
+    assert planner.config.load_scaling_down_sensitivity == 90
+    assert planner._config_generation == 1
+    assert "load_propose" in engine._builtins
+    await planner._shutdown_runtime()
+
+
+async def test_live_retune_keeps_the_config_when_a_planner_change_cannot_apply():
+    planner = _planner(
+        "disagg",
+        optimization_target="sla",
+        load_predictor="kalman",
+        kalman_min_points=20,
+    )
+    engine = planner._ensure_engine()
+    discarded = []
+
+    class Controller:
+        def discard_planner_changes(self, changes):
+            discarded.append(dict(changes))
+
+    engine._retune = Controller()
+    # A new throughput interval needs a warmed predictor; one bucket is too
+    # few for a Kalman filter that needs 20.
+    changes = {"throughput_adjustment_interval_seconds": 360}
+    warmup = (TrafficObservation(360.0, 10.0, 100.0, 10.0),)
+
+    await _apply_decisions(planner, [_applied(changes, warmup)])
+
+    assert planner.config.throughput_adjustment_interval_seconds == 180
+    assert planner._config_generation == 0
+    # The controller's current point is the running configuration again.
+    assert discarded == [changes]
+    engine._retune = None
+    await planner._shutdown_runtime()
