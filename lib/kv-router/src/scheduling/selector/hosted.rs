@@ -14,12 +14,13 @@ use crate::scheduling::types::{KvSchedulerError, WorkerSelectionPolicyError};
 
 /// Request metadata a routing host without the KV path supplies for one selection.
 ///
-/// Only the prompt length is set; every other [`WorkerSelectionContext`] value reads as
+/// Only the prompt length and the preview flag are set; every other [`WorkerSelectionContext`] value reads as
 /// the KV router's default for a request without it: no expected output length or
 /// temperature override, zero priorities, a block size of 0, and no session metadata.
 #[derive(Debug)]
 pub struct HostedSelectionRequest {
     isl_tokens: usize,
+    preview: bool,
 }
 
 impl HostedSelectionRequest {
@@ -27,7 +28,18 @@ impl HostedSelectionRequest {
     /// token IDs.
     #[inline]
     pub fn new(isl_tokens: usize) -> Self {
-        Self { isl_tokens }
+        Self {
+            isl_tokens,
+            preview: false,
+        }
+    }
+
+    /// Whether this selection only previews a worker, as a peek does; see
+    /// [`WorkerSelectionContext::is_preview`].
+    #[inline]
+    pub fn with_preview(mut self, preview: bool) -> Self {
+        self.preview = preview;
+        self
     }
 
     fn context(&self) -> WorkerSelectionContext<'_> {
@@ -46,6 +58,7 @@ impl HostedSelectionRequest {
             track_prefill_tokens: false,
             pinned_worker: None,
             router_temperature_override: None,
+            preview: self.preview,
         }
     }
 }
@@ -127,6 +140,26 @@ impl fmt::Debug for HostedWorkerPicker {
         f.debug_struct("HostedWorkerPicker")
             .field("inputs", &self.inputs)
             .finish_non_exhaustive()
+    }
+}
+
+/// Lets `PushRouter` run the picker. Its callers carry no LLM request, so the selection sees
+/// a zero-token request.
+#[cfg(feature = "runtime-protocols")]
+impl dynamo_runtime::pipeline::InstanceSelector for HostedWorkerPicker {
+    fn reads_active_requests(&self) -> bool {
+        self.inputs.contains(WorkerInputs::ACTIVE_REQUESTS)
+    }
+
+    fn select_instance(
+        &self,
+        instance_ids: &[u64],
+        active_requests: &dyn Fn(u64) -> u64,
+        preview: bool,
+    ) -> Option<u64> {
+        let request = HostedSelectionRequest::new(0).with_preview(preview);
+        let active_requests = self.reads_active_requests().then_some(active_requests);
+        self.select(instance_ids, active_requests, &request).ok()
     }
 }
 

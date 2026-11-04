@@ -112,9 +112,13 @@ impl Environment {
             .await
             .unwrap();
         Arc::new(
-            Router::from_client(client, RouterMode::RoundRobin)
-                .await
-                .unwrap(),
+            Router::from_client_with_options(
+                client,
+                RouterMode::RoundRobin,
+                dynamo_llm::kv_router::plugins::push_router_options(),
+            )
+            .await
+            .unwrap(),
         )
     }
 

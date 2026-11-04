@@ -285,7 +285,7 @@ impl KvRouterConfig {
                  selects worker-selection policy instance {instance:?} for {worker_type}"
             )));
         }
-        dynamo_custom_policy_builtin::startup_policy_parameters(&self.inner, role)
+        dynamo_router_policies::startup_policy_parameters(&self.inner, role)
             .into_iter()
             .map(|(name, value)| match value.as_f64() {
                 Some(value) => Ok((name, value)),
@@ -985,7 +985,7 @@ mod plugin_input_tests {
     #[test]
     fn explicit_policy_retains_frontend_restrictions() {
         let plugins = RouterPlugins::default()
-            .with_worker_selection(dynamo_custom_policy_builtin::default_factory());
+            .with_worker_selection(dynamo_router_policies::default_factory());
         assert!(validate_router_plugin_input(&plugins, &Input::Http, true).is_ok());
         assert_eq!(
             validate_router_plugin_input(&plugins, &Input::Http, false),
