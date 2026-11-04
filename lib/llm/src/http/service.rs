@@ -25,6 +25,7 @@ mod image_edits;
 pub mod metadata;
 mod openai;
 mod server;
+mod transcriptions;
 mod write_timeout;
 
 pub mod busy_threshold;

@@ -73,6 +73,7 @@ required-features = ["media-ffmpeg"]
 [dependencies]
 dynamo-custom-policy-builtin = { workspace = true }
 # repo
+dynamo-global-discovery-client = { workspace = true }
 dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols", "standalone-selection"] }
 dynamo-lora = { workspace = true }
 dynamo-memory = { workspace = true }
@@ -113,7 +114,7 @@ percent-encoding = "2.3.2"
 prometheus = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
 sha2 = "0.10"
 strum = { workspace = true }
 tempfile = { workspace = true }
