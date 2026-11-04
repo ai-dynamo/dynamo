@@ -28,6 +28,7 @@ from tests.serve.lora_utils import DEFAULT_LORA_REPO, MinioLoraConfig
 from tests.serve.multimodal_profiles.sglang import (
     SGLANG_MULTIMODAL_PROFILES,
     SGLANG_TOPOLOGY_SCRIPTS,
+    SGLangMmRoutingPayload,
 )
 from tests.utils.constants import DefaultPort, DynamoPortRange
 from tests.utils.engine_process import EngineConfig
@@ -52,7 +53,6 @@ from tests.utils.payload_builder import (
     router_selection_chat_payload_default,
 )
 from tests.utils.payloads import (
-    CachedTokensChatPayload,
     ChatPayload,
     HttpErrorPayload,
     ImageGenerationPayload,
@@ -83,18 +83,6 @@ class SGLangConfig(EngineConfig):
     """Configuration for SGLang test scenarios"""
 
     stragglers: list[str] = field(default_factory=lambda: ["SGLANG:EngineCore"])
-
-
-class SGLangVideoRoutingPayload(CachedTokensChatPayload):
-    def bind_environment(self, env: dict[str, str]) -> None:
-        # Defer the optional backend import until this test runs.
-        from dynamo.sglang._compat import sglang_has_wide_mm_pad_values
-
-        super().bind_environment(env)
-        if sglang_has_wide_mm_pad_values():
-            # Wide IDs use text-prefix routing, not exact media overlap.
-            # Keep response-content and worker cached-token checks enabled.
-            self.min_avg_kv_hit_rate = 0.0
 
 
 sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
@@ -807,7 +795,7 @@ sglang_configs = {
         timeout=450,
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
-            SGLangVideoRoutingPayload(
+            SGLangMmRoutingPayload(
                 body={
                     "messages": [
                         {
