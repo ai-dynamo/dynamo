@@ -11,14 +11,20 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 
 use rmp_serde as rmps;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::protocols::{DpRank, PlacementEvent, StorageTier, WorkerWithDpRank};
+use crate::protocols::{
+    DpRank, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, Placement, PlacementEvent,
+    StorageTier, WorkerWithDpRank,
+};
 
 mod convert;
 mod deserialize;
 mod extra_keys;
 mod filter;
+mod mm_exclusion;
+#[cfg(test)]
+mod mm_exclusion_tests;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -34,12 +40,35 @@ pub use extra_keys::{
 pub use filter::KvCacheSpecKind;
 pub use types::{
     BlockHashValue, ExtraKeyItem, KvEventBatch, KvEventOwnership, KvTokenIds, Locality, RawKvEvent,
+    WIDE_TOKEN_SENTINEL,
 };
 
 use filter::KvCacheEventMetadata;
 
 pub fn decode_event_batch(payload: &[u8]) -> Result<KvEventBatch, rmps::decode::Error> {
     rmps::from_slice(payload)
+}
+
+fn storage_tier_of(raw: &RawKvEvent) -> Option<StorageTier> {
+    match raw.medium() {
+        None => Some(StorageTier::Device),
+        Some(medium) => StorageTier::from_kv_medium(medium),
+    }
+}
+
+/// A no-op placement event that keeps the event id sequence intact when a
+/// store is dropped entirely.
+fn empty_removal(event_id: u64, worker: WorkerWithDpRank, tier: StorageTier) -> PlacementEvent {
+    PlacementEvent::new(
+        Placement::local_worker(worker.worker_id, worker.dp_rank, tier),
+        KvCacheEvent {
+            event_id,
+            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: Vec::new(),
+            }),
+            dp_rank: worker.dp_rank,
+        },
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +84,14 @@ pub struct ZmqEventNormalizer {
     warning_count: Arc<AtomicU32>,
     group_metadata: FxHashMap<(DpRank, u32), KvCacheGroupMetadata>,
     cache_namespaces: FxHashMap<(WorkerWithDpRank, u64), CacheNamespaceState>,
+    /// Exclusion of multimodal values the request side cannot reproduce. See
+    /// `mm_exclusion` and [`Self::with_engine_owned_mm_identity`].
+    engine_mm: mm_exclusion::EngineMmState,
+    /// Workers that have published at least one full-size block. Once a worker
+    /// has proven its block size matches, a smaller `BlockStored` event is a
+    /// partial tail (vLLM `--prefix-match-unit` below the block size), not a
+    /// misconfiguration, and is filtered quietly instead of warned about.
+    full_block_workers: FxHashSet<WorkerWithDpRank>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +118,7 @@ pub enum ZmqEventFilterReason {
     UnknownKind,
     NonMainAttentionGroup,
     UnlearnedGroupIdx,
+    PartialBlock,
 }
 
 impl ZmqEventFilterReason {
@@ -96,6 +134,7 @@ impl ZmqEventFilterReason {
             Self::UnknownKind => "unknown_kind",
             Self::NonMainAttentionGroup => "non_main_attention_group",
             Self::UnlearnedGroupIdx => "unlearned_group_idx",
+            Self::PartialBlock => "partial_block",
         }
     }
 }
@@ -109,6 +148,8 @@ impl ZmqEventNormalizer {
             warning_count: Arc::new(AtomicU32::new(0)),
             group_metadata: FxHashMap::default(),
             cache_namespaces: FxHashMap::default(),
+            engine_mm: mm_exclusion::EngineMmState::new(false),
+            full_block_workers: FxHashSet::default(),
         }
     }
 
@@ -120,7 +161,27 @@ impl ZmqEventNormalizer {
             warning_count,
             group_metadata: FxHashMap::default(),
             cache_namespaces: FxHashMap::default(),
+            engine_mm: mm_exclusion::EngineMmState::new(false),
+            full_block_workers: FxHashSet::default(),
         }
+    }
+
+    /// Mark this source as deriving multimodal pad values from engine
+    /// identities (sgl-project/sglang#43043): every event token at or above
+    /// `MM_PAD_SHIFT_VALUE` is excluded with the blocks chained after it.
+    /// Unflagged sources exclude only values that did not fit in `u32`.
+    pub fn with_engine_owned_mm_identity(mut self, enabled: bool) -> Self {
+        self.engine_mm = mm_exclusion::EngineMmState::new(enabled);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_engine_mm_excluded_capacity(mut self, excluded_capacity: usize) -> Self {
+        self.engine_mm = mm_exclusion::EngineMmState::with_excluded_capacity(
+            self.engine_mm.engine_owned(),
+            excluded_capacity,
+        );
+        self
     }
 
     /// Set the model's image placeholder token id so vLLM BlockStored events
@@ -216,6 +277,22 @@ impl ZmqEventNormalizer {
             Some(reason) => return Err(reason),
             None => {}
         }
+        // Only blocks that survived group filtering count toward a worker's
+        // full-block history, so a filtered (non-main-attention) group cannot
+        // suppress a size-mismatch warning for the routed group. A clear resets
+        // the history: the engine behind this worker may come back with a
+        // different block size.
+        match &raw {
+            RawKvEvent::BlockStored { block_size, .. } => {
+                if let Some(reason) = self.filter_partial_block(*block_size, worker) {
+                    return Err(reason);
+                }
+            }
+            RawKvEvent::AllBlocksCleared { .. } => {
+                self.full_block_workers.remove(&worker);
+            }
+            _ => {}
+        }
         if !is_lower_tier {
             self.propagate_cache_namespace(&mut raw, worker)?;
         }
@@ -223,20 +300,61 @@ impl ZmqEventNormalizer {
     }
 
     pub fn normalize_preprocessed(
-        &self,
-        raw: RawKvEvent,
+        &mut self,
+        mut raw: RawKvEvent,
         event_id: u64,
         worker: WorkerWithDpRank,
     ) -> Option<PlacementEvent> {
-        convert_event(
-            raw,
-            event_id,
-            self.kv_block_size,
-            worker,
-            &self.warning_count,
-            self.image_token_id,
-            self.video_token_id,
-        )
+        // Unknown media fail closed in conversion; keep that behavior.
+        let Some(tier) = storage_tier_of(&raw) else {
+            return convert_event(
+                raw,
+                event_id,
+                self.kv_block_size,
+                worker,
+                &self.warning_count,
+                self.image_token_id,
+                self.video_token_id,
+            );
+        };
+        // Engine-owned pads replace the placeholder tokens that vLLM-style
+        // normalization rewrites, so only legacy sources use those ids.
+        let (image_token_id, video_token_id) = if self.engine_mm.engine_owned() {
+            (None, None)
+        } else {
+            (self.image_token_id, self.video_token_id)
+        };
+        let convert = |raw| {
+            convert_event(
+                raw,
+                event_id,
+                self.kv_block_size,
+                worker,
+                &self.warning_count,
+                image_token_id,
+                video_token_id,
+            )
+        };
+        match raw {
+            RawKvEvent::BlockStored { .. } => {
+                // An excluded store still yields an event so the event id is
+                // not mistaken for an engine-side drop.
+                if !self.engine_mm.prepare_store(&mut raw, worker, tier) {
+                    return Some(empty_removal(event_id, worker, tier));
+                }
+                convert(raw)
+            }
+            RawKvEvent::BlockRemoved { .. } => {
+                let mut event = convert(raw)?;
+                self.engine_mm.filter_remove(&mut event, worker, tier);
+                Some(event)
+            }
+            RawKvEvent::AllBlocksCleared { .. } => {
+                self.engine_mm.clear(worker);
+                convert(raw)
+            }
+            RawKvEvent::Ignored => None,
+        }
     }
 
     pub fn normalize(
@@ -247,6 +365,41 @@ impl ZmqEventNormalizer {
     ) -> Option<PlacementEvent> {
         let raw = self.preprocess(raw, worker)?;
         self.normalize_preprocessed(raw, event_id, worker)
+    }
+
+    /// Filter partial-tail `BlockStored` events from engines whose hash unit is
+    /// smaller than the KV block size (vLLM `--prefix-match-unit`).
+    ///
+    /// vLLM publishes full blocks at the engine block size and the trailing
+    /// partial block of a prompt at the hash-unit size. The router can only
+    /// index full blocks, so conversion drops the partial one, but it does so
+    /// with a block-size-mismatch warning that users read as a misconfiguration.
+    /// Once a worker has published a full-size block its block size is known to
+    /// match, so a smaller event from that worker is a partial tail and is
+    /// filtered here at debug level. A mismatch on the first event from a worker
+    /// is left to conversion, which still warns, so a real block-size
+    /// misconfiguration stays visible.
+    fn filter_partial_block(
+        &mut self,
+        block_size: usize,
+        worker: WorkerWithDpRank,
+    ) -> Option<ZmqEventFilterReason> {
+        let kv_block_size = self.kv_block_size as usize;
+        if block_size == kv_block_size {
+            self.full_block_workers.insert(worker);
+            return None;
+        }
+        if block_size < kv_block_size && self.full_block_workers.contains(&worker) {
+            tracing::debug!(
+                block_size,
+                kv_block_size,
+                worker_id = worker.worker_id,
+                dp_rank = worker.dp_rank,
+                "Filtering partial-tail KV block event (hash unit smaller than block size)"
+            );
+            return Some(ZmqEventFilterReason::PartialBlock);
+        }
+        None
     }
 
     fn learn_metadata(&mut self, metadata: KvCacheEventMetadata, dp_rank: DpRank) {

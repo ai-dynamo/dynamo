@@ -204,6 +204,11 @@ struct KvIndexerCli {
     #[arg(long, default_value = "default")]
     routing_group: String,
 
+    /// Initial workers registered via --workers derive multimodal pad values from
+    /// engine identities (SGLang after sgl-project/sglang#43043)
+    #[arg(long)]
+    engine_owned_mm_identity: bool,
+
     /// Legacy compatibility input; accepted but ignored
     #[arg(long = "tenant-id", default_value = "default", hide = true)]
     _tenant_id: String,
@@ -253,6 +258,7 @@ where
             workers: cli.workers,
             model_name: cli.model_name,
             routing_group: cli.routing_group,
+            engine_owned_mm_identity: cli.engine_owned_mm_identity,
             peers: cli.peers,
             access_log: cli.access_log,
             trace_id_header,
@@ -1400,8 +1406,12 @@ impl KvEventPublisher {
     ///         does not change the endpoint used for request routing.
     ///     video_token_id: Optional model video-placeholder token used to
     ///         normalize vLLM KV events for exact MM routing.
+    ///     engine_owned_mm_identity: The source uses SGLang's wide multimodal pad
+    ///         format (after sgl-project/sglang#43043), including for caller hashes,
+    ///         so every event token at or above 1,000,000 is excluded from the
+    ///         index. Otherwise only values that do not fit in 32 bits are.
     #[new]
-    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None, kv_state_endpoint=None, video_token_id=None))]
+    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None, kv_state_endpoint=None, video_token_id=None, engine_owned_mm_identity=false))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: Endpoint,
@@ -1415,6 +1425,7 @@ impl KvEventPublisher {
         image_token_id: Option<u32>,
         kv_state_endpoint: Option<String>,
         video_token_id: Option<u32>,
+        engine_owned_mm_identity: bool,
     ) -> PyResult<Self> {
         let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
             liveness: None,
@@ -1423,6 +1434,7 @@ impl KvEventPublisher {
             topic: zmq_topic.unwrap_or_default(),
             image_token_id,
             video_token_id,
+            engine_owned_mm_identity,
             recovery: None,
         });
 

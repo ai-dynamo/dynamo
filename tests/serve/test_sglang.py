@@ -85,6 +85,18 @@ class SGLangConfig(EngineConfig):
     stragglers: list[str] = field(default_factory=lambda: ["SGLANG:EngineCore"])
 
 
+class SGLangVideoRoutingPayload(CachedTokensChatPayload):
+    def bind_environment(self, env: dict[str, str]) -> None:
+        # Defer the optional backend import until this test runs.
+        from dynamo.sglang._compat import sglang_has_wide_mm_pad_values
+
+        super().bind_environment(env)
+        if sglang_has_wide_mm_pad_values():
+            # Wide IDs use text-prefix routing, not exact media overlap.
+            # Keep response-content and worker cached-token checks enabled.
+            self.min_avg_kv_hit_rate = 0.0
+
+
 sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/sglang"
 )
@@ -795,7 +807,7 @@ sglang_configs = {
         timeout=450,
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
-            CachedTokensChatPayload(
+            SGLangVideoRoutingPayload(
                 body={
                     "messages": [
                         {
@@ -821,10 +833,7 @@ sglang_configs = {
                 min_cached_tokens=128,
                 require_rust_processor_init=True,
                 min_routing_total_blocks=10,
-                # A text-only hit is at most a small fraction of this video
-                # request. Requiring high router-side overlap proves the media
-                # hashes matched the worker KV events instead of accepting a
-                # cached text prefix as a false positive.
+                # Require exact media overlap only on scalar-ID builds.
                 min_avg_kv_hit_rate=0.9,
             )
         ],

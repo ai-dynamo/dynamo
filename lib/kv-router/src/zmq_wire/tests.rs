@@ -1180,6 +1180,152 @@ fn cpu_event_with_full_payload_is_indexable() {
     assert_eq!(warning_count.load(Ordering::Relaxed), 0);
 }
 
+// ---- partial-tail block filtering (vLLM --prefix-match-unit) ----
+
+fn gpu_block_stored(block_hashes: &[u64], token_ids: &[u32], block_size: usize) -> RawKvEvent {
+    RawKvEvent::BlockStored {
+        block_hashes: block_hashes
+            .iter()
+            .copied()
+            .map(BlockHashValue::Unsigned)
+            .collect(),
+        parent_block_hash: None,
+        token_ids: token_ids.to_vec(),
+        block_size,
+        medium: None,
+        lora_name: None,
+        cache_namespace: None,
+        block_mm_infos: None,
+        is_eagle: None,
+        group_idx: None,
+        kv_cache_spec_kind: None,
+        kv_cache_spec_sliding_window: None,
+        locality: None,
+        ownership: None,
+        session_id: None,
+    }
+}
+
+/// vLLM with `--prefix-match-unit` below the block size publishes full blocks
+/// at the block size and the trailing partial block at the hash-unit size.
+/// Once a worker has published a full block, the undersized event is a partial
+/// tail and is filtered with its own reason instead of reaching conversion,
+/// where it would trigger the block-size-mismatch warning.
+#[test]
+fn partial_tail_block_is_filtered_after_a_full_block_from_the_same_worker() {
+    let mut normalizer = ZmqEventNormalizer::new(4);
+    let worker = WorkerWithDpRank::new(7, 0);
+
+    let full = gpu_block_stored(&[1], &[10, 11, 12, 13], 4);
+    assert!(normalizer.preprocess_with_reason(full, worker).is_ok());
+
+    let partial_tail = gpu_block_stored(&[2], &[14, 15], 2);
+    assert_eq!(
+        normalizer
+            .preprocess_with_reason(partial_tail, worker)
+            .err(),
+        Some(ZmqEventFilterReason::PartialBlock)
+    );
+
+    let next_full = gpu_block_stored(&[3], &[16, 17, 18, 19], 4);
+    assert!(normalizer.preprocess_with_reason(next_full, worker).is_ok());
+}
+
+/// An undersized block from a worker that has never published a full block is
+/// not a partial tail: it may be a real block-size misconfiguration, so it still
+/// reaches conversion and the existing warning fires.
+#[test]
+fn undersized_block_before_any_full_block_still_reaches_conversion_and_warns() {
+    let mut normalizer = ZmqEventNormalizer::new(4);
+    let worker = WorkerWithDpRank::new(7, 0);
+
+    let undersized = gpu_block_stored(&[2], &[14, 15], 2);
+    let raw = normalizer
+        .preprocess_with_reason(undersized, worker)
+        .expect("first undersized block must not be filtered as a partial tail");
+
+    let warning_count = Arc::new(AtomicU32::new(0));
+    let placement = convert_event(raw, 1, 4, worker, &warning_count, None, None).unwrap();
+    match placement.event.data {
+        KvCacheEventData::Stored(store_data) => assert!(store_data.blocks.is_empty()),
+        other => panic!("expected Stored event, got {other:?}"),
+    }
+    assert_eq!(warning_count.load(Ordering::Relaxed), 1);
+}
+
+/// The full-block proof is per worker: another worker's undersized event is not
+/// filtered just because a different worker has published full blocks.
+#[test]
+fn partial_tail_filter_is_tracked_per_worker() {
+    let mut normalizer = ZmqEventNormalizer::new(4);
+    let proven = WorkerWithDpRank::new(7, 0);
+    let unproven = WorkerWithDpRank::new(8, 0);
+
+    let full = gpu_block_stored(&[1], &[10, 11, 12, 13], 4);
+    assert!(normalizer.preprocess_with_reason(full, proven).is_ok());
+
+    let undersized = gpu_block_stored(&[2], &[14, 15], 2);
+    assert!(
+        normalizer
+            .preprocess_with_reason(undersized, unproven)
+            .is_ok()
+    );
+}
+
+/// A full-size block from a group the router filters out (here a Mamba state
+/// group) must not count as proof of the worker's block size: a later undersized
+/// main-attention block still has to reach conversion and warn.
+#[test]
+fn filtered_group_does_not_prove_block_size_for_partial_tail_filter() {
+    let mut normalizer = ZmqEventNormalizer::new(4);
+    let worker = WorkerWithDpRank::new(7, 0);
+
+    let mut full_non_main = gpu_block_stored(&[1], &[10, 11, 12, 13], 4);
+    if let RawKvEvent::BlockStored {
+        kv_cache_spec_kind,
+        group_idx,
+        ..
+    } = &mut full_non_main
+    {
+        *kv_cache_spec_kind = Some(KvCacheSpecKind::Mamba);
+        *group_idx = Some(1);
+    }
+    assert_eq!(
+        normalizer
+            .preprocess_with_reason(full_non_main, worker)
+            .err(),
+        Some(ZmqEventFilterReason::NonMainAttentionKind)
+    );
+
+    let undersized = gpu_block_stored(&[2], &[14, 15], 2);
+    assert!(
+        normalizer
+            .preprocess_with_reason(undersized, worker)
+            .is_ok()
+    );
+}
+
+/// `AllBlocksCleared` resets the worker's full-block history, so an engine
+/// that comes back with a different block size is not silently filtered.
+#[test]
+fn all_blocks_cleared_resets_partial_tail_filter_history() {
+    let mut normalizer = ZmqEventNormalizer::new(4);
+    let worker = WorkerWithDpRank::new(7, 0);
+
+    let full = gpu_block_stored(&[1], &[10, 11, 12, 13], 4);
+    assert!(normalizer.preprocess_with_reason(full, worker).is_ok());
+
+    let cleared = RawKvEvent::AllBlocksCleared { ownership: None };
+    assert!(normalizer.preprocess_with_reason(cleared, worker).is_ok());
+
+    let undersized = gpu_block_stored(&[2], &[14, 15], 2);
+    assert!(
+        normalizer
+            .preprocess_with_reason(undersized, worker)
+            .is_ok()
+    );
+}
+
 // ---- locality decode + storage-tier gating (this PR) ----
 
 /// LOCAL/REMOTE decode to their variants, any other string folds into

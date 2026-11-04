@@ -430,7 +430,7 @@ fn pool_update_stream(
     })
 }
 
-fn catalog_to_wire(
+pub(super) fn catalog_to_wire(
     catalog: PoolCatalogSnapshot,
     relay: PoolRelayIdentity,
 ) -> proto::KvPoolCatalogUpdate {
@@ -445,7 +445,7 @@ fn catalog_to_wire(
     }
 }
 
-fn readiness_to_wire(
+pub(super) fn readiness_to_wire(
     snapshot: &TopologySnapshot,
     relay: PoolRelayIdentity,
 ) -> proto::ServingReadinessUpdate {

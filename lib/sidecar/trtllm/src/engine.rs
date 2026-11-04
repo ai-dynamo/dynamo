@@ -68,6 +68,7 @@ impl Default for RoutingSupervision {
 }
 
 struct RoutingState {
+    instance_id: String,
     node: Option<crate::node::NodeMetadata>,
     dp_size: u32,
     dp_targeting: bool,
@@ -100,6 +101,9 @@ pub struct TrtllmSidecarEngine {
     metrics_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     cancel: CancellationToken,
     load_failed: CancellationToken,
+    /// Cancelled once TensorRT-LLM stops serving after `start`, with the reason set first.
+    lost: CancellationToken,
+    lost_reason: Arc<std::sync::OnceLock<String>>,
 }
 
 impl TrtllmSidecarEngine {
@@ -124,6 +128,8 @@ impl TrtllmSidecarEngine {
             metrics_task: Arc::new(Mutex::new(None)),
             cancel: CancellationToken::new(),
             load_failed: CancellationToken::new(),
+            lost: CancellationToken::new(),
+            lost_reason: Arc::default(),
         }
     }
 
@@ -135,7 +141,7 @@ impl TrtllmSidecarEngine {
     }
 
     /// Fence a restarted native engine before continuing with stale discovery.
-    pub(crate) async fn monitor_routing(&self) -> anyhow::Result<()> {
+    async fn monitor_routing(&self) -> anyhow::Result<()> {
         tokio::select! {
             _ = self.load_failed.cancelled() => {
                 anyhow::bail!(
@@ -420,6 +426,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                     "Discovered OpenEngine routing capabilities"
                 );
                 Ok::<RoutingState, DynamoError>(RoutingState {
+                    instance_id: server.instance_id,
                     node,
                     dp_size,
                     dp_targeting,
@@ -456,6 +463,21 @@ impl LLMEngine for TrtllmSidecarEngine {
                     .map_err(|error| client::protocol_error(error.to_string()))?,
             );
         }
+        let (stop, lost) = (self.cancel.child_token(), self.lost.clone());
+        let reason = Arc::clone(&self.lost_reason);
+        let (health, open_timeout) = (
+            client.health_channel(),
+            self.transport.connect_attempt_timeout,
+        );
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = stop.cancelled() => {}
+                why = client::watch_liveness(health, open_timeout) => {
+                    let _ = reason.set(why);
+                    lost.cancel();
+                }
+            }
+        });
         Ok(config)
     }
 
@@ -599,13 +621,13 @@ impl LLMEngine for TrtllmSidecarEngine {
                                 }
                             },
                             Ok(None) => {
-                                yield Err(client::protocol_error(
-                                    "Generate ended before a terminal response",
+                                yield Err(client::stream_incomplete(
+                                    "TensorRT-LLM Generate ended before a terminal response",
                                 ));
                                 break;
                             }
                             Err(status) => {
-                                yield Err(client::status_to_dynamo("Generate", status));
+                                yield Err(client::stream_status_to_dynamo("Generate", status));
                                 break;
                             }
                         }
@@ -646,6 +668,26 @@ impl LLMEngine for TrtllmSidecarEngine {
         }
         tracing::info!("TensorRT-LLM sidecar shutdown complete");
         Ok(())
+    }
+
+    async fn engine_lost(&self) -> DynamoError {
+        let reason = tokio::select! {
+            _ = self.lost.cancelled() => {
+                self.lost_reason.get().map_or("unknown", String::as_str).to_owned()
+            }
+            // Routing supervision only returns on a failure.
+            result = self.monitor_routing() => match result {
+                Err(error) => format!("{error:#}"),
+                Ok(()) => "routing supervision stopped".to_owned(),
+            },
+        };
+        let instance_id = self
+            .routing
+            .get()
+            .map_or("unknown", |routing| routing.instance_id.as_str());
+        client::engine_shutdown(format!(
+            "TensorRT-LLM engine lost: {reason} (instance {instance_id})"
+        ))
     }
 
     async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
