@@ -79,8 +79,8 @@ from dynamo.planner.monitoring.traffic_metrics import Metrics
 from dynamo.planner.plugins.clock import VirtualClock
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
 from dynamo.planner.reconfiguration import (
-    PREDICTOR_FIELDS,
     candidate_config,
+    predictor_rebuild_required,
     prepare_predictor,
     runtime_candidate_errors,
 )
@@ -494,10 +494,9 @@ class ReplayPlannerAdapter:
                     f"planner configuration: {'; '.join(errors)}"
                 )
             predictor = None
-            if any(
-                getattr(candidate, field) != getattr(self._config, field)
-                for field in PREDICTOR_FIELDS
-            ):
+            if predictor_rebuild_required(self._config, candidate):
+                # The sweep bucketed the warmup at the candidate's throughput
+                # interval, as the swapped-in predictor steps.
                 predictor = prepare_predictor(
                     candidate, capabilities, decision.predictor_warmup
                 )

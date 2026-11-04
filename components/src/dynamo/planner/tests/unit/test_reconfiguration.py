@@ -585,7 +585,7 @@ async def test_timeout_bounds_preparation_and_shutdown_prevents_late_activation(
 @pytest.mark.parametrize(
     "changes",
     [
-        {"throughput_adjustment_interval_seconds": 60},
+        {"max_num_fpm_samples": 32},
         {"ais_perf_model": None},
         {"ttft_ms": -1.0},
         {"ttft_ms": True},
@@ -718,3 +718,130 @@ def test_native_planner_rejects_retune_config():
                 "router": {"overlap_score_credit": {"choices": [0.0, 1.0]}},
             },
         )
+
+
+class _FakeFpmProvider:
+    def __init__(self, age):
+        self.max_fpm_age_seconds = age
+        self.ages = []
+
+    def set_max_fpm_age_seconds(self, age):
+        self.ages.append(age)
+        self.max_fpm_age_seconds = age
+
+
+async def test_scaling_policy_is_a_runtime_field(tmp_path):
+    # SLA, throughput scaling at 180 s, load scaling off, load interval 5 s.
+    planner = sla_planner(runtime_warmup_trace_dir=str(tmp_path))
+    provider = _FakeFpmProvider(planner.config.fpm_max_age_seconds)
+    planner.environment.fpm_provider = provider
+    engine = planner._ensure_engine()
+    predictor = engine._builtins["load_predict"]
+    assert reconfiguration.SCALING_POLICY_FIELDS <= set(
+        (await planner.reconfiguration.get_config())["supported_fields"]
+    )
+
+    # Load scaling on at 10 s: the predictor is kept, the FPM window follows.
+    await planner.reconfiguration.submit(
+        request(
+            planner,
+            {"enable_load_scaling": True, "load_adjustment_interval_seconds": 10},
+        )
+    )
+    assert (await finish(planner))["state"] == "applied"
+    assert engine._builtins["load_predict"] is predictor
+    assert "load_propose" in engine._builtins
+    assert provider.ages == [30.0]
+
+    # Both scaling modes off is not a runtime configuration.
+    off = await planner.reconfiguration.handle_request(
+        {
+            "method": "PATCH",
+            "path": "config",
+            "body": request(
+                planner,
+                {"enable_load_scaling": False, "enable_throughput_scaling": False},
+            )
+            .model_copy(update={"request_id": "off", "expected_revision": 1})
+            .model_dump(),
+        }
+    )
+    assert off["status"] == 422
+    assert "At least one scaling mode must be enabled" in off["body"]["error"]
+
+    # A new throughput interval is a new predictor step: it needs a warmup.
+    second = request(
+        planner, {"throughput_adjustment_interval_seconds": 360}
+    ).model_copy(update={"request_id": "update-2", "expected_revision": 1})
+    with pytest.raises(ValueError, match="predictor replacement requires"):
+        await planner.reconfiguration.submit(second)
+    await planner.reconfiguration.submit(
+        second.model_copy(update={"warmup_trace": trace(tmp_path)})
+    )
+    await asyncio.gather(planner.reconfiguration._task, return_exceptions=True)
+    operation = planner.reconfiguration.get_operation("update-2")
+    assert operation["state"] == "applied", operation
+    assert planner.config.throughput_adjustment_interval_seconds == 360
+    plugin = engine._orchestrator.registry.get_plugin("builtin_load_predict")
+    assert plugin.execution_interval_seconds == 360.0
+    await planner._shutdown_runtime()
+
+
+def test_runtime_fpm_provider_updates_both_subscribers_in_place():
+    from dynamo.planner.environment.metrics_provider.runtime_provider import (
+        RuntimeFpmProvider,
+    )
+
+    class Subscriber:
+        def __init__(self):
+            self.ages = []
+
+        def set_max_age(self, *, max_age_seconds):
+            self.ages.append(max_age_seconds)
+
+    provider = RuntimeFpmProvider(
+        require_prefill=True,
+        require_decode=True,
+        backend="vllm",
+        model_name=None,
+        runtime=None,
+        max_fpm_age_seconds=15.0,
+    )
+    prefill, decode = Subscriber(), Subscriber()
+    provider._prefill_fpm_sub, provider._decode_fpm_sub = prefill, decode
+
+    provider.set_max_fpm_age_seconds(30.0)
+
+    assert (prefill.ages, decode.ages) == ([30.0], [30.0])
+    # A subscriber created later starts with the new age.
+    assert provider.max_fpm_age_seconds == 30.0
+
+
+async def test_run_loop_polls_at_the_current_load_interval(monkeypatch):
+    # The loop sleeps a tenth of the load interval between tick checks; a
+    # runtime change of the interval takes effect at the next check.
+    class FutureTickEngine:
+        def initial_tick(self, start_s):
+            return ScheduledTick(at_s=start_s + 1_000.0)
+
+        async def tick(self, scheduled_tick, tick_input):
+            raise AssertionError("no tick is due")
+
+        async def shutdown(self):
+            pass
+
+    planner = _planner("agg", load_adjustment_interval_seconds=10)
+    planner._engine = FutureTickEngine()
+    sleeps = []
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 1:
+            planner.config.load_adjustment_interval_seconds = 20
+        else:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr("dynamo.planner.core.base.asyncio.sleep", sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await planner.run()
+    assert sleeps == [1.0, 2.0]

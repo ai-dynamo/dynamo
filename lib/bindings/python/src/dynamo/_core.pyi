@@ -1481,8 +1481,9 @@ class FpmEventSubscriber:
         """
         Start background tracking of the latest FPM per (worker_id, dp_rank).
 
-        ``max_age_seconds`` fixes the freshness and cleanup window for this
-        subscription. It must be finite and positive.
+        ``max_age_seconds`` sets the freshness and cleanup window for this
+        subscription; ``set_max_age`` changes it later. It must be finite and
+        positive.
 
         Spawns two background tasks:
 
@@ -1495,6 +1496,19 @@ class FpmEventSubscriber:
 
         After calling this, ``recv()`` will raise RuntimeError.
         """
+        ...
+
+    def set_max_age(self, max_age_seconds: float) -> None:
+        """
+        Change the freshness and cleanup window, before or after
+        ``start_tracking``. Tracked samples are kept; snapshot reads and the
+        next cleanup use the new age. It must be finite and positive.
+        """
+        ...
+
+    @property
+    def max_age_seconds(self) -> float:
+        """The current freshness and cleanup window, in seconds."""
         ...
 
     def get_recent_stats(self) -> dict[tuple[str, int], bytes]:

@@ -517,55 +517,115 @@ class OrchestratorEngineAdapter:
     def plugins_bootstrapped(self) -> bool:
         return self._plugins_bootstrapped
 
-    def _register_builtin_plugins(self) -> None:
-        """Register the in-process builtins that implement local planning."""
+    def _builtin_registrations(self) -> dict[str, dict[str, Any]]:
+        """``register_internal`` arguments (without the instance) of every
+        builtin the current scaling policy runs, keyed by builtin name."""
         cfg = self._config
         throughput_interval = float(cfg.throughput_adjustment_interval_seconds)
         load_interval = float(cfg.load_adjustment_interval_seconds)
-
+        registrations: dict[str, dict[str, Any]] = {}
         if cfg.enable_throughput_scaling:
-            predict = BuiltinLoadPredict(cfg, self._capabilities)
-            self._builtins["load_predict"] = predict
-            self._orchestrator.register_internal(
-                plugin_id=predict.plugin_id,
-                plugin_type="predict",
-                priority=0,
-                instance=predict,
-                execution_interval_seconds=throughput_interval,
-                needs=["observations.traffic"],
-                observation_window_seconds=throughput_interval,
-            )
-
-            throughput = BuiltinThroughputPropose(cfg, self._scaling_state)
-            self._builtins["throughput_propose"] = throughput
-            self._orchestrator.register_internal(
-                plugin_id=throughput.plugin_id,
-                plugin_type="propose",
-                priority=20,
-                instance=throughput,
-                execution_interval_seconds=throughput_interval,
-                needs=["observations.traffic", "predictions"],
-                requires_produced_fields=["predictions"],
-                observation_window_seconds=throughput_interval,
-            )
-
+            registrations["load_predict"] = {
+                "plugin_type": "predict",
+                "priority": 0,
+                "execution_interval_seconds": throughput_interval,
+                "needs": ["observations.traffic"],
+                "requires_produced_fields": [],
+                "observation_window_seconds": throughput_interval,
+            }
+            registrations["throughput_propose"] = {
+                "plugin_type": "propose",
+                "priority": 20,
+                "execution_interval_seconds": throughput_interval,
+                "needs": ["observations.traffic", "predictions"],
+                "requires_produced_fields": ["predictions"],
+                "observation_window_seconds": throughput_interval,
+            }
         if cfg.enable_load_scaling:
-            load = BuiltinLoadPropose(cfg, self._scaling_state)
-            self._builtins["load_propose"] = load
             needs = ["observations.fpm", "observations.workers"]
             observation_window = 0.0
             if cfg.optimization_target == "sla" and not cfg.enable_throughput_scaling:
                 needs.append("observations.traffic")
                 observation_window = load_interval
+            registrations["load_propose"] = {
+                "plugin_type": "propose",
+                "priority": 10,
+                "execution_interval_seconds": load_interval,
+                "needs": needs,
+                "requires_produced_fields": [],
+                "observation_window_seconds": observation_window,
+            }
+        return registrations
+
+    def _new_builtin(self, name: str) -> Any:
+        if name == "load_predict":
+            return BuiltinLoadPredict(self._config, self._capabilities)
+        if name == "throughput_propose":
+            return BuiltinThroughputPropose(self._config, self._scaling_state)
+        return BuiltinLoadPropose(self._config, self._scaling_state)
+
+    def _register_builtin_plugins(self) -> None:
+        """Register the in-process builtins that implement local planning."""
+        for name, registration in self._builtin_registrations().items():
+            instance = self._new_builtin(name)
+            self._builtins[name] = instance
             self._orchestrator.register_internal(
-                plugin_id=load.plugin_id,
-                plugin_type="propose",
-                priority=10,
-                instance=load,
-                execution_interval_seconds=load_interval,
-                needs=needs,
-                observation_window_seconds=observation_window,
+                plugin_id=instance.plugin_id, instance=instance, **registration
             )
+
+    def _reconcile_builtin_plugins(
+        self, predictor: Optional[BuiltinLoadPredict]
+    ) -> None:
+        """Make the registered builtins match the current scaling policy.
+
+        A builtin the policy no longer runs is unregistered; one it newly
+        runs is registered as at startup, so it first fires one interval
+        after registration; one it keeps is updated in place (interval,
+        observation window and needs), keeping its state and phase. A new
+        or kept load predictor takes ``predictor``'s prepared forecasts when
+        given. Turning throughput scaling off also drops the throughput
+        lower bounds, which would otherwise keep flooring load scaling at
+        the last throughput target.
+        """
+        desired = self._builtin_registrations()
+        for name in [name for name in self._builtins if name not in desired]:
+            removed: Any = self._builtins.pop(name)
+            self._orchestrator.unregister_internal(
+                removed.plugin_id, reason="scaling_policy"
+            )
+        for name, registration in desired.items():
+            instance: Any = self._builtins.get(name)
+            if instance is None:
+                instance = self._new_builtin(name)
+                if name == "load_predict" and predictor is not None:
+                    instance.install_prepared_predictors(predictor)
+                self._builtins[name] = instance
+                self._orchestrator.register_internal(
+                    plugin_id=instance.plugin_id, instance=instance, **registration
+                )
+                continue
+            if name == "load_predict" and predictor is not None:
+                instance.install_prepared_predictors(predictor)
+            plugin = self._orchestrator._registry.get_plugin(instance.plugin_id)
+            if plugin is None:  # pragma: no cover - registered above or at startup
+                raise RuntimeError(f"builtin {name} is not registered")
+            plugin.execution_interval_seconds = registration[
+                "execution_interval_seconds"
+            ]
+            plugin.observation_window_seconds = registration[
+                "observation_window_seconds"
+            ]
+            plugin.needs = list(registration["needs"])
+            plugin.requires_produced_fields = list(
+                registration["requires_produced_fields"]
+            )
+        if not self._config.enable_throughput_scaling:
+            self._scaling_state.reset_throughput_lower_bounds()
+            for component in ("prefill", "decode"):
+                self._orchestrator.set_throughput_lower_bound(component, 1)
+        # The loop pointers restart with the policy, as at startup.
+        self._last_load_loop_monotonic = self._last_tick_monotonic
+        self._last_throughput_loop_monotonic = self._last_tick_monotonic
 
     # ------------------------------------------------------------------
     # Bootstrap API (delegates to orchestrator)
@@ -771,14 +831,42 @@ class OrchestratorEngineAdapter:
         fields: Iterable[str],
         predictor: BuiltinLoadPredict | None,
     ) -> None:
-        active_predictor: BuiltinLoadPredict | None = None
+        """Activate ``candidate``'s ``fields`` in the running engine.
+
+        A scaling-policy change re-registers the builtins
+        (``_reconcile_builtin_plugins``). ``predictor`` is the prepared load
+        predictor; it is required when the candidate needs a new one
+        (``reconfiguration.predictor_rebuild_required``: throughput scaling
+        turning on, or a predictor field or the throughput interval
+        changing). Everything is checked before anything changes.
+        """
+        # Imported on use: reconfiguration imports the planner core.
+        from dynamo.planner.reconfiguration import (
+            SCALING_POLICY_FIELDS,
+            predictor_rebuild_required,
+        )
+
+        fields = list(fields)
         if predictor is not None:
-            active = self._builtins["load_predict"]
-            if not isinstance(active, BuiltinLoadPredict):
+            if not isinstance(predictor, BuiltinLoadPredict):
                 raise TypeError(
                     "runtime prediction updates require the builtin load predictor"
                 )
-            active_predictor = active
+            if not candidate.enable_throughput_scaling:
+                raise ValueError(
+                    "a prepared load predictor requires throughput scaling"
+                )
+        elif predictor_rebuild_required(self._config, candidate):
+            raise ValueError(
+                "this configuration change needs a new load predictor "
+                "(throughput scaling turned on, or a predictor field or "
+                "throughput_adjustment_interval_seconds changed); prepare one"
+            )
+        active = self._builtins.get("load_predict")
+        if active is not None and not isinstance(active, BuiltinLoadPredict):
+            raise TypeError(
+                "runtime prediction updates require the builtin load predictor"
+            )
         changed = {
             field
             for field in fields
@@ -786,8 +874,10 @@ class OrchestratorEngineAdapter:
         }
         for field in changed:
             setattr(self._config, field, getattr(candidate, field))
-        if active_predictor is not None and predictor is not None:
-            active_predictor.install_prepared_predictors(predictor)
+        if changed & SCALING_POLICY_FIELDS:
+            self._reconcile_builtin_plugins(predictor)
+        elif active is not None and predictor is not None:
+            active.install_prepared_predictors(predictor)
         if changed or predictor is not None:
             self._orchestrator.invalidate_runtime_configuration()
             self._startup_down_candidate = None

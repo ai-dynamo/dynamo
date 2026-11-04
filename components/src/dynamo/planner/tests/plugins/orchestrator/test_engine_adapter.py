@@ -2169,6 +2169,111 @@ def test_throughput_only_sla_still_pulls_fpm_for_live_regression():
     assert not load_interval_tick.run_throughput_scaling
 
 
+@pytest.mark.asyncio
+async def test_runtime_scaling_policy_change_reregisters_builtins():
+    # Imported here: reconfiguration pulls in the planner core.
+    from dynamo.planner.reconfiguration import candidate_config, prepare_predictor
+
+    cfg = PlannerConfig.model_validate(
+        {
+            "mode": "agg",
+            "enable_load_scaling": True,
+            "enable_throughput_scaling": True,
+            "optimization_target": "sla",
+            "served_model_name": "test",
+            "load_adjustment_interval_seconds": 5,
+            "throughput_adjustment_interval_seconds": 60,
+            "load_predictor": "constant",
+        }
+    )
+    adapter = OrchestratorEngineAdapter(cfg, _caps(), clock=VirtualClock())
+    registry = adapter._orchestrator.registry
+    predict = adapter._builtins["load_predict"]
+    adapter._scaling_state._throughput_lower_bound_d = 4
+
+    def apply(updates, predictor=None):
+        adapter.apply_runtime_configuration(
+            candidate_config(cfg, updates), list(updates), predictor
+        )
+
+    adapter.initial_tick(start_s=0.0)
+    # Load scaling off: its plugin goes; the predictor and the throughput
+    # bound stay.
+    apply({"enable_load_scaling": False})
+    assert registry.get_plugin("builtin_load_propose") is None
+    assert adapter._builtins["load_predict"] is predict
+    assert adapter._scaling_state._throughput_lower_bound_d == 4
+
+    # A throughput-only SLA planner still pulls FPM at the load interval and
+    # refits the performance model, so turning load scaling back on later
+    # does not start it cold.
+    fpm_calls: list[FpmObservations] = []
+    adapter._scaling_state.observe_fpm = fpm_calls.append  # type: ignore[method-assign]
+    tick = adapter._compute_next_scheduled_tick()
+    assert tick.need_worker_fpm and tick.run_load_scaling
+    observations = FpmObservations(decode={("w1", 0): _make_fpm("w1")})
+    await adapter.tick(tick, TickInput(now_s=tick.at_s, fpm_observations=observations))
+    assert fpm_calls == [observations]
+
+    # Load scaling back on, a new load interval and throughput scaling off:
+    # the load plugin is registered again, alone, and takes the traffic it
+    # needs without a predictor; the throughput bound no longer floors it.
+    apply(
+        {
+            "enable_load_scaling": True,
+            "enable_throughput_scaling": False,
+            "load_adjustment_interval_seconds": 10,
+        }
+    )
+    assert set(adapter._builtins) == {"load_propose"}
+    assert registry.get_plugin("builtin_load_predict") is None
+    assert registry.get_plugin("builtin_throughput_propose") is None
+    load = registry.get_plugin("builtin_load_propose")
+    assert load.execution_interval_seconds == 10.0
+    assert "observations.traffic" in load.needs
+    assert load.observation_window_seconds == 10.0
+    assert adapter._scaling_state._throughput_lower_bound_d == 1
+
+    # Throughput scaling back on needs a prepared predictor; nothing changes
+    # without one.
+    with pytest.raises(ValueError, match="needs a new load predictor"):
+        apply(
+            {
+                "enable_throughput_scaling": True,
+                "throughput_adjustment_interval_seconds": 120,
+            }
+        )
+    assert cfg.enable_throughput_scaling is False
+    target = candidate_config(
+        cfg,
+        {
+            "enable_throughput_scaling": True,
+            "throughput_adjustment_interval_seconds": 120,
+        },
+    )
+    prepared = prepare_predictor(
+        target, _caps(), [TrafficObservation(120.0, 10.0, 100.0, 10.0)] * 3
+    )
+    apply(
+        {
+            "enable_throughput_scaling": True,
+            "throughput_adjustment_interval_seconds": 120,
+        },
+        prepared,
+    )
+    new_predict = adapter._builtins["load_predict"]
+    assert new_predict is not predict
+    assert new_predict._num_req_predictor is prepared._num_req_predictor
+    for plugin_id in ("builtin_load_predict", "builtin_throughput_propose"):
+        plugin = registry.get_plugin(plugin_id)
+        assert plugin.execution_interval_seconds == 120.0
+        assert plugin.observation_window_seconds == 120.0
+    # The kept load plugin is updated in place: no traffic of its own now.
+    assert registry.get_plugin("builtin_load_propose") is load
+    assert "observations.traffic" not in load.needs
+    assert load.observation_window_seconds == 0.0
+
+
 def test_builtin_first_fire_is_anchored_to_initial_tick_not_construction():
     cfg = _agg_config_custom_intervals(load_interval=7.0, throughput_interval=60.0)
     vc = VirtualClock()

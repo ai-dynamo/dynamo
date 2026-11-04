@@ -21,7 +21,7 @@ use pyo3::prelude::*;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -130,6 +130,36 @@ fn record_fpm(
             received_at,
         },
     );
+}
+
+/// Freshness window shared by snapshot reads and the tracking task's cleanup,
+/// so `set_max_age` reaches a task that already runs.
+#[derive(Clone, Debug)]
+struct SharedMaxAge(Arc<AtomicU64>);
+
+impl SharedMaxAge {
+    fn new(age: Duration) -> Self {
+        Self(Arc::new(AtomicU64::new(duration_nanos(age))))
+    }
+
+    fn get(&self) -> Duration {
+        Duration::from_nanos(self.0.load(Ordering::Relaxed))
+    }
+
+    fn set(&self, age: Duration) {
+        self.0.store(duration_nanos(age), Ordering::Relaxed);
+    }
+}
+
+fn duration_nanos(age: Duration) -> u64 {
+    u64::try_from(age.as_nanos()).unwrap_or(u64::MAX)
+}
+
+fn parse_max_age(max_age_seconds: f64) -> PyResult<Duration> {
+    Duration::try_from_secs_f64(max_age_seconds)
+        .ok()
+        .filter(|age| !age.is_zero())
+        .ok_or_else(|| PyValueError::new_err("max_age_seconds must be finite and positive"))
 }
 
 fn prune_inactive_workers(workers: &DashMap<String, WorkerFpm>, now: Instant, max_age: Duration) {
@@ -568,7 +598,7 @@ pub(crate) struct FpmEventSubscriber {
     rx: Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>>>,
     tracking_started: Arc<AtomicBool>,
     workers: Arc<DashMap<String, WorkerFpm>>,
-    max_age: Duration,
+    max_age: SharedMaxAge,
 }
 
 #[derive(Default)]
@@ -748,7 +778,7 @@ impl FpmEventSubscriber {
             rx: Arc::new(std::sync::Mutex::new(None)),
             tracking_started: Arc::new(AtomicBool::new(false)),
             workers: Arc::new(DashMap::new()),
-            max_age: DEFAULT_FPM_MAX_AGE,
+            max_age: SharedMaxAge::new(DEFAULT_FPM_MAX_AGE),
         })
     }
 
@@ -832,14 +862,12 @@ impl FpmEventSubscriber {
         })
     }
 
-    /// Track samples and discovery state with a fixed freshness and cleanup window.
+    /// Track samples and discovery state with a freshness and cleanup window.
     /// Legacy snapshots retain samples until worker removal; health snapshots filter by age.
+    /// `set_max_age` changes the window later.
     #[pyo3(signature = (max_age_seconds = DEFAULT_FPM_MAX_AGE.as_secs_f64()))]
     fn start_tracking(&mut self, max_age_seconds: f64) -> PyResult<()> {
-        let max_age = Duration::try_from_secs_f64(max_age_seconds)
-            .ok()
-            .filter(|age| !age.is_zero())
-            .ok_or_else(|| PyValueError::new_err("max_age_seconds must be finite and positive"))?;
+        let max_age = parse_max_age(max_age_seconds)?;
         if self.recv_started.load(Ordering::SeqCst) {
             return Err(PyRuntimeError::new_err(
                 "Cannot call start_tracking() after recv()",
@@ -852,7 +880,8 @@ impl FpmEventSubscriber {
         let endpoint = self.endpoint.clone();
         let rt = endpoint.component().drt().runtime().secondary();
         let cancel = self.cancel.clone();
-        self.max_age = max_age;
+        self.max_age.set(max_age);
+        let max_age = self.max_age.clone();
         let workers = self.workers.clone();
 
         rt.spawn({
@@ -881,7 +910,7 @@ impl FpmEventSubscriber {
                             break;
                         }
                         _ = cleanup_tick.tick() => {
-                            prune_inactive_workers(&workers, Instant::now(), max_age);
+                            prune_inactive_workers(&workers, Instant::now(), max_age.get());
                         }
                         event = subscriber.next() => {
                             match event {
@@ -1055,8 +1084,22 @@ impl FpmEventSubscriber {
         Ok(fresh_fpm_snapshot(
             &self.workers,
             Instant::now(),
-            self.max_age,
+            self.max_age.get(),
         ))
+    }
+
+    /// Change the freshness and cleanup window, before or after `start_tracking`.
+    /// Tracked samples are kept; reads and the next cleanup use the new age.
+    #[pyo3(signature = (max_age_seconds,))]
+    fn set_max_age(&self, max_age_seconds: f64) -> PyResult<()> {
+        self.max_age.set(parse_max_age(max_age_seconds)?);
+        Ok(())
+    }
+
+    /// The current freshness and cleanup window, in seconds.
+    #[getter]
+    fn max_age_seconds(&self) -> f64 {
+        self.max_age.get().as_secs_f64()
     }
 
     /// Selected model deployment cards for active workers, as serialized JSON.
@@ -1094,6 +1137,42 @@ impl Drop for FpmEventSubscriber {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_max_age_reaches_a_captured_clone() {
+        let max_age = SharedMaxAge::new(Duration::from_secs(10));
+        // What the tracking task captures when it starts.
+        let captured = max_age.clone();
+        let workers = DashMap::new();
+        let now = Instant::now();
+        record_fpm(&workers, ("worker".to_string(), 0), vec![1], now);
+        let later = now + Duration::from_secs(5);
+        prune_inactive_workers(&workers, later, captured.get());
+        assert!(workers.contains_key("worker"));
+        assert_eq!(
+            fresh_fpm_snapshot(&workers, later, max_age.get()).unjoined_worker_ids,
+            vec!["worker".to_string()]
+        );
+
+        max_age.set(Duration::from_secs(2));
+        assert_eq!(captured.get(), Duration::from_secs(2));
+        assert!(
+            fresh_fpm_snapshot(&workers, later, max_age.get())
+                .unjoined_worker_ids
+                .is_empty()
+        );
+        prune_inactive_workers(&workers, later, captured.get());
+        assert!(!workers.contains_key("worker"));
+    }
+
+    #[test]
+    fn parse_max_age_rejects_non_positive_and_non_finite() {
+        assert_eq!(parse_max_age(1.5).unwrap(), Duration::from_millis(1500));
+        assert!(parse_max_age(0.0).is_err());
+        assert!(parse_max_age(-1.0).is_err());
+        assert!(parse_max_age(f64::NAN).is_err());
+        assert!(parse_max_age(f64::INFINITY).is_err());
+    }
 
     fn active_worker(ranks: Range<u32>, now: Instant) -> WorkerFpm {
         let mut worker = WorkerFpm::default();

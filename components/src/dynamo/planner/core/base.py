@@ -607,9 +607,23 @@ class NativePlannerBase:
         self._config_generation += 1
         self.prometheus_metrics.sla_target_ttft_ms.set(self.config.ttft_ms)
         self.prometheus_metrics.sla_target_itl_ms.set(self.config.itl_ms)
+        self._sync_fpm_max_age()
         logger.info(
             "Activated planner configuration revision %d", self._config_generation
         )
+
+    def _sync_fpm_max_age(self) -> None:
+        """Keep the live FPM freshness window at three load intervals after a
+        runtime change of ``load_adjustment_interval_seconds``; the
+        subscribers keep their samples."""
+        provider = getattr(self.environment, "fpm_provider", None)
+        setter = getattr(provider, "set_max_fpm_age_seconds", None)
+        if not callable(setter):
+            return
+        age = self.config.fpm_max_age_seconds
+        if getattr(provider, "max_fpm_age_seconds", None) != age:
+            setter(age)
+            logger.info("FPM freshness window is now %.1fs", age)
 
     @asynccontextmanager
     async def _bounded_config_lock(self) -> AsyncIterator[None]:
@@ -1314,14 +1328,16 @@ class NativePlannerBase:
     async def run(self) -> None:
         engine = self._ensure_engine()
         next_tick = engine.initial_tick(time.time())
-        poll_interval = self.config.load_adjustment_interval_seconds / 10
-        gpu_shape_retry_interval = min(
-            max(poll_interval, _GPU_SHAPE_RETRY_MIN_SECONDS),
-            _GPU_SHAPE_RETRY_MAX_SECONDS,
-        )
 
         try:
             while True:
+                # Read every iteration: a runtime reconfiguration may change
+                # the load interval.
+                poll_interval = self.config.load_adjustment_interval_seconds / 10
+                gpu_shape_retry_interval = min(
+                    max(poll_interval, _GPU_SHAPE_RETRY_MIN_SECONDS),
+                    _GPU_SHAPE_RETRY_MAX_SECONDS,
+                )
                 now = time.time()
                 if now < next_tick.at_s:
                     await asyncio.sleep(min(next_tick.at_s - now, poll_interval))
