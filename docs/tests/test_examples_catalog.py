@@ -756,7 +756,6 @@ def test_diffusion_section_matches_catalog_without_changing_existing_slugs() -> 
             "audio-generation",
             [
                 "vllm/deploy/agg_omni_audio.yaml",
-                "vllm/deploy/experimental/agg_omni_audio.yaml",
                 "vllm/launch/agg_omni_audio.sh",
             ],
         ),
@@ -779,9 +778,7 @@ def test_diffusion_sources_are_on_the_matching_workload_page(
     assert expected <= embeds(EXAMPLES / f"{page}.mdx")
 
 
-@pytest.mark.parametrize(
-    "filename", ["agg_omni_audio.yaml", "agg_omni_video.yaml", "agg_omni_i2v.yaml"]
-)
+@pytest.mark.parametrize("filename", ["agg_omni_video.yaml", "agg_omni_i2v.yaml"])
 def test_experimental_diffusion_preserves_image_and_cache_requirements(
     filename: str,
 ) -> None:
@@ -808,32 +805,24 @@ def test_experimental_diffusion_preserves_image_and_cache_requirements(
         if "persistentVolumeClaim" in v
     ]
     assert cache["claimName"] == "model-cache-pvc"
-    if filename == "agg_omni_audio.yaml":
-        for component in components:
-            assert component["runtimeVersionOverride"] == "1.6.0"
-            image = component["podTemplate"]["spec"]["containers"][0]["image"]
-            assert image.endswith(":20260918-a9792db")
-        assert env["HF_HOME"] == "/model-cache"
-        assert not cache.get("readOnly", False)
-    else:
-        for component in components:
-            assert component["runtimeVersionOverride"] == "1.4.2"
-        assert frontend["podTemplate"]["spec"]["containers"][0]["image"] == (
-            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend@sha256:"
-            "4d6435ad3893487e7e5a8751eb2381199464f80248284bb98c5e0998f09a91c0"
-        )
-        assert container["image"] == (
-            "docker.io/jont828/dynamo-ffmpeg-color@sha256:"
-            "1b72cc6dfbbf610ba6e1135832c9cb702f7e6ddca2d57ddfc01e7e67e066980c"
-        )
-        assert env["HF_HUB_OFFLINE"] == "1"
-        assert cache["readOnly"] is True
-        (mount,) = [
-            m for m in container["volumeMounts"] if m["name"] == "shared-model-cache"
-        ]
-        assert mount["readOnly"] is True
-        assert mount["subPath"] == "model-cache"
-        assert env["HF_HUB_CACHE"] == mount["mountPath"] + "/hub"
+    for component in components:
+        assert component["runtimeVersionOverride"] == "1.4.2"
+    assert frontend["podTemplate"]["spec"]["containers"][0]["image"] == (
+        "nvcr.io/nvidia/ai-dynamo/dynamo-frontend@sha256:"
+        "4d6435ad3893487e7e5a8751eb2381199464f80248284bb98c5e0998f09a91c0"
+    )
+    assert container["image"] == (
+        "docker.io/jont828/dynamo-ffmpeg-color@sha256:"
+        "1b72cc6dfbbf610ba6e1135832c9cb702f7e6ddca2d57ddfc01e7e67e066980c"
+    )
+    assert env["HF_HUB_OFFLINE"] == "1"
+    assert cache["readOnly"] is True
+    (mount,) = [
+        m for m in container["volumeMounts"] if m["name"] == "shared-model-cache"
+    ]
+    assert mount["readOnly"] is True
+    assert mount["subPath"] == "model-cache"
+    assert env["HF_HUB_CACHE"] == mount["mountPath"] + "/hub"
 
 
 DIFFUSION_MODALITY_LABELS = {
@@ -872,7 +861,7 @@ def test_diffusion_overview_cards_match_the_dgd_models_and_backends() -> None:
         for source in embeds(EXAMPLES / f"{name}.mdx")
         if source.suffix == ".yaml"
     }
-    assert len(source_pages) == 8
+    assert len(source_pages) == 7
     assert not embeds(page)
     assert "<Accordion" not in text
     assert "<CardGroup" not in text

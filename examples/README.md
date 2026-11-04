@@ -67,12 +67,11 @@ documented in their files. These are functional examples, not performance benchm
 | Qwen-Image generation | vLLM-Omni | [agg_omni_image.yaml](backends/vllm/deploy/agg_omni_image.yaml) |
 | LLaDA 2.0 mini text generation | SGLang | [agg_llm_diffusion.yaml](backends/sglang/deploy/agg_llm_diffusion.yaml) |
 | Qwen3-TTS audio | vLLM-Omni | [agg_omni_audio.yaml](backends/vllm/deploy/agg_omni_audio.yaml) |
-| Qwen3-TTS audio with a model cache (September 18 nightly) | vLLM-Omni | [experimental/agg_omni_audio.yaml](backends/vllm/deploy/experimental/agg_omni_audio.yaml) |
 | Wan2.1 text-to-video (patched build) | vLLM-Omni | [experimental/agg_omni_video.yaml](backends/vllm/deploy/experimental/agg_omni_video.yaml) |
 | Wan2.2 image-to-video (patched build) | vLLM-Omni | [experimental/agg_omni_i2v.yaml](backends/vllm/deploy/experimental/agg_omni_i2v.yaml) |
 
 > [!WARNING]
-> The `experimental/` audio and video configurations are experimental. Keep the documented
+> The `experimental/` video configurations are experimental. Keep the documented
 > frontend/worker image pairs and runtime version overrides together. Replace image, cache, secret,
 > and node-placement settings as described in each manifest. Video requires both the response-format
 > and FFmpeg color-conversion fixes in the pinned custom image; stock 1.4.2 or an arbitrary nightly

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "Audio Generation"
-subtitle: "Qwen3-TTS deployments and a local vLLM-Omni launch script."
+subtitle: "A Qwen3-TTS deployment and a local vLLM-Omni launch script."
 hide-toc: true
 ---
 
@@ -20,7 +20,6 @@ response is not a JSON/base64 envelope.
 <ExampleSelector
   variants={[
     {"id": "kubernetes-vllm-agg-omni-audio-yaml", "target": "kubernetes:vllm", "label": "agg_omni_audio.yaml", "description": "Qwen3-TTS · validated on Dynamo 1.5.1"},
-    {"id": "kubernetes-vllm-audio-experimental-yaml", "target": "kubernetes:vllm", "label": "experimental/agg_omni_audio.yaml", "description": "Qwen3-TTS with a model cache · pinned Dynamo 1.6.0 nightly (experimental)"},
     {"id": "local-vllm-agg-omni-audio-sh", "target": "local:vllm", "label": "agg_omni_audio.sh", "description": "Local audio generation · Dynamo 1.5.1 or later"}
   ]}
 >
@@ -34,25 +33,6 @@ remote code before enabling `--trust-remote-code`.
 [Source: `agg_omni_audio.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_omni_audio.yaml)
 
 <Code src="../../../../../examples/backends/vllm/deploy/agg_omni_audio.yaml" title="agg_omni_audio.yaml" language="yaml" maxLines={0} />
-
-</div>
-
-<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-audio-experimental-yaml">
-
-<Warning>
-**Experimental.** Prefer `agg_omni_audio.yaml` on Dynamo 1.5.1 or later. This earlier configuration
-was validated on September 18, 2026 with one H100 GPU, the Dynamo 1.4.2 operator, and the pinned
-`20260918-a9792db` frontend/worker pair: Dynamo `1.6.0.dev20260918`, vLLM `0.29.0`, and vLLM-Omni
-`0.29.0rc1`. Keep that pair together and `runtimeVersionOverride: "1.6.0"` on both components; it
-describes the serving images, not the operator. Replace `model-cache-pvc` and `subPath: model-cache`
-with your writable cache and set your GPU node selectors. Namespace/node-pool bindings and cache names
-were generalized from the tested demo; revalidate after adapting them. The test checked non-silent
-waveform delivery and WAV framing, not listening quality or performance.
-</Warning>
-
-[Source: `experimental/agg_omni_audio.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/experimental/agg_omni_audio.yaml)
-
-<Code src="../../../../../examples/backends/vllm/deploy/experimental/agg_omni_audio.yaml" title="experimental/agg_omni_audio.yaml" language="yaml" maxLines={0} />
 
 </div>
 
