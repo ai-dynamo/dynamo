@@ -61,13 +61,14 @@ spec:
 
 To leave the complete hardware input to AISimulate and `inputOverrides`, use the
 empty-object opt-out and supply both the upstream hardware selector and candidate
-GPU budget yourself. The operator does not validate this opaque input against the
-AISimulate schema yet; invalid or incomplete overrides fail during the Run.
+GPU budget yourself. Request and Run admission validate the merged input against
+the bundled AISimulate input schema. Run specs remain immutable; unchanged specs
+remain metadata-updatable after a bundled schema change.
 
 ```yaml
 spec:
   hardware: {}
-  aisimulate:
+  aisim:
     inputOverrides:
       engine:
         hardware: h200_sxm
@@ -1179,14 +1180,14 @@ The operator lowers the trace to the AISimulate input `traffic.source` (`type: t
 `format: dynamo`, and `paths` with the mounted file) and `traffic.load.type: trace_timestamps`,
 with `traffic.load.speedup` when `arrivalSpeedupRatio` is set. It adds no `traffic.stop.requests`.
 These values are an underlay, like every value lowered from a typed field:
-`spec.aisimulate.inputOverrides` is applied last as a JSON Merge Patch and can replace any of them,
+`spec.aisim.inputOverrides` is applied last as a JSON Merge Patch and can replace any of them,
 including `traffic.source.type`, `traffic.source.format`, and `traffic.source.paths`. A `null`
 override deletes the named field or parent object, and the operator does not restore it. For
 example, this override deletes the lowered source:
 
 ```yaml
 spec:
-  aisimulate:
+  aisim:
     inputOverrides:
       traffic:
         source: null
