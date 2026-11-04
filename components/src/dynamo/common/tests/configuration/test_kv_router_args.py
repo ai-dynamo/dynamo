@@ -90,7 +90,10 @@ def test_decode_to_prefill_captured_environment_overrides_process_env(
         "TRANSFER_SOURCE_LOOKUP_BUDGET_MS": ("transfer_source_lookup_budget_ms", 12),
         "MINIMUM_TRANSFER_PREFIX_BLOCKS": ("minimum_transfer_prefix_blocks", 4),
         "MINIMUM_ESTIMATED_TTFT_SAVING_MS": ("minimum_estimated_ttft_saving_ms", 2.5),
-        "TRANSFER_SOURCE_ESTIMATED_BLOCK_US": ("transfer_source_estimated_block_us", 20.0),
+        "TRANSFER_SOURCE_ESTIMATED_BLOCK_US": (
+            "transfer_source_estimated_block_us",
+            20.0,
+        ),
         "TRANSFER_SOURCE_GPU_ESTIMATED_BLOCK_US": (
             "transfer_source_gpu_estimated_block_us",
             8.0,
