@@ -341,8 +341,8 @@ def test_parse_recipe_frontend():
         (("python3",), ("-m", "dynamo.frontend", "--router-mode", "random"), "random"),
         (
             ("python3",),
-            ("-m", "dynamo.frontend", "--router-mode", "power-of-two"),
-            "power_of_two",
+            ("-m", "dynamo.frontend", "--router-mode", "device-aware-weighted"),
+            "device_aware_weighted",
         ),
     ],
 )
@@ -1941,7 +1941,7 @@ WORKER_GOLDEN_CASES = [
     ((), {}),
     (("--router-mode", "kv"), {}),
     (("--router-m", "random"), {}),
-    (("--router-mode=power-of-two",), {}),
+    (("--router-mode=device-aware-weighted",), {}),
     ((), {"DYN_ROUTER_MODE": "kv"}),
     (("--router-mode", "least-loaded"), {"DYN_ROUTER_MODE": "kv"}),
     (("--no-router-kv-events", "--router-temperature", "0.5"), {}),
