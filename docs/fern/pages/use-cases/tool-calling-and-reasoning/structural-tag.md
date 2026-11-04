@@ -172,8 +172,8 @@ environment variables. The SGLang sidecar uses the same default-on policy. The
 vLLM sidecar uses it when vLLM reports version 0.33 or later, the first release
 whose gRPC server compiles these tags with xgrammar. Against older vLLM it
 defaults to `false`, because that gRPC server compiles them with guidance,
-which rejects them. 0.33.0 release candidates and development builds also
-default to `false`. The TensorRT-LLM sidecar defaults to `false`: the
+which rejects them. 0.33 release candidates and development builds also use
+it. The TensorRT-LLM sidecar defaults to `false`: the
 xgrammar version TensorRT-LLM pins rejects several tool-call tag formats.
 
 Setting `strict: false` on a tool relaxes its argument schema. On vLLM

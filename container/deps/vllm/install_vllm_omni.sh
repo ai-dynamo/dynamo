@@ -12,14 +12,6 @@ VLLM_OMNI_PROTECTED_OVERRIDES_FILE="${VLLM_OMNI_PROTECTED_OVERRIDES_FILE:-/tmp/v
 PROTECTED_CONSTRAINTS="$(mktemp /tmp/vllm-openai-protected.XXXXXX.txt)"
 PROTECTED_OVERRIDES="$(mktemp /tmp/vllm-openai-overrides.XXXXXX.txt)"
 VLLM_OMNI_VERSION="${VLLM_OMNI_REF#v}"
-VLLM_OMNI_REQUIREMENT="vllm-omni==${VLLM_OMNI_VERSION}"
-
-# An unreleased commit, written as <version>+g<sha>, builds from GitHub's source
-# archive (the image has no git) under that version.
-if [[ "${VLLM_OMNI_VERSION}" =~ \+g([0-9a-f]{40})$ ]]; then
-  export VLLM_OMNI_VERSION_OVERRIDE="${VLLM_OMNI_VERSION}"
-  VLLM_OMNI_REQUIREMENT="vllm-omni @ https://github.com/vllm-project/vllm-omni/archive/${BASH_REMATCH[1]}.tar.gz"
-fi
 
 cleanup() {
   rm -rf "${PROTECTED_CONSTRAINTS}" "${PROTECTED_OVERRIDES}"
@@ -66,11 +58,11 @@ if [ "${VLLM_OMNI_TARGET_DEVICE}" = "cuda" ]; then
   uv pip install --system \
     --prerelease=allow \
     --constraints "${PROTECTED_CONSTRAINTS}" \
-    "${VLLM_OMNI_REQUIREMENT}"
+    "vllm-omni==${VLLM_OMNI_VERSION}"
 else
   uv pip install \
     --prerelease=allow \
     --constraints "${PROTECTED_CONSTRAINTS}" \
     "${OVERRIDE_ARGS[@]}" \
-    "${VLLM_OMNI_REQUIREMENT}"
+    "vllm-omni==${VLLM_OMNI_VERSION}"
 fi
