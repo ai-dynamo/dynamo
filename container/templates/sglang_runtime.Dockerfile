@@ -316,6 +316,48 @@ RUN set -eux; \
     ldconfig
 {% endif %}
 
+{% if device == "cuda" %}
+# Move the image from the Ubuntu python3.12 packages to a uv-managed CPython
+# 3.12.16, the layout of later upstream SGLang images. The /opt/sglang venv keeps
+# its site-packages and points at the 3.12 minor-version link, which a later 3.12
+# patch install moves. The Ubuntu packages are then purged, and /usr/bin/python and
+# /usr/bin/python3 become the wrapper upstream ships. The uv in
+# context.dynamo.uv_version predates this CPython build, so this step runs a pinned
+# uv from a bind mount, without the shared uv cache.
+#
+# Keep this step after every apt-get call. A package that depends on python3
+# brings the Ubuntu interpreter back, and the --auto-remove of the purge above
+# would also remove the libraries that only the Ubuntu interpreter pulled in.
+RUN --mount=type=bind,from=ghcr.io/astral-sh/uv:0.13.6,source=/,target=/tmp/uv-python \
+    set -eu; \
+    export UV_NO_CACHE=1 UV_PYTHON_INSTALL_DIR=/opt/python; \
+    /tmp/uv-python/uv python install --no-bin 3.12.16; \
+    /tmp/uv-python/uv venv --allow-existing --managed-python --python 3.12 /opt/sglang; \
+    check='import sys; print(sys.argv[1], sys.version.split()[0], sys.prefix); sys.exit(0 if sys.version_info[:3] == (3, 12, 16) and sys.prefix == "/opt/sglang" else 1)'; \
+    /opt/sglang/bin/python -c "$check" /opt/sglang/bin/python; \
+    DEBIAN_FRONTEND=noninteractive apt-get purge -y \
+        libpython3.12-minimal \
+        libpython3.12-stdlib \
+        libpython3.12t64 \
+        python3-pip-whl \
+        python3-setuptools-whl \
+        python3.12 \
+        python3.12-minimal; \
+    update-alternatives --remove-all python3; \
+    rm -f /usr/bin/python /usr/bin/python3; \
+    printf '#!/bin/sh\nexec /opt/sglang/bin/python "$@"\n' > /usr/bin/python3; \
+    chmod 0755 /usr/bin/python3; \
+    cp -p /usr/bin/python3 /usr/bin/python; \
+    for py in /usr/bin/python3 /usr/bin/python; do \
+        "$py" -c "$check" "$py"; \
+    done; \
+    test ! -e /usr/lib/python3.12; \
+    if dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' | grep -E '^ii +[^ ]*python3'; then \
+        echo "ERROR: Ubuntu Python packages remain" >&2; \
+        exit 1; \
+    fi
+{% endif %}
+
 # Drop the Nsight efa_metrics plugin the CUDA floor carries: a Go NIC sampler
 # nothing in the serving path loads. On this image it arrives under Nsight
 # Compute rather than Nsight Systems, and both roots move with every base bump,
