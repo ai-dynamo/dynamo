@@ -65,7 +65,7 @@ jobs:
     if: github.event_name != 'workflow_dispatch'
     uses: $/.github/workflows/dynamo-pipeline.yml
     with:
-      gpu_runner_labels: '["dynamo-gpu-1-amd64-v1"]'
+      gpu_runner_labels: '["gpu-1","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       # TODO: widen to include `post_merge` — today it picks up tests
       # (e.g. fault_tolerance/deploy/*) that fail in this container-only
@@ -483,7 +483,7 @@ jobs:
       test_suite_name: vllm
       framework: vllm
       test_type: ${{ format('vLLM Sidecar {0}-GPU E2E Test', matrix.gpu_count) }}
-      amd_runner: ${{ format('dynamo-gpu-{0}-amd64-v1', matrix.gpu_count) }}
+      amd_runner_labels: ${{ format('["gpu-{0}","amd64","runner-version-v1","gpu-generic","us-west-2"]', matrix.gpu_count) }}
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
@@ -507,7 +507,7 @@ jobs:
       test_suite_name: sglang
       framework: sglang
       test_type: ${{ format('SGLang Sidecar {0}-GPU E2E Test', matrix.gpu_count) }}
-      amd_runner: ${{ format('dynamo-gpu-{0}-amd64-v1', matrix.gpu_count) }}
+      amd_runner_labels: ${{ format('["gpu-{0}","amd64","runner-version-v1","gpu-generic","us-west-2"]', matrix.gpu_count) }}
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
@@ -527,7 +527,7 @@ jobs:
       test_suite_name: trtllm
       framework: trtllm
       test_type: TensorRT-LLM Sidecar 1-GPU E2E Test
-      amd_runner: dynamo-gpu-1-amd64-v1
+      amd_runner_labels: '["gpu-1","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64"]'
@@ -547,7 +547,7 @@ jobs:
       test_suite_name: vllm
       framework: vllm  # matches the framework passed to vllm-build
       test_type: Test
-      amd_runner: dynamo-gpu-1-amd64-v1 # This runner is overridden for ARM platform
+      amd_runner_labels: '["gpu-1","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -572,7 +572,7 @@ jobs:
       test_suite_name: vllm
       framework: vllm  # matches the framework passed to vllm-build
       test_type: 2-GPU Test
-      amd_runner: dynamo-gpu-2-amd64-v1
+      amd_runner_labels: '["gpu-2","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -590,7 +590,7 @@ jobs:
       test_suite_name: vllm
       framework: vllm  # matches the framework passed to vllm-build
       test_type: 4-GPU Test
-      amd_runner: dynamo-gpu-4-amd64-v1
+      amd_runner_labels: '["gpu-4","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -629,7 +629,7 @@ jobs:
       test_suite_name: sglang
       framework: sglang  # matches the framework passed to sglang-build
       test_type: Test
-      amd_runner: dynamo-gpu-1-amd64-v1 # This runner is overridden for ARM platform
+      amd_runner_labels: '["gpu-1","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -654,7 +654,7 @@ jobs:
       test_suite_name: sglang
       framework: sglang  # matches the framework passed to sglang-build
       test_type: 2-GPU Test
-      amd_runner: dynamo-gpu-2-amd64-v1
+      amd_runner_labels: '["gpu-2","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -672,7 +672,7 @@ jobs:
       test_suite_name: trtllm
       framework: trtllm  # matches the framework passed to trtllm-build
       test_type: Test
-      amd_runner: dynamo-gpu-1-amd64-v1 # This runner is overridden for ARM platform
+      amd_runner_labels: '["gpu-1","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -697,7 +697,7 @@ jobs:
       test_suite_name: trtllm
       framework: trtllm  # matches the framework passed to trtllm-build
       test_type: 2-GPU Test
-      amd_runner: dynamo-gpu-2-amd64-v1
+      amd_runner_labels: '["gpu-2","amd64","runner-version-v1","gpu-generic","us-west-2"]'
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -753,7 +753,7 @@ jobs:
   #   with:
   #     test_suite_name: triton
   #     test_type: QA Test
-  #     amd_runner: dynamo-gpu-1-amd64-v1
+  #     amd_runner_labels: '["gpu-1","amd64","runner-version-v1","gpu-generic","us-west-2"]'
   #     target_tag_plain: ${{ needs.triton-build.outputs.target_tag_plain }}
   #     cuda_version: '[""]'
   #     platform: '["amd64"]' # @whoisj to enable ARM64 support in a future patch.
