@@ -3994,7 +3994,13 @@ class InstrumentedScheduler(AsyncScheduler):
         if value in ("on", "1", "true"):
             return True
         if value == "auto":
-            return bool(self._kvwarm_state_layer_groups())
+            config = getattr(
+                getattr(self, "kv_cache_manager", None), "kv_cache_config", None
+            )
+            return any(
+                self._kvwarm_is_state_spec(getattr(group, "kv_cache_spec", None))
+                for group in getattr(config, "kv_cache_groups", None) or []
+            )
         return False
 
     def _bench_realseed_chain(self, batch_size: int) -> dict:

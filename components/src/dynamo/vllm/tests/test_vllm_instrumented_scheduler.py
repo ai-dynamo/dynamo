@@ -3686,13 +3686,17 @@ def test_prefill_real_seed_switch_parsing(monkeypatch):
     assert InstrumentedScheduler._bench_realseed_on(stub) is False
 
 
-def _realseed_layout_stub(*spec_names):
+def _realseed_layout_stub(*specs):
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub.kv_cache_manager = SimpleNamespace(
         kv_cache_config=SimpleNamespace(
             kv_cache_groups=[
-                SimpleNamespace(kv_cache_spec=type(name, (), {})())
-                for name in spec_names
+                SimpleNamespace(
+                    kv_cache_spec=type(spec, (), {})()
+                    if isinstance(spec, str)
+                    else spec
+                )
+                for spec in specs
             ]
         )
     )
@@ -3708,9 +3712,16 @@ def test_prefill_real_seed_auto_follows_recurrent_state_layout(monkeypatch, valu
         monkeypatch.delenv("DYN_BENCH_PREFILL_REAL_SEED", raising=False)
     else:
         monkeypatch.setenv("DYN_BENCH_PREFILL_REAL_SEED", value)
+    state_subclass = type(
+        "GatedDeltaStateSpec", (instrumented_scheduler_module.MambaSpec,), {}
+    )
     hybrid = _realseed_layout_stub("FullAttentionSpec", "MambaSpec")
+    hybrid_subclass = _realseed_layout_stub(
+        "FullAttentionSpec", state_subclass.__new__(state_subclass)
+    )
     dense = _realseed_layout_stub("FullAttentionSpec", "SlidingWindowSpec")
     assert InstrumentedScheduler._bench_realseed_on(hybrid) is True
+    assert InstrumentedScheduler._bench_realseed_on(hybrid_subclass) is True
     assert InstrumentedScheduler._bench_realseed_on(dense) is False
 
 
