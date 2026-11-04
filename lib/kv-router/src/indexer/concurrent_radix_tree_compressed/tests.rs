@@ -687,13 +687,22 @@ mod race_tests {
             cleanup.join().unwrap();
             let _lookup = store.join().unwrap();
 
-            let edge_lengths = index.edge_lengths_for_test();
-            assert!(
-                edge_lengths == vec![5] || edge_lengths == vec![2, 3],
-                "unexpected edge lengths: {edge_lengths:?}"
-            );
-            assert_eq!(index.raw_child_edge_count(), edge_lengths.len());
             assert_direct_score(&index, &[1, 2, 3, 4, 5], worker, 5);
+            assert_direct_score(&index, &[1, 2, 3, 6, 7], worker, 3);
+
+            // The concurrent sweep can defer a child while the store holds its gate.
+            index.run_cleanup_for_test();
+            assert_eq!(
+                index.edge_topology_for_test(),
+                vec![edge_topology(
+                    &[1, 2, 3],
+                    vec![edge_topology(&[4, 5], vec![])]
+                )]
+            );
+            assert_edge_lengths(&index, &[2, 3]);
+            assert_eq!(index.raw_child_edge_count(), 2);
+            assert_direct_score(&index, &[1, 2, 3, 4, 5], worker, 5);
+            assert_direct_score(&index, &[1, 2, 3, 6, 7], worker, 3);
         }
     }
 
@@ -1912,6 +1921,8 @@ mod reclamation_tests {
             make_remove_event_with_parent(1, &[1], &[9]),
         );
         index.drain_pending_unlinks(&mut lookup, None);
+        assert_eq!(dead_node_count(&index), 1);
+        assert_eq!(index.run_cleanup_for_test(), 0);
         assert_eq!(dead_node_count(&index), 1);
 
         drop(leaf);
