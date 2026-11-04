@@ -13,6 +13,13 @@ FROM framework AS runtime
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% endif %}
 
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+{% include "templates/verify_ca_certificates.Dockerfile" %}
+
+ENV GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
+
 ARG MODELEXPRESS_VERSION
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
@@ -180,6 +187,18 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --no-deps $(grep -E '^nvtx==' /tmp/requirements.common.txt)
 
+# The upstream SGLang base copies a uv binary into /usr/local/bin, outside any
+# Python distribution, so requirements.sglang.txt cannot refresh it. Replace it
+# with the release carrying the current fix line where the base ships one.
+# Nothing on the runtime path runs uv.
+RUN --mount=type=bind,from=ghcr.io/astral-sh/uv:{{ context.dynamo.uv_version }},source=/,target=/tmp/uv-image \
+    if [ -e /usr/local/bin/uv ]; then \
+        install -m 0755 /tmp/uv-image/uv /tmp/uv-image/uvx /usr/local/bin/; \
+    fi && \
+    for u in $(which -a uv uvx); do \
+        "$u" --version | grep -q '^uvx\{0,1\} {{ context.dynamo.uv_version | replace(".", "\\.") }} ' || { echo "unexpected uv at $u" >&2; exit 1; }; \
+    done
+
 # Install SGLang-specific runtime dependencies without changing the upstream
 # dependency solution. imageio-ffmpeg is installed from source (no bundled
 # binary) for the VP9 video-encode path; see requirements.sglang.txt.
@@ -191,93 +210,10 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
     pip install --break-system-packages --force-reinstall --no-deps \
         --requirement /tmp/requirements.sglang.txt
 
-# Assert what the install left. The upstream SGLang image ships no
-# PyNvVideoCodec, so nothing is removed first -- but that is a property of the
-# current base rather than a guarantee, and checking the result is what keeps it
-# honest. PINNED is duplicated from the requirements file deliberately: this stage
-# must not parse the file it is checking; a test asserts the two agree.
-RUN python3 - <<'PYEOF'
-import csv
-import glob
-import os
-import re
-import sys
-from importlib.metadata import distributions
-
-PINNED = "2.2.3"
-NAME = "pynvvideocodec"
-# Mirrors the deny globs in container/compliance/policy/codec_policy.yaml. Kept as
-# families rather than the four this package happens to have shed, so a future
-# release vendoring libpostproc or libx264 is caught here -- beside the install
-# that introduced it -- instead of as an unattributed scan violation later.
-DENIED = (
-    "libavcodec",
-    "libavdevice",
-    "libavfilter",
-    "libswscale",
-    "libswresample",
-    "libpostproc",
-    "libx264",
-    "libx265",
-    "libfdk-aac",
-)
-
-
-def canonical(name):
-    return re.sub(r"[-_.]+", "-", name or "").lower()
-
-
-# Enumerated over sys.path rather than one scheme directory: these images carry
-# both /usr/local/lib/python3.12/dist-packages and /usr/lib/python3/dist-packages,
-# and the wheel declares Root-Is-Purelib: false, so neither purelib nor platlib
-# alone is guaranteed to be the install target or the only place a copy can hide.
-# A surviving base copy beside the new one is the failure being looked for, which
-# is also why this counts distributions instead of asking for one version.
-installed = [d for d in distributions() if canonical(d.metadata["Name"]) == NAME]
-versions = sorted(d.version for d in installed)
-print("PyNvVideoCodec distributions on sys.path:", versions)
-if len(installed) != 1:
-    sys.exit(f"ERROR: expected exactly one PyNvVideoCodec, found {versions}")
-if versions[0] != PINNED:
-    sys.exit(f"ERROR: PyNvVideoCodec is {versions[0]}, but the requirements file "
-             f"pins {PINNED}")
-
-site = os.path.normpath(str(installed[0].locate_file("")))
-pkg = os.path.join(site, "PyNvVideoCodec")
-bundled = sorted(
-    os.path.relpath(p, pkg)
-    for p in glob.glob(os.path.join(pkg, "**", "lib*.so*"), recursive=True)
-)
-print("PyNvVideoCodec bundles:", bundled)
-# Positive first, and on both libraries: an empty package directory satisfies
-# every negative check below while shipping no demuxer at all.
-for required in ("libavformat", "libavutil"):
-    if not any(os.path.basename(n).startswith(required) for n in bundled):
-        sys.exit(
-            f"ERROR: PyNvVideoCodec bundles no {required}, so the checks below "
-            f"would pass vacuously; found {bundled}"
-        )
-denied = [n for n in bundled if os.path.basename(n).startswith(DENIED)]
-if denied:
-    sys.exit(f"ERROR: PyNvVideoCodec bundles libraries the codec gate denies: {denied}")
-
-# The FFmpeg source tarball lands outside site-packages, so its directory is read
-# from the wheel's own RECORD rather than guessed from a sysconfig path -- the
-# RECORD is what the installer actually wrote, and it moves if the layout does.
-record = installed[0].read_text("RECORD") or ""
-declared = [
-    row[0]
-    for row in csv.reader(record.splitlines())
-    if row and row[0].endswith((".tar.xz", ".tar.gz", ".tar.bz2"))
-]
-if len(declared) != 1:
-    sys.exit(f"ERROR: expected one source tarball in the RECORD, found {declared}")
-external = os.path.dirname(os.path.normpath(os.path.join(site, declared[0])))
-tarballs = sorted(os.path.basename(p) for p in glob.glob(os.path.join(external, "ffmpeg-*.tar.*")))
-print("bundled FFmpeg source tarballs in", external, "->", tarballs)
-if len(tarballs) != 1:
-    sys.exit(f"ERROR: expected exactly one bundled FFmpeg source tarball, found {tarballs}")
-PYEOF
+# Assert what the install left. The pin is repeated from the requirements file
+# on purpose; a test asserts the two agree.
+RUN --mount=type=bind,source=./container/compliance,target=/tmp/compliance/compliance \
+    PYTHONPATH=/tmp/compliance python3 -m compliance.check_pynvvideocodec --pinned 2.2.3
 {% else %}
 # mooncake and PyNvVideoCodec are CUDA-only. The mooncake floor names the CUDA 13
 # distribution, and PyNvVideoCodec decodes on NVDEC through libnvcuvid, so both
@@ -317,22 +253,22 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
 # tests/dependencies/test_no_software_video_codecs.py -- when this purge
 # becomes redundant, delete it and keep those assertions.
 #
-# CUDA only, and it has to be: the replacement ffmpeg is copied in under
-# `device == "cuda"` just below. Running the purge on XPU strips the base image's
-# media stack and puts nothing back, leaving that image with no ffmpeg at all and
-# an empty IMAGEIO_FFMPEG_EXE -- worse than either leaving it alone or replacing
-# it properly. The XPU image is not published, so there is nothing to remove from
-# it in the first place; the codec gate skips it for the same reason. Matches the
+# CUDA only. On XPU the codec-bearing wheels from the SGLang install are not
+# purged yet; both devices get the in-tree VP9 ffmpeg below. Matches the
 # equivalent purge in vllm_runtime.Dockerfile.
 {% if device == "cuda" %}
 RUN set -eux; \
-    # SGLang 0.5.21's runtime image installs Ubuntu's full GPL/LGPL ffmpeg
+    # The upstream runtime image installs Ubuntu's full GPL/LGPL ffmpeg
     # dependency closure. Remove the packages (and their dpkg metadata) before
     # copying Dynamo's separately built VP9-only ffmpeg below. File deletion
     # alone is insufficient because the compliance generator inventories dpkg.
-    apt-get purge -y --auto-remove \
+    purge="$(dpkg-query -W -f='${Package}\n' \
         ffmpeg \
-        libwayland-server0; \
+        libwayland-server0 \
+        2>/dev/null || true)"; \
+    if [ -n "$purge" ]; then \
+        apt-get purge -y --auto-remove $purge; \
+    fi; \
     rm -rf /var/lib/apt/lists/*; \
     python3 -m pip uninstall --yes \
         av \
@@ -390,13 +326,14 @@ RUN rm -rf \
         /opt/nvidia/nsight-compute/*/host/target-linux-*/plugins/efa_metrics && \
     [ -z "$(find /usr/local /opt -xdev -type d -name efa_metrics 2>/dev/null)" ]
 
-{% if device == "cuda" %}
+{% if device in ("cuda", "xpu") %}
 # Copy the in-tree VP9 ffmpeg from wheel_builder: versioned shared libs
 # (libav*.so*, libsw*.so*) + libvpx + the in-tree CLI binary that imageio targets
-# via IMAGEIO_FFMPEG_EXE. The upstream ffmpeg was purged above, so this
-# VP9-only build is the only ffmpeg present; the video-generation
-# handler (CUDA DiffGenerator) encodes libvpx-vp9 with it. Same pattern as
-# vllm_runtime.Dockerfile.
+# via IMAGEIO_FFMPEG_EXE. On CUDA the upstream ffmpeg was purged above; the XPU
+# base ships none. Either way this is the only ffmpeg CLI in the image; the
+# video-generation handler (DiffGenerator) encodes libvpx-vp9 with it, and the
+# media-ffmpeg runtime wheel links its libav* for frontend video decoding. Same
+# pattern as vllm_runtime.Dockerfile.
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
     mkdir -p /usr/local/lib/pkgconfig && \
     cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
@@ -412,18 +349,10 @@ ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
 # NOT expose any H.264/H.265/AAC/NVENC encoder. A missing/broken copy (no VP9)
 # or a codec regression fails the build here rather than at runtime — closing the
 # gap where SGLang shipping no encoder passed every PR gate.
-RUN set -eu; \
-    ff="${IMAGEIO_FFMPEG_EXE:-ffmpeg}"; \
-    "$ff" -hide_banner -encoders 2>/dev/null | grep -qiE 'libvpx[-_]vp9' \
-      || { echo "ERROR: shipped ffmpeg ($ff) has no VP9 encoder" >&2; exit 1; }; \
-    if "$ff" -hide_banner -encoders 2>/dev/null \
-         | grep -iE 'h\.?264|h\.?265|hevc|(^| )aac|nvenc|cuvid|nvdec'; then \
-        echo "ERROR: shipped ffmpeg ($ff) exposes an H.264/H.265/AAC/NVENC encoder" >&2; \
-        exit 1; \
-    fi
+{% include "templates/ffmpeg_encoder_guard.Dockerfile" %}
 
-# Frontend video decoding is part of the shipped SGLang CUDA contract. Fail the
-# image build if the runtime wheel was accidentally compiled without it.
+# Frontend video decoding is part of the shipped SGLang CUDA and XPU contract.
+# Fail the image build if the runtime wheel was accidentally compiled without it.
 {% if target not in ("dev", "local-dev") %}
 RUN python3 -c 'from dynamo.llm import MediaDecoder; assert hasattr(MediaDecoder(), "enable_video")'
 {% endif %}

@@ -21,6 +21,8 @@ from __future__ import annotations
 import argparse
 import os
 
+from dynamo.vllm.nixl_telemetry import allow_nixl_telemetry_capture
+
 from .args import Config
 
 
@@ -44,6 +46,10 @@ def run_dynamo_headless(config: Config) -> None:
     Secondary nodes spawn vLLM workers only — no engine core, no scheduler,
     no Dynamo endpoints. Bypasses DistributedRuntime entirely (no NATS/etcd).
     """
+    # Before run_headless spawns workers: a false NIXL_TELEMETRY_ENABLE
+    # vetoes capture on every TP rank, and this path skips setup_vllm_engine.
+    allow_nixl_telemetry_capture()
+
     # Propagate worker_cls for custom load formats so headless workers use
     # the same model loader settings as the leader node.
     if config.engine_args.load_format == "gms":

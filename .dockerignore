@@ -32,6 +32,7 @@
 !.github/scripts
 .github/scripts/*
 !.github/scripts/apply_dev_version.py
+!.github/scripts/helm_chart_version.py
 !.github/scripts/retry_kubectl.sh
 !.github/scripts/collect_vcluster_diagnostics.sh
 **/*backup*/

@@ -17,7 +17,8 @@ use crate::sequences::topology::{
     MAX_DATA_PARALLEL_RANKS_PER_WORKER, WorkerDpRange, WorkerTopologyError,
 };
 use crate::sequences::{
-    ActiveSequencesMultiWorker, ReplicaWorkerPolicy, SequenceError, SequenceRequest,
+    ActiveSequencesMultiWorker, PrefillCompletion, ReplicaWorkerPolicy, SequenceError,
+    SequenceRequest,
 };
 
 use crate::services::common::replica_sync::{
@@ -318,7 +319,7 @@ impl SlotTrackerRegistry {
         let Some(booking) = entry.tracker.request_booking(request_id) else {
             return Err(not_found().into());
         };
-        let outcome = entry.tracker.mark_prefill_completed_if_booking(
+        let completion = entry.tracker.mark_prefill_completed_if_booking(
             &booking.request_id,
             booking.worker,
             booking.attempt_id,
@@ -326,7 +327,9 @@ impl SlotTrackerRegistry {
         )?;
         // Already marked: republish the completion while this attempt is still
         // live so peers that missed the first event converge.
-        if !outcome.is_applied() && !entry.tracker.publish_prefill_completed_if_booking(&booking) {
+        if completion == PrefillCompletion::Unchanged
+            && !entry.tracker.publish_prefill_completed_if_booking(&booking)
+        {
             return Err(not_found().into());
         }
         Ok(())

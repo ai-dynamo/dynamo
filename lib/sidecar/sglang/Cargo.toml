@@ -20,8 +20,12 @@ name = "dynamo-sglang-sidecar"
 path = "src/main.rs"
 
 [dependencies]
+dynamo-sglang-generate = { workspace = true }
 dynamo-backend-common = { workspace = true }
-dynamo-llm = { path = "../../llm", default-features = false }
+# The sidecar image builds all sidecars in one `cargo build`, which links the
+# vLLM sidecar's `mm-routing` here too. Enable it so this crate's SBOM lists
+# what the binary links; nothing in this sidecar calls it.
+dynamo-llm = { workspace = true, features = ["mm-routing"] }
 dynamo-runtime = { workspace = true }
 dynamo-sidecar-common = { workspace = true }
 

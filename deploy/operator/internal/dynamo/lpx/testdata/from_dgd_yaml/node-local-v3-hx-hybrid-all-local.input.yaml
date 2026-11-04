@@ -57,6 +57,8 @@ spec:
               volumeMounts:
               - name: model-storage
                 mountPath: /nfs
+              - name: config
+                mountPath: /configs
               resources:
                 claims:
                 - name: gpu

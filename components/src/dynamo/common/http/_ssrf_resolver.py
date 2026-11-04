@@ -33,8 +33,8 @@ class SsrfBlockedAddress(OSError):
     """Raised at connect time when every resolved IP is in a blocked range."""
 
 
-def _env_proxy_hosts() -> frozenset[str]:
-    """Hosts of any egress proxy configured in the environment.
+def _env_proxy_endpoints() -> frozenset[tuple[str, int]]:
+    """``(host, port)`` of each egress proxy configured in the environment.
 
     The session runs with ``trust_env=True``, so when a proxy is configured the
     connector dials *the proxy*, and it is the proxy's own address that reaches
@@ -44,11 +44,15 @@ def _env_proxy_hosts() -> frozenset[str]:
     into ClientConnectorDNSError. Exempt the configured proxy so proxied
     deployments keep working, and see the module docstring for what that means
     for enforcement.
+
+    aiohttp resolves a proxy at its URL's ``raw_host`` and ``port``, which is
+    the scheme default when the URL names none, so another port on the proxy's
+    host is an origin and stays filtered.
     """
     return frozenset(
-        info.proxy.host
+        (info.proxy.raw_host, info.proxy.port)
         for info in proxies_from_env().values()
-        if info.proxy.host is not None
+        if info.proxy.raw_host is not None and info.proxy.port is not None
     )
 
 
@@ -64,10 +68,14 @@ class BlocklistResolver(AbstractResolver):
     is the one that rebinds.
     """
 
-    def __init__(self, *, allow_private_ips: bool) -> None:
+    def __init__(self, *, allow_private_ips: bool, via_proxy: bool = False) -> None:
         self._inner = DefaultResolver()
         self._allow_private_ips = allow_private_ips
-        self._proxy_hosts = _env_proxy_hosts()
+        # Only the resolver of a connector that dials a proxy exempts one. A
+        # direct fetch to the proxy's host and port is an origin like any
+        # other, and aiohttp caches answers per connector, keyed by
+        # (host, port) alone, so the two must not share a connector.
+        self._proxy_endpoints = _env_proxy_endpoints() if via_proxy else frozenset()
 
     async def resolve(
         self,
@@ -76,7 +84,7 @@ class BlocklistResolver(AbstractResolver):
         family: socket.AddressFamily = socket.AF_INET,
     ) -> list[ResolveResult]:
         hosts = await self._inner.resolve(host, port, family)
-        if self._allow_private_ips or host in self._proxy_hosts:
+        if self._allow_private_ips or (host, port) in self._proxy_endpoints:
             return hosts
         allowed = [h for h in hosts if not is_blocked_ip(h["host"])]
         if not allowed:

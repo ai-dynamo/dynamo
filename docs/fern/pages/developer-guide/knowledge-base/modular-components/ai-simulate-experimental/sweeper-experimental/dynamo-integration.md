@@ -14,8 +14,7 @@ sweep configuration providers and `DynamoReplayRunnerFactory`.
 
 ## Install
 
-AISimulate requires Python 3.11 through 3.13. The `ai-dynamo` package remains installable on Python
-3.10, but the AISimulate dependency and CLI are not installed there.
+AISimulate requires Python 3.11 through 3.13.
 
 For a prebuilt environment, use a released `dynamo-planner` image with its bundled Dynamo and
 AISimulate artifacts. The AISimulate Python wheel and Rust crate must come from the same source

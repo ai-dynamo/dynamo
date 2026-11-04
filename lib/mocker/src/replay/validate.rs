@@ -4,12 +4,12 @@
 use anyhow::{Result, bail};
 
 use super::{OfflineDisaggReplayConfig, ReplayArgsMode};
-use crate::common::protocols::{MockEngineArgs, WorkerType};
+use crate::common::protocols::{MockerConfig, WorkerType};
 
 pub fn validate_replay_args_mode(
-    aggregated_args: Option<&MockEngineArgs>,
-    prefill_args: Option<&MockEngineArgs>,
-    decode_args: Option<&MockEngineArgs>,
+    aggregated_args: Option<&MockerConfig>,
+    prefill_args: Option<&MockerConfig>,
+    decode_args: Option<&MockerConfig>,
     num_workers: usize,
     num_prefill_workers: usize,
     num_decode_workers: usize,
@@ -42,7 +42,7 @@ pub fn validate_replay_args_mode(
     }
 }
 
-fn validate_aggregated_worker(args: &MockEngineArgs, mode: &str) -> Result<()> {
+fn validate_aggregated_worker(args: &MockerConfig, mode: &str) -> Result<()> {
     if args.worker_type != WorkerType::Aggregated {
         bail!(
             "{mode} only supports aggregated workers, got {:?}",
@@ -54,11 +54,11 @@ fn validate_aggregated_worker(args: &MockEngineArgs, mode: &str) -> Result<()> {
 
 // Engine and topology validation belong to AISimulate's ReplaySpec/engine factory.
 // Keep only the argument roles that Dynamo lowers into those contracts here.
-pub(super) fn validate_offline_replay_args(args: &MockEngineArgs) -> Result<()> {
+pub(super) fn validate_offline_replay_args(args: &MockerConfig) -> Result<()> {
     validate_aggregated_worker(args, "offline replay")
 }
 
-pub(super) fn validate_online_replay_args(args: &MockEngineArgs, num_workers: usize) -> Result<()> {
+pub(super) fn validate_online_replay_args(args: &MockerConfig, num_workers: usize) -> Result<()> {
     if num_workers == 0 {
         bail!("online replay requires num_workers >= 1");
     }
@@ -66,7 +66,7 @@ pub(super) fn validate_online_replay_args(args: &MockEngineArgs, num_workers: us
 }
 
 pub(super) fn validate_online_concurrency_args(
-    args: &MockEngineArgs,
+    args: &MockerConfig,
     num_workers: usize,
     max_in_flight: usize,
 ) -> Result<()> {
@@ -113,14 +113,18 @@ mod tests {
 
     fn config() -> OfflineDisaggReplayConfig {
         OfflineDisaggReplayConfig {
-            prefill_args: MockEngineArgs {
-                worker_type: WorkerType::Prefill,
-                ..MockEngineArgs::default()
-            },
-            decode_args: MockEngineArgs {
-                worker_type: WorkerType::Decode,
-                ..MockEngineArgs::default()
-            },
+            prefill_args: MockerConfig::from_value(serde_json::json!({
+                "engine": {
+                    "worker_type": WorkerType::Prefill
+                }
+            }))
+            .unwrap(),
+            decode_args: MockerConfig::from_value(serde_json::json!({
+                "engine": {
+                    "worker_type": WorkerType::Decode
+                }
+            }))
+            .unwrap(),
             num_prefill_workers: 1,
             num_decode_workers: 1,
         }
@@ -151,10 +155,7 @@ mod tests {
 
     #[test]
     fn online_replay_accepts_attention_dp() {
-        let args = MockEngineArgs {
-            dp_size: 2,
-            ..MockEngineArgs::default()
-        };
+        let args = MockerConfig::from_value(serde_json::json!({"dp_size":2})).unwrap();
         validate_online_replay_args(&args, 1).unwrap();
         validate_online_concurrency_args(&args, 1, 1).unwrap();
     }

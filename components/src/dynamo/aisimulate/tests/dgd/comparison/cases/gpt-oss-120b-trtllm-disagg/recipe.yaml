@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+source: recipes/gpt-oss-120b/trtllm/disagg/deploy.yaml
+requirements:
+  gb200-sxm-5gpu:
+    gpus: 5

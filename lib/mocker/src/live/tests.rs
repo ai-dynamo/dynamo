@@ -39,31 +39,35 @@ impl crate::common::protocols::KvCacheEventSink for NoopKvSink {
     }
 }
 
-fn args(engine_type: EngineType) -> MockEngineArgs {
-    MockEngineArgs::builder()
-        .engine_type(engine_type)
-        .block_size(4)
-        .num_gpu_blocks(128)
-        .max_num_seqs(Some(8))
-        .max_num_batched_tokens(Some(64))
-        .speedup_ratio(1000.0)
-        .dp_size(1)
-        .build()
-        .unwrap()
+fn args(engine_type: EngineType) -> MockerConfig {
+    MockerConfig::from_value(serde_json::json!({
+        "dp_size": 1,
+        "engine": {
+            "backend": engine_type,
+            "block_size": 4,
+            "num_gpu_blocks": 128,
+            "max_num_seqs": 8,
+            "max_num_batched_tokens": 64,
+            "speedup_ratio": 1000.0
+        }
+    }))
+    .unwrap()
 }
 
-fn handoff_args(engine_type: EngineType, worker_type: WorkerType) -> MockEngineArgs {
-    MockEngineArgs::builder()
-        .engine_type(engine_type)
-        .worker_type(worker_type)
-        .block_size(4)
-        .num_gpu_blocks(128)
-        .max_num_seqs(Some(8))
-        .max_num_batched_tokens(Some(64))
-        .speedup_ratio(1000.0)
-        .dp_size(1)
-        .build()
-        .unwrap()
+fn handoff_args(engine_type: EngineType, worker_type: WorkerType) -> MockerConfig {
+    MockerConfig::from_value(serde_json::json!({
+        "dp_size": 1,
+        "engine": {
+            "backend": engine_type,
+            "worker_type": worker_type,
+            "block_size": 4,
+            "num_gpu_blocks": 128,
+            "max_num_seqs": 8,
+            "max_num_batched_tokens": 64,
+            "speedup_ratio": 1000.0
+        }
+    }))
+    .unwrap()
 }
 
 async fn wait_for_idle(engine: &LiveEngine) {
@@ -182,8 +186,8 @@ async fn sglang_live_metrics_retain_the_last_prefill_cache_observation() {
 
 async fn assert_mtp_lifecycle_drains_through_live_boundary(engine_type: EngineType) {
     let mut mtp_args = args(engine_type);
-    mtp_args.ais_nextn = Some(2);
-    mtp_args.ais_nextn_accept_rates = Some("1,1".to_string());
+    mtp_args.aic_nextn = Some(2);
+    mtp_args.aic_nextn_accept_rates = Some("1,1".to_string());
     let fpm = Arc::new(CountingFpmSink::default());
     let engine = LiveEngine::start_with_options(
         mtp_args,
@@ -1233,16 +1237,7 @@ async fn direct_delivery_forwards_admission_before_releasing_output() {
 
 #[tokio::test]
 async fn replay_options_allow_zero_output() {
-    let zero_engine = LiveEngine::start_with_options(
-        args(EngineType::Sglang),
-        0,
-        LiveEngineOptions {
-            request_output_buffering: RequestOutputBuffering::FullResponse,
-            allow_zero_output: true,
-            ..LiveEngineOptions::default()
-        },
-    )
-    .unwrap();
+    let zero_engine = LiveEngine::start(args(EngineType::Sglang), 0).unwrap();
     let mut zero = zero_engine
         .submit(DirectRequest {
             tokens: vec![1, 2, 3],
@@ -1256,6 +1251,19 @@ async fn replay_options_allow_zero_output() {
     assert!(terminal.completed);
     assert_eq!(terminal.token_id, None);
     zero_engine.shutdown().await.unwrap();
+
+    let non_sglang = LiveEngine::start(args(EngineType::Vllm), 0).unwrap();
+    assert!(
+        non_sglang
+            .submit(DirectRequest {
+                tokens: vec![1, 2, 3],
+                max_output_tokens: 0,
+                ..Default::default()
+            })
+            .await
+            .is_err()
+    );
+    non_sglang.shutdown().await.unwrap();
 }
 
 #[tokio::test]

@@ -3,22 +3,47 @@
 
 use std::{future::Future, sync::Arc};
 
-use dynamo_backend_common::{DynamoError, LLMEngine, Worker, WorkerConfig};
+use dynamo_backend_common::{DynamoError, LLMEngine, RuntimeConfig, Worker, WorkerConfig};
 use dynamo_runtime::system_status_server::SystemProbePolicy;
-use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig, logging};
+use dynamo_runtime::{DistributedRuntime, Runtime, logging};
 use tokio_util::sync::CancellationToken;
 
 use crate::SidecarStartupError;
 
+/// Result of discovering an engine and preparing its worker configuration.
+pub type EngineBootstrapResult<E> = Result<(E, WorkerConfig), DynamoError>;
+
 /// Start sidecar probes and runtime dependencies before discovering engine metadata.
+/// Runtime settings accompany the bootstrap future so they take effect before
+/// the first connection, including in embedded Python launchers.
 /// CLI parsing must happen before constructing `bootstrap` so help and argument
 /// errors do not require a listener or any runtime connections.
 pub fn run<E: LLMEngine + 'static>(
-    bootstrap: impl Future<Output = Result<(E, WorkerConfig), DynamoError>>,
+    (runtime_config, bootstrap): (
+        RuntimeConfig,
+        impl Future<Output = EngineBootstrapResult<E>>,
+    ),
 ) -> anyhow::Result<()> {
-    run_task(
-        |runtime, shutdown| async move { run_until_shutdown(bootstrap, &runtime, shutdown).await },
-    )
+    run_task(|runtime, shutdown| async move {
+        run_until_shutdown(runtime_config, bootstrap, &runtime, shutdown).await
+    })
+}
+
+/// Start runtime probes before a sidecar chooses whether to serve inference or
+/// run a node-local telemetry task.
+pub fn run_with_drt<T, B, F, Fut>(
+    runtime_config: RuntimeConfig,
+    bootstrap: B,
+    task: F,
+) -> anyhow::Result<()>
+where
+    B: Future<Output = anyhow::Result<T>>,
+    F: FnOnce(DistributedRuntime, T, CancellationToken) -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
+    run_task(|runtime, shutdown| async move {
+        run_drt_task_until_shutdown(runtime_config, bootstrap, task, &runtime, shutdown).await
+    })
 }
 
 /// Run a sidecar task with the shared runtime and process-signal lifecycle.
@@ -57,12 +82,51 @@ where
 }
 
 async fn run_until_shutdown<E: LLMEngine + 'static>(
-    bootstrap: impl Future<Output = Result<(E, WorkerConfig), DynamoError>>,
+    runtime_config: RuntimeConfig,
+    bootstrap: impl Future<Output = EngineBootstrapResult<E>>,
     runtime: &Runtime,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
+    let expected_runtime = runtime_config.clone();
+    let bootstrap = async move {
+        // Keep engine discovery failures distinct from runtime/Worker failures
+        // for embedded launchers' existing error contracts.
+        let (engine, config) = bootstrap.await.map_err(SidecarStartupError::Dynamo)?;
+        anyhow::ensure!(
+            config.runtime == expected_runtime,
+            "sidecar runtime settings changed during engine discovery"
+        );
+        Ok::<_, anyhow::Error>((engine, config))
+    };
+    run_drt_task_until_shutdown(
+        runtime_config,
+        bootstrap,
+        |drt, (engine, config), shutdown| async move {
+            Worker::new(Arc::new(engine), config)
+                .run_with_drt(drt, shutdown)
+                .await
+                .map_err(Into::into)
+        },
+        runtime,
+        shutdown,
+    )
+    .await
+}
+
+async fn run_drt_task_until_shutdown<T, B, F, Fut>(
+    runtime_config: RuntimeConfig,
+    bootstrap: B,
+    task: F,
+    runtime: &Runtime,
+    shutdown: CancellationToken,
+) -> anyhow::Result<()>
+where
+    B: Future<Output = anyhow::Result<T>>,
+    F: FnOnce(DistributedRuntime, T, CancellationToken) -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
     let startup = async {
-        let distributed = DistributedConfig::try_from_settings()?;
+        let distributed = runtime_config.to_distributed_config()?;
         let drt = DistributedRuntime::new_with_probe_policy(
             runtime.clone(),
             distributed,
@@ -70,16 +134,8 @@ async fn run_until_shutdown<E: LLMEngine + 'static>(
         )
         .await?;
         tracing::info!("Sidecar runtime connected; discovering engine metadata");
-        // Keep engine discovery failures distinct from runtime/Worker failures
-        // for embedded launchers' existing error contracts.
-        let (engine, config) = bootstrap.await.map_err(SidecarStartupError::Dynamo)?;
-        // Sidecar CLI configuration uses env-based runtime settings. Reject a
-        // future factory that tries to change them after connections are live.
-        anyhow::ensure!(
-            !config.runtime.has_overrides(),
-            "sidecar runtime overrides must be configured before startup"
-        );
-        Ok::<_, anyhow::Error>((drt, engine, config))
+        let initialized = bootstrap.await?;
+        Ok::<_, anyhow::Error>((drt, initialized))
     };
     let runtime_shutdown = runtime.shutdown_started_token();
     let result = tokio::select! {
@@ -99,11 +155,8 @@ async fn run_until_shutdown<E: LLMEngine + 'static>(
         }
         anyhow::bail!("runtime shut down during sidecar initialization");
     }
-    let (drt, engine, config) = result?;
-    Worker::new(Arc::new(engine), config)
-        .run_with_drt(drt, shutdown)
-        .await
-        .map_err(Into::into)
+    let (drt, initialized) = result?;
+    task(drt, initialized, shutdown).await
 }
 
 #[cfg(test)]
@@ -166,7 +219,12 @@ mod tests {
                         };
                         let result = tokio::time::timeout(
                             std::time::Duration::from_secs(5),
-                            run_until_shutdown(bootstrap, &runtime, shutdown.clone()),
+                            run_until_shutdown(
+                                RuntimeConfig::default(),
+                                bootstrap,
+                                &runtime,
+                                shutdown.clone(),
+                            ),
                         )
                         .await
                         .expect("runtime shutdown cancels metadata discovery");

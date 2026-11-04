@@ -23,7 +23,7 @@ Start the mock SGLang endpoint:
 cargo run -p dynamo-sglang-mocker --bin dynamo-sglang-mocker-server -- \
   --listen 127.0.0.1:30001 \
   --model mocker-model \
-  --extra-engine-args '{"speedup_ratio":1000,"block_size":4}'
+  --extra-engine-args '{"engine":{"speedup_ratio":1000,"block_size":4}}'
 ```
 
 Point the existing sidecar at it:
@@ -34,8 +34,8 @@ cargo run -p dynamo-sglang-sidecar --bin dynamo-sglang-sidecar -- \
 ```
 
 `--extra-engine-args` accepts inline JSON or a JSON file path. The server adds
-`engine_type=sglang` when it is omitted; an explicitly different engine type,
-`dp_size` other than one, or a non-aggregated Mocker worker type is rejected.
+`engine.backend=sglang` when it is omitted; an explicitly different backend,
+`dp_size` other than one, or a non-aggregated `engine.worker_type` is rejected.
 The wire-level role remains controlled by `--disaggregation-mode`.
 `--max-concurrent-requests` bounds admitted RPCs, including requests waiting
 inside the Mocker scheduler.
@@ -70,7 +70,7 @@ port mappings, a Service, or firewall rules need a known event port. For example
 cargo run -p dynamo-sglang-mocker --bin dynamo-sglang-mocker-server -- \
   --listen 0.0.0.0:30001 \
   --model mocker-model \
-  --extra-engine-args '{"speedup_ratio":1000,"block_size":64,"zmq_kv_events_port":5557}'
+  --extra-engine-args '{"engine":{"speedup_ratio":1000,"block_size":64},"dynamo":{"zmq_kv_events_port":5557}}'
 
 cargo run -p dynamo-sglang-sidecar --bin dynamo-sglang-sidecar -- \
   --grpc-endpoint mock-host:30001
@@ -82,14 +82,14 @@ use `-p 30001:30001 -p 5557:5557` on the mock-server container. The sidecar will
 connect to `mock-host:5557` for events.
 
 An explicit replay client can use the existing optional replay socket by adding
-`"zmq_replay_port":5558` to the engine arguments. The current SGLang discovery
+`"zmq_replay_port":5558` under `dynamo` in the engine arguments. The current SGLang discovery
 descriptor does not advertise replay, and the sidecar receiver does not use it.
 The shared native PUB/SUB path
 can lose events before the subscription is ready, and restarting only the
 sidecar does not rebuild the index for blocks already in the mock server's
 cache. This server uses that existing path without additional recovery.
 
-Set `"enable_prefix_caching":false` to disable both prefix caching and KV
+Set `"enable_prefix_caching":false` under `engine` to disable both prefix caching and KV
 events. Decode servers do not publish events. In either case, explicit
 `zmq_kv_events_port` and `zmq_replay_port` values are ignored; they do not enable
 publishing. As with regular mock workers, publisher setup failures are logged

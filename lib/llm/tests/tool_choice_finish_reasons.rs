@@ -22,6 +22,8 @@ fn create_test_request() -> NvCreateChatCompletionRequest {
     )];
 
     NvCreateChatCompletionRequest {
+        preserve_thinking: None,
+        responses_tools: None,
         inner: CreateChatCompletionRequest {
             model: "test-model".to_string(),
             messages,
@@ -98,10 +100,12 @@ async fn apply_jail_transformation(
     tokio::pin!(output_stream);
     let out = output_stream.next().await.unwrap();
     NvCreateChatCompletionStreamResponse {
+        message_boundary: None,
         inner: out.data.unwrap(),
         nvext: None,
         prompt_logprobs: None,
         llm_metrics: None,
+        tool_call_completion: Vec::new(),
     }
 }
 

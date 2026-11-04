@@ -3,9 +3,9 @@
 
 //! Shared HTTP transport helpers for render clients.
 //!
-//! Both the vLLM and sglang render clients use the same transport protocol,
-//! error categories, and body-reading logic. This module holds the shared
-//! implementation so neither client duplicates it.
+//! The vLLM, SGLang, and TensorRT-LLM render clients use the same transport
+//! protocol, error categories, and body-reading logic. This module holds the
+//! shared implementation so no client duplicates it.
 
 use std::time::Duration;
 
@@ -16,7 +16,7 @@ use thiserror::Error;
 
 const MAX_ERROR_BODY_BYTES: usize = 1024;
 
-/// Unified error type for both vLLM and sglang render clients.
+/// Unified error type for the vLLM, SGLang, and TensorRT-LLM render clients.
 #[derive(Debug, Error)]
 pub enum RenderError {
     /// The renderer could not be reached or the connection failed.
@@ -67,10 +67,10 @@ pub(crate) fn classify_transport_error(source: reqwest::Error, timeout: Duration
 
 /// Reject immediately if the declared Content-Length exceeds the limit.
 ///
-/// Both vLLM and sglang-renderer set Content-Length on their success responses
-/// (the full JSON body is buffered before sending), so this fast-path is
-/// reliable for these backends. The streaming check in [`read_success_body`]
-/// enforces the limit for chunked or undeclared responses.
+/// vLLM, sglang-renderer, and TensorRT-LLM's renderer set Content-Length on
+/// their success responses (the full JSON body is buffered before sending), so
+/// this fast-path is reliable for these backends. The streaming check in
+/// [`read_success_body`] enforces the limit for chunked or undeclared responses.
 pub(crate) fn check_content_length(
     response: &reqwest::Response,
     max_bytes: usize,

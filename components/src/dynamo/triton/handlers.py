@@ -5,7 +5,9 @@ import logging
 from typing import AsyncGenerator
 
 import numpy as np
-import tritonclient.grpc.model_config_pb2 as mc
+import tritonclient.grpc.model_config_pb2 as TritonModelConfigPb
+from tritonserver import DataType as TritonDataType
+from tritonserver import MemoryBuffer as TritonMemoryBuffer
 from tritonserver import MemoryType as TritonMemoryType
 from tritonserver import Model as TritonModel
 from tritonserver import Server as TritonServer
@@ -23,12 +25,39 @@ from dynamo.triton.util import (
 logger = logging.getLogger(__name__)
 
 
+def _to_triton_input(tensor: dict) -> np.ndarray | TritonTensor:
+    """Convert a Dynamo input tensor to a value tritonserver accepts as input.
+
+    tritonserver converts NumPy inputs through NUMPY_TO_TRITON_DTYPE, which has
+    no entry for ml_dtypes.bfloat16, so a BF16 ndarray fails with "Unsupported
+    Numpy data type". Hand BF16 over as a Tensor over the raw host bytes
+    instead; owner= keeps the array alive while Triton reads it. Other dtypes
+    keep the plain ndarray path.
+    """
+    arr = dynamo_tensor_to_numpy(tensor)
+    if tensor["metadata"]["data_type"] != "BFloat16":
+        return arr
+
+    arr = np.ascontiguousarray(arr)
+    return TritonTensor(
+        TritonDataType.BF16,
+        list(arr.shape),
+        TritonMemoryBuffer(
+            data_ptr=arr.ctypes.data,
+            memory_type=TritonMemoryType.CPU,
+            memory_type_id=0,
+            size=arr.nbytes,
+            owner=arr,
+        ),
+    )
+
+
 class RequestHandler:
     def __init__(
         self,
         server: TritonServer,
         model: TritonModel,
-        triton_model_config: mc.ModelConfig,
+        triton_model_config: TritonModelConfigPb.ModelConfig,
     ):
         self._server = server
         self._model = model
@@ -60,8 +89,9 @@ class RequestHandler:
         inference_request = self._model.create_request()
         for tensor in request["tensors"]:
             logger.debug(f"Tensor: {tensor}")
-            arr = dynamo_tensor_to_numpy(tensor)
-            inference_request.inputs[tensor["metadata"]["name"]] = arr
+            inference_request.inputs[tensor["metadata"]["name"]] = _to_triton_input(
+                tensor
+            )
 
         inference_responses = self._model.async_infer(inference_request)
         async for inference_response in inference_responses:

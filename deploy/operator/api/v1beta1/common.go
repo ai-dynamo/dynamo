@@ -77,7 +77,9 @@ type CompilationCacheConfig struct {
 //   - target is `PodCliqueSet`, `PodCliqueTemplateSpec`, or
 //     `PodCliqueScalingGroupConfig`, according to the field location and
 //     component shape.
-//   - value may set only the target's topologyConstraint subtree.
+//   - value may set topologyConstraint, and component contexts may set the
+//     native minAvailable field and rollingUpdate.maxUnavailable. Availability
+//     and rollout budgets are not supported at root or role scope.
 //
 // All other providers, versions, targets, and fields are rejected.
 type ProviderOverride struct {
@@ -95,8 +97,11 @@ type ProviderOverride struct {
 
 	// value is a sparse fragment of the selected provider schema. For Grove,
 	// PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded
-	// PodCliqueTemplateSpec and PodCliqueScalingGroupConfig targets accept only
-	// `topologyConstraint`.
+	// targets accept `topologyConstraint`. Component contexts also accept
+	// `spec.minAvailable` on PodCliqueTemplateSpec or `minAvailable` on
+	// PodCliqueScalingGroupConfig. The minimum is immutable; migrating from the
+	// deprecated component field preserves its value and leaves the update strategy unchanged.
+	// Component contexts also accept rollingUpdate.maxUnavailable.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Type=object
@@ -826,15 +831,17 @@ type ComponentReplicaStatus struct {
 	RuntimeNamespace string `json:"runtimeNamespace,omitempty"`
 
 	// servedModelName is the effective primary model identity exposed by this
-	// component's serving role. During rolling updates, worker status keeps the
-	// old active revision value until cutover completes.
+	// component's serving role in combined mode. Native sidecars omit this field;
+	// Kubernetes Planner reads their registered model identity. During rolling
+	// updates, worker status keeps the old active revision until cutover completes.
 	// +optional
 	ServedModelName string `json:"servedModelName,omitempty"`
 
 	// runtimeComponentName is an explicit Dynamo runtime component identity
-	// resolved from the serving role's endpoint override. Omission means the
-	// backend default applies. During rolling updates, worker status keeps the
-	// old active revision value until cutover completes.
+	// resolved from the serving role's endpoint override in combined mode.
+	// Native sidecars omit this field; Kubernetes Planner reads their registered
+	// component identity. During rolling updates, worker status keeps the old
+	// active revision value until cutover completes.
 	// +optional
 	RuntimeComponentName string `json:"runtimeComponentName,omitempty"`
 

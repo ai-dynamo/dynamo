@@ -13,10 +13,10 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     body::Body,
     extract::State,
-    http::{HeaderMap, Method, Request, StatusCode, Uri},
+    http::{HeaderMap, Method, Request, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{
         IntoResponse, Response,
@@ -70,6 +70,9 @@ use super::error::{
 use super::metadata::{attach_x_request_id, extract_metadata_from_http};
 use super::openai::{get_body_limit, get_or_create_request_id, warn_nvext_disabled};
 
+mod validation;
+use validation::ValidatedRequest;
+
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
@@ -110,35 +113,83 @@ pub fn anthropic_models_router(
     let retrieve_path = format!("{}/{{*model_id}}", models_path);
     let list_doc = RouteDoc::new(axum::http::Method::GET, &models_path);
     let retrieve_doc = RouteDoc::new(axum::http::Method::GET, &retrieve_path);
+    let readiness_doc = RouteDoc::new(
+        axum::http::Method::GET,
+        format!("{}/{{model_id}}/ready", models_path),
+    );
     let router = Router::new()
         .route(&models_path, get(list_models))
         .route(&retrieve_path, get(get_model))
         .with_state(state);
-    (vec![list_doc, retrieve_doc], router)
+    (vec![list_doc, retrieve_doc, readiness_doc], router)
 }
 
 // ---------------------------------------------------------------------------
 // Error middleware
 // ---------------------------------------------------------------------------
 
-/// Converts 422 validation errors to Anthropic error format.
-async fn anthropic_error_middleware(request: Request<Body>, next: Next) -> Response {
-    let response = next.run(request).await;
+#[derive(Clone)]
+struct AnthropicRequestId(String);
 
-    if response.status() == StatusCode::UNPROCESSABLE_ENTITY {
-        let (_parts, body) = response.into_parts();
+/// Assign the ID before extraction, so even malformed requests have one, and
+/// normalize extractor rejections without losing existing error types or headers.
+async fn anthropic_error_middleware(mut request: Request<Body>, next: Next) -> Response {
+    let request_id = get_or_create_request_id(request.headers());
+    request
+        .extensions_mut()
+        .insert(AnthropicRequestId(request_id.clone()));
+    let mut response = next.run(request).await;
+
+    if response.status().is_client_error() || response.status().is_server_error() {
+        let (mut parts, body) = response.into_parts();
         let body_bytes = axum::body::to_bytes(body, get_body_limit())
             .await
             .unwrap_or_default();
-        let error_message = String::from_utf8_lossy(&body_bytes).to_string();
-        return anthropic_error(
-            ErrorClass::InvalidRequest,
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            &error_message,
+        if matches!(
+            parts.status,
+            StatusCode::UNPROCESSABLE_ENTITY | StatusCode::UNSUPPORTED_MEDIA_TYPE
+        ) {
+            parts.status = StatusCode::BAD_REQUEST;
+        }
+        let mut body = match serde_json::from_slice::<AnthropicErrorResponse>(&body_bytes) {
+            Ok(error) => serde_json::to_value(error).expect("Anthropic error is serializable"),
+            Err(_) => {
+                super::openai::record_local_failure(
+                    if parts.status == StatusCode::PAYLOAD_TOO_LARGE {
+                        ErrorClass::PayloadTooLarge
+                    } else if parts.status.is_client_error() {
+                        ErrorClass::InvalidRequest
+                    } else {
+                        ErrorClass::Internal
+                    },
+                );
+                serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": anthropic_error_type_for_status(parts.status, "api_error"),
+                        "message": if body_bytes.is_empty() {
+                            parts.status.canonical_reason().unwrap_or("Request failed").into()
+                        } else {
+                            String::from_utf8_lossy(&body_bytes)
+                        },
+                    },
+                })
+            }
+        };
+        body["request_id"] = serde_json::Value::String(request_id.clone());
+        parts.headers.insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("application/json"),
         );
+        parts.headers.remove(header::CONTENT_LENGTH);
+        response = Response::from_parts(parts, Body::from(body.to_string()));
     }
-
+    response.headers_mut().insert(
+        "request-id",
+        request_id
+            .parse()
+            .expect("assigned request ID is a valid header"),
+    );
     response
 }
 
@@ -366,12 +417,12 @@ fn validate_anthropic_tools(
 /// Top-level HTTP handler for POST /v1/messages.
 async fn handler_anthropic_messages(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    Extension(AnthropicRequestId(request_id)): Extension<AnthropicRequestId>,
     headers: HeaderMap,
-    Json(mut request): Json<AnthropicCreateMessageRequest>,
+    request: ValidatedRequest<AnthropicCreateMessageRequest>,
 ) -> Result<Response, Response> {
-    let request_id = get_or_create_request_id(&headers);
-    let streaming = request.stream;
-    let resolved_model = resolve_request_model(&request.model, template.as_ref());
+    let (model, streaming) = request.identity();
+    let resolved_model = resolve_request_model(&model, template.as_ref());
     let canonical_model = state.manager().resolve_canonical_name(resolved_model);
     let metric_model = state
         .manager()
@@ -383,6 +434,9 @@ async fn handler_anthropic_messages(
         streaming,
         &request_id,
     );
+    let mut request = request.into_request(&headers).map_err(|error| {
+        AnthropicHandlerError::validation(error).into_marked_response(&mut inflight_guard)
+    })?;
 
     validate_anthropic_messages(&request.messages).map_err(|error| {
         AnthropicHandlerError::from_request_validation(error)
@@ -571,6 +625,16 @@ async fn anthropic_messages(
     let anthropic_ctx = unified_request.anthropic_context().cloned();
     let mut chat_request = unified_request.into_inner();
     apply_anthropic_nvext_policy(&mut chat_request, &headers, state.nvext_enabled());
+    // Native Anthropic stop reporting needs this internal metadata even when
+    // client extensions are disabled. The converters consume it, never emit nvext.
+    let fields = chat_request
+        .nvext
+        .get_or_insert_with(Default::default)
+        .extra_fields
+        .get_or_insert_with(Vec::new);
+    if !fields.iter().any(|field| field == "stop_reason") {
+        fields.push("stop_reason".to_string());
+    }
     if let Err(error) = chat_request.validate() {
         let error = invalid_argument(error.to_string());
         return Err(AnthropicHandlerError::validation(error.message())
@@ -611,7 +675,7 @@ async fn anthropic_messages(
             .or_insert(serde_json::Value::Bool(false));
     }
 
-    let request = context.map(|_req| chat_request);
+    let mut request = context.map(|_req| chat_request);
 
     // Anthropic requests are converted to the same chat request contract. Keep
     // parser activation identical to the OpenAI Chat Completions and Responses
@@ -631,6 +695,10 @@ async fn anthropic_messages(
     let parsing_options = parsing_options
         .with_parallel_tool_calls(request.inner.parallel_tool_calls)
         .with_move_reasoning_to_content_when_empty(move_reasoning_to_content_when_empty);
+    request.insert(
+        crate::preprocessor::REQUEST_PARSING_OPTIONS_CONTEXT_KEY,
+        parsing_options.clone(),
+    );
 
     // Computed before `request` moves into `generate`. Only a stream that can
     // withhold every data frame needs forced keep-alive frames.
@@ -641,7 +709,8 @@ async fn anthropic_messages(
             request.chat_template_args.as_ref(),
         );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    let mut response_collector = inflight_guard.response_collector();
+    inflight_guard.request_metrics().attach_to(&mut request);
 
     tracing::trace!("Issuing generate call for Anthropic messages");
 
@@ -869,6 +938,7 @@ async fn anthropic_messages(
             stream_handle,
             activity_rx,
             error_signal,
+            false,
         );
 
         let mut sse_stream = Sse::new(stream);
@@ -899,8 +969,18 @@ async fn anthropic_messages(
             );
         });
 
+        // Anthropic limits valid tool blocks after input validation. Keep the
+        // original constraint on the backend request and parsing context.
+        let aggregation_options = if anthropic_ctx
+            .as_ref()
+            .is_some_and(|ctx| ctx.disable_parallel_tool_use)
+        {
+            parsing_options.clone().with_parallel_tool_calls(None)
+        } else {
+            parsing_options.clone()
+        };
         let chat_response =
-            NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
+            NvCreateChatCompletionResponse::from_annotated_stream(stream, aggregation_options)
                 .await
                 .map_err(|error| {
                     let error_type = if super::metrics::request_was_cancelled(&error) {
@@ -932,8 +1012,12 @@ async fn anthropic_messages(
 /// Returns an estimated input token count using a len/3 heuristic.
 async fn handler_count_tokens(
     State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
-    Json(mut request): Json<AnthropicCountTokensRequest>,
+    headers: HeaderMap,
+    request: ValidatedRequest<AnthropicCountTokensRequest>,
 ) -> Result<Response, Response> {
+    let mut request = request
+        .into_request(&headers)
+        .map_err(|error| AnthropicHandlerError::validation(error).into_response())?;
     if let Err(error) = validate_anthropic_messages(&request.messages) {
         return Err(AnthropicHandlerError::from_request_validation(error).into_response());
     }
@@ -1096,10 +1180,17 @@ async fn get_model(
     headers: HeaderMap,
     axum::extract::Path(model_id): axum::extract::Path<String>,
 ) -> Result<Response, super::openai::ErrorResponse> {
-    super::openai::check_ready(&state)?;
-
     // Strip leading slash from wildcard capture (axum `/{*key}` includes it).
     let model_id = model_id.strip_prefix('/').unwrap_or(&model_id);
+
+    if state.manager().get_committed_model(model_id).is_none()
+        && let Some(base) = model_id.strip_suffix("/ready")
+        && state.manager().get_committed_model(base).is_some()
+    {
+        return super::openai::get_model_readiness(&state, base);
+    }
+
+    super::openai::check_ready(&state)?;
 
     let models: HashSet<String> = state.manager().model_display_names();
     if !models.contains(model_id) {
