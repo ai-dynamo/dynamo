@@ -198,6 +198,22 @@ def test_prepare_rejects_invalid_domain_and_session_state(
 
 
 @pytest.mark.timeout(10)
+def test_prepare_refuses_a_held_lease_and_keeps_serving(v1_owner) -> None:
+    v1_owner.publish_weights()
+    # Stands in for an MX source, which holds an RO lease while it serves.
+    source = _GMSClientSession(v1_owner.paths["weights"], RequestedLockType.RO)
+    control = v1_owner.control()
+
+    with pytest.raises(RuntimeError, match="MX source still holds a lease"):
+        control.prepare()
+
+    assert control.state().state == "serving"
+    reader = _GMSClientSession(v1_owner.paths["weights"], RequestedLockType.RO)
+    reader.close()
+    source.close()
+
+
+@pytest.mark.timeout(10)
 def test_prepare_rejects_committed_or_active_kv(v1_owner) -> None:
     v1_owner.publish_weights()
     control = v1_owner.control()
@@ -298,11 +314,12 @@ def test_cli_composes_one_lifecycle_across_both_domains(monkeypatch) -> None:
             return None
 
     monkeypatch.setattr(cli, "get_vmm", lambda: FakeVMM(granularity=64))
-    monkeypatch.setattr(cli.device_identity, "get_device_uuid", lambda _device: "GPU-0")
+    monkeypatch.setattr(cli.device_identity, "gpu_uuid", lambda _device: "GPU-0")
+    monkeypatch.setattr(cli.device_identity, "cuda_ordinal", lambda _uuid: 0)
     monkeypatch.setattr(
         cli,
         "get_socket_path",
-        lambda device, domain: f"/{device}-{domain}.sock",
+        lambda gpu_uuid, domain: f"/{gpu_uuid}-{domain}.sock",
     )
     monkeypatch.setattr(cli, "GMSRPCServer", _Server)
     monkeypatch.setattr(cli, "run_servers", lambda _servers, _stop: None)
@@ -311,8 +328,8 @@ def test_cli_composes_one_lifecycle_across_both_domains(monkeypatch) -> None:
     cli.main(["--device", "0"])
 
     assert [server.path for server in servers] == [
-        "/0-weights.sock",
-        "/0-kv_cache.sock",
+        "/GPU-0-weights.sock",
+        "/GPU-0-kv_cache.sock",
     ]
     lifecycle = servers[0].checkpoint_lifecycle
     assert servers[1].checkpoint_lifecycle is lifecycle

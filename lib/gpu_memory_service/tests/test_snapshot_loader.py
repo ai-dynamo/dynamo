@@ -181,3 +181,14 @@ def test_main_forwards_explicit_argv_unchanged(monkeypatch):
     assert forwarded == [
         ("gpu_memory_service.v1.snapshot.loader", ["--checkpoint-dir", "/tmp/cp"])
     ]
+
+
+def test_v0_rejects_the_mx_backend(monkeypatch, capsys):
+    monkeypatch.delenv("DYN_GMS_USE_V1", raising=False)
+
+    with pytest.raises(SystemExit):
+        loader.main(["--checkpoint-dir", "/tmp/cp", "--transfer-backend", "mx"])
+
+    assert (
+        "--transfer-backend=mx requires DYN_GMS_USE_V1=true" in capsys.readouterr().err
+    )

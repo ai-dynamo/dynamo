@@ -138,6 +138,46 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 		assert.Contains(t, detail, "profiling failed")
 	})
 
+	t.Run("DGDR Run diagnostics", func(t *testing.T) {
+		t.Log("Project a pod of a Run's Job whose sweeper waits on a mount error")
+		job := &batchv1.Job{Name: "search-1-aisimulate", Namespace: pod.Namespace, UID: types.UID("job-uid")}
+		runPod := podcache.Project(&corev1.Pod{
+			Name:            "search-1-aisimulate-abcde",
+			Namespace:       pod.Namespace,
+			Labels:          map[string]string{batchv1.JobNameLabel: job.Name},
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(job, batchv1.SchemeGroupVersion.WithKind("Job"))},
+			Spec: corev1.PodSpec{
+				NodeName:   "node-a",
+				Containers: []corev1.Container{{Name: dgdrRunSweeperContainer}, {Name: dgdrRunPublisherContainer}},
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodPending,
+				ContainerStatuses: []corev1.ContainerStatus{
+					{Name: dgdrRunPublisherContainer, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+					{Name: dgdrRunSweeperContainer, State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+						Reason: "CreateContainerConfigError", Message: `failed to prepare subPath for volumeMount "trace"`,
+					}}},
+				},
+			},
+		})
+
+		t.Log("The Run controller finds the pod of its Job and reports the waiting sweeper verbatim")
+		scheme := runtime.NewScheme()
+		require.NoError(t, corev1.AddToScheme(scheme))
+		reconciler := &DynamoGraphDeploymentRunV1beta2Reconciler{
+			Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(runPod).Build(),
+		}
+		pods, err := reconciler.jobPods(context.Background(), job)
+		require.NoError(t, err)
+		require.Len(t, pods, 1)
+		container, waiting, found := dgdrRunWaitingContainer(pods)
+		assert.True(t, found)
+		assert.Equal(t, dgdrRunSweeperContainer, container)
+		assert.Equal(t, corev1.ContainerStateWaiting{
+			Reason: "CreateContainerConfigError", Message: `failed to prepare subPath for volumeMount "trace"`,
+		}, waiting)
+	})
+
 	t.Run("Recreate", func(t *testing.T) {
 		// PR #11909 lists old worker Pods by these labels and treats only
 		// Failed/Succeeded phases (or cache disappearance) as terminated.
