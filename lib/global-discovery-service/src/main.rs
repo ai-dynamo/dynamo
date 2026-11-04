@@ -158,14 +158,25 @@ struct Args {
     #[arg(long, help_heading = WITH_DYNAMODB)]
     dynamodb_ensure_table: bool,
     /// How far the clocks of replicas sharing a DynamoDB table may disagree.
-    /// A pool stays listed this much longer than its lease.
-    #[arg(long, default_value_t = 2, help_heading = WITH_DYNAMODB)]
+    /// A pool stays listed this much longer than its lease. At most a day.
+    #[arg(
+        long,
+        default_value_t = 2,
+        value_parser = clap::value_parser!(u64).range(..=MAX_LEASE_DURATION_SECS),
+        help_heading = WITH_DYNAMODB
+    )]
     lease_skew_secs: u64,
     /// With a DynamoDB Global Table, how long past its lease a pool stays
     /// listed when its last registration was written through another
     /// region's replica, since that region's renewals may be late. Lists are
-    /// incomplete meanwhile. 0 drops such a pool when its lease lapses.
-    #[arg(long, default_value_t = 60, help_heading = WITH_DYNAMODB)]
+    /// incomplete meanwhile. 0 drops such a pool when its lease lapses. At
+    /// most a day.
+    #[arg(
+        long,
+        default_value_t = 60,
+        value_parser = clap::value_parser!(u64).range(..=MAX_LEASE_DURATION_SECS),
+        help_heading = WITH_DYNAMODB
+    )]
     dynamodb_replication_grace_secs: u64,
     /// Each PoolRelay Service is named `<DGD name><suffix>`. Give a suffix
     /// that starts with `-` after an `=`: `--pool-service-suffix=-relay`.
@@ -1073,5 +1084,18 @@ mod tests {
         assert!(parse_args(["gds", "--lease-duration-secs", &day]).is_ok());
         let longer = (MAX_LEASE_DURATION_SECS + 1).to_string();
         assert!(parse_args(["gds", "--lease-duration-secs", &longer]).is_err());
+    }
+
+    #[test]
+    fn the_skew_and_the_replication_grace_are_at_most_a_day() {
+        // Far larger values would add up to the end of time, and a pool that
+        // stopped would stay listed for good.
+        let day = MAX_LEASE_DURATION_SECS.to_string();
+        let longer = (MAX_LEASE_DURATION_SECS + 1).to_string();
+        for flag in ["--lease-skew-secs", "--dynamodb-replication-grace-secs"] {
+            assert!(parse_args(dynamodb(&[flag, &day])).is_ok(), "{flag}");
+            let error = parse_args(dynamodb(&[flag, &longer])).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::ValueValidation, "{flag}: {error}");
+        }
     }
 }

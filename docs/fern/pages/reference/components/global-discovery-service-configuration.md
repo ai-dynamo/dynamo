@@ -60,8 +60,8 @@ These flags work with every `--pool-discovery` value: in each mode the service k
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--lease-skew-secs <n>` | `2` | Clock skew allowed when evaluating leases. |
-| `--dynamodb-replication-grace-secs <n>` | `60` | With a Global Table, how long past its lease a pool stays listed when its last registration was written through another region's replica, since that region's renewals may arrive late. `complete` is `false` meanwhile. `0` drops such a pool when its lease lapses. |
+| `--lease-skew-secs <n>` | `2` | Clock skew allowed when evaluating leases. At most `86400`. |
+| `--dynamodb-replication-grace-secs <n>` | `60` | With a Global Table, how long past its lease a pool stays listed when its last registration was written through another region's replica, since that region's renewals may arrive late. `complete` is `false` meanwhile. `0` drops such a pool when its lease lapses. At most `86400`. |
 | `--dynamodb-table <name>` | None | Table name: 3 to 255 letters, digits, `_`, `-`, or `.`. Required with `--registration-storage dynamodb`. |
 | `--dynamodb-region <region>` | SDK default chain (`AWS_REGION`) | Region of the table replica this process uses. |
 | `--dynamodb-endpoint <url>` | Unset | Endpoint override, for DynamoDB Local. Must be an `http` or `https` URL. |
@@ -80,7 +80,8 @@ The `--dynamodb-*` flags and `--lease-skew-secs` apply only with `--registration
 
 ## HTTP endpoints
 
-All bodies are JSON. A reader ignores fields it does not know.
+Successful responses carry JSON bodies, and a reader ignores fields it does not know. Errors carry a
+short plain-text reason, and `GET /healthz` answers with a status and an empty body.
 
 | Method and path | Purpose | Success | Errors |
 | --- | --- | --- | --- |
@@ -142,7 +143,7 @@ In `karmada` and `mcs` modes, the listed frontend addresses come from MCS; the r
 | --- | --- |
 | `pools[].model` | `null` when the service does not know the pool's model. |
 | `pools[].relay_identities` | The identities of the Pool Relay allowed to stream the pool's state, such as `ip:10.43.66.175`. Empty in `registrations` mode. |
-| `complete` | `true` when the service lists every pool. With either store it is `false` until one lease has passed after the service starts: a `memory` store has only the registrations it received, and while a rollout moves the service to a DynamoDB table, Pool Relays may still register with the old replicas. With `dynamodb` it is also `false` while the table cannot be reached, and for one lease after, since Pool Relays could not renew meanwhile; and with a Global Table, while a pool from another region is listed past its lease (see `--dynamodb-replication-grace-secs`). In `karmada` and `mcs` modes, both the imported and registered pool lists must be complete. |
+| `complete` | `true` when the service believes it lists every live pool; `false` when the list may be missing some. It is not an authoritative inventory: with `dynamodb`, an item that cannot be decoded is logged and left out, and another region's writes arrive by replication. With either store it is `false` until one lease has passed after the service starts: a `memory` store has only the registrations it received, and while a rollout moves the service to a DynamoDB table, Pool Relays may still register with the old replicas. With `dynamodb` it is also `false` while the table cannot be reached, and for one lease after, since Pool Relays could not renew meanwhile; and with a Global Table, while a pool from another region is listed past its lease (see `--dynamodb-replication-grace-secs`). In `karmada` and `mcs` modes, both the imported and registered pool lists must be complete. |
 
 ### `GET /routers`
 
@@ -171,7 +172,8 @@ A pool is live when `renewed_at + lease_s * 1000 + skew >= now` on the reading r
 `skew` is `--lease-skew-secs`. A pool whose `written_in` is another region than the reader's stays
 listed for `--dynamodb-replication-grace-secs` more, and `complete` is `false` while any pool is listed
 that way. The store never expires a pool itself. A registration is one `UpdateItem`
-without a condition. Each replica reads the table with one paginated `Query` on `pk = "pool"` every
+without a condition. Each replica reads the table with one strongly consistent, paginated `Query` on
+`pk = "pool"` every
 `--dynamodb-poll-interval-secs`, and `GET /pools` answers from the last read, leaving out at once a pool
 whose lease has lapsed since.
 

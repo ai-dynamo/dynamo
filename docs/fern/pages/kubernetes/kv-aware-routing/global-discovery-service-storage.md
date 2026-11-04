@@ -149,6 +149,13 @@ spec:
 The complete manifest, with the Service and ServiceAccount, is
 [`container/global-discovery-service-dynamodb.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/container/global-discovery-service-dynamodb.yaml).
 
+> [!WARNING]
+> `POST /pools` takes a registration from any caller that can reach the service, and any caller may
+> overwrite any pool. Keep the service on a trusted network: the example's `ClusterIP` Service is
+> reachable only from inside the cluster, but it does not authenticate callers. `--tls-cert-path` and
+> `--tls-key-path` encrypt the traffic (see
+> [Global Discovery Service Configuration](../../reference/components/global-discovery-service-configuration.md)).
+
 With Karmada, the DynamoDB flags stay the same. The router Service's flags replace `--router`, and the
 service joins the registrations with the pools that Karmada imports:
 

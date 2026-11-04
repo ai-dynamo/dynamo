@@ -576,6 +576,12 @@ impl Shared {
 
     /// Every pool's item, live or not, read page by page. An item that does
     /// not decode is skipped, so one bad write cannot hide every pool.
+    ///
+    /// The reads are strongly consistent, so a poll sees every write that
+    /// this region's replica of the table took before the poll began. An
+    /// eventually consistent read could return an item older than one this
+    /// replica already has, and make watchers see the pool change back and
+    /// forth. Other regions' writes still arrive by replication.
     async fn query(&self) -> Result<Vec<codec::Stored>, DiscoveryError> {
         let mut stored = Vec::new();
         let mut start = None;
@@ -584,6 +590,7 @@ impl Shared {
                 .client
                 .query()
                 .table_name(&self.table)
+                .consistent_read(true)
                 .key_condition_expression("#pk = :pk")
                 .expression_attribute_names("#pk", keys::PK)
                 .expression_attribute_values(":pk", AttributeValue::S(keys::POOLS.to_owned()))

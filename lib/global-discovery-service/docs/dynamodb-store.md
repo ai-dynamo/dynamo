@@ -122,9 +122,14 @@ Why not `PutItem`: `UpdateItem` keeps `created_at` without a read.
 
 ## Reads
 
-Reads are a `Query` on `pk = "pool"` with pagination, eventually consistent
-(a Global Table is eventually consistent anyway, and a just-written item is
-visible to the writing region within milliseconds). Each page's items are
+Reads are a `Query` on `pk = "pool"` with pagination, strongly consistent
+(`ConsistentRead`), so a poll sees every write that its region's replica of
+the table took before the poll began. An eventually consistent read could
+return an item older than one the replica already has, and make watchers see
+a pool change back and forth. A strongly consistent read costs twice the
+read capacity, which one poll per replica per poll interval keeps small.
+Other regions' writes still arrive by replication (see "Multi-region"). Each
+page's items are
 decoded and expired ones dropped. `list()` reads the table only before the
 first poll; after that it answers from the polled view (below), leaving out
 at once a pool whose lease has lapsed since the last poll, so a request costs
@@ -218,8 +223,8 @@ since they work with every `--pool-discovery` value:
 | `--dynamodb-endpoint <url>` | none | endpoint override for dynamodb-local; an `http` or `https` URL |
 | `--dynamodb-poll-interval-secs <n>` | 2 | poll period, which `list` and watches answer from; plus `--heartbeat-interval-secs`, must be less than `--lease-duration-secs` plus `--lease-skew-secs` |
 | `--dynamodb-ensure-table` | off | create the table if it does not exist, and turn on its TTL if it is off, on every start (development; needs `CreateTable`, and for TTL `DescribeTimeToLive` and `UpdateTimeToLive`, without which it warns and starts) |
-| `--lease-skew-secs <n>` | 2 | clock skew allowed when evaluating leases |
-| `--dynamodb-replication-grace-secs <n>` | 60 | with a Global Table, how long past its lease a pool written through another region's replica stays listed, as `Estimated`; 0 drops it when its lease lapses |
+| `--lease-skew-secs <n>` | 2 | clock skew allowed when evaluating leases; at most 86400 |
+| `--dynamodb-replication-grace-secs <n>` | 60 | with a Global Table, how long past its lease a pool written through another region's replica stays listed, as `Estimated`; 0 drops it when its lease lapses; at most 86400 |
 
 The `--dynamodb-*` flags and `--lease-skew-secs` fail at startup without
 `--registration-storage dynamodb`, as flags of another `--pool-discovery` do.
