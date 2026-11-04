@@ -130,6 +130,7 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     uv pip install \
         certifi==2026.10.23 pip==26.2.2 \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
+        /opt/dynamo/wheelhouse/aisim-*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
     \
     # Triton's Python bindings (from the release image) and the tritonclient gRPC client.

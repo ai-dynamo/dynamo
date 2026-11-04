@@ -311,7 +311,7 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
     # Dynamo's own wheels — --no-deps preserves upstream's solve.
     uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
     uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
-    uv pip install --no-deps /opt/dynamo/wheelhouse/aisimulate*.whl && \
+    uv pip install --no-deps /opt/dynamo/wheelhouse/aisim-*.whl && \
     \
     # nixl/nixl-cu13 for `import nixl` (dynamo.nixl_connect); version from NIXL_REF.
     # LD_PRELOAD swaps the runtime .so (nixl#1668).

@@ -38,7 +38,7 @@ def _pinned_version() -> Version:
     requirements = [
         Requirement(dependency)
         for dependency in dependencies
-        if canonicalize_name(Requirement(dependency).name) == "aisimulate"
+        if canonicalize_name(Requirement(dependency).name) == "aisim"
     ]
     assert len(requirements) == 1, "pyproject.toml must contain one AISimulate pin"
 
@@ -50,7 +50,7 @@ def _pinned_version() -> Version:
 
 
 def _packaged_hardware_skus() -> list[str]:
-    distribution = metadata.distribution("aisimulate")
+    distribution = metadata.distribution("aisim")
     system_files = [
         path
         for path in distribution.files or []
@@ -86,7 +86,7 @@ def _operator_hardware_skus() -> list[str]:
 
 
 def test_dgdr_hardware_catalog_matches_pinned_aisimulate() -> None:
-    assert Version(metadata.version("aisimulate")) == _pinned_version()
+    assert Version(metadata.version("aisim")) == _pinned_version()
 
     expected = _packaged_hardware_skus()
     assert _operator_hardware_skus() == expected

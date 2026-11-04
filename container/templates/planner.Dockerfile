@@ -83,7 +83,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/t
         --requirement /tmp/requirements.benchmark.txt \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-        /opt/dynamo/wheelhouse/aisimulate*.whl
+        /opt/dynamo/wheelhouse/aisim-*.whl
 
 # Copy only the subset of the repository needed for planner/profiler service
 # startup and the component-local planner-family test suites. AI Simulate
