@@ -72,7 +72,6 @@ pub(crate) const KIMI_K3_UNIFIED_FAMILY: &str = "kimi_k3";
 pub(crate) const DEEPSEEK_V41_UNIFIED_FAMILY: &str = "deepseek_v41";
 pub(crate) const DEEPSEEK_V4_UNIFIED_FAMILY: &str = "deepseek_v4";
 pub(crate) const GEMMA4_UNIFIED_FAMILY: &str = "gemma4";
-pub(crate) const MINIMAX_M3_UNIFIED_FAMILY: &str = "minimax_m3";
 /// The empty thought channel Gemma 4 opens with thinking off.
 pub(crate) const GEMMA4_EMPTY_THOUGHT_CHANNEL: &str = "<|channel>thought\n<channel|>";
 pub(crate) const GLM47_UNIFIED_FAMILY: &str = "glm47";
@@ -193,14 +192,7 @@ pub(crate) fn selected_family_for_selection(
     {
         return None;
     }
-    let configured = configured_family(tool_call_parser, reasoning_parser);
-    // MiniMax M3 stays legacy in Auto until Unified guided output uses content.
-    if selection == dynamo_runtime::config::ParserVersion::Auto
-        && configured == Some(MINIMAX_M3_UNIFIED_FAMILY)
-    {
-        return None;
-    }
-    configured
+    configured_family(tool_call_parser, reasoning_parser)
 }
 
 pub(crate) fn selected_content_decoder_family(
@@ -236,6 +228,9 @@ pub(crate) fn parsers_v2_selected() -> bool {
 pub(crate) struct UnifiedRequestPolicy {
     pub reasoning_disabled: bool,
     pub structured_response: bool,
+    /// A top-level `guided_*` grammar may own the output from the first token even
+    /// where the prompt opened a thought; the first bytes decide the channel.
+    pub explicit_guidance: bool,
     pub multiple_choices: bool,
 }
 
@@ -284,10 +279,15 @@ impl UnifiedRequestPolicy {
         family: &str,
         inferred: UnifiedParserStartingState,
     ) -> UnifiedParserStartingState {
-        if self.reasoning_disabled && matches!(family, "gemma4" | NEMOTRON_V3_UNIFIED_FAMILY) {
+        if self.reasoning_disabled
+            && matches!(family, "gemma4" | "minimax_m3" | NEMOTRON_V3_UNIFIED_FAMILY)
+        {
             // Gemma's Response state preserves literal thought delimiters and still parses tools.
             // Nemotron 3 defaults to an implicit open thought; `enable_thinking=false` renders
             // a closed `<think></think>` pair instead, so generation starts in the answer.
+            // MiniMax M3 reaches this only when the rendered prompt closed the thought with
+            // `</mm:think>` or a grammar owns the output (the preprocessor's rendered-prompt
+            // gate), so there is no reasoning channel left to parse.
             UnifiedParserStartingState::Response
         } else {
             inferred
@@ -295,7 +295,7 @@ impl UnifiedRequestPolicy {
     }
 
     fn inspects_json_prefill(self, constraint: &GuidedToolConstraint) -> bool {
-        self.structured_response || constraint.installs_guided_json()
+        self.structured_response || self.explicit_guidance || constraint.installs_guided_json()
     }
 
     fn batch_starting_state(
@@ -587,15 +587,7 @@ impl JsonPrefillProbe {
         }
     }
 
-    fn decision_for_family(
-        &mut self,
-        family: &str,
-        terminal: bool,
-        latest_text: &str,
-    ) -> anyhow::Result<Option<UnifiedParserStartingState>> {
-        if let Some(decision) = self.marker_decision {
-            return Ok(Some(decision));
-        }
+    fn has_control_marker(&mut self, family: &str, terminal: bool, latest_text: &str) -> bool {
         let first_push = self.marker_probe.is_none();
         let shield = self
             .marker_probe
@@ -617,6 +609,39 @@ impl JsonPrefillProbe {
             keep_from += 1;
         }
         self.marker_suffix.drain(..keep_from);
+
+        has_candidate
+    }
+
+    /// Under an explicit `guided_*` grammar the prompt's open thought does not decide
+    /// the channel: a JSON root is the answer whatever its strings contain, an unquoted
+    /// control marker hands the decision to the prompt rules, and marker-free text is
+    /// the grammar's output once the turn ends.
+    fn explicit_guidance_decision(
+        &mut self,
+        family: &str,
+        terminal: bool,
+        latest_text: &str,
+    ) -> anyhow::Result<Option<UnifiedParserStartingState>> {
+        if starts_bare_json(&self.text) {
+            return Ok(Some(UnifiedParserStartingState::Response));
+        }
+        if self.has_control_marker(family, terminal, latest_text) {
+            return detect_prefill(family, &self.text).map(Some);
+        }
+        Ok(terminal.then_some(UnifiedParserStartingState::Response))
+    }
+
+    fn decision_for_family(
+        &mut self,
+        family: &str,
+        terminal: bool,
+        latest_text: &str,
+    ) -> anyhow::Result<Option<UnifiedParserStartingState>> {
+        if let Some(decision) = self.marker_decision {
+            return Ok(Some(decision));
+        }
+        let has_candidate = self.has_control_marker(family, terminal, latest_text);
 
         // Only complete unquoted controls require raw-prefix classification;
         // rescanning growing JSON for every punctuation-bearing chunk is quadratic.
@@ -856,7 +881,8 @@ fn bare_json_starting_state(family: &str) -> UnifiedParserStartingState {
 /// neither marker means reasoning never ran for this turn.
 fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserStartingState> {
     match family {
-        "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" | "nemotron_v3" => {
+        "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" | "minimax_m3"
+        | "nemotron_v3" => {
             let (opener_marker, closer_marker) = reasoning_marker_pair(family)
                 .expect("think-marker families have a configured reasoning pair");
             // Compare FIRST-occurrence positions, not mere presence: a prompt that
@@ -867,6 +893,19 @@ fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserSt
             // that case as `None` instead of `Reasoning`.
             let opener = first_unquoted_marker_position(content, opener_marker);
             let closer = first_unquoted_marker_position(content, closer_marker);
+            if family == "minimax_m3"
+                && first_unquoted_native_tool_call_marker(content, family).is_some_and(|tool_at| {
+                    opener
+                        .into_iter()
+                        .chain(closer)
+                        .all(|marker_at| tool_at < marker_at)
+                })
+            {
+                // M3 parameters contain literal, unquoted text. A reasoning
+                // closer inside an argument cannot imply a prompt-opened thought.
+                // Let the parser own any channels after this first native call.
+                return Ok(UnifiedParserStartingState::None);
+            }
             Ok(match (opener, closer) {
                 // No opener before it (or no opener at all): the prompt opened reasoning.
                 (None, Some(_)) => UnifiedParserStartingState::Reasoning,
@@ -939,6 +978,7 @@ fn beam_prefill(content: &str) -> UnifiedParserStartingState {
 
 fn reasoning_marker_pair(family: &str) -> Option<(&'static str, &'static str)> {
     match family {
+        "minimax_m3" => Some(("<mm:think>", "</mm:think>")),
         "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" | "nemotron_v3" => {
             Some(("<think>", "</think>"))
         }
@@ -1386,6 +1426,7 @@ fn unified_parser_control_markers(family: &str) -> Vec<String> {
 
 fn native_family_marker(family: &str) -> Option<&'static str> {
     match family {
+        "minimax_m3" => Some("]<]minimax[>[<tool_call>"),
         "qwen3" | "glm47" | "nemotron_v3" => Some("<tool_call>"),
         "deepseek_v4" => Some("<｜DSML｜tool_calls>"),
         "deepseek_v41" => Some("<｜DSML｜ calls>"),
@@ -3371,9 +3412,10 @@ fn resolve_guided_prefix(
         return None;
     }
     let mut choice = empty_choice(index);
-    if policy.structured_response
-        && (prefill == UnifiedParserStartingState::None
-            || decision == Some(UnifiedParserStartingState::None))
+    if policy.explicit_guidance
+        || policy.structured_response
+            && (prefill == UnifiedParserStartingState::None
+                || decision == Some(UnifiedParserStartingState::None))
     {
         choice.delta.content = Some(ChatCompletionMessageContent::Text(probe.text));
     } else {
@@ -3845,11 +3887,12 @@ where
                         // reasoning opener. Let the native parser recognize it.
                         probe.unopened_channel_decision(family, original.finish_reason.is_some())
                     } else {
-                        match probe.decision_for_family(
-                            family,
-                            original.finish_reason.is_some(),
-                            text,
-                        ) {
+                        let decision = if policy.explicit_guidance {
+                            probe.explicit_guidance_decision(family, original.finish_reason.is_some(), text)
+                        } else {
+                            probe.decision_for_family(family, original.finish_reason.is_some(), text)
+                        };
+                        match decision {
                             Ok(decision) => decision,
                             Err(error) => {
                                 tracing::warn!(
@@ -3864,11 +3907,12 @@ where
                     };
                     let awaiting_reasoning_boundary = prefill == UnifiedParserStartingState::Reasoning
                         && policy.structured_response
+                        && !policy.explicit_guidance
                         && !policy.reasoning_disabled
                         && probe_decision == Some(UnifiedParserStartingState::None)
                         && original.finish_reason.is_none();
                     if (probe.text.trim().is_empty() && original.finish_reason.is_none())
-                        || policy.structured_response
+                        || (policy.structured_response || policy.explicit_guidance)
                             && (probe_decision.is_none() || awaiting_reasoning_boundary)
                     {
                         undecided_guided_prefix.insert(original.index, probe);
@@ -3876,7 +3920,9 @@ where
                         emitted.push(original);
                         continue;
                     }
-                    if prefill == UnifiedParserStartingState::None
+                    if policy.explicit_guidance {
+                        detected_prefill = probe_decision.unwrap_or(prefill);
+                    } else if prefill == UnifiedParserStartingState::None
                         && probe_decision == Some(UnifiedParserStartingState::Response)
                     {
                         detected_prefill = UnifiedParserStartingState::Response;
@@ -3904,7 +3950,9 @@ where
                             && policy.inspects_json_prefill(&guided_tool_constraint)
                             && !has_consumed_harmony_prefix
                         {
-                            if policy.structured_response {
+                            if policy.explicit_guidance {
+                                detected_prefill
+                            } else if policy.structured_response {
                                 match original.delta.content.as_ref() {
                                     Some(ChatCompletionMessageContent::Text(text)) => match structured_json_response_prefill(family, text, original.finish_reason.is_some()) {
                                         Ok(Some(state)) => state,
@@ -5830,6 +5878,96 @@ pub(crate) mod tests {
             "a leading closer with no prior opener means the prompt pre-opened reasoning, \
              regardless of a later model-opened thought"
         );
+    }
+
+    #[test]
+    fn minimax_m3_prefill_does_not_treat_argument_markers_as_prompt_state() {
+        let (_, native) = all_family_native_calls()
+            .into_iter()
+            .find(|(family, _)| *family == "minimax_m3")
+            .unwrap();
+        for body in [native.to_string(), native.replace("Tokyo", "</mm:think>")] {
+            let input = format!("{body}Done.");
+            let parsed = parse_complete(
+                "minimax_m3",
+                &input,
+                &GuidedToolConstraint::None,
+                &weather_tools(),
+            )
+            .unwrap();
+            assert!(parsed.reasoning.is_empty(), "{:?}", parsed.reasoning);
+            assert_eq!(parsed.text, "Done.");
+            assert_eq!(parsed.tool_calls.len(), 1);
+        }
+        let parsed = parse_complete(
+            "minimax_m3",
+            &format!("{native}<mm:think>Check.</mm:think>Done."),
+            &GuidedToolConstraint::None,
+            &weather_tools(),
+        )
+        .unwrap();
+        assert_eq!(parsed.reasoning, "Check.");
+        assert_eq!(parsed.text, "Done.");
+        assert_eq!(
+            detect_prefill("minimax_m3", &format!("Check.</mm:think>{native}")).unwrap(),
+            UnifiedParserStartingState::Reasoning
+        );
+    }
+
+    #[tokio::test]
+    async fn minimax_m3_explicit_guidance_preserves_channels_at_every_split() {
+        for (input, expected_text, expected_reasoning) in [
+            ("Zürich 🙂", "Zürich 🙂", ""),
+            ("Plan.</mm:think>Zürich 🙂", "Zürich 🙂", "Plan."),
+            ("<mm:think>Plan.</mm:think>Zürich 🙂", "Zürich 🙂", "Plan."),
+            (r#"{"note":"</mm:think>"}"#, r#"{"note":"</mm:think>"}"#, ""),
+            ("<mm:think>unfinished", "", "unfinished"),
+            ("unfinished </mm:th", "unfinished </mm:th", ""),
+        ] {
+            for split in input.char_indices().map(|(at, _)| at).chain([input.len()]) {
+                for finish in [None, Some(FinishReason::Stop), Some(FinishReason::Length)] {
+                    let mut last = chunk(&input[split..], false);
+                    last.data.as_mut().unwrap().inner.choices[0].finish_reason = finish;
+                    let output = apply_stream_with_policy(
+                        stream::iter([chunk(&input[..split], false), last]),
+                        None,
+                        GuidedToolConstraint::None,
+                        UnifiedParserStartingState::Reasoning,
+                        "minimax_m3",
+                        true,
+                        UnifiedRequestPolicy {
+                            explicit_guidance: true,
+                            ..Default::default()
+                        },
+                    )
+                    .collect::<Vec<_>>()
+                    .await;
+                    assert!(output.iter().all(|item| !item.is_error()));
+                    let choices = collect_choices(&output);
+                    let text: String = choices
+                        .iter()
+                        .filter_map(|choice| match &choice.delta.content {
+                            Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect();
+                    let reasoning: String = choices
+                        .iter()
+                        .filter_map(|choice| choice.delta.reasoning_content.as_deref())
+                        .collect();
+                    assert_eq!(
+                        (text.as_str(), reasoning.as_str()),
+                        (expected_text, expected_reasoning),
+                        "input={input:?}, split={split}, finish={finish:?}"
+                    );
+                    let finishes: Vec<_> = choices
+                        .iter()
+                        .filter_map(|choice| choice.finish_reason)
+                        .collect();
+                    assert_eq!(finishes, finish.into_iter().collect::<Vec<_>>());
+                }
+            }
+        }
     }
 
     #[test]
@@ -12646,8 +12784,12 @@ pub(crate) mod tests {
         }
     }
 
-    fn all_family_native_calls() -> [(&'static str, &'static str); 8] {
+    fn all_family_native_calls() -> [(&'static str, &'static str); 9] {
         [
+            (
+                "minimax_m3",
+                r#"]<]minimax[>[<tool_call>]<]minimax[>[<invoke name="get_weather">]<]minimax[>[<city>Tokyo]<]minimax[>[</city>]<]minimax[>[</invoke>]<]minimax[>[</tool_call>"#,
+            ),
             (
                 "deepseek_v4",
                 r#"<｜DSML｜tool_calls><｜DSML｜invoke name="get_weather"><｜DSML｜parameter name="city" string="true">Tokyo</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>"#,
@@ -12732,6 +12874,92 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn minimax_m3_guided_json_recovers_native_backend_output_after_reasoning() {
+        // The M3 backend emitted this native shape despite a named/required JSON
+        // grammar. Both API modes traverse this stream adapter.
+        let native = concat!(
+            "]<]minimax[>[<tool_call>\n",
+            "]<]minimax[>[<invoke name=\"calculate\">",
+            "]<]minimax[>[<expression>937 * 18 + 42]<]minimax[>[</expression>",
+            "]<]minimax[>[</invoke>\n]<]minimax[>[</tool_call>"
+        );
+        let tools = vec![ToolDefinition {
+            name: "calculate".into(),
+            parameters: Some(serde_json::json!({
+                "type":"object", "properties":{"expression":{"type":"string"}},
+                "required":["expression"], "additionalProperties":true
+            })),
+            strict: None,
+        }];
+        for constraint in [
+            GuidedToolConstraint::GuidedJsonRequired,
+            GuidedToolConstraint::GuidedJsonNamed {
+                tool_name: "calculate".into(),
+            },
+        ] {
+            for guided_streaming in [true, false] {
+                let input = format!("I can pass the entire expression.</mm:think>{native}");
+                for split in input.char_indices().map(|(i, _)| i).chain([input.len()]) {
+                    let output = apply_stream_with_constraint(
+                        stream::iter([chunk(&input[..split], false), chunk(&input[split..], true)]),
+                        Some(tools.clone()),
+                        constraint.clone(),
+                        UnifiedParserStartingState::Reasoning,
+                        "minimax_m3",
+                        guided_streaming,
+                    )
+                    .collect::<Vec<_>>()
+                    .await;
+                    assert!(output.iter().all(|response| !response.is_error()));
+                    let choices = collect_choices(&output);
+                    let calls: Vec<_> = choices
+                        .iter()
+                        .filter_map(|c| c.delta.tool_calls.as_ref())
+                        .flatten()
+                        .collect();
+                    assert_eq!(
+                        calls.iter().filter(|c| c.id.is_some()).count(),
+                        1,
+                        "lost or repeated call: split={split}, streaming={guided_streaming}"
+                    );
+                    assert!(calls.iter().all(|c| c.index == 0));
+                    let names: Vec<_> = calls
+                        .iter()
+                        .filter_map(|c| c.function.as_ref()?.name.as_deref())
+                        .collect();
+                    assert_eq!(names, ["calculate"]);
+                    let arguments: String = calls
+                        .iter()
+                        .filter_map(|c| c.function.as_ref()?.arguments.as_deref())
+                        .collect();
+                    assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(&arguments).unwrap(),
+                        serde_json::json!({"expression":"937 * 18 + 42"})
+                    );
+                    assert_eq!(
+                        choices
+                            .iter()
+                            .filter_map(|c| c.delta.reasoning_content.as_deref())
+                            .collect::<String>(),
+                        "I can pass the entire expression."
+                    );
+                    assert!(
+                        choices.iter().all(|c| c
+                            .delta
+                            .content
+                            .as_ref()
+                            .is_none_or(|content| matches!(content, ChatCompletionMessageContent::Text(text) if text.is_empty())))
+                    );
+                    assert_eq!(
+                        choices.last().unwrap().finish_reason,
+                        Some(FinishReason::ToolCalls)
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn every_family_native_and_guided_batch_stream_split_parity() {
         for (family, native) in all_family_native_calls() {
             for (input, constraint) in [
@@ -12800,6 +13028,7 @@ pub(crate) mod tests {
     async fn all_family_reasoning_prefill_and_native_batch_stream_parity() {
         for (family, native) in all_family_native_calls() {
             let (opener, closer, answer) = match family {
+                "minimax_m3" => ("<mm:think>", "</mm:think>", "answer"),
                 "gemma4" => ("<|channel>thought\n", "<channel|>", "answer"),
                 "kimi_k3" => (
                     "<|open|>think<|sep|>",
@@ -13202,11 +13431,8 @@ pub(crate) mod tests {
             ] {
                 let reasoning_only_shared_grammar = tool.is_none()
                     && matches!(reasoning, Some("qwen3" | "nemotron_v3" | "nemotron3"));
-                let minimax_m3_requires_explicit_v2 =
-                    family == MINIMAX_M3_UNIFIED_FAMILY && selection != "1" && selection != "2";
                 let expected = (selection != "1"
-                    && (selection == "2" || !reasoning_only_shared_grammar)
-                    && !minimax_m3_requires_explicit_v2)
+                    && (selection == "2" || !reasoning_only_shared_grammar))
                     .then_some(family);
                 assert_eq!(
                     selected_family(tool, reasoning),
