@@ -1158,6 +1158,10 @@ shared:
   owners:
   - router
   - kv-memory
+- glob: lib/llm/src/lora_routing.rs
+  owners:
+  - frontend
+  - router
 - glob: lib/llm/src/preprocessor/mm_routing/
   owners:
   - frontend
