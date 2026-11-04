@@ -26,8 +26,8 @@ use crate::protocols::{
 use super::convert::has_duplicate_block_hashes;
 use super::types::{BlockHashValue, RawKvEvent, WIDE_TOKEN_SENTINEL};
 
-/// Bound on per-block exclusion state. Overflow switches the affected rank to
-/// root stores until its cache is cleared, keeping unknown parents out of relays.
+/// Bound on per-block exclusion state. Overflow blocks descendants whose parent
+/// may have been excluded.
 const DEFAULT_EXCLUDED_CAPACITY: usize = 1 << 20;
 
 type Key = (WorkerWithDpRank, StorageTier, u64);
@@ -39,6 +39,8 @@ pub(super) struct EngineMmState {
     excluded_capacity: usize,
     /// One latch per affected source worker/rank, independent of its block count.
     overflowed_workers: FxHashSet<WorkerWithDpRank>,
+    /// Native clears cannot retire untracked retained-GPU parents.
+    gpu_direct_overflowed_workers: FxHashSet<WorkerWithDpRank>,
 }
 
 impl EngineMmState {
@@ -48,6 +50,7 @@ impl EngineMmState {
             excluded: FxHashSet::default(),
             excluded_capacity: DEFAULT_EXCLUDED_CAPACITY,
             overflowed_workers: FxHashSet::default(),
+            gpu_direct_overflowed_workers: FxHashSet::default(),
         }
     }
 
@@ -92,7 +95,14 @@ impl EngineMmState {
             return true;
         };
 
-        if parent_block_hash.is_some() && self.overflowed_workers.contains(&worker) {
+        if parent_block_hash.is_some()
+            && (self.overflowed_workers.contains(&worker)
+                || (tier == StorageTier::GpuDirect
+                    && self.gpu_direct_overflowed_workers.contains(&worker)))
+        {
+            if tier == StorageTier::GpuDirect {
+                self.gpu_direct_overflowed_workers.insert(worker);
+            }
             // This may repeat a text store indexed before overflow. Do not mark
             // its ids excluded: its eventual removal must still reach the index.
             return false;
@@ -157,22 +167,28 @@ impl EngineMmState {
             .retain(|hash| !self.excluded.remove(&(worker, tier, hash.0)));
     }
 
-    /// Forget all state for a worker after the engine cleared its cache.
+    /// Native cache clears leave retained-GPU exclusions and overflow intact.
     pub(super) fn clear(&mut self, worker: WorkerWithDpRank) {
-        self.excluded.retain(|(known, _, _)| *known != worker);
+        self.excluded
+            .retain(|(known, tier, _)| *known != worker || *tier == StorageTier::GpuDirect);
         self.overflowed_workers.remove(&worker);
     }
 
     fn exclude(&mut self, key: Key) {
         if self.excluded.len() < self.excluded_capacity {
             self.excluded.insert(key);
-        } else if !self.excluded.contains(&key) && self.overflowed_workers.insert(key.0) {
-            tracing::warn!(
-                worker_id = key.0.worker_id,
-                dp_rank = key.0.dp_rank,
-                capacity = self.excluded_capacity,
-                "Multimodal exclusion state is full; accepting only root stores until cache clear"
-            );
+        } else if !self.excluded.contains(&key) {
+            if key.1 == StorageTier::GpuDirect {
+                self.gpu_direct_overflowed_workers.insert(key.0);
+            }
+            if self.overflowed_workers.insert(key.0) {
+                tracing::warn!(
+                    worker_id = key.0.worker_id,
+                    dp_rank = key.0.dp_rank,
+                    capacity = self.excluded_capacity,
+                    "Multimodal exclusion state is full; accepting only root stores"
+                );
+            }
         }
     }
 }

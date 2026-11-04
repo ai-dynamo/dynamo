@@ -2326,6 +2326,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn retained_gpu_events_do_not_become_replay_device_hits() {
+        let mut indexer = SyncReplayIndexer::new(64);
+        let worker = WorkerWithDpRank::new(7, 0);
+        indexer
+            .apply_event(store_event(7, 1, 101, StorageTier::GpuDirect))
+            .unwrap();
+        assert_eq!(indexer.debug_snapshot().total_cached_blocks, 0);
+        let hits = indexer.find_matches_for_hashes(vec![LocalBlockHash(101)]);
+        assert!(!hits.device.overlap_scores.scores.contains_key(&worker));
+        assert!(
+            indexer
+                .lower_tier
+                .as_ref()
+                .unwrap()
+                .get(StorageTier::GpuDirect)
+                .is_some()
+        );
+
+        indexer
+            .apply_event(store_event(7, 2, 101, StorageTier::Device))
+            .unwrap();
+        assert_eq!(indexer.debug_snapshot().total_cached_blocks, 1);
+    }
+
     /// One store event covering a whole prompt, as AISimulate relays a
     /// cluster-shared G2 pool's residency (`HostPinned`) to each subscribed rank.
     fn prompt_store_event(

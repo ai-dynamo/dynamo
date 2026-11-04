@@ -323,6 +323,12 @@ mod tests {
         );
         process_event(
             &mut tracker,
+            stored_event(Some("gpu_direct"), None),
+            None,
+            EventSource::Vllm,
+        );
+        process_event(
+            &mut tracker,
             stored_event(Some("FS"), None),
             None,
             EventSource::Vllm,

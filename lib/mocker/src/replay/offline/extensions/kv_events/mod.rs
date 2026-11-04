@@ -167,6 +167,7 @@ fn storage_tier_identity(tier: StorageTier) -> (u8, &'static str) {
         StorageTier::HostPinned => (1, "host_pinned"),
         StorageTier::Disk => (2, "disk"),
         StorageTier::External => (3, "external"),
+        StorageTier::GpuDirect => (4, "gpu_direct"),
     }
 }
 
