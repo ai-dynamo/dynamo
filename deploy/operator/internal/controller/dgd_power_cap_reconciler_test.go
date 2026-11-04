@@ -232,7 +232,7 @@ func testPowerCapComponentPreservation(t *testing.T, hashKey string) {
 	require.NoError(t, c.Create(context.Background(), deployment))
 	workloads := newComponentWorkloadsReconciler(c, nil, newDGDWorkerRolloutReconciler(c, nil))
 	t.Log("An unchanged graph needs no exception on an operator-only upgrade")
-	unchanged, err := workloads.resolvePowerCapPreservation(t.Context(), dgd, nil, nil, renderer)
+	unchanged, err := workloads.resolvePowerCapPreservation(t.Context(), dgd, nil, nil)
 	require.NoError(t, err)
 	require.Nil(t, unchanged)
 
@@ -241,7 +241,7 @@ func testPowerCapComponentPreservation(t *testing.T, hashKey string) {
 		dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = cap
 		dgd.Spec.Components[0].Replicas = new(int32(3))
 		before := dgd.DeepCopy()
-		retained, err := workloads.resolvePowerCapPreservation(context.Background(), dgd, nil, nil, renderer)
+		retained, err := workloads.resolvePowerCapPreservation(context.Background(), dgd, nil, nil)
 		require.NoError(t, err)
 		require.NotNil(t, retained)
 		require.Equal(t, hash, retained.hash)
@@ -251,7 +251,7 @@ func testPowerCapComponentPreservation(t *testing.T, hashKey string) {
 	}
 
 	t.Log("The production DCD writer scales the retained generation and repairs new owned Pods")
-	retained, err := workloads.resolvePowerCapPreservation(t.Context(), dgd, nil, nil, renderer)
+	retained, err := workloads.resolvePowerCapPreservation(t.Context(), dgd, nil, nil)
 	require.NoError(t, err)
 	_, err = workloads.Reconcile(t.Context(), dgd, nil, nil, retained)
 	require.NoError(t, err)
@@ -278,7 +278,7 @@ func testPowerCapComponentPreservation(t *testing.T, hashKey string) {
 
 	t.Log("An unrelated worker edit follows ordinary rollout instead")
 	dgd.Spec.Components[0].PodTemplate.Spec.Containers[0].Image = "different:v2"
-	retained, err = workloads.resolvePowerCapPreservation(context.Background(), dgd, nil, nil, renderer)
+	retained, err = workloads.resolvePowerCapPreservation(context.Background(), dgd, nil, nil)
 	require.NoError(t, err)
 	require.Nil(t, retained)
 	if hashKey == consts.AnnotationCurrentWorkerHash {
@@ -702,7 +702,7 @@ func TestPowerCapComponentPreservationBoundaries(t *testing.T) {
 			}
 			dgd.Spec.Components[0].PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
 			workloads := newComponentWorkloadsReconciler(c, nil, newDGDWorkerRolloutReconciler(c, nil))
-			preserved, err := workloads.resolvePowerCapPreservation(t.Context(), dgd, nil, nil, renderer)
+			preserved, err := workloads.resolvePowerCapPreservation(t.Context(), dgd, nil, nil)
 			require.NoError(t, err)
 			require.NotNil(t, preserved, "an unchanged second worker must not prevent cap-only preservation")
 			switch scenario {
@@ -719,7 +719,7 @@ func TestPowerCapComponentPreservationBoundaries(t *testing.T) {
 				dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Image = "second:v2"
 			}
 			before := dgd.DeepCopy()
-			preserved, err = workloads.resolvePowerCapPreservation(t.Context(), dgd, nil, nil, renderer)
+			preserved, err = workloads.resolvePowerCapPreservation(t.Context(), dgd, nil, nil)
 			require.NoError(t, err)
 			require.Nil(t, preserved, "missing resources, already-current templates or any worker drift must use normal identity reconciliation")
 			require.Equal(t, before, dgd)

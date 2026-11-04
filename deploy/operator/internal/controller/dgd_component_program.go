@@ -38,7 +38,6 @@ type componentProgram struct {
 	workloads       *componentWorkloadsReconciler
 	scalingAdapters *dgdScalingAdaptersReconciler
 	lwsEnabled      bool
-	powerRenderer   *dcdWorkloadRenderer
 }
 
 // newComponentProgram wires the DCD pathway at the DGD composition root.
@@ -60,7 +59,6 @@ func (r *DynamoGraphDeploymentReconciler) newComponentProgram() *componentProgra
 		workloads:       newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout),
 		scalingAdapters: newDGDScalingAdaptersReconciler(r.Client, r.Recorder),
 		lwsEnabled:      r.RuntimeConfig.Gate.Enabled(features.LWS),
-		powerRenderer:   newDCDWorkloadRenderer(r.Client, r.Config, r.RuntimeConfig, r.DockerSecretRetriever),
 	}
 }
 
@@ -147,7 +145,7 @@ func (p *componentProgram) Reconcile(
 	var retained *componentPowerCapPreservation
 	if len(caps) > 0 {
 		preview := p.restart.Resolve(ctx, req.DGD, &programResult.Status, p.restartProgress.Resolve)
-		retained, err = p.workloads.resolvePowerCapPreservation(ctx, req.DGD, preview.State, checkpoints.Infos, p.powerRenderer)
+		retained, err = p.workloads.resolvePowerCapPreservation(ctx, req.DGD, preview.State, checkpoints.Infos)
 		if err != nil {
 			return programResult, err
 		}

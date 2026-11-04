@@ -5,7 +5,6 @@ package controller
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -14,7 +13,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,9 +24,9 @@ type componentPowerCapPreservation struct {
 	caps map[string]string
 }
 
-// resolvePowerCapPreservation proves the exception from owned live DCDs and Deployment templates.
-// renderer and dgd must be non-nil; restart may be nil when no restart is requested.
-func (r *componentWorkloadsReconciler) resolvePowerCapPreservation(ctx context.Context, dgd *v1beta1.DynamoGraphDeployment, restart *dynamo.RestartState, checkpoints map[string]*checkpoint.CheckpointInfo, renderer *dcdWorkloadRenderer) (*componentPowerCapPreservation, error) {
+// resolvePowerCapPreservation proves the exception from owned live DCDs and their owned Deployments.
+// dgd must be non-nil; restart may be nil when no restart is requested.
+func (r *componentWorkloadsReconciler) resolvePowerCapPreservation(ctx context.Context, dgd *v1beta1.DynamoGraphDeployment, restart *dynamo.RestartState, checkpoints map[string]*checkpoint.CheckpointInfo) (*componentPowerCapPreservation, error) {
 	if len(desiredWorkerPowerCaps(dgd)) == 0 || powerCapRolloutBlocked(dgd.Status.RollingUpdate) {
 		return nil, nil
 	}
@@ -61,12 +59,13 @@ func (r *componentWorkloadsReconciler) resolvePowerCapPreservation(ctx context.C
 		}
 	}
 
-	return r.resolveWorkerPowerCapPreservation(ctx, dgd, desired, checkpoints, renderer, hash)
+	return r.resolveWorkerPowerCapPreservation(ctx, dgd, desired, checkpoints, hash)
 }
 
-// resolveWorkerPowerCapPreservation compares every worker's DCD intent and live creation template.
-// dgd, renderer, and desired worker entries must be non-nil.
-func (r *componentWorkloadsReconciler) resolveWorkerPowerCapPreservation(ctx context.Context, dgd *v1beta1.DynamoGraphDeployment, desired map[string]*v1beta1.DynamoComponentDeployment, checkpoints map[string]*checkpoint.CheckpointInfo, renderer *dcdWorkloadRenderer, hash string) (*componentPowerCapPreservation, error) {
+// resolveWorkerPowerCapPreservation compares every worker's DCD intent with its live DCD.
+// A preserved DCD worker spec means the cap-only edit adds no change to the Deployment's desired template,
+// so the API-server-defaulted stored template is never compared. dgd and desired worker entries must be non-nil.
+func (r *componentWorkloadsReconciler) resolveWorkerPowerCapPreservation(ctx context.Context, dgd *v1beta1.DynamoGraphDeployment, desired map[string]*v1beta1.DynamoComponentDeployment, checkpoints map[string]*checkpoint.CheckpointInfo, hash string) (*componentPowerCapPreservation, error) {
 	retained := &componentPowerCapPreservation{hash: hash, caps: map[string]string{}}
 	changed := false
 	for name, candidate := range desired {
@@ -102,8 +101,7 @@ func (r *componentWorkloadsReconciler) resolveWorkerPowerCapPreservation(ctx con
 			return nil, nil
 		}
 
-		// Independently verify the actual creation template; the DCD alone is not rollout proof.
-		candidate.OwnerReferences = live.OwnerReferences
+		// An absent or foreign Deployment is created or reconciled from desired through normal rollout.
 		deployment := &appsv1.Deployment{}
 		if err := r.syncer.Get(ctx, client.ObjectKeyFromObject(live), deployment); err != nil {
 			if apierrors.IsNotFound(err) {
@@ -114,13 +112,6 @@ func (r *componentWorkloadsReconciler) resolveWorkerPowerCapPreservation(ctx con
 		if !metav1.IsControlledBy(deployment, live) {
 			return nil, nil
 		}
-		template, err := renderer.generatePodTemplateSpec(ctx, candidate, dynamo.RoleMain, renderer.containerGPUCount(ctx, candidate))
-		if err != nil {
-			return nil, fmt.Errorf("render active worker template: %w", err)
-		}
-		if !powerCapTemplatesEqual(template, &deployment.Spec.Template) {
-			return nil, nil
-		}
 	}
 	if !changed {
 		return nil, nil
@@ -128,15 +119,7 @@ func (r *componentWorkloadsReconciler) resolveWorkerPowerCapPreservation(ctx con
 	return retained, nil
 }
 
-// powerCapTemplatesEqual normalizes Kubernetes' built-in Pod defaults, never arbitrary live fields.
-// Inputs must be non-nil and remain unmodified. Extra live fields still invalidate preservation.
-func powerCapTemplatesEqual(a, b *corev1.PodTemplateSpec) bool {
-	x, y := a.DeepCopy(), b.DeepCopy()
-	defaultPowerCapTemplate(x)
-	defaultPowerCapTemplate(y)
-	return apiequality.Semantic.DeepEqual(x, y)
-}
-
+// defaultPowerCapTemplate normalizes Kubernetes' built-in Pod defaults for Grove clique comparisons.
 func defaultPowerCapTemplate(template *corev1.PodTemplateSpec) {
 	spec := &template.Spec
 	if spec.RestartPolicy == "" {
