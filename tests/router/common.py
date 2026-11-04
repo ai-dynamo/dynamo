@@ -5169,8 +5169,7 @@ def run_session_prefix_index_config_parity(
         expected_uid = stack.identity.pod_uid
         if owner_uid != expected_uid:
             logger.error(
-                "generate worker owner_uid mismatch actual=%s expected=%s "
-                "worker=%s",
+                "generate worker owner_uid mismatch actual=%s expected=%s " "worker=%s",
                 owner_uid,
                 expected_uid,
                 worker_id,
@@ -5213,9 +5212,7 @@ def run_session_prefix_index_config_parity(
             consumer_env=consumer_env,
             log_label=log_label,
         ) as stack:
-            run_frontend_epp_token_parity(
-                stack, cases, include_negative_control=False
-            )
+            run_frontend_epp_token_parity(stack, cases, include_negative_control=False)
             fe_tokens = stack.collect_frontend_tokens(
                 case.payload,
                 path=case.path,
@@ -5256,7 +5253,10 @@ def run_session_prefix_index_config_parity(
                 or epp_proc.proc is None
             ):
                 raise AssertionError("owned frontend or EPP process was not saved")
-            if frontend_proc.proc.poll() is not None or epp_proc.proc.poll() is not None:
+            if (
+                frontend_proc.proc.poll() is not None
+                or epp_proc.proc.poll() is not None
+            ):
                 raise AssertionError("owned frontend or EPP process is not live")
             if stack.kube_api.failures:
                 raise AssertionError(
@@ -5304,9 +5304,7 @@ def run_session_prefix_index_config_parity(
             require_readiness=False,
             log_label=log_label,
         ) as stack:
-            process = (
-                stack.frontend_process if include_frontend else stack.epp_process
-            )
+            process = stack.frontend_process if include_frontend else stack.epp_process
             pid, log = observe_owned_initialization_diagnostic(
                 process,
                 diagnostic=SESSION_PREFIX_INDEX_DIAGNOSTIC,
@@ -5504,9 +5502,7 @@ def run_session_prefix_index_config_parity(
 
     policy_path = tmp_path / "session-prefix-index-invalid.yaml"
     policy_path.write_text(
-        "router:\n"
-        "  enable_session_prefix_index: true\n"
-        "  use_kv_events: false\n",
+        "router:\n" "  enable_session_prefix_index: true\n" "  use_kv_events: false\n",
         encoding="utf-8",
     )
     yaml_env = session_prefix_index_consumer_env(
