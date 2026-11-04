@@ -72,7 +72,8 @@ implementation feature. Certificates, authentication, and rotation remain outsid
 
 ## Inputs
 
-The Relay consumes only DC-local, positively advertised facts:
+The Relay consumes only positively advertised facts. All of them are DC-local except the Global
+Router replica list:
 
 | Input | Source | Feeds |
 | --- | --- | --- |
@@ -83,6 +84,7 @@ The Relay consumes only DC-local, positively advertised facts:
 | Router scheduler reports | DC event plane (`scheduler_load` subject, per serving endpoint) | pool scheduler load in serving-load windows |
 | Frontend load frames | DC event plane (`frontend_load` topic, per namespace) | model request and token load in serving-load windows |
 | Event-channel registrations | discovery plane, watched per namespace and serving endpoint | expected routers and frontends for serving-load coverage |
+| Global Router replicas | Global Discovery Service `GET /routers`, read every 5 s by `RouterCache` from `dynamo-global-discovery-client` when `--global-discovery-url` is set | the router set behind `subscribe_global_routers()` |
 
 The Relay never probes workers, never synthesizes facts it cannot observe, and
 never assumes another component's internal state.

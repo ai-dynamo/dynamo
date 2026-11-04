@@ -307,6 +307,86 @@ This checks kubectl connectivity, default StorageClass configuration, GPU node a
 
 </Steps>
 
+## Upgrade Dynamo
+
+Dynamo supports Helm upgrades and downgrades within the installed minor release and between
+adjacent minor releases. Upgrade from `N.M` to `N.(M+1)` or downgrade from `N.(M+1)` to `N.M`.
+Move through every intermediate minor release for larger changes. For example, upgrade `1.2.x`
+to `1.3.x`, then `1.3.x` to `1.4.x`; a direct transition from `1.2.x` to `1.4.x` is unsupported.
+
+> [!IMPORTANT]
+> Flux users need helm-controller v1.7.0 or later, first included in Flux v2.10.0. Earlier
+> helm-controller versions panic on this chart's `helm.sh/hook-output-log-policy` annotation.
+> If a preflight fails, inspect the retained Job Pod logs as shown in
+> [Troubleshooting](#troubleshooting); Flux does not forward hook output to controller logs or events.
+
+1. Check the installed release and operator versions:
+
+   ```bash
+   helm list --namespace $NAMESPACE
+   kubectl get deployments --namespace $NAMESPACE \
+     -l app.kubernetes.io/name=dynamo-operator \
+     -L app.kubernetes.io/version
+   ```
+
+2. Read the [chart upgrade notes](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#upgrading)
+   for every minor release you cross, including the Grove and KAI Scheduler requirements.
+
+3. Set `RELEASE_VERSION` to the next target release, download its chart, and upgrade with your
+   existing configuration in `your-values.yaml`. Include all settings from the current installation,
+   including any originally passed with `--set`. For example, from `1.6.x` to `1.7.0`:
+
+   ```bash
+   export RELEASE_VERSION=1.7.0
+   helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-$RELEASE_VERSION.tgz
+   helm upgrade dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
+     --namespace $NAMESPACE \
+     -f your-values.yaml
+   ```
+
+   Wait for the operator rollout before repeating this step for the next minor:
+
+   ```bash
+   kubectl rollout status deployment --namespace $NAMESPACE \
+     -l app.kubernetes.io/name=dynamo-operator --timeout=120s
+   ```
+
+The upgrade-path check is enforced by target charts v1.7.0 and later when
+`dynamo-operator.enabled=true`. Upgrades or downgrades **to** earlier charts are not checked.
+The read-only `pre-install,pre-upgrade` Job runs before the operator Deployment changes; an initial
+installation passes when no Deployment exists. Helm and Flux run the hook directly; Argo CD maps it
+to PreSync. Raw `kubectl apply`, Argo CD selective sync, or disabled hooks do not enforce the check.
+A separately managed operator release owns its upgrade policy when the subchart is disabled.
+See the [chart configuration](https://github.com/ai-dynamo/dynamo/blob/main/deploy/helm/charts/platform/README.md#upgrading)
+for `upgradePreflight.job` settings, including images for internal registries and per-check overrides.
+
+### Unsupported Transitions
+
+If you have separately validated an unsupported forward upgrade, set
+`unsupportedUpgradeOverride` to the target minor version. For example, to upgrade from `1.7.x` to
+`1.9.x`, set `RELEASE_VERSION` to the intended `1.9.x` release and download that chart as above, then run:
+
+```bash
+helm upgrade dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
+  --namespace $NAMESPACE \
+  -f your-values.yaml \
+  --set-string dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedUpgradeOverride=1.9
+```
+
+For an unsupported downgrade from `1.9.x` to `1.7.x`, set `RELEASE_VERSION` to the intended `1.7.x`
+release and download that chart as above. Authorize the lower target minor with the downgrade override:
+
+```bash
+helm upgrade dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
+  --namespace $NAMESPACE \
+  -f your-values.yaml \
+  --set-string dynamo-operator.upgradePreflight.checks.upgradePath.unsupportedDowngradeOverride=1.7
+```
+
+The override must match the target operator's `N.M` version. If you leave the override in your
+values, it has no effect on later upgrades or downgrades to a different minor. It applies only to
+the upgrade-path check; other preflight checks still run. It permits the Helm operation but does
+not make that upgrade or downgrade path supported.
 
 ## Alternative: Install with AICR
 
@@ -317,6 +397,43 @@ This checks kubectl connectivity, default StorageClass configuration, GPU node a
 Your cluster is ready. Follow the **[Model Deployment guide](../model-deployment/introduction.mdx)** to choose between applying a tuned DGD recipe, creating a DGD directly, or using DGDR to generate one.
 
 ## Troubleshooting
+
+**"Dynamo upgrade-path preflight failed: Unsupported Dynamo upgrade" (or downgrade)**
+
+Cause: The target chart rejected a skipped-minor or major-version upgrade or downgrade.
+For example:
+
+```text
+Dynamo upgrade-path preflight failed: Unsupported Dynamo upgrade from 1.5.0 to 1.7.0. ...
+```
+
+Find the retained Job and inspect its logs, replacing `<job-name>` with the name from the first command:
+
+```bash
+kubectl get jobs -n $NAMESPACE | grep check-upgrade-path
+kubectl logs job/<job-name> -n $NAMESPACE
+```
+
+Move through every intermediate minor release. If you have validated the unsupported path,
+use the target-minor override under [Unsupported Transitions](#unsupported-transitions).
+
+**"Installed operator Deployment has no app.kubernetes.io/version label"**
+
+Cause: The check cannot determine the installed operator version. Target-minor overrides cannot
+bypass this error.
+
+Inspect the installed release and the Deployment's metadata and image:
+
+```bash
+helm list --namespace $NAMESPACE
+kubectl get deployments --namespace $NAMESPACE \
+  -l app.kubernetes.io/name=dynamo-operator -o yaml
+```
+
+Confirm the version of the running operator from its image and release records. Restore the
+Deployment's `metadata.labels.app.kubernetes.io/version` to that verified version in the Helm or
+GitOps configuration that manages it, then retry. Do not use the target version as the installed
+version; custom image tags or digests require checking the corresponding build records.
 
 **"VALIDATION ERROR: Cannot install cluster-wide Dynamo operator"**
 
@@ -356,9 +473,17 @@ Add to the helm install command:
 
 **Clean uninstall?**
 
+Before uninstalling, record any customized hook names with `helm get hooks dynamo-platform -n $NAMESPACE`.
+For the default release and operator names shown in this guide, remove the retained upgrade-path
+Job and its supporting resources after uninstalling:
+
 ```bash
 # Uninstall the platform
 helm uninstall dynamo-platform --namespace $NAMESPACE
+
+# Remove upgrade-path hook resources that Helm does not uninstall
+kubectl delete job,serviceaccount,role,rolebinding dynamo-platform-dynamo-operator-check-upgrade-path \
+  --namespace $NAMESPACE --ignore-not-found
 
 # List Dynamo CRDs
 kubectl get crd | grep "dynamo.*nvidia.com"

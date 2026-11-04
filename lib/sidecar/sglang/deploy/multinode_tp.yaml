@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
+# Replace <tag> with a supported SGLang image tag before deploying.
 # EXPERIMENTAL: multinode SGLang tensor parallelism (TP) with explicit leader and worker templates.
 # For a DGD created before operator 1.6.0, see docs/fern/pages/kubernetes/installation/multinode-orchestration.md#use-the-variables-in-a-dgd-created-before-160.
 
@@ -45,7 +46,7 @@ spec:
                 optional: true
           containers:
           - name: main
-            image: lmsysorg/sglang:v0.5.22
+            image: lmsysorg/sglang:<tag>
             startupProbe:
               exec:
                 command:
@@ -113,7 +114,7 @@ spec:
         spec:
           containers:
           - name: main
-            image: lmsysorg/sglang:v0.5.22
+            image: lmsysorg/sglang:<tag>
             envFrom:
             - secretRef:
                 name: hf-token-secret
