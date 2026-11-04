@@ -56,8 +56,13 @@ func testLivePowerCaps(t *testing.T, provider string) {
 	if namespace == "" {
 		namespace = "default"
 	}
+	// Admission derives the provider from routing intent, so request it through enable-grove.
+	enableGrove := consts.KubeLabelValueFalse
+	if provider == consts.WorkloadProviderGrove {
+		enableGrove = consts.KubeLabelValueTrue
+	}
 	probe := &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"/bin/true"}}}, PeriodSeconds: 1}
-	dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{GenerateName: "live-power-" + provider + "-", Namespace: namespace, Annotations: map[string]string{consts.KubeAnnotationWorkloadProvider: provider}}, Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "worker", ComponentType: "worker", RuntimeVersionOverride: "1.6.0", Replicas: new(int32(2)), PodTemplate: &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{consts.KubeAnnotationGPUPowerLimit: "300"}}, Spec: corev1.PodSpec{TerminationGracePeriodSeconds: new(int64(1)), Containers: []corev1.Container{{Name: "main", Image: "busybox:1.37", Command: []string{"/bin/sh", "-c"}, Args: []string{"sleep 3600"}, StartupProbe: probe.DeepCopy(), LivenessProbe: probe.DeepCopy(), ReadinessProbe: probe.DeepCopy()}}}}}}}}
+	dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{GenerateName: "live-power-" + provider + "-", Namespace: namespace, Annotations: map[string]string{consts.KubeAnnotationEnableGrove: enableGrove}}, Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "worker", ComponentType: "worker", RuntimeVersionOverride: "1.6.0", Replicas: new(int32(2)), PodTemplate: &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{consts.KubeAnnotationGPUPowerLimit: "300"}}, Spec: corev1.PodSpec{TerminationGracePeriodSeconds: new(int64(1)), Containers: []corev1.Container{{Name: "main", Image: "busybox:1.37", Command: []string{"/bin/sh", "-c"}, Args: []string{"sleep 3600"}, StartupProbe: probe.DeepCopy(), LivenessProbe: probe.DeepCopy(), ReadinessProbe: probe.DeepCopy()}}}}}}}}
 	require.NoError(t, c.Create(ctx, dgd))
 	t.Cleanup(func() {
 		cleanup, stop := context.WithTimeout(context.Background(), 20*time.Second)
@@ -75,6 +80,9 @@ func testLivePowerCaps(t *testing.T, provider string) {
 			t.Errorf("cleanup smoke workers: %v", err)
 		}
 	})
+
+	t.Log("Confirm admission selected the requested workload provider")
+	require.Equal(t, provider, dgd.Annotations[consts.KubeAnnotationWorkloadProvider])
 
 	t.Log("Wait for two real CPU-only worker Pods and record their identities and creation templates")
 	pods := waitForPowerCaps(t, ctx, c, dgd, "300")
