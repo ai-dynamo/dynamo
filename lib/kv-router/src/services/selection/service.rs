@@ -197,6 +197,13 @@ impl SelectionServiceBuilder {
                 .resolve_for_worker_type(&self.kv_router_config, self.worker_type)?
                 .ok_or(crate::plugins::WorkerSelectionPolicyRegistryError::MissingDefault)?,
         };
+        // Hint policies are a peer plugin role, resolved independently of worker selection.
+        if self.host.hints.policies.is_none() {
+            self.host.hints.policies = Some(
+                self.plugin_registry
+                    .resolve_hint_policies(&self.kv_router_config)?,
+            );
+        }
         let tracking_hash = Arc::new(TrackingHashContext::from_config(&self.kv_router_config)?);
         let indexer_policy = IndexerPolicy::from_router_config(&self.kv_router_config)?;
         let recover_from_peers = !self.indexer_peers.is_empty();
