@@ -62,10 +62,15 @@ pub(crate) fn build_generate_request(
         }),
         stopping: Some(pb::StoppingOptions {
             max_tokens: Some(max_tokens(request, engine.context_length)),
+            // The hybrid engine holds back every stop condition, not only EOS,
+            // until the minimum; the LPU-only engine rejects one.
             min_tokens: stop.min_tokens,
             conditions: stop_conditions(request),
             ignore_eos: stop.ignore_eos,
-            include_stop_in_output: None,
+            // Both engines reject `true`. The engine withholds the matched
+            // stop token and names it in the finish event, and
+            // `ResponseState` returns it when the frontend keeps its text.
+            include_stop_in_output: Some(false),
         }),
         // Logprobs are rejected in `validate_request`.
         response: None,
@@ -162,10 +167,12 @@ fn max_tokens(request: &PreprocessedRequest, context_length: u32) -> u32 {
 /// LPU-only requests.
 fn stop_conditions(request: &PreprocessedRequest) -> Vec<pb::StopCondition> {
     let stop = &request.stop_conditions;
-    // Both lists stop generation without returning the token.
+    // Every list stops generation; see `KeptStops` for which matched tokens
+    // the output keeps.
     let ids: BTreeSet<u32> = [
         stop.stop_token_ids.as_ref(),
         stop.stop_token_ids_hidden.as_ref(),
+        stop.stop_token_ids_visible.as_ref(),
     ]
     .into_iter()
     .flatten()
@@ -268,30 +275,6 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
         }
     }
     let stop = &request.stop_conditions;
-    if stop
-        .stop_token_ids_visible
-        .as_ref()
-        .is_some_and(|ids| !ids.is_empty())
-    {
-        // A visible stop token must end generation and stay in the output;
-        // OpenEngine stop conditions cannot express the second half.
-        return Err(invalid_argument(
-            "visible stop token IDs are not supported by the LPX sidecar",
-        ));
-    }
-    if request.output_options.no_stop_trim == Some(true)
-        && (stop
-            .stop_token_ids
-            .as_ref()
-            .is_some_and(|ids| !ids.is_empty())
-            || request.output_options.skip_special_tokens == Some(false))
-    {
-        // The engine strips stop tokens, so the frontend cannot restore their text.
-        return Err(invalid_argument(
-            "no_stop_trim with client stop token IDs or skip_special_tokens=false is not \
-             supported by the LPX sidecar",
-        ));
-    }
     if sampling.include_stop_str_in_output == Some(true) {
         return Err(invalid_argument(
             "include_stop_str_in_output is not supported by the LPX sidecar",
@@ -341,6 +324,43 @@ pub(crate) struct ResponseState {
     /// the only meaningful one there. The decode engine would count the
     /// transferred blocks, a different quantity reported under the same name.
     handoff_cached_tokens: Option<Option<u32>>,
+    kept_stops: KeptStops,
+}
+
+/// The withheld stop tokens the frontend needs back: a visible one, such as
+/// gpt-oss's `<|call|>` that closes a tool call, and any one when the request
+/// keeps stop text (`no_stop_trim` or `retain_model_stop_token_text`), which
+/// needs token IDs through the matched stop. The frontend would trim the
+/// others, so they stay withheld; returned, one the hybrid engine stops on at
+/// the `min_tokens` boundary, where the frontend does not yet apply stops,
+/// would show as text.
+enum KeptStops {
+    All,
+    Visible(Vec<u32>),
+}
+
+impl KeptStops {
+    fn new(request: &PreprocessedRequest) -> Self {
+        let output = &request.output_options;
+        if output.no_stop_trim == Some(true) || output.retain_model_stop_token_text == Some(true) {
+            Self::All
+        } else {
+            Self::Visible(
+                request
+                    .stop_conditions
+                    .stop_token_ids_visible
+                    .clone()
+                    .unwrap_or_default(),
+            )
+        }
+    }
+
+    fn contains(&self, id: u32) -> bool {
+        match self {
+            Self::All => true,
+            Self::Visible(ids) => ids.contains(&id),
+        }
+    }
 }
 
 impl ResponseState {
@@ -355,6 +375,7 @@ impl ResponseState {
                     .as_ref()
                     .and_then(|details| details.cached_tokens)
             }),
+            kept_stops: KeptStops::new(request),
         }
     }
 
@@ -433,30 +454,45 @@ impl ResponseState {
                 );
             }
         };
+        let matched = finished
+            .stop_match
+            .and_then(|stop_match| stop_match.r#match);
+        // An engine withholds only a stop token it names: the hybrid engine
+        // names none when its final batch is empty.
+        let stop_token = match &matched {
+            Some(
+                pb::stop_match::Match::StopTokenId(id) | pb::stop_match::Match::EosTokenId(id),
+            ) => self.kept_stops.contains(*id).then_some(*id),
+            Some(pb::stop_match::Match::StopText(_)) | None => None,
+        };
+        if stop_token.is_some() {
+            self.completion_tokens = self.completion_tokens.saturating_add(1);
+        }
         let mut cached_tokens = self.handoff_cached_tokens.flatten();
-        // The final usage is authoritative over the streamed counts.
+        // The final usage is authoritative over the streamed counts, but never
+        // counts fewer tokens than the output carries: the hybrid engine counts
+        // the stop token it withholds and the LPU-only engine does not.
         if let Some(reported) = reported {
             if reported.prompt_tokens != 0 {
                 self.prompt_tokens = reported.prompt_tokens;
             }
             if reported.completion_tokens != 0 {
-                self.completion_tokens = reported.completion_tokens;
+                self.completion_tokens = reported.completion_tokens.max(self.completion_tokens);
             }
             if self.handoff_cached_tokens.is_none() {
                 cached_tokens = reported.cached_prompt_tokens;
             }
         }
         Ok(LLMEngineOutput {
+            token_ids: stop_token.into_iter().collect(),
             index: Some(0),
             finish_reason: Some(finish_reason),
-            stop_reason: finished
-                .stop_match
-                .and_then(|stop_match| stop_match.r#match)
-                .map(|matched| match matched {
-                    pb::stop_match::Match::StopTokenId(id)
-                    | pb::stop_match::Match::EosTokenId(id) => StopReason::Int(i64::from(id)),
-                    pb::stop_match::Match::StopText(text) => StopReason::String(text),
-                }),
+            stop_reason: matched.map(|matched| match matched {
+                pb::stop_match::Match::StopTokenId(id) | pb::stop_match::Match::EosTokenId(id) => {
+                    StopReason::Int(i64::from(id))
+                }
+                pb::stop_match::Match::StopText(text) => StopReason::String(text),
+            }),
             completion_usage: Some(CompletionUsage {
                 prompt_tokens_details: cached_tokens.map(|cached| PromptTokensDetails {
                     cached_tokens: Some(cached.min(self.prompt_tokens)),

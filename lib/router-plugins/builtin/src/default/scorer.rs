@@ -36,12 +36,10 @@ struct DefaultScorer<const REQUEST_COST: bool, const SHARED_CREDIT: bool> {
     decode_active_request_weight: f64,
     prefill_load_scale: f64,
     is_decode: bool,
-    prepared: PreparedRequest,
 }
 
 /// Values shared by every worker score in one selection. Preparation keeps their conversions
 /// and role checks outside the per-worker calculation without changing floating-point arithmetic.
-#[derive(Default)]
 struct PreparedRequest {
     min_prefill: usize,
     block_size: IntegerDivisor,
@@ -79,12 +77,6 @@ impl IntegerDivisor {
     }
 }
 
-impl Default for IntegerDivisor {
-    fn default() -> Self {
-        Self::new(1)
-    }
-}
-
 impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
     DefaultScorer<REQUEST_COST, SHARED_CREDIT>
 {
@@ -98,7 +90,6 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
             decode_active_request_weight: config.decode_active_request_weight,
             prefill_load_scale: config.prefill_load_scale,
             is_decode: worker_label == "decode",
-            prepared: PreparedRequest::default(),
         }
     }
 }
@@ -107,11 +98,11 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
     DefaultScorer<REQUEST_COST, SHARED_CREDIT>
 {
     fn prepare(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
-    ) -> Result<(), WorkerSelectionPolicyError> {
-        self.prepared = PreparedRequest {
+    ) -> Result<PreparedRequest, WorkerSelectionPolicyError> {
+        let mut prepared = PreparedRequest {
             min_prefill: 0,
             block_size: IntegerDivisor::new(u64::from(context.block_size())),
             // An empty prompt (e.g. embeddings-only input) has no overlap to decay;
@@ -125,7 +116,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
                     .get(0)
                     .is_some_and(|candidate| candidate.kv_transfer().is_some()),
         };
-        if self.prepared.needs_decay {
+        if prepared.needs_decay {
             let mut minimum = usize::MAX;
             for candidate in candidates.iter() {
                 let load = candidate
@@ -133,13 +124,14 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
                     .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
                 minimum = minimum.min(load.active_prefill_tokens());
             }
-            self.prepared.min_prefill = minimum;
+            prepared.min_prefill = minimum;
         }
-        Ok(())
+        Ok(prepared)
     }
 
     fn score_worker(
-        &mut self,
+        &self,
+        prepared: &PreparedRequest,
         context: &WorkerSelectionContext<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<f64, WorkerSelectionPolicyError> {
@@ -158,7 +150,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
                     .shared_hits()
                     .map_or(0, |hits| hits.hits_beyond(device.round().max(0.0) as u32));
                 // Blocks a KV fetch would add beyond everything this worker holds.
-                let fetchable = if self.prepared.has_kv_transfer {
+                let fetchable = if prepared.has_kv_transfer {
                     candidate
                         .kv_transfer()
                         .and_then(|transfer| transfer.source_prefix_blocks())
@@ -176,17 +168,17 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
                 // Preserve signed zero when the configured weight is -0.0.
                 self.shared_cache_multiplier
             };
-            let decay = if self.prepared.needs_decay {
-                let excess = self.prepared.block_size.divide(
+            let decay = if prepared.needs_decay {
+                let excess = prepared.block_size.divide(
                     load.active_prefill_tokens()
-                        .saturating_sub(self.prepared.min_prefill) as f64,
+                        .saturating_sub(prepared.min_prefill) as f64,
                 );
                 1.0 / (1.0
-                    + self.overlap_score_credit_decay * self.prepared.request_blocks.divide(excess))
+                    + self.overlap_score_credit_decay * prepared.request_blocks.divide(excess))
             } else {
                 1.0
             };
-            let credit = self.prepared.overlap_credit * decay * device
+            let credit = prepared.overlap_credit * decay * device
                 + self.host_cache_hit_weight * cache.host_overlap_blocks()
                 + self.disk_cache_hit_weight * cache.disk_overlap_blocks()
                 + shared_credit;
@@ -199,7 +191,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
         } else {
             self.decode_active_request_weight
         };
-        let logit = if self.prepared.needs_decode_subtraction {
+        let logit = if prepared.needs_decode_subtraction {
             (load.decode_cost_blocks() - credit).max(0.0) + request_cost
         } else {
             let raw_tokens = if !context.tracks_prefill_tokens() {
@@ -210,7 +202,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
             } else {
                 context.isl_tokens()
             };
-            let prefill = (self.prepared.block_size.divide(raw_tokens as f64) - credit).max(0.0);
+            let prefill = (prepared.block_size.divide(raw_tokens as f64) - credit).max(0.0);
             self.prefill_load_scale * prefill + load.decode_cost_blocks() + request_cost
         };
         let cost = logit * candidate.preferred_taint_multiplier().unwrap_or(1.0);
@@ -237,14 +229,14 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool> WorkerScorer
     }
 
     fn score(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
-        self.prepare(context, candidates)?;
+        let prepared = self.prepare(context, candidates)?;
         for (candidate, cost) in candidates.iter().zip(costs) {
-            *cost = self.score_worker(context, candidate)?;
+            *cost = self.score_worker(&prepared, context, candidate)?;
         }
         Ok(())
     }
