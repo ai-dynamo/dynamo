@@ -15,7 +15,7 @@ pub mod context;
 pub mod error;
 pub mod network;
 pub use crate::routing_policy::{
-    BuiltinRoutePicker, OccupancyReservation, OccupancySelection, RouteTarget,
+    InstanceSelector, ModeSelectors, OccupancyReservation, OccupancySelection, RouteTarget,
     RoutingOccupancyState,
 };
 pub use network::egress::addressed_router::{
