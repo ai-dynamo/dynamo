@@ -187,6 +187,7 @@ pub fn generate_openapi_spec_with_options(
     // represent the 3.2 version. HTTP and file export share this final representation.
     let mut document = serde_json::to_value(openapi).map_err(|error| error.to_string())?;
     document["openapi"] = serde_json::json!("3.2.0");
+    annotate_vllm_xargs(&mut document)?;
     annotate_decision_errors(&mut document, route_docs)?;
     for route in route_docs {
         let Some((_, chunk, chat)) = completion_response_types(route) else {
@@ -202,6 +203,32 @@ pub fn generate_openapi_spec_with_options(
         media["itemSchema"] = streaming_event_schema(&chunk, chat, options);
     }
     Ok(document)
+}
+
+/// Describe the validated passthrough field without changing its runtime storage.
+fn annotate_vllm_xargs(document: &mut serde_json::Value) -> Result<(), String> {
+    use serde_json::json;
+
+    let schema = json!({
+        "type": "object",
+        "description": "Extra arguments for vLLM SamplingParams.extra_args on token-input and text-input workers. Request keys override defaults. Other backends ignore this field. Older text workers may ignore it during rolling updates; upgrade all text workers before relying on it. kv_transfer_params and ec_transfer_params are reserved and rejected.",
+        "propertyNames": {"not": {"enum": crate::protocols::openai::validate::RESERVED_VLLM_XARGS_KEYS}},
+        "additionalProperties": {
+            "anyOf": [
+                {"type": ["string", "number", "boolean"]},
+                {"type": "array", "items": {"type": ["string", "number", "boolean"]}}
+            ]
+        }
+    });
+    for name in ["NvCreateChatCompletionRequest", "NvCreateCompletionRequest"] {
+        let request = document
+            .pointer_mut(&format!("/components/schemas/{name}"))
+            .ok_or_else(|| format!("missing request schema {name}"))?;
+        // The request derives flatten their fields into allOf. A root property
+        // adds the constraint to that same object without changing those parts.
+        request["properties"]["vllm_xargs"] = schema.clone();
+    }
+    Ok(())
 }
 
 /// Error bodies follow the released decision adapter, not the generic completion envelope.

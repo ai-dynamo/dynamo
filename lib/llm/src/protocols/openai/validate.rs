@@ -90,7 +90,7 @@ pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
 
 /// `vllm_xargs` keys vLLM itself fills from dedicated request fields. Dynamo only
 /// forwards router-generated `kv_transfer_params`, so clients may not set them.
-const RESERVED_VLLM_XARGS_KEYS: &[&str] = &["kv_transfer_params", "ec_transfer_params"];
+pub(crate) const RESERVED_VLLM_XARGS_KEYS: &[&str] = &["kv_transfer_params", "ec_transfer_params"];
 
 /// Treat null passthrough fields as omitted while preserving unknown fields for validation.
 pub(super) fn deserialize_extra_fields<'de, D>(

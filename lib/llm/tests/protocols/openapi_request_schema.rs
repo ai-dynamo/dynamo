@@ -65,6 +65,21 @@ fn http_export_describes_request_aliases() {
         "reasoning_content",
         "reasoning",
     ));
+    for name in ["NvCreateChatCompletionRequest", "NvCreateCompletionRequest"] {
+        let xargs = &spec["components"]["schemas"][name]["properties"]["vllm_xargs"];
+        assert_eq!(xargs["type"], "object");
+        assert_eq!(
+            xargs["additionalProperties"]["anyOf"],
+            serde_json::json!([
+                {"type": ["string", "number", "boolean"]},
+                {"type": "array", "items": {"type": ["string", "number", "boolean"]}}
+            ])
+        );
+        assert_eq!(
+            xargs["propertyNames"]["not"]["enum"],
+            serde_json::json!(["kv_transfer_params", "ec_transfer_params"])
+        );
+    }
 }
 
 #[test]

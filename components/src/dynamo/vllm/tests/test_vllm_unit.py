@@ -2400,6 +2400,7 @@ def test_build_sampling_params_openai_root_thinking_token_budget_overrides_nvext
 def test_build_sampling_params_openai_applies_vllm_xargs(
     vllm_xargs, default_extra_args, expected
 ):
+    """Text workers apply request arguments, preserve defaults, and drop connector keys."""
     from dynamo.vllm.handlers import build_sampling_params_openai
 
     defaults = {"extra_args": default_extra_args} if default_extra_args else {}
