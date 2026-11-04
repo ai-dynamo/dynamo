@@ -393,6 +393,9 @@ fn build_endpoint_metadata(endpoint: &str) -> prost_types::Struct {
 /// unchanged when the names match, when either is empty, or when the body
 /// does not name the target model, so a token chunk is copied once, into
 /// its ext_proc message, rather than twice.
+///
+/// Works on the bytes, not on a string: a streamed chunk can end inside a
+/// multi-byte character, and its bytes must reach the client as they came.
 pub fn rewrite_model_name<'a>(
     body: &'a [u8],
     target_model: &str,
@@ -404,22 +407,41 @@ pub fn rewrite_model_name<'a>(
 
     let old = format!("\"model\":\"{target_model}\"");
     let new = format!("\"model\":\"{incoming_model}\"");
-
-    let body_str = String::from_utf8_lossy(body);
-    let replaced = body_str.replace(&old, &new);
-
-    if replaced.as_bytes() != body {
-        return Cow::Owned(replaced.into_bytes());
+    if let Some(rewritten) = replace_bytes(body, old.as_bytes(), new.as_bytes()) {
+        return Cow::Owned(rewritten);
     }
 
     let old_spaced = format!("\"model\": \"{target_model}\"");
     let new_spaced = format!("\"model\": \"{incoming_model}\"");
-    let replaced = body_str.replace(&old_spaced, &new_spaced);
-    if replaced.as_bytes() == body {
-        Cow::Borrowed(body)
-    } else {
-        Cow::Owned(replaced.into_bytes())
+    match replace_bytes(body, old_spaced.as_bytes(), new_spaced.as_bytes()) {
+        Some(rewritten) => Cow::Owned(rewritten),
+        None => Cow::Borrowed(body),
     }
+}
+
+/// `haystack` with every `needle` replaced by `replacement`, or `None` when
+/// `needle` does not occur, so an unchanged chunk is never copied.
+fn replace_bytes(haystack: &[u8], needle: &[u8], replacement: &[u8]) -> Option<Vec<u8>> {
+    if needle.is_empty() {
+        return None;
+    }
+    let find = |within: &[u8]| {
+        within
+            .windows(needle.len())
+            .position(|window| window == needle)
+    };
+    let first = find(haystack)?;
+    let mut out = Vec::with_capacity(haystack.len() - needle.len() + replacement.len());
+    out.extend_from_slice(&haystack[..first]);
+    out.extend_from_slice(replacement);
+    let mut rest = &haystack[first + needle.len()..];
+    while let Some(at) = find(rest) {
+        out.extend_from_slice(&rest[..at]);
+        out.extend_from_slice(replacement);
+        rest = &rest[at + needle.len()..];
+    }
+    out.extend_from_slice(rest);
+    Some(out)
 }
 
 #[cfg(test)]
@@ -452,6 +474,33 @@ mod tests {
         assert_eq!(
             rewrite_model_name(br#"{"model": "served"}"#, "served", "alias").as_ref(),
             br#"{"model": "alias"}"#
+        );
+        assert_eq!(
+            rewrite_model_name(
+                br#"[{"model":"served"},{"model":"served"}]"#,
+                "served",
+                "alias"
+            )
+            .as_ref(),
+            br#"[{"model":"alias"},{"model":"alias"}]"#
+        );
+    }
+
+    /// A chunk can end inside a multi-byte character. Its bytes reach the
+    /// client unchanged, whether or not the chunk names the model.
+    #[test]
+    fn rewrite_model_name_keeps_bytes_that_are_not_utf8() {
+        // "€" is E2 82 AC; these chunks end after its first two bytes.
+        let unnamed = b"data: {\"delta\":\"\xE2\x82";
+        assert!(matches!(
+            rewrite_model_name(unnamed, "served", "alias"),
+            Cow::Borrowed(chunk) if chunk == unnamed
+        ));
+
+        let named = b"data: {\"model\":\"served\",\"delta\":\"\xE2\x82";
+        assert_eq!(
+            rewrite_model_name(named, "served", "alias").as_ref(),
+            b"data: {\"model\":\"alias\",\"delta\":\"\xE2\x82"
         );
     }
 }
