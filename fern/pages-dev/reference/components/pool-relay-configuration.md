@@ -25,7 +25,9 @@ see [Pool Relay Concepts](../../developer-guide/knowledge-base/modular-component
 | `--bind` | `DYN_RELAY_BIND` | No listener | Plaintext gRPC socket address, such as `127.0.0.1:5561` or `[::1]:5561`. Requires a numeric IP and port. |
 | `--global-discovery-url` | `DYN_RELAY_GLOBAL_DISCOVERY_URL` | Unset | Root of the Global Discovery Service, such as `http://global-discovery:8080/`. The Relay reads the Global Router replica list from it every 5 seconds. When a read fails, it keeps the last list and reports why in the health field `global_routers_stale_reason`. When unset, the Relay reads no list. |
 | `--help` | None | — | Print CLI usage and exit. |
-| `--routing-pool` | `DYN_RELAY_ROUTING_POOL` | Unset | Publish this DGD's state to every discovered Global Router as `<cluster>/<Kubernetes namespace>/<DGD name>`. The cluster must match `--cluster-id`. Requires `--global-discovery-url` and `--bind`. |
+| `--routing-pool` | `DYN_RELAY_ROUTING_POOL` | Unset | Publish this DGD's state to every discovered Global Router as `<cluster>/<Kubernetes namespace>/<DGD name>`. The cluster must match `--cluster-id`. Requires `--global-discovery-url`, `--bind`, and `--routing-pool-region`. |
+| `--routing-pool-region` | `DYN_RELAY_ROUTING_POOL_REGION` | Unset | Region the routing pool is registered in with Global Discovery, such as `us-east-1`. Required with `--routing-pool`. |
+| `--routing-pool-frontends` | `DYN_RELAY_ROUTING_POOL_FRONTENDS` | None | Comma-separated HTTP(S) frontend URLs that Global Routers send the routing pool's requests to. Requires `--routing-pool`. Set it when Global Discovery runs with `--pool-discovery registrations`: a pool without frontends receives no requests. With `mcs` or `karmada`, Global Discovery takes the frontends from MCS and ignores these. |
 
 The protocol and gRPC server are included in the standard build. Omitting `--bind` disables only
 the WAN listener; local discovery and pool maintenance still run. Relay has no TLS flags or
@@ -36,6 +38,22 @@ With `--routing-pool`, each router receives the current catalog, serving readine
 serving load, and KV load, followed by updates. Router endpoints returned by
 `GET /routers` must address each replica's receiving gRPC listener, rather than
 its HTTP API. Reconnecting sends a fresh snapshot.
+
+The Relay also registers the routing pool with `POST /pools` on the Global
+Discovery Service and renews the registration on the interval the service's
+lease sets. Global Discovery lists the pool only while the registration is
+current, in every mode. With `mcs` or `karmada`, it also requires `--cluster-id`
+to be the cluster name MCS uses.
+
+A registration names one model. The Relay keeps the registered model while it
+is in its serving topology, in any state, so a second model rolling out does not
+move the registration and replicas stay on the same model. Otherwise it
+registers the one Ready model, or the only model while none is Ready. With no
+model, or with several to choose from, it registers nothing. Global Routers
+route the pool only by its registered model, not by aliases or adapters. The
+health field `routing_pool_unregistered_reason` says why the pool is not
+registered, including a failed call, which the Relay retries. On shutdown the
+Relay stops renewing, and the pool leaves `GET /pools` when the lease ends.
 
 The routing pool names a Kubernetes DGD. Scope the Relay's discovery sources to
 that DGD; the routing key does not filter discovery. Dynamo runtime namespaces in
@@ -180,7 +198,7 @@ of SHA-256 over the UTF-8 cluster ID. These are not HTTP paths or WAN RPCs.
 
 | Endpoint | Availability | Request and response |
 | --- | --- | --- |
-| `health` | Always | Empty request; reports `healthy`, shutdown state, endpoint counts, WAN state/errors, `global_discovery_enabled`, and `global_routers_stale_reason`. |
+| `health` | Always | Empty request; reports `healthy`, shutdown state, endpoint counts, WAN state/errors, `global_discovery_enabled`, `global_routers_stale_reason`, and `routing_pool_unregistered_reason`. |
 | `stats` | `ckf-diagnostics` build feature | Empty request; returns detailed endpoint/pool statistics. |
 | `snapshot` | `ckf-diagnostics` build feature | Requires `serving_endpoint`; returns that endpoint's diagnostic snapshot. |
 
