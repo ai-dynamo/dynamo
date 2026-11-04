@@ -37,7 +37,9 @@ from tests.utils.payload_builder import (
     anthropic_messages_stream_payload_default,
     chat_payload,
     chat_payload_default,
+    chat_payload_with_logprobs,
     completion_payload_default,
+    completion_payload_with_logprobs,
     embedding_payload,
     embedding_payload_default,
     guided_decoding_chat_payload_default,
@@ -81,6 +83,18 @@ class SGLangConfig(EngineConfig):
     """Configuration for SGLang test scenarios"""
 
     stragglers: list[str] = field(default_factory=lambda: ["SGLANG:EngineCore"])
+
+
+class SGLangVideoRoutingPayload(CachedTokensChatPayload):
+    def bind_environment(self, env: dict[str, str]) -> None:
+        # Defer the optional backend import until this test runs.
+        from dynamo.sglang._compat import sglang_has_wide_mm_pad_values
+
+        super().bind_environment(env)
+        if sglang_has_wide_mm_pad_values():
+            # Wide IDs use text-prefix routing, not exact media overlap.
+            # Keep response-content and worker cached-token checks enabled.
+            self.min_avg_kv_hit_rate = 0.0
 
 
 sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
@@ -154,6 +168,44 @@ sglang_configs = {
             _disable_responses_reasoning(responses_stream_payload_default()),
             guided_decoding_chat_payload_default(),
             metric_payload_default(min_num_requests=6, backend="sglang"),
+        ],
+    ),
+    # Top-k logprobs on chat and completions with no opt-in env var; mirrors
+    # the vLLM and TensorRT-LLM aggregated_logprobs configs.
+    "aggregated_logprobs": SGLangConfig(
+        name="aggregated_logprobs",
+        directory=sglang_dir,
+        script_name="agg.sh",
+        marks=[
+            pytest.mark.core,
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(
+                3.9
+            ),  # actual peak at recommended token count
+            pytest.mark.requested_sglang_kv_tokens(
+                512
+            ),  # 2x safety over min=256; payloads are ~16-token prompts + 30 max_tokens
+            pytest.mark.timeout(360),  # ~7x observed ~51s; CI machines are slower
+            pytest.mark.post_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        env={},
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload_with_logprobs(
+                repeat_count=2,
+                expected_response=["AI", "knock", "joke"],
+                max_tokens=30,
+                temperature=0.0,
+                top_logprobs=3,
+            ),
+            completion_payload_with_logprobs(
+                repeat_count=2,
+                expected_response=["AI", "knock", "joke"],
+                max_tokens=30,
+                temperature=0.0,
+                logprobs=5,
+            ),
         ],
     ),
     # Speculative decoding: Qwen3-8B main model with an EAGLE3 draft model
@@ -755,7 +807,7 @@ sglang_configs = {
         timeout=450,
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
-            CachedTokensChatPayload(
+            SGLangVideoRoutingPayload(
                 body={
                     "messages": [
                         {
@@ -781,10 +833,7 @@ sglang_configs = {
                 min_cached_tokens=128,
                 require_rust_processor_init=True,
                 min_routing_total_blocks=10,
-                # A text-only hit is at most a small fraction of this video
-                # request. Requiring high router-side overlap proves the media
-                # hashes matched the worker KV events instead of accepting a
-                # cached text prefix as a false positive.
+                # Require exact media overlap only on scalar-ID builds.
                 min_avg_kv_hit_rate=0.9,
             )
         ],

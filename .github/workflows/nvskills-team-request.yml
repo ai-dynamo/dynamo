@@ -27,7 +27,7 @@ jobs:
       (github.event_name == 'push' &&
         github.actor == (vars.NVSKILLS_SIGNATURE_PUSH_ACTOR || 'nv-nvskill-ci[bot]') &&
         startsWith(github.event.head_commit.message, vars.NVSKILLS_SIGNATURE_COMMIT_TITLE || 'Attach NVSkills validation signatures'))
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     concurrency:
       group: nvskills-ci-request-${{ github.repository }}-${{ github.event_name }}-${{ github.event.issue.number || github.sha }}
       cancel-in-progress: ${{ github.event_name == 'issue_comment' }}

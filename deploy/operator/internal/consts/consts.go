@@ -7,9 +7,6 @@ import (
 )
 
 const (
-	DefaultUserId = "default"
-	DefaultOrgId  = "default"
-
 	DynamoServicePort       = 8000
 	DynamoServicePortName   = "http"
 	DynamoContainerPortName = "http"
@@ -132,11 +129,6 @@ const (
 	SnapshotGMSModeAnnotation              = "nvidia.com/dynamo-snapshot-gms-mode"
 	SnapshotCompatibilityVersion           = "v2"
 	SnapshotGMSModeDisabled                = "disabled"
-
-	// CUDASharedMemorySupportAnnotation mirrors Snapshot's
-	// podcontract.CuInterposeAnnotation. SnapshotJob delivers and preloads the
-	// cuInterpose shim when it is "enabled".
-	CUDASharedMemorySupportAnnotation = "nvidia.com/cuda-shared-memory-support"
 
 	// Native restore candidate metadata pins the PodSnapshot observation used
 	// by workload reconciliation so admission can detect intervening changes.

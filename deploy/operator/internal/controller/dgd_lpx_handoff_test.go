@@ -29,7 +29,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -41,7 +40,7 @@ func newLPXHandoffSource(t *testing.T, fixture string) *v1beta1.DynamoGraphDeplo
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("../dynamo/lpx/testdata/from_dgd_yaml", fixture+".input.yaml"))
 	require.NoError(t, err)
-	source := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}}}
+	source := &v1beta1.DynamoGraphDeployment{Annotations: map[string]string{}}
 	require.NoError(t, yaml.Unmarshal(data, source))
 	source.GetComponentByName("lpu").ComponentName = "lpx"
 	source.Generation = 3
@@ -86,7 +85,7 @@ func TestGroveComponentSelectionDoesNotMutateDGD(t *testing.T) {
 				source.Spec.TopologyConstraint = &v1beta1.SpecTopologyConstraint{ClusterTopologyName: "test-topology", PackDomain: "rack"}
 				source.Spec.Components = append(source.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
 					ComponentName: "ordinary-frontend", ComponentType: v1beta1.ComponentTypeFrontend,
-					Replicas: ptr.To(int32(1)),
+					Replicas: new(int32(1)),
 					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: "main", Image: "frontend"}},
 					}},
@@ -110,16 +109,16 @@ func TestGroveComponentSelectionDoesNotMutateDGD(t *testing.T) {
 				require.NotEqual(t, dynamo.PCSNameForDGD(source, nil), pcsName)
 			}
 			pcs := &grovev1alpha1.PodCliqueSet{
-				ObjectMeta: metav1.ObjectMeta{Name: pcsName, Namespace: source.Namespace, Generation: 1},
-				Status: grovev1alpha1.PodCliqueSetStatus{ObservedGeneration: ptr.To(int64(1)), Conditions: []metav1.Condition{{
+				Name: pcsName, Namespace: source.Namespace, Generation: 1,
+				Status: grovev1alpha1.PodCliqueSetStatus{ObservedGeneration: new(int64(1)), Conditions: []metav1.Condition{{
 					Type: groveconstants.ConditionTopologyLevelsUnavailable, Status: metav1.ConditionTrue,
 					Reason: groveconstants.ConditionReasonClusterTopologyNotFound, Message: "missing ordinary topology",
 				}}},
 			}
 			clique := &grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{Name: dynamo.GroveComponentResourceName(pcsName, "ordinary-frontend"), Namespace: source.Namespace, Generation: 1},
-				Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
-				Status:     grovev1alpha1.PodCliqueStatus{ObservedGeneration: ptr.To(int64(1)), Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1},
+				Name: dynamo.GroveComponentResourceName(pcsName, "ordinary-frontend"), Namespace: source.Namespace, Generation: 1,
+				Spec:   grovev1alpha1.PodCliqueSpec{Replicas: 1},
+				Status: grovev1alpha1.PodCliqueStatus{ObservedGeneration: new(int64(1)), Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1},
 			}
 			builder := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t))
 			if !test.lpxOnly {
@@ -206,13 +205,13 @@ func TestLPXChildStatusRequiresObservedResultsAndCompleteEngine(t *testing.T) {
 	child.Status.ObservedGeneration = child.Generation
 	child.Status.Components = map[string]v1alpha1.LPXComponentStatus{"lpx": {
 		ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{
-			Replicas: 3, AvailableReplicas: ptr.To(int32(3)),
-			GPUsPerEngine: ptr.To(int64(8)), GPUsPerReplica: ptr.To(int64(8)),
+			Replicas: 3, AvailableReplicas: new(int32(3)),
+			GPUsPerEngine: new(int64(8)), GPUsPerReplica: new(int64(8)),
 		},
 	}}
-	source.Status.Placement = &v1beta1.PlacementStatus{Score: ptr.To(0.92), State: v1beta1.PlacementScoreStateReported}
+	source.Status.Placement = &v1beta1.PlacementStatus{Score: new(0.92), State: v1beta1.PlacementScoreStateReported}
 	meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: child.Generation, Reason: "Ready"})
-	result := ReconcileResult{State: v1beta1.DGDStateSuccessful, ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{"prefill": {Replicas: 4, AvailableReplicas: ptr.To(int32(4))}}}
+	result := ReconcileResult{State: v1beta1.DGDStateSuccessful, ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{"prefill": {Replicas: 4, AvailableReplicas: new(int32(4))}}}
 	result = mergeLPXChildStatus(source, child, result)
 	require.Equal(t, v1beta1.DGDStateSuccessful, result.State)
 	require.Len(t, result.ComponentStatus, 2)
@@ -233,7 +232,7 @@ func TestLPXChildStatusRequiresObservedResultsAndCompleteEngine(t *testing.T) {
 
 	t.Log("A partially ready child retains logical replica counts and GPU capacity in public status")
 	partial := child.Status.Components["lpx"]
-	partial.AvailableReplicas = ptr.To(int32(2))
+	partial.AvailableReplicas = new(int32(2))
 	child.Status.Components["lpx"] = partial
 	result.Reason = "CheckpointReady"
 	meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionFalse, ObservedGeneration: child.Generation, Reason: v1alpha1.LPXReadyReasonPending, Message: "Waiting for removed LPX requests"})
@@ -244,8 +243,8 @@ func TestLPXChildStatusRequiresObservedResultsAndCompleteEngine(t *testing.T) {
 	source.Status.Components = result.ComponentStatus
 	request := &v1beta1.DynamoGraphDeploymentRequest{}
 	require.True(t, updateDeploymentInfo(request, source))
-	require.Equal(t, ptr.To(int32(7)), request.Status.DeploymentInfo.Replicas)
-	require.Equal(t, ptr.To(int32(6)), request.Status.DeploymentInfo.AvailableReplicas)
+	require.Equal(t, new(int32(7)), request.Status.DeploymentInfo.Replicas)
+	require.Equal(t, new(int32(6)), request.Status.DeploymentInfo.AvailableReplicas)
 
 	t.Log("Retirement remains pending in final DGD status after ordinary checkpoint readiness")
 	projected := newWorkloadProgramResult(source)
@@ -289,7 +288,7 @@ func TestLPXFailureProjectionRequiresCurrentCondition(t *testing.T) {
 			case "cleared-condition":
 				child.Status.Conditions[0].Reason = v1alpha1.LPXReadyReasonPending
 			case "deleting":
-				child.DeletionTimestamp = ptr.To(metav1.Now())
+				child.DeletionTimestamp = new(metav1.Now())
 			case "ordinary-failure":
 				result = ReconcileResult{State: v1beta1.DGDStateFailed, Reason: "OrdinaryFailure", Message: "Existing ordinary failure"}
 			}
@@ -355,7 +354,7 @@ func TestLPXRestartUsesPersistedSelectionAndCurrentChildStatus(t *testing.T) {
 			require.Equal(t, []string{"lpx"}, progress(t.Context(), source, []string{"lpx"}))
 			updated.Status.ObservedGeneration = updated.Generation
 			updated.Status.Components = map[string]v1alpha1.LPXComponentStatus{"lpx": {
-				ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{Replicas: 1, AvailableReplicas: ptr.To(int32(1))},
+				ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{Replicas: 1, AvailableReplicas: new(int32(1))},
 				Conditions:             []metav1.Condition{{Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionTrue, ObservedGeneration: updated.Generation}},
 			}}
 			meta.SetStatusCondition(&updated.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: updated.Generation, Reason: "Ready"})
@@ -397,7 +396,7 @@ func TestParallelRestartStartsAllLPXAndOrdinaryWorkloadsBeforeReadiness(t *testi
 	second := source.Spec.Components[0].DeepCopy()
 	second.ComponentName = "second"
 	source.Spec.Components = append(source.Spec.Components, *second, v1beta1.DynamoComponentDeploymentSharedSpec{
-		ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend, Replicas: ptr.To(int32(1)),
+		ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend, Replicas: new(int32(1)),
 		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "frontend"}}}},
 	})
 	source.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = string(configv1alpha1.DiscoveryBackendKubernetes)
@@ -419,12 +418,12 @@ func TestParallelRestartStartsAllLPXAndOrdinaryWorkloadsBeforeReadiness(t *testi
 		Namespace: source.Namespace, Name: pcsName,
 	}, pcs))
 	pcs.Generation = 1
-	pcs.Status.ObservedGeneration = ptr.To(pcs.Generation)
+	pcs.Status.ObservedGeneration = new(pcs.Generation)
 	require.NoError(t, kube.Update(t.Context(), pcs))
 	frontend := &grovev1alpha1.PodClique{
-		ObjectMeta: metav1.ObjectMeta{Name: dynamo.GroveComponentResourceName(pcsName, "frontend"), Namespace: source.Namespace, Generation: 1},
-		Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
-		Status:     grovev1alpha1.PodCliqueStatus{ObservedGeneration: ptr.To(int64(1)), Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1},
+		Name: dynamo.GroveComponentResourceName(pcsName, "frontend"), Namespace: source.Namespace, Generation: 1,
+		Spec:   grovev1alpha1.PodCliqueSpec{Replicas: 1},
+		Status: grovev1alpha1.PodCliqueStatus{ObservedGeneration: new(int64(1)), Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1},
 	}
 	require.NoError(t, kube.Create(t.Context(), frontend))
 
@@ -462,7 +461,7 @@ func TestParallelRestartStartsAllLPXAndOrdinaryWorkloadsBeforeReadiness(t *testi
 	t.Log("One ready LPX workload cannot finish the restart while the second is pending")
 	child.Status.ObservedGeneration = child.Generation
 	child.Status.Components = map[string]v1alpha1.LPXComponentStatus{"lpx": {
-		ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{Replicas: 1, AvailableReplicas: ptr.To(int32(1))},
+		ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{Replicas: 1, AvailableReplicas: new(int32(1))},
 		Conditions:             []metav1.Condition{{Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionTrue, ObservedGeneration: child.Generation}},
 	}}
 	require.NoError(t, kube.Status().Update(t.Context(), child))
@@ -486,7 +485,7 @@ func TestParallelRestartStartsAllLPXAndOrdinaryWorkloadsBeforeReadiness(t *testi
 
 	t.Log("Complete only after Grove observes the frontend's ready replacement")
 	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
-	pcs.Status.ObservedGeneration = ptr.To(pcs.Generation)
+	pcs.Status.ObservedGeneration = new(pcs.Generation)
 	require.NoError(t, kube.Update(t.Context(), pcs))
 	frontend.Status.ReadyReplicas = 1
 	require.NoError(t, kube.Update(t.Context(), frontend))
@@ -500,9 +499,9 @@ func TestLPXHandoffOrdinaryScalingPreservesReadiness(t *testing.T) {
 	t.Log("Seed the shared child's current readiness")
 	_, source, kube := newLPXHandoffFixture(t, "node-local-v2-specdecode")
 	source.Spec.Components = append(source.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
-		ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: ptr.To(int32(1)),
+		ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: new(int32(1)),
 	}, v1beta1.DynamoComponentDeploymentSharedSpec{
-		ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend, Replicas: ptr.To(int32(1)),
+		ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend, Replicas: new(int32(1)),
 		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "frontend:0"}}}},
 	})
 	handoff := &dgdLPXHandoff{client: kube}
@@ -511,10 +510,10 @@ func TestLPXHandoffOrdinaryScalingPreservesReadiness(t *testing.T) {
 	child.Status.ObservedGeneration = child.Generation
 	child.Status.Components = map[string]v1alpha1.LPXComponentStatus{
 		"lpx": {
-			ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{Replicas: 1, AvailableReplicas: ptr.To(int32(1))},
+			ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{Replicas: 1, AvailableReplicas: new(int32(1))},
 		},
 		"draft": {
-			ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{Replicas: 2, AvailableReplicas: ptr.To(int32(2))},
+			ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{Replicas: 2, AvailableReplicas: new(int32(2))},
 		},
 	}
 	meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: child.Generation, Reason: "Ready"})
@@ -550,14 +549,14 @@ func TestLPXHandoffOrdinaryScalingPreservesReadiness(t *testing.T) {
 	require.Equal(t, int64(8), source.Generation)
 
 	t.Log("Scale prefill without changing the child or its readiness")
-	source.GetComponentByName("prefill").Replicas = ptr.To(int32(4))
+	source.GetComponentByName("prefill").Replicas = new(int32(4))
 	source.Generation++
 	current, err := handoff.Reconcile(t.Context(), source)
 	require.NoError(t, err)
 	require.Equal(t, beforeChild, current)
 
 	t.Log("LPX capacity updates the handoff without modifying its child's durable attempt")
-	source.GetComponentByName("draft").Replicas = ptr.To(int32(3))
+	source.GetComponentByName("draft").Replicas = new(int32(3))
 	source.Generation++
 	updated, err := handoff.Reconcile(t.Context(), source)
 	require.NoError(t, err)
@@ -650,8 +649,8 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 
 			t.Log("Adding an ordinary worker invalidates the child's previous serving revision")
 			source.Spec.Components = append(source.Spec.Components,
-				v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend, Replicas: ptr.To(int32(1))},
-				v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: ptr.To(int32(1))},
+				v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend, Replicas: new(int32(1))},
+				v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: new(int32(1))},
 			)
 			requested := []string{"draft", "frontend", "lpx", "prefill", "removed"}
 			require.Equal(t, []string{"draft", "frontend", "lpx", "prefill"}, progress(t.Context(), source, requested))
@@ -670,8 +669,8 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 			t.Log("An unobserved ordinary PCS cannot hold back either ready LPX member")
 			groveReq := groveReconcileRequest{DGD: source, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}
 			pcs := &grovev1alpha1.PodCliqueSet{
-				ObjectMeta: metav1.ObjectMeta{Name: dynamo.PCSNameForDGD(groveReq.DGD, groveReq.IsDelegated), Namespace: source.Namespace, Generation: 2},
-				Status:     grovev1alpha1.PodCliqueSetStatus{ObservedGeneration: ptr.To(int64(1))},
+				Name: dynamo.PCSNameForDGD(groveReq.DGD, groveReq.IsDelegated), Namespace: source.Namespace, Generation: 2,
+				Status: grovev1alpha1.PodCliqueSetStatus{ObservedGeneration: new(int64(1))},
 			}
 			require.NoError(t, kube.Create(t.Context(), pcs))
 			childReads, pcsReads = 0, 0
@@ -680,12 +679,12 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 			require.Equal(t, 1, pcsReads)
 
 			t.Log("A failed child read cannot hold back a ready ordinary member or reorder pending members")
-			pcs.Status.ObservedGeneration = ptr.To(pcs.Generation)
+			pcs.Status.ObservedGeneration = new(pcs.Generation)
 			require.NoError(t, kube.Update(t.Context(), pcs))
 			prefill := &grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{Name: dynamo.GroveComponentResourceName(dynamo.PCSNameForDGD(groveReq.DGD, groveReq.IsDelegated), "prefill"), Namespace: source.Namespace, Generation: 1},
-				Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
-				Status:     grovev1alpha1.PodCliqueStatus{ObservedGeneration: ptr.To(int64(1)), Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1},
+				Name: dynamo.GroveComponentResourceName(dynamo.PCSNameForDGD(groveReq.DGD, groveReq.IsDelegated), "prefill"), Namespace: source.Namespace, Generation: 1,
+				Spec:   grovev1alpha1.PodCliqueSpec{Replicas: 1},
+				Status: grovev1alpha1.PodCliqueStatus{ObservedGeneration: new(int64(1)), Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1},
 			}
 			require.NoError(t, kube.Create(t.Context(), prefill))
 			failChildRead, childReads, pcsReads = true, 0, 0
@@ -701,7 +700,7 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 func TestGroveProgramWithoutLPXDoesNotReadLPXChild(t *testing.T) {
 	t.Log("Reconcile an ordinary DGD while LPX child reads would fail")
 	source := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "ordinary", Namespace: "default"},
+		Name: "ordinary", Namespace: "default",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
 			ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend,
 			PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "frontend"}}}},
@@ -734,10 +733,10 @@ func TestGroveProgramWithoutLPXDoesNotReadLPXChild(t *testing.T) {
 func TestLPXHandoffWaitsForSharedResourceReconciliation(t *testing.T) {
 	t.Log("Edit LPX capacity while shared-resource reconciliation will fail")
 	child, source, kube := newLPXHandoffFixture(t, "node-local-v2-lpu-only")
-	source.Spec.Components[0].Replicas = ptr.To(int32(2))
+	source.Spec.Components[0].Replicas = new(int32(2))
 	source.Generation++
 	require.NoError(t, kube.Update(t.Context(), source))
-	source.Status.Placement = &v1beta1.PlacementStatus{Score: ptr.To(0.92), State: v1beta1.PlacementScoreStateReported}
+	source.Status.Placement = &v1beta1.PlacementStatus{Score: new(0.92), State: v1beta1.PlacementScoreStateReported}
 	source.Status.Components = map[string]v1beta1.ComponentReplicaStatus{"lpx": {Replicas: 1}}
 	previousStatus := source.Status.DeepCopy()
 	program := (&DynamoGraphDeploymentReconciler{
@@ -747,7 +746,7 @@ func TestLPXHandoffWaitsForSharedResourceReconciliation(t *testing.T) {
 
 	t.Log("Preserve the child revision and component status while reporting the shared-resource error")
 	result, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
-	require.ErrorContains(t, err, "RBAC manager not initialized")
+	require.ErrorContains(t, err, "planner ClusterRole name is required")
 	require.Equal(t, v1beta1.DGDStateFailed, result.Status.State)
 	stored := &v1alpha1.LPXGraphDeployment{}
 	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(child), stored))
@@ -791,7 +790,7 @@ func TestLPXPendingDownloadDoesNotBlockOrdinaryWorkloads(t *testing.T) {
 	source.Spec.Labels = map[string]string{"example.com/policy": "enabled"}
 	source.Spec.BackendFramework = string(dynamo.BackendFrameworkVLLM)
 	source.Spec.Components = append(source.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
-		ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: ptr.To(int32(1)),
+		ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: new(int32(1)),
 		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "vllm-runtime"}}}},
 		ProviderOverride: &v1beta1.ProviderOverride{
 			APIVersion: grovev1alpha1.SchemeGroupVersion.String(), Target: "PodCliqueTemplateSpec",
@@ -814,10 +813,8 @@ func TestLPXPendingDownloadDoesNotBlockOrdinaryWorkloads(t *testing.T) {
 
 	t.Log("Leave a graph-owned adapter behind after ordinary component scaling was disabled")
 	disabledAdapter := &v1alpha1.DynamoGraphDeploymentScalingAdapter{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: generateAdapterName(source.Name, "prefill"), Namespace: source.Namespace,
-			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(source, v1beta1.DynamoGraphDeploymentGVK)},
-		},
+		Name: generateAdapterName(source.Name, "prefill"), Namespace: source.Namespace,
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(source, v1beta1.DynamoGraphDeploymentGVK)},
 		Spec: v1alpha1.DynamoGraphDeploymentScalingAdapterSpec{
 			DGDRef: v1alpha1.DynamoGraphDeploymentServiceRef{Name: source.Name, ServiceName: "prefill"},
 		},
@@ -862,7 +859,7 @@ func TestLPXPendingDownloadDoesNotBlockOrdinaryWorkloads(t *testing.T) {
 	t.Log("A pending ordinary checkpoint retains its startup and scaling gates alongside the pending child")
 	prefill := source.GetComponentByName("prefill")
 	prefill.Experimental = &v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{
-		Enabled: true, CheckpointRef: ptr.To(friendlyCheckpointName), StartupPolicy: v1beta1.CheckpointStartupPolicyWaitForCheckpoint,
+		Enabled: true, CheckpointRef: new(friendlyCheckpointName), StartupPolicy: v1beta1.CheckpointStartupPolicyWaitForCheckpoint,
 	}}
 	prefill.ScalingAdapter = &v1beta1.ScalingAdapter{}
 	require.NoError(t, kube.Update(t.Context(), source))
@@ -910,10 +907,10 @@ func TestGroveProgramPreservesAnotherGraphsScalingAdapter(t *testing.T) {
 	source.Spec.Components[0].ComponentName = "foo-bar"
 	source.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = string(configv1alpha1.DiscoveryBackendKubernetes)
 	ordinary := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "graph-foo", Namespace: source.Namespace, UID: "ordinary-uid"},
+		Name: "graph-foo", Namespace: source.Namespace, UID: "ordinary-uid",
 		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
 			ComponentName: "bar", ComponentType: v1beta1.ComponentTypeWorker,
-			Replicas: ptr.To(int32(3)), ScalingAdapter: &v1beta1.ScalingAdapter{},
+			Replicas: new(int32(3)), ScalingAdapter: &v1beta1.ScalingAdapter{},
 		}}},
 	}
 	kube := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).

@@ -213,6 +213,7 @@ impl Frame {
                     self.block_size,
                 ),
                 None,
+                None,
                 Some(&provider),
             )
             .unwrap()
@@ -435,6 +436,7 @@ fn progress_group_factory_uses_legacy_selection_for_disaggregated_roles() {
                         64
                     ),
                     None,
+                    None,
                     Some(&provider)
                 )
                 .unwrap()
@@ -458,7 +460,7 @@ impl WorkerPicker for Probe {
         }
     }
     fn pick(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         _input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -489,6 +491,7 @@ fn progress_group_public_picker_contract_requires_explicit_input_group() {
                 frame.request.eligibility(),
                 64,
             ),
+            None,
             None,
             Some(&provider),
         )

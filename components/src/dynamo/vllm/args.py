@@ -325,6 +325,8 @@ def _unsupported_fpm_trace_role(dynamo_config: Config) -> Optional[str]:
         return "embedding"
     if dynamo_config.classify_worker:
         return "classify"
+    if dynamo_config.transcription_worker:
+        return "transcription"
     if dynamo_config.headless:
         return "headless"
     if dynamo_config.disaggregation_mode == DisaggregationMode.ENCODE:
@@ -366,6 +368,14 @@ def update_engine_config_with_dynamo(
             # caching for pooling runners.
             logger.debug(
                 "Pooling-family worker: defaulting --enable-prefix-caching to False"
+            )
+            engine_config.enable_prefix_caching = False
+        elif dynamo_config.transcription_worker:
+            # Whisper is an encoder-decoder model. vLLM does not support
+            # prefix caching for cross-attention KV caches, and enabling it
+            # causes the first transcription request to terminate EngineCore.
+            logger.debug(
+                "Transcription worker: defaulting --enable-prefix-caching to False"
             )
             engine_config.enable_prefix_caching = False
         else:
@@ -603,9 +613,32 @@ def create_kv_events_config(
                 "To publish events, explicitly set enable_kv_cache_events to True."
             )
         logger.info(f"Using user-provided kv_events_config {c}")
+        _set_state_agent_topic(engine_config, c)
         return c
 
     return None
+
+
+def _set_state_agent_topic(
+    engine_config: AsyncEngineArgs, events: KVEventsConfig
+) -> None:
+    """Publish on this worker's KV state-agent topic, which its attachment
+    descriptors advertise, so the agent can route its raw streams by topic."""
+    from dynamo.common.kv_state_agent import worker_raw_topic
+
+    from .state_agent import state_agent_settings_from_engine_args
+
+    settings = state_agent_settings_from_engine_args(engine_config)
+    if settings is None:
+        return
+    topic = worker_raw_topic(settings.cache_owner_ids.values())
+    if events.topic != topic:
+        logger.info(
+            "Publishing KV events on the KV state-agent worker topic %r instead of %r",
+            topic,
+            events.topic,
+        )
+        events.topic = topic
 
 
 def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
@@ -687,7 +720,7 @@ def _connector_to_kv_transfer_json(connectors: list[str], nixl_role: str) -> str
             "kv_connector": "PdConnector",
             "kv_role": "kv_both",
             "kv_connector_extra_config": {"connectors": multi_connectors},
-            "kv_connector_module_path": "kvbm.vllm_integration.connector",
+            "kv_connector_module_path": "dynamo.vllm.pd_connector",
         }
     )
 

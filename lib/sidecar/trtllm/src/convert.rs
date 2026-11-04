@@ -4,20 +4,20 @@
 //! Conversion between Dynamo's `PreprocessedRequest` / `LLMEngineOutput` and the
 //! TensorRT-LLM OpenEngine (`openengine.v1`) protobuf messages.
 //!
-//! Scope: aggregated and disaggregated (prefill/decode) generation. Multimodal,
-//! LoRA, beam search, and `n > 1` are rejected before dispatch — the sidecar
-//! streams a single sequence.
+//! Supports aggregated and disaggregated image, video, and audio generation.
+//! LoRA, beam search, and `n > 1` are rejected before dispatch.
 //!
 //! Disaggregation is driven by [`DisaggregationMode`]: a prefill worker marks
 //! its request `context_only` and returns the `PrefillReady` handoff as its
 //! terminal chunk, and a decode worker replays that handoff in `kv.session`.
 //! See [`crate::disagg`] for the codec.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
+use std::sync::Arc;
 
 use dynamo_backend_common::{
     CompletionUsage, DisaggregationMode, DynamoError, FinishReason, LLMEngineOutput,
-    PreprocessedRequest, PromptTokensDetails, StopReason, TopLogprob, usage,
+    MultimodalData, PreprocessedRequest, PromptTokensDetails, StopReason, TopLogprob, usage,
 };
 
 use crate::client::{self, ModelLimits};
@@ -28,18 +28,28 @@ use crate::proto as pb;
 /// per-token top-k alternatives, all aligned with each other.
 type MappedTokens = (Vec<u32>, Option<Vec<f64>>, Option<Vec<Vec<TopLogprob>>>);
 
+#[cfg(test)]
 pub(crate) fn build_generate_request(
-    request: &PreprocessedRequest,
+    request: PreprocessedRequest,
     request_id: &str,
     model: &str,
     limits: Option<ModelLimits>,
     mode: DisaggregationMode,
 ) -> Result<pb::GenerateRequest, DynamoError> {
-    validate_request(request, mode)?;
+    build_generate_request_with_routing(request, request_id, model, limits, mode, false)
+}
 
-    let sampling = &request.sampling_options;
-    let stop = &request.stop_conditions;
-    let output = &request.output_options;
+pub(crate) fn build_generate_request_with_routing(
+    mut request: PreprocessedRequest,
+    request_id: &str,
+    model: &str,
+    limits: Option<ModelLimits>,
+    mode: DisaggregationMode,
+    allow_dp_rank: bool,
+) -> Result<pb::GenerateRequest, DynamoError> {
+    validate_request(&request, mode, allow_dp_rank)?;
+    let request_has_media = has_media(&request);
+    let media = media(&mut request, limits)?;
 
     // A prefill worker only needs the context phase; TensorRT-LLM still requires
     // a positive budget, and one token is what the context phase produces.
@@ -50,9 +60,9 @@ pub(crate) fn build_generate_request(
     // reject requests a wider decode window would serve. Releasing the handoff
     // when decode does reject is the sound fix and belongs on that side.
     let max_tokens = if mode.is_prefill() {
-        1
+        Some(1)
     } else {
-        max_tokens(request, limits)?
+        max_tokens(&request, limits, request_has_media)?
     };
     // The decode worker replays the prefill worker's session; the prefill worker
     // marks its request `context_only` through `extra`.
@@ -71,15 +81,37 @@ pub(crate) fn build_generate_request(
         },
         DisaggregationMode::Aggregated | DisaggregationMode::Encode => None,
     };
+    let conditions = stop_conditions(&request);
+    let guided = guided_decoding(&request)?;
+    let session_id = request
+        .agent_context
+        .as_ref()
+        .map(|context| context.session_id.trim())
+        .filter(|session_id| !session_id.is_empty())
+        // Rank hints require a conversation ID in OpenEngine.
+        .or_else(|| {
+            let rank = request.routing.as_ref().and_then(|routing| {
+                if mode.is_prefill() {
+                    routing.prefill_dp_rank.or(routing.dp_rank)
+                } else {
+                    routing.dp_rank
+                }
+            });
+            (allow_dp_rank && rank.is_some()).then_some(request_id)
+        })
+        .map(str::to_string);
+    let include_stop_in_output = has_visible_stop_tokens(&request).then_some(true);
+    let input = request_input(&mut request, limits)?;
+    let sampling = &request.sampling_options;
+    let stop = &request.stop_conditions;
+    let output = &request.output_options;
 
     Ok(pb::GenerateRequest {
         request_id: request_id.to_string(),
         // The OpenEngine server rejects an empty model; any non-empty name is
         // served by the loaded model (single-model server).
         model: model.to_string(),
-        input: Some(pb::generate_request::Input::TokenIds(pb::TokenIds {
-            ids: request.token_ids.as_ref().clone(),
-        })),
+        input: Some(input),
         sampling: Some(pb::SamplingParams {
             temperature: sampling.temperature.map(f64::from),
             top_p: sampling.top_p.map(f64::from),
@@ -92,7 +124,7 @@ pub(crate) fn build_generate_request(
             num_sequences: Some(1),
         }),
         stopping: Some(pb::StoppingOptions {
-            max_tokens: Some(max_tokens),
+            max_tokens,
             // Forwarded on a context-only request too. The minimum only masks
             // EOS until the sequence reaches it, so it cannot extend a context
             // phase that `max_tokens` already caps at one token. Dropping it
@@ -100,12 +132,12 @@ pub(crate) fn build_generate_request(
             // `Stop` instead of `PrefillReady`, and leave the frontend treating
             // a request that never met its minimum as complete.
             min_tokens: stop.min_tokens,
-            conditions: stop_conditions(request),
+            conditions,
             ignore_eos: stop.ignore_eos,
-            // `include_stop_in_output` retains matched stop *strings*; the
-            // request-level flag is rejected in `validate_request`, so leave it
-            // unset (the server strips them).
-            include_stop_in_output: None,
+            // Keeps a matched visible stop token (e.g. Harmony's `<|call|>`) in
+            // the output. A visible token equal to `end_id` finishes as END_ID
+            // and may still be dropped.
+            include_stop_in_output,
         }),
         response: Some(pb::ResponseOptions {
             // A prefill worker streams no tokens to the client, but it must
@@ -122,48 +154,69 @@ pub(crate) fn build_generate_request(
             prompt_candidates: None,
             prompt_logprob_start: None,
         }),
-        guided: guided_decoding(request)?,
-        // Text generation only: no multimodal media or LoRA selection.
-        media: Vec::new(),
+        guided,
+        media,
         lora_name: String::new(),
         kv,
         extra: Some(disagg::request_extra(
             mode.is_prefill(),
-            request
-                .agent_context
-                .as_ref()
-                .map(|context| context.session_id.trim())
-                .filter(|session_id| !session_id.is_empty()),
+            session_id.as_deref(),
         )),
     })
 }
 
-// Temporary workaround: the OpenEngine contract makes `stopping.max_tokens`
-// optional, but an omitted value falls through to TensorRT-LLM's small
-// `SamplingParams` default rather than filling the context. The Dynamo frontend
-// forwards an omitted `max_tokens` as `None` expecting the backend to default,
-// so we mirror the in-process backend's text-only default,
-// `max(1, context_length - prompt_len)` (components/src/dynamo/trtllm
-// `_default_max_tokens`); the sidecar rejects multimodal before dispatch, so
-// `token_ids.len()` is the true prompt length. `context_length` is resolved in
-// `engine::start`, where `--context-length` wins over the `GetModelInfo` report.
-// Only `/v1/chat/completions` and `/v1/responses` reach this fallback: they set
-// `PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY`, which stops the frontend supplying
-// its own default (`preprocessor::omitted_max_tokens_default`). `/v1/completions`
-// is already defaulted by the frontend and never lands here.
-//
-// Remove when https://github.com/NVIDIA/TensorRT-LLM/issues/16549 lands (gRPC
-// `max_tokens` made optional): drop this fallback and forward an omitted
-// `max_tokens` as unset. Keep `--context-length` and the plumbing in
-// `engine.rs` — they also feed `LlmRegistration.context_length`, which the
-// frontend registers as the served context window and which this fallback does
-// not govern.
+fn request_input(
+    request: &mut PreprocessedRequest,
+    limits: Option<ModelLimits>,
+) -> Result<pb::generate_request::Input, DynamoError> {
+    match limits.and_then(|limits| limits.supported_inputs) {
+        Some(inputs) if inputs.token_ids => token_ids_input(request),
+        Some(inputs) if inputs.text => {
+            let prompt = request
+                .extra_args
+                .as_ref()
+                .and_then(|extra| extra.get("formatted_prompt"))
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    client::invalid_argument(
+                        "the loaded TensorRT-LLM model requires text input, but the request has no string extra_args.formatted_prompt",
+                    )
+                })?;
+            Ok(pb::generate_request::Input::Prompt(prompt.to_string()))
+        }
+        Some(_) => Err(client::invalid_argument(
+            "the loaded TensorRT-LLM model advertises neither text nor token-ID input support",
+        )),
+        // Older OpenEngine servers leave both optional capability fields unset.
+        None => token_ids_input(request),
+    }
+}
+
+fn token_ids_input(
+    request: &mut PreprocessedRequest,
+) -> Result<pb::generate_request::Input, DynamoError> {
+    if request.token_ids.is_empty() {
+        return Err(client::invalid_argument("token_ids must not be empty"));
+    }
+    Ok(pb::generate_request::Input::TokenIds(pb::TokenIds {
+        ids: Arc::unwrap_or_clone(std::mem::take(&mut request.token_ids)),
+    }))
+}
+
+// Derive omitted text max_tokens from the context window. For media, only
+// TensorRT-LLM knows the prompt length after expansion, so leave it unset.
+// Remove this fallback when NVIDIA/TensorRT-LLM#16549 lands; context_length
+// remains necessary for LlmRegistration.
 fn max_tokens(
     request: &PreprocessedRequest,
     limits: Option<ModelLimits>,
-) -> Result<u32, DynamoError> {
+    has_media: bool,
+) -> Result<Option<u32>, DynamoError> {
     if let Some(max_tokens) = request.stop_conditions.max_tokens {
-        return Ok(max_tokens);
+        return Ok(Some(max_tokens));
+    }
+    if has_media {
+        return Ok(None);
     }
     let context_length = limits
         .and_then(|limits| limits.context_length)
@@ -185,7 +238,303 @@ fn max_tokens(
         None => remaining,
     };
     reject_impossible_minimum(request, derived, context_length, prompt_len)?;
-    Ok(derived)
+    Ok(Some(derived))
+}
+
+const IMAGE_KEY: &str = "image_url";
+const VIDEO_KEY: &str = "video_url";
+const AUDIO_KEY: &str = "audio_url";
+
+/// The engine fetches passthrough media, so enforce Dynamo's policy before dispatch.
+pub(crate) fn validate_remote_media_urls(
+    request: &PreprocessedRequest,
+    allow_remote: bool,
+) -> Result<(), DynamoError> {
+    if allow_remote {
+        return Ok(());
+    }
+    for item in request
+        .multi_modal_data
+        .iter()
+        .flat_map(|media| media.values())
+        .flatten()
+    {
+        let url = match item {
+            MultimodalData::Url(url) => url.as_str(),
+            MultimodalData::RawUrl(url) => url.as_str(),
+            _ => continue,
+        };
+        if url.split_once(':').is_some_and(|(scheme, _)| {
+            scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+        }) {
+            return Err(client::invalid_argument(
+                "Remote media URLs are disabled (DYN_MM_ALLOW_REMOTE_URLS=0); \
+                 send the media inline as a data: URL instead",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct MediaKind {
+    key: &'static str,
+    name: &'static str,
+    modality: pb::Modality,
+}
+
+const MEDIA_KINDS: [MediaKind; 3] = [
+    MediaKind {
+        key: IMAGE_KEY,
+        name: "image",
+        modality: pb::Modality::Image,
+    },
+    MediaKind {
+        key: VIDEO_KEY,
+        name: "video",
+        modality: pb::Modality::Video,
+    },
+    MediaKind {
+        key: AUDIO_KEY,
+        name: "audio",
+        modality: pb::Modality::Audio,
+    },
+];
+
+fn media_kind(key: &str) -> Option<MediaKind> {
+    MEDIA_KINDS.iter().copied().find(|kind| kind.key == key)
+}
+
+/// Map Dynamo's grouped media payload to OpenEngine's globally ordered list.
+fn media(
+    request: &mut PreprocessedRequest,
+    limits: Option<ModelLimits>,
+) -> Result<Vec<pb::MediaItem>, DynamoError> {
+    reject_media_override("mm_processor_kwargs", request.mm_processor_kwargs.as_ref())?;
+    reject_media_override("media_io_kwargs", request.media_io_kwargs.as_ref())?;
+
+    // mm_routing_info stays router-side; multi_modal_data is engine input.
+    let media_map = request.multi_modal_data.take();
+    if let Some(media_map) = media_map.as_ref() {
+        for (modality, items) in media_map {
+            if media_kind(modality).is_none() && !items.is_empty() {
+                return Err(client::invalid_argument(format!(
+                    "multimodal modality `{modality}` is not supported by the TensorRT-LLM sidecar"
+                )));
+            }
+        }
+    }
+
+    let uuid_map = request.multi_modal_uuids.take();
+    if let Some(uuid_map) = uuid_map.as_ref() {
+        for (modality, uuids) in uuid_map {
+            if media_kind(modality).is_none() && !uuids.is_empty() {
+                return Err(client::invalid_argument(format!(
+                    "multimodal UUIDs for unsupported modality `{modality}` cannot be forwarded"
+                )));
+            }
+        }
+    }
+
+    let mut active_kinds = Vec::new();
+    let mut total_items = 0;
+    for kind in MEDIA_KINDS {
+        let items = media_map
+            .as_ref()
+            .and_then(|media| media.get(kind.key))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if let Some(uuids) = uuid_map.as_ref().and_then(|uuids| uuids.get(kind.key))
+            && uuids.len() != items.len()
+        {
+            return Err(client::invalid_argument(format!(
+                "`{}` UUID count ({}) must match its media item count ({})",
+                kind.key,
+                uuids.len(),
+                items.len()
+            )));
+        }
+        if !items.is_empty() {
+            if !limits
+                .and_then(|limits| limits.supported_media)
+                .is_some_and(|media| media.contains(kind.name))
+            {
+                let requirement = if kind.name == "video" {
+                    ". Video decoding requires OpenCV (cv2) in the TensorRT-LLM server environment"
+                } else {
+                    ""
+                };
+                return Err(client::invalid_argument(format!(
+                    "the loaded TensorRT-LLM model does not advertise {} support through Control.GetModelInfo{requirement}",
+                    kind.name,
+                )));
+            }
+            active_kinds.push(kind);
+            total_items += items.len();
+        }
+    }
+
+    if total_items == 0 {
+        return Ok(Vec::new());
+    }
+    if let Some(limits) = limits
+        && (limits.engine_context_length.is_none()
+            || limits.context_length != limits.engine_context_length)
+    {
+        return Err(client::invalid_argument(
+            "media requests require --context-length to match the window reported by \
+             TensorRT-LLM; the sidecar cannot enforce a different window after media expansion",
+        ));
+    }
+    let ordered_items: Vec<(MediaKind, usize)> = match request.multi_modal_order.take() {
+        Some(order) => {
+            if order.len() != total_items {
+                return Err(client::invalid_argument(format!(
+                    "multi_modal_order has {} entries for {total_items} media items",
+                    order.len()
+                )));
+            }
+            let mut seen = HashSet::with_capacity(order.len());
+            order
+                .into_iter()
+                .map(|item| {
+                    let kind = media_kind(&item.modality).ok_or_else(|| {
+                        client::invalid_argument(format!(
+                            "multi_modal_order references unsupported modality `{}`",
+                            item.modality
+                        ))
+                    })?;
+                    let item_count = media_map
+                        .as_ref()
+                        .and_then(|media| media.get(kind.key))
+                        .map(Vec::len)
+                        .unwrap_or_default();
+                    if item.index >= item_count {
+                        return Err(client::invalid_argument(format!(
+                            "multi_modal_order references missing `{}` item {}",
+                            kind.key, item.index
+                        )));
+                    }
+                    if !seen.insert((kind.key, item.index)) {
+                        return Err(client::invalid_argument(format!(
+                            "multi_modal_order repeats `{}` item {}",
+                            kind.key, item.index
+                        )));
+                    }
+                    Ok((kind, item.index))
+                })
+                .collect::<Result<_, _>>()?
+        }
+        None if active_kinds.len() == 1 => {
+            let kind = active_kinds[0];
+            let item_count = media_map
+                .as_ref()
+                .and_then(|media| media.get(kind.key))
+                .map(Vec::len)
+                .unwrap_or_default();
+            (0..item_count).map(|index| (kind, index)).collect()
+        }
+        None => {
+            return Err(client::invalid_argument(
+                "mixed multimodal input requires multi_modal_order to preserve prompt order",
+            ));
+        }
+    };
+
+    let mut media_slots = media_map
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(key, items)| (key, items.into_iter().map(Some).collect::<Vec<_>>()))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut uuid_slots = uuid_map
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(key, uuids)| (key, uuids.into_iter().map(Some).collect::<Vec<_>>()))
+        .collect::<std::collections::HashMap<_, _>>();
+
+    ordered_items
+        .into_iter()
+        .map(|(kind, index)| {
+            let item = media_slots
+                .get_mut(kind.key)
+                .and_then(|items| items.get_mut(index))
+                .and_then(Option::take)
+                .ok_or_else(|| {
+                    client::protocol_error(format!(
+                        "validated media order lost `{}` item {index}",
+                        kind.key
+                    ))
+                })?;
+            let source = match item {
+                MultimodalData::Url(url) => media_source(String::from(url), kind.key, index)?,
+                MultimodalData::RawUrl(url) => media_source(url, kind.key, index)?,
+                MultimodalData::Decoded(_) => {
+                    return Err(client::invalid_argument(format!(
+                        "`{}` item {index} is pre-decoded; OpenEngine requires a URL or data URI so TensorRT-LLM can own {} decoding",
+                        kind.key, kind.name
+                    )));
+                }
+                MultimodalData::UuidOnly(_) => {
+                    return Err(client::invalid_argument(format!(
+                        "`{}` item {index} contains only a cache UUID; OpenEngine requires a source for {} input",
+                        kind.key, kind.name
+                    )));
+                }
+            };
+            Ok(pb::MediaItem {
+                modality: kind.modality as i32,
+                source: Some(source),
+                // MIME metadata belongs to raw_bytes, which this client does not send.
+                mime_type: String::new(),
+                // Do not substitute router-owned mm_hashes for caller cache identities.
+                uuid: uuid_slots
+                    .get_mut(kind.key)
+                    .and_then(|uuids| uuids.get_mut(index))
+                    .and_then(Option::take)
+                    .flatten()
+                    .unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+fn media_source(
+    value: String,
+    key: &str,
+    index: usize,
+) -> Result<pb::media_item::Source, DynamoError> {
+    let scheme = value
+        .split_once(':')
+        .map(|(scheme, _)| scheme.to_ascii_lowercase());
+    match scheme.as_deref() {
+        Some("http") | Some("https") => Ok(pb::media_item::Source::Url(value)),
+        Some("data") => Ok(pb::media_item::Source::DataUri(value)),
+        _ => Err(client::invalid_argument(format!(
+            "`{key}` item {index} must use an http, https, or data URI"
+        ))),
+    }
+}
+
+fn reject_media_override(name: &str, value: Option<&serde_json::Value>) -> Result<(), DynamoError> {
+    let is_empty = match value {
+        None | Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::Object(fields)) => fields.is_empty(),
+        Some(_) => false,
+    };
+    if is_empty {
+        Ok(())
+    } else {
+        Err(client::invalid_argument(format!(
+            "{name} is not supported by the TensorRT-LLM OpenEngine sidecar"
+        )))
+    }
+}
+
+fn has_media(request: &PreprocessedRequest) -> bool {
+    request
+        .multi_modal_data
+        .as_ref()
+        .is_some_and(|media| media.values().any(|items| !items.is_empty()))
 }
 
 /// Both the output cap and the `.max(1)` floor can land under an explicit
@@ -261,12 +610,15 @@ fn stop_conditions(request: &PreprocessedRequest) -> Vec<pb::StopCondition> {
     conditions
 }
 
+/// TensorRT-LLM 1.3.0rc29's `min_tokens` holds back only `end_id`, so any of
+/// these can end generation early (NVIDIA/TensorRT-LLM#20188).
 fn stop_token_ids(request: &PreprocessedRequest) -> Vec<u32> {
     let stop = &request.stop_conditions;
     let mut ids = BTreeSet::new();
     for values in [
         stop.stop_token_ids.as_ref(),
         stop.stop_token_ids_hidden.as_ref(),
+        stop.stop_token_ids_visible.as_ref(),
     ]
     .into_iter()
     .flatten()
@@ -274,6 +626,27 @@ fn stop_token_ids(request: &PreprocessedRequest) -> Vec<u32> {
         ids.extend(values.iter().copied());
     }
     ids.into_iter().collect()
+}
+
+fn has_visible_stop_tokens(request: &PreprocessedRequest) -> bool {
+    request
+        .stop_conditions
+        .stop_token_ids_visible
+        .as_ref()
+        .is_some_and(|ids| !ids.is_empty())
+}
+
+/// Hidden stop IDs to remove when the engine confirms they ended generation.
+fn retained_hidden_stop_ids(request: &PreprocessedRequest) -> BTreeSet<u32> {
+    let visible = request
+        .stop_conditions
+        .stop_token_ids_visible
+        .as_deref()
+        .unwrap_or_default();
+    stop_token_ids(request)
+        .into_iter()
+        .filter(|id| !visible.contains(id))
+        .collect()
 }
 
 fn guided_decoding(
@@ -332,21 +705,16 @@ fn json_guide(value: &serde_json::Value) -> String {
 fn validate_request(
     request: &PreprocessedRequest,
     mode: DisaggregationMode,
+    allow_dp_rank: bool,
 ) -> Result<(), DynamoError> {
-    if request.token_ids.is_empty() {
-        return Err(client::invalid_argument("token_ids must not be empty"));
-    }
     if request.prompt_embeds.is_some() {
         return Err(client::invalid_argument(
             "prompt embeddings are not supported by the TensorRT-LLM sidecar",
         ));
     }
-    if request.multi_modal_data.is_some()
-        || request.mm_routing_info.is_some()
-        || request.encoder_result.is_some()
-    {
+    if request.encoder_result.is_some() {
         return Err(client::invalid_argument(
-            "multimodal requests are not supported by the TensorRT-LLM sidecar",
+            "multimodal encoder handoffs are not supported by the TensorRT-LLM sidecar",
         ));
     }
     // Only a decode worker consumes a prefill handoff. Seeing one anywhere else
@@ -363,20 +731,6 @@ fn validate_request(
         // drop them.
         return Err(client::invalid_argument(
             "prompt logprobs are not supported by the TensorRT-LLM sidecar",
-        ));
-    }
-    if request
-        .stop_conditions
-        .stop_token_ids_visible
-        .as_ref()
-        .is_some_and(|ids| !ids.is_empty())
-    {
-        // A visible stop token must halt generation *and* stay in the output.
-        // OpenEngine's stop conditions and single `include_stop_in_output` (stop
-        // *strings*) cannot honor that per token, so reject rather than silently
-        // drop or mis-retain them.
-        return Err(client::invalid_argument(
-            "visible stop token IDs are not supported by the TensorRT-LLM sidecar",
         ));
     }
     if request
@@ -417,17 +771,16 @@ fn validate_request(
             "request priority is not supported by the TensorRT-LLM sidecar",
         ));
     }
-    if request.routing.as_ref().is_some_and(|routing| {
-        routing.dp_rank.is_some_and(|rank| rank != 0)
-            || routing.prefill_dp_rank.is_some_and(|rank| rank != 0)
-    }) {
-        // This sidecar advertises one logical worker (rank 0). The KV router
-        // attaches that rank even when KV events are disabled. It selects the
-        // endpoint, not an internal TRT-LLM attention-DP rank: the engine owns
-        // internal placement through conversation affinity. Nonzero logical
-        // ranks are not registered and must never be silently ignored.
+    let own_rank = request.routing.as_ref().and_then(|routing| {
+        if mode.is_prefill() {
+            routing.prefill_dp_rank.or(routing.dp_rank)
+        } else {
+            routing.dp_rank
+        }
+    });
+    if !allow_dp_rank && own_rank.is_some_and(|rank| rank != 0) {
         return Err(client::invalid_argument(
-            "nonzero data-parallel rank targeting is not supported by the TensorRT-LLM sidecar",
+            "data-parallel rank targeting was not advertised by the OpenEngine server",
         ));
     }
     if request.stop_conditions.max_thinking_tokens.is_some() {
@@ -438,10 +791,7 @@ fn validate_request(
     }
     let sampling = &request.sampling_options;
     if sampling.include_stop_str_in_output == Some(true) {
-        // Retaining stop *strings* maps to `include_stop_in_output`, but the
-        // sidecar rejects visible stop token IDs above; honoring string retention
-        // alone would be inconsistent, so reject until both are supported
-        // together.
+        // Would map to `include_stop_in_output`; not yet tested end to end.
         return Err(client::invalid_argument(
             "include_stop_str_in_output is not supported by the TensorRT-LLM sidecar",
         ));
@@ -455,6 +805,15 @@ fn validate_request(
     if sampling.use_beam_search.unwrap_or(false) {
         return Err(client::invalid_argument("beam search is not supported"));
     }
+    if sampling
+        .logit_bias
+        .as_ref()
+        .is_some_and(|bias| !bias.is_empty())
+    {
+        return Err(client::invalid_argument(
+            "logit_bias is not supported by the TensorRT-LLM sidecar",
+        ));
+    }
     Ok(())
 }
 
@@ -465,6 +824,12 @@ pub(crate) struct ResponseState {
     prompt_tokens: u32,
     completion_tokens: u32,
     output_logprobs: Option<u32>,
+    /// Hold a trailing stop until terminal usage arrives. The frontend decoder
+    /// can terminate on hidden or visible stops before reading that usage.
+    held_stop_ids: BTreeSet<u32>,
+    /// See [`retained_hidden_stop_ids`]. Dropped when the terminal matched it.
+    hidden_stop_ids: BTreeSet<u32>,
+    pending_stop: Option<pb::TokenInfo>,
     phase: Phase,
 }
 
@@ -501,6 +866,9 @@ impl ResponseState {
             prompt_tokens: request.token_ids.len() as u32,
             completion_tokens: 0,
             output_logprobs: request.output_options.logprobs,
+            held_stop_ids: stop_token_ids(request).into_iter().collect(),
+            hidden_stop_ids: retained_hidden_stop_ids(request),
+            pending_stop: None,
             phase: if mode.is_prefill() {
                 Phase::Prefill { held: Vec::new() }
             } else {
@@ -602,10 +970,20 @@ impl ResponseState {
             self.completion_tokens = held.len() as u32;
             return Ok(None);
         }
-        let (token_ids, log_probs, top_logprobs) = self.map_tokens(token.tokens)?;
         self.completion_tokens = self
             .completion_tokens
-            .saturating_add(token_ids.len() as u32);
+            .saturating_add(token.tokens.len() as u32);
+        let mut tokens = token.tokens;
+        if let Some(pending) = self.pending_stop.take() {
+            tokens.insert(0, pending);
+        }
+        if tokens
+            .last()
+            .is_some_and(|info| self.held_stop_ids.contains(&info.token_id))
+        {
+            self.pending_stop = tokens.pop();
+        }
+        let (token_ids, log_probs, top_logprobs) = self.map_tokens(tokens)?;
         if token_ids.is_empty() {
             // A text-only delta (e.g. stop-string holdback): the sidecar streams
             // token IDs and lets the frontend detokenize, so there is nothing to
@@ -676,7 +1054,7 @@ impl ResponseState {
         // silently truncate the completion. Any other reason is a genuine stop
         // during the context phase, and with no decode leg to run, it is the
         // whole answer.
-        let held = match &mut self.phase {
+        let mut held = match &mut self.phase {
             Phase::Prefill { held } if finish_reason == FinishReason::Length => {
                 return Err(client::protocol_error(format!(
                     "context request ended at its token budget without a kv_session handoff \
@@ -687,8 +1065,18 @@ impl ResponseState {
                 )));
             }
             Phase::Prefill { held } => std::mem::take(held),
-            Phase::Stream { .. } => Vec::new(),
+            Phase::Stream { .. } => self.pending_stop.take().into_iter().collect(),
         };
+        let stop_match = finished
+            .stop_match
+            .and_then(|stop_match| stop_match.r#match);
+        if let Some(pb::stop_match::Match::StopTokenId(id) | pb::stop_match::Match::EosTokenId(id)) =
+            stop_match
+            && self.hidden_stop_ids.contains(&id)
+            && held.last().is_some_and(|info| info.token_id == id)
+        {
+            held.pop();
+        }
 
         let (token_ids, log_probs, top_logprobs) = if held.is_empty() {
             (Vec::new(), None, None)
@@ -708,15 +1096,12 @@ impl ResponseState {
             }),
             ..Default::default()
         };
-        terminal.stop_reason = finished
-            .stop_match
-            .and_then(|stop_match| stop_match.r#match)
-            .map(|matched| match matched {
-                pb::stop_match::Match::StopTokenId(id) | pb::stop_match::Match::EosTokenId(id) => {
-                    StopReason::Int(i64::from(id))
-                }
-                pb::stop_match::Match::StopText(text) => StopReason::String(text),
-            });
+        terminal.stop_reason = stop_match.map(|matched| match matched {
+            pb::stop_match::Match::StopTokenId(id) | pb::stop_match::Match::EosTokenId(id) => {
+                StopReason::Int(i64::from(id))
+            }
+            pb::stop_match::Match::StopText(text) => StopReason::String(text),
+        });
         Ok(terminal)
     }
 
@@ -731,7 +1116,7 @@ impl ResponseState {
         };
         let mut log_probs = Vec::with_capacity(tokens.len());
         // `logprobs=0` keeps the selected-token logprob but omits the top
-        // alternatives, matching the vLLM sidecar contract.
+        // alternatives.
         let wants_candidates = count != 0;
         let mut top_logprobs = Vec::with_capacity(if wants_candidates { tokens.len() } else { 0 });
         for info in tokens {
@@ -862,3 +1247,8 @@ pub(crate) fn engine_error(error: pb::EngineError) -> DynamoError {
         _ => client::engine_error(message),
     }
 }
+
+#[cfg(test)]
+mod request_tests;
+#[cfg(test)]
+mod response_tests;

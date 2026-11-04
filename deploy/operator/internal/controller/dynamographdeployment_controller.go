@@ -29,7 +29,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/events"
@@ -68,11 +67,6 @@ const (
 	dgdComponentPodIndex = ".metadata.dgdComponent"
 )
 
-// rbacManager interface for managing RBAC resources
-type rbacManager interface {
-	EnsureServiceAccountWithRBAC(ctx context.Context, targetNamespace, serviceAccountName, clusterRoleName string) error
-}
-
 // DynamoGraphDeploymentReconciler reconciles a DynamoGraphDeployment object
 type DynamoGraphDeploymentReconciler struct {
 	client.Client
@@ -82,7 +76,6 @@ type DynamoGraphDeploymentReconciler struct {
 	Recorder              events.EventRecorder
 	DockerSecretRetriever DockerSecretRetriever
 	SSHKeyManager         *secret.SSHKeyManager
-	RBACManager           rbacManager
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch;create;update;patch;delete
@@ -274,13 +267,22 @@ func workloadRoutingAnnotationsChanged(update event.UpdateEvent) bool {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	controllerBuilder, err := r.controllerBuilder(mgr)
+	if err != nil {
+		return err
+	}
+	return controllerBuilder.Complete(r)
+}
+
+// controllerBuilder shares production watches and indexes with instrumented reconcilers.
+func (r *DynamoGraphDeploymentReconciler) controllerBuilder(mgr ctrl.Manager) (*builder.Builder, error) {
 	if err := mgr.GetFieldIndexer().IndexField(
 		context.Background(),
 		&corev1.Pod{},
 		dgdComponentPodIndex,
 		dgdComponentPodIndexValues,
 	); err != nil {
-		return fmt.Errorf("register DGD component Pod index: %w", err)
+		return nil, fmt.Errorf("register DGD component Pod index: %w", err)
 	}
 
 	// Index native PodSnapshot references so dependency events can find affected DGDs.
@@ -291,7 +293,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			dgdPodSnapshotRefIndex,
 			dgdPodSnapshotRefIndexValues,
 		); err != nil {
-			return fmt.Errorf("register DGD PodSnapshot reference index: %w", err)
+			return nil, fmt.Errorf("register DGD PodSnapshot reference index: %w", err)
 		}
 	}
 
@@ -340,7 +342,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 	// Restore owned pools after deletion or spec drift without requiring GAIE on every cluster.
 	_, poolMappingErr := mgr.GetRESTMapper().RESTMapping(epp.InferencePoolGVK.GroupKind(), epp.InferencePoolGVK.Version)
 	if poolMappingErr != nil && !meta.IsNoMatchError(poolMappingErr) {
-		return fmt.Errorf("discover InferencePool API for DGD watch: %w", poolMappingErr)
+		return nil, fmt.Errorf("discover InferencePool API for DGD watch: %w", poolMappingErr)
 	}
 	if poolMappingErr == nil {
 		ctrlBuilder = ctrlBuilder.Owns(&gaiev1.InferencePool{}, builder.WithPredicates(
@@ -404,7 +406,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 		ctrlBuilder = newGroveWatchSetup(r.Client).addTo(ctrlBuilder)
 	}
 
-	return ctrlBuilder.Complete(r)
+	return ctrlBuilder, nil
 }
 
 func (r *DynamoGraphDeploymentReconciler) GetRecorder() events.EventRecorder {
@@ -416,10 +418,12 @@ func isDGDManagedWorkerPod(obj client.Object) bool {
 	if !ok || pod == nil {
 		return false
 	}
+
+	// Native LWS pods carry a worker hash instead of the DCD selector.
 	labels := pod.GetLabels()
 	return labels[consts.KubeLabelDynamoGraphDeploymentName] != "" &&
 		labels[consts.KubeLabelDynamoComponent] != "" &&
-		labels[consts.KubeLabelDynamoSelector] != "" &&
+		(labels[consts.KubeLabelDynamoSelector] != "" || labels[consts.KubeLabelDynamoWorkerHash] != "") &&
 		dynamo.IsWorkerComponent(labels[consts.KubeLabelDynamoComponentType])
 }
 
@@ -444,7 +448,7 @@ func dgdComponentPodIndexValue(dgdName, componentName string) string {
 }
 
 // dgdWorkerPodEventPredicate admits only events that can change whether a
-// Recreate rollout is blocked by an old pod. Creation and deletion change pod
+// worker rollout is blocked by an old pod. Creation and deletion change pod
 // membership; updates matter only when membership or terminality changes. A
 // deletion timestamp alone leaves the pod non-terminal and does not enqueue.
 func dgdWorkerPodEventPredicate() predicate.Predicate {
@@ -468,7 +472,8 @@ func dgdWorkerPodEventPredicate() predicate.Predicate {
 			newPod := e.ObjectNew.(*corev1.Pod)
 			if oldPod.Labels[consts.KubeLabelDynamoGraphDeploymentName] != newPod.Labels[consts.KubeLabelDynamoGraphDeploymentName] ||
 				oldPod.Labels[consts.KubeLabelDynamoComponent] != newPod.Labels[consts.KubeLabelDynamoComponent] ||
-				oldPod.Labels[consts.KubeLabelDynamoSelector] != newPod.Labels[consts.KubeLabelDynamoSelector] {
+				oldPod.Labels[consts.KubeLabelDynamoSelector] != newPod.Labels[consts.KubeLabelDynamoSelector] ||
+				oldPod.Labels[consts.KubeLabelDynamoWorkerHash] != newPod.Labels[consts.KubeLabelDynamoWorkerHash] {
 				return true
 			}
 			return isTerminalPhase(oldPod.Status.Phase) != isTerminalPhase(newPod.Status.Phase)
@@ -484,7 +489,7 @@ func mapDGDWorkerPodToRequests(_ context.Context, obj client.Object) []ctrl.Requ
 		return nil
 	}
 	dgdName := obj.GetLabels()[consts.KubeLabelDynamoGraphDeploymentName]
-	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: dgdName}}}
+	return []ctrl.Request{{Namespace: obj.GetNamespace(), Name: dgdName}}
 }
 
 func (r *DynamoGraphDeploymentReconciler) mapAutoSnapshotJobToDGDRequests(ctx context.Context, obj client.Object) []ctrl.Request {
@@ -502,5 +507,5 @@ func (r *DynamoGraphDeploymentReconciler) mapAutoSnapshotJobToDGDRequests(ctx co
 	if dgdName == "" {
 		return nil
 	}
-	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: snapshotJob.Namespace, Name: dgdName}}}
+	return []ctrl.Request{{Namespace: snapshotJob.Namespace, Name: dgdName}}
 }

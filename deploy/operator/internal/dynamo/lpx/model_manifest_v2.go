@@ -72,12 +72,12 @@ func buildFromGbuildManifestV2(buildRef string, manifest manifestcapnpv2.Manifes
 		return nil, fmt.Errorf("reading %s artifacts: %w", gbuildManifestV2CapnpFile, err)
 	}
 	build := &Build{
-		Path:                      buildRef,
-		SelectedPropSyncChains:    chains,
-		StandaloneTokenEmbeddings: program.StandaloneTokenEmbeddings(),
-		SupportsCPUEmbeddings:     program.SupportsCpuEmbeddings(),
-		IOFPGACount:               ioFPGACount,
-		IOFanoutFactor:            ioFanoutFactor,
+		path:                      buildRef,
+		selectedPropSyncChains:    chains,
+		standaloneTokenEmbeddings: program.StandaloneTokenEmbeddings(),
+		supportsCPUEmbeddings:     program.SupportsCpuEmbeddings(),
+		ioFPGACount:               ioFPGACount,
+		ioFanoutFactor:            ioFanoutFactor,
 	}
 
 	// Complete the normalized build with scheduler-facing LPU artifacts.
@@ -145,21 +145,21 @@ func addLPUArtifactsFromManifestV2(
 	if err != nil {
 		return fmt.Errorf("reading %s artifacts.partitions: %w", gbuildManifestV2CapnpFile, err)
 	}
-	partitions := make([]BuildPartition, 0, rawPartitions.Len())
+	partitions := make([]buildPartition, 0, rawPartitions.Len())
 	for index := 0; index < rawPartitions.Len(); index++ {
 		partition, err := buildPartitionFromManifestV2(rawPartitions.At(index))
 		if err != nil {
 			return err
 		}
 		// Project LPU artifacts while retaining whether the build also requires CUDA.
-		if partition.PartPath != "" {
+		if partition.partPath != "" {
 			partitions = append(partitions, partition)
 		} else {
 			ref, err := rawPartitions.At(index).Partition()
 			if err != nil {
 				return fmt.Errorf("reading %s artifact partition ref: %w", gbuildManifestV2CapnpFile, err)
 			}
-			build.HasCUDAPartitions = build.HasCUDAPartitions || ref.DeviceType() == manifestcapnpv2.DeviceType_cuda
+			build.hasCUDAPartitions = build.hasCUDAPartitions || ref.DeviceType() == manifestcapnpv2.DeviceType_cuda
 		}
 	}
 	if len(partitions) == 0 {
@@ -172,43 +172,43 @@ func addLPUArtifactsFromManifestV2(
 	}
 
 	// Publish the scheduler-facing artifact projection.
-	build.Partitions = partitions
-	build.Family = family
+	build.partitions = partitions
+	build.family = family
 
 	return nil
 }
 
-func buildPartitionFromManifestV2(raw manifestcapnpv2.PartitionInfo) (BuildPartition, error) {
+func buildPartitionFromManifestV2(raw manifestcapnpv2.PartitionInfo) (buildPartition, error) {
 	if !raw.HasPartition() {
-		return BuildPartition{}, fmt.Errorf("%s artifact partition is missing partition ref", gbuildManifestV2CapnpFile)
+		return buildPartition{}, fmt.Errorf("%s artifact partition is missing partition ref", gbuildManifestV2CapnpFile)
 	}
 	ref, err := raw.Partition()
 	if err != nil {
-		return BuildPartition{}, fmt.Errorf("reading %s artifact partition ref: %w", gbuildManifestV2CapnpFile, err)
+		return buildPartition{}, fmt.Errorf("reading %s artifact partition ref: %w", gbuildManifestV2CapnpFile, err)
 	}
 	if ref.DeviceType() != manifestcapnpv2.DeviceType_lpu {
-		return BuildPartition{}, nil
+		return buildPartition{}, nil
 	}
 	if raw.Detail().Which() != manifestcapnpv2.PartitionInfo_detail_Which_lpu || !raw.Detail().HasLpu() {
-		return BuildPartition{}, fmt.Errorf("%s artifact partition %d has deviceType lpu without LPU detail", gbuildManifestV2CapnpFile, ref.PartitionId())
+		return buildPartition{}, fmt.Errorf("%s artifact partition %d has deviceType lpu without LPU detail", gbuildManifestV2CapnpFile, ref.PartitionId())
 	}
 	detail, err := raw.Detail().Lpu()
 	if err != nil {
-		return BuildPartition{}, fmt.Errorf("reading %s LPU partition %d detail: %w", gbuildManifestV2CapnpFile, ref.PartitionId(), err)
+		return buildPartition{}, fmt.Errorf("reading %s LPU partition %d detail: %w", gbuildManifestV2CapnpFile, ref.PartitionId(), err)
 	}
 	subject := fmt.Sprintf("%s LPU partition %d", gbuildManifestV2CapnpFile, ref.PartitionId())
 	programs, err := detail.Reserved4()
 	if err != nil || programs.List().Len() == 0 {
-		return BuildPartition{}, fmt.Errorf("%s programs are missing or invalid", subject)
+		return buildPartition{}, fmt.Errorf("%s programs are missing or invalid", subject)
 	}
 
 	chips, err := programs.List().Struct(0).Ptr(1)
 	if err != nil || chips.List().Len() == 0 {
-		return BuildPartition{}, fmt.Errorf("%s program chips are missing or invalid", subject)
+		return buildPartition{}, fmt.Errorf("%s program chips are missing or invalid", subject)
 	}
 	architecture, err := chips.List().Struct(0).Ptr(1)
 	if err != nil {
-		return BuildPartition{}, fmt.Errorf("%s reading chip architecture: %w", subject, err)
+		return buildPartition{}, fmt.Errorf("%s reading chip architecture: %w", subject, err)
 	}
 
 	switch architecture.Text() {
@@ -217,6 +217,6 @@ func buildPartitionFromManifestV2(raw manifestcapnpv2.PartitionInfo) (BuildParti
 	case chipArchXT:
 		return buildLPUArtifact(gbuildManifestV2CapnpFile, ref.PartitionId(), detail, BuildFamilyXT)
 	default:
-		return BuildPartition{}, fmt.Errorf("%s unsupported chip architecture %q", subject, architecture.Text())
+		return buildPartition{}, fmt.Errorf("%s unsupported chip architecture %q", subject, architecture.Text())
 	}
 }

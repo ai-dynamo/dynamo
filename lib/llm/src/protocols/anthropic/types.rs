@@ -123,7 +123,15 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             .transpose()?;
 
         // Convert tool_choice
-        let tool_choice = req.tool_choice.as_ref().map(convert_anthropic_tool_choice);
+        let tool_choice = req
+            .tool_choice
+            .as_ref()
+            .map(convert_anthropic_tool_choice)
+            .transpose()?
+            // vLLM rejects explicit auto without tools; use the backend default.
+            .filter(|choice| {
+                tools.is_some() || !matches!(choice, ChatCompletionToolChoiceOption::Auto)
+            });
         let parallel_tool_calls = req
             .tool_choice
             .as_ref()
@@ -167,6 +175,8 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             .transpose()?;
 
         Ok(NvCreateChatCompletionRequest {
+            preserve_thinking: None,
+            responses_tools: None,
             inner: dynamo_protocols::types::CreateChatCompletionRequest {
                 messages,
                 model: req.model,
@@ -454,6 +464,7 @@ fn convert_assistant_blocks(
                 // same as client tool use for conversion purposes.
                 segments.push(std::mem::take(&mut pending_reasoning));
                 tool_calls.push(ChatCompletionMessageToolCall {
+                    custom: None,
                     id: id.clone(),
                     r#type: FunctionType::Function,
                     function: dynamo_protocols::types::FunctionCall {
@@ -533,12 +544,15 @@ fn convert_anthropic_tools(
                 anyhow::anyhow!("tools[{tool_index}].input_schema: field required for client tools")
             })?;
             Ok(ChatCompletionTool {
+                custom: None,
                 r#type: ChatCompletionToolType::Function,
+                defer_loading: None,
                 function: FunctionObject {
                     name: tool.name.clone(),
                     description: tool.description.clone(),
                     parameters: Some(schema),
                     strict: tool.strict,
+                    defer_loading: None,
                 },
             })
         })
@@ -546,24 +560,27 @@ fn convert_anthropic_tools(
 }
 
 /// Convert Anthropic tool_choice to ChatCompletionToolChoiceOption.
-fn convert_anthropic_tool_choice(tc: &AnthropicToolChoice) -> ChatCompletionToolChoiceOption {
-    match tc {
+fn convert_anthropic_tool_choice(
+    tc: &AnthropicToolChoice,
+) -> anyhow::Result<ChatCompletionToolChoiceOption> {
+    Ok(match tc {
         AnthropicToolChoice::Simple(simple) => match simple.choice_type {
             AnthropicToolChoiceMode::Auto => ChatCompletionToolChoiceOption::Auto,
             AnthropicToolChoiceMode::Any => ChatCompletionToolChoiceOption::Required,
             AnthropicToolChoiceMode::None => ChatCompletionToolChoiceOption::None,
             AnthropicToolChoiceMode::Tool => {
-                // {"type": "tool"} without a "name" field is invalid per the Anthropic spec.
-                // It deserialized as Simple because Named requires the name field.
-                // Treat as "any" (required) since the caller wants a specific tool but
-                // didn't specify which — this is the closest semantic match.
-                tracing::warn!(
-                    "tool_choice has type 'tool' without a 'name' field; treating as 'any' (required)"
-                );
-                ChatCompletionToolChoiceOption::Required
+                anyhow::bail!("tool_choice.name: field required when tool_choice.type is \"tool\"");
             }
         },
         AnthropicToolChoice::Named(named) => {
+            anyhow::ensure!(
+                named.choice_type == AnthropicToolChoiceMode::Tool,
+                "tool_choice.name: only allowed for type tool"
+            );
+            anyhow::ensure!(
+                !named.name.is_empty(),
+                "tool_choice.name: must be a non-empty string"
+            );
             ChatCompletionToolChoiceOption::Named(ChatCompletionNamedToolChoice {
                 r#type: ChatCompletionToolType::Function,
                 function: FunctionName {
@@ -571,7 +588,7 @@ fn convert_anthropic_tool_choice(tc: &AnthropicToolChoice) -> ChatCompletionTool
                 },
             })
         }
-    }
+    })
 }
 
 /// Convert Dynamo's OpenAI-compatible usage into Anthropic's non-overlapping
@@ -1448,6 +1465,30 @@ mod tests {
     }
 
     #[test]
+    fn test_tool_choice_conversion_rejects_malformed_discriminators() {
+        for tool_choice in [
+            serde_json::json!({"type": "none", "name": "read"}),
+            serde_json::json!({"type": "auto", "name": "read"}),
+            serde_json::json!({"type": "any", "name": "read"}),
+            serde_json::json!({"type": "tool"}),
+            serde_json::json!({"type": "tool", "name": ""}),
+        ] {
+            let request: AnthropicCreateMessageRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test", "max_tokens": 16,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "tool_choice": tool_choice,
+                }))
+                .unwrap();
+            let error = NvCreateChatCompletionRequest::try_from(request).unwrap_err();
+            assert!(
+                error.to_string().contains("tool_choice.name"),
+                "{tool_choice}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn test_tool_choice_conversion_preserves_request_level_parser_policy() {
         for (label, tool_choice, parsing_enabled) in [
             ("auto", serde_json::json!({"type": "auto"}), true),
@@ -1496,10 +1537,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_tool_choice_without_tools() {
+        for tools in [serde_json::Value::Null, serde_json::json!([])] {
+            for choice in [
+                serde_json::Value::Null,
+                serde_json::json!({"type": "auto"}),
+                serde_json::json!({"type": "none"}),
+            ] {
+                let mut payload = serde_json::json!({
+                    "model": "test-model",
+                    "max_tokens": 100,
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "tool_choice": choice
+                });
+                if !tools.is_null() {
+                    payload["tools"] = tools.clone();
+                }
+                let req: AnthropicCreateMessageRequest = serde_json::from_value(payload).unwrap();
+                let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+                assert!(chat_req.inner.tools.is_none());
+                if choice["type"] == "none" {
+                    assert_eq!(
+                        chat_req.inner.tool_choice,
+                        Some(ChatCompletionToolChoiceOption::None)
+                    );
+                } else {
+                    assert_eq!(
+                        chat_req.inner.tool_choice, None,
+                        "tools={tools}, choice={choice}"
+                    );
+                }
+            }
+        }
+    }
+
     #[allow(deprecated)]
     #[test]
     fn test_chat_completion_to_anthropic_response() {
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -1559,6 +1636,7 @@ mod tests {
         // cached tokens (11). Anthropic input_tokens must report only the
         // uncached portion (12 - 11 = 1), with cache_read reported separately.
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-cache".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -1635,6 +1713,7 @@ mod tests {
     #[test]
     fn test_anthropic_response_emits_zero_cache_creation_when_backend_reports_no_usage() {
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-no-usage".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -1675,6 +1754,7 @@ mod tests {
     #[test]
     fn test_anthropic_response_does_not_emit_nvext() {
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-xyz".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {
@@ -2776,6 +2856,7 @@ mod anthropic_types_tests {
             .enumerate()
             .map(
                 |(index, arguments)| dynamo_protocols::types::ChatCompletionMessageToolCall {
+                    custom: None,
                     id: format!("call_{}", index + 1),
                     r#type: dynamo_protocols::types::FunctionType::Function,
                     function: dynamo_protocols::types::FunctionCall {
@@ -2786,6 +2867,7 @@ mod anthropic_types_tests {
             )
             .collect();
         let chat_resp = NvCreateChatCompletionResponse {
+            response_events: Vec::new(),
             inner: dynamo_protocols::types::CreateChatCompletionResponse {
                 id: "chatcmpl-wiring".into(),
                 choices: vec![dynamo_protocols::types::ChatChoice {

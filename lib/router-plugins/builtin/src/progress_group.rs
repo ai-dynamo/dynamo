@@ -75,7 +75,7 @@ pub(crate) fn select(
         return None;
     }
     let required = context
-        .prompt_tokens()
+        .isl_tokens()
         .saturating_sub(context.block_size() as usize)
         .max(parameters.min_prefix_tokens) as f64;
     let warm = overlaps.map(|blocks| blocks * f64::from(context.block_size()) >= required);

@@ -103,7 +103,7 @@ class AudioLoader:
         self._vllm_media_connector = None
         if self._enable_frontend_decoding:
             self._nixl_connector = _create_nixl_connector()
-            run_async(self._nixl_connector.initialize)
+            run_async(self._nixl_connector.warmup)
 
     def _get_vllm_media_connector(self) -> Any:
         if self._vllm_media_connector is None:

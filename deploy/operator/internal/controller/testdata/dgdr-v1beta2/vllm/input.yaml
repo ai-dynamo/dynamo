@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta2
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: aisimulate-vllm
+spec:
+  model:
+    name: Qwen/Qwen3-32B
+  backends:
+    - vllm
+  workload:
+    static:
+      inputTokens: 1024
+      outputTokens: 128
+      load:
+        concurrency: 10
+  objective:
+    mode: Optimize
+    metric: ThroughputPerGPU
+    sla: {}
+  aisimulate:
+    inputOverrides:
+      engine:
+        mode: aggregated
+        context_length: 32768
+        workers:
+          # TODO(#17581): Remove this explicit value after AISimulate preserves an unset runtime block size.
+          aggregated:
+            kv_cache:
+              block_size: 64
+          prefill: null
+          decode: null
+      traffic:
+        stop:
+          requests: 8
+      optimizer:
+        algorithm: random
+        max_trials: 3
+        parallelism: 1
+        candidate_timeout_seconds: 120
+      dgdr_run:
+        snapshot_interval_seconds: 0
+  recommendation:
+    maxCandidates: 1

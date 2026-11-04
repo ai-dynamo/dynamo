@@ -30,8 +30,6 @@ import (
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -328,35 +326,13 @@ func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 	return resource, nil
 }
 
-// deleteOwnedService removes the named Service, but only the exact object it verified
-// this DGD controls.
-//
-// The UID precondition is what makes the check and the delete one decision: if the
-// Service is replaced by an unowned object of the same name in between, the delete fails
-// with a conflict and the reconcile retries against the replacement instead of removing
-// a Service this DGD does not own. An already-absent Service is success, not an error.
 func (r *groveStableResourcesReconciler) deleteOwnedService(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	name string,
 ) error {
-	existing := &corev1.Service{}
-	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: dgd.Namespace}, existing)
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("failed to get service %s: %w", name, err)
-	}
-	if !metav1.IsControlledBy(existing, dgd) {
-		return nil
-	}
-
-	err = r.Delete(ctx, existing, client.Preconditions{UID: &existing.UID})
-	if err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("failed to delete service %s: %w", name, err)
-	}
-	return nil
+	key := types.NamespacedName{Name: name, Namespace: dgd.Namespace}
+	return r.deleteIfControlledBy(ctx, dgd, key, &corev1.Service{}, "service")
 }
 
 func (r *groveStableResourcesReconciler) reconcileFrontendIngress(

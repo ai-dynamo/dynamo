@@ -25,8 +25,9 @@ from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uu
 from dynamo.common.utils.input_params import resolve_thinking_token_budget
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
-from dynamo.llm.exceptions import InvalidArgument, Unknown
+from dynamo.llm.exceptions import InvalidArgument, Unknown, WorkerUnavailable
 
+from .responses_history import responses_tools_request
 from .sglang_prepost import (
     ReasoningParser,
     SglangStreamingPostProcessor,
@@ -42,6 +43,7 @@ from .sglang_prepost import (
 )
 from .structural_tag_policy import runtime_structural_tag_options
 from .thinking import runtime_default_thinking_mode
+from .usage import response_usage, update_usage_metadata
 from .utils import (
     PreprocessError,
     PromptLogprobsAccumulator,
@@ -70,14 +72,28 @@ def _cached_tokens_from_usage(usage: dict[str, Any] | None) -> int | None:
 
 
 def _request_logprobs_count(request: dict[str, Any]) -> int | None:
+    """Map OpenAI chat logprob fields onto ``output_options.logprobs``.
+
+    The result is the number of alternatives per token. ``logprobs: true``
+    without ``top_logprobs`` is ``0``: the sampled token only. A positive
+    ``top_logprobs`` requires ``logprobs: true``, as in OpenAI.
+    """
     logprobs = request.get("logprobs")
     top_logprobs = request.get("top_logprobs")
+    if top_logprobs is not None and (
+        not isinstance(top_logprobs, int)
+        or isinstance(top_logprobs, bool)
+        or top_logprobs < 0
+    ):
+        raise PreprocessError("`top_logprobs` must be an integer >= 0.")
+    if top_logprobs and logprobs is not True:
+        raise PreprocessError(
+            "When using `top_logprobs`, `logprobs` must be set to true."
+        )
     if logprobs is True:
-        return top_logprobs if top_logprobs is not None else 1
+        return top_logprobs if top_logprobs is not None else 0
     if isinstance(logprobs, int) and not isinstance(logprobs, bool):
         return logprobs
-    if top_logprobs not in (None, 0):
-        return top_logprobs
     return None
 
 
@@ -588,6 +604,19 @@ class SglangProcessor:
         self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Main entry point: preprocess, route, post-process a chat request."""
+        if request.get("responses_native_tools") and not (
+            self.exclude_tools_when_tool_choice_none
+            and request.get("tool_choice") == "none"
+        ):
+            # Inline and pool postprocessing must use the same tool identities
+            # as the prompt, including when parsers are recreated in the parent.
+            request = responses_tools_request(
+                request,
+                self.tokenizer.get_chat_template(
+                    chat_template=request.get("chat_template"),
+                    tools=request.get("tools"),
+                ),
+            )
         if self.debug_perf:
             from .perf_instrumentation import (  # type: ignore[import-not-found, import-untyped]
                 enter_generator,
@@ -614,6 +643,37 @@ class SglangProcessor:
                     elapsed_ms,
                     active,
                 )
+
+    def _build_postprocessor(
+        self,
+        request: dict[str, Any],
+        dynamo_preproc: dict[str, Any],
+        *,
+        tool_call_parser: ToolCallParserType | None,
+        reasoning_parser: ReasoningParser | None,
+        named_zero_arg_tool: str | None,
+        prompt_token_ids: list[int],
+    ) -> SglangStreamingPostProcessor:
+        """Parsers are passed in because the pool path must recreate them in the
+        main process; they are not picklable.
+        """
+        return SglangStreamingPostProcessor(
+            tokenizer=self.tokenizer,
+            tool_call_parser=tool_call_parser,
+            reasoning_parser=reasoning_parser,
+            history_tool_calls_count=_get_history_tool_calls_count(
+                request.get("messages", [])
+            ),
+            sglang_tools=convert_tools(request.get("tools")),
+            tool_call_parser_name=self.tool_call_parser_name,
+            named_zero_arg_tool=named_zero_arg_tool,
+            guided_json_is_content=_guided_json_is_content(dynamo_preproc),
+            eos_token_ids=self.eos_token_ids,
+            prompt_token_ids=prompt_token_ids,
+            stop_strings=_request_stop_strings(request),
+            skip_special_tokens=request.get("skip_special_tokens"),
+            stop_token_ids=set(_request_stop_token_ids(request)),
+        )
 
     async def _generator_inner(
         self, request: dict[str, Any], context: Any | None = None
@@ -677,22 +737,13 @@ class SglangProcessor:
             logger.exception("SGLang preprocessing failed for request %s", request_id)
             raise Unknown(f"Preprocessing error: {exc}") from exc
 
-        post = SglangStreamingPostProcessor(
-            tokenizer=self.tokenizer,
+        post = self._build_postprocessor(
+            request,
+            dynamo_preproc,
             tool_call_parser=pre.tool_call_parser,
             reasoning_parser=pre.reasoning_parser,
-            history_tool_calls_count=_get_history_tool_calls_count(
-                request.get("messages", [])
-            ),
-            sglang_tools=convert_tools(request.get("tools")),
-            tool_call_parser_name=self.tool_call_parser_name,
             named_zero_arg_tool=pre.named_zero_arg_tool,
-            guided_json_is_content=_guided_json_is_content(dynamo_preproc),
-            eos_token_ids=self.eos_token_ids,
             prompt_token_ids=pre.prompt_token_ids,
-            stop_strings=_request_stop_strings(request),
-            skip_special_tokens=request.get("skip_special_tokens"),
-            stop_token_ids=set(_request_stop_token_ids(request)),
         )
 
         async for item in self._generate_and_stream(
@@ -746,24 +797,13 @@ class SglangProcessor:
             tokenizer=self.tokenizer,
         )
 
-        post = SglangStreamingPostProcessor(
-            tokenizer=self.tokenizer,
+        post = self._build_postprocessor(
+            request,
+            preproc_result.dynamo_preproc,
             tool_call_parser=tool_call_parser,
             reasoning_parser=reasoning_parser,
-            history_tool_calls_count=_get_history_tool_calls_count(
-                request.get("messages", [])
-            ),
-            sglang_tools=convert_tools(request.get("tools")),
-            tool_call_parser_name=self.tool_call_parser_name,
             named_zero_arg_tool=preproc_result.named_zero_arg_tool,
-            guided_json_is_content=_guided_json_is_content(
-                preproc_result.dynamo_preproc
-            ),
-            eos_token_ids=self.eos_token_ids,
             prompt_token_ids=preproc_result.prompt_token_ids,
-            stop_strings=_request_stop_strings(request),
-            skip_special_tokens=request.get("skip_special_tokens"),
-            stop_token_ids=set(_request_stop_token_ids(request)),
         )
 
         async for item in self._generate_and_stream(
@@ -792,6 +832,10 @@ class SglangProcessor:
         stream_interval = self.stream_interval
         prompt_logprobs = PromptLogprobsAccumulator(request)
         logprobs_count = _request_logprobs_count(request)
+        include_completion_ids = nvext_extra_field_requested(
+            request, "completion_token_ids"
+        )
+        include_prompt_ids = nvext_extra_field_requested(request, "prompt_token_ids")
 
         try:
             dynamo_stream = await self.routed_engine.generate(
@@ -805,7 +849,9 @@ class SglangProcessor:
             pending_token_ids: list[int] = []
             pending_log_probs: list[float] | None = None
             pending_top_logprobs: list[list[dict[str, Any]]] | None = None
-            pending_usage: dict[str, Any] | None = None
+            # Requested generated IDs wait here while parsing emits no chunk.
+            completion_ids: list[int] = []
+            latest_usage: dict[str, Any] = {}
             pending_terminal: dict[str, Any] | None = None
             first_chunk = True
             input_tokens = len(tokens)
@@ -828,7 +874,8 @@ class SglangProcessor:
                 nonlocal pending_token_ids
                 nonlocal pending_log_probs
                 nonlocal pending_top_logprobs
-                nonlocal pending_usage
+                nonlocal completion_ids
+                nonlocal latest_usage
                 nonlocal first_chunk
                 nonlocal post_proc_total_ms
                 nonlocal token_count
@@ -849,14 +896,20 @@ class SglangProcessor:
                     t_pp0 = time.monotonic()
 
                 choice = post.process_output(mapped_response)
+                if include_completion_ids:
+                    completion_ids.extend(pending_token_ids)
+                    if post.locally_finished:
+                        # IDs that decoding withheld before the stop are still queued.
+                        dropped = post.post_stop_token_count()
+                        del completion_ids[len(completion_ids) - dropped :]
 
-                if post.locally_finished and pending_usage is None:
-                    pending_usage = {
+                if post.locally_finished and not latest_usage:
+                    latest_usage = {
                         "prompt_tokens": input_tokens,
                         "completion_tokens": cumulative_output_tokens,
                         "total_tokens": input_tokens + cumulative_output_tokens,
                     }
-                usage_for_metrics = pending_usage
+                usage_for_metrics = latest_usage
 
                 if self.debug_perf:
                     t_pp1 = time.monotonic()
@@ -872,8 +925,14 @@ class SglangProcessor:
                         "model": request["model"],
                         "object": "chat.completion.chunk",
                     }
-                    if pending_usage:
-                        dynamo_out["usage"] = pending_usage
+                    if usage := response_usage(
+                        request,
+                        latest_usage,
+                        prompt_tokens=input_tokens,
+                        completion_tokens=cumulative_output_tokens,
+                        finished=bool(finish_reason or post.locally_finished),
+                    ):
+                        dynamo_out["usage"] = usage
                     response_nvext: dict[str, Any] = {}
                     effective_stop_reason = (
                         stop_reason
@@ -889,6 +948,11 @@ class SglangProcessor:
                         request, "engine_data"
                     ):
                         response_nvext["engine_data"] = engine_data
+                    if include_completion_ids:
+                        response_nvext["completion_token_ids"] = completion_ids
+                        completion_ids = []
+                    if include_prompt_ids and (finish_reason or post.locally_finished):
+                        response_nvext["prompt_token_ids"] = tokens
                     if response_nvext:
                         dynamo_out["nvext"] = response_nvext
 
@@ -920,9 +984,24 @@ class SglangProcessor:
                 pending_token_ids = []
                 pending_log_probs = None
                 pending_top_logprobs = None
-                pending_usage = None
                 first_chunk = False
                 return envelope
+
+            def finalize_terminal(terminal: dict[str, Any]) -> dict[str, Any]:
+                data = terminal["data"]
+                if usage := response_usage(
+                    request,
+                    latest_usage,
+                    prompt_tokens=input_tokens,
+                    completion_tokens=cumulative_output_tokens,
+                    finished=True,
+                ):
+                    data["usage"] = usage
+                cached_tokens = _cached_tokens_from_usage(latest_usage)
+                if cached_tokens is not None:
+                    data["llm_metrics"]["cached_tokens"] = cached_tokens
+                prompt_logprobs.attach(data)
+                return terminal
 
             async for dynamo_response in dynamo_stream:
                 if dynamo_response.is_error():
@@ -960,11 +1039,12 @@ class SglangProcessor:
                     )
                     break
                 prompt_logprobs.update(engine_response)
+                if usage := engine_response.get("completion_usage"):
+                    update_usage_metadata(latest_usage, usage)
                 if pending_terminal is not None:
                     if prompt_logprobs.needs_payload and not backend_finished:
                         continue
-                    prompt_logprobs.attach(pending_terminal["data"])
-                    yield pending_terminal
+                    yield finalize_terminal(pending_terminal)
                     break
 
                 new_ids = engine_response["token_ids"]
@@ -1013,8 +1093,6 @@ class SglangProcessor:
                 stop_reason = engine_response.get("stop_reason")
                 stop_terminated = raw_finish_reason in {"eos", "stop"}
 
-                if usage := engine_response.get("completion_usage"):
-                    pending_usage = usage
                 engine_data = engine_response.get("engine_data")
 
                 pending_token_ids.extend(new_ids)
@@ -1052,8 +1130,8 @@ class SglangProcessor:
                         break
             else:
                 if pending_terminal is not None:
-                    yield pending_terminal
-        except (InvalidArgument, Unknown):
+                    yield finalize_terminal(pending_terminal)
+        except (InvalidArgument, Unknown, WorkerUnavailable):
             raise
         except Exception as e:
             logger.exception("Error generating response for request %s", request_id)
