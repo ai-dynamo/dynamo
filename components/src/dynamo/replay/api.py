@@ -97,7 +97,7 @@ class _TraceReplayOptions(_CommonReplayOptions, total=False):
     trace_num_prefix_groups: int
     report_jsonl_path: str | os.PathLike[str] | None
     max_sim_time_ms: float | None
-    # Internal to retune sweeps; not part of the public API.
+    # Internal; not part of the public API.
     _planner_warmup_observations: "Sequence[TrafficObservation] | None"
     _deterministic: bool
 
@@ -155,6 +155,14 @@ def _retune_inputs(
     AISimulate setting.
     """
 
+    retune = config.retune
+    if retune is not None and retune.executor != "local":
+        # Replay runs local sweeps only; executor 'dgdr' needs a live
+        # Planner, so do not silently replay it as a local sweep.
+        raise ValueError(
+            f"planner.retune executor {retune.executor!r} is not supported in "
+            "replay; replay retune runs executor 'local'"
+        )
     if trace_format != "dynamo":
         raise ValueError(
             "planner.retune replays a Dynamo request trace: it requires "
@@ -420,8 +428,9 @@ def run_trace_replay(
     # Internal: a retune sweep's inner planner is warmed with the history it
     # already bucketed instead of its load_predictor_warmup_trace.
     _planner_warmup_observations=None,
-    # Internal: a retune sweep replays the baseline and every candidate with
-    # the canonical router seed and ordinal request ids (common random numbers).
+    # Internal: replay with the canonical router seed and ordinal request ids
+    # (common random numbers). Retune sweeps and every trace replay through
+    # the Sweeper's Dynamo runner set it.
     _deterministic=False,
 ) -> ReplayReport | dict[str, Any]:
     """Run trace replay.

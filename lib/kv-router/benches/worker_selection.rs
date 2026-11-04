@@ -17,6 +17,10 @@ use dynamo_kv_router::indexer::{
 use dynamo_kv_router::plugins::worker_selection::experimental::resident_blocks::{
     RESIDENT_BLOCKS, ResidentBlocks,
 };
+use dynamo_kv_router::plugins::worker_selection::{
+    WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView, WorkerInputs, WorkerPicker,
+    WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
+};
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash, RouterEvent, RoutingConstraints, WorkerConfigLike,
@@ -24,10 +28,8 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode};
 use dynamo_kv_router::{
-    DefaultWorkerSelector, KvRouterConfig, SchedulingRequest, WorkerCandidate, WorkerCandidates,
-    WorkerFilter, WorkerInputView, WorkerInputs, WorkerLoadProjection, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionInput, WorkerSelectionPolicy,
-    WorkerSelectionPolicyError, WorkerSelector,
+    DefaultWorkerSelector, KvRouterConfig, SchedulingRequest, WorkerLoadProjection,
+    WorkerSelectionInput, WorkerSelectionPolicyError, WorkerSelector,
 };
 use rustc_hash::FxHashMap;
 
@@ -62,7 +64,7 @@ struct KeepAllFilter;
 
 impl WorkerFilter for KeepAllFilter {
     fn keep(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         _candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
@@ -75,7 +77,7 @@ struct CapacityFilter;
 
 impl WorkerFilter for CapacityFilter {
     fn keep(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
@@ -93,7 +95,7 @@ impl WorkerScorer for BenchScorer {
     }
 
     fn score(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -127,7 +129,7 @@ impl WorkerScorer for IgnoringPreferenceScorer {
     }
 
     fn score(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -159,7 +161,7 @@ impl WorkerScorer for ResidentBlocksScorer {
     }
 
     fn score(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
@@ -190,7 +192,7 @@ struct LowestCostPicker;
 
 impl WorkerPicker for LowestCostPicker {
     fn pick(
-        &mut self,
+        &self,
         _context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {

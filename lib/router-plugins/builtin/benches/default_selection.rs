@@ -3,9 +3,9 @@
 #[path = "../tests/support/mod.rs"]
 mod support;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use dynamo_custom_policy_builtin::default_policy;
 use dynamo_kv_router::protocols::SelectionTraceSpec;
 use dynamo_kv_router::{KvRouterConfig, WorkerSelector};
+use dynamo_router_policies::default_policy;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -157,14 +157,14 @@ fn bench(c: &mut Criterion) {
 }
 
 struct LoadScorer(f64);
-impl dynamo_kv_router::WorkerScorer for LoadScorer {
-    fn required_worker_inputs(&self) -> dynamo_kv_router::WorkerInputs {
-        dynamo_kv_router::WorkerInputs::LOAD
+impl dynamo_kv_router::plugins::worker_selection::WorkerScorer for LoadScorer {
+    fn required_worker_inputs(&self) -> dynamo_kv_router::plugins::worker_selection::WorkerInputs {
+        dynamo_kv_router::plugins::worker_selection::WorkerInputs::LOAD
     }
     fn score(
-        &mut self,
-        _: &dynamo_kv_router::WorkerSelectionContext<'_>,
-        candidates: dynamo_kv_router::WorkerCandidates<'_>,
+        &self,
+        _: &dynamo_kv_router::plugins::worker_selection::WorkerSelectionContext<'_>,
+        candidates: dynamo_kv_router::plugins::worker_selection::WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), dynamo_kv_router::WorkerSelectionPolicyError> {
         for (candidate, cost) in candidates.iter().zip(costs) {
@@ -175,11 +175,11 @@ impl dynamo_kv_router::WorkerScorer for LoadScorer {
 }
 
 struct MinimumPicker;
-impl dynamo_kv_router::WorkerPicker for MinimumPicker {
+impl dynamo_kv_router::plugins::worker_selection::WorkerPicker for MinimumPicker {
     fn pick(
-        &mut self,
-        _: &dynamo_kv_router::WorkerSelectionContext<'_>,
-        input: dynamo_kv_router::WorkerInputView<'_>,
+        &self,
+        _: &dynamo_kv_router::plugins::worker_selection::WorkerSelectionContext<'_>,
+        input: dynamo_kv_router::plugins::worker_selection::WorkerInputView<'_>,
     ) -> Result<usize, dynamo_kv_router::WorkerSelectionPolicyError> {
         Ok(input
             .candidates()
@@ -204,10 +204,10 @@ fn stacked(c: &mut Criterion) {
             let scorers = (0..scorer_count)
                 .map(|index| {
                     Box::new(LoadScorer((index + 1) as f64))
-                        as Box<dyn dynamo_kv_router::WorkerScorer>
+                        as Box<dyn dynamo_kv_router::plugins::worker_selection::WorkerScorer>
                 })
                 .collect();
-            let policy = dynamo_kv_router::WorkerSelectionPolicy::new(
+            let policy = dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicy::new(
                 KvRouterConfig::default(),
                 "prefill",
                 scorers,

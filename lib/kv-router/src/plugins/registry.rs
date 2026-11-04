@@ -72,10 +72,6 @@ pub struct RouterPluginRegistry {
     default_factory: Option<WorkerSelectionPolicyFactory>,
 }
 
-/// Existing catalogs can retain their worker-selection registration signature.
-// TODO(v1.7): Remove this compatibility alias; use RouterPluginRegistry.
-pub type WorkerSelectionPolicyRegistry = RouterPluginRegistry;
-
 /// An error from policy registration or startup resolution.
 #[derive(Debug, Error)]
 pub enum WorkerSelectionPolicyRegistryError {
@@ -165,16 +161,6 @@ impl RouterPluginRegistry {
         self.providers.is_empty() && self.request_classifiers.is_empty()
     }
 
-    /// Compatibility entry point for worker-only catalogs.
-    // TODO(v1.7): Remove this compatibility method; use register_worker_selection.
-    pub fn register(
-        &mut self,
-        name: impl Into<String>,
-        provider: WorkerSelectionPolicyProvider,
-    ) -> Result<(), WorkerSelectionPolicyRegistryError> {
-        self.register_worker_selection(name, provider)
-    }
-
     /// Resolve the configured policy instances once at process startup.
     ///
     /// Aggregated, prefill, decode, and encode pools can select separate instances. The returned
@@ -208,7 +194,7 @@ impl RouterPluginRegistry {
 
     fn resolve_selections(
         &self,
-        policy_config: Option<&crate::scheduling::WorkerSelectionConfig>,
+        policy_config: Option<&crate::plugins::worker_selection::WorkerSelectionConfig>,
         selected: WorkerSelectionPolicySelections,
     ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
         let mut resolved = HashMap::new();
@@ -255,7 +241,7 @@ impl RouterPluginRegistry {
 
     fn resolve_selected_cached(
         &self,
-        config: Option<&crate::scheduling::WorkerSelectionConfig>,
+        config: Option<&crate::plugins::worker_selection::WorkerSelectionConfig>,
         selected: Option<&str>,
         resolved: &mut HashMap<String, WorkerSelectionPolicyFactory>,
     ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
@@ -276,7 +262,7 @@ impl RouterPluginRegistry {
 
     fn resolve_selected(
         &self,
-        config: Option<&crate::scheduling::WorkerSelectionConfig>,
+        config: Option<&crate::plugins::worker_selection::WorkerSelectionConfig>,
         selected: Option<&str>,
     ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
         let Some(selected) = selected else {
@@ -290,7 +276,7 @@ impl RouterPluginRegistry {
             .ok_or_else(|| WorkerSelectionPolicyRegistryError::UnknownInstance {
                 name: selected.to_owned(),
                 available: config
-                    .map(crate::scheduling::WorkerSelectionConfig::instance_names)
+                    .map(crate::plugins::worker_selection::WorkerSelectionConfig::instance_names)
                     .filter(|names| !names.is_empty())
                     .map(|names| names.join(", "))
                     .unwrap_or_else(|| "<none>".to_owned()),
@@ -311,6 +297,27 @@ impl RouterPluginRegistry {
         })
     }
 
+    /// Build the factory for one registered policy type with default parameters, as a routing
+    /// mode names it (for example `round-robin`) without a policy file.
+    pub fn resolve_type(
+        &self,
+        policy_type: &str,
+    ) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyRegistryError> {
+        let provider = self.providers.get(policy_type).ok_or_else(|| {
+            WorkerSelectionPolicyRegistryError::UnknownType {
+                name: policy_type.to_owned(),
+                available: self.available_policy_types(),
+            }
+        })?;
+        provider(&WorkerSelectionPolicyParameters::new(
+            serde_yaml::Value::Mapping(Default::default()),
+        ))
+        .map_err(|source| WorkerSelectionPolicyRegistryError::Provider {
+            policy_type: policy_type.to_owned(),
+            source,
+        })
+    }
+
     fn available_policy_types(&self) -> String {
         let mut available = self.providers.keys().cloned().collect::<Vec<_>>();
         available.sort_unstable();
@@ -327,7 +334,7 @@ mod tests {
     use super::*;
     use crate::WorkerSelectionPolicyError;
     use crate::identity::RoutingPartitionRef;
-    use crate::scheduling::selector::{
+    use crate::plugins::worker_selection::{
         WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
     };
     use std::sync::Mutex;
@@ -363,7 +370,7 @@ mod tests {
 
     impl WorkerPicker for NeverPicker {
         fn pick(
-            &mut self,
+            &self,
             _context: &WorkerSelectionContext<'_>,
             _input: WorkerInputView<'_>,
         ) -> Result<usize, WorkerSelectionPolicyError> {
@@ -394,7 +401,7 @@ mod tests {
         })
     }
 
-    fn config() -> crate::scheduling::WorkerSelectionConfig {
+    fn config() -> crate::plugins::worker_selection::WorkerSelectionConfig {
         crate::scheduling::RouterPolicyConfig::from_yaml(
             r#"
 worker_selection:
@@ -470,9 +477,13 @@ worker_selection:
 
     #[test]
     fn resolves_builtin_default_and_multiple_custom_instances() {
-        let mut registry = WorkerSelectionPolicyRegistry::default();
-        registry.register("alpha", Arc::new(provider)).unwrap();
-        registry.register("beta", Arc::new(provider)).unwrap();
+        let mut registry = RouterPluginRegistry::default();
+        registry
+            .register_worker_selection("alpha", Arc::new(provider))
+            .unwrap();
+        registry
+            .register_worker_selection("beta", Arc::new(provider))
+            .unwrap();
         let config = config();
 
         assert!(
@@ -499,15 +510,15 @@ worker_selection:
     fn resolved_factory_dispatches_role_specific_instances() {
         let provider_calls = Arc::new(AtomicUsize::new(0));
         let factory_calls = Arc::new(Mutex::new(Vec::new()));
-        let mut registry = WorkerSelectionPolicyRegistry::default();
+        let mut registry = RouterPluginRegistry::default();
         registry
-            .register(
+            .register_worker_selection(
                 "alpha",
                 recording_provider(provider_calls.clone(), factory_calls.clone()),
             )
             .unwrap();
         registry
-            .register(
+            .register_worker_selection(
                 "beta",
                 recording_provider(provider_calls.clone(), factory_calls.clone()),
             )
@@ -547,8 +558,10 @@ worker_selection:
 
     #[test]
     fn partial_role_selection_requires_an_explicit_fallback() {
-        let mut registry = WorkerSelectionPolicyRegistry::default();
-        registry.register("alpha", Arc::new(provider)).unwrap();
+        let mut registry = RouterPluginRegistry::default();
+        registry
+            .register_worker_selection("alpha", Arc::new(provider))
+            .unwrap();
         let config = config();
         let selections = WorkerSelectionPolicySelections {
             aggregated: Some("first".to_string()),
@@ -586,8 +599,10 @@ worker_selection:
             router_policy_config: Some(policy_file.path().display().to_string()),
             ..Default::default()
         };
-        let mut registry = WorkerSelectionPolicyRegistry::default();
-        registry.register("alpha", Arc::new(provider)).unwrap();
+        let mut registry = RouterPluginRegistry::default();
+        registry
+            .register_worker_selection("alpha", Arc::new(provider))
+            .unwrap();
 
         assert!(
             registry
@@ -603,7 +618,7 @@ worker_selection:
 
     #[test]
     fn rejects_invalid_and_unknown_names() {
-        let mut registry = WorkerSelectionPolicyRegistry::default();
+        let mut registry = RouterPluginRegistry::default();
         let provider: WorkerSelectionPolicyProvider = Arc::new(provider);
 
         assert!(matches!(
@@ -611,16 +626,18 @@ worker_selection:
             Err(WorkerSelectionPolicyRegistryError::UnknownInstance { available, .. }) if available == "<none>"
         ));
         assert!(matches!(
-            registry.register("", provider.clone()),
+            registry.register_worker_selection("", provider.clone()),
             Err(WorkerSelectionPolicyRegistryError::EmptyName)
         ));
         assert!(matches!(
-            registry.register("default", provider.clone()),
+            registry.register_worker_selection("default", provider.clone()),
             Err(WorkerSelectionPolicyRegistryError::ReservedDefault)
         ));
-        registry.register("alpha", provider.clone()).unwrap();
+        registry
+            .register_worker_selection("alpha", provider.clone())
+            .unwrap();
         assert!(matches!(
-            registry.register("alpha", provider),
+            registry.register_worker_selection("alpha", provider),
             Err(WorkerSelectionPolicyRegistryError::Duplicate { name }) if name == "alpha"
         ));
 

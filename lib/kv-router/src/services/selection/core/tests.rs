@@ -42,7 +42,10 @@ fn local_core_with(
         cancel_token,
         SelectionCacheConfig::default(),
         std::sync::Arc::new(|config, role, _| {
-            crate::WorkerSelectionPolicy::reference(config.clone(), role.default_selector_label())
+            crate::plugins::worker_selection::WorkerSelectionPolicy::reference(
+                config.clone(),
+                role.default_selector_label(),
+            )
         }),
     )
     .expect("valid test config")
@@ -67,7 +70,7 @@ fn core_with(
         None,
         policy_factory.unwrap_or_else(|| {
             Arc::new(|config, role, _| {
-                crate::WorkerSelectionPolicy::reference(
+                crate::plugins::worker_selection::WorkerSelectionPolicy::reference(
                     config.clone(),
                     role.default_selector_label(),
                 )
@@ -859,15 +862,15 @@ struct SelectionObservation {
     shared_beyond_device_blocks: Vec<u32>,
 }
 
-impl crate::scheduling::selector::WorkerPicker for CapturingPicker {
-    fn required_worker_inputs(&self) -> crate::scheduling::selector::WorkerInputs {
-        crate::scheduling::selector::WorkerInputs::CACHE
+impl crate::plugins::worker_selection::WorkerPicker for CapturingPicker {
+    fn required_worker_inputs(&self) -> crate::plugins::worker_selection::WorkerInputs {
+        crate::plugins::worker_selection::WorkerInputs::CACHE
     }
 
     fn pick(
-        &mut self,
-        context: &crate::scheduling::selector::WorkerSelectionContext<'_>,
-        input: crate::scheduling::selector::WorkerInputView<'_>,
+        &self,
+        context: &crate::plugins::worker_selection::WorkerSelectionContext<'_>,
+        input: crate::plugins::worker_selection::WorkerInputView<'_>,
     ) -> Result<usize, crate::scheduling::WorkerSelectionPolicyError> {
         self.observed.lock().push(SelectionObservation {
             session_context: context.session_context().cloned(),
@@ -907,19 +910,19 @@ fn capturing_policy_factory() -> (
 
 /// Picker that declares `inputs`, records the resident block count of row 0, and takes it.
 struct ResidentBlocksRecorder {
-    inputs: crate::scheduling::selector::WorkerInputs,
+    inputs: crate::plugins::worker_selection::WorkerInputs,
     observed: Arc<parking_lot::Mutex<Vec<Option<u64>>>>,
 }
 
-impl crate::scheduling::selector::WorkerPicker for ResidentBlocksRecorder {
-    fn required_worker_inputs(&self) -> crate::scheduling::selector::WorkerInputs {
+impl crate::plugins::worker_selection::WorkerPicker for ResidentBlocksRecorder {
+    fn required_worker_inputs(&self) -> crate::plugins::worker_selection::WorkerInputs {
         self.inputs
     }
 
     fn pick(
-        &mut self,
-        _context: &crate::scheduling::selector::WorkerSelectionContext<'_>,
-        input: crate::scheduling::selector::WorkerInputView<'_>,
+        &self,
+        _context: &crate::plugins::worker_selection::WorkerSelectionContext<'_>,
+        input: crate::plugins::worker_selection::WorkerInputView<'_>,
     ) -> Result<usize, crate::scheduling::WorkerSelectionPolicyError> {
         self.observed.lock().push(input.resident_blocks(0));
         Ok(0)
@@ -927,7 +930,7 @@ impl crate::scheduling::selector::WorkerPicker for ResidentBlocksRecorder {
 }
 
 fn resident_blocks_core(
-    inputs: crate::scheduling::selector::WorkerInputs,
+    inputs: crate::plugins::worker_selection::WorkerInputs,
 ) -> (SelectionCore, Arc<parking_lot::Mutex<Vec<Option<u64>>>>) {
     let observed = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let factory_observed = Arc::clone(&observed);
@@ -955,8 +958,8 @@ fn resident_blocks_core(
 #[tokio::test]
 async fn declaring_policy_reads_live_resident_blocks() {
     let (core, observed) = resident_blocks_core(
-        crate::scheduling::selector::WorkerInputs::CACHE
-            | crate::scheduling::selector::WorkerInputs::RESIDENT_BLOCKS,
+        crate::plugins::worker_selection::WorkerInputs::CACHE
+            | crate::plugins::worker_selection::WorkerInputs::RESIDENT_BLOCKS,
     );
     core.upsert_worker(worker_with_kv_events(1))
         .await
@@ -982,7 +985,7 @@ async fn declaring_policy_reads_live_resident_blocks() {
 
 #[tokio::test]
 async fn only_a_declaring_policy_tracks_resident_blocks() {
-    use crate::scheduling::selector::WorkerInputs;
+    use crate::plugins::worker_selection::WorkerInputs;
     let indexer = crate::services::indexer::backend::create_indexer(16, 1);
     let key = default_key();
     let track = |inputs| super::workers::track_resident_blocks(&key, inputs, &indexer);
@@ -993,7 +996,7 @@ async fn only_a_declaring_policy_tracks_resident_blocks() {
 #[tokio::test]
 async fn partition_rejects_resident_blocks_without_cache() {
     let (core, _) =
-        resident_blocks_core(crate::scheduling::selector::WorkerInputs::RESIDENT_BLOCKS);
+        resident_blocks_core(crate::plugins::worker_selection::WorkerInputs::RESIDENT_BLOCKS);
     let record = core
         .upsert_worker(worker_with_kv_events(1))
         .await
