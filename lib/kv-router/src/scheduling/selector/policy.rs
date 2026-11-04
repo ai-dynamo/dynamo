@@ -263,8 +263,9 @@ impl WorkerSelectionPolicy {
     }
 
     /// Take out this policy's picker for hosted selection, when the policy can run there:
-    /// it has no filters, no scorers and no runtime config, and its picker declares at
-    /// most [`WorkerInputs::ACTIVE_REQUESTS`]. Any other policy comes back unchanged.
+    /// it has no filters, no scorers, no KV fetch scorer and no runtime config, and its picker
+    /// declares at most [`WorkerInputs::ACTIVE_REQUESTS`]. Any other policy comes back
+    /// unchanged.
     ///
     /// Passing this check doesn't make a policy run hosted: for now the hosts call it only
     /// for the `--router-mode` types (random, round-robin, least-loaded), in
@@ -307,8 +308,11 @@ impl WorkerSelectionPolicy {
             WorkerSelectionPolicyState::Reference(..) => false,
             WorkerSelectionPolicyState::Composed(state) => {
                 let state = state.borrow();
+                // A KV fetch scorer reads KV_TRANSFER, and its committed fetch must reach the
+                // booking, so its policy always runs on the KV path.
                 state.filters.is_empty()
                     && state.scorers.is_empty()
+                    && state.fetch_scorer.is_none()
                     && WorkerInputs::ACTIVE_REQUESTS.contains(state.picker_declared_inputs)
             }
         }
@@ -1200,7 +1204,7 @@ mod tests {
 
         impl KvFetchScorer for TransferFetchScorer {
             fn score(
-                &mut self,
+                &self,
                 _context: &WorkerSelectionContext<'_>,
                 candidates: WorkerCandidates<'_>,
                 costs: &mut [f64],
@@ -1309,7 +1313,7 @@ mod tests {
 
         impl KvFetchScorer for ModeScorer {
             fn score(
-                &mut self,
+                &self,
                 _context: &WorkerSelectionContext<'_>,
                 candidates: WorkerCandidates<'_>,
                 costs: &mut [f64],
@@ -1530,7 +1534,7 @@ mod tests {
             }
 
             fn score(
-                &mut self,
+                &self,
                 _context: &WorkerSelectionContext<'_>,
                 candidates: WorkerCandidates<'_>,
                 costs: &mut [f64],

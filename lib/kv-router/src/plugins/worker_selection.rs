@@ -76,7 +76,11 @@ pub trait WorkerScorer: Send + Sync {
 /// Only a `KvFetchScorer` receives [`WorkerInputs::KV_TRANSFER`]: the host strips it from
 /// filters, scorers, and pickers, so a policy that credits a fetch always commits to one. A
 /// policy has at most one; it runs after the [`WorkerScorer`]s, and its costs add to theirs.
-pub trait KvFetchScorer: Send {
+/// A policy with a `KvFetchScorer` always runs on the KV path, never as a hosted picker.
+///
+/// One instance may be called from several threads at once, and successive calls may run on
+/// different threads. Keep any state that changes between calls thread-safe.
+pub trait KvFetchScorer: Send + Sync {
     /// Declare the worker-signal groups needed by this scorer. The host adds
     /// [`WorkerInputs::KV_TRANSFER`].
     fn required_worker_inputs(&self) -> WorkerInputs {
@@ -92,7 +96,7 @@ pub trait KvFetchScorer: Send {
     /// `None` otherwise; any other value fails selection. Only the picked candidate's fetch leaves
     /// selection, and the router delivers it with the booking.
     fn score(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],

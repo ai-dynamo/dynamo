@@ -263,7 +263,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool> KvFetchScorer
     }
 
     fn score(
-        &mut self,
+        &self,
         context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
