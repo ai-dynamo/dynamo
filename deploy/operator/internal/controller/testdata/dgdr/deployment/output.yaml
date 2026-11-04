@@ -39,7 +39,7 @@ spec:
                 - --ais-backend
                 - vllm
                 - --ais-backend-version
-                - 0.24.0
+                - 0.30.0
                 - --ais-system
                 - h100_sxm
                 - --ais-tp-size
@@ -78,7 +78,7 @@ spec:
                 - --ais-backend
                 - vllm
                 - --ais-backend-version
-                - 0.24.0
+                - 0.30.0
                 - --ais-system
                 - h100_sxm
                 - --ais-tp-size
@@ -131,7 +131,7 @@ spec:
             - --ais-backend
             - vllm
             - --ais-backend-version
-            - 0.24.0
+            - 0.30.0
             - --ais-system
             - h100_sxm
             - --ais-tp-size
@@ -201,7 +201,7 @@ spec:
             - --ais-backend
             - vllm
             - --ais-backend-version
-            - 0.24.0
+            - 0.30.0
             - --ais-system
             - h100_sxm
             - --ais-tp-size
@@ -482,7 +482,7 @@ spec:
             - --ais-backend
             - vllm
             - --ais-backend-version
-            - 0.24.0
+            - 0.30.0
             - --ais-system
             - h100_sxm
             - --ais-tp-size
@@ -656,7 +656,7 @@ spec:
             - --ais-backend
             - vllm
             - --ais-backend-version
-            - 0.24.0
+            - 0.30.0
             - --ais-system
             - h100_sxm
             - --ais-tp-size

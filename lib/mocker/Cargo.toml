@@ -17,14 +17,14 @@ default = []
 profile = []
 # Benchmark builds for replay parity tooling. Canonical (seeded) replay needs no
 # feature: a caller opts in per replay with ReplayDeterminism::CanonicalV1.
-replay-bench = ["aisim-core/replay-bench", "dynamo-kv-router/bench"]
+replay-bench = ["aisimulate-core/replay-bench", "dynamo-kv-router/bench"]
 test-support = []
 zmq-events = ["dep:tmq"]
 
 [dependencies]
 dynamo-router-policies = { workspace = true }
 # repo
-aisim-core = { workspace = true }
+aisimulate-core = { workspace = true }
 dynamo-kv-router = { workspace = true }
 dynamo-tokens = { workspace = true }
 

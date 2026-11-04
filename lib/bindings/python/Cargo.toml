@@ -41,7 +41,7 @@ select-service = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standa
 # Replay parity benchmark builds. Deterministic replay itself is the `deterministic`
 # argument of `run_mocker_trace_replay` and needs no feature.
 replay-bench = ["dynamo-mocker/replay-bench"]
-ais-forward-pass = ["dep:aisim-core"]
+ais-forward-pass = ["dep:aisimulate-core"]
 nvtx = ["dynamo-runtime/nvtx"]
 velo-ucx = ["dynamo-runtime/velo-ucx"]
 # Enable in-process MM-aware KV routing
@@ -61,7 +61,7 @@ request-trace-s3 = ["dynamo-llm/request-trace-s3"]
 # former AIC crate surface. The `python` feature is required for
 # AicEngineBuilder; this extension supplies the interpreter, so the dependency
 # must not enable `extension-module`.
-aisim-core = { version = "=0.14.0", optional = true, features = ["python"] }
+aisimulate-core = { package = "aisim-core", version = "=0.14.0", optional = true, features = ["python"] }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { version = "=10.2.2" }

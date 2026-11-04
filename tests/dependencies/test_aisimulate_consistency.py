@@ -119,7 +119,7 @@ def test_dynamo_pins_matching_aisim_rc_sources() -> None:
     assert _exact_version(_python_requirement(benchmarks)) == python_version
     assert "aisim" not in pyproject.get("tool", {}).get("uv", {}).get("sources", {})
 
-    cargo_dependency = cargo["workspace"]["dependencies"]["aisim-core"]
+    cargo_dependency = cargo["workspace"]["dependencies"]["aisimulate-core"]
     assert not {"path", "git", "rev", "branch", "tag"} & cargo_dependency.keys()
     cargo_requirement = str(cargo_dependency["version"])
     assert cargo_requirement.startswith("="), "aisim-core must use one exact version"
@@ -127,9 +127,10 @@ def test_dynamo_pins_matching_aisim_rc_sources() -> None:
 
     with (ROOT / "lib/bindings/python/Cargo.toml").open("rb") as handle:
         bindings = tomllib.load(handle)
-    bindings_dependency = bindings["dependencies"]["aisim-core"]
+    bindings_dependency = bindings["dependencies"]["aisimulate-core"]
     assert not {"path", "git", "rev", "branch", "tag"} & bindings_dependency.keys()
     assert bindings_dependency["version"] == cargo_requirement
+    assert cargo_dependency["package"] == bindings_dependency["package"] == "aisim-core"
 
     patch = cargo["patch"]["crates-io"]["aisim-core"]
     assert set(patch) == {"git", "rev"}

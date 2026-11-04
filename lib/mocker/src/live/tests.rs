@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use super::*;
@@ -13,14 +13,19 @@ use dynamo_kv_router::protocols::StorageTier;
 struct NoopKvSink;
 
 #[derive(Default)]
-struct CountingFpmSink(AtomicUsize);
+struct CountingFpmSink {
+    passes: AtomicUsize,
+    decode_requests: AtomicU32,
+}
 
 impl FpmSink for CountingFpmSink {
     fn publish(
         &self,
-        _snapshot: crate::common::protocols::ForwardPassSnapshot,
+        snapshot: crate::common::protocols::ForwardPassSnapshot,
     ) -> anyhow::Result<()> {
-        self.0.fetch_add(1, Ordering::Relaxed);
+        self.passes.fetch_add(1, Ordering::Relaxed);
+        self.decode_requests
+            .fetch_add(snapshot.num_decode_requests, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -236,7 +241,7 @@ async fn assert_mtp_lifecycle_drains_through_live_boundary(engine_type: EngineTy
     }
 
     wait_for_idle(&engine).await;
-    let passes = fpm.0.load(Ordering::Relaxed);
+    let passes = fpm.passes.load(Ordering::Relaxed);
     assert!(passes > 0);
     assert!(
         passes < 7,
@@ -1000,14 +1005,14 @@ async fn full_output_stream_is_cancelled_without_stalling_an_unrelated_request()
         .unwrap();
     assert_eq!(fast_output.token_id, Some(22));
     assert!(fast_output.completed);
+    wait_for_idle(&engine).await;
     assert_eq!(slow.recv().await.unwrap().token_id, Some(7));
     assert!(slow.recv().await.is_none());
     assert!(!slow.is_aborted());
-    wait_for_idle(&engine).await;
     assert_eq!(
-        fpm.0.load(Ordering::Relaxed),
-        2,
-        "a full route must be cancelled at its completion boundary before a third pass starts"
+        fpm.decode_requests.load(Ordering::Relaxed),
+        1,
+        "a full route must be cancelled before the slow request decodes again"
     );
 }
 
