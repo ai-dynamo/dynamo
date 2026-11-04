@@ -43,7 +43,7 @@ spec:
           - --http-port
           - "8000"
           - --dyn-chat-processor
-          - sglang
+          - dynamo
           - --router-mode
           - round-robin
           - --router-session-affinity-ttl-secs
@@ -54,6 +54,8 @@ spec:
           - -m
           - dynamo.frontend
           env:
+          - name: DYN_SGL_FRONTEND_DECODING
+            value: "true"
           - name: HF_HUB_OFFLINE
             value: "1"
           - name: TRANSFORMERS_OFFLINE
@@ -127,6 +129,8 @@ spec:
           - /bin/bash
           - -lc
           env:
+          - name: DYN_SGL_FRONTEND_DECODING
+            value: "true"
           - name: HOME
             value: /tmp/k31-home
           - name: PYTHONUNBUFFERED

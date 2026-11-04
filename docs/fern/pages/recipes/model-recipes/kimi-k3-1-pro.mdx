@@ -398,7 +398,7 @@ GPU counts below describe the checked-in manifests. P counts prefill workers; D 
 ## Notes
 
 - SGLang targets are experimental, text-only, and functional-only. No SGLang performance claims are made. Use the vLLM multimodal overlays for image and video input.
-- On SGLang, disable thinking for strict `json_schema` output (`"chat_template_kwargs": {"thinking": false}`). Earlier validation returned JSON in `reasoning_content` with thinking enabled; this needs re-validation with the current structural-tag configuration.
+The SGLang frontends run the Dynamo chat processor (`--dyn-chat-processor dynamo`, `DYN_SGL_FRONTEND_DECODING=true`). With the SGLang chat processor, strict `json_schema` output with thinking enabled was returned in `reasoning_content`; if you switch processors, disable thinking for `json_schema` requests (`"chat_template_kwargs": {"thinking": false}`).
 - Synthetic draft acceptance is for benchmarking. Use the natural-acceptance variants for normal serving.
 - Disaggregated performance depends on your fabric; RDMA tuning is cluster-specific.
 
