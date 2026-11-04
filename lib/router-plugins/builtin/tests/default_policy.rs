@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 mod support;
+use dynamo_kv_router::plugins::worker_selection::{
+    WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
+};
 use dynamo_kv_router::protocols::WorkerWithDpRank;
 use dynamo_kv_router::{
-    KvRouterConfig, RoutingPartitionRef, WorkerInputView, WorkerInputs, WorkerPicker,
-    WorkerSelectionContext, WorkerSelectionInput, WorkerSelectionPolicy,
-    WorkerSelectionPolicyError, WorkerSelector, WorkerType,
+    KvRouterConfig, RoutingPartitionRef, WorkerSelectionInput, WorkerSelectionPolicyError,
+    WorkerSelector, WorkerType,
 };
 use dynamo_router_policies::{DefaultWorkerSelector, default_policy, default_registry};
 use std::collections::{HashMap, HashSet};
