@@ -41,11 +41,15 @@ cargo build -p dynamo-global-discovery-service
 cargo test -p dynamo-global-discovery-service
 ```
 
-The DynamoDB tests run against DynamoDB Local and skip when no endpoint is set:
+The DynamoDB tests run against DynamoDB Local and skip when no endpoint is set. No CI job starts
+DynamoDB Local yet, so in CI they skip; run them locally after changing the store. The tests of
+`--dynamodb-ensure-table` build their client from the environment's credentials, which DynamoDB Local
+accepts with any value:
 
 ```bash
 scripts/dynamodb-local.sh up
 export GDS_TEST_DYNAMODB_ENDPOINT=http://localhost:8000
+export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test
 cargo test -p dynamo-global-discovery-service
 ```
 

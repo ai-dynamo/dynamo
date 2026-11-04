@@ -85,7 +85,7 @@ All bodies are JSON. A reader ignores fields it does not know.
 | `POST /pools` | Register a pool and renew its lease. | 200 with a lease | 400 for malformed JSON, 413 for a body over 64 KiB, 415 without `Content-Type: application/json`, 422 for an invalid registration or one the store cannot keep, 503 when the store is unreachable |
 | `GET /pools` | List live pools. | 200 with a pool list | 503 when the backend is unreachable |
 | `GET /routers` | List Global Router replicas. | 200 with a router list | 503 when the backend is unreachable |
-| `GET /healthz` | Readiness: the backend answers. | 200 | 503 when the backend is unreachable |
+| `GET /healthz` | Readiness: the backend answers a read. It does not check that registrations can be written. | 200 | 503 when the backend is unreachable |
 
 ### `POST /pools`
 

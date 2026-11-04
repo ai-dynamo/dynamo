@@ -48,7 +48,8 @@ pub fn dynamodb_endpoint() -> Option<Url> {
 }
 
 /// Evaluates to the dynamodb-local endpoint, or prints why and returns from
-/// the test when `GDS_TEST_DYNAMODB_ENDPOINT` is not set.
+/// the test when `GDS_TEST_DYNAMODB_ENDPOINT` is not set. No CI job sets it
+/// or starts dynamodb-local yet, so in CI these tests skip and pass.
 macro_rules! skip_without_dynamodb {
     () => {
         match $crate::dynamodb_support::dynamodb_endpoint() {

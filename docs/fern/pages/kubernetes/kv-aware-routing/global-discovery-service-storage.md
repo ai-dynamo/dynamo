@@ -232,9 +232,13 @@ Query another replica, or delete a Pod, and the same pools appear. With `--pool-
 `relay_identities` is empty because registrations do not carry relay identities. With `karmada` or
 `mcs`, MCS supplies them, and a pool is listed only while MCS also imports a Ready Pool Relay for it.
 
-`GET /healthz` returns 200 while the table answers. It returns 503 when the table is unreachable, when
-the Pod lacks permission, or when the table does not exist. The readiness probe in the example manifest
-uses it, so the Pod leaves the Service until the table is back.
+`GET /healthz` returns 200 while the table answers a read. It returns 503 when the table is unreachable,
+when the Pod cannot read it, or when the table does not exist. The readiness probe in the example
+manifest uses it, so the Pod leaves the Service until the table is back.
+
+Readiness covers reads only. A Pod whose role lacks `dynamodb:UpdateItem`, or has it only for another
+region's replica, stays Ready while every `POST /pools` returns 503, and the pools drop out as their
+leases lapse. Check that the policy grants all three actions in every region the service runs in.
 
 ## Operate
 

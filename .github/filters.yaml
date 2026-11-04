@@ -137,10 +137,11 @@ ignore:
   - '.github/allurerc.mjs'
   - '.github/actionlint.yaml'
   - 'container/Dockerfile.docs'
-  # The Global Discovery Service's image and example manifest have no CI
+  # The Global Discovery Service's image and example manifests have no CI
   # image-build or deploy job yet.
   - 'container/Dockerfile.global-discovery-service'
   - 'container/global-discovery-service.yaml'
+  - 'container/global-discovery-service-dynamodb.yaml'
   - 'container/run.sh'
   - 'container/use-sccache.sh'
   - 'container/dev/**'
