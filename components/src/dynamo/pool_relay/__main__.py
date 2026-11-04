@@ -81,6 +81,7 @@ async def worker(runtime: DistributedRuntime) -> None:
         tuning=dict(args.tuning) or None,
         sources_file=args.sources_file,
         connection_revision=args.connection_revision,
+        global_discovery_url=args.global_discovery_url,
     )
     await relay.start()
     diagnostics = PoolRelayDiagnostics(relay)
@@ -89,12 +90,13 @@ async def worker(runtime: DistributedRuntime) -> None:
 
     logger.info(
         "Pool Relay started for cluster_id=%s namespaces=%s watch_all=%s "
-        "endpoint_prefixes=%s wan_bind=%s",
+        "endpoint_prefixes=%s wan_bind=%s global_discovery_url=%s",
         args.cluster_id,
         args.namespaces,
         args.watch_all,
         args.endpoint_prefixes,
         args.bind,
+        args.global_discovery_url,
     )
     endpoint_tasks: list[asyncio.Future[object]] = []
     # A terminal host failure only resolves wait_for_shutdown(); the diagnostics
