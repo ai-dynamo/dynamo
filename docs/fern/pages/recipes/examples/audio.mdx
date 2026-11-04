@@ -14,7 +14,8 @@ For text-to-speech deployments and launch scripts, see [Audio Generation](audio-
   variants={[
     {"id": "kubernetes-vllm-nemotron-speech-agg-yaml", "target": "kubernetes:vllm", "label": "Nemotron Speech · agg.yaml", "description": "Cascaded ASR, LLM, and TTS pipeline"},
     {"id": "local-vllm-agg-omni-realtime-sh", "target": "local:vllm", "label": "agg_omni_realtime.sh", "description": "Realtime Speech-to-Speech"},
-    {"id": "local-vllm-agg-realtime-transcription-sh", "target": "local:vllm", "label": "agg_realtime_transcription.sh", "description": "Qwen3-ASR Realtime Transcription"}
+    {"id": "local-vllm-agg-realtime-transcription-sh", "target": "local:vllm", "label": "agg_realtime_transcription.sh", "description": "Qwen3-ASR Realtime Transcription"},
+    {"id": "local-vllm-agg-transcription-sh", "target": "local:vllm", "label": "agg_transcription.sh", "description": "Whisper Speech-to-Text Transcription"}
   ]}
 >
 
@@ -55,6 +56,21 @@ Published Dynamo 1.5.0 runtime images are not compatible; use compatible source-
 [Source: `agg_realtime_transcription.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_realtime_transcription.sh)
 
 <Code src="../../../../../examples/backends/vllm/launch/agg_realtime_transcription.sh" title="agg_realtime_transcription.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-transcription-sh">
+
+Serves `POST /v1/audio/transcriptions` with `json` and `verbose_json` responses; streaming is not
+supported. Pass `--model` to serve another Whisper model.
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_transcription.sh)
+```
+
+[Source: `agg_transcription.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_transcription.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_transcription.sh" title="agg_transcription.sh" language="bash" maxLines={0} />
 
 </div>
 

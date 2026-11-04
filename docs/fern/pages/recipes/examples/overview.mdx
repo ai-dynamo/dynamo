@@ -34,7 +34,7 @@ Frontend and workers that each perform prefill and decode.
 
 </div>
 
-<div className="dynamo-example-card" data-example="disaggregated" data-topic="basic-serving" data-topic-label="Basic Serving" data-targets="kubernetes:sglang kubernetes:trtllm kubernetes:vllm local:sglang local:trtllm local:vllm" data-keywords="disagg.sh disagg.yaml disagg_hetero_cpu_decode.sh disagg_hetero_xpu_prefill.sh disagg_xpu_dra.yaml">
+<div className="dynamo-example-card" data-example="disaggregated" data-topic="basic-serving" data-topic-label="Basic Serving" data-targets="kubernetes:sglang kubernetes:trtllm kubernetes:vllm local:sglang local:trtllm local:vllm" data-keywords="disagg.sh disagg.yaml disagg_hetero_cpu_decode.sh disagg_hetero_xpu_prefill.sh disagg_xpu.yaml disagg_xpu_dra.yaml">
 
 <span className="dynamo-example-icon"><Icon icon="arrows-split-up-and-left" /></span>
 
@@ -434,7 +434,7 @@ Cross-encoder reranking through the /v1/rerank endpoint.
 
 </div>
 
-<div className="dynamo-example-card" data-example="audio" data-topic="workloads" data-topic-label="Workloads" data-targets="kubernetes:vllm local:vllm" data-keywords="agg.yaml agg_omni_realtime.sh agg_realtime_transcription.sh">
+<div className="dynamo-example-card" data-example="audio" data-topic="workloads" data-topic-label="Workloads" data-targets="kubernetes:vllm local:vllm" data-keywords="agg.yaml agg_omni_realtime.sh agg_realtime_transcription.sh agg_transcription.sh">
 
 <span className="dynamo-example-icon"><Icon icon="microphone" /></span>
 
@@ -490,7 +490,7 @@ Experimental patched-build T2V/I2V deployments and local launch scripts.
 
 ### Audio Generation
 
-Qwen3-TTS with validated nightly-image templates and a local launch script.
+Qwen3-TTS deployments and a local vLLM-Omni launch script.
 
 <ExampleTargets targets="kubernetes:vllm local:vllm" />
 
