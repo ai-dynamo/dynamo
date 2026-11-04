@@ -10,14 +10,15 @@ use std::{
     time::{Duration, Instant},
 };
 
+use super::builder::hosted_picker;
 use crate::kv_router::SelectionPolicySource;
 use dynamo_kv_router::plugins::worker_selection::WorkerCandidates;
 use dynamo_kv_router::{
     config::KvRouterConfig,
-    protocols::RoutingConstraints,
-    scheduling::{
+    plugins::request_classifier::{
         ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
     },
+    protocols::RoutingConstraints,
 };
 use dynamo_runtime::{
     DistributedRuntime, Runtime,
@@ -106,16 +107,12 @@ fn selector_state_remains_owned_by_the_scheduler_actor() {
 #[test]
 fn builtin_policies_declare_capabilities() {
     for mode in [RouterMode::RoundRobin, RouterMode::Random] {
-        let selector = BuiltinWorkerSelector::new(mode).unwrap();
-        assert_eq!(selector.required_worker_inputs(), WorkerInputs::NONE);
+        assert_eq!(hosted_picker(mode).unwrap().inputs(), WorkerInputs::NONE);
     }
-    for mode in [RouterMode::PowerOfTwoChoices, RouterMode::LeastLoaded] {
-        let selector = BuiltinWorkerSelector::new(mode).unwrap();
-        assert_eq!(
-            selector.required_worker_inputs(),
-            WorkerInputs::ACTIVE_REQUESTS
-        );
-    }
+    assert_eq!(
+        hosted_picker(RouterMode::LeastLoaded).unwrap().inputs(),
+        WorkerInputs::ACTIVE_REQUESTS
+    );
 }
 
 #[tokio::test]
@@ -145,12 +142,12 @@ async fn builtin_host_constructs_only_declared_capabilities() {
 
     client.override_discovered_instances(vec![1, 2]);
     client.override_instance_avail(vec![1, 2]);
-    let host = RoutingHost::builder(client, RouterMode::PowerOfTwoChoices)
+    let host = RoutingHost::builder(client, RouterMode::LeastLoaded)
         .load_context(load_context)
         .build()
         .await
         .unwrap();
-    let RoutingPolicy::Builtin(selector) = &host.policy else {
+    let RoutingPolicy::Hosted(picker) = &host.policy else {
         unreachable!()
     };
     assert_eq!(host.required_worker_inputs(), WorkerInputs::ACTIVE_REQUESTS);
@@ -159,7 +156,7 @@ async fn builtin_host_constructs_only_declared_capabilities() {
         .hosted_occupancy
         .as_ref()
         .unwrap()
-        .select_and_reserve(&host.inner, selector, Some(1))
+        .select_and_reserve(&host.inner, picker, &request(), Some(1))
         .unwrap();
     assert_eq!(selection.worker_id, 1);
     assert_eq!(selection.occupancy, 1);
@@ -274,15 +271,15 @@ async fn builtin_occupancy_selection_uses_all_selectable_workers() {
         .build()
         .await
         .unwrap();
-    let RoutingPolicy::Builtin(selector) = &host.policy else {
+    let RoutingPolicy::Hosted(picker) = &host.policy else {
         unreachable!()
     };
     let occupancy = host.hosted_occupancy.as_ref().unwrap();
     let first = occupancy
-        .select_and_reserve(&host.inner, selector, Some(1))
+        .select_and_reserve(&host.inner, picker, &request(), Some(1))
         .unwrap();
     let second = occupancy
-        .select_and_reserve(&host.inner, selector, None)
+        .select_and_reserve(&host.inner, picker, &request(), None)
         .unwrap();
 
     assert_eq!(first.worker_id, 1);
@@ -559,7 +556,6 @@ async fn builtin_affinity_uses_common_host_for_every_policy() {
     for (index, mode) in [
         RouterMode::RoundRobin,
         RouterMode::Random,
-        RouterMode::PowerOfTwoChoices,
         RouterMode::LeastLoaded,
         RouterMode::DeviceAwareWeighted,
         RouterMode::Direct,
@@ -624,7 +620,7 @@ async fn builtin_soft_affinity_clears_dp_rank_after_worker_fallback() {
 
     for (index, (mode, transport_fallback)) in [
         (RouterMode::RoundRobin, false),
-        (RouterMode::PowerOfTwoChoices, false),
+        (RouterMode::LeastLoaded, false),
         (RouterMode::RoundRobin, true),
     ]
     .into_iter()
@@ -744,7 +740,7 @@ async fn builtin_soft_affinity_rebinds_after_worker_exit() {
         .component("workers".to_string())
         .unwrap();
 
-    for (index, mode) in [RouterMode::RoundRobin, RouterMode::PowerOfTwoChoices]
+    for (index, mode) in [RouterMode::RoundRobin, RouterMode::LeastLoaded]
         .into_iter()
         .enumerate()
     {
@@ -2536,7 +2532,10 @@ async fn tracked_admission_without_lifecycle_bypasses_classifier() {
 }
 
 struct TokenContractClassifier {
-    classified: mpsc::UnboundedSender<(usize, dynamo_kv_router::scheduling::RequestProgress)>,
+    classified: mpsc::UnboundedSender<(
+        usize,
+        dynamo_kv_router::plugins::request_classifier::RequestProgress,
+    )>,
     completed: mpsc::UnboundedSender<usize>,
 }
 

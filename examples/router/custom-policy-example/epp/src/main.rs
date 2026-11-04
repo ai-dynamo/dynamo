@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_ext_proc::run;
-use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
+use dynamo_kv_router::services::selection::RouterPluginRegistry;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut registry = WorkerSelectionPolicyRegistry::default();
+    let mut registry = RouterPluginRegistry::default();
     dynamo_custom_policy_example_catalog::register(&mut registry)?;
     run(Some(registry)).await
 }

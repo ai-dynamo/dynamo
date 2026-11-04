@@ -4,7 +4,7 @@
 //! Conversion between Dynamo's `PreprocessedRequest` / `LLMEngineOutput` and the
 //! TensorRT-LLM OpenEngine (`openengine.v1`) protobuf messages.
 //!
-//! Supports aggregated and disaggregated image and video generation. Audio,
+//! Supports aggregated and disaggregated image, video, and audio generation.
 //! LoRA, beam search, and `n > 1` are rejected before dispatch.
 //!
 //! Disaggregation is driven by [`DisaggregationMode`]: a prefill worker marks
@@ -52,10 +52,6 @@ pub(crate) fn build_generate_request_with_routing(
     validate_request(&request, mode, allow_dp_rank)?;
     let request_has_media = has_media(&request);
     let media = media(&mut request, limits, mode)?;
-
-    let sampling = &request.sampling_options;
-    let stop = &request.stop_conditions;
-    let output = &request.output_options;
 
     // A prefill worker only needs the context phase; TensorRT-LLM still requires
     // a positive budget, and one token is what the context phase produces.
@@ -107,16 +103,17 @@ pub(crate) fn build_generate_request_with_routing(
         })
         .map(str::to_string);
     let include_stop_in_output = has_visible_stop_tokens(&request).then_some(true);
-    let token_ids = Arc::unwrap_or_clone(request.token_ids);
+    let input = request_input(&mut request, limits)?;
+    let sampling = &request.sampling_options;
+    let stop = &request.stop_conditions;
+    let output = &request.output_options;
 
     Ok(pb::GenerateRequest {
         request_id: request_id.to_string(),
         // The OpenEngine server rejects an empty model; any non-empty name is
         // served by the loaded model (single-model server).
         model: model.to_string(),
-        input: Some(pb::generate_request::Input::TokenIds(pb::TokenIds {
-            ids: token_ids,
-        })),
+        input: Some(input),
         sampling: Some(pb::SamplingParams {
             temperature: sampling.temperature.map(f64::from),
             top_p: sampling.top_p.map(f64::from),
@@ -170,6 +167,44 @@ pub(crate) fn build_generate_request_with_routing(
     })
 }
 
+fn request_input(
+    request: &mut PreprocessedRequest,
+    limits: Option<ModelLimits>,
+) -> Result<pb::generate_request::Input, DynamoError> {
+    match limits.and_then(|limits| limits.supported_inputs) {
+        Some(inputs) if inputs.token_ids => token_ids_input(request),
+        Some(inputs) if inputs.text => {
+            let prompt = request
+                .extra_args
+                .as_ref()
+                .and_then(|extra| extra.get("formatted_prompt"))
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    client::invalid_argument(
+                        "the loaded TensorRT-LLM model requires text input, but the request has no string extra_args.formatted_prompt",
+                    )
+                })?;
+            Ok(pb::generate_request::Input::Prompt(prompt.to_string()))
+        }
+        Some(_) => Err(client::invalid_argument(
+            "the loaded TensorRT-LLM model advertises neither text nor token-ID input support",
+        )),
+        // Older OpenEngine servers leave both optional capability fields unset.
+        None => token_ids_input(request),
+    }
+}
+
+fn token_ids_input(
+    request: &mut PreprocessedRequest,
+) -> Result<pb::generate_request::Input, DynamoError> {
+    if request.token_ids.is_empty() {
+        return Err(client::invalid_argument("token_ids must not be empty"));
+    }
+    Ok(pb::generate_request::Input::TokenIds(pb::TokenIds {
+        ids: Arc::unwrap_or_clone(std::mem::take(&mut request.token_ids)),
+    }))
+}
+
 // Derive omitted text max_tokens from the context window. For media, only
 // TensorRT-LLM knows the prompt length after expansion, so leave it unset.
 // Remove this fallback when NVIDIA/TensorRT-LLM#16549 lands; context_length
@@ -210,6 +245,7 @@ fn max_tokens(
 
 const IMAGE_KEY: &str = "image_url";
 const VIDEO_KEY: &str = "video_url";
+const AUDIO_KEY: &str = "audio_url";
 
 /// The engine fetches passthrough media, so enforce Dynamo's policy before dispatch.
 pub(crate) fn validate_remote_media_urls(
@@ -249,7 +285,7 @@ struct MediaKind {
     modality: pb::Modality,
 }
 
-const MEDIA_KINDS: [MediaKind; 2] = [
+const MEDIA_KINDS: [MediaKind; 3] = [
     MediaKind {
         key: IMAGE_KEY,
         name: "image",
@@ -259,6 +295,11 @@ const MEDIA_KINDS: [MediaKind; 2] = [
         key: VIDEO_KEY,
         name: "video",
         modality: pb::Modality::Video,
+    },
+    MediaKind {
+        key: AUDIO_KEY,
+        name: "audio",
+        modality: pb::Modality::Audio,
     },
 ];
 
@@ -728,9 +769,6 @@ fn validate_request(
     mode: DisaggregationMode,
     allow_dp_rank: bool,
 ) -> Result<(), DynamoError> {
-    if request.token_ids.is_empty() {
-        return Err(client::invalid_argument("token_ids must not be empty"));
-    }
     if request.prompt_embeds.is_some() {
         return Err(client::invalid_argument(
             "prompt embeddings are not supported by the TensorRT-LLM sidecar",

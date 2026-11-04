@@ -420,6 +420,51 @@ pub async fn health_check(client: &mut Client, deadline: Instant) -> Result<bool
     .map(|response| response.into_inner().healthy)
 }
 
+/// Follows SGLang's `WatchEngineState` until the stream ends or fails, and
+/// returns why; `None` if SGLang does not implement it. `healthy=false` is not
+/// a loss: SGLang also reports it while a `/health_generate` probe times out,
+/// for example during a pause, and clears it on the next successful probe.
+pub(crate) async fn watch_engine_state(
+    mut client: Client,
+    open_timeout: Duration,
+) -> Option<String> {
+    let request = client.watch_engine_state(pb::WatchEngineStateRequest {});
+    let mut stream = match tokio::time::timeout(open_timeout, request).await {
+        Ok(Ok(response)) => response.into_inner(),
+        Ok(Err(status))
+            if matches!(
+                status.code(),
+                tonic::Code::Unimplemented | tonic::Code::NotFound
+            ) =>
+        {
+            tracing::warn!(%status, "SGLang has no WatchEngineState; engine loss is not detected");
+            return None;
+        }
+        Ok(Err(status)) => return Some(format!("engine state watch failed: {status}")),
+        Err(_) => {
+            return Some(format!(
+                "engine state watch did not open in {open_timeout:?}"
+            ));
+        }
+    };
+    let mut logged = false;
+    loop {
+        match stream.message().await {
+            Ok(Some(snapshot)) => {
+                if !logged {
+                    tracing::info!(
+                        instance_id = snapshot.instance_id,
+                        "following SGLang engine state"
+                    );
+                    logged = true;
+                }
+            }
+            Ok(None) => return Some("engine state stream ended".to_string()),
+            Err(status) => return Some(format!("engine state stream failed: {status}")),
+        }
+    }
+}
+
 pub async fn abort(
     client: &mut Client,
     request: pb::AbortRequest,
@@ -637,6 +682,16 @@ pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
         kind,
         format!("{rpc}: {} ({:?})", status.message(), status.code()),
     )
+}
+
+/// For a generate stream: a broken stream maps as in
+/// [`dynamo_sidecar_common::stream_status_to_dynamo`]; a status SGLang sent
+/// keeps this module's mapping.
+pub fn stream_status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
+    if dynamo_sidecar_common::is_broken_stream(&status) {
+        return dynamo_sidecar_common::stream_status_to_dynamo(rpc, status);
+    }
+    status_to_dynamo(rpc, status)
 }
 
 #[cfg(test)]
