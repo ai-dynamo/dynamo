@@ -11,7 +11,6 @@
 //! own publication cadence; this module only owns the slot protocol and the
 //! close-aware wait.
 
-use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use tokio::sync::Notify;
@@ -23,10 +22,11 @@ pub const EMPTY_OPERATION_ID: u32 = u32::MAX;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LaneOverflow;
 
-/// Fixed-capacity ID lane with no consumer-progress counter.
+/// Fixed-capacity ID lane with optional consumer-progress reporting.
 pub struct FixedLane {
     slots: Box<[AtomicU32]>,
     published: AtomicUsize,
+    consumed: AtomicUsize,
     closed: AtomicBool,
     notify: Notify,
 }
@@ -39,6 +39,7 @@ impl FixedLane {
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             published: AtomicUsize::new(0),
+            consumed: AtomicUsize::new(0),
             closed: AtomicBool::new(false),
             notify: Notify::new(),
         }
@@ -89,7 +90,7 @@ impl FixedLane {
     /// after a wakeup or when new IDs are already visible; the caller then
     /// reloads `published()`. The `notified()` future is created before the
     /// recheck so a publish or close that lands in between is not lost.
-    pub async fn wait_for_publish(&self, consumed: usize) -> bool {
+    pub async fn wait_for_more(&self, consumed: usize) -> bool {
         if self.closed.load(Ordering::Acquire) && consumed == self.published.load(Ordering::Acquire)
         {
             return false;
@@ -103,22 +104,6 @@ impl FixedLane {
         }
         true
     }
-}
-
-/// `FixedLane` plus a consumer-progress counter readable from other threads,
-/// for benchmarks that report queue depth or check drain after the run.
-pub struct ConsumedLane {
-    lane: FixedLane,
-    consumed: AtomicUsize,
-}
-
-impl ConsumedLane {
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            lane: FixedLane::new(capacity),
-            consumed: AtomicUsize::new(0),
-        }
-    }
 
     #[inline]
     pub fn record_consumed(&self, consumed: usize) {
@@ -131,16 +116,7 @@ impl ConsumedLane {
     }
 
     pub fn depth(&self) -> usize {
-        self.lane.published().saturating_sub(self.consumed())
-    }
-}
-
-impl Deref for ConsumedLane {
-    type Target = FixedLane;
-
-    #[inline]
-    fn deref(&self) -> &FixedLane {
-        &self.lane
+        self.published().saturating_sub(self.consumed())
     }
 }
 
@@ -149,7 +125,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::{ConsumedLane, EMPTY_OPERATION_ID, FixedLane, LaneOverflow};
+    use super::{EMPTY_OPERATION_ID, FixedLane, LaneOverflow};
 
     const WAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -168,7 +144,7 @@ mod tests {
         let lane = Arc::new(FixedLane::new(1));
         let waiter = tokio::spawn({
             let lane = Arc::clone(&lane);
-            async move { lane.wait_for_publish(0).await }
+            async move { lane.wait_for_more(0).await }
         });
         // Let the waiter park on `notified()` before publishing.
         tokio::task::yield_now().await;
@@ -190,7 +166,7 @@ mod tests {
         let lane = Arc::new(FixedLane::new(1));
         let waiter = tokio::spawn({
             let lane = Arc::clone(&lane);
-            async move { lane.wait_for_publish(0).await }
+            async move { lane.wait_for_more(0).await }
         });
         tokio::task::yield_now().await;
         assert!(!waiter.is_finished());
@@ -200,7 +176,7 @@ mod tests {
             .await
             .expect("close must wake the consumer")
             .unwrap();
-        assert!(!lane.wait_for_publish(0).await);
+        assert!(!lane.wait_for_more(0).await);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -211,20 +187,20 @@ mod tests {
         lane.close();
 
         // Not drained yet: must return without parking.
-        let pending = tokio::time::timeout(WAKE_TIMEOUT, lane.wait_for_publish(0))
+        let pending = tokio::time::timeout(WAKE_TIMEOUT, lane.wait_for_more(0))
             .await
             .expect("a published ID must not block the consumer");
         assert!(pending);
         // Drained and closed: must report the end of the lane.
-        let drained = tokio::time::timeout(WAKE_TIMEOUT, lane.wait_for_publish(1))
+        let drained = tokio::time::timeout(WAKE_TIMEOUT, lane.wait_for_more(1))
             .await
             .expect("a drained, closed lane must not block the consumer");
         assert!(!drained);
     }
 
     #[test]
-    fn consumed_lane_reports_depth() {
-        let lane = ConsumedLane::new(3);
+    fn fixed_lane_reports_depth() {
+        let lane = FixedLane::new(3);
         assert_eq!(lane.capacity(), 3);
         assert_eq!(lane.depth(), 0);
         lane.write(0, 0).unwrap();

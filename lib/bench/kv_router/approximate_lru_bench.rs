@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use clap::{Parser, ValueEnum};
 use dynamo_bench::kv_router_common::args::CommonArgs;
-use dynamo_bench::kv_router_common::fixed_lane::{ConsumedLane, EMPTY_OPERATION_ID};
+use dynamo_bench::kv_router_common::fixed_lane::{EMPTY_OPERATION_ID, FixedLane};
 use dynamo_bench::kv_router_common::issuer::{
     parse_cpu_list, pin_current_thread, pin_current_thread_to_cpus,
 };
@@ -556,7 +556,7 @@ async fn execute_payload(
 async fn lane_worker(
     indexer: Arc<ApproximateIndexer>,
     policy: Policy,
-    lane: Arc<ConsumedLane>,
+    lane: Arc<FixedLane>,
     mut payloads: Box<[LanePayloadSlot]>,
     request_count: usize,
     ready: oneshot::Sender<()>,
@@ -584,7 +584,7 @@ async fn lane_worker(
             lane.record_consumed(consumed);
         }
 
-        if !lane.wait_for_publish(consumed).await {
+        if !lane.wait_for_more(consumed).await {
             break;
         }
     }
@@ -594,7 +594,7 @@ async fn lane_worker(
 
 fn issue_operations(
     dispatch: Vec<ScheduledOperation>,
-    lanes: Vec<Arc<ConsumedLane>>,
+    lanes: Vec<Arc<FixedLane>>,
     clock: Arc<BenchmarkClock>,
     start_signal: Arc<AtomicU64>,
     ready: mpsc::SyncSender<()>,
@@ -631,7 +631,6 @@ fn issue_operations(
             break;
         }
         lane_cursors[operation.lane] += 1;
-        // Publish per operation, not per deadline group.
         lane.publish(lane_cursors[operation.lane]);
         issued_operations += 1;
     }
@@ -781,7 +780,7 @@ async fn run_trial(
     let lanes = trial
         .lane_payloads
         .iter()
-        .map(|payloads| Arc::new(ConsumedLane::new(payloads.len())))
+        .map(|payloads| Arc::new(FixedLane::new(payloads.len())))
         .collect::<Vec<_>>();
     let mut ready_receivers = Vec::with_capacity(lanes.len());
     let mut tasks = Vec::with_capacity(lanes.len());

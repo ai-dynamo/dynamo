@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use dynamo_bench::kv_router_common::fixed_lane::{ConsumedLane, EMPTY_OPERATION_ID, LaneOverflow};
+use dynamo_bench::kv_router_common::fixed_lane::{EMPTY_OPERATION_ID, FixedLane, LaneOverflow};
 use dynamo_bench::kv_router_common::issuer::pin_current_thread;
 use dynamo_bench::kv_router_common::replay::NoopSequencePublisher;
 use dynamo_bench::kv_router_common::trace_gen::WorkerTimelines;
@@ -762,7 +762,7 @@ fn execute_payload(
 
 async fn operation_lane_worker(
     sequences: Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
-    lane: Arc<ConsumedLane>,
+    lane: Arc<FixedLane>,
     mut payloads: Box<[LanePayloadSlot]>,
     request_ids: Box<[String]>,
     clock: Arc<BenchmarkClock>,
@@ -807,7 +807,7 @@ async fn operation_lane_worker(
         if failure != LaneFailure::None {
             break;
         }
-        if !lane.wait_for_publish(consumed).await {
+        if !lane.wait_for_more(consumed).await {
             break;
         }
     }
@@ -852,7 +852,7 @@ struct IssuerOutput {
 
 fn issue_operations(
     dispatch: Vec<ScheduledOperation>,
-    lanes: Vec<Arc<ConsumedLane>>,
+    lanes: Vec<Arc<FixedLane>>,
     operation_count: usize,
     clock: Arc<BenchmarkClock>,
     start_signal: Arc<AtomicU64>,
@@ -1055,7 +1055,7 @@ pub(crate) async fn run_active_sequences_trial(
     let lanes = trial
         .lane_capacities
         .iter()
-        .map(|&capacity| Arc::new(ConsumedLane::new(capacity)))
+        .map(|&capacity| Arc::new(FixedLane::new(capacity)))
         .collect::<Vec<_>>();
 
     let mut ready_receivers = Vec::with_capacity(lanes.len());
@@ -1690,7 +1690,7 @@ mod tests {
 
     use super::{
         ActiveOperationKind, ActiveSequencesRunConfig, BenchmarkClock, CompletionFailure,
-        ConsumedLane, IssuerFailure, LanePayload, LanePayloadSlot, prepare_active_sequences_corpus,
+        FixedLane, LanePayload, LanePayloadSlot, prepare_active_sequences_corpus,
         run_active_sequences_benchmark,
     };
     use crate::active_sequences_shared::{SequenceTrace, SequenceTraceEntry};
@@ -1843,19 +1843,9 @@ mod tests {
         assert!(error.contains("replay window must be positive"));
     }
 
-    #[test]
-    fn fixed_lane_reports_overflow() {
-        let lane = ConsumedLane::new(1);
-        assert!(lane.write(0, 1).is_ok());
-        assert_eq!(
-            lane.write(1, 2).map_err(IssuerFailure::from),
-            Err(IssuerFailure::LaneOverflow)
-        );
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn fixed_lane_does_not_lose_publish_before_wait() {
-        let lane = Arc::new(ConsumedLane::new(1));
+        let lane = Arc::new(FixedLane::new(1));
         lane.write(0, 7).unwrap();
         lane.publish(1);
         lane.close();

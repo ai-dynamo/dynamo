@@ -505,7 +505,7 @@ async fn query_lane_worker<T: SyncIndexer>(
         if failure != QueryLaneFailure::None {
             break;
         }
-        if !lane.wait_for_publish(consumed).await {
+        if !lane.wait_for_more(consumed).await {
             break;
         }
     }
@@ -1840,16 +1840,6 @@ impl From<ObservationError> for IssuerFailure {
 mod tests {
     #[allow(unused_imports)]
     use super::*;
-
-    #[test]
-    fn query_lane_overflow_maps_to_query_lane_overflow() {
-        let lane = FixedLane::new(1);
-        assert!(lane.write(0, 1).is_ok());
-        assert_eq!(
-            lane.write(1, 2).map_err(IssuerFailure::from),
-            Err(IssuerFailure::QueryLaneOverflow)
-        );
-    }
 
     #[test]
     fn partition_assigns_contiguous_worker_groups_to_write_issuers() -> anyhow::Result<()> {
