@@ -287,9 +287,9 @@ impl<'a> RoutingEligibility<'a> {
             return any_worker_rank(target.worker_id, config, &mut predicate);
         }
 
-        // Walk the smaller inclusion set instead when one is much smaller than the
-        // workers. Hash iteration scans capacity, not length. The half-capacity cutoff
-        // is a conservative heuristic for the extra worker lookups.
+        // Walk the smaller inclusion set when it is much smaller than the workers. Hash
+        // iteration scans capacity, not length. The half-capacity cutoff is a
+        // conservative heuristic for the extra worker lookups.
         let allowed = self
             .allowed_worker_ids
             .map_or(usize::MAX, |ids| ids.capacity());
@@ -325,6 +325,7 @@ impl<'a> RoutingEligibility<'a> {
         false
     }
 
+    /// `any_eligible_worker_rank` over the listed workers only.
     fn any_listed_worker_rank<'i, C, F>(
         &self,
         workers: &HashMap<WorkerId, C>,

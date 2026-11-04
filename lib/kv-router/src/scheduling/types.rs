@@ -56,19 +56,17 @@ pub type OverloadedWorkerProvider =
 pub type WorkerAvailabilityProvider =
     Arc<dyn Fn(&SchedulingRequest) -> Option<Arc<HashSet<WorkerId>>> + Send + Sync + 'static>;
 
-/// Worker IDs with the Fx hasher. Selection probes the available set once per worker on
-/// every admission, which SipHash makes a large share of the eligibility checks.
+/// Worker IDs hashed with Fx: eligibility probes the available set once per worker on
+/// every admission.
 pub type WorkerIdSet = FxHashSet<WorkerId>;
 
-/// A [`WorkerAvailabilityProvider`]'s sets as [`WorkerIdSet`]s, converted once per set.
-///
-/// The frontend's provider hands out the same `Arc` until membership changes, so a set
-/// is converted when it changes, not per admission. A set built per request (a LoRA
-/// filter) is converted per request, at about the cost of building it.
+/// A [`WorkerAvailabilityProvider`] whose sets are converted to [`WorkerIdSet`]s once per
+/// set. The frontend's provider returns the same `Arc` until membership changes; a set
+/// built per request (a LoRA filter) is converted per request.
 pub(crate) struct AvailableWorkerIds {
     provider: WorkerAvailabilityProvider,
-    /// The last set converted, with its source. Holding the source keeps its allocation
-    /// alive, so a pointer match means the same set.
+    /// The last source set and its conversion. Holding the source keeps its address from
+    /// being reused, so a pointer match means the same set.
     last: ArcSwapOption<(Arc<HashSet<WorkerId>>, Arc<WorkerIdSet>)>,
 }
 
