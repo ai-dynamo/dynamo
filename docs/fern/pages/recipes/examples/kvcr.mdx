@@ -35,7 +35,11 @@ Requires an operator-configured etcd endpoint. The KV pool does not survive a wo
 <div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-kvcr-agg-memory-service-yaml">
 
 Set `DYNAMO_KVCR_COMPATIBILITY_DIGEST` and change it whenever the model, dtype, block layout, or KVCR
-integration changes. The memory service needs Linux 6.5 or equivalent `SO_PEERPIDFD` support.
+integration changes. The memory service needs Linux 6.5 or equivalent `SO_PEERPIDFD` support. Deploy
+it with `KVCR_MEMORY_SERVICE_ENABLED=true ./deploy.sh`: the script first applies the content-addressed
+`kvcr-startup` ConfigMap that both containers mount, names it in `KVCR_STARTUP_CONFIG_MAP`, and derives
+the memory settings from `KVCR_POOL_SIZE_GIB`. To apply rendered files yourself, apply the output of
+`./deploy.sh --render-configmap` first.
 
 [Source: `agg-memory-service.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/kvcr/agg-memory-service.yaml)
 

@@ -18,6 +18,7 @@ import { ExampleSelector } from "@/components/ExampleSelector";
     {"id": "kubernetes-vllm-xpu-agg-lora-xpu-dra-yaml", "target": "kubernetes:vllm", "label": "xpu/agg_lora_xpu_dra.yaml", "description": "Dynamic LoRA adapters on Intel XPU with DRA"},
     {"id": "kubernetes-vllm-xpu-agg-qwen-lora-xpu-dra-yaml", "target": "kubernetes:vllm", "label": "xpu/agg_qwen_lora_xpu_dra.yaml", "description": "Multimodal LoRA on Intel XPU with DRA"},
     {"id": "local-sglang-lora-agg-lora-sh", "target": "local:sglang", "label": "lora/agg_lora.sh", "description": "Dynamic LoRA Adapter Serving"},
+    {"id": "local-sglang-lora-agg-lora-router-sh", "target": "local:sglang", "label": "lora/agg_lora_router.sh", "description": "LoRA Adapters with KV-Aware Routing"},
     {"id": "local-vllm-lora-agg-lora-sh", "target": "local:vllm", "label": "lora/agg_lora.sh", "description": "Dynamic LoRA Adapter Serving"},
     {"id": "local-vllm-lora-agg-lora-hf-sh", "target": "local:vllm", "label": "lora/agg_lora_hf.sh", "description": "LoRA Adapter from Hugging Face"},
     {"id": "local-vllm-lora-agg-lora-router-sh", "target": "local:vllm", "label": "lora/agg_lora_router.sh", "description": "LoRA Adapters with KV-Aware Routing"},
@@ -77,6 +78,18 @@ import { ExampleSelector } from "@/components/ExampleSelector";
 [Source: `agg_lora.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/lora/agg_lora.sh)
 
 <Code src="../../../../../examples/backends/sglang/launch/lora/agg_lora.sh" title="agg_lora.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-sglang-lora-agg-lora-router-sh">
+
+```bash
+(cd examples/backends/sglang && bash launch/lora/agg_lora_router.sh)
+```
+
+[Source: `agg_lora_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/lora/agg_lora_router.sh)
+
+<Code src="../../../../../examples/backends/sglang/launch/lora/agg_lora_router.sh" title="agg_lora_router.sh" language="bash" maxLines={0} />
 
 </div>
 

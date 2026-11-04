@@ -8,17 +8,17 @@ hide-toc: true
 
 import { ExampleSelector } from "@/components/ExampleSelector";
 
-The Kubernetes manifests were functionally validated on September 10, 2026 with one H100 GPU and
-Dynamo 1.4.2 serving images and operator; these are correctness checks, not performance benchmarks.
-Use matching 1.4.2 runtime images, and request `response_format: "b64_json"` because the
-`file:///tmp/dynamo_media` storage in these examples is pod-local. See
+The Kubernetes manifests were functionally validated on October 12, 2026 with one H100 GPU and
+Dynamo 1.5.1 serving images and operator; these are correctness checks, not performance benchmarks.
+Request `response_format: "b64_json"` because the `file:///tmp/dynamo_media` storage in these
+examples is pod-local. See
 [Text-to-Image](../../use-cases/diffusion/workflows/text-to-image.md) for requests.
 
 <ExampleSelector
   variants={[
-    {"id": "kubernetes-sglang-agg-image-diffusion-yaml", "target": "kubernetes:sglang", "label": "agg_image_diffusion.yaml", "description": "FLUX.1-schnell · validated on Dynamo 1.4.2"},
-    {"id": "kubernetes-trtllm-agg-image-diffusion-yaml", "target": "kubernetes:trtllm", "label": "agg_image_diffusion.yaml", "description": "FLUX.2-klein-4B · validated on Dynamo 1.4.2"},
-    {"id": "kubernetes-vllm-agg-omni-image-yaml", "target": "kubernetes:vllm", "label": "agg_omni_image.yaml", "description": "Qwen-Image · validated on Dynamo 1.4.2"},
+    {"id": "kubernetes-sglang-agg-image-diffusion-yaml", "target": "kubernetes:sglang", "label": "agg_image_diffusion.yaml", "description": "FLUX.1-schnell · validated on Dynamo 1.5.1"},
+    {"id": "kubernetes-trtllm-agg-image-diffusion-yaml", "target": "kubernetes:trtllm", "label": "agg_image_diffusion.yaml", "description": "FLUX.2-klein-4B · validated on Dynamo 1.5.1"},
+    {"id": "kubernetes-vllm-agg-omni-image-yaml", "target": "kubernetes:vllm", "label": "agg_omni_image.yaml", "description": "Qwen-Image · validated on Dynamo 1.5.1"},
     {"id": "local-sglang-image-diffusion-sh", "target": "local:sglang", "label": "image_diffusion.sh", "description": "Text-to-Image Generation"},
     {"id": "local-trtllm-agg-image-diffusion-sh", "target": "local:trtllm", "label": "agg_image_diffusion.sh", "description": "Text-to-Image Generation"},
     {"id": "local-vllm-agg-omni-image-sh", "target": "local:vllm", "label": "agg_omni_image.sh", "description": "Text-to-Image Generation"},
@@ -30,7 +30,8 @@ Use matching 1.4.2 runtime images, and request `response_format: "b64_json"` bec
 
 <div className="dynamo-example-variant" data-example-variant="kubernetes-sglang-agg-image-diffusion-yaml">
 
-Keep `shareProcessNamespace: true` for the tested SGLang runtime; it prevents the worker from treating PID 1 as a dead parent.
+Use Dynamo 1.5.1 or later. Earlier SGLang runtimes stop the diffusion scheduler when the worker runs
+as PID 1. The functional check used a 1024×1024 image with 15 inference steps.
 
 [Source: `agg_image_diffusion.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/agg_image_diffusion.yaml)
 
@@ -50,7 +51,9 @@ The functional check used a 256×256 image with 10 inference steps.
 
 <div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-agg-omni-image-yaml">
 
-The visual check used a 512×512 image with 20 inference steps.
+Keep `DYN_HEALTH_CHECK_ENABLED=false` on the worker. The operator's canary health check sends a text
+request, which the image handler rejects, so the worker would never become ready. The visual check
+used a 512×512 image with 20 inference steps.
 
 [Source: `agg_omni_image.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_omni_image.yaml)
 
