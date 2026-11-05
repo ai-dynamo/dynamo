@@ -1643,7 +1643,7 @@ pub(super) const VECTORS: [Vector; 37] = [
     },
     Vector {
         inv: "D2",
-        desc: "within the fitting layer the multiplier applies to the scalar cost (default semantics): preferred ranks 4, 5 with 2 requests beat rank 7 with 1",
+        desc: "within the fitting layer the request count comes first and the multiplier scales only the cost: rank 7 with 1 request beats the preferred ranks 4, 5 with 2",
         booked: &[
             10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
             10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000, 10000,
@@ -1689,7 +1689,7 @@ pub(super) const VECTORS: [Vector; 37] = [
         capacity_fraction: 1.0,
         count_priority: true,
         decode_active_request_weight: 0.0,
-        expect_ties: &[4, 5],
+        expect_ties: &[7],
         expect_fallback: false,
         expect_warning_for: &[],
     },

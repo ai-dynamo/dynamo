@@ -8,21 +8,20 @@
 //! rank plus this request's), `N` is `active_requests`, and a rank's capacity is the
 //! `total_kv_blocks` it advertises, else the `capacity_blocks` parameter.
 //!
-//! - A rank fits when `D <= capacity_fraction * capacity`. A rank without a capacity fits.
-//! - Among fitting ranks: fewest requests first (`count_priority`), then the lowest `D + W * N`.
-//!   With preferred taints, the multiplier scales `N * 2^24 + D + W * N`, as the default scales
-//!   its cost.
+//! - A rank fits when `D <= capacity_fraction * capacity`, compared exactly with the fraction in
+//!   parts per million. A rank without a capacity fits.
+//! - Among fitting ranks: fewest requests first (`count_priority`), then the lowest
+//!   `(D + W * N) * taint`, where `taint` is the preferred-taint multiplier, as in the default.
 //! - When no rank fits: the lowest `D`, ignoring taints.
-//! - Ties are broken uniformly at random.
+//! - Ties are broken uniformly at random. Session-affinity targets bind, as in the default.
 //!
-//! The capacity may be an estimate, so the policy never queues or rejects a request. With
-//! `capacity_fraction: null` and `count_priority: false` it ties exactly like the default
-//! plain-decode cost.
+//! The capacity may be an estimate, so the policy never queues or rejects a request. It is meant
+//! for decode pools; on other pools it logs a warning at startup. With `capacity_fraction: null`
+//! and `count_priority: false` it ties exactly like the default plain-decode cost.
 
 use std::cell::Cell;
 use std::sync::Arc;
 
-use dynamo_kv_router::KvRouterConfig;
 use dynamo_kv_router::plugins::worker_selection::{
     ScoredWorkerCandidate, WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext,
     WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerSelectionPolicyFactory,
@@ -32,14 +31,16 @@ use dynamo_kv_router::plugins::{
     WorkerSelectionPolicyRegistryError,
 };
 use dynamo_kv_router::protocols::WorkerWithDpRank;
+use dynamo_kv_router::{KvRouterConfig, WorkerType};
 use parking_lot::Mutex;
 use rustc_hash::FxHashSet;
 
 /// Policy type selected by `worker_selection.instances[].type`.
 pub const POLICY_TYPE: &str = "dynamo-kv-capacity-aware";
 
-/// Weight of the request count in the taint-scaled cost; `D + W * N` must stay below it.
-const COUNT_SCALE: f64 = 16_777_216.0;
+/// `capacity_fraction` applies in parts per million, so the fit test is exact: with 0.7 and a
+/// capacity of 90, 63 blocks fit, although the f64 product is 62.999...
+const PPM: f64 = 1_000_000.0;
 
 /// Instance parameters. Every field is optional; unknown keys fail startup.
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
@@ -86,10 +87,10 @@ enum Key {
 impl Parameters {
     fn validate(&self) -> Result<(), WorkerSelectionPolicyProviderError> {
         if let Some(fraction) = self.capacity_fraction
-            && !(fraction.is_finite() && fraction > 0.0)
+            && !(fraction.is_finite() && (fraction * PPM).round() >= 1.0)
         {
             return Err(WorkerSelectionPolicyProviderError::new(
-                "capacity_fraction must be a finite number greater than 0, or null for no capacity filter",
+                "capacity_fraction must be a finite number of at least 0.000001, or null for no capacity filter",
             ));
         }
         if self.capacity_blocks == Some(0) {
@@ -108,14 +109,15 @@ impl Parameters {
 
     fn fits(&self, rank: &Rank) -> bool {
         match (rank.capacity, self.capacity_fraction) {
-            (Some(capacity), Some(fraction)) => rank.decode_cost <= fraction * capacity as f64,
+            (Some(capacity), Some(fraction)) => {
+                let ppm = (fraction * PPM).round() as u128;
+                rank.decode_cost as u128 * PPM as u128 <= ppm * u128::from(capacity)
+            }
             _ => true,
         }
     }
 
-    /// With `scaled`, the taint multiplies `N * 2^24 + D + W * N`; selection sets it when a
-    /// fitting rank carries a multiplier other than 1.
-    fn key(&self, rank: &Rank, scaled: bool) -> Key {
+    fn key(&self, rank: &Rank) -> Key {
         if !self.fits(rank) {
             return Key::Over {
                 decode_cost: rank.decode_cost,
@@ -126,17 +128,9 @@ impl Parameters {
         } else {
             0
         };
-        let cost = rank.decode_cost + self.decode_active_request_weight * rank.requests as f64;
-        if scaled {
-            let cost = (count as f64 * COUNT_SCALE + cost) * rank.taint.unwrap_or(1.0);
-            Key::Fits { count: 0, cost }
-        } else {
-            Key::Fits { count, cost }
-        }
-    }
-
-    fn scaled(&self, mut ranks: impl Iterator<Item = Rank>) -> bool {
-        ranks.any(|rank| rank.taint.is_some_and(|taint| taint != 1.0) && self.fits(&rank))
+        let cost = (rank.decode_cost + self.decode_active_request_weight * rank.requests as f64)
+            * rank.taint.unwrap_or(1.0);
+        Key::Fits { count, cost }
     }
 }
 
@@ -144,14 +138,13 @@ impl Parameters {
 /// `rows` yields them; `draw(n)` returns an index below `n`.
 fn select_row(
     parameters: &Parameters,
-    rows: impl Iterator<Item = (usize, Rank)> + Clone,
+    rows: impl Iterator<Item = (usize, Rank)>,
     mut draw: impl FnMut(usize) -> usize,
 ) -> Option<usize> {
-    let scaled = parameters.scaled(rows.clone().map(|(_, rank)| rank));
     let mut best: Option<(Key, usize)> = None;
     let mut ties = 0;
     for (row, rank) in rows {
-        let key = parameters.key(&rank, scaled);
+        let key = parameters.key(&rank);
         match best {
             Some((best_key, _)) if key > best_key => {}
             Some((best_key, _)) if key == best_key => {
@@ -292,12 +285,21 @@ fn provider(
     parameters.validate()?;
     Ok(Arc::new(
         move |config: &KvRouterConfig, worker_type, _partition| {
+            if worker_type != WorkerType::Decode {
+                tracing::warn!(
+                    policy = POLICY_TYPE,
+                    role = worker_type.as_str(),
+                    "selected for a non-decode pool; it ranks by decode blocks and requests only, \
+                     ignoring cache overlap and prefill load"
+                );
+            }
             WorkerSelectionPolicy::new(
                 config.clone(),
                 worker_type.as_str(),
                 Vec::new(),
                 Box::new(KvCapacityAwarePicker::new(parameters, None)),
             )
+            .with_exclusive_affinity(true)
         },
     ))
 }
@@ -346,11 +348,7 @@ mod tests {
 
     /// Every row at the minimum key, and whether no rank fits.
     fn tie_set(parameters: &Parameters, ranks: &[Rank]) -> (Vec<usize>, bool) {
-        let scaled = parameters.scaled(ranks.iter().copied());
-        let keys: Vec<Key> = ranks
-            .iter()
-            .map(|rank| parameters.key(rank, scaled))
-            .collect();
+        let keys: Vec<Key> = ranks.iter().map(|rank| parameters.key(rank)).collect();
         let min = keys
             .iter()
             .copied()
@@ -470,9 +468,13 @@ mod tests {
             let fits = |c| p.fits(&ranks(&[d], &[0], &[Some(c)], None)[0]);
             assert!(!fits(cap) || fits(cap + 1) && fits(cap * 2));
         }
-        // 0.95 x 16,001 = 15,200.95: 15,200 fits, 15,201 does not (f64 product, compared with <=).
+        // 0.95 x 16,001 = 15,200.95: 15,200 fits, 15,201 does not.
         assert!(p.fits(&ranks(&[15_200], &[0], &[Some(16_001)], None)[0]));
         assert!(!p.fits(&ranks(&[15_201], &[0], &[Some(16_001)], None)[0]));
+        // 0.7 x 90 = 63 exactly, although the f64 product is 62.999...: 63 fits, 64 does not.
+        let p = parameters(0.7, true, 0.0);
+        assert!(p.fits(&ranks(&[63], &[0], &[Some(90)], None)[0]));
+        assert!(!p.fits(&ranks(&[64], &[0], &[Some(90)], None)[0]));
     }
 
     /// The same seeded generator reproduces the same picks.
@@ -665,6 +667,8 @@ worker_selection:
         let workers = [(950, 100, 0), (100, 100, 1), (100, 100, 2)];
         let decode = factory(&config, WorkerType::Decode, partition);
         assert_eq!(host_select(&decode, None, &workers), 2);
+        // Like the default, the policy binds session-affinity targets.
+        assert!(WorkerSelector::<TestWorker>::uses_exclusive_affinity_target(&decode));
         let default_decode = crate::default_policy(config.clone(), "decode");
         assert_eq!(host_select(&default_decode, None, &workers), 1);
     }
@@ -677,6 +681,7 @@ worker_selection:
             p.validate()
         };
         assert!(with(|p| p.capacity_fraction = Some(0.0)).is_err());
+        assert!(with(|p| p.capacity_fraction = Some(0.000_000_4)).is_err());
         assert!(with(|p| p.capacity_fraction = Some(f64::NAN)).is_err());
         assert!(with(|p| p.capacity_blocks = Some(0)).is_err());
         assert!(with(|p| p.decode_active_request_weight = -1.0).is_err());
