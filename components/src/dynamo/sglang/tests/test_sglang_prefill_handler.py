@@ -6,9 +6,12 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
+from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 
+from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.llm import HttpError
 from dynamo.llm.exceptions import InvalidArgument
+from dynamo.sglang.health_check import SglangPrefillHealthCheckPayload
 from dynamo.sglang.request_handlers import cancellation
 from dynamo.sglang.request_handlers.llm.prefill_handler import PrefillWorkerHandler
 
@@ -469,3 +472,171 @@ async def test_prefill_reports_backend_cancellation_without_success_cache_stats(
 
 async def _drain(stream):
     return [item async for item in stream]
+
+
+def _bootstrap_capture_handler(monkeypatch, *, native):
+    """Prefill handler whose engine records the request it is given."""
+    calls = []
+
+    async def results():
+        yield {"meta_info": {"id": "request-id", "finish_reason": {"type": "length"}}}
+
+    class _Engine:
+        async def async_generate(self, **kwargs):
+            calls.append(kwargs)
+            return results()
+
+    def capture_native_stream(_engine, request):
+        calls.append(
+            {
+                "bootstrap_host": request.bootstrap_host,
+                "bootstrap_port": request.bootstrap_port,
+                "bootstrap_room": request.bootstrap_room,
+                "input_ids": request.input_ids,
+            }
+        )
+        return results()
+
+    handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
+    handler.engine = _Engine()
+    handler.config = SimpleNamespace(
+        server_args=SimpleNamespace(), dynamo_args=SimpleNamespace(enable_rl=False)
+    )
+    handler.shutdown_event = None
+    handler.bootstrap_host = "10.0.0.5"
+    handler.bootstrap_port = 1234
+    handler.enable_trace = False
+    handler._consume_tasks = set()
+    handler._default_sampling_params = {}
+    handler._generate_bootstrap_room = lambda: 17
+    handler._get_input_param = lambda request: {"input_ids": request["token_ids"]}
+    handler._resolve_lora = lambda request: None
+    handler._priority_kwargs = lambda priority: {}
+
+    @asynccontextmanager
+    async def cancellation_monitor(*args, **kwargs):
+        # Never fires: these requests are not cancelled.
+        never_cancelled = asyncio.get_running_loop().create_future()
+        try:
+            yield never_cancelled
+        finally:
+            never_cancelled.cancel()
+
+    handler._cancellation_monitor = cancellation_monitor
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.llm.prefill_handler.require_reasoning_kwargs",
+        lambda engine, request, **kwargs: {},
+    )
+    if native:
+        monkeypatch.setattr(
+            "dynamo.sglang.request_handlers.llm.prefill_handler.native_generate_stream",
+            capture_native_stream,
+        )
+    return handler, calls
+
+
+def _flat_request(**fields):
+    return {
+        "token_ids": [7, 8],
+        "sampling_options": {"temperature": 0.0},
+        "stop_conditions": {"max_tokens": 1},
+        **fields,
+    }
+
+
+# (request, expected engine-facing bootstrap (host, port, room), is a probe)
+_PROBE_HOST_CASES = {
+    "default_probe": (
+        lambda: SglangPrefillHealthCheckPayload().to_dict(),
+        (FAKE_BOOTSTRAP_HOST, 0, 0),
+        True,
+    ),
+    "probe_without_bootstrap_info": (
+        lambda: _flat_request(**{HEALTH_CHECK_KEY: True}),
+        (FAKE_BOOTSTRAP_HOST, 1234, 17),
+        True,
+    ),
+    "probe_with_real_host": (
+        lambda: _flat_request(
+            **{
+                HEALTH_CHECK_KEY: True,
+                "bootstrap_info": {"bootstrap_host": "10.0.0.9", "bootstrap_room": 5},
+            }
+        ),
+        (FAKE_BOOTSTRAP_HOST, 1234, 5),
+        True,
+    ),
+    "wrapped_probe": (
+        lambda: {
+            HEALTH_CHECK_KEY: True,
+            "request": {"token_ids": [7, 8], "routing": {}},
+            "sampling_params": {},
+        },
+        (FAKE_BOOTSTRAP_HOST, 1234, 17),
+        True,
+    ),
+    "ordinary_router_request": (
+        lambda: {
+            "request": {
+                "token_ids": [7, 8],
+                "routing": {},
+                "bootstrap_info": {
+                    "bootstrap_host": "10.0.0.9",
+                    "bootstrap_port": 4321,
+                    "bootstrap_room": 5,
+                },
+            },
+            "sampling_params": {},
+        },
+        ("10.0.0.9", 4321, 5),
+        False,
+    ),
+    "ordinary_local_request": (
+        lambda: _flat_request(),
+        ("10.0.0.5", 1234, 17),
+        False,
+    ),
+    "non_bool_marker": (
+        lambda: _flat_request(**{HEALTH_CHECK_KEY: 1}),
+        ("10.0.0.5", 1234, 17),
+        False,
+    ),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("case", list(_PROBE_HOST_CASES))
+async def test_prefill_probe_forces_fake_bootstrap_host(monkeypatch, case, native):
+    """A marked probe reaches the engine with FAKE_BOOTSTRAP_HOST, whatever
+    host its payload names; ordinary requests keep their real handoff."""
+    monkeypatch.delenv("DYN_HEALTH_CHECK_PAYLOAD", raising=False)
+    make_request, (host, port, room), probe = _PROBE_HOST_CASES[case]
+    request = make_request()
+    if native:
+        inner = request.get("request", request)
+        inner["extra_args"] = {"sglang_tito": {}}
+    handler, calls = _bootstrap_capture_handler(monkeypatch, native=native)
+    context = SimpleNamespace(
+        id=lambda: "request-id", trace_id=None, trace_headers=lambda: {}
+    )
+
+    chunks = await _drain(handler.generate(request, context))
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert (
+        call["bootstrap_host"],
+        call["bootstrap_port"],
+        call["bootstrap_room"],
+    ) == (host, port, room)
+    if probe:
+        # The probe relays engine output instead of a handoff.
+        assert all("disaggregated_params" not in chunk for chunk in chunks)
+    else:
+        assert chunks[0]["disaggregated_params"] == {
+            "bootstrap_host": host,
+            "bootstrap_port": port,
+            "bootstrap_room": room,
+        }
