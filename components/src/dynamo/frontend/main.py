@@ -27,7 +27,6 @@ from argparse import Namespace
 from typing import TYPE_CHECKING, Any, Optional
 
 import uvloop
-from packaging.version import Version
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
@@ -303,10 +302,13 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
         try:
             from vllm.engine.arg_utils import AsyncEngineArgs
 
-            if Version(importlib.metadata.version("vllm")).release >= (0, 29):
+            try:
+                from vllm.entrypoints.common.cli_args import FrontendArgs
+            except ModuleNotFoundError as exc:
+                if exc.name != "vllm.entrypoints.common.cli_args":
+                    raise
+                # vLLM 0.32 (CPU and XPU images); remove once they ship 0.33.
                 from vllm.entrypoints.launchers.cli_args import FrontendArgs
-            else:
-                from vllm.entrypoints.openai.cli_args import FrontendArgs
         except ModuleNotFoundError:
             logger.exception("Flag '--chat-processor vllm' requires vllm be installed.")
             sys.exit(1)
