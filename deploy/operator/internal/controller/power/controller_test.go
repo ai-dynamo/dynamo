@@ -324,8 +324,12 @@ func TestReconcileSkipsUnobservableGraphs(t *testing.T) {
 				delete(dgd.Spec.Components[0].PodTemplate.Annotations, consts.KubeAnnotationGPUPowerLimit)
 			}
 			owners, pod := testOwners(dgd, provider)
-			podReads, podPatches := 0, 0
+			podReads, podPatches, statusApplies := 0, 0, 0
 			c := testClient(t).WithObjects(append(owners, dgd, pod)...).WithStatusSubresource(dgd).WithInterceptorFuncs(interceptor.Funcs{
+				SubResourceApply: func(ctx context.Context, c client.Client, subResourceName string, obj runtime.ApplyConfiguration, opts ...client.SubResourceApplyOption) error {
+					statusApplies++
+					return c.SubResource(subResourceName).Apply(ctx, obj, opts...)
+				},
 				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 					if _, ok := list.(*corev1.PodList); ok {
 						podReads++
@@ -345,9 +349,10 @@ func TestReconcileSkipsUnobservableGraphs(t *testing.T) {
 			require.NoError(t, err)
 			require.Zero(t, result.RequeueAfter)
 
-			t.Log("No Pod is read or patched and no condition is written")
+			t.Log("No Pod is read or patched and no condition is applied, not even an empty one")
 			require.Zero(t, podReads)
 			require.Zero(t, podPatches)
+			require.Zero(t, statusApplies)
 			require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
 			require.Equal(t, "300", pod.Annotations[consts.KubeAnnotationGPUPowerLimit])
 			require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(dgd), dgd))
