@@ -3308,7 +3308,7 @@ mod tests {
             [
                 ("DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS", Some("2")),
                 ("DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS", Some("1")),
-                (GRACE_PERIOD_ENV, Some("0")),
+                ("DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS", Some("0")),
                 ("DYN_SYSTEM_PORT", None),
             ],
             async {
@@ -3380,7 +3380,7 @@ mod tests {
                     let runtime = Runtime::from_current().unwrap();
                     let shutdown = CancellationToken::new();
                     let (engine, cleanup_calls) = StateMockEngine::new(false);
-                    let mut worker = worker_with(engine.clone());
+                    let worker = worker_with(engine.clone());
                     let mut run = Box::pin(worker.run_owned(
                         runtime.clone(), None, Some(shutdown.clone()),
                     ));
