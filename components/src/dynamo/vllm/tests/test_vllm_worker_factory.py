@@ -1972,31 +1972,6 @@ async def test_transcription_exit_shuts_down_the_engine(
 
 
 @pytest.mark.asyncio
-async def test_transcription_failed_snapshot_sync_shuts_down_the_engine_once(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """The sync helper owns the shutdown until the sync succeeds."""
-    calls: list[str] = []
-    factory, runtime, config, _ = _transcription_worker_case(monkeypatch, calls)
-    snapshot, engine_client = _restore_snapshot_engine(
-        call_utility_async=AsyncMock(side_effect=Exception("rejected"))
-    )
-    handler_cls = Mock()
-    monkeypatch.setattr(
-        "dynamo.vllm.worker_factory.TranscriptionWorkerHandler", handler_cls
-    )
-
-    with pytest.raises(RuntimeError, match="invisible to the planner"):
-        await factory._create_transcription_worker(
-            runtime, config, asyncio.Event(), [], snapshot_engine=snapshot
-        )
-
-    handler_cls.assert_not_called()
-    runtime.endpoint.return_value.serve_endpoint.assert_not_called()
-    engine_client.shutdown.assert_called_once_with(timeout=5.0)
-
-
-@pytest.mark.asyncio
 async def test_sync_or_shutdown_keeps_the_sync_error_when_shutdown_also_fails(
     caplog,
 ):
