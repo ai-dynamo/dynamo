@@ -6,7 +6,6 @@
 import json
 import logging
 import os
-import tempfile
 from inspect import isawaitable
 from pathlib import Path
 from typing import Awaitable, Callable, Mapping, TypeVar
@@ -47,12 +46,11 @@ async def refresh_snapshot_restore_config(
 ) -> ConfigT:
     """Apply restore env, then rebuild backend config through normal parsing.
 
-    The restore-context file comes from the destination's Snapshot proxy or
-    legacy restore standby process. Apply that env first and then re-run the
-    runtime parser so fields derived from env (namespace, discovery backend,
-    request plane, event plane, etc.) follow the
-    same CLI/env precedence as a cold start. This avoids brittle ad hoc patches
-    to an already-parsed config object.
+    Read destination env from ``snapshot-restore-proxy`` or a legacy standby
+    context file. Apply that env first and then re-run the runtime parser so
+    fields derived from env (namespace, discovery backend, request plane, event
+    plane, etc.) follow the same CLI/env precedence as a cold start. This avoids
+    brittle ad hoc patches to an already-parsed config object.
 
     Args:
         parse_config: Zero-argument callable that returns a config object after
@@ -117,14 +115,16 @@ def parse_snapshot_restore_runtime_config(argv: list[str] | None) -> object:
 
 
 def apply_snapshot_restore_env() -> dict[str, str | None]:
-    """Load restore-context JSON and apply its runtime env to ``os.environ``."""
+    """Apply destination env from the proxy or legacy context to ``os.environ``."""
 
     control_dir = os.environ.get(SNAPSHOT_CONTROL_DIR_ENV, SNAPSHOT_CONTROL_DIR)
     proxy_env = _read_restore_proxy_env(Path(control_dir))
     if proxy_env is not None:
-        # The proxy bypasses the legacy standby entrypoint. Always replace a
-        # context left by an earlier container with this incarnation's env.
-        write_snapshot_restore_context(control_dir, env=proxy_env)
+        # Include absent settings so capture-time values are cleared too.
+        return _apply_restore_env(
+            {name: proxy_env.get(name) for name in _SUPPORTED_RESTORE_ENV_NAMES},
+            source=str(_PID_ONE / "environ"),
+        )
     context_path = Path(control_dir) / SNAPSHOT_RESTORE_CONTEXT_FILE
     if not context_path.is_file():
         raise RuntimeError(f"snapshot restore context file not found: {context_path}")
@@ -181,52 +181,41 @@ def _read_restore_proxy_env(control_path: Path) -> dict[str, str] | None:
     return destination_env
 
 
-def write_snapshot_restore_context(
-    control_dir: str | None = None,
-    *,
-    env: Mapping[str, str] | None = None,
-) -> None:
+def write_snapshot_restore_context(control_dir: str | None = None) -> None:
     """Capture restore-time environment into the snapshot-control volume.
 
-    Capture from the verified destination proxy after restore, or from the
-    legacy standby before CRIU resumes the old process image. Kubernetes has
-    already resolved literal env, Downward API, ConfigMap, and Secret refs.
+    The restore standby process runs in the new Pod before CRIU restores the old
+    process image. Capturing here lets Kubernetes resolve all env sources
+    (literal env, Downward API, ConfigMap, and Secret refs) without teaching the
+    operator how to copy runtime env values.
 
     Args:
         control_dir: Optional snapshot-control directory override. Defaults to
             ``DYN_SNAPSHOT_CONTROL_DIR`` or ``/snapshot-control``.
-        env: Destination environment from a verified restore proxy. Defaults to
-            the current environment for the legacy standby entrypoint.
     """
 
     # Capture only the non-secret env names Dynamo needs after restore. Missing
     # values are written as null so stale snapshot-time env can be cleared.
-    destination_env = os.environ if env is None else env
     context = {
         "env": {
-            name: destination_env.get(name)
+            name: os.environ.get(name) if name in os.environ else None
             for name in sorted(_SUPPORTED_RESTORE_ENV_NAMES)
         },
     }
 
-    # Readers see either the old complete context or the new complete context.
+    # Write atomically into the shared snapshot-control volume before exec'ing
+    # the inert standby process that snapshot-agent restores into.
     control_path = Path(
         control_dir or os.environ.get(SNAPSHOT_CONTROL_DIR_ENV, SNAPSHOT_CONTROL_DIR)
     )
     control_path.mkdir(parents=True, exist_ok=True)
     context_file = control_path / SNAPSHOT_RESTORE_CONTEXT_FILE
-    descriptor, temporary = tempfile.mkstemp(
-        prefix=f".{context_file.name}.", dir=control_path
+    tmp_path = context_file.with_name(f".{context_file.name}.tmp")
+    tmp_path.write_text(
+        json.dumps(context, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
     )
-    tmp_path = Path(temporary)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write(
-                json.dumps(context, sort_keys=True, separators=(",", ":")) + "\n"
-            )
-        tmp_path.replace(context_file)
-    finally:
-        tmp_path.unlink(missing_ok=True)
+    tmp_path.replace(context_file)
     logger.info("Captured snapshot restore context at %s", context_file)
 
 

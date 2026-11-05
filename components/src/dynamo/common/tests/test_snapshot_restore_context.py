@@ -65,7 +65,11 @@ def restore_proxy(monkeypatch, tmp_path):
     return proxy, control_path
 
 
-@pytest.mark.parametrize("existing_context", [False, True])
+@pytest.mark.parametrize(
+    "existing_context",
+    [None, '{"env":{"POD_UID":"stale-uid"}}', "invalid JSON"],
+    ids=["missing-context", "stale-context", "invalid-context"],
+)
 @pytest.mark.parametrize("same_pod", [False, True])
 async def test_proxy_refresh_uses_destination_identity_before_parsing(
     monkeypatch, restore_proxy, existing_context, same_pod
@@ -79,9 +83,11 @@ async def test_proxy_refresh_uses_destination_identity_before_parsing(
     destination["DYN_EVENT_PLANE"] = "nats"
     monkeypatch.setenv("POD_UID", destination["POD_UID"] if same_pod else "capture-uid")
     monkeypatch.setenv("DYN_TCP_RPC_HOST", "capture-host")
+    monkeypatch.setenv("HF_TOKEN", "capture-token")
+    monkeypatch.setenv("UNRELATED", "capture-unrelated")
     context_path = control_path / SNAPSHOT_RESTORE_CONTEXT_FILE
-    if existing_context:
-        context_path.write_text('{"env":{"POD_UID":"stale-uid"}}', encoding="utf-8")
+    if existing_context is not None:
+        context_path.write_text(existing_context, encoding="utf-8")
     (proxy / "environ").write_bytes(
         b"\0".join(f"{name}={value}".encode() for name, value in destination.items())
         + b"\0HF_TOKEN=secret\xff\0UNRELATED=\xff\0"
@@ -91,6 +97,8 @@ async def test_proxy_refresh_uses_destination_identity_before_parsing(
         for name, value in destination.items():
             assert os.environ[name] == value
         assert "DYN_TCP_RPC_HOST" not in os.environ
+        assert os.environ["HF_TOKEN"] == "capture-token"
+        assert os.environ["UNRELATED"] == "capture-unrelated"
         return SimpleNamespace(
             namespace=os.environ["DYN_NAMESPACE"],
             discovery_backend=os.environ["DYN_DISCOVERY_BACKEND"],
@@ -101,11 +109,10 @@ async def test_proxy_refresh_uses_destination_identity_before_parsing(
     config = await refresh_snapshot_restore_config(SimpleNamespace(), parse_config)
 
     assert config.namespace == destination["DYN_NAMESPACE"]
-    context = json.loads(context_path.read_text(encoding="utf-8"))
-    assert context["env"]["POD_UID"] == destination["POD_UID"]
-    assert context["env"]["DYN_TCP_RPC_HOST"] is None
-    assert "HF_TOKEN" not in context["env"]
-    assert "UNRELATED" not in context["env"]
+    if existing_context is None:
+        assert not context_path.exists()
+    else:
+        assert context_path.read_text(encoding="utf-8") == existing_context
 
 
 @pytest.mark.parametrize(
