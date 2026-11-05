@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import dataclasses
 import gzip
 import json
 import threading
@@ -22,6 +23,8 @@ from dynamo.planner.core.load.predictors import ARIMAPredictor, KalmanPredictor
 from dynamo.planner.core.types import (
     EngineCapabilities,
     FpmObservations,
+    RetuneDecision,
+    RetuneParams,
     ScheduledTick,
     TickInput,
     TrafficObservation,
@@ -845,6 +848,169 @@ async def test_run_loop_polls_at_the_current_load_interval(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await planner.run()
     assert sleeps == [1.0, 2.0]
+
+
+def _applied(changes, warmup=None):
+    return RetuneDecision(
+        decision_id="retune-w1",
+        outcome="applied",
+        window_index=0,
+        window_start_s=0.0,
+        window_end_s=60.0,
+        as_of_s=65.0,
+        launched_at_s=65.0,
+        decided_at_s=70.0,
+        num_requests=10,
+        num_candidates=2,
+        previous=RetuneParams(),
+        chosen=RetuneParams(planner=dict(changes)),
+        baseline_score=1.0,
+        best_score=2.0,
+        planner_changes=dict(changes),
+        predictor_warmup=warmup,
+    )
+
+
+async def _apply_decisions(planner, decisions):
+    # What the live supervisor does once each decision is persisted.
+    for decision in decisions:
+        planner.retune_decision_persisted(decision)
+    await asyncio.gather(*planner._retune_apply_tasks)
+
+
+async def test_live_retune_applies_planner_changes_through_runtime_reconfiguration():
+    planner = sla_planner(enable_load_scaling=True)
+    engine = planner._ensure_engine()
+    advisory = dataclasses.replace(
+        _applied({"load_scaling_down_sensitivity": 70}), outcome="advisory"
+    )
+
+    await _apply_decisions(
+        planner, [advisory, _applied({"load_scaling_down_sensitivity": 90})]
+    )
+
+    # The advisory decision changes nothing; the applied one is a new revision.
+    assert planner.config.load_scaling_down_sensitivity == 90
+    assert planner._config_generation == 1
+    assert "load_propose" in engine._builtins
+    await planner._shutdown_runtime()
+
+
+async def test_live_retune_drops_a_planner_change_overtaken_while_preparing(
+    monkeypatch,
+):
+    # A decision needs a new predictor for 360 s; while it is prepared, a
+    # control API update activates another revision. The decision is dropped
+    # instead of installing a predictor warmed for another configuration.
+    planner = _planner("disagg", optimization_target="sla", load_predictor="constant")
+    engine = planner._ensure_engine()
+    discarded = []
+
+    class Controller:
+        def discard_planner_changes(self, changes):
+            discarded.append(dict(changes))
+
+    engine._retune = Controller()
+    real_prepare = reconfiguration.prepare_predictor
+
+    def prepare(config, capabilities, observations):
+        predictor = real_prepare(config, capabilities, observations)
+        # The control API's activation, between the two locked sections.
+        planner._config_generation += 1
+        planner.config.load_scaling_down_sensitivity = 70
+        return predictor
+
+    monkeypatch.setattr(reconfiguration, "prepare_predictor", prepare)
+    changes = {"throughput_adjustment_interval_seconds": 360}
+    warmup = tuple(TrafficObservation(360.0, 10.0, 100.0, 10.0) for _ in range(8))
+
+    await _apply_decisions(planner, [_applied(changes, warmup)])
+
+    assert planner.config.throughput_adjustment_interval_seconds == 180
+    assert planner.config.load_scaling_down_sensitivity == 70
+    assert planner._config_generation == 1
+    assert discarded == [changes]
+    engine._retune = None
+    await planner._shutdown_runtime()
+
+
+async def test_live_retune_and_the_control_api_take_turns(monkeypatch):
+    # One update prepares at a time, a control API one or a live decision's:
+    # the other is rejected instead of fitting a second predictor.
+    planner = _planner("disagg", optimization_target="sla", load_predictor="constant")
+    engine = planner._ensure_engine()
+    discarded = []
+
+    class Controller:
+        def discard_planner_changes(self, changes):
+            discarded.append(dict(changes))
+
+    engine._retune = Controller()
+    release = threading.Event()
+    real_prepare = reconfiguration.prepare_predictor
+
+    def slow_prepare(config, capabilities, observations):
+        release.wait(5)
+        return real_prepare(config, capabilities, observations)
+
+    monkeypatch.setattr(reconfiguration, "prepare_predictor", slow_prepare)
+    changes = {"throughput_adjustment_interval_seconds": 360}
+    warmup = tuple(TrafficObservation(360.0, 10.0, 100.0, 10.0) for _ in range(8))
+    planner.retune_decision_persisted(_applied(changes, warmup))
+    while planner.reconfiguration._preparation is None:
+        await asyncio.sleep(0)
+
+    # The decision prepares its predictor: a control API update waits.
+    with pytest.raises(ConfigurationConflict, match="still preparing"):
+        await planner.reconfiguration.submit(request(planner, {"ttft_ms": 250.0}))
+    release.set()
+    await asyncio.gather(*planner._retune_apply_tasks)
+    assert planner.config.throughput_adjustment_interval_seconds == 360
+    assert planner._config_generation == 1
+
+    # A control API update prepares: the decision is dropped.
+    release.clear()
+    await planner.reconfiguration.submit(
+        request(planner, {"load_predictor": "kalman"}, cold_start=True)
+    )
+    other = {"load_scaling_down_sensitivity": 70}
+    await _apply_decisions(planner, [_applied(other)])
+    assert discarded == [other]
+    release.set()
+    assert (await finish(planner))["state"] == "applied"
+    assert planner.config.load_scaling_down_sensitivity != 70
+    engine._retune = None
+    await planner._shutdown_runtime()
+
+
+async def test_live_retune_keeps_the_config_when_a_planner_change_cannot_apply():
+    planner = _planner(
+        "disagg",
+        optimization_target="sla",
+        load_predictor="kalman",
+        kalman_min_points=20,
+    )
+    engine = planner._ensure_engine()
+    discarded = []
+
+    class Controller:
+        def discard_planner_changes(self, changes):
+            discarded.append(dict(changes))
+
+    engine._retune = Controller()
+    # A new throughput interval needs a warmed predictor; one bucket is too
+    # few for a Kalman filter that needs 20.
+    changes = {"throughput_adjustment_interval_seconds": 360}
+    warmup = (TrafficObservation(360.0, 10.0, 100.0, 10.0),)
+
+    await _apply_decisions(planner, [_applied(changes, warmup)])
+
+    assert planner.config.throughput_adjustment_interval_seconds == 180
+    assert planner._config_generation == 0
+    # The controller's current point is the running configuration again.
+    assert discarded == [changes]
+    engine._retune = None
+    await planner._shutdown_runtime()
 
 
 async def test_run_loop_replans_the_pending_tick_after_an_activation(monkeypatch):
