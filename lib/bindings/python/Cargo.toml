@@ -142,3 +142,11 @@ tracing-subscriber = { version = "0.3", features = ["registry"] }
 inherits = "release"
 debug = true
 strip = false
+
+# Temporary source override for https://github.com/ai-dynamo/frontend-crates/pull/556.
+# Replace with released frontend crates after that PR merges. This standalone
+# workspace must use the same overrides as the repository Cargo.toml.
+[patch.crates-io]
+dynamo-parsers = { git = "https://github.com/ai-dynamo/frontend-crates.git", branch = "rmccormick/dgh-2431-gpt-oss-return-config" }
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", branch = "rmccormick/dgh-2431-gpt-oss-return-config" }
+dynamo-structural-tag = { git = "https://github.com/ai-dynamo/frontend-crates.git", branch = "rmccormick/dgh-2431-gpt-oss-return-config" }
