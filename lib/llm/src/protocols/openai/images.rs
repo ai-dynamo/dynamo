@@ -389,12 +389,7 @@ impl NvImagesResponse {
             usage,
             nvext,
         } = self;
-        let b64_len: usize = data
-            .iter()
-            .filter_map(|image| image.b64_json.as_deref())
-            .map(str::len)
-            .sum();
-        let mut out = Vec::with_capacity(b64_len + 512);
+        let mut out = Vec::with_capacity(self.json_capacity());
         out.extend_from_slice(b"{\"created\":");
         serde_json::to_writer(&mut out, created)?;
         out.extend_from_slice(b",\"data\":[");
@@ -415,6 +410,21 @@ impl NvImagesResponse {
         }
         out.push(b'}');
         Ok(out)
+    }
+
+    /// The body length when no string needs escaping, rounded up, so the
+    /// buffer is not regrown after megabytes of images are in it.
+    fn json_capacity(&self) -> usize {
+        // Keys, numbers, enum values, `usage` and `nvext` fit in 1 KiB, and
+        // each image's keys and punctuation in 64 bytes.
+        let strings: usize = self
+            .data
+            .iter()
+            .flat_map(|image| [&image.url, &image.b64_json, &image.revised_prompt])
+            .flatten()
+            .map(String::len)
+            .sum();
+        1024 + self.size.as_ref().map_or(0, String::len) + 64 * self.data.len() + strings
     }
 }
 
@@ -1151,11 +1161,18 @@ mod tests {
             format!(
                 r#"{{"created":1,"data":[{{"b64_json":"{b64}"}},{{"b64_json":"{b64}","revised_prompt":"a cat"}}],"nvext":{{"usage":{{"output_images":2}}}}}}"#
             ),
+            // Ten images with long revised prompts, every optional field set.
+            format!(
+                r#"{{"created":4294967295,"data":[{}],"background":"transparent","output_format":"webp","size":"1536x1024","quality":"medium","usage":{{"input_tokens":4294967295,"total_tokens":4294967295,"output_tokens":4294967295,"output_token_details":{{"text_tokens":4294967295,"image_tokens":4294967295}},"input_tokens_details":{{"text_tokens":4294967295,"image_tokens":4294967295}}}},"nvext":{{"usage":{{"output_images":4294967295,"input_images":4294967295,"num_inference_steps":255}}}}}}"#,
+                vec![format!(r#"{{"b64_json":"{b64}","revised_prompt":"{}"}}"#, "a cat ".repeat(100)); 10].join(",")
+            ),
         ];
         for json in responses {
             let response: NvImagesResponse = serde_json::from_str(&json).unwrap();
             let body = String::from_utf8(response.to_json_vec().unwrap()).unwrap();
             assert_eq!(body, serde_json::to_string(&response).unwrap());
+            let capacity = response.json_capacity();
+            assert!(body.len() <= capacity, "{} > {capacity}", body.len());
         }
     }
 
