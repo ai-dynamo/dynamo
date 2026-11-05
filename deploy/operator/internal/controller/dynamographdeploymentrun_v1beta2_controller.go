@@ -875,6 +875,8 @@ func dgdrRunPublisherRules(runName string) []rbacv1.PolicyRule {
 	}
 }
 
+// reconcileInput reuses a Run's frozen input or creates it before the Job starts.
+// run must not be nil; job is nil before the Run has a Job.
 func (r *DynamoGraphDeploymentRunV1beta2Reconciler) reconcileInput(
 	ctx context.Context,
 	run *nvidiacomv1beta2.DynamoGraphDeploymentRun,

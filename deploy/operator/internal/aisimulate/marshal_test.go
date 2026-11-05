@@ -34,6 +34,7 @@ var pyYAMLFloat = regexp.MustCompile(`^(?:[-+]?(?:[0-9][0-9_]*)\.[0-9_]*(?:[eE][
 	`|[-+]?\.(?:inf|Inf|INF)` +
 	`|\.(?:nan|NaN|NAN))$`)
 
+// TestMarshalInputWritesFloatsPyYAMLReads checks that PyYAML recognizes emitted floats without changing other values.
 func TestMarshalInputWritesFloatsPyYAMLReads(t *testing.T) {
 	tests := []struct {
 		key     string

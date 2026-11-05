@@ -217,6 +217,7 @@ var pyYAMLFloat = regexp.MustCompile(`^(?:[-+]?(?:[0-9][0-9_]*)\.[0-9_]*(?:[eE][
 	`|[-+]?\.(?:inf|Inf|INF)` +
 	`|\.(?:nan|NaN|NAN))$`)
 
+// TestV1beta2RunControllerWritesSLAsAsPyYAMLFloats checks the SLA text in the ConfigMap AISimulate reads.
 func TestV1beta2RunControllerWritesSLAsAsPyYAMLFloats(t *testing.T) {
 	tests := []struct {
 		name string
@@ -270,6 +271,7 @@ func TestV1beta2RunControllerWritesSLAsAsPyYAMLFloats(t *testing.T) {
 	}
 }
 
+// yamlMappingValue finds a key in a non-nil YAML node and fails the test if the key is missing.
 func yamlMappingValue(t *testing.T, mapping *yamlv3.Node, key string) *yamlv3.Node {
 	t.Helper()
 	if mapping.Kind == yamlv3.MappingNode {
