@@ -6938,6 +6938,7 @@ impl OpenAIPreprocessor {
                     prompt_logprobs,
                     llm_metrics,
                     tool_call_completion: Vec::new(),
+                    model_eos: Vec::new(),
                 }),
                 id: a.id,
                 event: a.event,
@@ -7090,6 +7091,7 @@ impl OpenAIPreprocessor {
                                 prompt_logprobs,
                                 llm_metrics,
                                 tool_call_completion: Vec::new(),
+                                model_eos: Vec::new(),
                             }),
                             id: None,
                             event: None,
@@ -8689,6 +8691,10 @@ impl
         let mm_counts = MultimodalCounts::from_preprocessed(&common_request);
 
         let mut response_generator = Box::new(response_generator);
+        response_generator.enable_tool_call_eos(matches!(
+            guided_tool_constraint,
+            crate::protocols::openai::GuidedToolConstraint::BeamTurnGrammar { .. }
+        ));
 
         // Update ISL only for text prompts (embeddings get sequence length from tensor shape)
         if common_request.prompt_embeds.is_none() {
@@ -8858,6 +8864,14 @@ impl
             .await?;
 
         let mut common_request = builder.build()?;
+        // Backends can distinguish legacy completion defaults from chat defaults.
+        let extra_args = common_request
+            .extra_args
+            .get_or_insert_with(|| serde_json::json!({}));
+        let extra_args = extra_args
+            .as_object_mut()
+            .context("preprocessed extra_args must be an object")?;
+        extra_args.insert("request_type".to_string(), "completions".into());
         Self::validate_preprocessed_token_budget(&common_request, self.token_budget.as_ref())?;
         if let Some(tracked) = RequestMetrics::from_context(&context) {
             tracked.add_input_tokens(common_request.token_ids.len());
@@ -12341,6 +12355,7 @@ responses_tools: None,
             prompt_logprobs: None,
             llm_metrics: None,
             tool_call_completion: Vec::new(),
+            model_eos: Vec::new(),
         })
     }
 
@@ -16141,6 +16156,56 @@ responses_tools: None,
         assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
     }
 
+    /// `/v1/completions` forwards an omitted or `null` `max_tokens` as `None`,
+    /// even when a token budget is published, so the backend applies its default.
+    #[tokio::test]
+    async fn test_completion_operator_forwards_omitted_max_tokens_as_none() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.context_length = Some(100);
+        mdc.runtime_config
+            .set_engine_specific(TOKEN_BUDGET_RUNTIME_KEY, token_budget(100, true, true))
+            .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+
+        for body in [
+            serde_json::json!({"model": "test-model", "prompt": [1, 2, 3], "max_tokens": null}),
+            serde_json::json!({"model": "test-model", "prompt": [1, 2, 3]}),
+        ] {
+            let request: NvCreateCompletionRequest = serde_json::from_value(body.clone()).unwrap();
+            let capture = Arc::new(PromptRecordingBackend::default());
+            let next: Arc<
+                dyn AsyncEngine<
+                        SingleIn<PreprocessedRequest>,
+                        ManyOut<Annotated<BackendOutput>>,
+                        Error,
+                    >,
+            > = capture.clone();
+
+            let result =
+                Operator::generate(preprocessor.as_ref(), PipelineContext::new(request), next)
+                    .await;
+            assert!(result.is_err(), "capture backend always fails: {body}");
+            let dispatched = capture
+                .requests
+                .lock()
+                .unwrap()
+                .pop()
+                .unwrap_or_else(|| panic!("request was not dispatched: {body}"));
+            assert_eq!(
+                dispatched.stop_conditions.max_tokens, None,
+                "request: {body}"
+            );
+            assert_eq!(
+                dispatched.extra_args.unwrap()["request_type"],
+                "completions"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn chat_operator_rejects_invalid_legacy_jail_request_before_dispatch() {
         let mut mdc = ModelDeploymentCard::load_from_disk(
@@ -16183,9 +16248,12 @@ responses_tools: None,
         assert!(dynamo_err.to_string().contains("legacy tool-call parsing"));
     }
 
-    /// Records each dispatched prompt's length, then fails before any output.
+    /// Records dispatched requests, then fails before any output.
     #[derive(Default)]
-    struct PromptRecordingBackend(std::sync::Mutex<Vec<usize>>);
+    struct PromptRecordingBackend {
+        requests: std::sync::Mutex<Vec<PreprocessedRequest>>,
+        embedding_prompt_lengths: std::sync::Mutex<Vec<usize>>,
+    }
 
     #[async_trait]
     impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
@@ -16195,7 +16263,7 @@ responses_tools: None,
             &self,
             request: SingleIn<PreprocessedRequest>,
         ) -> Result<ManyOut<Annotated<BackendOutput>>, Error> {
-            self.0.lock().unwrap().push(request.token_ids.len());
+            self.requests.lock().unwrap().push(request.into_parts().0);
             anyhow::bail!("stop before any output")
         }
     }
@@ -16212,7 +16280,7 @@ responses_tools: None,
             &self,
             request: SingleIn<PreprocessedEmbeddingRequest>,
         ) -> Result<ManyOut<Annotated<EmbeddingsEngineOutput>>, Error> {
-            self.0
+            self.embedding_prompt_lengths
                 .lock()
                 .unwrap()
                 .extend(request.token_ids.iter().map(Vec::len));
@@ -16248,7 +16316,7 @@ responses_tools: None,
             panic!("the recording backend must stop before producing output");
         };
         assert_eq!(error.to_string(), "stop before any output");
-        assert_eq!(*backend.0.lock().unwrap(), [3, 2]);
+        assert_eq!(*backend.embedding_prompt_lengths.lock().unwrap(), [3, 2]);
         assert_eq!(awaiting_first_token_input_tokens(&metrics), 5);
         drop(inflight);
         assert_eq!(awaiting_first_token_input_tokens(&metrics), 0);
@@ -16296,12 +16364,19 @@ responses_tools: None,
         let result = Operator::generate(preprocessor.as_ref(), context, backend.clone()).await;
 
         assert!(result.is_err());
-        let dispatched = backend.0.lock().unwrap().clone();
+        let dispatched = backend.requests.lock().unwrap();
         assert_eq!(dispatched.len(), 1);
-        assert!(dispatched[0] > 0);
+        assert!(!dispatched[0].token_ids.is_empty());
+        assert!(
+            dispatched[0]
+                .extra_args
+                .as_ref()
+                .and_then(|args| args.get("request_type"))
+                .is_none()
+        );
         assert_eq!(
             awaiting_first_token_input_tokens(&metrics),
-            dispatched[0] as u64
+            dispatched[0].token_ids.len() as u64
         );
     }
 

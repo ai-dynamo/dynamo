@@ -525,7 +525,7 @@ class FakeRetuneKube:
         ready: bool = True,
         terminating: bool = False,
         ip: str | None = None,
-        http_port: int | None = 8000,
+        admin_port: int | None = 8002,
         labels: Mapping[str, str] | None = None,
         restarts: int | None = 0,
     ) -> PodInfo:
@@ -541,7 +541,7 @@ class FakeRetuneKube:
             ready=ready,
             terminating=terminating,
             labels=all_labels,
-            http_port=http_port,
+            admin_port=admin_port,
             restarts=restarts,
         )
         with self._lock:
