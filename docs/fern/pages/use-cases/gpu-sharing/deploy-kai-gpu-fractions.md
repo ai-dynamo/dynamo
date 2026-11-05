@@ -24,6 +24,8 @@ All commands run from `examples/gpu-sharing` in a checkout of the [Dynamo reposi
 
 ## Requirements
 
+For a bounded TP2 test on two GPUs, including unequal per-device compute and pod replacement, use [Reproduce Multi-GPU GPU Fractions](deploy-tp2-gpu-fractions.md). Its r620 extension and memory-view checks differ from this TP1 benchmark configuration.
+
 You must build and install the two forks before you deploy any models. That procedure, including the full node requirements, is in [Build the KAI-Scheduler and GPU Fractioning Forks](build-gpu-fractioning-forks.md) and is not repeated here.
 
 This guide assumes a multi-node Kubernetes cluster that you administer from a workstation with `kubectl` and `helm`. All 16 models run on one node with eight A100 40GB GPUs. The model cache is a `hostPath` directory on that node, so every frontend and worker is pinned to it. The load generator runs in its own pod on a different node and reaches each frontend through its Service DNS name.
