@@ -35,6 +35,8 @@ pub(crate) struct DiscoveredModel {
     pub source: String,
     pub served_name: String,
     pub supports_multimodal: bool,
+    /// The engine reads frontend-decoded images sent as `MediaItem.nixl_ref`.
+    pub supports_nixl_ref: bool,
     identity: ModelIdentity,
     server: pb::ServerInfo,
     data_parallel_range: Range<u32>,
@@ -85,6 +87,7 @@ impl DiscoveredModel {
             source,
             served_name,
             supports_multimodal: model.supports_multimodal,
+            supports_nixl_ref: model.supports_nixl_ref,
             identity,
             server,
             data_parallel_range,
@@ -102,6 +105,12 @@ impl DiscoveredModel {
             return Err(client::protocol_error(format!(
                 "parallelism changed between bootstrap and startup: expected {:?}, observed {:?}",
                 self.server.parallelism, observed.server.parallelism
+            )));
+        }
+        if self.supports_nixl_ref != observed.supports_nixl_ref {
+            return Err(client::protocol_error(format!(
+                "nixl_ref support changed between bootstrap and startup: expected {}, observed {}",
+                self.supports_nixl_ref, observed.supports_nixl_ref
             )));
         }
         if self.server.rl_capabilities != observed.server.rl_capabilities {

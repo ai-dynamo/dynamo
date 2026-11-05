@@ -33,6 +33,7 @@ pub(crate) fn model_info() -> pb::ModelInfo {
         supports_multimodal: false,
         reasoning_parser: "deepseek_r1".to_string(),
         tool_call_parser: "hermes".to_string(),
+        supports_nixl_ref: false,
     }
 }
 

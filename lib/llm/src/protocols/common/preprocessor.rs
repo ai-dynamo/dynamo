@@ -759,6 +759,23 @@ impl std::fmt::Debug for PreprocessedRequest {
 }
 
 impl PreprocessedRequest {
+    /// The registrations of this request's frontend-decoded media, if any; see
+    /// [`DecodedMediaHold`](crate::preprocessor::media::DecodedMediaHold).
+    pub(crate) fn decoded_media_hold(
+        &self,
+    ) -> Option<crate::preprocessor::media::DecodedMediaHold> {
+        crate::preprocessor::media::DecodedMediaHold::of(
+            self.multi_modal_data
+                .iter()
+                .flat_map(|data| data.values())
+                .flatten()
+                .filter_map(|item| match item {
+                    MultimodalData::Decoded(descriptor) => Some(descriptor),
+                    _ => None,
+                }),
+        )
+    }
+
     pub fn phase(&self) -> RequestPhase {
         self.tracker
             .as_ref()

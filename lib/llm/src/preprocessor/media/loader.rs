@@ -11,13 +11,14 @@ use ipnet::IpNet;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::redirect::Policy;
 
-use dynamo_memory::nixl::NixlAgent;
 use dynamo_protocols::types::ChatCompletionRequestUserMessageContentPart;
 use dynamo_runtime::error::{DynamoError, ErrorType};
 
 use super::common::EncodedMediaData;
 use super::decoders::{Decoder, MediaDecoder};
-use super::rdma::{DataType, RdmaMediaDataDescriptor, drain_nixl_notifications, get_nixl_agent};
+use super::rdma::{
+    DataType, MediaAgent, RdmaMediaDataDescriptor, drain_nixl_notifications, get_nixl_agent,
+};
 use super::require_image_url;
 use lru::LruCache;
 use parking_lot::Mutex;
@@ -527,7 +528,7 @@ pub struct MediaLoader {
     http_client: reqwest::Client,
     #[allow(dead_code)]
     media_fetcher: MediaFetcher,
-    nixl_agent: NixlAgent,
+    nixl_agent: MediaAgent,
     /// Optional byte-budgeted LRU cache of decoded + NIXL-registered media,
     /// keyed by URL hash. Each cache entry is shared via Arc; the underlying
     /// NIXL registration is kept alive as long as any clone (in cache or
@@ -574,7 +575,7 @@ impl MediaLoader {
         let media_fetcher = media_fetcher.unwrap_or_else(MediaFetcher::from_env);
         let http_client = media_fetcher.build_http_client()?;
 
-        let nixl_agent = get_nixl_agent()?;
+        let nixl_agent = MediaAgent::new(get_nixl_agent()?)?;
 
         let cache = match Self::cache_budget_bytes_from_env() {
             0 => {
@@ -617,6 +618,45 @@ impl MediaLoader {
             Some(Arc::new(Mutex::new(LoaderCache::new(budget_bytes))))
         };
         Ok(loader)
+    }
+
+    /// Whether this loader decodes content parts of `modality`, such as
+    /// `image_url` or `video_url`. Parts of other modalities stay URLs for the
+    /// backend.
+    pub fn decodes(&self, modality: &str) -> bool {
+        match modality {
+            "image_url" => self.media_decoder.image.is_some(),
+            #[cfg(feature = "media-ffmpeg")]
+            "video_url" => self.media_decoder.video.is_some(),
+            _ => false,
+        }
+    }
+
+    /// Parse the sections of per-request `media_io_kwargs` for the media that
+    /// this loader decodes. The sections for other media go to the backend,
+    /// which decodes that media, so the loader does not read them.
+    pub fn media_io_kwargs(
+        &self,
+        kwargs: &serde_json::Value,
+    ) -> std::result::Result<MediaDecoder, serde_json::Error> {
+        use serde::Deserialize as _;
+
+        let Some(sections) = kwargs.as_object() else {
+            return MediaDecoder::deserialize(kwargs);
+        };
+        let section = |name: &str, decoded: bool| sections.get(name).filter(|_| decoded);
+        Ok(MediaDecoder {
+            image: section("image", self.media_decoder.image.is_some())
+                .map(Option::deserialize)
+                .transpose()?
+                .flatten(),
+            #[cfg(feature = "media-ffmpeg")]
+            video: section("video", self.media_decoder.video.is_some())
+                .map(Option::deserialize)
+                .transpose()?
+                .flatten(),
+            ..Default::default()
+        })
     }
 
     /// Number of entries currently held in the cache (test/observability helper).
@@ -767,22 +807,51 @@ mod tests {
     use super::*;
     use dynamo_protocols::types::{ChatCompletionRequestMessageContentPartImage, ImageUrl};
 
+    /// The loader parses only the `media_io_kwargs` sections for the media it
+    /// decodes. The backend reads the other sections, whose keys the frontend
+    /// decoders may not know.
+    #[test]
+    fn media_io_kwargs_parse_only_the_media_the_loader_decodes() {
+        let loader = MediaLoader::new(MediaDecoder::images_only(), None).unwrap();
+        let kwargs = serde_json::json!({
+            "image": {"limits": {"max_image_width": 64}},
+            "video": {"num_frames": 8, "backend_only": true},
+            "audio": {"sampling_rate": 16000},
+        });
+        let parsed = loader.media_io_kwargs(&kwargs).unwrap();
+        assert_eq!(parsed.image.unwrap().limits.max_image_width, Some(64));
+        #[cfg(feature = "media-ffmpeg")]
+        assert!(parsed.video.is_none());
+
+        let backend_only = serde_json::json!({"image": {"backend_only": true}});
+        for invalid in [backend_only.clone(), serde_json::json!("not an object")] {
+            assert!(loader.media_io_kwargs(&invalid).is_err(), "{invalid}");
+        }
+        // A loader that decodes no images leaves the image section alone.
+        let no_images = MediaLoader::new(MediaDecoder::default(), None).unwrap();
+        assert!(
+            no_images
+                .media_io_kwargs(&backend_only)
+                .unwrap()
+                .image
+                .is_none()
+        );
+    }
+
     /// The card sets EXIF orientation for every image decode; a request
     /// cannot change it.
     #[test]
     fn exif_orientation_comes_from_the_card() {
         for apply in [false, true] {
             let card = MediaDecoder {
-                image: Some(ImageDecoder::default()),
-                #[cfg(feature = "media-ffmpeg")]
-                video: None,
                 apply_exif_orientation: apply,
+                ..MediaDecoder::images_only()
             };
             let loader = MediaLoader::new(card, None).unwrap();
             let image = loader.media_decoder.image.as_ref().unwrap();
             assert_eq!(image.apply_exif_orientation, apply);
             let kwargs = serde_json::json!({"image": {}, "apply_exif_orientation": !apply});
-            let request: MediaDecoder = serde_json::from_value(kwargs).unwrap();
+            let request = loader.media_io_kwargs(&kwargs).unwrap();
             assert_eq!(
                 image
                     .with_runtime(request.image.as_ref())

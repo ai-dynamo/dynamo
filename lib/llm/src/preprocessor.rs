@@ -70,7 +70,7 @@ use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo, PromptFormatterArtifact};
 #[cfg(feature = "mm-routing")]
 use crate::preprocessor::media::MediaFetcher;
-use crate::preprocessor::media::{MediaDecoder, MediaLoader, max_data_url_bytes};
+use crate::preprocessor::media::{MediaLoader, max_data_url_bytes};
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, MultimodalItemRef, MultimodalUuidMap,
     PreprocessedRequestBuilder, RoutingHints,
@@ -3831,14 +3831,30 @@ impl OpenAIPreprocessor {
         // Forward mm_processor_kwargs (e.g. use_audio_in_video) to the backend.
         builder.mm_processor_kwargs(request.mm_processor_kwargs().cloned());
 
-        // Forward media_io_kwargs untouched only when the worker owns decoding. With a
-        // media loader the frontend consumes them itself, so re-sending would risk the
-        // worker applying them a second time.
-        if self.media_loader.is_none() {
+        // Forward media_io_kwargs untouched when the worker decodes any media part. When
+        // the frontend's loader decodes every part, it consumes them itself, so re-sending
+        // would risk the worker applying them a second time.
+        if !self.frontend_decodes_all_media(request) {
             builder.media_io_kwargs(request.media_io_kwargs().cloned());
         }
 
         Ok(builder)
+    }
+
+    /// True when a media loader decodes every media part of the request, so
+    /// no part reaches the worker as a URL.
+    fn frontend_decodes_all_media<R: OAIChatLikeRequest>(&self, request: &R) -> bool {
+        let Some(loader) = self.media_loader.as_ref() else {
+            return false;
+        };
+        request.typed_messages().is_none_or(|messages| {
+            messages
+                .iter()
+                .filter_map(multimodal_content_parts)
+                .flatten()
+                .filter_map(|part| part.media_info())
+                .all(|(modality, _, _)| loader.decodes(modality))
+        })
     }
 
     fn remove_tool_parser_end_tokens_from_hidden_stops<R: OAIChatLikeRequest>(
@@ -4240,7 +4256,7 @@ impl OpenAIPreprocessor {
         // there is no media loader. Each recoverable `fetch_image_dims_uncached`
         // failure logs a warning and skips its `mm_image_entries.push`.
         // Security-policy failures remain terminal. The decoded path
-        // (`has_media_loader`) propagates any fetch failure via `?`.
+        // (`decoded_here`) propagates any fetch failure via `?`.
         #[cfg(feature = "mm-routing")]
         let mut total_image_count: usize = 0;
         // For the URL-passthrough case (media_loader is None) we collect image
@@ -4252,7 +4268,6 @@ impl OpenAIPreprocessor {
         let Some(messages) = request.typed_messages() else {
             return Ok((Vec::new(), None));
         };
-        let has_media_loader = self.media_loader.is_some();
 
         let message_order = self.formatter.media_message_order(request);
         for index in 0..messages.len() {
@@ -4264,13 +4279,19 @@ impl OpenAIPreprocessor {
                 let Some((type_str, url, uuid)) = content_part.media_info() else {
                     continue;
                 };
+                // A loader without a decoder for this media type leaves the
+                // part to the backend as a URL.
+                let decoded_here = self
+                    .media_loader
+                    .as_ref()
+                    .is_some_and(|loader| loader.decodes(type_str));
 
                 #[cfg(feature = "mm-routing")]
                 if type_str == "image_url" {
                     total_image_count += 1;
                 }
                 #[cfg(feature = "mm-routing")]
-                if !exact_mm_routing_supports_modality(type_str, has_media_loader)
+                if !exact_mm_routing_supports_modality(type_str, decoded_here)
                     || !exact_mm_routing_layout_accepts_next_entry(
                         &mut previous_routing_entry_was_video,
                         type_str == "video_url",
@@ -4317,7 +4338,7 @@ impl OpenAIPreprocessor {
                                 ));
                             }
                         }
-                        if has_media_loader {
+                        if decoded_here {
                             fetch_tasks.push(MediaFetchTask {
                                 modality: type_str,
                                 slot_idx,
@@ -4364,12 +4385,13 @@ impl OpenAIPreprocessor {
         // Execute all fetch tasks
         if !fetch_tasks.is_empty() {
             let loader = self.media_loader.as_ref().unwrap();
-            // The frontend owns decoding here, so the opaque request kwargs are parsed
-            // into the decoder config -- borrowing the `Value`, no clone. Mapped to
-            // InvalidArgument so a malformed payload stays a 400 rather than a 500.
+            // The frontend owns decoding of these parts, so it parses the request
+            // kwargs for the media it decodes -- borrowing the `Value`, no clone.
+            // Mapped to InvalidArgument so a malformed payload stays a 400 rather
+            // than a 500.
             let media_io_kwargs = request
                 .media_io_kwargs()
-                .map(<MediaDecoder as serde::Deserialize>::deserialize)
+                .map(|kwargs| loader.media_io_kwargs(kwargs))
                 .transpose()
                 .map_err(|e| invalid_argument_error(format!("invalid media_io_kwargs: {e}")))?;
             let results = futures::future::join_all(fetch_tasks.iter().map(|task| {
@@ -9524,6 +9546,8 @@ mod strip_tests {
 mod extra_args_media_copy_tests {
     use super::*;
     use crate::model_card::ModelDeploymentCard;
+    #[cfg(feature = "testing-nixl")]
+    use crate::preprocessor::media::MediaDecoder;
     use crate::protocols::common::preprocessor::MultimodalData;
 
     pub(super) fn test_preprocessor() -> OpenAIPreprocessor {
@@ -9546,6 +9570,92 @@ mod extra_args_media_copy_tests {
     fn inline_data_url() -> String {
         "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
             .to_string()
+    }
+
+    /// `media_io_kwargs` reach the worker when it decodes any part, here a
+    /// video that an image-only frontend decoder leaves as a URL.
+    #[cfg(feature = "testing-nixl")]
+    #[test]
+    fn media_io_kwargs_reach_the_worker_for_parts_it_decodes() {
+        let mut preprocessor = test_preprocessor();
+        preprocessor.media_loader = Some(
+            MediaLoader::new(MediaDecoder::images_only(), None)
+                .expect("test media loader must initialize"),
+        );
+        let kwargs = serde_json::json!({"video": {"num_frames": 8}});
+        for (part, forwarded) in [
+            (
+                serde_json::json!({"type": "video_url", "video_url": {"url": "https://example.invalid/a.mp4"}}),
+                true,
+            ),
+            (
+                serde_json::json!({"type": "image_url", "image_url": {"url": "https://example.invalid/a.png"}}),
+                false,
+            ),
+        ] {
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": [part]}],
+                    "max_tokens": 1
+                }))
+                .unwrap();
+            request.media_io_kwargs = Some(kwargs.clone());
+            let built = preprocessor
+                .builder(&request)
+                .unwrap()
+                .token_ids(Vec::new())
+                .build()
+                .unwrap();
+            assert_eq!(built.media_io_kwargs.is_some(), forwarded, "{part}");
+        }
+    }
+
+    /// An image-only decoder must leave video parts to the backend as URLs.
+    /// Before, every part reached the loader, which has no video decoder and
+    /// failed the request.
+    #[cfg(feature = "testing-nixl")]
+    #[tokio::test]
+    async fn parts_without_a_frontend_decoder_stay_urls() {
+        let mut preprocessor = test_preprocessor();
+        let loader = MediaLoader::new(MediaDecoder::images_only(), None)
+            .expect("test media loader must initialize");
+        assert!(loader.decodes("image_url"));
+        assert!(!loader.decodes("video_url"));
+        assert!(!loader.decodes("audio_url"));
+        preprocessor.media_loader = Some(loader);
+
+        let video_url = "https://example.invalid/clip.mp4";
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "video_url", "video_url": {"url": video_url}}]
+            }],
+            "max_tokens": 1
+        }))
+        .unwrap();
+        let mut builder = PreprocessedRequest::builder();
+        builder
+            .model("test-model".to_string())
+            .token_ids(Vec::new())
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default());
+        preprocessor
+            .gather_multi_modal_data_with_image_tokens(&request, &mut builder, None, &[])
+            .await
+            .expect("the video must pass through undecoded");
+        let preprocessed = builder.build().unwrap();
+        let videos = preprocessed
+            .multi_modal_data
+            .as_ref()
+            .and_then(|media| media.get("video_url"))
+            .expect("video part");
+        assert!(
+            matches!(videos.as_slice(), [MultimodalData::Url(url)] if url.as_str() == video_url),
+            "{videos:?}"
+        );
     }
 
     #[tokio::test]
@@ -14135,6 +14245,8 @@ responses_tools: None,
     ))]
     #[tokio::test]
     async fn adjacent_videos_reach_media_loader_with_hashing_disabled() {
+        use crate::preprocessor::media::MediaDecoder;
+
         let video_bytes = include_bytes!("../tests/data/media/240p_10.mp4");
         let mut server = mockito::Server::new_async().await;
         let video_mock = server

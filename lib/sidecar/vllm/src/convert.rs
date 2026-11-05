@@ -73,6 +73,16 @@ pub(crate) fn request_has_multimodal_input(request: &PreprocessedRequest) -> boo
     request_has_raw_media(request) || request_has_preprocessed_media(request)
 }
 
+/// True when the frontend decoded any media item and sent a NIXL descriptor.
+pub(crate) fn request_has_decoded_media(request: &PreprocessedRequest) -> bool {
+    request.multi_modal_data.as_ref().is_some_and(|media| {
+        media
+            .values()
+            .flatten()
+            .any(|item| matches!(item, MultimodalData::Decoded(_)))
+    })
+}
+
 pub(crate) fn build_generate_request(
     mut request: PreprocessedRequest,
     request_id: String,
@@ -828,10 +838,24 @@ fn build_media(
             let source = match item {
                 MultimodalData::Url(url) => media_source(&key, url.into())?,
                 MultimodalData::RawUrl(source) => media_source(&key, source)?,
-                MultimodalData::Decoded(_) => {
-                    return Err(client::invalid_argument(
-                        "vLLM sidecar cannot dereference pre-decoded RDMA media; configure URL passthrough",
-                    ));
+                MultimodalData::Decoded(descriptor) => {
+                    if modality != pb::Modality::Image {
+                        return Err(client::invalid_argument(format!(
+                            "vLLM gRPC accepts pre-decoded RDMA media only for images, not `{key}`"
+                        )));
+                    }
+                    let image = descriptor.remote_image().map_err(|error| {
+                        client::invalid_argument(format!(
+                            "pre-decoded image cannot be read by vLLM: {error:#}"
+                        ))
+                    })?;
+                    pb::media_item::Source::NixlRef(pb::NixlRef {
+                        agent_metadata: image.agent_metadata,
+                        addr: image.addr,
+                        height: image.height,
+                        width: image.width,
+                        channels: image.channels,
+                    })
                 }
                 MultimodalData::UuidOnly(_) => {
                     return Err(client::invalid_argument(
