@@ -28,6 +28,7 @@ pub(crate) use agent_context::{
     record_backend_finish_reason_metadata, record_chat_finish_reason_metadata,
     record_completion_finish_reason_metadata, record_llm_metric_tokens, request_metrics,
     request_metrics_from_agent_state, start_request_trace_tool_event_ingest,
+    x_request_id_from_context,
 };
 pub use config::{
     RequestTraceFileFormat, RequestTracePolicy, RequestTraceRecordKind, RequestTraceSinkKind,
