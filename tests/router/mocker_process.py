@@ -73,7 +73,12 @@ def _build_mocker_command(
 
 
 class MockerProcess:
-    """Manage mocker engine instances with a shared Tokio runtime."""
+    """Manage mocker engine instances with a shared Tokio runtime.
+
+    An explicit namespace groups independently managed workers at one endpoint.
+    extra_env configures worker processes; None values remove inherited settings.
+    display_name distinguishes worker logs when several processes share a test.
+    """
 
     def __init__(
         self,
@@ -87,12 +92,19 @@ class MockerProcess:
         standalone_selector: bool = False,
         model_name: str = "mocker",
         zmq_replay: bool = False,
+        *,
+        namespace: str | None = None,
+        extra_env: Mapping[str, str | None] | None = None,
+        display_name: str | None = None,
     ):
         if standalone_selector and not standalone_indexer:
             raise ValueError("standalone_selector requires standalone_indexer=True")
 
-        namespace_suffix = generate_random_suffix()
-        self.namespace = f"test-namespace-{namespace_suffix}"
+        self.namespace = (
+            f"test-namespace-{generate_random_suffix()}"
+            if namespace is None
+            else namespace
+        )
         self.component_name = "mocker"
         self.model_name = model_name
         self.endpoint = f"dyn://{self.namespace}.{self.component_name}.generate"
@@ -113,6 +125,8 @@ class MockerProcess:
         self._request = request
         self._store_backend = store_backend
         self._request_plane = request_plane
+        self._extra_env = dict(extra_env or {})
+        self._display_name = display_name
         self._mocker_config = MockerConfig.from_value(mocker_args)
         self.worker_id_to_zmq_ports: dict[int, dict[int, str]] = {}
         request.addfinalizer(self._release_ports)
@@ -175,18 +189,16 @@ class MockerProcess:
                 num_workers=num_mockers,
                 mocker_args=process_config,
             )
-            env = os.environ.copy()
-            env["DYN_REQUEST_PLANE"] = request_plane
             self._process = ManagedProcess(
                 command=command,
-                env=env,
+                env=self._worker_env(),
                 timeout=60,
                 display_output=True,
                 health_check_ports=[],
                 health_check_urls=[],
                 log_dir=request.node.name,
                 terminate_all_matching_process_names=False,
-                display_name="dynamo-mocker",
+                display_name=display_name or "dynamo-mocker",
             )
 
         logger.info(
@@ -196,6 +208,23 @@ class MockerProcess:
             ", standalone_indexer=True" if standalone_indexer else "",
             ", standalone_selector=True" if standalone_selector else "",
         )
+
+    def _worker_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        env["DYN_REQUEST_PLANE"] = self._request_plane
+        for name, value in self._extra_env.items():
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = value
+        return env
+
+    @property
+    def managed_process(self) -> ManagedProcess:
+        """Return the process wrapper for a deployment without a standalone indexer."""
+        if self._process is None:
+            raise ValueError("Standalone-indexer mode has no single managed process")
+        return self._process
 
     @property
     def standalone_indexer_url(self) -> Optional[str]:
@@ -307,18 +336,16 @@ class MockerProcess:
                 num_workers=1,
                 mocker_args=mocker_config,
             )
-            env = os.environ.copy()
-            env["DYN_REQUEST_PLANE"] = self._request_plane
             proc = ManagedProcess(
                 command=command,
-                env=env,
+                env=self._worker_env(),
                 timeout=60,
                 display_output=True,
                 health_check_ports=[],
                 health_check_urls=[],
                 log_dir=self._request.node.name,
                 terminate_all_matching_process_names=False,
-                display_name=f"mocker-{i}",
+                display_name=f"{self._display_name or 'mocker'}-{i}",
             )
             self._exit_stack.enter_context(proc)
             self._mocker_processes.append(proc)
