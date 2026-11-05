@@ -4094,6 +4094,29 @@ class EppFrontendRoutingParityStack:
 
         return self.run_until_complete(_loads())
 
+    def provider_free(
+        self,
+        request_id: str,
+        *,
+        timeout_s: float = READINESS_DEADLINE_S,
+    ) -> None:
+        if self.provider_router is None:
+            raise RuntimeError("routing parity stack has not started")
+        budget = _require_positive_timeout_s(timeout_s, label="provider_free")
+
+        async def _free() -> None:
+            try:
+                await asyncio.wait_for(
+                    self.provider_router.free(request_id),
+                    timeout=budget,
+                )
+            except asyncio.TimeoutError as exc:
+                raise AssertionError(
+                    f"provider free outlived the {budget}s budget"
+                ) from exc
+
+        self.run_until_complete(_free())
+
     def __exit__(self, exc_type, exc, tb) -> None:
         consumer_error: BaseException | None = None
         close_error: BaseException | None = None
