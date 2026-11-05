@@ -329,21 +329,22 @@ fn convert_tool_result_content(
         ToolResultContent::Blocks(blocks) => blocks,
     };
 
-    if blocks
-        .iter()
-        .any(|block| matches!(block, ToolResultContentBlock::Other(_)))
-    {
-        anyhow::bail!(
-            "unsupported Anthropic tool_result content block; only text and image are supported"
-        );
-    }
-
+    // Blocks other than text and image (document, search_result, ...) are
+    // degraded to text rather than failing the whole request.
     if !blocks
         .iter()
         .any(|block| matches!(block, ToolResultContentBlock::Image { .. }))
     {
         return Ok(ChatCompletionRequestToolMessageContent::Text(
-            content.clone().into_text(),
+            blocks
+                .iter()
+                .filter_map(|block| match block {
+                    ToolResultContentBlock::Text { text } => Some(text.clone()),
+                    ToolResultContentBlock::Other(value) => Some(other_block_text(value)),
+                    ToolResultContentBlock::Image { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
         ));
     }
 
@@ -363,10 +364,50 @@ fn convert_tool_result_content(
                     convert_image(source)?,
                 ));
             }
-            ToolResultContentBlock::Other(_) => unreachable!("validated above"),
+            ToolResultContentBlock::Other(value) => {
+                parts.push(ChatCompletionRequestToolMessageContentPart::Text(
+                    ChatCompletionRequestMessageContentPartText {
+                        text: other_block_text(value),
+                        ..Default::default()
+                    },
+                ));
+            }
         }
     }
     Ok(ChatCompletionRequestToolMessageContent::Array(parts))
+}
+
+/// Text for a `tool_result` block that is neither text nor image: the block's own
+/// text (`text`, a text `document` source, or nested text blocks), else a placeholder.
+fn other_block_text(value: &serde_json::Value) -> String {
+    if let Some(text) = value.get("text").and_then(|v| v.as_str()) {
+        return text.to_string();
+    }
+    if let Some(source) = value.get("source")
+        && source.get("type").and_then(|v| v.as_str()) == Some("text")
+        && let Some(data) = source.get("data").and_then(|v| v.as_str())
+    {
+        return data.to_string();
+    }
+    let nested = value
+        .get("content")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("text").and_then(|v| v.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    if !nested.is_empty() {
+        return nested;
+    }
+    let kind = value
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    format!("[tool_result block of type '{kind}' omitted: not supported by this endpoint]")
 }
 
 /// Flush accumulated user content parts into a user message.
@@ -2135,17 +2176,56 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_result_other_block_is_rejected() {
-        let content = ToolResultContent::Blocks(vec![ToolResultContentBlock::Other(
-            serde_json::json!({"type": "document"}),
-        )]);
+    fn test_tool_result_other_block_is_degraded_to_text() {
+        let content = ToolResultContent::Blocks(vec![
+            ToolResultContentBlock::Text { text: "a ".into() },
+            ToolResultContentBlock::Other(serde_json::json!({"type": "document"})),
+            ToolResultContentBlock::Other(serde_json::json!({
+                "type": "document",
+                "source": {"type": "text", "media_type": "text/plain", "data": " doc"}
+            })),
+            ToolResultContentBlock::Other(serde_json::json!({
+                "type": "search_result",
+                "content": [{"type": "text", "text": " hit"}]
+            })),
+        ]);
 
-        let error = convert_tool_result_content(&content).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("only text and image are supported")
+        let ChatCompletionRequestToolMessageContent::Text(text) =
+            convert_tool_result_content(&content).unwrap()
+        else {
+            panic!("expected text content");
+        };
+        assert_eq!(
+            text,
+            "a [tool_result block of type 'document' omitted: not supported by this endpoint] doc hit"
         );
+    }
+
+    #[test]
+    fn test_tool_result_other_block_next_to_image_becomes_text_part() {
+        let content = ToolResultContent::Blocks(vec![
+            ToolResultContentBlock::Image {
+                source: AnthropicImageSource {
+                    source_type: "base64".into(),
+                    media_type: "image/png".into(),
+                    data: "aGVsbG8=".into(),
+                },
+            },
+            ToolResultContentBlock::Other(
+                serde_json::json!({"type": "search_result", "text": "hit"}),
+            ),
+        ]);
+
+        let ChatCompletionRequestToolMessageContent::Array(parts) =
+            convert_tool_result_content(&content).unwrap()
+        else {
+            panic!("expected array content");
+        };
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(
+            &parts[1],
+            ChatCompletionRequestToolMessageContentPart::Text(t) if t.text == "hit"
+        ));
     }
 
     #[test]
