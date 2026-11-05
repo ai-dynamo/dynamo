@@ -48,6 +48,9 @@ blocks.
 
 ## Forking to a real plugin
 
+For a forecasting model example, see the [t0-beta traffic predictor](t0_beta/README.md),
+which supplies demand forecasts to Dynamo's existing capacity planner.
+
 For each stage you want to serve:
 
 1. Copy `reference_runner.py` to your package.
