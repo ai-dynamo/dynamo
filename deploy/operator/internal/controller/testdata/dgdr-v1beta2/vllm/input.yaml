@@ -20,7 +20,7 @@ spec:
     mode: Optimize
     metric: ThroughputPerGPU
     sla: {}
-  aisimulate:
+  aisim:
     inputOverrides:
       engine:
         mode: aggregated
@@ -44,3 +44,12 @@ spec:
         snapshot_interval_seconds: 0
   recommendation:
     maxCandidates: 1
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1beta1
+      kind: DynamoGraphDeployment
+      metadata:
+        labels:
+          test.dynamo.nvidia.com/dgd-override: label-applied
+        annotations:
+          test.dynamo.nvidia.com/dgd-override: annotation-applied

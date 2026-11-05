@@ -49,7 +49,7 @@ func publicUnderlay() map[string]any {
 }
 
 // applyDefaults adds the derived defaults to the typed underlay, before the public-input
-// input overrides are applied. spec.aisimulate.inputOverrides is the final overlay: it overrides or
+// input overrides are applied. spec.aisim.inputOverrides is the final overlay: it overrides or
 // deletes any derived value, and nothing is derived in response to what it introduces.
 // An override that needs a matching change elsewhere (deleting requests when adding
 // requests_per_load_unit, or strict_sla next to a new SLA bound) must make that change itself.
