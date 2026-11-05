@@ -349,12 +349,14 @@ Retune searches parameters a running deployment can change without a restart:
 
 - **Router parameters** of the KV router, in `retune.router`: `overlap_score_credit`,
   `prefill_load_scale`, `temperature`, and four more `/router_policy` parameters.
-- **Planner runtime fields**, in `retune.planner`: load-scaling sensitivity, the load predictor,
-  minimum worker counts, GPU budgets, `max_throughput_scaling_replicas`, and the thresholds of
-  `optimization_target: load`.
+- **Planner runtime fields**, in `retune.planner`: the scaling policy (which scaling modes run, and
+  their intervals), load-scaling sensitivity, the load predictor,
+  `max_throughput_scaling_replicas`, and the thresholds of `optimization_target: load`.
 
-The engine, the topology, the router mode, and Planner settings fixed at startup, such as the
-scaling intervals and `ttft_ms` / `itl_ms`, stay as configured.
+The engine, the topology, the router mode, Planner settings fixed at startup such as
+`scheduling.scale_interval_seconds` and the FPM sampling, and `ttft_ms` / `itl_ms` stay as
+configured. Minimum worker counts and GPU budgets are user constraints: retune never searches
+them, and every candidate replays within them.
 
 Retune supports two scenarios:
 
