@@ -35,7 +35,9 @@ server. See the [sidecar overview](../README.md) for installation.
 SGLang's Rust server runs one listener per DP rank: listener `k` on a node
 binds `--port + k` and `--grpc-port + k`, so keep the two ports at least the
 node's listener count apart. One sidecar per node serves all of the node's
-listeners as one worker.
+listeners as one worker, with `--grpc-connections` connections
+to each. DP>1 needs SGLang main at or after
+[sgl-project/sglang#46637](https://github.com/sgl-project/sglang/pull/46637); v0.5.23 does not have it.
 
 See [support notes](../SUPPORT_NOTES.md#sglang) for feature restrictions and operational limits.
 
