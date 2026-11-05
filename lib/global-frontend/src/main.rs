@@ -258,14 +258,16 @@ async fn run() -> Result<()> {
     let mut metrics = Metrics::new(args.region.clone(), in_flight.clone());
     let app = if let Some(policy) = selection_core_policy {
         let selection_core = Arc::new(SelectionCoreSelector::new(policy, in_flight.clone()).await?);
-        // Wait for the first pool snapshot, or early requests get a 503.
-        let (first_snapshot, reconcile) =
-            selection_core.reconcile_catalog(pools.clone(), shutdown.child_token());
+        // Serve the pools the core has applied, from the first snapshot on,
+        // or early requests get a 503.
+        let (mut applied, reconcile) =
+            selection_core.reconcile_catalog(pools, shutdown.child_token());
         tokio::spawn(reconcile);
-        first_snapshot
+        applied
+            .changed()
             .await
-            .context("the router core stopped before taking the first pool snapshot")?;
-        app_with_selection_core(pools, selection_core, in_flight, http, metrics)
+            .context("the router core stopped before applying the first pool snapshot")?;
+        app_with_selection_core(applied, selection_core, in_flight, http, metrics)
     } else {
         // Only `affinity` has affinity metrics to export.
         let mut affinity_metrics = None;

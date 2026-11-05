@@ -20,7 +20,7 @@ use dynamo_kv_router::services::selection::{
     SelectionService, SelectionServiceBuilder,
 };
 use dynamo_kv_router::{WorkerId, WorkerType};
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{RwLock, RwLockReadGuard, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::load::{InFlightGuard, InFlightTracker};
@@ -38,6 +38,8 @@ pub enum SelectionCorePolicy {
 /// Selects a pool through the router core, then rotates over its frontends.
 pub struct SelectionCoreSelector {
     service: Arc<SelectionService>,
+    /// Held for writing while a pool snapshot is applied to the core.
+    catalog: Arc<RwLock<()>>,
     frontends: Cursors<PoolId>,
     in_flight: Arc<InFlightTracker>,
 }
@@ -57,29 +59,38 @@ impl SelectionCoreSelector {
         let service = Arc::new(builder.build().await.context("build the router core")?);
         Ok(Self {
             service,
+            catalog: Arc::default(),
             frontends: Cursors::default(),
             in_flight,
         })
     }
 
     /// Keeps the core's workers in sync with `pools`, as the local router's
-    /// `CatalogReconciler` does. The receiver resolves once the first
-    /// snapshot is applied.
+    /// `CatalogReconciler` does. The receiver holds the pools the core has
+    /// applied and changes once the first snapshot is applied. Select from
+    /// it under [`Self::hold_catalog`], so the pools and the core's workers
+    /// agree.
     pub fn reconcile_catalog<S>(
         &self,
         pools: watch::Receiver<Arc<S>>,
         cancel: CancellationToken,
     ) -> (
-        oneshot::Receiver<()>,
+        watch::Receiver<Arc<S>>,
         impl Future<Output = ()> + Send + 'static,
     )
     where
         S: AsRef<[Pool]> + Send + Sync + 'static,
     {
         let reconciler = CatalogReconciler::new(self.service.core().clone());
-        let (source, first_taken) = PoolCatalogSource::new(pools);
+        let (source, applied) = PoolCatalogSource::new(pools, self.catalog.clone());
         let reconcile = async move { reconciler.run(source, cancel).await };
-        (first_taken, reconcile)
+        (applied, reconcile)
+    }
+
+    /// Holds the core's workers as they are: read the applied pools and
+    /// select under the guard, and drop it before forwarding.
+    pub async fn hold_catalog(&self) -> RwLockReadGuard<'_, ()> {
+        self.catalog.read().await
     }
 
     /// The chosen pool and frontend, with the request's in-flight count.
@@ -182,10 +193,10 @@ mod tests {
                 .await
                 .unwrap();
         let (_catalog, subscription) = watch::channel(Arc::new(pools.to_vec()));
-        let (first_snapshot, reconcile) =
+        let (mut applied, reconcile) =
             selection_core.reconcile_catalog(subscription, CancellationToken::new());
         tokio::spawn(reconcile);
-        first_snapshot.await.unwrap();
+        applied.changed().await.unwrap();
         let current = RoundRobinSelector::new();
 
         // Red loses its frontend for a while, then gets it back.
@@ -217,5 +228,37 @@ mod tests {
             }
         }
         assert_eq!(in_flight.get(&blue.id), 0);
+    }
+
+    /// A pool replaced by another stays selectable throughout: the applied
+    /// pools and the core's workers agree under `hold_catalog`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replaced_pools_stay_selectable() {
+        let blue = pool("blue", "qwen", &["http://blue-0:8000"]);
+        let green = pool("green", "qwen", &["http://green-0:8000"]);
+        let selection_core =
+            SelectionCoreSelector::new(SelectionCorePolicy::RoundRobin, Arc::default())
+                .await
+                .unwrap();
+        let (catalog, subscription) = watch::channel(Arc::new(vec![blue.clone()]));
+        let (mut applied, reconcile) =
+            selection_core.reconcile_catalog(subscription, CancellationToken::new());
+        tokio::spawn(reconcile);
+        applied.changed().await.unwrap();
+
+        let request = RoutingRequest::new("qwen");
+        for round in 0..200 {
+            let next = if round % 2 == 0 { &green } else { &blue };
+            catalog.send_replace(Arc::new(vec![next.clone()]));
+            for _ in 0..4 {
+                let _held = selection_core.hold_catalog().await;
+                let pools = applied.borrow().clone();
+                let candidates = pools.iter().collect::<Vec<_>>();
+                assert!(
+                    selection_core.select(&request, &candidates).await.is_some(),
+                    "round {round}"
+                );
+            }
+        }
     }
 }
