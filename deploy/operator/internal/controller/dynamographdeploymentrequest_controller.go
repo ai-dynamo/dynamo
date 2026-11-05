@@ -1398,10 +1398,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleFailedPhase(ctx context.C
 	return ctrl.Result{}, nil
 }
 
-// getProfilingJobName returns the profiling Job name for a DGDR: "profile-<name>".
-// Kubernetes copies the Job name into the pod template's job-name labels, and a
-// label value can be at most 63 characters, so a longer name is cut and given a
-// stable hash suffix. Names that already fit are unchanged.
+// getProfilingJobName returns "profile-<name>", cut with a stable hash suffix when
+// longer than 63 characters, since Kubernetes copies it into job-name pod labels.
 func getProfilingJobName(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) string {
 	return truncateDNSLabelWithHash("profile-"+dgdr.Name, validation.DNS1123LabelMaxLength)
 }
