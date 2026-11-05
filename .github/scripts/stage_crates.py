@@ -30,6 +30,26 @@ source Cargo.toml, independently of the normal source-build requirement:
 ARTIFACTORY_CARGO_DEPENDENCY_REGISTRIES is non-secret JSON configuration mapping
 these aliases to sparse Cargo index URLs on the same Artifactory server as the
 publication registry. ARTIFACTORY_TOKEN must have read access to those indexes.
+
+For AISim on release/1.7.0, create a repository variable in ai-dynamo/dynamo:
+Settings > Secrets and variables > Actions > Variables > New repository variable.
+Name: ARTIFACTORY_CARGO_DEPENDENCY_REGISTRIES
+Value (a JSON object, not a quoted JSON string):
+
+    {"aisim":"sparse+https://artifactory.nvidia.com/artifactory/api/cargo/sw-dynamo-aisimulate-cargo-local/index/"}
+
+The key "aisim" matches registry = "aisim" in the source Cargo.toml's
+workspace.metadata.artifactory.dependencies. That metadata selects the exact
+aisim-core version (=0.14.0-rc.0); versions and crate download paths do not belong
+in this variable. Keep the sparse+ prefix and trailing /index/.
+
+Store credentials only in the existing ARTIFACTORY_TOKEN secret, which needs
+read access to the dependency repository as well as publication access to the
+Dynamo repository. ARTIFACTORY_CARGO_INDEX still selects the Dynamo publication
+destination; this mapping only adds dependency registries. The automated-release
+environment must not override the repository variable with a different value.
+An unset variable is allowed only when the source has no publication references.
+
 Only this disposable staging checkout gets rewritten; ordinary builds keep their
 Git pins. The matching patch is removed so cargo check/package use the published
 counterpart too. Start retries from the committed source checkout.
