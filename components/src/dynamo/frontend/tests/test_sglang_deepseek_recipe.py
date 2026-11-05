@@ -4,11 +4,13 @@
 """Recipe encoding against SGLang's real adapter, without loading a model."""
 
 import copy
+import importlib.util
 import json
 
 import pytest
 
-pytest.importorskip("sglang.srt.parser")
+if importlib.util.find_spec("sglang") is None:
+    pytest.skip("SGLang is not installed", allow_module_level=True)
 from dynamo.frontend import sglang_deepseek  # noqa: E402 -- optional SGLang guard
 
 pytestmark = [
@@ -22,10 +24,12 @@ pytestmark = [
 
 @pytest.fixture
 def tokenizer():
-    if sglang_deepseek.recipe_renderer is None:
-        pytest.skip("SGLang predates the recipe renderer")
-    recipe = pytest.importorskip("deepseek_recipe")
-    tokenizers = pytest.importorskip("tokenizers")
+    import deepseek_recipe as recipe
+    import tokenizers
+
+    assert (
+        sglang_deepseek.recipe_renderer is not None
+    ), "The supported SGLang installation must provide the recipe renderer"
     alphabet = sorted(tokenizers.pre_tokenizers.ByteLevel.alphabet())
     backend = tokenizers.Tokenizer(
         tokenizers.models.BPE(vocab={c: i for i, c in enumerate(alphabet)}, merges=[])
