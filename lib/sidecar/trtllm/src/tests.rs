@@ -921,7 +921,7 @@ async fn a_matched_stop_token_is_returned_when_the_frontend_keeps_it() {
     engine.start(0).await.expect("start");
     let stop_on_42 = |output_options: OutputOptions| {
         let mut request = request();
-        request.stop_conditions.stop_token_ids = Some(vec![42]);
+        request.stop_conditions.stop_token_ids_hidden = Some(vec![42]);
         request.output_options = output_options;
         request
     };
