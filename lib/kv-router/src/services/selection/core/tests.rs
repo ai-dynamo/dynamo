@@ -2828,6 +2828,8 @@ async fn queued_selection_returns_refreshed_overlap_snapshot() {
     // Freeze time only after async setup so background timers cannot expire the fixture.
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(11)).await;
+    // Let the real-thread indexer respond without paused-time auto-advance.
+    tokio::time::resume();
     core.free_reservation("occupy-2")
         .await
         .expect("release worker 2");

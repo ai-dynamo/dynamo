@@ -5053,14 +5053,8 @@ async fn committed_session_lease_lives_as_long_as_the_response_stream() {
 }
 
 const DECODE_WAIT_LIMIT_POLICY: &str = r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
 policy_classes:
   - name: decode-bound
-    policy_family: standard
-    cache_bucket: all
     quantum: 1
     decode_busy_threshold_frac: 0.5
 "#;

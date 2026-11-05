@@ -536,11 +536,24 @@ pub const ACTIVE_SEQUENCES_SUBJECT: &str = "active_sequences_events";
 // for worker-local kvindexer query
 pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent events in worker buffer
 
+/// Context marking a router's refusal of an unknown policy class when the request enters its
+/// class. It wraps the unchanged `DynamoError` and displays as it, so hosts see the same class,
+/// reason, status and message; the prefill handoff recognizes this refusal by type.
+#[derive(Debug)]
+pub(crate) struct UnknownPolicyClassRefusal(DynamoError);
+
+impl std::fmt::Display for UnknownPolicyClassRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
     // Keep the two overload cases apart. A single overloaded worker can be
     // retried elsewhere; a pool with no free worker cannot, and migrating it
     // would just bounce the request around. A filter rejection is unavailable,
     // not overload, and becomes HTTP 503.
+    let unknown_policy_class = matches!(error, scheduling::KvSchedulerError::UnknownPolicyClass(_));
     let (error_type, overloaded) = match error {
         scheduling::KvSchedulerError::PinnedWorkerOverloaded { .. } => {
             (ErrorType::WorkerOverloaded, true)
@@ -550,6 +563,7 @@ fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
         }
         scheduling::KvSchedulerError::DeadlineExceeded => (ErrorType::DeadlineExceeded, false),
         scheduling::KvSchedulerError::AllEligibleWorkersFiltered => (ErrorType::Unavailable, false),
+        scheduling::KvSchedulerError::UnknownPolicyClass(_) => (ErrorType::InvalidArgument, false),
         _ => return error.into(),
     };
 
@@ -570,6 +584,9 @@ fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
             .cause(PipelineError::ServiceOverloaded(message))
             .build()
             .into()
+    } else if unknown_policy_class {
+        let error = error.build();
+        anyhow::Error::new(error.clone()).context(UnknownPolicyClassRefusal(error))
     } else {
         error.build().into()
     }
@@ -2088,6 +2105,26 @@ mod tests {
             .expect("overloaded workers should produce a DynamoError");
 
         assert_eq!(dynamo_error.error_type(), ErrorType::ResourceExhausted);
+    }
+
+    #[test]
+    fn unknown_policy_class_maps_to_invalid_argument() {
+        let error =
+            map_scheduler_error(KvSchedulerError::UnknownPolicyClass("missing".to_string()));
+        let dynamo_error = error
+            .downcast_ref::<DynamoError>()
+            .expect("an unknown policy class should produce a DynamoError");
+
+        assert_eq!(dynamo_error.error_type(), ErrorType::InvalidArgument);
+        assert_eq!(dynamo_error.message(), "unknown policy class \"missing\"");
+        assert_eq!(dynamo_error.reason().as_str(), "request.invalid_argument");
+        // The refusal context displays as the error and leaves it the one hosts classify.
+        assert!(error.downcast_ref::<UnknownPolicyClassRefusal>().is_some());
+        assert_eq!(error.to_string(), dynamo_error.to_string());
+        assert_eq!(
+            crate::http::service::error::find_canonical_error_in_chain(error.as_ref()),
+            Some(dynamo_error)
+        );
     }
 
     #[test]
@@ -3662,7 +3699,9 @@ mod tests {
 
     #[tokio::test]
     async fn client_availability_distinguishes_startup_from_last_worker_removal() {
-        use dynamo_kv_router::scheduling::{RoutingEligibility, WorkerEligibilityError};
+        use dynamo_kv_router::scheduling::{
+            RoutingEligibility, WorkerEligibilityError, WorkerIdSet,
+        };
 
         const DECODE_WORKER: u64 = 1;
         const PREFILL_WORKER: u64 = 2;
@@ -3689,9 +3728,10 @@ mod tests {
         ]);
         let constraints = RoutingConstraints::default();
         let validate = |available: &HashSet<u64>, worker: u64| {
+            let available: WorkerIdSet = available.iter().copied().collect();
             let pinned = WorkerWithDpRank::from_worker_id(worker);
             RoutingEligibility::new(None, None, Some(pinned), &constraints)
-                .with_available_workers(Some(available))
+                .with_available_workers(Some(&available))
                 .validate_worker_rank(&workers, pinned)
                 .map(|_| ())
         };

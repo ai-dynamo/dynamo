@@ -29,7 +29,7 @@ import (
 )
 
 // Lower returns the effective public recommendation input: the typed underlay and derived defaults, merged
-// with spec.aisimulate.inputOverrides. The spec must already carry its structural defaults;
+// with spec.aisim.inputOverrides. The spec must already carry its structural defaults;
 // lowering repeats none of them.
 func Lower(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 	return LowerWithUnderlay(spec, nil)
@@ -67,16 +67,16 @@ func LowerWithUnderlay(spec *v1beta2.NativeSearchInput, staticUnderlay map[strin
 	return input, nil
 }
 
-// InputOverrides returns spec.aisimulate.inputOverrides as a JSON object, or nil when absent.
+// InputOverrides returns spec.aisim.inputOverrides as a JSON object, or nil when absent.
 func InputOverrides(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
-	if spec.AISimulate == nil || spec.AISimulate.InputOverrides == nil {
+	if spec.AISim == nil || spec.AISim.InputOverrides == nil {
 		return nil, nil
 	}
-	raw := spec.AISimulate.InputOverrides.Raw
-	if len(raw) == 0 && spec.AISimulate.InputOverrides.Object != nil {
+	raw := spec.AISim.InputOverrides.Raw
+	if len(raw) == 0 && spec.AISim.InputOverrides.Object != nil {
 		var err error
-		if raw, err = json.Marshal(spec.AISimulate.InputOverrides.Object); err != nil {
-			return nil, fmt.Errorf("spec.aisimulate.inputOverrides: %w", err)
+		if raw, err = json.Marshal(spec.AISim.InputOverrides.Object); err != nil {
+			return nil, fmt.Errorf("spec.aisim.inputOverrides: %w", err)
 		}
 	}
 	if len(raw) == 0 {
@@ -86,10 +86,10 @@ func InputOverrides(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	if err := decoder.Decode(&value); err != nil {
-		return nil, fmt.Errorf("spec.aisimulate.inputOverrides: %w", err)
+		return nil, fmt.Errorf("spec.aisim.inputOverrides: %w", err)
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return nil, fmt.Errorf("spec.aisimulate.inputOverrides: trailing JSON value")
+		return nil, fmt.Errorf("spec.aisim.inputOverrides: trailing JSON value")
 	}
 	switch typed := value.(type) {
 	case nil:
@@ -97,7 +97,7 @@ func InputOverrides(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 	case map[string]any:
 		return typed, nil
 	default:
-		return nil, fmt.Errorf("spec.aisimulate.inputOverrides: must be a JSON object, got %T", value)
+		return nil, fmt.Errorf("spec.aisim.inputOverrides: must be a JSON object, got %T", value)
 	}
 }
 
@@ -164,13 +164,8 @@ func Underlay(spec *v1beta2.NativeSearchInput) (map[string]any, error) {
 	b.setTraceWorkload(spec.Workload)
 
 	if objective := spec.Objective; objective != nil {
-		if objective.Mode == v1beta2.ObjectiveModePareto {
-			if len(objective.Metrics) > 0 && !isDefaultParetoMetrics(objective.Metrics) {
-				b.err = fmt.Errorf("spec.objective.metrics: the AISimulate public recommendation input only exposes its default Pareto objectives")
-			} else {
-				b.set(TargetPareto, optimizationTarget)
-			}
-		} else if objective.Metric != nil {
+		// CRD enum and CEL rules admit only scalar Optimize; Pareto lowering is intentionally absent.
+		if objective.Metric != nil {
 			target, err := publicMetric(*objective.Metric)
 			if err != nil {
 				b.err = err
@@ -214,17 +209,6 @@ func (b *builder) setTraceWorkload(workload *v1beta2.WorkloadSpec) {
 
 func hasStaticWorkloadFields(static *v1beta2.StaticWorkloadSpec) bool {
 	return static.InputTokens != nil || static.OutputTokens != nil || static.Load != nil
-}
-
-func isDefaultParetoMetrics(metrics []v1beta2.ObjectiveMetric) bool {
-	if len(metrics) != 2 {
-		return false
-	}
-	found := map[v1beta2.ObjectiveMetric]bool{}
-	for _, metric := range metrics {
-		found[metric] = true
-	}
-	return found[v1beta2.ObjectiveMetric("ThroughputPerGPU")] && found[v1beta2.ObjectiveMetric("ThroughputPerUser")]
 }
 
 // builder writes public input values, remembering the first failure so the translation reads
