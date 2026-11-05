@@ -2510,11 +2510,12 @@ async def test_lora_registration_model_type_gate(
 
     # Exercise the mixin in isolation — avoids needing a concrete subclass
     # with abstract methods, real publisher, runtime, etc. The mixin only
-    # touches engine, config, generate_endpoint, and its own LoRA tracking.
+    # touches engine, config, generate_endpoint, the attachment gate, and LoRA tracking.
     class _Host(LoraMixin):
         pass
 
     handler = _Host()
+    handler._raise_if_not_attached = Mock()
     handler.engine = fake_engine
     handler.generate_endpoint = MagicMock()
 
@@ -2536,6 +2537,7 @@ async def test_lora_registration_model_type_gate(
         )
     ]
 
+    handler._raise_if_not_attached.assert_called_once_with()
     assert results and results[-1]["status"] == "success", results
     assert captured, "register_llm was not invoked"
     assert (

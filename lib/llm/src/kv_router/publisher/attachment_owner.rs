@@ -36,12 +36,14 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::discovery::kv_state_agent::{
-    KV_STATE_ATTACHMENT_INTENT_TOPIC_V2, KV_STATE_HOST_TOPIC_V2, KvStateAttachmentIntent,
-    KvStateHostAdvertisement, KvStateIngressProtocol,
+    KV_STATE_ATTACHMENT_INTENT_TOPIC_V2, KV_STATE_ATTACHMENT_TOPIC_V2, KV_STATE_HOST_TOPIC_V2,
+    KvStateAttachmentAdvertisement, KvStateAttachmentIntent, KvStateHostAdvertisement,
+    KvStateIngressProtocol,
 };
 
 const HOST_COMPONENT: &str = "kv_state_agent";
 const DEFAULT_HOST_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_ATTACH_TIMEOUT: Duration = Duration::from_secs(120);
 const JSON_SAFE_MASK: u64 = (1u64 << 53) - 1;
 
 #[derive(Debug, Clone)]
@@ -91,6 +93,31 @@ impl KvStateAttachmentOwner {
         });
         register_transaction(owner.clone()).await?;
         Ok(owner)
+    }
+
+    /// Wait until the host has acknowledged every intent of this incarnation.
+    ///
+    /// `start` only registers intent. The host acknowledges by advertising an
+    /// attachment record that names this producer and this intent's
+    /// incarnation, after its raw-event subscriber exists; a worker made
+    /// routable earlier loses the events published before the subscription.
+    /// Fails closed on expiry (default 120s).
+    pub async fn await_attached(&self, timeout: Option<Duration>) -> Result<()> {
+        let timeout = timeout.unwrap_or(DEFAULT_ATTACH_TIMEOUT);
+        let expected = self
+            .intents
+            .values()
+            .map(|intent| {
+                (
+                    intent.kv_state_endpoint.clone(),
+                    intent.producer_instance.clone(),
+                    intent.intent_incarnation,
+                )
+            })
+            .collect::<Vec<_>>();
+        let discovery = self.component.drt().discovery();
+        let shutdown = self.component.drt().primary_token();
+        await_attachments(discovery.as_ref(), &expected, timeout, &shutdown).await
     }
 
     pub fn managed_ranks(&self) -> impl Iterator<Item = u32> + '_ {
@@ -251,45 +278,63 @@ async fn await_single_host(
     }
     // The deadline is fixed before any backend I/O: the initial list, watch
     // setup, and every re-list all run under it.
-    let expiry = host_discovery_expiry(timeout);
-    let watch_cancel = shutdown.child_token();
-    // Cancelled on every exit path; without this the discovery watch task
-    // outlives the wait for the rest of the process.
-    let _watch_guard = watch_cancel.clone().drop_guard();
-    let wait = async {
-        if let Some(host) = list_single_host(discovery, namespace).await? {
-            return Ok(host);
-        }
-        tracing::info!(
-            namespace,
-            timeout_secs = timeout.as_secs(),
-            "KV state-agent host is not advertised yet; waiting"
-        );
-        let mut events = discovery
-            .list_and_watch(host_query(namespace), Some(watch_cancel.clone()))
-            .await
-            .context("failed to watch for the KV state-agent host")?;
-        while let Some(event) = events.next().await {
-            event.context("KV state-agent host discovery watch failed")?;
-            if let Some(host) = list_single_host(discovery, namespace).await? {
-                return Ok(host);
-            }
-        }
-        anyhow::bail!("KV state-agent host discovery watch ended before a host appeared")
-    };
-    tokio::select! {
-        biased;
-        _ = watch_cancel.cancelled() => {
-            anyhow::bail!("runtime shutdown before the KV state-agent host appeared")
-        }
-        result = tokio::time::timeout_at(expiry, wait) => match result {
-            Ok(result) => result,
-            Err(_elapsed) => anyhow::bail!(
+    bounded_wait(
+        shutdown,
+        timeout,
+        "runtime shutdown before the KV state-agent host appeared",
+        || {
+            format!(
                 "no live V2 KV state-agent host appeared within {}s \
                  (topic {KV_STATE_HOST_TOPIC_V2} on {namespace}/{HOST_COMPONENT}; \
                  set {HOST_DISCOVERY_TIMEOUT_ENV} to adjust the startup wait)",
                 timeout.as_secs()
-            ),
+            )
+        },
+        |watch_cancel| async move {
+            if let Some(host) = list_single_host(discovery, namespace).await? {
+                return Ok(host);
+            }
+            tracing::info!(
+                namespace,
+                timeout_secs = timeout.as_secs(),
+                "KV state-agent host is not advertised yet; waiting"
+            );
+            let mut events = discovery
+                .list_and_watch(host_query(namespace), Some(watch_cancel))
+                .await
+                .context("failed to watch for the KV state-agent host")?;
+            while let Some(event) = events.next().await {
+                event.context("KV state-agent host discovery watch failed")?;
+                if let Some(host) = list_single_host(discovery, namespace).await? {
+                    return Ok(host);
+                }
+            }
+            anyhow::bail!("KV state-agent host discovery watch ended before a host appeared")
+        },
+    )
+    .await
+}
+
+/// Runs `wait` under one absolute deadline and the runtime shutdown token.
+/// `wait` receives a child token for its discovery watches; it is cancelled on
+/// every exit path so no watch task outlives the wait.
+async fn bounded_wait<T, Fut: std::future::Future<Output = Result<T>>>(
+    shutdown: &CancellationToken,
+    timeout: Duration,
+    shutdown_message: &str,
+    expiry_message: impl FnOnce() -> String,
+    wait: impl FnOnce(CancellationToken) -> Fut,
+) -> Result<T> {
+    let expiry = host_discovery_expiry(timeout);
+    let watch_cancel = shutdown.child_token();
+    let _watch_guard = watch_cancel.clone().drop_guard();
+    let wait = wait(watch_cancel.clone());
+    tokio::select! {
+        biased;
+        _ = watch_cancel.cancelled() => anyhow::bail!("{shutdown_message}"),
+        result = tokio::time::timeout_at(expiry, wait) => match result {
+            Ok(result) => result,
+            Err(_elapsed) => anyhow::bail!("{}", expiry_message()),
         },
     }
 }
@@ -300,6 +345,109 @@ fn host_discovery_expiry(timeout: Duration) -> tokio::time::Instant {
     let now = tokio::time::Instant::now();
     now.checked_add(timeout)
         .unwrap_or_else(|| now + Duration::from_secs(u32::MAX.into()))
+}
+
+/// Wait up to `timeout` until one `list` snapshot per endpoint holds, for every
+/// `(kv_state_endpoint, producer, intent_incarnation)`, an attachment record
+/// with that exact producer and incarnation.
+///
+/// As in `await_single_host`, the `list` snapshot is authoritative and the
+/// watch is only a wake-up to re-list. A record from another incarnation
+/// (a previous run of the same producer) never satisfies the wait, and an entry
+/// withdrawn after it was first seen is simply absent from the next snapshot.
+/// A zero timeout checks one snapshot; cancelling `shutdown` aborts the wait.
+async fn await_attachments(
+    discovery: &dyn Discovery,
+    expected: &[(EndpointId, Instance, u64)],
+    timeout: Duration,
+    shutdown: &CancellationToken,
+) -> Result<()> {
+    if timeout.is_zero() {
+        return match all_attached(discovery, expected).await? {
+            true => Ok(()),
+            false => anyhow::bail!("KV state-agent attachment is not advertised"),
+        };
+    }
+    bounded_wait(
+        shutdown,
+        timeout,
+        "runtime shutdown before the KV state-agent attach ack",
+        || {
+            format!(
+                "KV state-agent did not acknowledge the attachment within {}s \
+                 (topic {KV_STATE_ATTACHMENT_TOPIC_V2})",
+                timeout.as_secs()
+            )
+        },
+        |watch_cancel| async move {
+            let endpoints = expected
+                .iter()
+                .map(|(endpoint, _, _)| endpoint)
+                .collect::<HashSet<_>>();
+            let mut events = Vec::new();
+            for endpoint in endpoints {
+                events.push(
+                    discovery
+                        .list_and_watch(attachment_query(endpoint), Some(watch_cancel.clone()))
+                        .await
+                        .context("failed to watch for the KV state-agent attachment")?,
+                );
+            }
+            let mut events = futures::stream::select_all(events);
+            while !all_attached(discovery, expected).await? {
+                tracing::info!("KV state-agent attachment pending; waiting");
+                let Some(event) = events.next().await else {
+                    anyhow::bail!("KV state-agent attachment watch ended before the attach ack");
+                };
+                event.context("KV state-agent attachment watch failed")?;
+            }
+            Ok(())
+        },
+    )
+    .await
+}
+
+fn attachment_query(endpoint: &EndpointId) -> DiscoveryQuery {
+    DiscoveryQuery::EventSources(EventSourceQuery::endpoint_topic(
+        endpoint.clone(),
+        KV_STATE_ATTACHMENT_TOPIC_V2,
+    ))
+}
+
+/// Does one `list` snapshot per endpoint hold every expected attachment?
+async fn all_attached(
+    discovery: &dyn Discovery,
+    expected: &[(EndpointId, Instance, u64)],
+) -> Result<bool> {
+    let mut snapshots: HashMap<&EndpointId, Vec<DiscoveryInstance>> = HashMap::new();
+    for (endpoint, producer, incarnation) in expected {
+        if !snapshots.contains_key(endpoint) {
+            let instances = discovery
+                .list(attachment_query(endpoint))
+                .await
+                .context("failed to list KV state-agent attachments")?;
+            snapshots.insert(endpoint, instances);
+        }
+        if !has_attachment(&snapshots[endpoint], producer, *incarnation) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn has_attachment(instances: &[DiscoveryInstance], producer: &Instance, incarnation: u64) -> bool {
+    instances.iter().any(|instance| {
+        let DiscoveryInstance::EventSource {
+            topic, metadata, ..
+        } = instance
+        else {
+            return false;
+        };
+        topic == KV_STATE_ATTACHMENT_TOPIC_V2
+            && serde_json::from_value::<KvStateAttachmentAdvertisement>(metadata.clone()).is_ok_and(
+                |ad| ad.producer_instance == *producer && ad.intent_incarnation == incarnation,
+            )
+    })
 }
 
 /// Shared so the zero-timeout path stays byte-identical to the legacy error message.
@@ -901,5 +1049,135 @@ mod tests {
         .unwrap_err();
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(format!("{error:#}").contains("exactly one live V2 host, found 2"));
+    }
+
+    fn endpoint_id() -> EndpointId {
+        EndpointId::from("ns.backend.generate")
+    }
+
+    /// Advertise an attachment record the way the state agent does.
+    async fn register_attachment(
+        discovery: &dyn Discovery,
+        record_id: u64,
+        producer: &Instance,
+        incarnation: u64,
+    ) {
+        let ad = KvStateAttachmentAdvertisement {
+            cache_owner_id: cache_owner(4),
+            publisher_id: 5,
+            protocol_version: KvStateProtocolVersion::V2,
+            recovery_control_target: instance("kv_state_agent", 1),
+            attachment_generation: 1,
+            producer_instance: producer.clone(),
+            intent_incarnation: incarnation,
+            worker: WorkerWithDpRank::new(17, 4),
+            ingress_protocol: KvStateIngressProtocol::VllmResidencyV1,
+            raw_zmq_endpoint: "tcp://producer.example:20004".to_string(),
+            raw_topic: String::new(),
+            ready_at_outbound_cursor: 0,
+        };
+        discovery
+            .register(DiscoverySpec::EventSource {
+                scope: EventScope::Endpoint {
+                    endpoint: endpoint_id(),
+                },
+                topic: KV_STATE_ATTACHMENT_TOPIC_V2.to_string(),
+                publisher_id: record_id,
+                metadata: serde_json::to_value(ad).unwrap(),
+            })
+            .await
+            .unwrap();
+    }
+
+    /// A stale same-owner record must not satisfy the wait; only the matching
+    /// incarnation, arriving later, resolves it.
+    #[tokio::test]
+    async fn attach_ack_requires_the_matching_incarnation() {
+        let discovery = mock_discovery();
+        let producer = instance("producer", 11);
+        register_attachment(discovery.as_ref(), 1, &producer, 100).await;
+        let expected = vec![(endpoint_id(), producer.clone(), 200)];
+
+        let stale_only = await_attachments(
+            discovery.as_ref(),
+            &expected,
+            Duration::from_millis(200),
+            &CancellationToken::new(),
+        )
+        .await;
+        let message = format!(
+            "{:#}",
+            stale_only.expect_err("stale incarnation must not resolve")
+        );
+        assert!(message.contains("did not acknowledge"), "{message}");
+        assert!(message.contains(KV_STATE_ATTACHMENT_TOPIC_V2), "{message}");
+
+        let register = discovery.clone();
+        let late = producer.clone();
+        let registration = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            register_attachment(register.as_ref(), 2, &late, 200).await;
+        });
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            await_attachments(
+                discovery.as_ref(),
+                &expected,
+                Duration::from_secs(30),
+                &CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("the matching record must wake the wait")
+        .unwrap();
+        registration.await.unwrap();
+    }
+
+    /// An entry withdrawn after it was first seen, while a later entry is still
+    /// awaited, must not count: no ack until it is advertised again.
+    #[tokio::test]
+    async fn attach_ack_requires_all_entries_present_at_ack_time() {
+        let discovery = mock_discovery();
+        let first = instance("producer", 11);
+        let second = instance("producer", 12);
+        register_attachment(discovery.as_ref(), 1, &first, 100).await;
+        let expected = vec![
+            (endpoint_id(), first.clone(), 100),
+            (endpoint_id(), second.clone(), 200),
+        ];
+
+        let mutator = discovery.clone();
+        let changes = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let withdrawn = mutator
+                .list(attachment_query(&endpoint_id()))
+                .await
+                .unwrap()
+                .remove(0);
+            mutator.unregister(withdrawn).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            register_attachment(mutator.as_ref(), 2, &second, 200).await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            register_attachment(mutator.as_ref(), 3, &first, 100).await;
+            tokio::time::Instant::now()
+        });
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            await_attachments(
+                discovery.as_ref(),
+                &expected,
+                Duration::from_secs(30),
+                &CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("re-advertising the withdrawn entry must wake the wait")
+        .unwrap();
+        let acked_at = tokio::time::Instant::now();
+        let readvertised_at = changes.await.unwrap();
+        assert!(
+            acked_at >= readvertised_at,
+            "acked before the withdrawn entry was advertised again"
+        );
     }
 }

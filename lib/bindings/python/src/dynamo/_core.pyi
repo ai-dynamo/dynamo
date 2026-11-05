@@ -2904,6 +2904,9 @@ class KvStateAttachmentOwner:
     async def start(self) -> None:
         ...
 
+    async def await_attached(self, timeout_secs: Optional[float] = None) -> None:
+        ...
+
     async def close(self) -> None:
         ...
 

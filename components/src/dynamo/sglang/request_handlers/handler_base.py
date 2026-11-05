@@ -9,7 +9,7 @@ import random
 import re
 import threading
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator, Dict, Generic, Optional, Tuple, TypeVar
+from typing import Any, AsyncIterator, Callable, Dict, Generic, Optional, Tuple, TypeVar
 
 import sglang as sgl
 from sglang.srt.managers.io_struct import ProfileReq
@@ -117,6 +117,7 @@ class LoraMixin:
     engine: sgl.Engine  # provided by BaseWorkerHandler
     config: Config
     generate_endpoint: Any
+    _raise_if_not_attached: Callable[[], None]  # provided by BaseWorkerHandler
 
     def _init_lora_tracking(self) -> None:
         """Initialize LoRA tracking state. Call from host __init__."""
@@ -162,6 +163,7 @@ class LoraMixin:
         This method is idempotent - concurrent calls for the same LoRA will be
         serialized and only one load operation will happen.
         """
+        self._raise_if_not_attached()
         try:
             if request is None:
                 yield {
@@ -408,6 +410,7 @@ class LoraMixin:
             "lora_name": str,
         }
         """
+        self._raise_if_not_attached()
         try:
             if request is None:
                 yield {
@@ -560,6 +563,13 @@ class BaseWorkerHandler(
     - Disaggregated serving support
     """
 
+    # StateAgentLifecycle in Guard mode; requests are refused until it is attached.
+    attach_gate = None
+
+    def _raise_if_not_attached(self) -> None:
+        if self.attach_gate is not None and not self.attach_gate.attached:
+            raise HttpError(503, "KV state agent attachment pending")
+
     def __init__(
         self,
         engine: sgl.Engine,
@@ -638,6 +648,7 @@ class BaseWorkerHandler(
 
     async def clear_kv_blocks(self, request: Optional[Dict[str, Any]] = None):
         """Flush SGLang's local cache when no requests are active."""
+        self._raise_if_not_attached()
         tokenizer_manager = (
             getattr(self.engine, "tokenizer_manager", None)
             if self.engine is not None
@@ -903,10 +914,20 @@ class BaseWorkerHandler(
             finally:
                 await self._sync_discovery_with_sglang_pause_state()
 
+    def _gate_route(self, route_handler):
+        """Refuse a state-mutating control route until the worker is attached."""
+
+        async def gated_handler(body: dict) -> dict:
+            self._raise_if_not_attached()
+            return await route_handler(body)
+
+        return gated_handler
+
     def _wrap_engine_route(self, route_handler):
         """Add discovery synchronization to an SGLang route."""
 
         async def synchronized_handler(body: dict) -> dict:
+            self._raise_if_not_attached()
             return await self._invoke_engine_route(route_handler, body)
 
         return synchronized_handler
@@ -924,18 +945,28 @@ class BaseWorkerHandler(
         built_in_routes = {
             "control/start_profile": self.start_profile,
             "control/stop_profile": self.stop_profile,
-            "control/update_weights_from_disk": self.update_weights_from_disk,
-            "control/update_weights_from_tensor": self.update_weights_from_tensor,
-            "control/update_weights_from_distributed": (
+            "control/update_weights_from_disk": self._gate_route(
+                self.update_weights_from_disk
+            ),
+            "control/update_weights_from_tensor": self._gate_route(
+                self.update_weights_from_tensor
+            ),
+            "control/update_weights_from_distributed": self._gate_route(
                 self.update_weights_from_distributed
             ),
-            "control/update_weights_from_ipc": self.update_weights_from_ipc,
-            "control/update_weight_version": self.update_weight_version,
+            "control/update_weights_from_ipc": self._gate_route(
+                self.update_weights_from_ipc
+            ),
+            "control/update_weight_version": self._gate_route(
+                self.update_weight_version
+            ),
         }
         # Register elastic-EP scaling only on workers whose engine can serve it
         # (see _supports_elastic_ep); the rest simply don't expose the route.
         if self._supports_elastic_ep():
-            built_in_routes["control/scale_elastic_ep"] = self.scale_elastic_ep
+            built_in_routes["control/scale_elastic_ep"] = self._gate_route(
+                self.scale_elastic_ep
+            )
             built_in_routes[
                 "control/is_scaling_elastic_ep"
             ] = self.is_scaling_elastic_ep
