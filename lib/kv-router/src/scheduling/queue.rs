@@ -2552,9 +2552,8 @@ impl<
             }
         };
 
-        // Selection discounts host and disk hits to model transfer cost, but the active-load
-        // booking must not carry that discount: those blocks are transfer work, not GPU prefill
-        // compute. Book against the selected rank's raw cached tokens across all tiers.
+        // Book raw cached tokens, not selection's tier-weighted credit: host and disk hits
+        // are transfer work, not GPU prefill compute.
         let selected_rank_raw_cached_tokens =
             request.raw_cached_tokens_for(selected.selection.worker, self.block_size);
         let response = SchedulingResponse {

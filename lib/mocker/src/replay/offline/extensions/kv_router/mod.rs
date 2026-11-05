@@ -1441,10 +1441,8 @@ impl OfflineReplayRouter {
         let worker_idx = self.scheduler_id(selection.worker)?;
         let kv_fetch_source = self.kv_fetch_source(selection.kv_transfer_source)?;
         let request_id = request.request_id();
-        // Book GPU prefill against the selected rank's raw cached tokens across all tiers, as
-        // serving does: host and disk hits are transfer work, not prefill compute. Replay's
-        // tracked default-selector selections always set this; a missing value books the full
-        // ISL rather than under-booking.
+        // Book raw cached tokens across all tiers, as serving does. Replay's default selector
+        // always sets this; a missing value books the full ISL rather than under-booking.
         let prefill_load_hint = self.prefill_load_hint_for(
             request.isl_tokens,
             selection.selected_raw_cached_tokens.unwrap_or_default(),
