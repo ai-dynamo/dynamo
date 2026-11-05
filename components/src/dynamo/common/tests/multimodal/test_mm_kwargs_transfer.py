@@ -173,6 +173,36 @@ class TestMmKwargsPreparationOwnership:
         handles[0].unlink.assert_called_once_with()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure_site", ["item_metadata", "batch_metadata"])
+    async def test_shm_release_failure_keeps_preparation_error(
+        self, monkeypatch, failure_site
+    ):
+        handles, _ = self._shm_boundary(monkeypatch)
+        sender = MmKwargsShmSender()
+        failure = OSError(errno.ENOSPC, "controlled preparation failure")
+
+        def fail(*args, **kwargs):
+            # Cleanup failure must preserve the error and not skip later segments.
+            handles[0].unlink.side_effect = OSError(errno.EIO, "release failed")
+            raise failure
+
+        if failure_site == "item_metadata":
+            monkeypatch.setattr(mm_kwargs_transfer, "MmKwargsShmItem", fail)
+        else:
+            monkeypatch.setattr(sender, "_assemble_extra_args", fail)
+
+        with pytest.raises(OSError) as caught:
+            await sender.prepare(
+                [_make_feature(data=_make_kwargs_item(i)) for i in range(2)]
+            )
+
+        assert caught.value is failure
+        assert len(handles) == (2 if failure_site == "batch_metadata" else 1)
+        for handle in handles:
+            handle.close.assert_called_once_with()
+            handle.unlink.assert_called_once_with()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "failure_site", ["registration", "item_metadata", "batch_metadata"]
     )

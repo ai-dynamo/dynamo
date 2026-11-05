@@ -107,6 +107,7 @@ RUN apt-get update && \
         gpgv \
         keyboxd \
         libbrotli1 \
+        libgnutls30t64 \
         libssl3t64 \
         openssl && \
     rm -rf /var/lib/apt/lists/*
