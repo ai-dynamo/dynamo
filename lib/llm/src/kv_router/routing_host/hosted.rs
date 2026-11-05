@@ -4,7 +4,7 @@
 use dynamo_kv_router::selector::HostedSelectionRequest;
 
 /// The request metadata a hosted picker reads. The routing host tracks no KV block size, so
-/// [`request_blocks`](dynamo_kv_router::WorkerSelectionContext::request_blocks) reads 0.
+/// [`request_blocks`](dynamo_kv_router::plugins::worker_selection::WorkerSelectionContext::request_blocks) reads 0.
 pub(super) fn hosted_request(request: &PreprocessedRequest) -> HostedSelectionRequest {
     HostedSelectionRequest::new(request.token_ids.len())
 }
@@ -435,8 +435,6 @@ impl RoutingHost {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
-
     use dynamo_kv_router::selector::HostedWorkerPicker;
     use dynamo_runtime::pipeline::RouterMode;
 
@@ -477,12 +475,10 @@ mod tests {
     }
 
     #[test]
-    fn load_based_modes_require_active_requests() {
-        for mode in [RouterMode::PowerOfTwoChoices, RouterMode::LeastLoaded] {
-            let picker = hosted_picker(mode).unwrap();
-            assert_eq!(picker.inputs(), WorkerInputs::ACTIVE_REQUESTS);
-            assert!(picker.select(&[10, 20], None, &request()).is_err());
-        }
+    fn least_loaded_requires_active_requests() {
+        let picker = hosted_picker(RouterMode::LeastLoaded).unwrap();
+        assert_eq!(picker.inputs(), WorkerInputs::ACTIVE_REQUESTS);
+        assert!(picker.select(&[10, 20], None, &request()).is_err());
     }
 
     #[test]
@@ -494,25 +490,12 @@ mod tests {
     }
 
     #[test]
-    fn power_of_two_reads_only_two_active_request_counts() {
-        let picker = hosted_picker(RouterMode::PowerOfTwoChoices).unwrap();
-        let reads = Cell::new(0);
-        let active = |_| {
-            reads.set(reads.get() + 1);
-            0
-        };
-        picker
-            .select(&[10, 20, 30, 40], Some(&active), &request())
-            .unwrap();
-        assert_eq!(reads.get(), 2);
-    }
-
-    #[test]
     fn non_plugin_modes_have_no_hosted_policy() {
         for mode in [
             RouterMode::KV,
             RouterMode::Direct,
             RouterMode::DeviceAwareWeighted,
+            RouterMode::PowerOfTwoChoices,
         ] {
             assert!(hosted_picker(mode).is_err());
         }

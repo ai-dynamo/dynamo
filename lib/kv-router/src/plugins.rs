@@ -6,8 +6,6 @@
 //! Plugin authors implement [`worker_selection`] or [`request_classifier`] and register their
 //! providers with [`RouterPluginRegistry`]. Signal accessors and callback signatures are unchanged.
 //! Scheduling owns execution, eligibility, lifecycle synchronization, and capacity accounting.
-//!
-//! Legacy imports remain compatibility re-exports until v1.7; new plugins should use this module.
 
 mod registry;
 pub mod request_classifier;
@@ -16,8 +14,7 @@ pub mod worker_selection;
 pub use registry::{
     DYN_ROUTER_DECODE_POLICY, DYN_ROUTER_PREFILL_POLICY, DYN_ROUTER_WORKER_SELECTION_POLICY,
     RouterPluginRegistry, WorkerSelectionPolicyParameters, WorkerSelectionPolicyProvider,
-    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
-    WorkerSelectionPolicyRegistryError,
+    WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
 };
 
 use request_classifier::{RequestClassifierFactory, RequestClassifierRegistryError};

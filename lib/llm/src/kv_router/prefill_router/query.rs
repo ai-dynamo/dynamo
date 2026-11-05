@@ -655,13 +655,9 @@ mod tests {
         let runtime = Runtime::from_current().unwrap();
         let discovery_root = tempfile::tempdir().unwrap();
 
-        for (index, mode) in [
-            RouterMode::PowerOfTwoChoices,
-            RouterMode::LeastLoaded,
-            RouterMode::DeviceAwareWeighted,
-        ]
-        .into_iter()
-        .enumerate()
+        for (index, mode) in [RouterMode::LeastLoaded, RouterMode::DeviceAwareWeighted]
+            .into_iter()
+            .enumerate()
         {
             let dispatch = Arc::new(RecordingDispatch::pending());
             let (shared, prefill, runtimes, workers) = shared_router(

@@ -233,17 +233,15 @@ class RouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_MODE",
             default=self.default_router_mode,
             help=(
-                "How to route the request. power-of-two picks 2 random workers and "
-                "routes to the one with fewer in-flight requests. least-loaded routes to "
-                "the worker with the fewest active requests. device-aware-weighted routes "
-                "based on worker device type (CPU/CUDA). In disaggregated prefill mode, "
-                "both power-of-two and least-loaded skip bootstrap optimization and fall "
-                "back to the synchronous prefill path."
+                "How to route the request. least-loaded routes to the worker with the "
+                "fewest active requests. device-aware-weighted routes based on worker "
+                "device type (CPU/CUDA). In disaggregated prefill mode, least-loaded "
+                "skips bootstrap optimization and falls back to the synchronous prefill "
+                "path."
             ),
             choices=[
                 "round-robin",
                 "random",
-                "power-of-two",
                 "kv",
                 "direct",
                 "least-loaded",
@@ -323,7 +321,6 @@ class RouterArgGroup(ArgGroup):
 ROUTER_MODE_MAP: dict[str, str] = {
     "round-robin": "RoundRobin",
     "random": "Random",
-    "power-of-two": "PowerOfTwoChoices",
     "kv": "KV",
     "direct": "Direct",
     "least-loaded": "LeastLoaded",

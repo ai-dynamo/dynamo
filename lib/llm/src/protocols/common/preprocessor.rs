@@ -10,8 +10,9 @@ pub use dynamo_kv_router::kv_hints::{
 };
 use dynamo_kv_router::{
     config::RouterConfigOverride,
+    plugins::request_classifier::AbortCause,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
-    scheduling::{AbortCause, RequestLifecycle},
+    scheduling::RequestLifecycle,
 };
 use dynamo_runtime::error::{DynamoError, ErrorType, match_error_chain};
 use serde::{Deserialize, Serialize};

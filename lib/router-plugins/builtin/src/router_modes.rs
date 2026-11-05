@@ -3,15 +3,13 @@
 
 //! The non-KV routing modes as worker-selection policies, one module per mode.
 //!
-//! `--router-mode random`, `round-robin`, `least-loaded` and `power-of-two` resolve to these types
-//! by name. Each picker declares at most [`WorkerInputs::ACTIVE_REQUESTS`]. `PushRouter` runs
-//! the same pickers through the instance selectors its caller passes, so each algorithm lives
-//! only here.
+//! `--router-mode random`, `round-robin` and `least-loaded` resolve to these types by name. Each picker declares at most [`WorkerInputs::ACTIVE_REQUESTS`].
+//! `PushRouter` runs the same pickers through the instance selectors its caller passes, so each
+//! algorithm lives only here.
 //!
 //! [`WorkerInputs::ACTIVE_REQUESTS`]: dynamo_kv_router::plugins::worker_selection::WorkerInputs::ACTIVE_REQUESTS
 
 mod least_loaded;
-mod power_of_two;
 mod random;
 mod round_robin;
 
@@ -28,7 +26,6 @@ use dynamo_kv_router::plugins::{
 };
 
 pub use least_loaded::LEAST_LOADED;
-pub use power_of_two::POWER_OF_TWO;
 pub use random::RANDOM;
 pub use round_robin::ROUND_ROBIN;
 
@@ -90,7 +87,7 @@ fn provider<P: WorkerPicker + 'static>(
 /// Add each routing mode `registry` doesn't already provide. Every host links them through
 /// [`crate::with_defaults`].
 pub(crate) fn register_missing(registry: &mut RouterPluginRegistry) {
-    let modes: [(&str, WorkerSelectionPolicyProvider); 4] = [
+    let modes: [(&str, WorkerSelectionPolicyProvider); 3] = [
         (RANDOM, Arc::new(provider(|| random::RandomPicker))),
         (
             ROUND_ROBIN,
@@ -99,10 +96,6 @@ pub(crate) fn register_missing(registry: &mut RouterPluginRegistry) {
         (
             LEAST_LOADED,
             Arc::new(provider(|| least_loaded::LeastLoadedPicker)),
-        ),
-        (
-            POWER_OF_TWO,
-            Arc::new(provider(|| power_of_two::PowerOfTwoPicker)),
         ),
     ];
     for (name, provider) in modes {
@@ -115,11 +108,8 @@ pub(crate) fn register_missing(registry: &mut RouterPluginRegistry) {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
-
     use super::Samples;
     use super::least_loaded::least_loaded;
-    use super::power_of_two::power_of_two;
     use super::random::random;
     use super::round_robin::round_robin;
 
@@ -151,7 +141,6 @@ mod tests {
         assert_eq!(random(0, &mut samples), None);
         assert_eq!(round_robin(7, 0), None);
         assert_eq!(least_loaded(0, |_| 0, &mut samples), None);
-        assert_eq!(power_of_two(0, |_| 0, &mut samples), None);
         assert_eq!(samples.consumed, 0);
     }
 
@@ -168,23 +157,6 @@ mod tests {
         let mut samples = ScriptedSamples::new([2]);
         assert_eq!(random(4, &mut samples), Some(2));
         assert_eq!(samples.consumed, 1);
-    }
-
-    #[test]
-    fn power_of_two_uses_exactly_two_samples_and_two_load_reads() {
-        let mut samples = ScriptedSamples::new([1, 1]);
-        let reads = Cell::new(0);
-        let chosen = power_of_two(
-            4,
-            |index| {
-                reads.set(reads.get() + 1);
-                if index == 1 { 5 } else { 1 }
-            },
-            &mut samples,
-        );
-        assert_eq!(chosen, Some(3));
-        assert_eq!(samples.consumed, 2);
-        assert_eq!(reads.get(), 2);
     }
 
     #[test]
