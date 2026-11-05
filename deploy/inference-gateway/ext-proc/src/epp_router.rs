@@ -26,6 +26,7 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::sync::Semaphore;
 
+use dynamo_kv_router::scheduling::KvSchedulerError;
 use dynamo_kv_router::services::selection::{RouterPluginRegistry, SelectionError};
 use dynamo_llm::http::service::metadata::extract_metadata_from_header_pairs;
 use dynamo_llm::protocols::agents::HEADER_DYNAMO_SESSION_ID;
@@ -376,6 +377,9 @@ impl EndpointPicker for EppRouter {
             Ok(resp) => resp,
             Err(SelectionError::BadRequest(message)) => {
                 return Err(PickError::InvalidRequest(message));
+            }
+            Err(error @ SelectionError::Scheduler(KvSchedulerError::UnknownPolicyClass(_))) => {
+                return Err(PickError::InvalidRequest(error.to_string()));
             }
             Err(e) => return Err(PickError::RoutingFailed(e.to_string())),
         };

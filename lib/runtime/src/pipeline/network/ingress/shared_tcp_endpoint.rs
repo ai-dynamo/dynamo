@@ -617,8 +617,12 @@ impl SharedTcpServer {
                 "Received TCP request"
             );
 
-            // Look up handler (lock-free read with DashMap)
-            let handler = handlers.get(endpoint_path).map(|h| h.clone());
+            // Count admission before releasing the map guard: removal must not
+            // observe zero inflight while this request still holds the handler.
+            let handler = handlers.get(endpoint_path).map(|h| {
+                h.inflight.fetch_add(1, Ordering::SeqCst);
+                h.clone()
+            });
 
             let handler = match handler {
                 Some(h) => h,
@@ -636,8 +640,6 @@ impl SharedTcpServer {
                     continue;
                 }
             };
-
-            handler.inflight.fetch_add(1, Ordering::SeqCst);
 
             // Build work item
             // NOTE: payload is Bytes (Arc-counted), so cloning is extremely cheap
