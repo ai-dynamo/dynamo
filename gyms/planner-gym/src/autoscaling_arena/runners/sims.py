@@ -1005,8 +1005,9 @@ def _validate_report_destination(
 ) -> None:
     # The summary is written after the match succeeds; rejecting a trace
     # alias up front keeps a finished run from overwriting its own input.
+    # Compare the paths as they are read and written, without expanding "~".
     for trace_path in trace_paths:
-        candidate = Path(trace_path).expanduser()
+        candidate = Path(trace_path)
         if _paths_refer_to_same_file(report_path, candidate):
             raise ValueError(
                 "report_json must not refer to a replay trace input: " f"{candidate}"
@@ -1440,9 +1441,7 @@ def run_arena_replay(
     if not replay_trace_files:
         raise ValueError("trace_files must contain at least one trace file")
     if report_json is not None:
-        _validate_report_destination(
-            Path(report_json).expanduser(), trace_paths=replay_trace_files
-        )
+        _validate_report_destination(Path(report_json), trace_paths=replay_trace_files)
     if report_jsonl_path is not None:
         output = Path(report_jsonl_path).expanduser().resolve()
         if any(
