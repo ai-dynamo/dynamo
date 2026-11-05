@@ -13,9 +13,10 @@
 //! and the gate that judges "all eligible workers full" over the slot projection stay in
 //! `lib/router/kv-router`, which implements [`WorkerView`] over worker selection's rows.
 //!
-//! Kernel-facing: the `ClassifyRequest` constructors, `ClassificationOverrides`,
-//! `QueueMetadata`, the `PolicyQueue` scheduling methods, and `RequestClassifierRuntime` are
-//! public for the kernel in another crate; hosts and plugins do not call them.
+//! Kernel-facing: the `ClassifyRequest` constructors, `ClassificationOverrides`, the
+//! `PolicyQueue` scheduling methods (`extract_next`, `settle`, `take_expired`), and
+//! `RequestClassifierRuntime` are public for the kernel in another crate; hosts and plugins do
+//! not call them. `QueueMetadata` is also what offline replay enqueues with.
 
 pub mod classifier;
 pub mod host;
@@ -31,10 +32,10 @@ pub use classifier::{
 };
 pub use placement::WorkerPlacement;
 pub use profile::{
-    AdmissionConfigError, FamilyBucketTable, PolicyClassConfig, PolicyProfile, RouterQueuePolicy,
-    SYNTHETIC_POLICY_CLASS,
+    AdmissionConfigError, PolicyClassConfig, PolicyProfile, RouterQueuePolicy,
+    SYNTHETIC_POLICY_CLASS, UnknownPolicyClassError,
 };
 pub use queue::{
-    PolicyQueue, PolicyQueueEntry, PolicyQueueStats, QueueLimitKind, QueueMetadata, QueueRejection,
-    QueueSnapshot,
+    DispatchCharge, PolicyQueue, PolicyQueueEntry, PolicyQueueStats, QueueLimitKind, QueueMetadata,
+    QueueRejection, QueueSnapshot,
 };

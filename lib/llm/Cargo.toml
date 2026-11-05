@@ -75,6 +75,8 @@ dynamo-router-policies = { workspace = true }
 # repo
 dynamo-global-discovery-client = { workspace = true }
 dynamo-admission = { workspace = true }
+dynamo-global-common = { workspace = true, features = ["grpc"] }
+dynamo-global-view-broadcaster = { path = "../global-view-broadcaster" }
 dynamo-kv-events = { workspace = true }
 dynamo-kv-hashing = { workspace = true }
 dynamo-kv-hints = { workspace = true }

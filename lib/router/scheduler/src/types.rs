@@ -87,6 +87,9 @@ pub enum KvSchedulerError {
     #[error("pinned worker {worker_id} is not in allowed worker set")]
     PinnedWorkerNotAllowed { worker_id: WorkerId },
 
+    #[error("unknown policy class {0:?}")]
+    UnknownPolicyClass(String),
+
     #[error("endpoint subscriber shutdown")]
     SubscriberShutdown,
 
@@ -539,6 +542,12 @@ impl From<dynamo_worker_selection::SelectionFailure> for KvSchedulerError {
             SelectionFailure::AllFiltered => Self::AllEligibleWorkersFiltered,
             SelectionFailure::Policy(error) => Self::WorkerSelectionPolicy(error),
         }
+    }
+}
+
+impl From<dynamo_admission::profile::UnknownPolicyClassError> for KvSchedulerError {
+    fn from(error: dynamo_admission::profile::UnknownPolicyClassError) -> Self {
+        Self::UnknownPolicyClass(error.0)
     }
 }
 

@@ -182,6 +182,13 @@ pub const SGLANG_GENERATE_CAPABILITY: &str = "sglang_generate";
 /// Worker-confirmed isolated scheduling for zero-decode candidate scoring.
 pub const SGLANG_SYSTEMONE_SERIAL_V1: &str = "sglang_systemone_serial_v1";
 
+/// Worker-advertised guarantee that disaggregated prefill cancellation is safe
+/// at any point before the prefill stream finishes.
+///
+/// Both prefill and decode workers must advertise this versioned capability.
+/// Absence is conservative and leaves remote prefill cancellation disabled.
+pub const DISAGG_PREFILL_CANCEL_ANYTIME_V1: &str = "disagg_prefill_cancel_anytime_v1";
+
 /// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

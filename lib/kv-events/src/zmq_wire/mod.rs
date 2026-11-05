@@ -25,6 +25,7 @@ mod filter;
 mod mm_exclusion;
 #[cfg(test)]
 mod tests;
+mod trtllm;
 mod types;
 
 pub use convert::{
@@ -35,6 +36,7 @@ pub use extra_keys::{
     DYNAMO_CACHE_SALT_PREFIX, extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace,
 };
 pub use filter::KvCacheSpecKind;
+pub use trtllm::IMAGE_ROUTING_UUID_PREFIX;
 pub use types::{
     BlockHashValue, ExtraKeyItem, KvEventBatch, KvEventOwnership, KvTokenIds, Locality, RawKvEvent,
     WIDE_TOKEN_SENTINEL,

@@ -2100,8 +2100,11 @@ name = "dynamo-global-common"
 version = "1.7.0"
 dependencies = [
  "blake3",
+ "prost 0.13.5",
  "serde",
  "thiserror 2.0.18",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
  "url",
 ]
 
@@ -2118,6 +2121,16 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "dynamo-global-view-broadcaster"
+version = "1.7.0"
+dependencies = [
+ "parking_lot",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -2255,7 +2268,9 @@ dependencies = [
  "dialoguer",
  "dynamo-admission",
  "dynamo-decisions",
+ "dynamo-global-common",
  "dynamo-global-discovery-client",
+ "dynamo-global-view-broadcaster",
  "dynamo-kv-events",
  "dynamo-kv-hashing",
  "dynamo-kv-hints",
@@ -2637,6 +2652,7 @@ dependencies = [
  "futures-util",
  "http 1.4.1",
  "once_cell",
+ "ordered-float 4.6.0",
  "parking_lot",
  "rmp-serde",
  "rustc-hash 2.1.2",

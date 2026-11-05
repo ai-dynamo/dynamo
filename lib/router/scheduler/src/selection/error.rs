@@ -82,7 +82,8 @@ fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
         | KvSchedulerError::PinnedWorkerOverloaded { .. }
         | KvSchedulerError::QueueRejected(_)
         | KvSchedulerError::DeadlineExceeded => StatusCode::TOO_MANY_REQUESTS,
-        KvSchedulerError::PinnedWorkerNotAllowed { .. } => StatusCode::BAD_REQUEST,
+        KvSchedulerError::PinnedWorkerNotAllowed { .. }
+        | KvSchedulerError::UnknownPolicyClass(_) => StatusCode::BAD_REQUEST,
         // A duplicate live request id, or a lifecycle the caller ended (or
         // re-registered) mid-classification, is caller-induced, like
         // `BookingFailed` and `SequenceError::DuplicateRequest`.

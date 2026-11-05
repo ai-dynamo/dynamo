@@ -592,6 +592,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prefill_reservation_keeps_the_unknown_class_error() {
+        use dynamo_runtime::error::{DynamoError, ErrorType};
+
+        // The tracked prefill router has no policy file, so its synthetic profile has no `priority`.
+        let (router, chooser) = tracked_prefill_router().await;
+        let error = router
+            .reserve_prefill_worker(
+                "epp-prefill/unknown-class",
+                &[1u32; 64],
+                None,
+                None,
+                None,
+                0.0,
+                0,
+                Some("priority".to_string()),
+                None,
+                RoutingConstraints::default(),
+            )
+            .await
+            .err()
+            .expect("prefill class entry must reject an unknown class");
+        let error = error
+            .downcast_ref::<DynamoError>()
+            .expect("the class error must stay a top-level DynamoError");
+        assert_eq!(error.error_type(), ErrorType::InvalidArgument);
+        assert_eq!(error.message(), "unknown policy class \"priority\"");
+        let loads = chooser
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap();
+        assert!(
+            loads.iter().all(|load| load.potential_prefill_tokens == 0),
+            "a rejected class must not book prefill load: {loads:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_class_decode_refusal_stops_pending_prefill() {
+        use super::super::handoff::PrefillTask;
+        use crate::protocols::response_merge::PrefillNeed;
+        use dynamo_runtime::engine::AsyncEngineContextProvider;
+        use dynamo_runtime::error::{DynamoError, ErrorType};
+        use dynamo_runtime::pipeline::context::Controller;
+
+        // This KV routing host stands in for decode: its synthetic profile has no `priority`,
+        // so decode refuses that class when the request enters it, before any dispatch.
+        let (decode, _chooser) = tracked_binding("decode-refusal").await;
+        for output in [
+            PrefillNeed::None,
+            PrefillNeed::BeforeLast,
+            PrefillNeed::BeforeFirst,
+        ] {
+            // Prefill accepted the class and is still running under its own controller.
+            let prefill_context = Arc::new(Controller::default());
+            let task_context = prefill_context.clone();
+            let (cleaned_tx, cleaned_rx) = tokio::sync::oneshot::channel();
+            let prefill = PrefillTask::spawn(
+                async move {
+                    task_context.stopped().await;
+                    let _ = cleaned_tx.send(());
+                    Ok(None)
+                },
+                prefill_context.clone(),
+            );
+            let request = Context::with_id_and_metadata(
+                request(),
+                format!("decode-refusal-{output:?}"),
+                std::collections::BTreeMap::from([(
+                    "policy-class".to_string(),
+                    "priority".to_string(),
+                )]),
+            );
+            let request_context = request.context();
+            let error = prefill
+                .forward_decode(
+                    decode.router.generate(request),
+                    request_context,
+                    output,
+                    prefill_context.clone(),
+                )
+                .await
+                .expect_err("decode routing must refuse the unknown class");
+            let refusal = error
+                .downcast_ref::<DynamoError>()
+                .expect("the refusal keeps its DynamoError");
+            assert_eq!(refusal.error_type(), ErrorType::InvalidArgument);
+            assert_eq!(refusal.message(), "unknown policy class \"priority\"");
+            assert!(
+                prefill_context.is_stopped(),
+                "decode's class refusal left prefill running: {output:?}"
+            );
+            tokio::time::timeout(Duration::from_secs(1), cleaned_rx)
+                .await
+                .expect("stopped prefill must finish its cleanup")
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn rr_prefill_queries_and_reservations_do_not_advance_dispatch_cursor() {
         let runtime = Runtime::from_current().unwrap();
         let discovery_root = tempfile::tempdir().unwrap();

@@ -52,6 +52,7 @@ tracing = { workspace = true }
 zeroize = { workspace = true }
 uuid = { workspace = true }
 once_cell = { version = "1" }
+ordered-float = { workspace = true }
 
 [dev-dependencies]
 dynamo-kv-indexer = { workspace = true, features = ["testing"] }

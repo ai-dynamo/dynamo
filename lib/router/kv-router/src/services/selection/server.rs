@@ -382,6 +382,22 @@ mod tests {
     struct PrivateClassifierError;
 
     #[tokio::test]
+    async fn unknown_policy_class_is_a_client_error() {
+        let response = selection_error_response(SelectionError::Scheduler(
+            KvSchedulerError::UnknownPolicyClass("missing".to_string()),
+        ));
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            body.as_ref(),
+            br#"{"error":"unknown policy class \"missing\""}"#
+        );
+    }
+
+    #[tokio::test]
     async fn classifier_error_response_is_sanitized() {
         let response = selection_error_response(SelectionError::Scheduler(
             KvSchedulerError::RequestClassifierFailed(std::sync::Arc::new(PrivateClassifierError)),

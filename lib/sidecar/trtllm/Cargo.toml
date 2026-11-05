@@ -22,6 +22,7 @@ path = "src/main.rs"
 [dependencies]
 dynamo-backend-common = { workspace = true }
 dynamo-sidecar-common = { workspace = true }
+dynamo-kv-events = { workspace = true }
 # The sidecar image builds all sidecars in one `cargo build`, which links the
 # vLLM sidecar's `mm-routing` here (and into LPX) too. Enable it so the SBOMs
 # list what the binaries link; nothing in this sidecar calls it.
@@ -51,4 +52,7 @@ tonic-build = { workspace = true }
 
 [dev-dependencies]
 dynamo-backend-common = { workspace = true, features = ["testing"] }
+dynamo-kv-hashing = { workspace = true }
+dynamo-multimodal = { workspace = true }
+dynamo-router-protocol = { workspace = true }
 tokio-stream = { workspace = true, features = ["net"] }
