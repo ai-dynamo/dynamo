@@ -19,6 +19,9 @@ limitations under the License.
 
 Run the commands below from Dynamo’s `examples/global-router/cdk` directory.
 
+For independently named development copies with SSM-only administration, see
+[Isolated CPU development fleets](CPU_FLEET.md).
+
 This TypeScript AWS CDK v2 template creates an Amazon EKS cluster and deploys one or more
 aggregated NVIDIA Dynamo `DynamoGraphDeployment` (DGD) resources backed by CPU-only Mocker
 workers. Generic deployment examples live in `lib/const.ts`. Use an explicit local JSON file for

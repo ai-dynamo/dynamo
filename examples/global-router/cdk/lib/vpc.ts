@@ -57,7 +57,20 @@ export class MockerVpc extends Construct {
       (_, index) => index + 1,
     );
 
+    const nat = config.natInstanceType
+      ? ec2.NatProvider.instanceV2({
+          instanceType: new ec2.InstanceType(config.natInstanceType),
+          associatePublicIpAddress: true,
+          defaultAllowedTraffic: ec2.NatTrafficDirection.OUTBOUND_ONLY,
+          machineImage: config.natInstanceAmiId
+            ? ec2.MachineImage.genericLinux({
+                [config.region]: config.natInstanceAmiId,
+              })
+            : undefined,
+        })
+      : undefined;
     this.vpc = new ec2.Vpc(this, "Resource", {
+      natGatewayProvider: nat,
       availabilityZones: [...config.availabilityZones],
       ipAddresses: ec2.IpAddresses.cidr(config.cidrBlock),
       natGateways: 1,
@@ -89,6 +102,12 @@ export class MockerVpc extends Construct {
       reason:
         "The typed pool config selects explicit AZs for single-subnet pool node groups.",
     });
+
+    nat?.connections.allowFrom(
+      ec2.Peer.ipv4(config.cidrBlock),
+      ec2.Port.allTraffic(),
+      "Private lab egress from this VPC only",
+    );
 
     this.clusterSubnets = this.vpc.selectSubnets({
       subnetGroupName: "cluster",
