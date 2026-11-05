@@ -1350,6 +1350,9 @@ class CachedTokensChatPayload(ChatPayload):
         # block-count, etc.), move into a RouterMetricsAssertion
         # mixin/subclass.
         self.min_avg_kv_hit_rate = min_avg_kv_hit_rate
+        # Require new router_kv_hit_rate observations on R2+. A subclass may
+        # drop the floor at run time and keep this check.
+        self.require_kv_hit_rate_observations = min_avg_kv_hit_rate > 0
         self._metrics_baseline: Optional[tuple[float, float]] = None
 
     def validate(self, response: Any, content: str) -> None:
@@ -1404,7 +1407,7 @@ class CachedTokensChatPayload(ChatPayload):
         if (
             self._metrics_baseline is None
             and self._request_count == 1
-            and self.min_avg_kv_hit_rate > 0
+            and self.require_kv_hit_rate_observations
         ):
             self._metrics_baseline = self._scrape_router_kv_hit_rate()
 
@@ -1440,8 +1443,8 @@ class CachedTokensChatPayload(ChatPayload):
 
     def final_validation(self) -> None:
         """Assert cached_tokens >= min_cached_tokens on at least one repeat
-        (only when min_cached_tokens > 0), and (if set) router_kv_hit_rate
-        post-R1 mean >= min_avg_kv_hit_rate.
+        (only when min_cached_tokens > 0), and (if set) new router_kv_hit_rate
+        observations with a post-R1 mean >= min_avg_kv_hit_rate.
         """
         # Only assert cached tokens when a positive threshold is set; a caller
         # validating purely via the router metric passes min_cached_tokens=0.
@@ -1457,11 +1460,11 @@ class CachedTokensChatPayload(ChatPayload):
                 "✓ Final validation PASSED: cached_tokens found in repeated requests"
             )
 
-        if self.min_avg_kv_hit_rate <= 0:
+        if not self.require_kv_hit_rate_observations:
             return
         if self._metrics_baseline is None:
             raise AssertionError(
-                "min_avg_kv_hit_rate set but no metrics baseline captured "
+                "router_kv_hit_rate check set but no metrics baseline captured "
                 "(R1 validate() didn't run or /metrics was unreachable)."
             )
         after = self._scrape_router_kv_hit_rate()
@@ -1480,6 +1483,12 @@ class CachedTokensChatPayload(ChatPayload):
                 f"MM-routing likely not engaging on repeat requests."
             )
         avg = d_sum / d_count
+        if self.min_avg_kv_hit_rate <= 0:
+            logger.info(
+                f"✓ router_kv_hit_rate: {d_count} new observations over R2+ "
+                f"(mean {avg:.3f}, no floor)"
+            )
+            return
         if avg < self.min_avg_kv_hit_rate:
             raise AssertionError(
                 f"router_kv_hit_rate: mean over R2+ ({avg:.3f}) below required "
