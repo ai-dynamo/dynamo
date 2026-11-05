@@ -736,6 +736,25 @@ RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade \
 RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m, sys; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3; print("runtime import paths:", sys.modules[ServerApp.__module__].__file__, sys.modules[LabApp.__module__].__file__, sys.modules[JupyterNotebookApp.__module__].__file__, urllib3.__file__)'
 {% endif %}
 
+# Raise transformers and fsspec in system site, for the same inventory reason as
+# aiohttp above. The venv holds no copy of either, so the system copies are the
+# ones that every interpreter in the image imports.
+#
+# Both move past pins of the base image: tensorrt-llm 1.3.0rc29 requires
+# transformers==5.5.4 and datasets==3.1.0, and datasets 3.1.0 caps fsspec at
+# 2024.9.0. pip reports these two conflicts and installs anyway. transformers
+# 5.10.2 declares the same requirements as 5.5.4, and fsspec declares none, so the
+# solve must change these two distributions and no other.
+#
+# Mirrored by the pre_runtime whiteout below: the upgrade renames both dist-info
+# directories. The same guard runs again after the overlay.
+RUN /usr/bin/python3 -m pip install --break-system-packages --upgrade \
+        --report /tmp/hf-upgrade.json \
+        "transformers==5.10.2" "fsspec==2026.6.0" && \
+    /usr/bin/python3 -c 'import json; d = json.load(open("/tmp/hf-upgrade.json")); changed = {p["metadata"]["name"].lower().replace("_", "-") for p in d["install"]}; print("upgraded system distributions:", sorted(changed)); assert changed <= {"transformers", "fsspec"}, "Add whiteouts for upgraded transitive distributions"' && \
+    rm /tmp/hf-upgrade.json && \
+    /usr/bin/python3 -c 'import glob, importlib.metadata as m; pins = {"transformers": "5.10.2", "fsspec": "2026.6.0"}; found = {n: sorted(p.rsplit("/", 1)[1] for p in glob.glob("/usr/local/lib/python3.12/dist-packages/" + n + "-*.dist-info")) for n in pins}; print("transformers and fsspec dist-info in system site:", found); assert all(found[n] == [n + "-" + v + ".dist-info"] and m.version(n) == v for n, v in pins.items())'
+
 # Pull /workspace_src (incl. LICENSE) from the transport stage and
 # wire up the launch screen in a single RUN — saves the standalone workspace COPY layer.
 RUN --mount=type=bind,from=workspace_files,source=/workspace_src,target=/tmp/workspace_src \
@@ -834,6 +853,10 @@ RUN apt-get purge -y git-lfs && rm -rf /var/lib/apt/lists/*
 # has the same doubling problem. Dropping them here is free: the overlay restores
 # whatever runtime_full holds, so listing one that did not move costs nothing and
 # omitting one that did would leave stale metadata behind.
+#
+# transformers and fsspec are here for the aiohttp reason too: runtime_full
+# upgrades them in system site, and the upgrade renames their dist-info
+# directories (transformers-5.5.4.dist-info -> transformers-5.10.2.dist-info).
 # Remove old trust-store files and Python metadata before restoring the updated overlay.
 RUN rm -rf /workspace /home/ubuntu \
     /etc/ssl/certs \
@@ -884,7 +907,11 @@ RUN rm -rf /workspace /home/ubuntu \
     /usr/local/lib/python3.12/dist-packages/certifi-* \
     /usr/local/lib/python3.12/dist-packages/PIL \
     /usr/local/lib/python3.12/dist-packages/pillow-* \
-    /usr/local/lib/python3.12/dist-packages/pillow.libs && \
+    /usr/local/lib/python3.12/dist-packages/pillow.libs \
+    /usr/local/lib/python3.12/dist-packages/transformers \
+    /usr/local/lib/python3.12/dist-packages/transformers-*.dist-info \
+    /usr/local/lib/python3.12/dist-packages/fsspec \
+    /usr/local/lib/python3.12/dist-packages/fsspec-*.dist-info && \
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
     ! /usr/bin/python3 -c "import wandb" 2>/dev/null
 COPY --from=runtime_full / /
@@ -894,9 +921,13 @@ COPY --from=runtime_full / /
 RUN /usr/bin/python3 -c 'import glob, importlib.metadata as m; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("system-site versions:", versions); assert all(len(glob.glob("/usr/local/lib/python3.12/dist-packages/" + n.replace("-", "_") + "-*.dist-info")) == 1 and Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3'
 RUN /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/certifi-*.dist-info"); vs = [os.path.basename(p)[8:-10] for p in d]; print("certifi dist-info after overlay:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and tv(vs[0]) >= (2026, 10, 19) else 1)'
 RUN /usr/bin/python3 -c 'import glob, os, sys; d = glob.glob("/usr/local/lib/python3.12/dist-packages/pillow-*.dist-info"); vs = [os.path.basename(p)[7:-10] for p in d]; print("pillow dist-info after overlay:", vs); tv = lambda s: tuple(int(x) for x in s.split(".")[:3]); sys.exit(0 if len(vs) == 1 and (13, 0, 0) <= tv(vs[0]) < (14, 0, 0) else 1)'
+RUN /usr/bin/python3 -c 'import glob, importlib.metadata as m; pins = {"transformers": "5.10.2", "fsspec": "2026.6.0"}; found = {n: sorted(p.rsplit("/", 1)[1] for p in glob.glob("/usr/local/lib/python3.12/dist-packages/" + n + "-*.dist-info")) for n in pins}; print("transformers and fsspec dist-info after overlay:", found); assert all(found[n] == [n + "-" + v + ".dist-info"] and m.version(n) == v for n, v in pins.items())'
 
 {% if target not in ("dev", "local-dev") %}
 RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m, sys; from packaging.version import Version; bounds = {"jupyter-server": ("2.21.0", "3"), "jupyterlab": ("4.6.4", "5"), "notebook": ("7.6.3", "8"), "urllib3": ("2.8.0", "3")}; versions = {n: m.version(n) for n in bounds}; print("runtime interpreter versions:", versions); assert all(Version(lo) <= Version(versions[n]) < Version(hi) for n, (lo, hi) in bounds.items()); from jupyter_server.serverapp import ServerApp; from jupyterlab.labapp import LabApp; from notebook.app import JupyterNotebookApp; import urllib3; print("runtime import paths:", sys.modules[ServerApp.__module__].__file__, sys.modules[LabApp.__module__].__file__, sys.modules[JupyterNotebookApp.__module__].__file__, urllib3.__file__)'
+# The runtime interpreter must resolve the upgraded system copies of transformers
+# and fsspec, not a copy in the venv.
+RUN /opt/dynamo/venv/bin/python3 -c 'import importlib.metadata as m; import fsspec, transformers; pins = {"transformers": "5.10.2", "fsspec": "2026.6.0"}; got = {n: m.version(n) for n in pins}; paths = [transformers.__file__, fsspec.__file__]; print("runtime interpreter versions:", got, paths); assert got == pins and all(p.startswith("/usr/local/lib/python3.12/dist-packages/") for p in paths)'
 {% endif %}
 
 # Check the merged filesystem: both base stages must purge package-owned paths.
