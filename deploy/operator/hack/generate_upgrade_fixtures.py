@@ -240,6 +240,33 @@ def check(base=None):
             or set(inputs) != expected
         ):
             raise ValueError("Published v1.6.0 history differs from its frozen scope")
+    compatibility = fixture_inputs("compatibility")
+    compatibility_lock = FIXTURES / "compatibility.lock.json"
+    if (
+        minor(current) >= (1, 7)
+        and not (FIXTURES / "compatibility/missing-origin/input.yaml").is_file()
+    ):
+        raise ValueError("Missing required missing-origin compatibility fixture")
+    if compatibility or compatibility_lock.exists():
+        compatibility_source = json.loads(compatibility_lock.read_text())
+        if compatibility_source["reconciledVersion"] != reconciled:
+            raise ValueError(
+                "Compatibility fixtures and history must have the same last reconciler; regenerate both before bumping the operator"
+            )
+        if (
+            compatibility_source["sourceKind"] != "release-tag"
+            or compatibility_source["sourceRef"] != f"v{reconciled}"
+            or compatibility_source["sourceRevision"] != lock["sourceRevision"]
+        ):
+            raise ValueError(
+                "Compatibility fixtures require the same released-tag provenance as history"
+            )
+        if not compatibility or compatibility_source["inputs"] != {
+            str(path.relative_to(FIXTURES)): digest(path) for path in compatibility
+        }:
+            raise ValueError(
+                "Compatibility input inventory or bytes changed; regenerate through production controllers"
+            )
     for path in fixture_inputs("history"):
         if not path.with_name("output.yaml").exists():
             raise ValueError(f"Missing golden: {path.parent}")
@@ -449,11 +476,16 @@ def regenerate(release_tag=None, candidate_sha=None, candidate_output=None):
                 "requiredScenarios"
             ]
         )
-        expected = list(fixture_inputs("history")) + [
-            p
-            for p in fixture_inputs("latest")
-            if p.parent.relative_to(FIXTURES / "latest").as_posix() in catalog
-        ]
+        compatibility = fixture_inputs("compatibility")
+        expected = (
+            fixture_inputs("history")
+            + compatibility
+            + [
+                p
+                for p in fixture_inputs("latest")
+                if p.parent.relative_to(FIXTURES / "latest").as_posix() in catalog
+            ]
+        )
         captures = {}
         for original in expected:
             relative = original.relative_to(FIXTURES)
@@ -466,6 +498,19 @@ def regenerate(release_tag=None, candidate_sha=None, candidate_output=None):
             captured = capture / relative
             if not captured.is_file():
                 raise ValueError(f"Capture incomplete: {relative}")
+            if relative.parts[0] == "compatibility":
+                dgds = [
+                    obj
+                    for obj in yaml.safe_load_all(captured.read_text())
+                    if obj["kind"] == "DynamoGraphDeployment"
+                ]
+                if len(dgds) != 1 or (
+                    "nvidia.com/dynamo-operator-origin-version"
+                    in dgds[0]["metadata"].get("annotations", {})
+                ):
+                    raise ValueError(
+                        f"Compatibility capture must contain exactly one DGD without an origin annotation: {relative}"
+                    )
             captures[relative] = captured
         if candidate_sha:
             (capture / "capture-source.json").write_text(
@@ -495,14 +540,17 @@ def regenerate(release_tag=None, candidate_sha=None, candidate_output=None):
                 destination = stage / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(captured, destination)
-                write_golden(
-                    destination.with_name("output.yaml"),
-                    list(yaml.safe_load_all(captured.read_text())),
-                )
+                if relative.parts[0] != "compatibility":
+                    write_golden(
+                        destination.with_name("output.yaml"),
+                        list(yaml.safe_load_all(captured.read_text())),
+                    )
             # Latest describes the development tree; release capture never rewrites it.
             namespaces = set()
-            for historical in list((stage / "history").rglob("input.yaml")) + list(
-                (stage / "latest").rglob("input.yaml")
+            for historical in (
+                path
+                for role in ("history", "compatibility", "latest")
+                for path in (stage / role).rglob("input.yaml")
             ):
                 objects = list(yaml.safe_load_all(historical.read_text()))
                 names = {obj["metadata"]["namespace"] for obj in objects}
@@ -511,7 +559,7 @@ def regenerate(release_tag=None, candidate_sha=None, candidate_output=None):
                         "Fixture namespace collision: history and latest must use distinct namespaces"
                     )
                 namespaces.update(names)
-                if "history" in historical.relative_to(stage).parts[:1] and any(
+                if historical.relative_to(stage).parts[0] != "latest" and any(
                     not obj["metadata"].get("uid") for obj in objects
                 ):
                     raise ValueError(f"Non-concrete capture: {historical}")
@@ -529,6 +577,24 @@ def regenerate(release_tag=None, candidate_sha=None, candidate_output=None):
             (stage / "history.lock.json").write_text(
                 json.dumps(lock, indent=2, sort_keys=True) + "\n"
             )
+            if compatibility:
+                (stage / "compatibility.lock.json").write_text(
+                    json.dumps(
+                        {
+                            "reconciledVersion": current,
+                            **source,
+                            "inputs": {
+                                str(path.relative_to(stage)): digest(path)
+                                for path in (stage / "compatibility").rglob(
+                                    "input.yaml"
+                                )
+                            },
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
             (stage / "RECONCILED_VERSION").write_text(current + "\n")
             FIXTURES.rename(backup)
             try:

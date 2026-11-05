@@ -230,7 +230,8 @@ fn terminal_outcome_for_error_type(error_type: ErrorType) -> TerminalOutcome {
         | ErrorType::NotFound
         | ErrorType::Overload
         | ErrorType::Unavailable
-        | ErrorType::NotImplemented => TerminalOutcome::Rejected,
+        | ErrorType::NotImplemented
+        | ErrorType::UnsupportedModality => TerminalOutcome::Rejected,
         ErrorType::Cancelled => TerminalOutcome::Cancelled,
         ErrorType::ResponseTimeout => TerminalOutcome::TimedOut,
         ErrorType::Internal | ErrorType::None => TerminalOutcome::Failed,
@@ -389,6 +390,110 @@ pub(super) fn metric_error_type_for_class(class: dynamo_runtime::error::ErrorCla
     }
 }
 
+pub(super) struct MediaRefusal {
+    pub(super) status: StatusCode,
+    pub(super) message: String,
+}
+
+/// Refusal for a chat request that carries image, video, or audio content in
+/// any message, current turn or history, when `--reject-media` is set. Callers
+/// run this before routing, so no worker sees the request and a streaming
+/// client receives the status instead of a 200 followed by an error event.
+pub(super) fn media_refusal(
+    state: &service_v2::State,
+    request: &NvCreateChatCompletionRequest,
+) -> Option<MediaRefusal> {
+    media_refusal_for_content_type(state, || {
+        crate::preprocessor::request_media_content_types(&request.inner.messages)
+            .first()
+            .copied()
+    })
+}
+
+/// Keep classification lazy so disabled frontends do not scan request content.
+pub(super) fn media_refusal_for_content_type(
+    state: &service_v2::State,
+    content_type: impl FnOnce() -> Option<&'static str>,
+) -> Option<MediaRefusal> {
+    let config = state.media_rejection();
+    if !config.enabled() {
+        return None;
+    }
+    let content_type = content_type()?;
+    let status =
+        StatusCode::from_u16(config.status_code()).unwrap_or(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    let modality = match content_type {
+        "input_audio" => "audio",
+        other => other.trim_end_matches("_url"),
+    };
+    let message = format!(
+        "Model does not accept {modality} input; received unsupported content type '{content_type}'."
+    );
+    tracing::debug!(status = %status, "Media refused: {message}");
+    Some(MediaRefusal { status, message })
+}
+
+/// OpenAI-shaped [`media_refusal`] for the Chat Completions and Responses
+/// handlers. Labeled `unsupported_modality` in metrics whatever the status, so
+/// a refusal sent with a capacity status is not counted as capacity shedding.
+fn reject_media_if_configured(
+    state: &service_v2::State,
+    request: &NvCreateChatCompletionRequest,
+) -> Result<(), ErrorResponse> {
+    reject_media(media_refusal(state, request))
+}
+
+fn reject_media(refusal: Option<MediaRefusal>) -> Result<(), ErrorResponse> {
+    let Some(MediaRefusal { status, message }) = refusal else {
+        return Ok(());
+    };
+    record_local_failure(ErrorClass::UnsupportedMedia);
+    Err((
+        status,
+        Json(ErrorMessage {
+            message,
+            error_type: status
+                .canonical_reason()
+                .unwrap_or("UnknownError")
+                .to_string(),
+            code: status.as_u16(),
+            details: None,
+            metric_error_type: Some(ErrorType::UnsupportedModality),
+        }),
+    ))
+}
+
+/// Inspect the native input, including image references and non-user history,
+/// before the Responses-to-chat conversion loses or rejects media.
+fn responses_media_content_type(request: &NvCreateResponse) -> Option<&'static str> {
+    use dynamo_protocols::types::responses::{
+        EasyInputContent, FunctionCallOutput, InputContent, InputItem, InputParam, Item,
+        MessageItem,
+    };
+
+    let InputParam::Items(items) = &request.inner.input else {
+        return None;
+    };
+    items.iter().find_map(|item| {
+        let parts = match item {
+            InputItem::EasyMessage(message) => match &message.content {
+                EasyInputContent::ContentList(parts) => parts,
+                EasyInputContent::Text(_) => return None,
+            },
+            InputItem::Item(Item::Message(MessageItem::Input(message))) => &message.content,
+            InputItem::Item(Item::FunctionCallOutput(output)) => match &output.output {
+                FunctionCallOutput::Content(parts) => parts,
+                FunctionCallOutput::Text(_) => return None,
+            },
+            _ => return None,
+        };
+        parts.iter().find_map(|part| match part {
+            InputContent::InputImage(_) => Some("image_url"),
+            _ => None,
+        })
+    })
+}
+
 /// Extract ErrorType from ErrorResponse for metrics
 pub(super) fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
     response
@@ -463,6 +568,10 @@ pub(crate) fn find_invalid_argument_in_chain<'a>(
         current = e.source();
     }
     None
+}
+
+pub(super) fn error_is_invalid_argument(err: &(dyn std::error::Error + 'static)) -> bool {
+    find_invalid_argument_in_chain(err).is_some()
 }
 
 fn find_queue_rejection_in_chain<'a>(
@@ -577,6 +686,23 @@ impl ErrorMessage {
                 code: code.as_u16(),
                 details: None,
                 metric_error_type: Some(ErrorType::Cancelled),
+            }),
+        )
+    }
+
+    /// Invalid request (400). Recorded as an `InvalidRequest` local failure,
+    /// like the other client-error constructors.
+    pub fn bad_request<T: Display>(msg: T) -> ErrorResponse {
+        let code = StatusCode::BAD_REQUEST;
+        record_local_failure(ErrorClass::InvalidRequest);
+        (
+            code,
+            Json(ErrorMessage {
+                message: msg.to_string(),
+                error_type: bad_request_error_type(),
+                code: code.as_u16(),
+                details: None,
+                metric_error_type: None,
             }),
         )
     }
@@ -997,21 +1123,20 @@ fn unprocessable_error_message(body: &[u8]) -> (String, bool) {
     }
 }
 
-// Problem: Currently we are using JSON from axum as the request validator. Whenever there is an invalid JSON, it will return a 422.
-// But all the downstream apps that relies on openai based APIs, expects to get 400 for all these cases otherwise they fail badly
-// Solution: Intercept the response from handlers and convert ANY 422 status codes to 400 with the actual error message.
+/// OpenAI clients expect 400 for Axum extraction failures, but handler errors own their status.
 pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> Response {
     let response = next.run(request).await;
 
     if response.status() == StatusCode::UNPROCESSABLE_ENTITY {
-        let (_parts, body) = response.into_parts();
+        let (parts, body) = response.into_parts();
         let body_bytes = axum::body::to_bytes(body, get_body_limit())
             .await
             .unwrap_or_default();
         let (error_message, already_recorded) = unprocessable_error_message(&body_bytes);
-        if !already_recorded {
-            record_local_failure(ErrorClass::InvalidRequest);
+        if already_recorded {
+            return Response::from_parts(parts, Body::from(body_bytes));
         }
+        record_local_failure(ErrorClass::InvalidRequest);
         (
             StatusCode::BAD_REQUEST,
             Json(ErrorMessage {
@@ -1031,43 +1156,25 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
 
 /// Return the request ID for the current request.
 ///
-/// The canonical request ID is set by `make_inference_request_span()` and stored
+/// The canonical request ID is minted by `make_inference_request_span()` and stored
 /// in the `DistributedTraceContext` via `DistributedTraceIdLayer`. This function
-/// retrieves it, falling back to a validated `x-dynamo-request-id` header value
-/// (deprecated, DEP #7812) or a new UUID.
+/// retrieves it, or generates a new UUID when no request span is active.
 ///
-/// **Deprecation (DEP #7812):** The `x-dynamo-request-id` header is deprecated.
-/// Clients should rely on server-generated request IDs instead of supplying their own.
+/// Client-supplied ids never become the internal request id: in-flight request state
+/// is keyed on this value, so two requests sharing a client id would collide. Clients
+/// correlate requests with `x-request-id` instead.
+///
+/// **Deprecation (DEP #7812):** the `x-dynamo-request-id` and `request-id` headers are
+/// ignored on HTTP requests; a warning is logged when either is present.
 pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> String {
-    // Validate x-dynamo-request-id header if present, warn on invalid values.
-    // DEP #7812: x-dynamo-request-id is deprecated — clients should rely on
-    // server-generated request IDs instead of supplying their own.
-    let validated_header = if let Some(raw) = headers.get(DYNAMO_REQUEST_ID_HEADER) {
-        tracing::warn!(
-            "{} header is deprecated (DEP #7812); server-generated request IDs should be used instead",
-            DYNAMO_REQUEST_ID_HEADER
-        );
-        match raw.to_str() {
-            Err(_) => {
-                tracing::warn!(
-                    "{} header must be a valid UTF-8 string",
-                    DYNAMO_REQUEST_ID_HEADER
-                );
-                None
-            }
-            Ok(s) if uuid::Uuid::parse_str(s).is_err() => {
-                tracing::warn!(
-                    "{} header must be a valid UUID, got: {}",
-                    DYNAMO_REQUEST_ID_HEADER,
-                    s
-                );
-                None
-            }
-            Ok(s) => Some(s.to_string()),
+    for header in [DYNAMO_REQUEST_ID_HEADER, "request-id"] {
+        if headers.contains_key(header) {
+            tracing::warn!(
+                header,
+                "deprecated request id header ignored (DEP #7812); the server generates the request ID, use x-request-id for client correlation"
+            );
         }
-    } else {
-        None
-    };
+    }
 
     // Prefer trace context (set by make_inference_request_span via DistributedTraceIdLayer)
     if let Some(trace_context) = get_distributed_tracing_context()
@@ -1076,8 +1183,7 @@ pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> String {
         return request_id;
     }
 
-    // Fallback: use validated header for backwards compat, or generate new UUID
-    validated_header.unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+    uuid::Uuid::new_v4().to_string()
 }
 
 pub(super) fn context_from_headers<T: Send + Sync + 'static>(
@@ -1410,7 +1516,11 @@ async fn completions_single(
                         .is_some_and(is_empty_completion_stream_response),
                 )
             })
-            .map(move |response| {
+            .map(move |mut response| {
+                // `echo` rides the chunk as typed metadata up to this boundary.
+                if let Some(data) = response.data.as_mut() {
+                    data.fold_echo();
+                }
                 let semantic_error = set_stream_semantic_error(&response, &producer_error_signal);
                 // Calls observe_response() on each token
                 let result = process_response_using_event_converter_and_observe_metrics(
@@ -1697,6 +1807,10 @@ async fn completions_batch(
                 for choice in &mut data.inner.choices {
                     choice.index += prompt_idx_u32 * n_u32;
                 }
+                // The echo names its choice by index too; keep them together.
+                if let Some(echo) = data.echo.as_mut() {
+                    echo.choice_index += prompt_idx_u32 * n_u32;
+                }
             }
             response
         });
@@ -1767,7 +1881,11 @@ async fn completions_batch(
                         .is_some_and(is_empty_completion_stream_response),
                 )
             })
-            .map(move |response| {
+            .map(move |mut response| {
+                // `echo` rides the chunk as typed metadata up to this boundary.
+                if let Some(data) = response.data.as_mut() {
+                    data.fold_echo();
+                }
                 let semantic_error = set_stream_semantic_error(&response, &producer_error_signal);
                 // Calls observe_response() on each token
                 let result = process_response_using_event_converter_and_observe_metrics(
@@ -2724,7 +2842,7 @@ fn unsupported_media_type_error() -> ErrorResponse {
 
 /// Returns the standard error response for a request body that exceeds the
 /// configured size limit.
-fn payload_too_large_error() -> ErrorResponse {
+pub(super) fn payload_too_large_error() -> ErrorResponse {
     ErrorMessage::from_http_error(
         ErrorClass::PayloadTooLarge,
         HttpError {
@@ -3375,7 +3493,7 @@ fn deduplicate_stream_roles(
 
 /// Completions variant of [`is_empty_stream_response`].
 fn is_empty_completion_stream_response(resp: &NvCreateCompletionResponse) -> bool {
-    if resp.nvext.is_some() {
+    if resp.nvext.is_some() || resp.echo.is_some() {
         return false;
     }
     resp.inner.usage.is_none()
@@ -3547,10 +3665,27 @@ async fn chat_completions(
         &request_id,
     );
 
+    state
+        .chat_template_defaults()
+        .apply_to_request(&mut request);
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
     }
+
+    // Retain API identity here while all engine/parser paths receive functions.
+    let custom_tools =
+        crate::protocols::openai::chat_completions::custom_tools::ChatCustomToolAdapter::prepare(
+            &mut request,
+        )
+        .map_err(|error| {
+            let response = ErrorMessage::from_anyhow(
+                invalid_argument(error.to_string()).into(),
+                "Invalid custom tools",
+            );
+            inflight_guard.mark_error(extract_error_type_from_response(&response));
+            response
+        })?;
 
     // Handle unsupported fields - if Some(resp) is returned by
     // validate_chat_completion_unsupported_fields,
@@ -3573,6 +3708,41 @@ async fn chat_completions(
         return Err(err_response);
     }
 
+    if let Err(err_response) = reject_media_if_configured(&state, &request) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+
+    tracing::trace!("Getting chat completions engine for model: {}", model);
+
+    // Selected once: the Beam request normalization below reads this engine's parsing
+    // options and dispatch uses this same engine, so the two cannot disagree on the
+    // worker set when one served name fronts Beam and non-Beam pools.
+    let (engine, parsing_options) = state
+        .manager()
+        .get_chat_completions_engine_with_parsing(&model)
+        .map_err(|e| {
+            let err_response = ErrorMessage::from_model_error(&e);
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
+
+    // Beam route, before generic validation (which rejects what these normalize): a
+    // `strict` tool whose schema is outside OpenAI's strict subset is served as
+    // non-strict instead of rejected, and a legacy `builtin_tools` declaration is
+    // promoted into `tools` (see `tool_choice::relax_noncompliant_strict_tools_for_beam`
+    // and `tool_choice::declare_legacy_builtin_tools_for_beam`).
+    crate::preprocessor::tool_choice::declare_legacy_builtin_tools_for_beam(
+        &mut request,
+        parsing_options.tool_call_parser.as_deref(),
+        parsing_options.reasoning_parser.as_deref(),
+    );
+    crate::preprocessor::tool_choice::relax_noncompliant_strict_tools_for_beam(
+        &mut request,
+        parsing_options.tool_call_parser.as_deref(),
+        parsing_options.reasoning_parser.as_deref(),
+    );
+
     // Handle Rest of Validation Errors
     if let Err(err_response) = validate_chat_completion_fields_generic(&request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -3586,17 +3756,6 @@ async fn chat_completions(
     if request.inner.max_completion_tokens.is_none() {
         request.insert(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, true);
     }
-
-    tracing::trace!("Getting chat completions engine for model: {}", model);
-
-    let (engine, parsing_options) = state
-        .manager()
-        .get_chat_completions_engine_with_parsing(&model)
-        .map_err(|e| {
-            let err_response = ErrorMessage::from_model_error(&e);
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
 
     // Request policy controls whether parser-produced tool calls may be exposed.
     // Assistant response/guided constraints are handled separately during
@@ -3679,6 +3838,7 @@ async fn chat_completions(
         // once the response is built, so it does not bound this wait:
         // `UntilFirstEvent` ends on the first event or on the client
         // disconnecting, and on nothing else.
+        let stream = custom_tools.stream(stream);
         let stream = until_client_disconnects(
             check_for_backend_error_info(stream, state.streaming_backend_error_check()),
             &ctx,
@@ -3807,6 +3967,7 @@ async fn chat_completions(
             stream_handle,
             activity_rx,
             error_signal,
+            true,
         );
         let terminal = terminal.clone();
         // Arm the cancellation fallback before Axum can take ownership of the
@@ -3870,7 +4031,7 @@ async fn chat_completions(
                 error_response
             })?;
 
-        let response =
+        let mut response =
             NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
                 .await
                 .map_err(|e| {
@@ -3881,6 +4042,14 @@ async fn chat_completions(
                     inflight_guard.mark_error(extract_error_type_from_response(&err_response));
                     err_response
                 })?;
+
+        custom_tools
+            .project_response(&mut response)
+            .map_err(|error| {
+                let response = ErrorMessage::from_anyhow(error, "Invalid custom tool output");
+                inflight_guard.mark_error(extract_error_type_from_response(&response));
+                response
+            })?;
 
         inflight_guard.mark_ok();
         // If the engine context was killed (client disconnect), the response was
@@ -4217,12 +4386,28 @@ async fn responses(
         return Err(err_response);
     }
 
+    if let Err(err_response) = reject_media(media_refusal_for_content_type(&state, || {
+        responses_media_content_type(&request)
+    })) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+
     // Extract request parameters before into_parts() consumes the request.
     // These are echoed back in the Response object per the OpenAI spec.
-    let tools = crate::protocols::openai::responses::sdk_tools(request.inner.tools.as_deref());
+    let loaded_tools: Vec<_> =
+        crate::protocols::openai::responses::effective_response_tools(&request)
+            .map_err(|error| {
+                let response = responses_conversion_error_response(error);
+                inflight_guard.mark_error(extract_error_type_from_response(&response));
+                response
+            })?
+            .into_iter()
+            .map(|tool| tool.inner)
+            .collect();
     let response_params = ResponseParams {
         tool_names: Some(crate::protocols::openai::responses::ToolNameMap::new(
-            tools.as_deref().unwrap_or_default(),
+            &loaded_tools,
             Some(&request.inner.input),
         )),
         model: request.inner.model.clone(),
@@ -4232,13 +4417,14 @@ async fn responses(
         metadata: request.inner.metadata.clone(),
         parallel_tool_calls: request.inner.parallel_tool_calls,
         store: request.inner.store,
-        tools,
-        // validate_responses_fields already rejected choices with no SDK form.
-        tool_choice: crate::protocols::openai::responses::sdk_tool_choice(
-            request.inner.tool_choice.as_ref(),
-        )
-        .ok()
-        .flatten(),
+        tools: request
+            .inner
+            .tools
+            .as_ref()
+            .map(|tools| tools.iter().map(|tool| tool.inner.clone()).collect()),
+        template_tools: request.inner.tools.clone(),
+        loaded_tools,
+        tool_choice: request.inner.tool_choice.clone(),
         instructions: request.inner.instructions.clone(),
         reasoning: request.inner.reasoning.clone(),
         text: request.inner.text.clone(),
@@ -4276,6 +4462,9 @@ async fn responses(
     // that the stream converter needs for faithful response reconstruction.
     let responses_ctx = unified_request.responses_context().cloned();
     let mut chat_request = unified_request.into_inner();
+    state
+        .chat_template_defaults()
+        .apply_to_request(&mut chat_request);
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut chat_request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
@@ -4645,8 +4834,6 @@ pub fn validate_responses_fields(request: &NvCreateResponse) -> Result<(), Error
     validate::validate_temperature(request.inner.temperature).map_err(invalid_request)?;
     validate::validate_top_p(request.inner.top_p).map_err(invalid_request)?;
     validate::validate_max_tokens(request.inner.max_output_tokens).map_err(invalid_request)?;
-    crate::protocols::openai::responses::sdk_tool_choice(request.inner.tool_choice.as_ref())
-        .map_err(invalid_request)?;
 
     if let Some(text) = &request.inner.text {
         use crate::protocols::openai::responses::convert_text_format;
@@ -6672,8 +6859,9 @@ mod tests {
         headers.insert("x-dynamo-parent-session-id", "parent-456".parse().unwrap());
         headers.insert("x-dynamo-session-final", "true".parse().unwrap());
         let context =
-            preprocessed_context_from_headers(request(), "request-1".to_string(), &headers)
-                .unwrap();
+            preprocessed_context_from_headers(request(), "request-123".into(), &headers).unwrap();
+
+        assert_eq!(context.id(), "request-123");
 
         // The router reads the request field; the context key must carry the same identity.
         let on_request = context
@@ -6699,12 +6887,10 @@ mod tests {
             "session affinity still keyed from the same headers"
         );
 
-        let context = preprocessed_context_from_headers(
-            request(),
-            "request-2".to_string(),
-            &HeaderMap::new(),
-        )
-        .unwrap();
+        let context =
+            preprocessed_context_from_headers(request(), "request-456".into(), &HeaderMap::new())
+                .unwrap();
+        assert_eq!(context.id(), "request-456");
         assert!(context.content().agent_context.is_none());
     }
 
@@ -6837,6 +7023,104 @@ mod tests {
         state.start_draining();
         let response = check_ready(&state).unwrap_err();
         assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    fn media_rejection_state(enabled: bool, status_code: u16) -> Arc<service_v2::State> {
+        service_v2::HttpService::builder()
+            .media_rejection(
+                crate::frontend_config::MediaRejectionConfig::new(enabled, status_code).unwrap(),
+            )
+            .build()
+            .unwrap()
+            .state_clone()
+    }
+
+    fn chat_request_from_json(value: serde_json::Value) -> NvCreateChatCompletionRequest {
+        serde_json::from_value(value).expect("valid chat request")
+    }
+
+    fn chat_request_with_history_image() -> NvCreateChatCompletionRequest {
+        chat_request_from_json(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "look"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+                ]},
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": "now continue"}
+            ]
+        }))
+    }
+
+    #[test]
+    fn test_reject_media_refuses_history_image_with_configured_status() {
+        let state = media_rejection_state(true, 429);
+
+        let (status, Json(body)) =
+            reject_media_if_configured(&state, &chat_request_with_history_image()).unwrap_err();
+
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body.code, 429);
+        assert_eq!(
+            body.message,
+            "Model does not accept image input; received unsupported content type 'image_url'."
+        );
+        assert_eq!(
+            extract_error_type_from_response(&(status, Json(body))),
+            ErrorType::UnsupportedModality
+        );
+    }
+
+    #[test]
+    fn test_reject_media_default_status_is_unsupported_media_type() {
+        let state = media_rejection_state(
+            true,
+            crate::frontend_config::DEFAULT_REJECT_MEDIA_STATUS_CODE,
+        );
+
+        let (status, Json(body)) =
+            reject_media_if_configured(&state, &chat_request_with_history_image()).unwrap_err();
+
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(body.error_type, "Unsupported Media Type");
+    }
+
+    #[test]
+    fn test_reject_media_refuses_media_in_tool_message() {
+        let state = media_rejection_state(true, 415);
+        let request = chat_request_from_json(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "take a screenshot"},
+                {"role": "assistant", "content": null, "tool_calls": [{
+                    "id": "call_1", "type": "function",
+                    "function": {"name": "screenshot", "arguments": "{}"}
+                }]},
+                {"role": "tool", "tool_call_id": "call_1", "content": [
+                    {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}
+                ]}
+            ]
+        }));
+
+        let refusal = media_refusal(&state, &request).expect("tool image is refused");
+        assert!(refusal.message.contains("'image_url'"));
+    }
+
+    #[test]
+    fn test_reject_media_allows_text_only_and_disabled() {
+        let text_only = chat_request_from_json(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+                {"role": "assistant", "content": "hello"},
+                {"role": "user", "content": "bye"}
+            ]
+        }));
+        assert!(reject_media_if_configured(&media_rejection_state(true, 429), &text_only).is_ok());
+
+        let disabled = media_rejection_state(false, 429);
+        assert!(reject_media_if_configured(&disabled, &chat_request_with_history_image()).is_ok());
     }
 
     #[test]
@@ -8349,21 +8633,24 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_responses_fields_rejects_tool_search_choice() {
+    fn test_validate_responses_fields_allows_configured_client_tool_search() {
         let mut request = make_base_request();
         request.inner.tool_choice =
             Some(serde_json::from_value(serde_json::json!({"type": "tool_search"})).unwrap());
-        let (code, body) = validate_responses_fields(&request)
-            .expect_err("tool_search has no Chat Completions equivalent");
-        assert_eq!(code, StatusCode::BAD_REQUEST);
-        assert!(
-            body.message
-                .contains("Unsupported Responses tool_choice type 'tool_search'")
+        request.inner.tools = Some(
+            serde_json::from_value(serde_json::json!([
+                {"type":"tool_search","execution":"client"}
+            ]))
+            .unwrap(),
         );
-
-        request.inner.tool_choice =
-            Some(serde_json::from_value(serde_json::json!("required")).unwrap());
-        assert!(validate_responses_fields(&request).is_ok());
+        // Validate the native choice before any lossy SDK projection.
+        validate_responses_fields(&request).unwrap();
+        NvCreateChatCompletionRequest::try_from(request.clone()).unwrap();
+        request.inner.tools = None;
+        let response = responses_conversion_error_response(
+            NvCreateChatCompletionRequest::try_from(request).unwrap_err(),
+        );
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
     }
 
     #[test]
@@ -8457,6 +8744,8 @@ mod tests {
     #[test]
     fn test_validate_chat_completion_required_fields_empty_messages() {
         let request = NvCreateChatCompletionRequest {
+            preserve_thinking: None,
+            responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![],
@@ -8487,6 +8776,8 @@ mod tests {
     #[test]
     fn test_validate_chat_completion_required_fields_with_messages() {
         let request = NvCreateChatCompletionRequest {
+            preserve_thinking: None,
+            responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8740,6 +9031,8 @@ mod tests {
     fn test_bad_base_request_for_chatcompletion() {
         // Frequency Penalty: Should be a float between -2.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            preserve_thinking: None,
+            responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8773,6 +9066,8 @@ mod tests {
 
         // Presence Penalty: Should be a float between -2.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            preserve_thinking: None,
+            responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8805,6 +9100,8 @@ mod tests {
 
         // Temperature: Should be a float between 0.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            preserve_thinking: None,
+            responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8837,6 +9134,8 @@ mod tests {
 
         // Top P: Should be a float between 0.0 and 1.0
         let request = NvCreateChatCompletionRequest {
+            preserve_thinking: None,
+            responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8869,6 +9168,8 @@ mod tests {
 
         // Repetition Penalty: Should be a float between 0.0 and 2.0
         let request = NvCreateChatCompletionRequest {
+            preserve_thinking: None,
+            responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -8903,6 +9204,8 @@ mod tests {
 
         // Top Logprobs: Should be a positive integer between 0 and 20
         let request = NvCreateChatCompletionRequest {
+            preserve_thinking: None,
+            responses_tools: None,
             inner: CreateChatCompletionRequest {
                 model: "test-model".to_string(),
                 messages: vec![ChatCompletionRequestMessage::User(
@@ -9009,6 +9312,7 @@ mod tests {
 
         let normal_event = Annotated {
             data: Some(NvCreateChatCompletionStreamResponse {
+                message_boundary: None,
                 inner: CreateChatCompletionStreamResponse {
                     id: "test-id".to_string(),
                     choices: vec![],
@@ -9665,6 +9969,7 @@ mod tests {
         .expect("annotation construction should succeed");
         let normal_event = Annotated::<NvCreateChatCompletionStreamResponse> {
             data: Some(NvCreateChatCompletionStreamResponse {
+                message_boundary: None,
                 inner: CreateChatCompletionStreamResponse {
                     id: "test-id".to_string(),
                     choices: vec![],
@@ -9757,6 +10062,7 @@ mod tests {
         // Create a normal data event
         let normal_event = Annotated::<NvCreateChatCompletionStreamResponse> {
             data: Some(NvCreateChatCompletionStreamResponse {
+                message_boundary: None,
                 inner: CreateChatCompletionStreamResponse {
                     id: "test-id".to_string(),
                     choices: vec![],
@@ -10170,6 +10476,7 @@ mod tests {
         choices: Vec<ChatChoiceStream>,
     ) -> Annotated<NvCreateChatCompletionStreamResponse> {
         let response = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: CreateChatCompletionStreamResponse {
                 id: "test-id".to_string(),
                 choices,
@@ -10240,6 +10547,7 @@ mod tests {
         arguments: Option<&str>,
     ) -> ChatChoiceStream {
         let tool_call = ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: id.map(|s| s.to_string()),
             r#type: Some(FunctionType::Function),
@@ -10247,7 +10555,6 @@ mod tests {
                 name: name.map(|s| s.to_string()),
                 arguments: arguments.map(|s| s.to_string()),
             }),
-            custom: None,
         };
         #[allow(deprecated)]
         ChatChoiceStream {
@@ -10333,6 +10640,7 @@ mod tests {
     #[test]
     fn test_tool_dispatch_multiple_tool_calls() {
         let tc1 = ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("call_1".to_string()),
             r#type: Some(FunctionType::Function),
@@ -10340,9 +10648,9 @@ mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some(r#"{"city":"Paris"}"#.to_string()),
             }),
-            custom: None,
         };
         let tc2 = ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 1,
             id: Some("call_2".to_string()),
             r#type: Some(FunctionType::Function),
@@ -10350,7 +10658,6 @@ mod tests {
                 name: Some("get_time".to_string()),
                 arguments: Some(r#"{"tz":"UTC"}"#.to_string()),
             }),
-            custom: None,
         };
         #[allow(deprecated)]
         let choice = ChatChoiceStream {
@@ -10406,6 +10713,7 @@ mod tests {
         // One complete tool call and one incomplete (missing arguments = streaming delta).
         // Only the complete one should dispatch.
         let complete = ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("call_complete".to_string()),
             r#type: Some(FunctionType::Function),
@@ -10413,9 +10721,9 @@ mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some(r#"{"city":"Paris"}"#.to_string()),
             }),
-            custom: None,
         };
         let incomplete = ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 1,
             id: Some("call_partial".to_string()),
             r#type: Some(FunctionType::Function),
@@ -10423,7 +10731,6 @@ mod tests {
                 name: Some("search".to_string()),
                 arguments: None, // still streaming
             }),
-            custom: None,
         };
         #[allow(deprecated)]
         let choice = ChatChoiceStream {
@@ -10456,11 +10763,11 @@ mod tests {
     fn test_tool_dispatch_function_none() {
         // Tool call chunk with function: None — should not dispatch and should not panic.
         let tool_call = ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("call_999".to_string()),
             r#type: Some(FunctionType::Function),
             function: None,
-            custom: None,
         };
         #[allow(deprecated)]
         let choice = ChatChoiceStream {
@@ -10812,6 +11119,7 @@ mod tests {
             logprobs: None,
         };
         NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: CreateChatCompletionStreamResponse {
                 id: "test".to_string(),
                 choices: vec![choice],
@@ -10827,6 +11135,22 @@ mod tests {
             llm_metrics: None,
             tool_call_completion: Vec::new(),
         }
+    }
+
+    #[test]
+    fn phase_only_chunks_are_filtered_before_chat_completions_sse() {
+        let mut chunk = make_delta(None, None, None, None, None, None, None, None);
+        chunk.message_boundary = Some(
+            crate::protocols::openai::chat_completions::MessageBoundary::Start(
+                dynamo_protocols::types::responses::MessagePhase::Commentary,
+            ),
+        );
+        assert!(is_empty_stream_response(&chunk));
+        chunk.message_boundary =
+            Some(crate::protocols::openai::chat_completions::MessageBoundary::End);
+        assert!(is_empty_stream_response(&chunk));
+        chunk.inner.choices[0].finish_reason = Some(dynamo_protocols::types::FinishReason::Stop);
+        assert!(!is_empty_stream_response(&chunk));
     }
 
     #[test]
@@ -10884,6 +11208,7 @@ mod tests {
 
         // Not empty: has tool_calls
         let tc = vec![ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("call_1".to_string()),
             r#type: Some(FunctionType::Function),
@@ -10891,7 +11216,6 @@ mod tests {
                 name: Some("f".to_string()),
                 arguments: Some("{}".to_string()),
             }),
-            custom: None,
         }];
         assert!(
             !is_empty_stream_response(&make_delta(
@@ -11138,6 +11462,7 @@ mod tests {
                 usage,
             },
             nvext: None,
+            echo: None,
         }
     }
 
@@ -11194,6 +11519,7 @@ mod tests {
                 usage: Some(usage),
             },
             nvext: None,
+            echo: None,
         }
     }
 

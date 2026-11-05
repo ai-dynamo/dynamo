@@ -40,14 +40,15 @@ use std::sync::LazyLock;
 use async_stream::stream;
 use dynamo_parsers::tool_calling::ToolDefinition;
 use dynamo_parsers_v2::{
-    InvalidGuidedPayloadPolicy, Tool, UnifiedEvent, UnifiedParser, UnifiedParserEvent,
-    UnifiedParserInit, UnifiedParserOutput, UnifiedParserStartingState, UnifiedToolOutputMode,
-    create_unified_parser_for_family,
+    ArgumentFraming, InvalidGuidedPayloadPolicy, Tool, ToolCallPolicy, UnifiedEvent, UnifiedParser,
+    UnifiedParserContinuation, UnifiedParserEvent, UnifiedParserInit, UnifiedParserOutput,
+    UnifiedParserStartingState, UnifiedToolOutputMode, create_unified_parser_for_family,
 };
 use dynamo_protocols::types::{
-    ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCall,
-    ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta, FinishReason,
-    FunctionCall, FunctionCallStream, FunctionType,
+    ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionMessageContent,
+    ChatCompletionMessageToolCall, ChatCompletionMessageToolCallChunk,
+    ChatCompletionStreamResponseDelta, FinishReason, FunctionCall, FunctionCallStream,
+    FunctionType,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
@@ -71,11 +72,36 @@ pub(crate) const KIMI_K3_UNIFIED_FAMILY: &str = "kimi_k3";
 pub(crate) const DEEPSEEK_V41_UNIFIED_FAMILY: &str = "deepseek_v41";
 pub(crate) const DEEPSEEK_V4_UNIFIED_FAMILY: &str = "deepseek_v4";
 pub(crate) const GEMMA4_UNIFIED_FAMILY: &str = "gemma4";
+/// The empty thought channel Gemma 4 opens with thinking off.
+pub(crate) const GEMMA4_EMPTY_THOUGHT_CHANNEL: &str = "<|channel>thought\n<channel|>";
 pub(crate) const GLM47_UNIFIED_FAMILY: &str = "glm47";
 pub(crate) const MUSE_UNIFIED_FAMILY: &str = "muse_glimmer";
+/// The `dynamo-parsers-v2` unified family that serves Beam. Dynamo has no v1 Beam
+/// parser, so the `beam` + `beam` pair routes to the unified parser without
+/// `DYN_PARSER_VERSION=2`, like DeepSeek V4.1.
+pub(crate) const BEAM_UNIFIED_FAMILY: &str = "beam";
+pub(crate) const MUSE_SPARK_UNIFIED_FAMILY: &str = "muse_spark";
+/// Nemotron 3 (Ultra, Super, 3.5 Super): `nemotron_v3` forced reasoning over the
+/// Qwen3-Coder XML tool grammar. Model cards pair `--dyn-tool-call-parser qwen3_coder`
+/// with `--dyn-reasoning-parser nemotron_v3`.
+pub(crate) const NEMOTRON_V3_UNIFIED_FAMILY: &str = "nemotron_v3";
 
 /// Dynamo's `--dyn-tool-call-parser` name that pairs into [`QWEN3_UNIFIED_FAMILY`].
 const QWEN3_TOOL_CALL_PARSER: &str = "qwen3_coder";
+
+fn uses_qwen_xml_grammar(family: &str) -> bool {
+    matches!(family, QWEN3_UNIFIED_FAMILY | NEMOTRON_V3_UNIFIED_FAMILY)
+}
+
+/// A family that borrows another family's tool grammar names the owner through its
+/// reasoning half: `qwen3_coder` + `nemotron_v3` is Nemotron, not Qwen3, because the
+/// forced-reasoning default lives in the reasoning parser and the XML grammar is shared.
+fn shared_grammar_family(tool_family: &str, reasoning_family: &str) -> Option<&'static str> {
+    match (tool_family, reasoning_family) {
+        (QWEN3_UNIFIED_FAMILY, NEMOTRON_V3_UNIFIED_FAMILY) => Some(NEMOTRON_V3_UNIFIED_FAMILY),
+        _ => None,
+    }
+}
 
 const DYNAMO_FAMILY_ALIASES: &[(&str, &str)] = &[
     ("deepseek-v4", DEEPSEEK_V4_UNIFIED_FAMILY),
@@ -110,8 +136,12 @@ pub(crate) fn configured_family(
 ) -> Option<&'static str> {
     match (tool_call_parser, reasoning_parser) {
         (Some(tool), Some(reasoning)) => {
-            let family = canonical_family(tool)?;
-            (canonical_family(reasoning)? == family).then_some(family)
+            let tool_family = canonical_family(tool)?;
+            let reasoning_family = canonical_family(reasoning)?;
+            if tool_family == reasoning_family {
+                return Some(tool_family);
+            }
+            shared_grammar_family(tool_family, reasoning_family)
         }
         (Some(parser), None) | (None, Some(parser)) => canonical_family(parser),
         (None, None) => None,
@@ -131,39 +161,38 @@ pub(crate) fn selected_family(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
 ) -> Option<&'static str> {
-    let configured = configured_family(tool_call_parser, reasoning_parser);
     let selection = super::tool_parser_v2::selected_version()
         .unwrap_or_else(|error| panic!("invalid parser routing configuration: {error:#}"));
-    // Qwen3 thinking models also use this reasoning name with Hermes tool syntax.
-    let selected = if tool_call_parser.is_none()
-        && reasoning_parser == Some("qwen3")
-        && selection == dynamo_runtime::config::ParserVersion::Auto
-    {
-        None
-    } else {
-        selected_family_for_selection(configured, selection)
-    };
+    let selected = selected_family_for_selection(tool_call_parser, reasoning_parser, selection);
     tracing::debug!(
         target: "dynamo_unified",
         ?tool_call_parser,
         ?reasoning_parser,
-        ?configured,
         ?selection,
+        ?selected,
         "unified parser path decision"
     );
     selected
 }
 
-fn selected_family_for_selection(
-    configured: Option<&'static str>,
+pub(crate) fn selected_family_for_selection(
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
     selection: dynamo_runtime::config::ParserVersion,
 ) -> Option<&'static str> {
-    match selection {
-        dynamo_runtime::config::ParserVersion::Auto | dynamo_runtime::config::ParserVersion::V2 => {
-            configured
-        }
-        dynamo_runtime::config::ParserVersion::V1 => None,
+    // Qwen3 thinking models can use Hermes syntax; reasoning-only Nemotron cards
+    // do not identify their tool grammar. Auto keeps both on the legacy path.
+    if selection == dynamo_runtime::config::ParserVersion::V1
+        || (selection == dynamo_runtime::config::ParserVersion::Auto
+            && tool_call_parser.is_none()
+            && matches!(
+                reasoning_parser,
+                Some("qwen3" | "nemotron_v3" | "nemotron3")
+            ))
+    {
+        return None;
     }
+    configured_family(tool_call_parser, reasoning_parser)
 }
 
 pub(crate) fn selected_content_decoder_family(
@@ -194,21 +223,69 @@ pub(crate) fn parsers_v2_selected() -> bool {
     super::tool_parser_v2::enabled()
 }
 
-/// Request facts that affect channel interpretation before any bytes are consumed.
+/// Request facts for parser initialization and response interpretation.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct UnifiedRequestPolicy {
     pub reasoning_disabled: bool,
     pub structured_response: bool,
+    pub multiple_choices: bool,
 }
 
 impl UnifiedRequestPolicy {
+    /// The policy as the installed grammar leaves it: a `response_format` the grammar
+    /// holds inside the model's answer channel is native channel output, not the bare
+    /// JSON document the structured-response probes expect.
+    fn under(self, constraint: &GuidedToolConstraint) -> Self {
+        Self {
+            structured_response: self.structured_response && !constraint.frames_structured_answer(),
+            ..self
+        }
+    }
+
+    fn harmony_prefill_cache(
+        self,
+        family: &str,
+        prefix: Option<std::sync::Arc<str>>,
+    ) -> Option<HarmonyPrefill> {
+        if family == "gpt_oss" && self.multiple_choices {
+            prefix.map(HarmonyPrefill::new)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn resolve_stream_prefill(
+        self,
+        family: &str,
+        mut prefill: StreamPrefill,
+        constraint: &GuidedToolConstraint,
+        has_explicit_guided_decoding: bool,
+        harmony_required_array: impl FnOnce() -> bool,
+    ) -> StreamPrefill {
+        if family == "gpt_oss"
+            && (has_explicit_guided_decoding
+                || constraint.installs_guided_json() && !harmony_required_array())
+        {
+            return UnifiedParserStartingState::Response.into();
+        }
+        prefill.starting_state = self.starting_state(family, prefill.starting_state);
+        prefill
+    }
+
     fn starting_state(
         self,
         family: &str,
         inferred: UnifiedParserStartingState,
     ) -> UnifiedParserStartingState {
-        if self.reasoning_disabled && family == "gemma4" {
+        if self.reasoning_disabled
+            && matches!(family, "gemma4" | "minimax_m3" | NEMOTRON_V3_UNIFIED_FAMILY)
+        {
             // Gemma's Response state preserves literal thought delimiters and still parses tools.
+            // Nemotron 3 defaults to an implicit open thought; `enable_thinking=false` renders
+            // a closed `<think></think>` pair instead, so generation starts in the answer.
+            // MiniMax M3 reaches this only when the rendered prompt closed the thought with
+            // `</mm:think>` or a grammar owns the output (the preprocessor's rendered-prompt
+            // gate), so there is no reasoning channel left to parse.
             UnifiedParserStartingState::Response
         } else {
             inferred
@@ -453,7 +530,23 @@ impl JsonPrefillProbe {
         }
     }
 
-    fn unopened_channel_decision(&self, terminal: bool) -> Option<UnifiedParserStartingState> {
+    fn unopened_channel_decision(
+        &self,
+        family: &str,
+        terminal: bool,
+    ) -> Option<UnifiedParserStartingState> {
+        // Muse Spark's prompt ends at `<|start|>assistant`, so every turn opens with
+        // a ` to=<recipient>` header whose `t` would otherwise read as JSON `true`.
+        if family == MUSE_SPARK_UNIFIED_FAMILY {
+            const HEADER: &str = "to=";
+            let text = self.text.trim_start();
+            if text.starts_with(HEADER) {
+                return Some(UnifiedParserStartingState::None);
+            }
+            if !terminal && !text.is_empty() && HEADER.starts_with(text) {
+                return None;
+            }
+        }
         // JSON roots are unambiguous when the prompt has not opened reasoning;
         // waiting for a complete scalar would unnecessarily buffer its stream.
         match self.starts_json {
@@ -492,15 +585,7 @@ impl JsonPrefillProbe {
         }
     }
 
-    fn decision_for_family(
-        &mut self,
-        family: &str,
-        terminal: bool,
-        latest_text: &str,
-    ) -> anyhow::Result<Option<UnifiedParserStartingState>> {
-        if let Some(decision) = self.marker_decision {
-            return Ok(Some(decision));
-        }
+    fn has_control_marker(&mut self, family: &str, terminal: bool, latest_text: &str) -> bool {
         let first_push = self.marker_probe.is_none();
         let shield = self
             .marker_probe
@@ -522,6 +607,20 @@ impl JsonPrefillProbe {
             keep_from += 1;
         }
         self.marker_suffix.drain(..keep_from);
+
+        has_candidate
+    }
+
+    fn decision_for_family(
+        &mut self,
+        family: &str,
+        terminal: bool,
+        latest_text: &str,
+    ) -> anyhow::Result<Option<UnifiedParserStartingState>> {
+        if let Some(decision) = self.marker_decision {
+            return Ok(Some(decision));
+        }
+        let has_candidate = self.has_control_marker(family, terminal, latest_text);
 
         // Only complete unquoted controls require raw-prefix classification;
         // rescanning growing JSON for every punctuation-bearing chunk is quadratic.
@@ -573,10 +672,14 @@ fn reasoning_marker_prefill(
                 kimi_channel_marker_position(content, "<|open|>", "think").is_some()
                     || kimi_channel_marker_position(content, "<|close|>", "think").is_some()
             }
-            "muse_glimmer" => {
+            "muse_glimmer" | "muse_spark" => {
                 contains_unquoted_marker(content, "<|start|>")
                     || contains_unquoted_marker(content, "<|eom|>")
             }
+            BEAM_UNIFIED_FAMILY => BEAM_OPENERS
+                .iter()
+                .chain(BEAM_CLOSERS.iter())
+                .any(|marker| content.contains(marker)),
             _ => false,
         }
     };
@@ -601,6 +704,67 @@ pub(crate) struct StreamPrefill {
     pub prefix: Option<std::sync::Arc<str>>,
 }
 
+// The consumed seed belongs to the request; choices keep independent parser state.
+struct HarmonyPrefill {
+    prefix: Option<std::sync::Arc<str>>,
+    token_ids: Option<Box<[u32]>>,
+    continuation: Option<Box<dyn UnifiedParserContinuation>>,
+}
+
+impl HarmonyPrefill {
+    fn new(prefix: std::sync::Arc<str>) -> Self {
+        Self {
+            prefix: Some(prefix),
+            token_ids: None,
+            continuation: None,
+        }
+    }
+
+    fn matches_prefix(&self, prefix: Option<&std::sync::Arc<str>>) -> bool {
+        match (self.prefix.as_ref(), prefix) {
+            (Some(cached), Some(current)) => std::sync::Arc::ptr_eq(cached, current),
+            (None, None) => self.continuation.is_some(),
+            _ => false,
+        }
+    }
+
+    fn release_prefix(&mut self) -> bool {
+        if self.continuation.is_none() {
+            return false;
+        }
+        self.prefix = None;
+        true
+    }
+
+    fn token_ids(&mut self) -> anyhow::Result<&[u32]> {
+        if self.token_ids.is_none() {
+            self.token_ids = Some(
+                dynamo_parsers_v2::unified::harmony::encode_harmony(
+                    self.prefix
+                        .as_deref()
+                        .ok_or_else(|| anyhow::anyhow!("consumed prefix was released"))?,
+                )?
+                .into_boxed_slice(),
+            );
+        }
+        Ok(self.token_ids.as_deref().expect("encoded above"))
+    }
+}
+
+fn replay_consumed_harmony(
+    parser: &mut dyn UnifiedParser,
+    tokens: &[u32],
+    chunk_size: usize,
+) -> anyhow::Result<()> {
+    let mut discarded = UnifiedParserOutput::default();
+    for chunk in tokens.chunks(chunk_size) {
+        parser.parse_token_ids_into(chunk, &mut discarded)?;
+        // Only the parser state survives consumed input; generated deltas start fresh.
+        discarded.events.clear();
+    }
+    Ok(())
+}
+
 impl From<UnifiedParserStartingState> for StreamPrefill {
     fn from(starting_state: UnifiedParserStartingState) -> Self {
         Self {
@@ -622,6 +786,14 @@ pub(crate) fn stream_prefill(
         // so the model emits `<think>` itself when it thinks.
         QWEN3_UNIFIED_FAMILY => UnifiedParserStartingState::None,
         DEEPSEEK_V41_UNIFIED_FAMILY => UnifiedParserStartingState::None,
+        // Beam's prompt ends at the `<|start|>assistant` header slot; the model opens
+        // its own channel and the grammar owns that open slot.
+        BEAM_UNIFIED_FAMILY => UnifiedParserStartingState::None,
+        // Nemotron 3's template pre-opens `<think>\n` whenever thinking is on, which the
+        // prompt check above normally reports. When the rendered prompt is unavailable,
+        // keep the v1 `nemotron_v3` contract: reasoning is on unless the request turned it
+        // off, and `UnifiedRequestPolicy::starting_state` moves that case to `Response`.
+        NEMOTRON_V3_UNIFIED_FAMILY => UnifiedParserStartingState::Reasoning,
         _ => UnifiedParserStartingState::None,
     }
 }
@@ -649,7 +821,12 @@ pub(crate) fn stream_prefill(
 /// Nonterminal empty and whitespace-only chunks are held by `apply_stream` until this
 /// check can classify the first non-whitespace content. A terminal empty stream keeps
 /// the prompt's `Reasoning` state because there is no later payload to classify.
+///
+/// `None` is the family default, and Nemotron 3's default is the implicit thought, so
+/// bare JSON for that family starts in `Response` explicitly; `None` would hand the
+/// payload back to reasoning.
 fn bare_guided_json_prefill(
+    family: &str,
     first_content: Option<&ChatCompletionMessageContent>,
 ) -> UnifiedParserStartingState {
     let Some(ChatCompletionMessageContent::Text(text)) = first_content else {
@@ -660,9 +837,18 @@ fn bare_guided_json_prefill(
         return UnifiedParserStartingState::Reasoning;
     }
     if starts_bare_json(trimmed) {
-        UnifiedParserStartingState::None
+        bare_json_starting_state(family)
     } else {
         UnifiedParserStartingState::Reasoning
+    }
+}
+
+/// The starting state that lets a bare guided JSON payload reach the tool parser.
+fn bare_json_starting_state(family: &str) -> UnifiedParserStartingState {
+    if family == NEMOTRON_V3_UNIFIED_FAMILY {
+        UnifiedParserStartingState::Response
+    } else {
+        UnifiedParserStartingState::None
     }
 }
 
@@ -674,7 +860,8 @@ fn bare_guided_json_prefill(
 /// neither marker means reasoning never ran for this turn.
 fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserStartingState> {
     match family {
-        "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" => {
+        "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" | "minimax_m3"
+        | "nemotron_v3" => {
             let (opener_marker, closer_marker) = reasoning_marker_pair(family)
                 .expect("think-marker families have a configured reasoning pair");
             // Compare FIRST-occurrence positions, not mere presence: a prompt that
@@ -685,6 +872,19 @@ fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserSt
             // that case as `None` instead of `Reasoning`.
             let opener = first_unquoted_marker_position(content, opener_marker);
             let closer = first_unquoted_marker_position(content, closer_marker);
+            if family == "minimax_m3"
+                && first_unquoted_native_tool_call_marker(content, family).is_some_and(|tool_at| {
+                    opener
+                        .into_iter()
+                        .chain(closer)
+                        .all(|marker_at| tool_at < marker_at)
+                })
+            {
+                // M3 parameters contain literal, unquoted text. A reasoning
+                // closer inside an argument cannot imply a prompt-opened thought.
+                // Let the parser own any channels after this first native call.
+                return Ok(UnifiedParserStartingState::None);
+            }
             Ok(match (opener, closer) {
                 // No opener before it (or no opener at all): the prompt opened reasoning.
                 (None, Some(_)) => UnifiedParserStartingState::Reasoning,
@@ -694,6 +894,11 @@ fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserSt
                 // An opener exists (and any closer does not precede it): the model will
                 // open reasoning itself later, currently visible as ordinary text.
                 (Some(_), _) => UnifiedParserStartingState::None,
+                // Marker-free text is the visible answer. This also holds for Nemotron
+                // 3, whose implicit thought is split by the streaming path before the
+                // aggregator re-reads a choice's text: starting that text in reasoning
+                // would relabel an already-parsed answer. A raw thought cut off before
+                // `</think>` is indistinguishable here and is read the same way.
                 (None, None) => UnifiedParserStartingState::Response,
             })
         }
@@ -713,14 +918,47 @@ fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserSt
             },
         ),
         "gpt_oss" => Ok(UnifiedParserStartingState::None),
-        "muse_glimmer" => Ok(infer_marker_prefill(content, "<|start|>", "<|eom|>")),
+        "muse_glimmer" | "muse_spark" => Ok(infer_marker_prefill(content, "<|start|>", "<|eom|>")),
+        BEAM_UNIFIED_FAMILY => Ok(beam_prefill(content)),
         other => anyhow::bail!("no prefill detector for unified parser family '{other}'"),
+    }
+}
+
+/// Beam's channel markers are special tokens the engine emits as such, so a literal
+/// never hides inside quotes: plain substring positions are the right reading.
+const BEAM_OPENERS: [&str; 2] = ["<|channel|>", "<|start|>"];
+const BEAM_CLOSERS: [&str; 3] = ["<|end|>", "<|return|>", "<|call|>"];
+
+/// Beam's channel state read back off complete output.
+///
+/// The prompt ends at the `<|start|>assistant` header slot, so output normally opens
+/// its own channel (`<|channel|>…`, or a framed `<|start|>…` message): `None`. A closer
+/// before any opener means the prompt had opened a channel: `<|end|>` closes the
+/// analysis channel it opened (`Reasoning`), `<|return|>` the final one (`Response`).
+/// Output with no control marker at all is a final answer the prompt opened
+/// (`Response`), which is also what already-decoded text looks like when the
+/// aggregator re-reads it.
+fn beam_prefill(content: &str) -> UnifiedParserStartingState {
+    let opener = BEAM_OPENERS
+        .iter()
+        .filter_map(|marker| content.find(marker))
+        .min();
+    let closer = BEAM_CLOSERS
+        .iter()
+        .filter_map(|marker| content.find(marker).map(|at| (at, *marker)))
+        .min_by_key(|(at, _)| *at);
+    match (opener, closer) {
+        (Some(open), Some((close, _))) if open < close => UnifiedParserStartingState::None,
+        (Some(_), None) => UnifiedParserStartingState::None,
+        (_, Some((_, "<|end|>"))) => UnifiedParserStartingState::Reasoning,
+        (_, Some(_)) | (None, None) => UnifiedParserStartingState::Response,
     }
 }
 
 fn reasoning_marker_pair(family: &str) -> Option<(&'static str, &'static str)> {
     match family {
-        "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" => {
+        "minimax_m3" => Some(("<mm:think>", "</mm:think>")),
+        "qwen3" | "deepseek_v4" | "deepseek_v41" | "glm47" | "kimi_k2" | "nemotron_v3" => {
             Some(("<think>", "</think>"))
         }
         "gemma4" => Some(("<|channel>", "<channel|>")),
@@ -990,10 +1228,38 @@ fn tool_output_mode(constraint: &GuidedToolConstraint) -> UnifiedToolOutputMode 
         GuidedToolConstraint::GuidedJsonRequired => {
             UnifiedToolOutputMode::GuidedJson { named_tool: None }
         }
-        GuidedToolConstraint::None | GuidedToolConstraint::StructuralTag => {
-            UnifiedToolOutputMode::Native
-        }
+        GuidedToolConstraint::None
+        | GuidedToolConstraint::StructuralTag
+        | GuidedToolConstraint::BeamTurnGrammar { .. } => UnifiedToolOutputMode::Native,
     }
+}
+
+/// How the native parser frames argument values for this request: the Beam turn
+/// grammar writes every held tool's non-string parameters as JSON, so those slots own
+/// their strings and a closing tag inside one is data (see
+/// `dynamo_parsers_v2::ArgumentFraming::SchemaConstrained`); without a grammar a value
+/// runs to the first closing tag.
+fn argument_framing(constraint: &GuidedToolConstraint) -> ArgumentFraming {
+    match constraint {
+        GuidedToolConstraint::BeamTurnGrammar { .. } => ArgumentFraming::SchemaConstrained,
+        GuidedToolConstraint::None
+        | GuidedToolConstraint::StructuralTag
+        | GuidedToolConstraint::GuidedJsonNamed { .. }
+        | GuidedToolConstraint::GuidedJsonRequired => ArgumentFraming::Lenient,
+    }
+}
+
+fn apply_argument_framing(
+    parser: &mut dyn UnifiedParser,
+    argument_framing: ArgumentFraming,
+) -> anyhow::Result<()> {
+    if argument_framing != ArgumentFraming::default() {
+        parser.set_tool_call_policy(ToolCallPolicy {
+            malformed: Default::default(),
+            argument_framing,
+        })?;
+    }
+    Ok(())
 }
 
 /// The malformed-guided-payload contract for one request, selected by the
@@ -1026,7 +1292,7 @@ fn batch_tool_output_mode(
     content: &str,
     constraint: &GuidedToolConstraint,
 ) -> UnifiedToolOutputMode {
-    let tool_parser = if family == QWEN3_UNIFIED_FAMILY {
+    let tool_parser = if uses_qwen_xml_grammar(family) {
         QWEN3_TOOL_CALL_PARSER
     } else {
         family
@@ -1104,11 +1370,26 @@ fn unified_parser_control_markers(family: &str) -> Vec<String> {
         }
         markers.push("<|sep|>".to_string());
     }
-    if family == "muse_glimmer" {
+    if matches!(family, "muse_glimmer" | "muse_spark") {
         markers.extend(
             ["<|start|>", "<|message|>", "<|eom|>", "<|eot|>"]
                 .into_iter()
                 .map(str::to_string),
+        );
+    }
+    if family == BEAM_UNIFIED_FAMILY {
+        markers.extend(
+            [
+                "<|start|>",
+                "<|channel|>",
+                "<|message|>",
+                "<|constrain|>",
+                "<|end|>",
+                "<|return|>",
+                "<|call|>",
+            ]
+            .into_iter()
+            .map(str::to_string),
         );
     }
     if let Some(marker) = native_family_marker(family) {
@@ -1124,13 +1405,15 @@ fn unified_parser_control_markers(family: &str) -> Vec<String> {
 
 fn native_family_marker(family: &str) -> Option<&'static str> {
     match family {
-        "qwen3" | "glm47" => Some("<tool_call>"),
+        "minimax_m3" => Some("]<]minimax[>[<tool_call>"),
+        "qwen3" | "glm47" | "nemotron_v3" => Some("<tool_call>"),
         "deepseek_v4" => Some("<｜DSML｜tool_calls>"),
         "deepseek_v41" => Some("<｜DSML｜ calls>"),
         "gemma4" => Some("<|tool_call>"),
         "kimi_k2" => Some("<|tool_call_begin|>"),
         "kimi_k3" => Some("<|open|>call"),
-        "muse_glimmer" => Some("<atem:invoke"),
+        "muse_glimmer" | "muse_spark" => Some("<atem:invoke"),
+        "beam" => Some("<|start|>assistant to="),
         _ => None,
     }
 }
@@ -1173,9 +1456,8 @@ pub(crate) fn fanout_llm_metrics_position(choices: &[ChatChoiceStream]) -> Optio
 /// An empty streaming choice for `index`, used as the base every emitted chunk is
 /// filled in from.
 ///
-/// `logprobs` is dropped on purpose: once parsing rewrites a choice, the emitted text
-/// no longer lines up token-for-token with the backend's raw stream, so per-token
-/// logprobs would be attached to the wrong characters.
+/// It carries no `logprobs`: `choices_for` moves a source chunk's raw-token logprobs
+/// onto exactly one of the choices parsed from it.
 pub(crate) fn empty_choice(index: u32) -> ChatChoiceStream {
     #[allow(deprecated)]
     ChatChoiceStream {
@@ -1191,6 +1473,43 @@ pub(crate) fn empty_choice(index: u32) -> ChatChoiceStream {
         finish_reason: None,
         logprobs: None,
     }
+}
+
+/// Additional adapter state, selected once for the native grammar. A shared
+/// `<tool_call>` spelling does not establish shared grammar semantics: reuse a
+/// variant only when its full behavior matches, otherwise document a new variant.
+enum NativeGrammarState {
+    /// These adapter mechanisms are inactive; the selected parser remains active.
+    None,
+    /// Qwen's XML tool-call dialect, also used by Nemotron. Parameter delimiters
+    /// and literal-marker rules require dialect-specific handling.
+    QwenXml(QwenXmlStreamState),
+    /// GLM's native EOF truncation check uses its grammar to distinguish unfinished
+    /// calls from literal argument text.
+    Glm(GlmNativeStreamState),
+}
+
+/// Adapter ordering state for the Qwen XML dialect; source responses live longer
+/// than a parser instance and remain in `ChoiceRecord`.
+#[derive(Default)]
+struct QwenXmlStreamState {
+    lexical_state: QwenNativeLexicalState,
+    /// Buffered text whose interpretation is unresolved, rather than a source position.
+    pending_opener: String,
+    /// Must follow recovered opener text on mismatch and precede completed call events.
+    deferred_reasoning: Vec<String>,
+    /// Logprobs of chunks generated after the latest deferred reasoning, held until it
+    /// is released.
+    deferred_logprobs: Option<ChatChoiceLogprobs>,
+    /// Entries in event/output lists, not XML character offsets: these preserve
+    /// deferred reasoning's original response metadata through projection.
+    deferred_reasoning_event_indices: HashSet<usize>,
+    deferred_reasoning_choice_indices: HashSet<usize>,
+}
+
+#[derive(Default)]
+struct GlmNativeStreamState {
+    input_for_truncation_check: String,
 }
 
 /// Per-choice streaming state: one parser instance plus the bookkeeping the OpenAI
@@ -1533,20 +1852,12 @@ impl QuotedControlMarkerProbe {
 /// streaming tool-call contract needs. One instance parses exactly one choice of one
 /// request, which is what gives per-stream isolation by construction.
 pub(crate) struct ChoiceState {
-    glm_native_input: Option<String>,
+    native_grammar_state: NativeGrammarState,
     incomplete_native_call: bool,
     family: String,
+    message_boundaries: Vec<Option<super::MessageBoundary>>,
     parser: Box<dyn UnifiedParser>,
     tool_output_mode: UnifiedToolOutputMode,
-    qwen_native_lexical_state: QwenNativeLexicalState,
-    /// Qwen's native tool opener is held until it is complete or disproven.
-    pending_qwen_opener_text: String,
-    /// Reasoning chunks arriving while a split Qwen block opener is ambiguous.
-    /// They must follow recovered opener text on mismatch and precede call events
-    /// when the opener completes.
-    pending_qwen_opener_reasoning: Vec<String>,
-    qwen_reasoning_event_positions: HashSet<usize>,
-    qwen_reasoning_choice_positions: HashSet<usize>,
     /// Tool indices that have emitted at least one `tool_calls` delta.
     opened_calls: HashSet<usize>,
     /// Upstream IDs and types may arrive after an index opens. Names remain fragments.
@@ -1572,15 +1883,35 @@ pub(crate) struct ChoiceState {
 }
 
 impl ChoiceState {
+    #[cfg(test)]
     pub(crate) fn new(
         family: &str,
         tools: &[Tool],
         prefill: impl Into<StreamPrefill>,
         tool_output_mode: UnifiedToolOutputMode,
         guided_streaming: bool,
+        argument_framing: ArgumentFraming,
     ) -> anyhow::Result<Self> {
-        let prefill = prefill.into();
-        let mut parser = create_unified_parser_for_family(family, tools)?;
+        Self::new_with_prefill_cache(
+            family,
+            tools,
+            prefill.into(),
+            tool_output_mode,
+            guided_streaming,
+            argument_framing,
+            None,
+        )
+    }
+
+    fn new_with_prefill_cache(
+        family: &str,
+        tools: &[Tool],
+        prefill: StreamPrefill,
+        tool_output_mode: UnifiedToolOutputMode,
+        guided_streaming: bool,
+        argument_framing: ArgumentFraming,
+        mut cache: Option<&mut HarmonyPrefill>,
+    ) -> anyhow::Result<Self> {
         // The built-in Harmony initializer resets its call counter. Replay consumed
         // tokens afterward so the open call and later calls share that counter.
         // Guided JSON inherits only the resolved channel, since its request constraint
@@ -1591,52 +1922,89 @@ impl ChoiceState {
             && dynamo_parsers_v2::vendor_unified_families()
                 .iter()
                 .any(|registered| registered == family);
-        let replay_harmony =
-            native_harmony && !vendor_harmony && parser.input_capabilities().token_ids;
-        let mut harmony_prefix_tokens = if native_harmony || vendor_harmony {
-            prefill
-                .prefix
-                .as_deref()
-                .or_else(|| {
-                    (native_harmony && prefill.starting_state == UnifiedParserStartingState::None)
-                        .then_some("<|start|>assistant")
-                })
-                .map(dynamo_parsers_v2::unified::harmony::encode_harmony)
-                .transpose()?
+        let builtin_native_harmony = native_harmony && !vendor_harmony;
+        let continuation = cache
+            .as_deref()
+            .filter(|cache| builtin_native_harmony && cache.matches_prefix(prefill.prefix.as_ref()))
+            .and_then(|cache| cache.continuation.as_ref());
+        let mut parser = if let Some(continuation) = continuation {
+            let mut parser = continuation.fork()?;
+            apply_argument_framing(parser.as_mut(), argument_framing)?;
+            parser
         } else {
-            None
-        };
-        let prompt_token_ids = if replay_harmony {
-            Vec::new()
-        } else {
-            harmony_prefix_tokens.take().unwrap_or_default()
-        };
-
-        // Streaming guided calls commit per call once the name and argument object opener
-        // are unambiguous. A committed fragment cannot later be rejected or recovered as
-        // text, so this path opts into that contract explicitly — unless the request
-        // rolled guided tool streaming back, in which case it buffers to completion.
-        // `guided_streaming` is decided once per request by
-        // `OpenAIPreprocessor::guided_tool_streaming_release` and threaded down here;
-        // it is inert in `UnifiedToolOutputMode::Native`, where the parser builds no
-        // guided state at all.
-        parser.initialize_request(UnifiedParserInit {
-            prompt_token_ids,
-            starting_state: if prefill.prefix.is_some()
-                && (!harmony || native_harmony || vendor_harmony)
-            {
-                UnifiedParserStartingState::None
+            let mut parser = create_unified_parser_for_family(family, tools)?;
+            let replay_harmony = builtin_native_harmony && parser.input_capabilities().token_ids;
+            let mut harmony_prefix_tokens = if native_harmony || vendor_harmony {
+                prefill
+                    .prefix
+                    .as_deref()
+                    .or_else(|| {
+                        (native_harmony
+                            && prefill.starting_state == UnifiedParserStartingState::None)
+                            .then_some("<|start|>assistant")
+                    })
+                    .map(|prefix| {
+                        if replay_harmony
+                            && let Some(cache) = cache.as_deref_mut()
+                            && cache.matches_prefix(prefill.prefix.as_ref())
+                        {
+                            return cache.token_ids().map(std::borrow::Cow::Borrowed);
+                        }
+                        dynamo_parsers_v2::unified::harmony::encode_harmony(prefix)
+                            .map(std::borrow::Cow::Owned)
+                    })
+                    .transpose()?
             } else {
-                prefill.starting_state
-            },
-            tool_output_mode: tool_output_mode.clone(),
-            invalid_guided_payload: invalid_guided_payload_policy(guided_streaming),
-        })?;
-        if let Some(tokens) = harmony_prefix_tokens {
-            // Consumed prompt deltas stay private; token replay preserves literal
-            // delimiter fragments without joining them to generated text.
-            parser.parse_token_ids_into(&tokens, &mut UnifiedParserOutput::default())?;
-        }
+                None
+            };
+            let prompt_token_ids = if replay_harmony {
+                Vec::new()
+            } else {
+                harmony_prefix_tokens
+                    .take()
+                    .map(std::borrow::Cow::into_owned)
+                    .unwrap_or_default()
+            };
+
+            // Streaming guided calls commit per call once the name and argument object opener
+            // are unambiguous. A committed fragment cannot later be rejected or recovered as
+            // text, so this path opts into that contract explicitly — unless the request
+            // rolled guided tool streaming back, in which case it buffers to completion.
+            // `guided_streaming` is decided once per request by
+            // `OpenAIPreprocessor::guided_tool_streaming_release` and threaded down here;
+            // it is inert in `UnifiedToolOutputMode::Native`, where the parser builds no
+            // guided state at all.
+            parser.initialize_request(UnifiedParserInit {
+                prompt_token_ids,
+                starting_state: if prefill.prefix.is_some()
+                    && (!harmony || native_harmony || vendor_harmony)
+                {
+                    UnifiedParserStartingState::None
+                } else {
+                    prefill.starting_state
+                },
+                tool_output_mode: tool_output_mode.clone(),
+                invalid_guided_payload: invalid_guided_payload_policy(guided_streaming),
+            })?;
+            apply_argument_framing(parser.as_mut(), argument_framing)?;
+            if let Some(tokens) = harmony_prefix_tokens {
+                // Consumed prompt deltas stay private; token replay preserves literal
+                // delimiter fragments without joining them to generated text.
+                replay_consumed_harmony(parser.as_mut(), &tokens, 256)?;
+            }
+            if replay_harmony
+                && let Some(cache) = cache
+                && cache.matches_prefix(prefill.prefix.as_ref())
+            {
+                cache.continuation = parser.continuation()?;
+                if cache.continuation.is_some() {
+                    // The checkpoint owns consumed state. Token replay is no longer
+                    // needed for subsequent choices or delayed choice initialization.
+                    cache.token_ids = None;
+                }
+            }
+            parser
+        };
         if family != "gpt_oss"
             && let Some(prefix) = prefill.prefix
         {
@@ -1650,46 +2018,22 @@ impl ChoiceState {
             );
         }
         Ok(Self {
-            glm_native_input: (family == GLM47_UNIFIED_FAMILY
-                && matches!(&tool_output_mode, UnifiedToolOutputMode::Native))
-            .then(String::new),
+            native_grammar_state: if matches!(&tool_output_mode, UnifiedToolOutputMode::Native) {
+                if uses_qwen_xml_grammar(family) {
+                    NativeGrammarState::QwenXml(QwenXmlStreamState::default())
+                } else if family == GLM47_UNIFIED_FAMILY {
+                    NativeGrammarState::Glm(GlmNativeStreamState::default())
+                } else {
+                    NativeGrammarState::None
+                }
+            } else {
+                NativeGrammarState::None
+            },
             incomplete_native_call: false,
             family: family.to_string(),
+            message_boundaries: Vec::new(),
             parser,
             tool_output_mode,
-            qwen_native_lexical_state: QwenNativeLexicalState::default(),
-            pending_qwen_opener_text: String::new(),
-            pending_qwen_opener_reasoning: Vec::new(),
-            qwen_reasoning_event_positions: HashSet::new(),
-            qwen_reasoning_choice_positions: HashSet::new(),
-            opened_calls: HashSet::new(),
-            tool_ids_emitted: HashSet::new(),
-            tool_types_emitted: HashSet::new(),
-            parser_tool_indices: HashMap::new(),
-            passthrough_tool_indices: HashMap::new(),
-            tool_index_offset: 0,
-            next_tool_index: 0,
-            pending_tool_calls: HashSet::new(),
-            parser_call_completion: HashMap::new(),
-            pending_parsed_tool_calls: HashMap::new(),
-            tool_emitted: false,
-            failed: false,
-        })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new_default(family: &str, tools: &[Tool]) -> anyhow::Result<Self> {
-        Ok(Self {
-            glm_native_input: (family == GLM47_UNIFIED_FAMILY).then(String::new),
-            incomplete_native_call: false,
-            family: family.to_string(),
-            parser: create_unified_parser_for_family(family, tools)?,
-            tool_output_mode: UnifiedToolOutputMode::Native,
-            qwen_native_lexical_state: QwenNativeLexicalState::default(),
-            pending_qwen_opener_text: String::new(),
-            pending_qwen_opener_reasoning: Vec::new(),
-            qwen_reasoning_event_positions: HashSet::new(),
-            qwen_reasoning_choice_positions: HashSet::new(),
             opened_calls: HashSet::new(),
             tool_ids_emitted: HashSet::new(),
             tool_types_emitted: HashSet::new(),
@@ -1706,13 +2050,42 @@ impl ChoiceState {
     }
 
     /// Feed one decoded text delta through the parser.
+    #[cfg(test)]
+    pub(crate) fn new_with_constraint(
+        family: &str,
+        tools: &[Tool],
+        prefill: UnifiedParserStartingState,
+        constraint: &GuidedToolConstraint,
+        guided_streaming: bool,
+    ) -> anyhow::Result<Self> {
+        Self::new(
+            family,
+            tools,
+            prefill,
+            tool_output_mode(constraint),
+            guided_streaming,
+            argument_framing(constraint),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_message_boundaries(&mut self) -> Vec<Option<super::MessageBoundary>> {
+        std::mem::take(&mut self.message_boundaries)
+    }
+
+    pub(crate) fn preserve_message_phases(&mut self, enabled: bool) {
+        self.parser.preserve_message_phases(enabled);
+    }
+
     pub(crate) fn push(&mut self, text: &str) -> Vec<UnifiedParserEvent> {
         if self.failed {
             return text_delta(text.to_string());
         }
-        if self.is_qwen_native_outside_block() {
-            let held = std::mem::take(&mut self.pending_qwen_opener_text);
-            if !self.pending_qwen_opener_reasoning.is_empty() && !held.is_empty() {
+        if let NativeGrammarState::QwenXml(qwen) = &mut self.native_grammar_state
+            && qwen.lexical_state.mode == QwenNativeLexicalMode::OutsideBlock
+        {
+            let held = std::mem::take(&mut qwen.pending_opener);
+            if !qwen.deferred_reasoning.is_empty() && !held.is_empty() {
                 if let Some((_resolution_end, opener_completed)) =
                     qwen_opener_resolution(&held, text)
                 {
@@ -1729,18 +2102,16 @@ impl ChoiceState {
                     }
                     return events;
                 }
-                self.pending_qwen_opener_text = held;
-                self.pending_qwen_opener_text.push_str(text);
+                qwen.pending_opener = held;
+                qwen.pending_opener.push_str(text);
                 return Vec::new();
             }
 
             let mut combined = held;
             combined.push_str(text);
-            if let Some(start) =
-                qwen_partial_opener_suffix_start(&self.qwen_native_lexical_state, &combined)
-            {
+            if let Some(start) = qwen_partial_opener_suffix_start(&qwen.lexical_state, &combined) {
                 let safe_text = combined[..start].to_string();
-                self.pending_qwen_opener_text = combined[start..].to_string();
+                qwen.pending_opener = combined[start..].to_string();
                 return if safe_text.is_empty() {
                     Vec::new()
                 } else {
@@ -1753,24 +2124,29 @@ impl ChoiceState {
     }
 
     fn qwen_resumed_marker_can_start_call(&self) -> bool {
-        self.qwen_native_lexical_state.mode != QwenNativeLexicalMode::ParameterValue
+        matches!(&self.native_grammar_state, NativeGrammarState::QwenXml(qwen)
+            if qwen.lexical_state.mode != QwenNativeLexicalMode::ParameterValue)
     }
 
-    fn is_qwen_native_outside_block(&self) -> bool {
-        self.family == QWEN3_UNIFIED_FAMILY
-            && matches!(&self.tool_output_mode, UnifiedToolOutputMode::Native)
-            && self.qwen_native_lexical_state.mode == QwenNativeLexicalMode::OutsideBlock
+    fn has_pending_qwen_xml_opener(&self) -> bool {
+        matches!(&self.native_grammar_state, NativeGrammarState::QwenXml(qwen)
+            if qwen.lexical_state.mode == QwenNativeLexicalMode::OutsideBlock
+                && !qwen.pending_opener.is_empty())
+    }
+
+    fn is_deferred_qwen_xml_reasoning_choice(&self, index: usize) -> bool {
+        matches!(&self.native_grammar_state, NativeGrammarState::QwenXml(qwen)
+            if qwen.deferred_reasoning_choice_indices.contains(&index))
     }
 
     fn parse_segment(&mut self, text: &str) -> Vec<UnifiedParserEvent> {
-        if let Some(input) = &mut self.glm_native_input {
-            // EOF recovery needs source context; scan once there, not on every push.
-            input.push_str(text);
-        }
-        if self.family == QWEN3_UNIFIED_FAMILY
-            && matches!(&self.tool_output_mode, UnifiedToolOutputMode::Native)
-        {
-            self.qwen_native_lexical_state.observe(text);
+        match &mut self.native_grammar_state {
+            NativeGrammarState::Glm(glm) => {
+                // EOF recovery needs source context; scan once there, not on every push.
+                glm.input_for_truncation_check.push_str(text);
+            }
+            NativeGrammarState::QwenXml(qwen) => qwen.lexical_state.observe(text),
+            NativeGrammarState::None => {}
         }
         let mut output = UnifiedParserOutput::default();
         match self.parser.parse_into(text, &mut output) {
@@ -1787,26 +2163,47 @@ impl ChoiceState {
         }
     }
 
-    fn queue_qwen_opener_reasoning(&mut self, reasoning: String) {
-        self.pending_qwen_opener_reasoning.push(reasoning);
+    /// Scores held since the previous queued reasoning were generated before this
+    /// one, so they lead its source envelope's `logprobs`.
+    fn queue_qwen_opener_reasoning(
+        &mut self,
+        reasoning: String,
+        source_logprobs: &mut Option<ChatChoiceLogprobs>,
+    ) {
+        let NativeGrammarState::QwenXml(qwen) = &mut self.native_grammar_state else {
+            return;
+        };
+        qwen.deferred_reasoning.push(reasoning);
+        if let Some(mut held) = qwen.deferred_logprobs.take() {
+            if let Some(source) = source_logprobs.take() {
+                extend_logprobs(&mut held, source);
+            }
+            *source_logprobs = Some(held);
+        }
     }
 
     fn prepend_pending_qwen_reasoning(&mut self, events: &mut Vec<UnifiedParserEvent>) {
-        let mut reasoning = std::mem::take(&mut self.pending_qwen_opener_reasoning)
+        let NativeGrammarState::QwenXml(qwen) = &mut self.native_grammar_state else {
+            return;
+        };
+        let mut reasoning = std::mem::take(&mut qwen.deferred_reasoning)
             .into_iter()
             .map(UnifiedParserEvent::Reasoning)
             .collect::<Vec<_>>();
-        self.qwen_reasoning_event_positions
+        qwen.deferred_reasoning_event_indices
             .extend(0..reasoning.len());
         reasoning.append(events);
         *events = reasoning;
     }
 
     fn append_pending_qwen_reasoning(&mut self, events: &mut Vec<UnifiedParserEvent>) {
-        self.qwen_reasoning_event_positions
-            .extend(events.len()..events.len() + self.pending_qwen_opener_reasoning.len());
+        let NativeGrammarState::QwenXml(qwen) = &mut self.native_grammar_state else {
+            return;
+        };
+        qwen.deferred_reasoning_event_indices
+            .extend(events.len()..events.len() + qwen.deferred_reasoning.len());
         events.extend(
-            std::mem::take(&mut self.pending_qwen_opener_reasoning)
+            std::mem::take(&mut qwen.deferred_reasoning)
                 .into_iter()
                 .map(UnifiedParserEvent::Reasoning),
         );
@@ -1817,7 +2214,10 @@ impl ChoiceState {
         held: &str,
         events: &mut Vec<UnifiedParserEvent>,
     ) {
-        let pending = std::mem::take(&mut self.pending_qwen_opener_reasoning);
+        let NativeGrammarState::QwenXml(qwen) = &mut self.native_grammar_state else {
+            return;
+        };
+        let pending = std::mem::take(&mut qwen.deferred_reasoning);
         let mut ordered = Vec::new();
         let mut inserted = false;
         for event in std::mem::take(events) {
@@ -1828,7 +2228,7 @@ impl ChoiceState {
                 if !held.is_empty() {
                     ordered.push(UnifiedParserEvent::Text(held.to_string()));
                 }
-                self.qwen_reasoning_event_positions
+                qwen.deferred_reasoning_event_indices
                     .extend(ordered.len()..ordered.len() + pending.len());
                 ordered.extend(pending.iter().cloned().map(UnifiedParserEvent::Reasoning));
                 if !remainder.is_empty() {
@@ -1843,7 +2243,7 @@ impl ChoiceState {
             // TODO(frontend-crates): parser 0.7.17 malformed-call recovery still needs
             // a source-order barrier. Recovered text can span this thought at EOF;
             // matching a repeated opener cannot recover its original position.
-            self.qwen_reasoning_event_positions
+            qwen.deferred_reasoning_event_indices
                 .extend(ordered.len()..ordered.len() + pending.len());
             ordered.extend(pending.into_iter().map(UnifiedParserEvent::Reasoning));
         }
@@ -1855,7 +2255,8 @@ impl ChoiceState {
         if self.failed {
             return Vec::new();
         }
-        if let Some(input) = &self.glm_native_input {
+        if let NativeGrammarState::Glm(glm) = &self.native_grammar_state {
+            let input = &glm.input_for_truncation_check;
             match glm_unfinished_call(input) {
                 Ok(Some(start)) => {
                     self.incomplete_native_call = true;
@@ -1874,7 +2275,10 @@ impl ChoiceState {
                 }
             }
         }
-        let pending_qwen_opener = std::mem::take(&mut self.pending_qwen_opener_text);
+        let pending_qwen_opener = match &mut self.native_grammar_state {
+            NativeGrammarState::QwenXml(qwen) => std::mem::take(&mut qwen.pending_opener),
+            _ => String::new(),
+        };
         let mut events = if pending_qwen_opener.is_empty() {
             Vec::new()
         } else {
@@ -1911,14 +2315,32 @@ impl ChoiceState {
             // TODO: Preserve the parser's consumed offset so a partial-commit error cannot replay input.
             recovered.push_str(fallback);
         }
-        recovered.push_str(&std::mem::take(&mut self.pending_qwen_opener_text));
+        if let NativeGrammarState::QwenXml(qwen) = &mut self.native_grammar_state {
+            recovered.push_str(&std::mem::take(&mut qwen.pending_opener));
+        }
         text_delta(recovered)
     }
 
     /// Convert one ordered delta into a streaming choice for `index`.
     fn delta_to_choice(&mut self, index: u32, delta: UnifiedParserEvent) -> ChatChoiceStream {
         let mut choice = empty_choice(index);
+        let boundary = match &delta {
+            UnifiedParserEvent::MessageStart(phase) => {
+                Some(super::MessageBoundary::Start(match phase {
+                    dynamo_parsers_v2::unified::MessagePhase::Commentary => {
+                        dynamo_protocols::types::responses::MessagePhase::Commentary
+                    }
+                    dynamo_parsers_v2::unified::MessagePhase::FinalAnswer => {
+                        dynamo_protocols::types::responses::MessagePhase::FinalAnswer
+                    }
+                }))
+            }
+            UnifiedParserEvent::MessageEnd => Some(super::MessageBoundary::End),
+            _ => None,
+        };
+        self.message_boundaries.push(boundary);
         match delta {
+            UnifiedParserEvent::MessageStart(_) | UnifiedParserEvent::MessageEnd => {}
             UnifiedParserEvent::Text(text) => {
                 choice.delta.content = Some(ChatCompletionMessageContent::Text(text));
             }
@@ -1954,6 +2376,7 @@ impl ChoiceState {
                     self.tool_types_emitted.insert(tool_index);
                 }
                 choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+                    custom: None,
                     index: tool_index as u32,
                     id: first.then(|| {
                         self.parser
@@ -1966,7 +2389,6 @@ impl ChoiceState {
                         name: first.then_some(call.name).flatten(),
                         arguments: Some(call.arguments),
                     }),
-                    custom: None,
                 }]);
             }
         }
@@ -1977,7 +2399,9 @@ impl ChoiceState {
     ///
     /// `role` / `refusal` ride on the first choice owned by the current source
     /// response; queued reasoning keeps its earlier source envelope. The terminating
-    /// `finish_reason` stays after every emitted delta.
+    /// `finish_reason` stays after every emitted delta. The source chunk's `logprobs`
+    /// move once to its last choice, waiting for any queued reasoning to go first:
+    /// they score generated tokens, not parsed text.
     pub(crate) fn choices_for(
         &mut self,
         original: &ChatChoiceStream,
@@ -1985,20 +2409,40 @@ impl ChoiceState {
         emit_tool_calls: bool,
         finish_reason: Option<FinishReason>,
     ) -> Vec<ChatChoiceStream> {
+        self.message_boundaries.clear();
         let terminal_tool_call_delta = finish_reason_closes_tool_calls(finish_reason.as_ref());
         // Queued reasoning belongs to its earlier source response. Coalescing it
         // with parser reasoning would erase the source envelope's event boundary.
-        let source_positions = std::mem::take(&mut self.qwen_reasoning_event_positions);
-        self.qwen_reasoning_choice_positions.clear();
+        let source_positions = match &mut self.native_grammar_state {
+            NativeGrammarState::QwenXml(qwen) => {
+                let indices = std::mem::take(&mut qwen.deferred_reasoning_event_indices);
+                qwen.deferred_reasoning_choice_indices.clear();
+                indices
+            }
+            _ => HashSet::new(),
+        };
         let mut run = Vec::new();
         let mut projected = Vec::new();
         for (position, delta) in deltas.into_iter().enumerate() {
+            // Muse Spark boundaries feed the Responses API through the sidecar.
+            // Other families must not create empty chunks for optional metadata.
+            if self.family != MUSE_SPARK_UNIFIED_FAMILY
+                && matches!(
+                    delta,
+                    UnifiedParserEvent::MessageStart(_) | UnifiedParserEvent::MessageEnd
+                )
+            {
+                continue;
+            }
             if !emit_tool_calls && matches!(delta, UnifiedParserEvent::ToolCall(_)) {
                 continue;
             }
             if source_positions.contains(&position) {
                 projected.extend(coalesce(std::mem::take(&mut run)));
-                self.qwen_reasoning_choice_positions.insert(projected.len());
+                if let NativeGrammarState::QwenXml(qwen) = &mut self.native_grammar_state {
+                    qwen.deferred_reasoning_choice_indices
+                        .insert(projected.len());
+                }
                 projected.push(delta);
             } else {
                 run.push(delta);
@@ -2007,7 +2451,7 @@ impl ChoiceState {
         projected.extend(coalesce(run));
         let deltas = projected;
         let envelope_position = (0..deltas.len())
-            .find(|position| !self.qwen_reasoning_choice_positions.contains(position));
+            .find(|position| !self.is_deferred_qwen_xml_reasoning_choice(*position));
         let mut original = original.clone();
         if let Some(original_calls) = original.delta.tool_calls.as_mut() {
             for call in original_calls {
@@ -2058,7 +2502,7 @@ impl ChoiceState {
                     choice.delta.tool_calls = Some(original_calls);
                 }
             }
-            if position + 1 == count && !self.qwen_reasoning_choice_positions.contains(&position) {
+            if position + 1 == count && !self.is_deferred_qwen_xml_reasoning_choice(position) {
                 choice.finish_reason = self.normalize_finish_reason(finish_reason);
             }
             choices.push(choice);
@@ -2067,7 +2511,7 @@ impl ChoiceState {
         if !choices.is_empty()
             && (envelope_position.is_none()
                 || (finish_reason.is_some()
-                    && self.qwen_reasoning_choice_positions.contains(&(count - 1))))
+                    && self.is_deferred_qwen_xml_reasoning_choice(count - 1)))
         {
             let mut choice = empty_choice(index);
             if envelope_position.is_none() {
@@ -2108,6 +2552,33 @@ impl ChoiceState {
             }
             choice.finish_reason = self.normalize_finish_reason(finish_reason);
             choices.push(choice);
+        }
+
+        // Queued reasoning arrived before this chunk, so this chunk's logprobs must
+        // not ride ahead of it: hold them while it is queued, then follow it.
+        let mut logprobs = original.logprobs.take();
+        if let NativeGrammarState::QwenXml(qwen) = &mut self.native_grammar_state {
+            if let Some(mut held) = qwen.deferred_logprobs.take() {
+                if let Some(source) = logprobs.take() {
+                    extend_logprobs(&mut held, source);
+                }
+                logprobs = Some(held);
+            }
+            if !qwen.deferred_reasoning.is_empty() {
+                qwen.deferred_logprobs = logprobs.take();
+            }
+        }
+        if let Some(logprobs) = logprobs {
+            let last_is_queued = choices
+                .len()
+                .checked_sub(1)
+                .is_some_and(|last| self.is_deferred_qwen_xml_reasoning_choice(last));
+            if choices.is_empty() || last_is_queued {
+                choices.push(empty_choice(index));
+            }
+            if let Some(choice) = choices.last_mut() {
+                choice.logprobs = Some(logprobs);
+            }
         }
 
         choices
@@ -2253,11 +2724,13 @@ fn text_delta(text: String) -> Vec<UnifiedParserEvent> {
 }
 
 /// The aggregated result of parsing one complete (non-streaming) output.
+#[derive(Debug)]
 pub(crate) struct CompleteOutput {
     pub incomplete_native_call: bool,
     pub text: String,
     pub reasoning: String,
     pub tool_calls: Vec<ChatCompletionMessageToolCall>,
+    pub events: Vec<super::ResponseOutputEvent>,
 }
 
 /// Batch (non-streaming) path: run the whole output through the same parser lifecycle
@@ -2292,6 +2765,7 @@ pub(crate) fn parse_complete_with_policy(
     tool_definitions: &[ToolDefinition],
     policy: UnifiedRequestPolicy,
 ) -> anyhow::Result<CompleteOutput> {
+    let policy = policy.under(guided_tool_constraint);
     // A remote frontend may reconstruct guided JSON even when the backend returned
     // native reasoning/content without a tool call. Keep that recovery under the
     // same grammar owner as ordinary native batch output.
@@ -2345,6 +2819,7 @@ fn parse_complete_in_mode(
 ) -> anyhow::Result<CompleteOutput> {
     let tools = to_v2_tools(Some(tool_definitions));
     let mut parser = create_unified_parser_for_family(family, &tools)?;
+    parser.preserve_message_phases(family == MUSE_SPARK_UNIFIED_FAMILY);
     // `batch_tool_output_mode` drops to `Native` on observed markup even when the
     // constraint reconstructed a `GuidedJsonNamed` pin. That native fallback recovers
     // whatever tool name the markup happens to contain, so it must be checked against
@@ -2376,6 +2851,7 @@ fn parse_complete_in_mode(
         tool_output_mode: effective_mode,
         ..UnifiedParserInit::default()
     })?;
+    apply_argument_framing(parser.as_mut(), argument_framing(guided_tool_constraint))?;
 
     let mut text = String::new();
     let mut reasoning = String::new();
@@ -2401,9 +2877,26 @@ fn parse_complete_in_mode(
         _ => None,
     });
     let events = dynamo_parsers_v2::assemble(&output.events);
+    let mut ordered_events = Vec::new();
     for event in events {
         match event {
-            UnifiedEvent::Text { text: chunk } => text.push_str(&chunk),
+            UnifiedEvent::MessageStart { phase } => ordered_events.push(
+                super::ResponseOutputEvent::Boundary(super::MessageBoundary::Start(match phase {
+                    dynamo_parsers_v2::unified::MessagePhase::Commentary => {
+                        dynamo_protocols::types::responses::MessagePhase::Commentary
+                    }
+                    dynamo_parsers_v2::unified::MessagePhase::FinalAnswer => {
+                        dynamo_protocols::types::responses::MessagePhase::FinalAnswer
+                    }
+                })),
+            ),
+            UnifiedEvent::MessageEnd => ordered_events.push(super::ResponseOutputEvent::Boundary(
+                super::MessageBoundary::End,
+            )),
+            UnifiedEvent::Text { text: chunk } => {
+                ordered_events.push(super::ResponseOutputEvent::Text(chunk.clone()));
+                text.push_str(&chunk);
+            }
             UnifiedEvent::Reasoning { text: chunk } => {
                 if policy.reasoning_disabled {
                     text.push_str(&chunk);
@@ -2428,7 +2921,9 @@ fn parse_complete_in_mode(
                     );
                     continue;
                 }
+                ordered_events.push(super::ResponseOutputEvent::ToolCall(id.clone()));
                 tool_calls.push(ChatCompletionMessageToolCall {
+                    custom: None,
                     id,
                     r#type: FunctionType::Function,
                     // `assemble` already parsed the argument fragments into a typed
@@ -2438,13 +2933,13 @@ fn parse_complete_in_mode(
                         name,
                         arguments: serde_json::to_string(&arguments)?,
                     },
-                    custom: None,
                 });
             }
         }
     }
 
     Ok(CompleteOutput {
+        events: ordered_events,
         incomplete_native_call: incomplete_start.is_some(),
         text,
         reasoning,
@@ -2474,7 +2969,7 @@ struct ChoiceRecord {
     /// whether generation starts with reasoning prose or bare guided JSON.
     pending_guided_prefill_whitespace: String,
     /// Source envelopes for Qwen reasoning held until a split native opener resolves.
-    pending_qwen_opener_responses: VecDeque<PendingQwenReasoningResponse>,
+    deferred_qwen_xml_reasoning_responses: VecDeque<DeferredQwenXmlReasoningResponse>,
     tool_emitted: bool,
     finished: bool,
     /// Whether an already-parsed chunk has EVER interrupted this choice. An
@@ -2488,7 +2983,7 @@ struct ChoiceRecord {
     detoured: bool,
 }
 
-struct PendingQwenReasoningResponse {
+struct DeferredQwenXmlReasoningResponse {
     text: String,
     choice: ChatChoiceStream,
     response: Annotated<NvCreateChatCompletionStreamResponse>,
@@ -2496,14 +2991,24 @@ struct PendingQwenReasoningResponse {
 
 enum FinishedStreamChunk {
     Choice(ChatChoiceStream),
+    Boundary(ChatChoiceStream, super::MessageBoundary),
     Source(Annotated<Box<NvCreateChatCompletionStreamResponse>>),
+}
+
+fn extend_logprobs(held: &mut ChatChoiceLogprobs, later: ChatChoiceLogprobs) {
+    if let Some(content) = later.content {
+        held.content.get_or_insert_default().extend(content);
+    }
+    if let Some(refusal) = later.refusal {
+        held.refusal.get_or_insert_default().extend(refusal);
+    }
 }
 
 fn take_qwen_reasoning_response(
     record: &mut ChoiceRecord,
 ) -> Annotated<Box<NvCreateChatCompletionStreamResponse>> {
     let pending = record
-        .pending_qwen_opener_responses
+        .deferred_qwen_xml_reasoning_responses
         .pop_front()
         .expect("queued reasoning event must have a source response");
     let mut response = pending.response;
@@ -2519,7 +3024,7 @@ fn take_qwen_reasoning_response(
     response.map_data(|data| Ok(Box::new(data)))
 }
 
-fn qwen_chunks_for_choices(
+fn stream_chunks_for_choices(
     state: &ChoiceState,
     record: &mut ChoiceRecord,
     choices: Vec<ChatChoiceStream>,
@@ -2528,8 +3033,11 @@ fn qwen_chunks_for_choices(
         .into_iter()
         .enumerate()
         .map(|(position, choice)| {
-            if state.qwen_reasoning_choice_positions.contains(&position) {
+            if state.is_deferred_qwen_xml_reasoning_choice(position) {
                 FinishedStreamChunk::Source(take_qwen_reasoning_response(record))
+            } else if let Some(boundary) = state.message_boundaries.get(position).cloned().flatten()
+            {
+                FinishedStreamChunk::Boundary(choice, boundary)
             } else {
                 FinishedStreamChunk::Choice(choice)
             }
@@ -2615,10 +3123,7 @@ fn finish_unterminated_choices(
                 state.resolve_complete_parsed_tool_calls_at_eof();
                 if let Some(reason) = state.unterminated_finish_reason() {
                     if let Some(last_position) = flushed.len().checked_sub(1) {
-                        if state
-                            .qwen_reasoning_choice_positions
-                            .contains(&last_position)
-                        {
+                        if state.is_deferred_qwen_xml_reasoning_choice(last_position) {
                             let mut terminal = empty_choice(index);
                             terminal.finish_reason = Some(reason);
                             flushed.push(terminal);
@@ -2629,7 +3134,7 @@ fn finish_unterminated_choices(
                         flushed.extend(state.choices_for(&base, Vec::new(), true, Some(reason)));
                     }
                 }
-                chunks.extend(qwen_chunks_for_choices(state, record, flushed));
+                chunks.extend(stream_chunks_for_choices(state, record, flushed));
             }
             None => {
                 let pending_whitespace =
@@ -2639,7 +3144,7 @@ fn finish_unterminated_choices(
                     choice.delta.reasoning_content = Some(pending_whitespace);
                     chunks.push(FinishedStreamChunk::Choice(choice));
                 }
-                while !record.pending_qwen_opener_responses.is_empty() {
+                while !record.deferred_qwen_xml_reasoning_responses.is_empty() {
                     chunks.push(FinishedStreamChunk::Source(take_qwen_reasoning_response(
                         record,
                     )));
@@ -2947,10 +3452,13 @@ where
         starting_state: prefill,
         prefix: prefill_prefix,
     } = prefill.into();
+    let policy = policy.under(&guided_tool_constraint);
     let prefill = policy.starting_state(family, prefill);
-    let prefill_prefix = prefill_prefix
+    let mut prefill_prefix = prefill_prefix
         .filter(|_| family == "gpt_oss" || prefill == UnifiedParserStartingState::Reasoning);
     let has_consumed_harmony_prefix = family == "gpt_oss" && prefill_prefix.is_some();
+    let argument_framing = argument_framing(&guided_tool_constraint);
+    let mut harmony_prefill_cache = policy.harmony_prefill_cache(family, prefill_prefix.clone());
     let tools = to_v2_tools(tool_definitions.as_deref());
     stream! {
         let mut undecided_guided_prefix: HashMap<u32, JsonPrefillProbe> = HashMap::new();
@@ -3020,6 +3528,16 @@ where
                             FinishedStreamChunk::Choice(choice) => {
                                 yield response_with_choice(template, choice, &states, &records);
                             }
+                            FinishedStreamChunk::Boundary(choice, boundary) => {
+
+                                let mut response = response_with_choice(template, choice, &states, &records);
+
+                                response.data.as_mut().unwrap().message_boundary = Some(boundary);
+
+                                yield response;
+
+                            }
+
                             FinishedStreamChunk::Source(response) => yield normalized_source_response(response, &states, &records),
                         }
                     }
@@ -3033,6 +3551,7 @@ where
 
             let originals = std::mem::take(&mut chat.inner.choices);
             let mut emitted: Vec<ChatChoiceStream> = Vec::new();
+            let mut phase_boundaries = HashMap::new();
             let mut deferred_qwen_responses = Vec::new();
             let mut qwen_source_metadata_deferred = false;
             for mut original in originals {
@@ -3134,12 +3653,8 @@ where
                             .reasoning_content
                             .as_ref()
                             .is_some_and(|reasoning| !reasoning.is_empty())
-                        && family == QWEN3_UNIFIED_FAMILY
-                        && states.get(&original.index).is_some_and(|state| {
-                            state.qwen_native_lexical_state.mode
-                                == QwenNativeLexicalMode::OutsideBlock
-                                && !state.pending_qwen_opener_text.is_empty()
-                        });
+                        && uses_qwen_xml_grammar(family)
+                        && states.get(&original.index).is_some_and(ChoiceState::has_pending_qwen_xml_opener);
                     if preserve_reasoning_only_state {
                         // Reasoning is an ordered event between generated bytes, not a
                         // replacement parser input. Keep the parser state alive so a
@@ -3155,7 +3670,10 @@ where
                             states
                                 .get_mut(&original.index)
                                 .expect("preserved parser state must still exist")
-                                .queue_qwen_opener_reasoning(reasoning.clone());
+                                .queue_qwen_opener_reasoning(
+                                    reasoning.clone(),
+                                    &mut original.logprobs,
+                                );
                             let mut source_data = chat.clone();
                             source_data.inner.choices.clear();
                             let keep_source_metadata = !qwen_source_metadata_deferred;
@@ -3166,8 +3684,8 @@ where
                                 source_data.nvext = None;
                                 source_data.llm_metrics = None;
                             }
-                            record.pending_qwen_opener_responses.push_back(
-                                PendingQwenReasoningResponse {
+                            record.deferred_qwen_xml_reasoning_responses.push_back(
+                                DeferredQwenXmlReasoningResponse {
                                     text: reasoning,
                                     choice: original.clone(),
                                     response: Annotated {
@@ -3253,10 +3771,14 @@ where
                             true,
                             None,
                         );
-                        for output in qwen_chunks_for_choices(&state, record, flushed) {
+                        for output in stream_chunks_for_choices(&state, record, flushed) {
                             match output {
                                 FinishedStreamChunk::Source(response) => {
                                     deferred_qwen_responses.push((emitted.len(), response));
+                                }
+                                FinishedStreamChunk::Boundary(choice, boundary) => {
+                                    phase_boundaries.insert(emitted.len(), boundary);
+                                    emitted.push(choice);
                                 }
                                 FinishedStreamChunk::Choice(choice) => emitted.push(choice),
                             }
@@ -3283,7 +3805,7 @@ where
                 let new_native_call_after_detour = records
                     .get(&original.index)
                     .is_some_and(|record| record.detoured)
-                    && family == QWEN3_UNIFIED_FAMILY
+                    && uses_qwen_xml_grammar(family)
                     && states
                         .get(&original.index)
                         .is_some_and(|state| {
@@ -3309,10 +3831,14 @@ where
                             &empty_choice(original.index), deltas, true, None,
                         );
                         let record = records.entry(original.index).or_default();
-                        for output in qwen_chunks_for_choices(&state, record, flushed) {
+                        for output in stream_chunks_for_choices(&state, record, flushed) {
                             match output {
                                 FinishedStreamChunk::Source(response) => {
                                     deferred_qwen_responses.push((emitted.len(), response));
+                                }
+                                FinishedStreamChunk::Boundary(choice, boundary) => {
+                                    phase_boundaries.insert(emitted.len(), boundary);
+                                    emitted.push(choice);
                                 }
                                 FinishedStreamChunk::Choice(choice) => emitted.push(choice),
                             }
@@ -3337,13 +3863,9 @@ where
                     let probe_decision = if prefill == UnifiedParserStartingState::None {
                         // Without a prompt-opened channel, non-JSON may contain an explicit
                         // reasoning opener. Let the native parser recognize it.
-                        probe.unopened_channel_decision(original.finish_reason.is_some())
+                        probe.unopened_channel_decision(family, original.finish_reason.is_some())
                     } else {
-                        match probe.decision_for_family(
-                            family,
-                            original.finish_reason.is_some(),
-                            text,
-                        ) {
+                        match probe.decision_for_family(family, original.finish_reason.is_some(), text) {
                             Ok(decision) => decision,
                             Err(error) => {
                                 tracing::warn!(
@@ -3416,7 +3938,7 @@ where
                                     _ => UnifiedParserStartingState::Reasoning,
                                 }
                             } else {
-                                bare_guided_json_prefill(original.delta.content.as_ref())
+                                bare_guided_json_prefill(family, original.delta.content.as_ref())
                             }
                         } else {
                             detected_prefill
@@ -3448,13 +3970,21 @@ where
                                 }
                             }
                         }
+                        let uses_request_prefill = choice_prefill == prefill
+                            && !records.get(&original.index).is_some_and(|record| record.detoured);
                         let choice_prefill = StreamPrefill {
                             starting_state: choice_prefill,
-                            prefix: (choice_prefill == prefill && !records.get(&original.index).is_some_and(|record| record.detoured))
-                                .then(|| prefill_prefix.clone()).flatten(),
+                            prefix: uses_request_prefill.then(|| prefill_prefix.clone()).flatten(),
                         };
-                        match ChoiceState::new(family, &tools, choice_prefill, mode, guided_streaming) {
+                        let cache = if uses_request_prefill { harmony_prefill_cache.as_mut() } else { None };
+                        match ChoiceState::new_with_prefill_cache(family, &tools, choice_prefill, mode, guided_streaming, argument_framing, cache) {
                             Ok(mut state) => {
+                                state.preserve_message_phases(family == MUSE_SPARK_UNIFIED_FAMILY);
+                                // Only a successful checkpoint replaces the request seed.
+                                // Detours use a fresh response parser and never this seed.
+                                if harmony_prefill_cache.as_mut().is_some_and(HarmonyPrefill::release_prefix) {
+                                    prefill_prefix = None;
+                                }
                                 // A raw run resuming after an already-parsed detour
                                 // gets a brand-new parser instance; seed it with any
                                 // tool-call history from before the gap so a Stop at
@@ -3540,10 +4070,14 @@ where
                 }
                 let mut parsed = Vec::new();
                 let record = records.entry(original.index).or_default();
-                for output in qwen_chunks_for_choices(state, record, choices) {
+                for output in stream_chunks_for_choices(state, record, choices) {
                     match output {
                         FinishedStreamChunk::Source(response) => {
                             deferred_qwen_responses.push((emitted.len() + parsed.len(), response));
+                        }
+                        FinishedStreamChunk::Boundary(choice, boundary) => {
+                            phase_boundaries.insert(emitted.len() + parsed.len(), boundary);
+                            parsed.push(choice);
                         }
                         FinishedStreamChunk::Choice(choice) => parsed.push(choice),
                     }
@@ -3594,9 +4128,12 @@ where
                 };
                 let is_last = Some(position) == last;
                 let mut data = chat.clone();
+                data.message_boundary = phase_boundaries.get(&position).cloned();
                 if !is_last {
                     data.tool_call_completion.clear();
                 }
+                // Every child referencing a call can carry its final parser state,
+                // even before its arguments. Completion is not a delivery barrier.
                 attach_call_completion(&mut data, &choice, &states, &records);
                 data.inner.choices = vec![choice];
                 if !is_last {
@@ -3626,6 +4163,16 @@ where
                     FinishedStreamChunk::Choice(choice) => {
                         yield response_with_choice(template, choice, &states, &records);
                     }
+                    FinishedStreamChunk::Boundary(choice, boundary) => {
+
+                        let mut response = response_with_choice(template, choice, &states, &records);
+
+                        response.data.as_mut().unwrap().message_boundary = Some(boundary);
+
+                        yield response;
+
+                    }
+
                     FinishedStreamChunk::Source(response) => yield normalized_source_response(response, &states, &records),
                 }
             }
@@ -3671,6 +4218,7 @@ pub(crate) mod tests {
     fn chunk(text: &str, finish: bool) -> Annotated<NvCreateChatCompletionStreamResponse> {
         #[allow(deprecated)]
         let response = NvCreateChatCompletionStreamResponse {
+            message_boundary: None,
             inner: CreateChatCompletionStreamResponse {
                 id: "test".to_string(),
                 choices: vec![ChatChoiceStream {
@@ -4015,6 +4563,258 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn nemotron_pairs_qwen3_coder_with_nemotron_v3_reasoning() {
+        // The released reasoning parser also answers to `nemotron3`; the canonical
+        // spelling is covered by `eight_family_routing_all_modes`.
+        assert_eq!(
+            configured_family(Some("qwen3_coder"), Some("nemotron3")),
+            Some(NEMOTRON_V3_UNIFIED_FAMILY)
+        );
+        assert_eq!(
+            configured_family(None, Some("nemotron3")),
+            Some(NEMOTRON_V3_UNIFIED_FAMILY)
+        );
+        // The reverse pairing (Nemotron tool half, Qwen reasoning) names no owner.
+        assert_eq!(configured_family(Some("nemotron_v3"), Some("qwen3")), None);
+        assert_eq!(
+            configured_family(Some("kimi_k2"), Some("nemotron_v3")),
+            None
+        );
+        // The older Nemotron JSON tool grammar is not the shared XML one.
+        assert_eq!(
+            configured_family(Some("qwen3_coder"), Some("nemotron_nano")),
+            None
+        );
+    }
+
+    #[test]
+    fn nemotron_prefill_defaults_to_reasoning_unless_the_request_disables_it() {
+        assert_eq!(
+            stream_prefill(NEMOTRON_V3_UNIFIED_FAMILY, true),
+            UnifiedParserStartingState::Reasoning
+        );
+        assert_eq!(
+            stream_prefill(NEMOTRON_V3_UNIFIED_FAMILY, false),
+            UnifiedParserStartingState::Reasoning
+        );
+        let disabled = UnifiedRequestPolicy {
+            reasoning_disabled: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            disabled.starting_state(
+                NEMOTRON_V3_UNIFIED_FAMILY,
+                UnifiedParserStartingState::Reasoning
+            ),
+            UnifiedParserStartingState::Response
+        );
+        assert_eq!(
+            UnifiedRequestPolicy::default().starting_state(
+                NEMOTRON_V3_UNIFIED_FAMILY,
+                UnifiedParserStartingState::Reasoning
+            ),
+            UnifiedParserStartingState::Reasoning
+        );
+        // Batch: a bare closer means the prompt pre-opened the thought; marker-free
+        // text is the answer (the streaming path already split any thought off it).
+        assert_eq!(
+            detect_prefill(NEMOTRON_V3_UNIFIED_FAMILY, "reason</think>answer").unwrap(),
+            UnifiedParserStartingState::Reasoning
+        );
+        assert_eq!(
+            detect_prefill(NEMOTRON_V3_UNIFIED_FAMILY, "Hello!").unwrap(),
+            UnifiedParserStartingState::Response
+        );
+        assert_eq!(
+            detect_prefill(NEMOTRON_V3_UNIFIED_FAMILY, "<think>reason</think>answer").unwrap(),
+            UnifiedParserStartingState::None
+        );
+        assert_eq!(
+            disabled
+                .batch_starting_state(NEMOTRON_V3_UNIFIED_FAMILY, "answer")
+                .unwrap(),
+            UnifiedParserStartingState::Response
+        );
+        // Bare guided JSON must reach the tool parser: `None` is the family default,
+        // which for Nemotron is the implicit thought, so the state is `Response`.
+        let json = ChatCompletionMessageContent::Text(r#"{"city":"Paris"}"#.into());
+        assert_eq!(
+            bare_guided_json_prefill(NEMOTRON_V3_UNIFIED_FAMILY, Some(&json)),
+            UnifiedParserStartingState::Response
+        );
+        assert_eq!(
+            bare_guided_json_prefill(QWEN3_UNIFIED_FAMILY, Some(&json)),
+            UnifiedParserStartingState::None
+        );
+        let prose = ChatCompletionMessageContent::Text("thinking first".into());
+        assert_eq!(
+            bare_guided_json_prefill(NEMOTRON_V3_UNIFIED_FAMILY, Some(&prose)),
+            UnifiedParserStartingState::Reasoning
+        );
+    }
+
+    #[tokio::test]
+    async fn nemotron_bare_guided_json_becomes_a_tool_call_in_stream_and_batch() {
+        // The prompt pre-opened reasoning (`prefill = Reasoning`) and guided decoding
+        // forbids the closer, so the payload's first byte is JSON. Both paths must
+        // return the forced call instead of consuming the JSON as reasoning.
+        let tools = weather_tools();
+        for (constraint, raw) in [
+            (
+                GuidedToolConstraint::GuidedJsonNamed {
+                    tool_name: "get_weather".into(),
+                },
+                r#"{"city":"Paris"}"#,
+            ),
+            (
+                GuidedToolConstraint::GuidedJsonRequired,
+                r#"[{"name":"get_weather","arguments":{"city":"Paris"}}]"#,
+            ),
+        ] {
+            let batch = parse_complete_with_policy(
+                NEMOTRON_V3_UNIFIED_FAMILY,
+                raw,
+                &constraint,
+                &tools,
+                UnifiedRequestPolicy::default(),
+            )
+            .unwrap();
+            assert!(batch.reasoning.is_empty(), "batch {raw}");
+            assert!(batch.text.is_empty(), "batch {raw}");
+            assert_eq!(batch.tool_calls.len(), 1, "batch {raw}");
+            assert_eq!(batch.tool_calls[0].function.name, "get_weather");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&batch.tool_calls[0].function.arguments)
+                    .unwrap(),
+                serde_json::json!({"city": "Paris"})
+            );
+            for split in 0..=raw.len() {
+                let outputs: Vec<_> = apply_stream_with_policy(
+                    futures::stream::iter([
+                        chunk(&raw[..split], false),
+                        chunk(&raw[split..], true),
+                    ]),
+                    Some(tools.clone()),
+                    constraint.clone(),
+                    stream_prefill(NEMOTRON_V3_UNIFIED_FAMILY, true),
+                    NEMOTRON_V3_UNIFIED_FAMILY,
+                    true,
+                    UnifiedRequestPolicy::default(),
+                )
+                .collect()
+                .await;
+                let choices = collect_choices(&outputs);
+                assert!(
+                    choices
+                        .iter()
+                        .all(|choice| choice.delta.reasoning_content.is_none()),
+                    "split {split}: {raw}: {choices:?}"
+                );
+                let names: Vec<_> = choices
+                    .iter()
+                    .filter_map(|choice| choice.delta.tool_calls.as_ref())
+                    .flatten()
+                    .filter_map(|call| call.function.as_ref()?.name.as_deref())
+                    .collect();
+                assert_eq!(names, ["get_weather"], "split {split}: {raw}");
+                let arguments: String = choices
+                    .iter()
+                    .filter_map(|choice| choice.delta.tool_calls.as_ref())
+                    .flatten()
+                    .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+                    .collect();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&arguments).unwrap(),
+                    serde_json::json!({"city": "Paris"}),
+                    "split {split}: {raw}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn nemotron_thinking_on_and_off_split_channels_at_every_split() {
+        let call = "<tool_call><function=get_weather><parameter=city>Montréal</parameter></function></tool_call>";
+        let tools = weather_tools();
+        let cases = [
+            // enable_thinking=true: the prompt opened `<think>`, the model closes it.
+            (
+                format!("Check Montréal.</think>Sure.{call}"),
+                UnifiedRequestPolicy::default(),
+                "Check Montréal.",
+                "Sure.",
+            ),
+            // enable_thinking=false: the prompt rendered `<think></think>`; a literal
+            // marker in the answer stays visible text.
+            (
+                format!("Sure, </think> is literal.{call}"),
+                UnifiedRequestPolicy {
+                    reasoning_disabled: true,
+                    ..Default::default()
+                },
+                "",
+                "Sure, </think> is literal.",
+            ),
+        ];
+        for (raw, policy, want_reasoning, want_text) in cases {
+            let batch = parse_complete_with_policy(
+                NEMOTRON_V3_UNIFIED_FAMILY,
+                &raw,
+                &GuidedToolConstraint::None,
+                &tools,
+                policy,
+            )
+            .unwrap();
+            assert_eq!(batch.reasoning, want_reasoning, "batch {raw}");
+            assert_eq!(batch.text, want_text, "batch {raw}");
+            assert_eq!(batch.tool_calls.len(), 1, "batch {raw}");
+            assert_eq!(batch.tool_calls[0].function.name, "get_weather");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&batch.tool_calls[0].function.arguments)
+                    .unwrap(),
+                serde_json::json!({"city": "Montréal"})
+            );
+            for split in (0..=raw.len()).filter(|split| raw.is_char_boundary(*split)) {
+                let outputs: Vec<_> = apply_stream_with_policy(
+                    futures::stream::iter([
+                        chunk(&raw[..split], false),
+                        chunk(&raw[split..], true),
+                    ]),
+                    Some(tools.clone()),
+                    GuidedToolConstraint::None,
+                    stream_prefill(NEMOTRON_V3_UNIFIED_FAMILY, false),
+                    NEMOTRON_V3_UNIFIED_FAMILY,
+                    true,
+                    policy,
+                )
+                .collect()
+                .await;
+                let choices = collect_choices(&outputs);
+                let reasoning: String = choices
+                    .iter()
+                    .filter_map(|choice| choice.delta.reasoning_content.as_deref())
+                    .collect();
+                let text: String = choices
+                    .iter()
+                    .filter_map(|choice| match &choice.delta.content {
+                        Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(reasoning, want_reasoning, "stream split {split}: {raw}");
+                assert_eq!(text, want_text, "stream split {split}: {raw}");
+                let names: Vec<_> = choices
+                    .iter()
+                    .filter_map(|choice| choice.delta.tool_calls.as_ref())
+                    .flatten()
+                    .filter_map(|call| call.function.as_ref()?.name.as_deref())
+                    .collect();
+                assert_eq!(names, ["get_weather"], "stream split {split}: {raw}");
+            }
+        }
+    }
+
+    #[test]
     fn batch_routing_uses_the_configured_pair_for_every_output_mode() {
         let pair = (Some("qwen3_coder"), Some("qwen3"));
         assert_eq!(
@@ -4042,7 +4842,10 @@ pub(crate) mod tests {
                 (ParserVersion::V1, None),
                 (ParserVersion::V2, Some("gpt_oss")),
             ] {
-                assert_eq!(selected_family_for_selection(family, version), expected);
+                assert_eq!(
+                    selected_family_for_selection(tool, reasoning, version),
+                    expected
+                );
             }
         }
     }
@@ -4164,6 +4967,376 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn gpt_oss_prefill_policy_preserves_guidance_envelope_ownership() {
+        for (family, explicit, guided, required_array, bare) in [
+            ("gpt_oss", false, false, false, false),
+            ("gpt_oss", true, false, false, true),
+            ("gpt_oss", false, true, false, true),
+            ("gpt_oss", false, true, true, false),
+            ("gpt_oss", true, true, true, true),
+            ("qwen3", true, true, true, false),
+        ] {
+            let constraint = if guided {
+                GuidedToolConstraint::GuidedJsonRequired
+            } else {
+                GuidedToolConstraint::None
+            };
+            for starting_state in [
+                UnifiedParserStartingState::None,
+                UnifiedParserStartingState::Reasoning,
+                UnifiedParserStartingState::Response,
+            ] {
+                let prefix = std::sync::Arc::<str>::from("consumed prompt");
+                let mut array_checked = false;
+                let actual = UnifiedRequestPolicy::default().resolve_stream_prefill(
+                    family,
+                    StreamPrefill {
+                        starting_state,
+                        prefix: Some(prefix.clone()),
+                    },
+                    &constraint,
+                    explicit,
+                    || {
+                        array_checked = true;
+                        required_array
+                    },
+                );
+                assert_eq!(array_checked, family == "gpt_oss" && !explicit && guided);
+                if bare {
+                    assert_eq!(actual.starting_state, UnifiedParserStartingState::Response);
+                    assert!(actual.prefix.is_none());
+                } else {
+                    assert_eq!(actual.starting_state, starting_state);
+                    assert!(std::sync::Arc::ptr_eq(
+                        actual.prefix.as_ref().unwrap(),
+                        &prefix
+                    ));
+                }
+            }
+        }
+    }
+
+    // Consumed prompt replay and discarded output are adapter-owned, outside parser fixtures.
+    #[test]
+    fn gpt_oss_replay_discards_output_between_bounded_token_batches() {
+        struct BoundedReplay {
+            received: Vec<u32>,
+        }
+        impl UnifiedParser for BoundedReplay {
+            fn parse_into(&mut self, _: &str, _: &mut UnifiedParserOutput) -> anyhow::Result<()> {
+                anyhow::bail!("consumed prefix must remain token-native")
+            }
+            fn parse_token_ids_into(
+                &mut self,
+                ids: &[u32],
+                output: &mut UnifiedParserOutput,
+            ) -> anyhow::Result<()> {
+                anyhow::ensure!(ids.len() <= 256, "whole-prefix batch");
+                anyhow::ensure!(output.events.is_empty(), "discarded history retained");
+                self.received.extend_from_slice(ids);
+                output.push_text("consumed");
+                Ok(())
+            }
+            fn finish(&mut self) -> anyhow::Result<UnifiedParserOutput> {
+                Ok(UnifiedParserOutput::default())
+            }
+        }
+        let tokens: Vec<u32> = (0..1025).collect();
+        let mut parser = BoundedReplay {
+            received: Vec::new(),
+        };
+        assert!(
+            parser
+                .parse_token_ids_into(&tokens, &mut UnifiedParserOutput::default())
+                .is_err()
+        );
+        let mut stale = UnifiedParserOutput::default();
+        stale.push_text("earlier consumed event");
+        assert!(
+            parser
+                .parse_token_ids_into(&tokens[..1], &mut stale)
+                .is_err()
+        );
+        replay_consumed_harmony(&mut parser, &tokens, 256).unwrap();
+        assert_eq!(parser.received, tokens);
+    }
+
+    #[test]
+    fn gpt_oss_replay_chunking_preserves_continuation_state() {
+        let large_body = "alpha ".repeat(512);
+        let prefix = format!(
+            "<|start|>assistant to=functions.lookup<|channel|>commentary<|message|>{{\"q\":\"{large_body}"
+        );
+        let ids = dynamo_parsers_v2::unified::harmony::encode_harmony(&prefix).unwrap();
+        assert!(
+            ids.len() > 256,
+            "the consumed prefix must span replay batches"
+        );
+
+        let generated = "tail\"}<|call|>";
+        let parse = |chunk_size| {
+            let mut parser = create_unified_parser_for_family("gpt_oss", &[]).unwrap();
+            parser
+                .initialize_request(UnifiedParserInit::default())
+                .unwrap();
+            replay_consumed_harmony(parser.as_mut(), &ids, chunk_size).unwrap();
+            let mut output = UnifiedParserOutput::default();
+            parser.parse_into(generated, &mut output).unwrap();
+            output.events.extend(parser.finish().unwrap().events);
+            output.events
+        };
+
+        assert_eq!(
+            parse(256),
+            parse(ids.len()),
+            "production-sized replay must preserve continuation state"
+        );
+    }
+
+    #[test]
+    fn gpt_oss_checkpoint_releases_raw_seed_and_forks_late_choices() {
+        struct CountedContinuation {
+            inner: Box<dyn UnifiedParserContinuation>,
+            forks: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl UnifiedParserContinuation for CountedContinuation {
+            fn fork(&self) -> anyhow::Result<Box<dyn UnifiedParser>> {
+                self.forks
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.inner.fork()
+            }
+        }
+        let mut prefix: Option<std::sync::Arc<str>> = Some(std::sync::Arc::from(
+            "<|start|>assistant to=functions.lookup<|message|>{\"q\":\"consumed",
+        ));
+        let observer = std::sync::Arc::downgrade(prefix.as_ref().unwrap());
+        let mut cache = HarmonyPrefill::new(prefix.as_ref().unwrap().clone());
+        assert!(!cache.release_prefix());
+        assert!(!cache.matches_prefix(None));
+        let first = ChoiceState::new_with_prefill_cache(
+            "gpt_oss",
+            &[],
+            StreamPrefill {
+                starting_state: UnifiedParserStartingState::Response,
+                prefix: prefix.clone(),
+            },
+            UnifiedToolOutputMode::Native,
+            true,
+            ArgumentFraming::default(),
+            Some(&mut cache),
+        )
+        .unwrap();
+        let forks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        cache.continuation = Some(Box::new(CountedContinuation {
+            inner: cache.continuation.take().unwrap(),
+            forks: forks.clone(),
+        }));
+        assert!(cache.release_prefix());
+        drop(prefix.take());
+        assert!(
+            observer.upgrade().is_none(),
+            "raw seed remains owned after checkpoint"
+        );
+        assert!(cache.matches_prefix(None));
+        let late = ChoiceState::new_with_prefill_cache(
+            "gpt_oss",
+            &[],
+            StreamPrefill {
+                starting_state: UnifiedParserStartingState::Response,
+                prefix: None,
+            },
+            UnifiedToolOutputMode::Native,
+            true,
+            ArgumentFraming::default(),
+            Some(&mut cache),
+        )
+        .unwrap();
+        assert_eq!(forks.load(std::sync::atomic::Ordering::Relaxed), 1);
+        for (mut state, suffix) in [first, late].into_iter().zip(["first", "late"]) {
+            let mut events = state.push(&format!("{suffix}\"}}<|call|>"));
+            events.extend(state.finish());
+            let arguments = events
+                .iter()
+                .filter_map(|event| match event {
+                    UnifiedParserEvent::ToolCall(call) => Some(call.arguments.as_str()),
+                    _ => None,
+                })
+                .collect::<String>();
+            assert_eq!(arguments, format!("{suffix}\"}}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn gpt_oss_released_seed_survives_late_choices_without_replaying_on_detours() {
+        let mut parsed = chunk("", false);
+        parsed.data.as_mut().unwrap().inner.choices[0].delta.content = None;
+        parsed.data.as_mut().unwrap().inner.choices[0]
+            .delta
+            .reasoning_content = Some("parsed".into());
+        let mut late = chunk("late\"}<|call|>", true);
+        late.data.as_mut().unwrap().inner.choices[0].index = 1;
+        let responses = apply_stream_with_policy(
+            stream::iter([
+                chunk("first\"}<|call|>", false),
+                parsed,
+                chunk("after", true),
+                late,
+            ]),
+            None,
+            GuidedToolConstraint::None,
+            StreamPrefill {
+                starting_state: UnifiedParserStartingState::Response,
+                prefix: Some(std::sync::Arc::from(
+                    "<|start|>assistant to=functions.lookup<|message|>{\"q\":\"consumed",
+                )),
+            },
+            "gpt_oss",
+            true,
+            UnifiedRequestPolicy {
+                multiple_choices: true,
+                ..Default::default()
+            },
+        )
+        .collect::<Vec<_>>()
+        .await;
+        assert!(responses.iter().all(|response| !response.is_error()));
+        let choices = collect_choices(&responses);
+        for (index, expected, content) in [(0, "first\"}", "after"), (1, "late\"}", "")] {
+            let selected = choices
+                .iter()
+                .filter(|choice| choice.index == index)
+                .collect::<Vec<_>>();
+            let arguments = selected
+                .iter()
+                .flat_map(|choice| choice.delta.tool_calls.iter().flatten())
+                .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+                .collect::<String>();
+            let text = selected
+                .iter()
+                .filter_map(|choice| match &choice.delta.content {
+                    Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>();
+            assert_eq!(arguments, expected);
+            assert_eq!(text, content);
+            assert_eq!(
+                selected.last().unwrap().finish_reason,
+                Some(FinishReason::ToolCalls)
+            );
+        }
+    }
+
+    #[test]
+    fn gpt_oss_choices_share_continuation_without_sharing_generated_state() {
+        let prefix: std::sync::Arc<str> = std::sync::Arc::from(
+            "<|start|>assistant to=functions.lookup<|channel|>commentary<|message|>{\"q\":\"hé",
+        );
+        assert!(
+            UnifiedRequestPolicy::default()
+                .harmony_prefill_cache("gpt_oss", Some(prefix.clone()))
+                .is_none()
+        );
+        let policy = UnifiedRequestPolicy {
+            multiple_choices: true,
+            ..Default::default()
+        };
+        assert!(
+            policy
+                .harmony_prefill_cache("qwen3", Some(prefix.clone()))
+                .is_none()
+        );
+        assert!(policy.harmony_prefill_cache("gpt_oss", None).is_none());
+        let mut cache = policy
+            .harmony_prefill_cache("gpt_oss", Some(prefix.clone()))
+            .unwrap();
+        assert!(cache.token_ids.is_none());
+        let mut states = (0..2)
+            .map(|_| {
+                ChoiceState::new_with_prefill_cache(
+                    "gpt_oss",
+                    &[],
+                    StreamPrefill {
+                        starting_state: UnifiedParserStartingState::None,
+                        prefix: Some(prefix.clone()),
+                    },
+                    UnifiedToolOutputMode::Native,
+                    true,
+                    ArgumentFraming::default(),
+                    Some(&mut cache),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(cache.continuation.is_some());
+        assert!(
+            cache.token_ids.is_none(),
+            "checkpoint replaces replay tokens"
+        );
+        for (state, tail) in states.iter_mut().zip(["first", "second"]) {
+            let mut events = state.push(&format!("{tail}\"}}<|call|>"));
+            events.extend(state.finish());
+            let calls: Vec<_> = events
+                .into_iter()
+                .filter_map(|e| {
+                    if let UnifiedParserEvent::ToolCall(c) = e {
+                        Some(c)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(
+                calls
+                    .iter()
+                    .map(|c| c.arguments.as_str())
+                    .collect::<String>(),
+                format!("{tail}\"}}")
+            );
+            assert!(calls.iter().all(|c| c.tool_index == 0));
+            assert!(calls.last().unwrap().complete);
+        }
+        let mut other_cache = HarmonyPrefill::new(prefix.clone());
+        let other_seed: std::sync::Arc<str> = std::sync::Arc::from(prefix.as_ref());
+        ChoiceState::new_with_prefill_cache(
+            "gpt_oss",
+            &[],
+            StreamPrefill {
+                starting_state: UnifiedParserStartingState::None,
+                prefix: Some(other_seed),
+            },
+            UnifiedToolOutputMode::Native,
+            true,
+            ArgumentFraming::default(),
+            Some(&mut other_cache),
+        )
+        .unwrap();
+        assert!(
+            other_cache.token_ids.is_none(),
+            "a different seed allocation cannot use this request's cache"
+        );
+        ChoiceState::new_with_prefill_cache(
+            "gpt_oss",
+            &[],
+            StreamPrefill {
+                starting_state: UnifiedParserStartingState::Reasoning,
+                prefix: Some(prefix),
+            },
+            UnifiedToolOutputMode::GuidedJson {
+                named_tool: Some("lookup".into()),
+            },
+            true,
+            ArgumentFraming::default(),
+            Some(&mut other_cache),
+        )
+        .unwrap();
+        assert!(
+            other_cache.token_ids.is_none(),
+            "guided channel-only initialization does not encode the native seed"
+        );
+    }
+
+    #[test]
     fn gpt_oss_vendor_keeps_prompt_initialization() {
         if crate::test_utils::run_isolated(
             concat!(
@@ -4243,17 +5416,20 @@ pub(crate) mod tests {
                     named_tool: Some("lookup".into()),
                 },
             ] {
-                let mut state = ChoiceState::new(
+                let prefix: std::sync::Arc<str> =
+                    std::sync::Arc::from("<|start|>assistant<|channel|>final<|message|>");
+                let mut cache = HarmonyPrefill::new(prefix.clone());
+                let mut state = ChoiceState::new_with_prefill_cache(
                     "gpt_oss",
                     &[],
                     StreamPrefill {
                         starting_state: UnifiedParserStartingState::Reasoning,
-                        prefix: Some(std::sync::Arc::from(
-                            "<|start|>assistant<|channel|>final<|message|>",
-                        )),
+                        prefix: Some(prefix),
                     },
                     mode,
                     true,
+                    ArgumentFraming::default(),
+                    Some(&mut cache),
                 )
                 .unwrap();
                 assert_eq!(
@@ -4261,6 +5437,7 @@ pub(crate) mod tests {
                     vec![UnifiedParserEvent::Text("answer".into())]
                 );
                 assert!(state.finish().is_empty());
+                assert!(cache.token_ids.is_none(), "vendor owns initialization");
             }
             assert!(dynamo_parsers_v2::unregister_unified_parser("gpt_oss").is_some());
         }
@@ -4291,6 +5468,7 @@ pub(crate) mod tests {
                     },
                     UnifiedToolOutputMode::Native,
                     true,
+                    ArgumentFraming::default(),
                 )
                 .unwrap();
                 let events = state.push(&input[..split]);
@@ -4379,6 +5557,7 @@ pub(crate) mod tests {
                     UnifiedParserStartingState::None,
                     mode.clone(),
                     true,
+                    ArgumentFraming::default(),
                 )
                 .unwrap();
                 let mut wire = Vec::new();
@@ -4454,6 +5633,12 @@ pub(crate) mod tests {
         for native in [
             GuidedToolConstraint::None,
             GuidedToolConstraint::StructuralTag,
+            GuidedToolConstraint::BeamTurnGrammar {
+                frames_answer: false,
+            },
+            GuidedToolConstraint::BeamTurnGrammar {
+                frames_answer: true,
+            },
         ] {
             assert_eq!(
                 tool_output_mode(&native),
@@ -4461,6 +5646,55 @@ pub(crate) mod tests {
                 "{native:?} must stay on native markup"
             );
         }
+    }
+
+    #[test]
+    fn the_beam_turn_grammar_frames_arguments_and_owns_a_structured_answer() {
+        // Only the grammar that typed the arguments frames them.
+        for (constraint, framing) in [
+            (GuidedToolConstraint::None, ArgumentFraming::Lenient),
+            (
+                GuidedToolConstraint::StructuralTag,
+                ArgumentFraming::Lenient,
+            ),
+            (
+                GuidedToolConstraint::GuidedJsonRequired,
+                ArgumentFraming::Lenient,
+            ),
+            (
+                GuidedToolConstraint::BeamTurnGrammar {
+                    frames_answer: false,
+                },
+                ArgumentFraming::SchemaConstrained,
+            ),
+        ] {
+            assert_eq!(argument_framing(&constraint), framing, "{constraint:?}");
+        }
+        // A `response_format` the grammar holds in the final channel is native output.
+        let structured = UnifiedRequestPolicy {
+            reasoning_disabled: false,
+            structured_response: true,
+            ..Default::default()
+        };
+        assert!(
+            structured
+                .under(&GuidedToolConstraint::BeamTurnGrammar {
+                    frames_answer: false,
+                })
+                .structured_response
+        );
+        assert!(
+            !structured
+                .under(&GuidedToolConstraint::BeamTurnGrammar {
+                    frames_answer: true,
+                })
+                .structured_response
+        );
+        assert!(
+            structured
+                .under(&GuidedToolConstraint::None)
+                .structured_response
+        );
     }
 
     #[test]
@@ -4615,6 +5849,93 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn minimax_m3_prefill_does_not_treat_argument_markers_as_prompt_state() {
+        let (_, native) = all_family_native_calls()
+            .into_iter()
+            .find(|(family, _)| *family == "minimax_m3")
+            .unwrap();
+        for body in [native.to_string(), native.replace("Tokyo", "</mm:think>")] {
+            let input = format!("{body}Done.");
+            let parsed = parse_complete(
+                "minimax_m3",
+                &input,
+                &GuidedToolConstraint::None,
+                &weather_tools(),
+            )
+            .unwrap();
+            assert!(parsed.reasoning.is_empty(), "{:?}", parsed.reasoning);
+            assert_eq!(parsed.text, "Done.");
+            assert_eq!(parsed.tool_calls.len(), 1);
+        }
+        let parsed = parse_complete(
+            "minimax_m3",
+            &format!("{native}<mm:think>Check.</mm:think>Done."),
+            &GuidedToolConstraint::None,
+            &weather_tools(),
+        )
+        .unwrap();
+        assert_eq!(parsed.reasoning, "Check.");
+        assert_eq!(parsed.text, "Done.");
+        assert_eq!(
+            detect_prefill("minimax_m3", &format!("Check.</mm:think>{native}")).unwrap(),
+            UnifiedParserStartingState::Reasoning
+        );
+    }
+
+    #[tokio::test]
+    async fn minimax_m3_prompt_seed_preserves_reasoning_at_every_split() {
+        for (input, expected_text, expected_reasoning) in [
+            ("Zürich 🙂", "", "Zürich 🙂"),
+            ("Plan.</mm:think>Zürich 🙂", "Zürich 🙂", "Plan."),
+            ("[plan]</mm:think>Paris", "Paris", "[plan]"),
+            ("[plan]", "", "[plan]"),
+            (r#"{"city":"Paris"}"#, "", r#"{"city":"Paris"}"#),
+            ("unfinished </mm:th", "", "unfinished </mm:th"),
+        ] {
+            for split in input.char_indices().map(|(at, _)| at).chain([input.len()]) {
+                for finish in [None, Some(FinishReason::Stop), Some(FinishReason::Length)] {
+                    let mut last = chunk(&input[split..], false);
+                    last.data.as_mut().unwrap().inner.choices[0].finish_reason = finish;
+                    let output = apply_stream_with_policy(
+                        stream::iter([chunk(&input[..split], false), last]),
+                        None,
+                        GuidedToolConstraint::None,
+                        UnifiedParserStartingState::Reasoning,
+                        "minimax_m3",
+                        true,
+                        UnifiedRequestPolicy::default(),
+                    )
+                    .collect::<Vec<_>>()
+                    .await;
+                    assert!(output.iter().all(|item| !item.is_error()));
+                    let choices = collect_choices(&output);
+                    let text: String = choices
+                        .iter()
+                        .filter_map(|choice| match &choice.delta.content {
+                            Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect();
+                    let reasoning: String = choices
+                        .iter()
+                        .filter_map(|choice| choice.delta.reasoning_content.as_deref())
+                        .collect();
+                    assert_eq!(
+                        (text.as_str(), reasoning.as_str()),
+                        (expected_text, expected_reasoning),
+                        "input={input:?}, split={split}, finish={finish:?}"
+                    );
+                    let finishes: Vec<_> = choices
+                        .iter()
+                        .filter_map(|choice| choice.finish_reason)
+                        .collect();
+                    assert_eq!(finishes, finish.into_iter().collect::<Vec<_>>());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn apostrophe_exemption_needs_only_one_alphanumeric_side() {
         // A possessive apostrophe that ends a word (`James'`) has non-alphanumeric on
         // the RIGHT. Requiring alphanumeric on both sides treats it as a real
@@ -4668,8 +5989,69 @@ pub(crate) mod tests {
             UnifiedParserStartingState::None,
             UnifiedToolOutputMode::Native,
             true,
+            ArgumentFraming::default(),
         )
         .expect("qwen3 unified parser")
+    }
+
+    #[test]
+    fn native_grammar_state_matches_family_and_output_mode() {
+        for family in [
+            QWEN3_UNIFIED_FAMILY,
+            NEMOTRON_V3_UNIFIED_FAMILY,
+            GLM47_UNIFIED_FAMILY,
+            KIMI_K2_UNIFIED_FAMILY,
+            "gpt_oss",
+            DEEPSEEK_V4_UNIFIED_FAMILY,
+            MUSE_SPARK_UNIFIED_FAMILY,
+        ] {
+            for mode in [
+                UnifiedToolOutputMode::Native,
+                UnifiedToolOutputMode::GuidedJson { named_tool: None },
+                UnifiedToolOutputMode::GuidedJson {
+                    named_tool: Some("get_weather".to_string()),
+                },
+            ] {
+                let state = ChoiceState::new(
+                    family,
+                    &[],
+                    UnifiedParserStartingState::None,
+                    mode.clone(),
+                    true,
+                    ArgumentFraming::default(),
+                )
+                .unwrap();
+                match (&state.native_grammar_state, &mode, family) {
+                    (
+                        NativeGrammarState::QwenXml(qwen),
+                        UnifiedToolOutputMode::Native,
+                        QWEN3_UNIFIED_FAMILY | NEMOTRON_V3_UNIFIED_FAMILY,
+                    ) => {
+                        assert!(qwen.lexical_state.mode == QwenNativeLexicalMode::OutsideBlock);
+                        assert!(qwen.pending_opener.is_empty());
+                        assert!(qwen.deferred_reasoning.is_empty());
+                        assert!(qwen.deferred_reasoning_event_indices.is_empty());
+                        assert!(qwen.deferred_reasoning_choice_indices.is_empty());
+                    }
+                    (
+                        NativeGrammarState::Glm(glm),
+                        UnifiedToolOutputMode::Native,
+                        GLM47_UNIFIED_FAMILY,
+                    ) => assert!(glm.input_for_truncation_check.is_empty()),
+                    (NativeGrammarState::None, UnifiedToolOutputMode::GuidedJson { .. }, _)
+                    | (
+                        NativeGrammarState::None,
+                        UnifiedToolOutputMode::Native,
+                        KIMI_K2_UNIFIED_FAMILY
+                        | "gpt_oss"
+                        | DEEPSEEK_V4_UNIFIED_FAMILY
+                        | MUSE_SPARK_UNIFIED_FAMILY,
+                    ) => {}
+                    _ => panic!("wrong adapter grammar state for {family} / {mode:?}"),
+                }
+                assert!(!state.is_deferred_qwen_xml_reasoning_choice(0));
+            }
+        }
     }
 
     #[test]
@@ -4717,6 +6099,7 @@ pub(crate) mod tests {
             "raw parser input".to_string(),
         ));
         original.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("upstream-call".to_string()),
             r#type: Some(FunctionType::Function),
@@ -4724,7 +6107,6 @@ pub(crate) mod tests {
                 name: Some("upstream".to_string()),
                 arguments: Some("{}".to_string()),
             }),
-            custom: None,
         }]);
 
         let choices = state.choices_for(
@@ -4745,6 +6127,7 @@ pub(crate) mod tests {
 
         let mut upstream_continuation = empty_choice(0);
         upstream_continuation.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: None,
             r#type: None,
@@ -4752,7 +6135,6 @@ pub(crate) mod tests {
                 name: None,
                 arguments: Some("more".to_string()),
             }),
-            custom: None,
         }]);
         let choices = state.choices_for(&upstream_continuation, Vec::new(), true, None);
         assert_eq!(
@@ -4833,6 +6215,42 @@ pub(crate) mod tests {
         assert_eq!(ids[0].0, 0);
         assert_eq!(ids[1].0, 1);
         assert_ne!(ids[0].1, ids[1].1, "each call gets its own id");
+    }
+
+    #[test]
+    fn optional_message_phases_preserve_muse_boundaries() {
+        let mut plain = test_state();
+        let mut phased = test_state();
+        let original = empty_choice(0);
+        let expected = plain.choices_for(
+            &original,
+            vec![UnifiedParserEvent::Text("answer".into())],
+            true,
+            Some(FinishReason::Stop),
+        );
+        let deltas = vec![
+            UnifiedParserEvent::MessageStart(dynamo_parsers_v2::unified::MessagePhase::FinalAnswer),
+            UnifiedParserEvent::Text("answer".into()),
+            UnifiedParserEvent::MessageEnd,
+        ];
+        let actual = phased.choices_for(&original, deltas.clone(), true, Some(FinishReason::Stop));
+        assert_eq!(actual, expected);
+        assert_eq!(phased.take_message_boundaries(), vec![None]);
+
+        phased.family = MUSE_SPARK_UNIFIED_FAMILY.to_owned();
+        let actual = phased.choices_for(&original, deltas, true, Some(FinishReason::Stop));
+        assert_eq!(actual.len(), 3);
+        assert_eq!(actual[1].delta.content, expected[0].delta.content);
+        assert_eq!(
+            phased.take_message_boundaries(),
+            vec![
+                Some(super::super::MessageBoundary::Start(
+                    dynamo_protocols::types::responses::MessagePhase::FinalAnswer,
+                )),
+                None,
+                Some(super::super::MessageBoundary::End),
+            ],
+        );
     }
 
     #[test]
@@ -4959,6 +6377,7 @@ pub(crate) mod tests {
         let mut parsed_fragments = empty_choice(0);
         parsed_fragments.delta.tool_calls = Some(vec![
             ChatCompletionMessageToolCallChunk {
+                custom: None,
                 index: 0,
                 id: Some("call-first".to_string()),
                 r#type: Some(FunctionType::Function),
@@ -4966,9 +6385,9 @@ pub(crate) mod tests {
                     name: Some("first".to_string()),
                     arguments: Some(r#"{"city":"Paris"}"#.to_string()),
                 }),
-                custom: None,
             },
             ChatCompletionMessageToolCallChunk {
+                custom: None,
                 index: 1,
                 id: Some("call-second".to_string()),
                 r#type: Some(FunctionType::Function),
@@ -4976,7 +6395,6 @@ pub(crate) mod tests {
                     name: Some("second".to_string()),
                     arguments: Some(r#"{"city":"Tokyo"}"#.to_string()),
                 }),
-                custom: None,
             },
         ]);
         let partials = state.choices_for(&parsed_fragments, Vec::new(), true, None);
@@ -6494,6 +7912,7 @@ pub(crate) mod tests {
         let mut mixed = chunk(output, true);
         let choice = &mut mixed.data.as_mut().unwrap().inner.choices[0];
         choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 7,
             id: Some("existing-call".to_string()),
             r#type: Some(FunctionType::Function),
@@ -6501,7 +7920,6 @@ pub(crate) mod tests {
                 name: Some("already_parsed".to_string()),
                 arguments: Some("{}".to_string()),
             }),
-            custom: None,
         }]);
 
         let responses = apply_stream(
@@ -6547,6 +7965,7 @@ pub(crate) mod tests {
         let choice = &mut upstream_call.data.as_mut().unwrap().inner.choices[0];
         choice.delta.content = None;
         choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("upstream-call".to_string()),
             r#type: Some(FunctionType::Function),
@@ -6554,13 +7973,13 @@ pub(crate) mod tests {
                 name: Some("upstream".to_string()),
                 arguments: Some("{\"city\":\"Paris\"}".to_string()),
             }),
-            custom: None,
         }]);
 
         let mut continuation = chunk("", false);
         let choice = &mut continuation.data.as_mut().unwrap().inner.choices[0];
         choice.delta.content = None;
         choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: None,
             r#type: None,
@@ -6568,7 +7987,6 @@ pub(crate) mod tests {
                 name: None,
                 arguments: Some("more".to_string()),
             }),
-            custom: None,
         }]);
 
         let responses = apply_stream(
@@ -6971,6 +8389,7 @@ pub(crate) mod tests {
             };
             #[allow(deprecated)]
             let response = NvCreateChatCompletionStreamResponse {
+                message_boundary: None,
                 inner: CreateChatCompletionStreamResponse {
                     id: "test".to_string(),
                     choices: vec![make(0, index0.0, index0.1), make(1, index1.0, index1.1)],
@@ -7151,6 +8570,7 @@ pub(crate) mod tests {
         let choice = &mut parsed.data.as_mut().unwrap().inner.choices[0];
         choice.delta.content = None;
         choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("call-complete".to_string()),
             r#type: Some(FunctionType::Function),
@@ -7158,7 +8578,6 @@ pub(crate) mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some("{}".to_string()),
             }),
-            custom: None,
         }]);
 
         let responses = apply_stream(
@@ -7190,6 +8609,7 @@ pub(crate) mod tests {
         let first_choice = &mut first.data.as_mut().unwrap().inner.choices[0];
         first_choice.delta.content = None;
         first_choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("call-fragmented".to_string()),
             r#type: Some(FunctionType::Function),
@@ -7197,13 +8617,13 @@ pub(crate) mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some(r#"{"city":"#.to_string()),
             }),
-            custom: None,
         }]);
 
         let mut second = chunk("", false);
         let second_choice = &mut second.data.as_mut().unwrap().inner.choices[0];
         second_choice.delta.content = None;
         second_choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: None,
             r#type: None,
@@ -7211,7 +8631,6 @@ pub(crate) mod tests {
                 name: None,
                 arguments: Some(r#""Tokyo"}"#.to_string()),
             }),
-            custom: None,
         }]);
 
         let responses = apply_stream(
@@ -7249,6 +8668,7 @@ pub(crate) mod tests {
             let choice = &mut parsed.data.as_mut().unwrap().inner.choices[0];
             choice.delta.content = None;
             choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+                custom: None,
                 index: 0,
                 id: id.map(str::to_string),
                 r#type: id.map(|_| FunctionType::Function),
@@ -7256,7 +8676,6 @@ pub(crate) mod tests {
                     name: id.map(|_| "get_weather".to_string()),
                     arguments: Some(arguments.to_string()),
                 }),
-                custom: None,
             }]);
             parsed
         };
@@ -7383,6 +8802,7 @@ pub(crate) mod tests {
             let choice = &mut response.data.as_mut().unwrap().inner.choices[0];
             choice.delta.content = None;
             choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+                custom: None,
                 index: 0,
                 id: id.map(str::to_string),
                 r#type: call_type,
@@ -7390,7 +8810,6 @@ pub(crate) mod tests {
                     name: name.map(str::to_string),
                     arguments: arguments.map(str::to_string),
                 }),
-                custom: None,
             }]);
             choice.finish_reason = finish;
             response
@@ -7467,6 +8886,7 @@ pub(crate) mod tests {
         first.data.as_mut().unwrap().inner.choices[0]
             .delta
             .tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("call-once".to_string()),
             r#type: Some(FunctionType::Function),
@@ -7474,7 +8894,6 @@ pub(crate) mod tests {
                 name: Some("get_".to_string()),
                 arguments: Some(r#"{"city":"Pa"#.to_string()),
             }),
-            custom: None,
         }]);
         let mut gap = chunk("", false);
         let gap_choice = &mut gap.data.as_mut().unwrap().inner.choices[0];
@@ -7485,6 +8904,7 @@ pub(crate) mod tests {
         let resumed_choice = &mut resumed.data.as_mut().unwrap().inner.choices[0];
         resumed_choice.delta.content = None;
         resumed_choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("duplicate-id".to_string()),
             r#type: Some(FunctionType::Function),
@@ -7492,7 +8912,6 @@ pub(crate) mod tests {
                 name: Some("weather".to_string()),
                 arguments: Some("ris\"}".to_string()),
             }),
-            custom: None,
         }]);
         resumed_choice.finish_reason = Some(FinishReason::ToolCalls);
 
@@ -7551,6 +8970,7 @@ pub(crate) mod tests {
         first.data.as_mut().unwrap().inner.choices[0]
             .delta
             .tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("call-pending".to_string()),
             r#type: Some(FunctionType::Function),
@@ -7558,7 +8978,6 @@ pub(crate) mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some(r#"{"city":"Pa"#.to_string()),
             }),
-            custom: None,
         }]);
         let mut gap = chunk("", false);
         let gap_choice = &mut gap.data.as_mut().unwrap().inner.choices[0];
@@ -7643,6 +9062,7 @@ pub(crate) mod tests {
         let choice = &mut terminal.data.as_mut().unwrap().inner.choices[0];
         choice.delta.content = None;
         choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("call-terminal".to_string()),
             r#type: Some(FunctionType::Function),
@@ -7650,7 +9070,6 @@ pub(crate) mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some("{}".to_string()),
             }),
-            custom: None,
         }]);
 
         let responses = apply_stream(
@@ -7686,6 +9105,7 @@ pub(crate) mod tests {
         let choice = &mut terminal.data.as_mut().unwrap().inner.choices[0];
         choice.delta.content = None;
         choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("call-complete".to_string()),
             r#type: Some(FunctionType::Function),
@@ -7693,7 +9113,6 @@ pub(crate) mod tests {
                 name: Some("upstream".to_string()),
                 arguments: Some("{\"city\":\"Paris\"}".to_string()),
             }),
-            custom: None,
         }]);
 
         let responses = apply_stream(
@@ -8014,6 +9433,7 @@ pub(crate) mod tests {
         let choice = &mut parsed_fragment.data.as_mut().unwrap().inner.choices[0];
         choice.delta.content = None;
         choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("call-parsed".to_string()),
             r#type: Some(FunctionType::Function),
@@ -8021,7 +9441,6 @@ pub(crate) mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some(r#"{"city":"Paris""#.to_string()),
             }),
-            custom: None,
         }]);
 
         let responses = apply_stream(
@@ -8086,6 +9505,7 @@ pub(crate) mod tests {
             let choice = &mut parsed_call.data.as_mut().unwrap().inner.choices[0];
             choice.delta.content = None;
             choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+                custom: None,
                 index: 0,
                 id: Some("parsed-call".to_string()),
                 r#type: Some(FunctionType::Function),
@@ -8093,7 +9513,6 @@ pub(crate) mod tests {
                     name: Some("get_weather".to_string()),
                     arguments: Some(r#"{"city":"NY"}"#.to_string()),
                 }),
-                custom: None,
             }]);
 
             let responses = apply_stream(
@@ -8320,6 +9739,7 @@ pub(crate) mod tests {
             choice.delta.content = None;
             choice.delta.tool_calls = Some(vec![
                 ChatCompletionMessageToolCallChunk {
+                    custom: None,
                     index: 0,
                     id: Some("call-first".to_string()),
                     r#type: Some(FunctionType::Function),
@@ -8327,9 +9747,9 @@ pub(crate) mod tests {
                         name: Some("get_weather".to_string()),
                         arguments: Some(r#"{"city":"Par"#.to_string()),
                     }),
-                    custom: None,
                 },
                 ChatCompletionMessageToolCallChunk {
+                    custom: None,
                     index: 1,
                     id: Some("call-second".to_string()),
                     r#type: Some(FunctionType::Function),
@@ -8337,7 +9757,6 @@ pub(crate) mod tests {
                         name: Some("get_weather".to_string()),
                         arguments: Some(r#"{"city":"Tok"#.to_string()),
                     }),
-                    custom: None,
                 },
             ]);
 
@@ -8391,6 +9810,7 @@ pub(crate) mod tests {
         first.delta.content = None;
         first.delta.tool_calls = Some(vec![
             ChatCompletionMessageToolCallChunk {
+                custom: None,
                 index: 0,
                 id: Some("call-invalid".to_string()),
                 r#type: Some(FunctionType::Function),
@@ -8398,9 +9818,9 @@ pub(crate) mod tests {
                     name: Some("get_weather".to_string()),
                     arguments: Some(r#"{"city":"#.to_string()),
                 }),
-                custom: None,
             },
             ChatCompletionMessageToolCallChunk {
+                custom: None,
                 index: 1,
                 id: Some("call-valid".to_string()),
                 r#type: Some(FunctionType::Function),
@@ -8408,12 +9828,12 @@ pub(crate) mod tests {
                     name: Some("get_weather".to_string()),
                     arguments: Some(r#"{"city":"#.to_string()),
                 }),
-                custom: None,
             },
         ]);
         let mut second = first.clone();
         second.index = 1;
         second.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("call-parameterless".to_string()),
             r#type: Some(FunctionType::Function),
@@ -8421,7 +9841,6 @@ pub(crate) mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some(String::new()),
             }),
-            custom: None,
         }]);
         partials.data.as_mut().unwrap().inner.choices.push(second);
 
@@ -8431,6 +9850,7 @@ pub(crate) mod tests {
         first.finish_reason = Some(FinishReason::ToolCalls);
         first.delta.tool_calls = Some(vec![
             ChatCompletionMessageToolCallChunk {
+                custom: None,
                 index: 0,
                 id: None,
                 r#type: None,
@@ -8438,9 +9858,9 @@ pub(crate) mod tests {
                     name: None,
                     arguments: Some("not-json".to_string()),
                 }),
-                custom: None,
             },
             ChatCompletionMessageToolCallChunk {
+                custom: None,
                 index: 1,
                 id: None,
                 r#type: None,
@@ -8448,12 +9868,12 @@ pub(crate) mod tests {
                     name: None,
                     arguments: Some(r#""Tokyo"}"#.to_string()),
                 }),
-                custom: None,
             },
         ]);
         let mut second = first.clone();
         second.index = 1;
         second.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: None,
             r#type: None,
@@ -8461,7 +9881,6 @@ pub(crate) mod tests {
                 name: None,
                 arguments: Some(String::new()),
             }),
-            custom: None,
         }]);
         terminal.data.as_mut().unwrap().inner.choices.push(second);
 
@@ -8510,6 +9929,7 @@ pub(crate) mod tests {
         let choice = &mut already_parsed.data.as_mut().unwrap().inner.choices[0];
         choice.delta.content = None;
         choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("call-preexisting".to_string()),
             r#type: Some(FunctionType::Function),
@@ -8517,7 +9937,6 @@ pub(crate) mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some("{}".to_string()),
             }),
-            custom: None,
         }]);
 
         // This choice index never has a raw chunk at all — no ChoiceState is ever
@@ -8566,6 +9985,7 @@ pub(crate) mod tests {
         ) -> Annotated<NvCreateChatCompletionStreamResponse> {
             #[allow(deprecated)]
             let response = NvCreateChatCompletionStreamResponse {
+                message_boundary: None,
                 inner: CreateChatCompletionStreamResponse {
                     id: "test".to_string(),
                     choices,
@@ -8902,18 +10322,14 @@ pub(crate) mod tests {
     #[test]
     fn a_failed_push_keeps_committed_events_before_recovered_bytes() {
         let mut state = ChoiceState {
-            glm_native_input: None,
+            message_boundaries: Vec::new(),
+            native_grammar_state: NativeGrammarState::None,
             incomplete_native_call: false,
             family: "test".to_string(),
             parser: Box::new(PartialCommitParser {
                 recovered: "<broken>".to_string(),
             }),
             tool_output_mode: UnifiedToolOutputMode::Native,
-            qwen_native_lexical_state: QwenNativeLexicalState::default(),
-            pending_qwen_opener_text: String::new(),
-            pending_qwen_opener_reasoning: Vec::new(),
-            qwen_reasoning_event_positions: HashSet::new(),
-            qwen_reasoning_choice_positions: HashSet::new(),
             opened_calls: HashSet::new(),
             tool_ids_emitted: HashSet::new(),
             tool_types_emitted: HashSet::new(),
@@ -9195,6 +10611,7 @@ pub(crate) mod tests {
                 UnifiedParserStartingState::Response,
                 mode.clone(),
                 true,
+                ArgumentFraming::default(),
             )
             .unwrap();
             let mut events = state.push(prefix);
@@ -9255,6 +10672,7 @@ pub(crate) mod tests {
                     UnifiedParserStartingState::Response,
                     mode.clone(),
                     true,
+                    ArgumentFraming::default(),
                 )
                 .unwrap();
                 let mut split_events = split_state.push(&short_raw[..split]);
@@ -9652,8 +11070,8 @@ pub(crate) mod tests {
                 let mut records = HashMap::from([(
                     0,
                     ChoiceRecord {
-                        pending_qwen_opener_responses: VecDeque::from([
-                            PendingQwenReasoningResponse {
+                        deferred_qwen_xml_reasoning_responses: VecDeque::from([
+                            DeferredQwenXmlReasoningResponse {
                                 text: "detour".into(),
                                 choice: expected.clone(),
                                 response: source.clone(),
@@ -9718,6 +11136,63 @@ pub(crate) mod tests {
             }
         }
     }
+
+    /// Scores stay in generation order while raw text and reasoning alternate behind a
+    /// split Qwen opener.
+    #[tokio::test]
+    async fn qwen_queued_reasoning_keeps_source_logprob_order() {
+        fn scored(
+            mut response: Annotated<NvCreateChatCompletionStreamResponse>,
+            token: &str,
+        ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+            response.data.as_mut().unwrap().inner.choices[0].logprobs = Some(
+                serde_json::from_value(serde_json::json!({
+                    "content": [{"token": token, "logprob": -0.5, "bytes": [], "top_logprobs": []}],
+                    "refusal": null
+                }))
+                .unwrap(),
+            );
+            response
+        }
+
+        fn reasoning(text: &str, token: &str) -> Annotated<NvCreateChatCompletionStreamResponse> {
+            let mut source = scored(chunk("", false), token);
+            let choice = &mut source.data.as_mut().unwrap().inner.choices[0];
+            choice.delta.content = None;
+            choice.delta.reasoning_content = Some(text.to_string());
+            source
+        }
+
+        let completed_call = concat!(
+            "ll><function=get_weather><parameter=city>Paris</parameter>",
+            "</function></tool_call>"
+        );
+        let responses = apply_stream(
+            stream::iter(vec![
+                scored(chunk("<tool_", false), "A"),
+                reasoning("first", "B"),
+                scored(chunk("ca", false), "C"),
+                reasoning("second", "D"),
+                scored(chunk(completed_call, true), "E"),
+            ]),
+            Some(weather_tools()),
+            None,
+            false,
+            UnifiedParserStartingState::None,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let tokens: Vec<_> = collect_choices(&responses)
+            .into_iter()
+            .filter_map(|choice| choice.logprobs.as_ref()?.content.as_ref())
+            .flatten()
+            .map(|entry| entry.token.as_str())
+            .collect();
+        assert_eq!(tokens, ["A", "B", "C", "D", "E"]);
+    }
+
     #[tokio::test]
     #[ignore = "Parser 0.7.17 missing-parameter-close recovery delays text across external reasoning; run explicitly to measure ordering"]
     async fn qwen_recovered_parameter_close_restores_opener_ordering_at_every_split() {
@@ -9968,6 +11443,7 @@ pub(crate) mod tests {
                             mixed_content.then(|| ChatCompletionMessageContent::Text("".into()));
                         data.inner.choices[0].delta.tool_calls =
                             Some(vec![ChatCompletionMessageToolCallChunk {
+                                custom: None,
                                 index: backend_index,
                                 id: Some("backend-call".into()),
                                 r#type: Some(FunctionType::Function),
@@ -9975,7 +11451,6 @@ pub(crate) mod tests {
                                     name: Some("get_weather".into()),
                                     arguments: Some("{}".into()),
                                 }),
-                                custom: None,
                             }]);
                         data.tool_call_completion
                             .push(super::super::ToolCallCompletion {
@@ -10089,6 +11564,7 @@ pub(crate) mod tests {
         let data = backend.data.as_mut().unwrap();
         data.inner.choices[0].delta.content = None;
         data.inner.choices[0].delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 7,
             id: Some("backend-call".into()),
             r#type: Some(FunctionType::Function),
@@ -10096,7 +11572,6 @@ pub(crate) mod tests {
                 name: Some("get_weather".into()),
                 arguments: Some("{}".into()),
             }),
-            custom: None,
         }]);
         data.tool_call_completion
             .push(super::super::ToolCallCompletion {
@@ -10151,6 +11626,7 @@ pub(crate) mod tests {
         data.inner.choices[0].delta.tool_calls = Some(
             (0..2)
                 .map(|index| ChatCompletionMessageToolCallChunk {
+                    custom: None,
                     index,
                     id: Some(format!("backend-{index}")),
                     r#type: Some(FunctionType::Function),
@@ -10158,7 +11634,6 @@ pub(crate) mod tests {
                         name: Some("get_weather".into()),
                         arguments: Some("{}".into()),
                     }),
-                    custom: None,
                 })
                 .collect(),
         );
@@ -10246,6 +11721,7 @@ pub(crate) mod tests {
             choice.delta.content =
                 mixed_content.then(|| ChatCompletionMessageContent::Text("".into()));
             choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+                custom: None,
                 index: 0,
                 id: Some("unfinished".into()),
                 r#type: Some(FunctionType::Function),
@@ -10253,7 +11729,6 @@ pub(crate) mod tests {
                     name: Some("get_weather".into()),
                     arguments: Some("{}".into()),
                 }),
-                custom: None,
             }]);
             let mut terminal = chunk("", false);
             terminal.data.as_mut().unwrap().inner.choices[0].finish_reason =
@@ -10327,6 +11802,7 @@ pub(crate) mod tests {
                             choice.finish_reason = finish;
                         }
                         choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+                            custom: None,
                             index: 0,
                             id: Some("unfinished".into()),
                             r#type: Some(FunctionType::Function),
@@ -10334,7 +11810,6 @@ pub(crate) mod tests {
                                 name: Some("get_weather".into()),
                                 arguments: Some("{}".into()),
                             }),
-                            custom: None,
                         }]);
                         let mut input = vec![upstream];
                         if let Some(finish) = finish.filter(|_| !same_envelope) {
@@ -10549,6 +12024,7 @@ pub(crate) mod tests {
                         UnifiedParserStartingState::None,
                         mode,
                         true,
+                        ArgumentFraming::default(),
                     )
                     .unwrap();
                     let mut library = Vec::new();
@@ -10682,6 +12158,7 @@ pub(crate) mod tests {
             ("gemma4", "gemma4", GEMMA4_UNIFIED_FAMILY),
             ("glm47", "glm45", GLM47_UNIFIED_FAMILY),
             ("muse", "muse_glimmer", MUSE_UNIFIED_FAMILY),
+            ("qwen3_coder", "nemotron_v3", NEMOTRON_V3_UNIFIED_FAMILY),
         ] {
             assert_eq!(configured_family(Some(tool), Some(reason)), Some(family));
             for choice in [
@@ -10710,7 +12187,10 @@ pub(crate) mod tests {
                 }
             }
             if family != MUSE_UNIFIED_FAMILY {
-                assert_eq!(configured_family(Some(tool), None), Some(family));
+                // Nemotron borrows Qwen's tool parser, so that half alone stays Qwen3.
+                if family != NEMOTRON_V3_UNIFIED_FAMILY {
+                    assert_eq!(configured_family(Some(tool), None), Some(family));
+                }
                 assert_eq!(configured_family(None, Some(reason)), Some(family));
                 assert_eq!(configured_family(Some(tool), Some("unrelated")), None);
             }
@@ -10738,6 +12218,7 @@ pub(crate) mod tests {
                 UnifiedParserStartingState::None,
                 UnifiedToolOutputMode::Native,
                 true,
+                ArgumentFraming::default(),
             )
             .unwrap();
             let events = state.push(&input[..stop]);
@@ -11268,8 +12749,12 @@ pub(crate) mod tests {
         }
     }
 
-    fn all_family_native_calls() -> [(&'static str, &'static str); 8] {
+    fn all_family_native_calls() -> [(&'static str, &'static str); 9] {
         [
+            (
+                "minimax_m3",
+                r#"]<]minimax[>[<tool_call>]<]minimax[>[<invoke name="get_weather">]<]minimax[>[<city>Tokyo]<]minimax[>[</city>]<]minimax[>[</invoke>]<]minimax[>[</tool_call>"#,
+            ),
             (
                 "deepseek_v4",
                 r#"<｜DSML｜tool_calls><｜DSML｜invoke name="get_weather"><｜DSML｜parameter name="city" string="true">Tokyo</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>"#,
@@ -11354,6 +12839,92 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn minimax_m3_guided_json_recovers_native_backend_output_after_reasoning() {
+        // The M3 backend emitted this native shape despite a named/required JSON
+        // grammar. Both API modes traverse this stream adapter.
+        let native = concat!(
+            "]<]minimax[>[<tool_call>\n",
+            "]<]minimax[>[<invoke name=\"calculate\">",
+            "]<]minimax[>[<expression>937 * 18 + 42]<]minimax[>[</expression>",
+            "]<]minimax[>[</invoke>\n]<]minimax[>[</tool_call>"
+        );
+        let tools = vec![ToolDefinition {
+            name: "calculate".into(),
+            parameters: Some(serde_json::json!({
+                "type":"object", "properties":{"expression":{"type":"string"}},
+                "required":["expression"], "additionalProperties":true
+            })),
+            strict: None,
+        }];
+        for constraint in [
+            GuidedToolConstraint::GuidedJsonRequired,
+            GuidedToolConstraint::GuidedJsonNamed {
+                tool_name: "calculate".into(),
+            },
+        ] {
+            for guided_streaming in [true, false] {
+                let input = format!("I can pass the entire expression.</mm:think>{native}");
+                for split in input.char_indices().map(|(i, _)| i).chain([input.len()]) {
+                    let output = apply_stream_with_constraint(
+                        stream::iter([chunk(&input[..split], false), chunk(&input[split..], true)]),
+                        Some(tools.clone()),
+                        constraint.clone(),
+                        UnifiedParserStartingState::Reasoning,
+                        "minimax_m3",
+                        guided_streaming,
+                    )
+                    .collect::<Vec<_>>()
+                    .await;
+                    assert!(output.iter().all(|response| !response.is_error()));
+                    let choices = collect_choices(&output);
+                    let calls: Vec<_> = choices
+                        .iter()
+                        .filter_map(|c| c.delta.tool_calls.as_ref())
+                        .flatten()
+                        .collect();
+                    assert_eq!(
+                        calls.iter().filter(|c| c.id.is_some()).count(),
+                        1,
+                        "lost or repeated call: split={split}, streaming={guided_streaming}"
+                    );
+                    assert!(calls.iter().all(|c| c.index == 0));
+                    let names: Vec<_> = calls
+                        .iter()
+                        .filter_map(|c| c.function.as_ref()?.name.as_deref())
+                        .collect();
+                    assert_eq!(names, ["calculate"]);
+                    let arguments: String = calls
+                        .iter()
+                        .filter_map(|c| c.function.as_ref()?.arguments.as_deref())
+                        .collect();
+                    assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(&arguments).unwrap(),
+                        serde_json::json!({"expression":"937 * 18 + 42"})
+                    );
+                    assert_eq!(
+                        choices
+                            .iter()
+                            .filter_map(|c| c.delta.reasoning_content.as_deref())
+                            .collect::<String>(),
+                        "I can pass the entire expression."
+                    );
+                    assert!(
+                        choices.iter().all(|c| c
+                            .delta
+                            .content
+                            .as_ref()
+                            .is_none_or(|content| matches!(content, ChatCompletionMessageContent::Text(text) if text.is_empty())))
+                    );
+                    assert_eq!(
+                        choices.last().unwrap().finish_reason,
+                        Some(FinishReason::ToolCalls)
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn every_family_native_and_guided_batch_stream_split_parity() {
         for (family, native) in all_family_native_calls() {
             for (input, constraint) in [
@@ -11422,6 +12993,7 @@ pub(crate) mod tests {
     async fn all_family_reasoning_prefill_and_native_batch_stream_parity() {
         for (family, native) in all_family_native_calls() {
             let (opener, closer, answer) = match family {
+                "minimax_m3" => ("<mm:think>", "</mm:think>", "answer"),
                 "gemma4" => ("<|channel>thought\n", "<channel|>", "answer"),
                 "kimi_k3" => (
                     "<|open|>think<|sep|>",
@@ -11805,6 +13377,16 @@ pub(crate) mod tests {
             selected_family(None, Some("qwen3")),
             (selection == "2").then_some(QWEN3_UNIFIED_FAMILY)
         );
+        // Nemotron 3 shares Qwen's tool grammar: the explicit pair routes like Qwen3,
+        // and a reasoning-only card stays legacy unless V2 is selected explicitly.
+        assert_eq!(
+            selected_family(Some("qwen3_coder"), Some("nemotron_v3")),
+            (selection != "1").then_some(NEMOTRON_V3_UNIFIED_FAMILY)
+        );
+        assert_eq!(
+            selected_family(None, Some("nemotron_v3")),
+            (selection == "2").then_some(NEMOTRON_V3_UNIFIED_FAMILY)
+        );
         for &parser in FAMILY_NAMES.iter() {
             let family = canonical_family(parser).unwrap();
             for (tool, reasoning) in [
@@ -11812,8 +13394,10 @@ pub(crate) mod tests {
                 (Some(parser), None),
                 (None, Some(parser)),
             ] {
-                let reasoning_only_qwen3 = tool.is_none() && reasoning == Some("qwen3");
-                let expected = (selection != "1" && (selection == "2" || !reasoning_only_qwen3))
+                let reasoning_only_shared_grammar = tool.is_none()
+                    && matches!(reasoning, Some("qwen3" | "nemotron_v3" | "nemotron3"));
+                let expected = (selection != "1"
+                    && (selection == "2" || !reasoning_only_shared_grammar))
                     .then_some(family);
                 assert_eq!(
                     selected_family(tool, reasoning),
@@ -11878,6 +13462,7 @@ pub(crate) mod tests {
         let choice = &mut already_parsed.data.as_mut().unwrap().inner.choices[0];
         choice.delta.content = None;
         choice.delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+            custom: None,
             index: 0,
             id: Some("call-preexisting".to_string()),
             r#type: Some(FunctionType::Function),
@@ -11885,7 +13470,6 @@ pub(crate) mod tests {
                 name: Some("get_weather".to_string()),
                 arguments: Some("{}".to_string()),
             }),
-            custom: None,
         }]);
 
         // This choice index never has a raw chunk at all — no ChoiceState is ever
@@ -12015,6 +13599,139 @@ pub(crate) mod tests {
                 }
             }
         }
+    }
+
+    fn engine_like_chunks(raw: &str) -> Vec<String> {
+        // Engine-like chunks: special tokens alone, other text in short pieces.
+        let mut out = Vec::new();
+        let mut rest = raw;
+        while !rest.is_empty() {
+            if rest.starts_with("<|") {
+                let end = rest.find("|>").unwrap() + 2;
+                out.push(rest[..end].to_string());
+                rest = &rest[end..];
+            } else {
+                let next = rest.find("<|").unwrap_or(rest.len());
+                let mut piece_end = next.min(3);
+                while !rest.is_char_boundary(piece_end) {
+                    piece_end += 1;
+                }
+                out.push(rest[..piece_end].to_string());
+                rest = &rest[piece_end..];
+            }
+        }
+        out
+    }
+
+    async fn muse_spark_structured_stream(
+        raw_chunks: &[String],
+        policy: UnifiedRequestPolicy,
+    ) -> (String, String) {
+        let last = raw_chunks.len() - 1;
+        let outputs: Vec<_> = apply_stream_with_policy(
+            futures::stream::iter(
+                raw_chunks
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| chunk(c, i == last))
+                    .collect::<Vec<_>>(),
+            ),
+            None,
+            GuidedToolConstraint::None,
+            UnifiedParserStartingState::None,
+            "muse_spark",
+            true,
+            policy,
+        )
+        .collect()
+        .await;
+        let mut text = String::new();
+        let mut reasoning = String::new();
+        for choice in collect_choices(&outputs) {
+            if let Some(ChatCompletionMessageContent::Text(t)) = &choice.delta.content {
+                text.push_str(t);
+            }
+            if let Some(r) = &choice.delta.reasoning_content {
+                reasoning.push_str(r);
+            }
+        }
+        (text, reasoning)
+    }
+
+    #[tokio::test]
+    async fn muse_spark_structured_response_bare_and_final_json_stay_content() {
+        let policy = UnifiedRequestPolicy {
+            structured_response: true,
+            ..Default::default()
+        };
+        let cases = [
+            ("{\"name\":\"John Doe\"}", "{\"name\":\"John Doe\"}", ""),
+            ("true", "true", ""),
+            (
+                " to=user<|message|>{\"name\":\"John Doe\"}<|eot|>",
+                "{\"name\":\"John Doe\"}",
+                "",
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (raw, want_text, want_reasoning) in cases {
+            for (name, chunks) in [
+                ("whole", vec![raw.to_string()]),
+                ("tokenish", engine_like_chunks(raw)),
+                (
+                    "per-char",
+                    raw.chars().map(|c| c.to_string()).collect::<Vec<_>>(),
+                ),
+            ] {
+                let (text, reasoning) = muse_spark_structured_stream(&chunks, policy).await;
+                if text != want_text || reasoning != want_reasoning {
+                    failures.push(format!(
+                        "{name} {raw:?}: text={text:?} reasoning={reasoning:?}"
+                    ));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[tokio::test]
+    async fn muse_spark_structured_response_separates_recipient_header_reasoning() {
+        let raws = [
+            " to=self<|message|>Need the name.<|eom|><|start|>assistant to=user<|message|>{\"name\":\"John Doe\"}<|eot|>",
+            " to=self<|message|>Need the name.<|eom|>{\"name\":\"John Doe\"}<|eot|>",
+        ];
+        let mut failures = Vec::new();
+        for raw in raws {
+            for structured_response in [false, true] {
+                let policy = UnifiedRequestPolicy {
+                    structured_response,
+                    ..Default::default()
+                };
+                let batch = parse_complete_with_policy(
+                    "muse_spark",
+                    raw,
+                    &GuidedToolConstraint::None,
+                    &[],
+                    policy,
+                )
+                .unwrap();
+                assert_eq!(batch.text, "{\"name\":\"John Doe\"}");
+                let chunkings = [
+                    ("whole", vec![raw.to_string()]),
+                    ("tokenish", engine_like_chunks(raw)),
+                    ("per-char", raw.chars().map(|c| c.to_string()).collect()),
+                ];
+                for (name, chunks) in chunkings {
+                    let (text, reasoning) = muse_spark_structured_stream(&chunks, policy).await;
+                    if text != "{\"name\":\"John Doe\"}" || reasoning != "Need the name." {
+                        failures.push(format!(
+                            "structured_response={structured_response} {name} raw={raw:?}: text={text:?} reasoning={reasoning:?}"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 
     #[tokio::test]
@@ -12653,6 +14370,7 @@ pub(crate) mod tests {
                     let delta = &mut input.data.as_mut().unwrap().inner.choices[0].delta;
                     delta.content = None;
                     delta.tool_calls = Some(vec![ChatCompletionMessageToolCallChunk {
+                        custom: None,
                         index: 0,
                         id: Some("backend-call".into()),
                         r#type: Some(FunctionType::Function),
@@ -12660,7 +14378,6 @@ pub(crate) mod tests {
                             name: Some("get_weather".into()),
                             arguments: Some(arguments.into()),
                         }),
-                        custom: None,
                     }]);
                     let output = apply_stream(
                         stream::iter([input]),
@@ -12701,6 +14418,7 @@ pub(crate) mod tests {
             UnifiedParserStartingState::None,
             UnifiedToolOutputMode::Native,
             true,
+            ArgumentFraming::default(),
         )
         .unwrap();
         let started = std::time::Instant::now();
@@ -12746,6 +14464,7 @@ pub(crate) mod tests {
                     UnifiedParserStartingState::None,
                     UnifiedToolOutputMode::Native,
                     true,
+                    ArgumentFraming::default(),
                 )
                 .unwrap();
                 state.push(&input[..split]);
@@ -12759,6 +14478,229 @@ pub(crate) mod tests {
             format!("{complete} The literal \"<tool_call>\" stays visible."),
         ] {
             assert_eq!(glm_unfinished_call(&input).unwrap(), None);
+        }
+    }
+}
+
+#[cfg(test)]
+mod beam_routing_tests {
+    use super::*;
+    use dynamo_runtime::config::ParserVersion;
+
+    /// The turn grammar writes a held tool's non-string parameters as JSON, so a closing
+    /// tag inside one of their strings is data; and it holds a `response_format` answer
+    /// in the final channel behind the analysis, so that output is a native turn.
+    #[test]
+    fn beam_turn_grammar_frames_held_json_arguments_and_the_structured_answer() {
+        let tools = vec![ToolDefinition {
+            name: "render".into(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "doc": {"type": "object", "properties": {"html": {"type": "string"}}},
+                    "title": {"type": "string"}
+                },
+                "required": ["doc", "title"]
+            })),
+            strict: None,
+        }];
+        let content = concat!(
+            "<|channel|>analysis<|message|>Rendering.<|end|>",
+            "<|start|>assistant to=render<|channel|>analysis <|constrain|>xml<|message|>",
+            "<rfl:parameter name=\"doc\">{\"html\":\"<b>x</b></rfl:parameter> inside\"}</rfl:parameter>",
+            "<rfl:parameter name=\"title\">t</rfl:parameter><|call|>"
+        );
+        let expected = serde_json::json!({
+            "doc": {"html": "<b>x</b></rfl:parameter> inside"},
+            "title": "t"
+        });
+        let held = GuidedToolConstraint::BeamTurnGrammar {
+            frames_answer: false,
+        };
+        let batch = parse_complete_with_policy(
+            BEAM_UNIFIED_FAMILY,
+            content,
+            &held,
+            &tools,
+            UnifiedRequestPolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(batch.reasoning, "Rendering.");
+        assert_eq!(batch.tool_calls.len(), 1, "{batch:?}");
+        assert_eq!(batch.tool_calls[0].function.name, "render");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&batch.tool_calls[0].function.arguments)
+                .unwrap(),
+            expected
+        );
+        // Without the grammar a value runs to the first closing tag.
+        let lenient = parse_complete_with_policy(
+            BEAM_UNIFIED_FAMILY,
+            content,
+            &GuidedToolConstraint::None,
+            &tools,
+            UnifiedRequestPolicy::default(),
+        )
+        .unwrap();
+        assert!(
+            lenient.tool_calls.first().is_none_or(|call| {
+                serde_json::from_str::<serde_json::Value>(&call.function.arguments).ok()
+                    != Some(expected.clone())
+            }),
+            "{lenient:?}"
+        );
+
+        // Streaming frames the same way at every split.
+        let v2_tools = to_v2_tools(Some(&tools));
+        for split in content
+            .char_indices()
+            .map(|(at, _)| at)
+            .chain(std::iter::once(content.len()))
+        {
+            let mut state = ChoiceState::new(
+                BEAM_UNIFIED_FAMILY,
+                &v2_tools,
+                UnifiedParserStartingState::None,
+                UnifiedToolOutputMode::Native,
+                true,
+                argument_framing(&held),
+            )
+            .unwrap();
+            let mut wire = Vec::new();
+            for events in [
+                state.push(&content[..split]),
+                state.push(&content[split..]),
+                state.finish(),
+            ] {
+                wire.extend(state.choices_for(&empty_choice(0), events, true, None));
+            }
+            let calls: Vec<_> = wire
+                .iter()
+                .flat_map(|choice| choice.delta.tool_calls.iter().flatten())
+                .collect();
+            let arguments: String = calls
+                .iter()
+                .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+                .collect();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&arguments).unwrap(),
+                expected,
+                "split {split}"
+            );
+            let reasoning: String = wire
+                .iter()
+                .filter_map(|choice| choice.delta.reasoning_content.as_deref())
+                .collect();
+            assert_eq!(reasoning, "Rendering.", "split {split}");
+        }
+
+        // A `response_format` answer the grammar framed keeps the reasoning and the
+        // channel structure, and is not probed as a bare JSON document.
+        let answer = concat!(
+            "<|channel|>analysis<|message|>Thinking.<|end|>",
+            "<|start|>assistant<|channel|>final<|message|>{\"ok\":true}<|return|>"
+        );
+        let structured = UnifiedRequestPolicy {
+            reasoning_disabled: false,
+            structured_response: true,
+            ..Default::default()
+        };
+        let framed = parse_complete_with_policy(
+            BEAM_UNIFIED_FAMILY,
+            answer,
+            &GuidedToolConstraint::BeamTurnGrammar {
+                frames_answer: true,
+            },
+            &[],
+            structured,
+        )
+        .unwrap();
+        assert_eq!(framed.reasoning, "Thinking.");
+        assert_eq!(framed.text, "{\"ok\":true}");
+        assert!(framed.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn beam_pair_routes_to_the_unified_parser_without_an_explicit_generation() {
+        assert_eq!(
+            configured_family(Some("beam"), Some("beam")),
+            Some(BEAM_UNIFIED_FAMILY)
+        );
+        assert_eq!(
+            selected_family_for_selection(
+                Some(BEAM_UNIFIED_FAMILY),
+                Some(BEAM_UNIFIED_FAMILY),
+                ParserVersion::Auto,
+            ),
+            Some(BEAM_UNIFIED_FAMILY)
+        );
+        assert_eq!(
+            selected_family_for_selection(
+                Some(BEAM_UNIFIED_FAMILY),
+                Some(BEAM_UNIFIED_FAMILY),
+                ParserVersion::V2,
+            ),
+            Some(BEAM_UNIFIED_FAMILY)
+        );
+        // There is no v1 Beam parser to fall back to: an explicit `1` selects nothing
+        // here (and `validate_parser_version` rejects it), and half a pair under `auto`
+        // is rejected by the same validation before this choice is made.
+        assert_eq!(
+            selected_family_for_selection(
+                Some(BEAM_UNIFIED_FAMILY),
+                Some(BEAM_UNIFIED_FAMILY),
+                ParserVersion::V1,
+            ),
+            None
+        );
+        assert!(FAMILY_NAMES.contains(&BEAM_UNIFIED_FAMILY));
+    }
+
+    #[test]
+    fn beam_prefill_reads_the_channel_the_prompt_opened() {
+        assert_eq!(
+            beam_prefill(
+                "<|channel|>analysis<|message|>t<|end|><|start|>assistant<|channel|>final<|message|>a<|return|>"
+            ),
+            UnifiedParserStartingState::None
+        );
+        assert_eq!(
+            beam_prefill(
+                "<|start|>assistant to=get_weather<|channel|>analysis <|constrain|>xml<|message|><|call|>"
+            ),
+            UnifiedParserStartingState::None
+        );
+        assert_eq!(
+            beam_prefill("thought<|end|><|start|>assistant<|channel|>final<|message|>a<|return|>"),
+            UnifiedParserStartingState::Reasoning
+        );
+        assert_eq!(
+            beam_prefill("answer<|return|>"),
+            UnifiedParserStartingState::Response
+        );
+        assert_eq!(
+            beam_prefill("plain decoded answer"),
+            UnifiedParserStartingState::Response
+        );
+        assert_eq!(
+            detect_prefill("beam", "plain").unwrap(),
+            UnifiedParserStartingState::Response
+        );
+    }
+
+    #[test]
+    fn beam_control_markers_cover_the_whole_grammar() {
+        let markers = unified_parser_control_markers("beam");
+        for marker in [
+            "<|start|>",
+            "<|channel|>",
+            "<|message|>",
+            "<|constrain|>",
+            "<|end|>",
+            "<|return|>",
+            "<|call|>",
+        ] {
+            assert!(markers.iter().any(|m| m == marker), "{marker}");
         }
     }
 }

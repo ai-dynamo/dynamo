@@ -27,7 +27,11 @@
 //! subset still waiting — for a first generated token, or a prefill's
 //! completion; `request_queue_count` is requests waiting to be admitted, which
 //! hold neither. The limits are
-//! configuration rather than state, so they are not exported.
+//! configuration rather than state, so they are not exported, and an
+//! unlimited one is still counted here.
+//!
+//! While admission control is disabled, with neither engine limit set, the gate
+//! counts nothing: its family is still created, and every series stays at zero.
 //!
 //! Every request the gate receives is counted once by
 //! [`REQUEST_RECEIVE_TOTAL`], and once more by [`REQUEST_ADMIT_TOTAL`] if it is

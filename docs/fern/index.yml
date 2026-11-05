@@ -224,6 +224,8 @@ navigation:
             path: pages/kubernetes/auto-deployment/dynamo-profiler.md
           - page: Dynamo Planner
             path: pages/kubernetes/auto-deployment/dynamo-planner.mdx
+          - page: Planner Live Retune
+            path: pages/kubernetes/auto-deployment/planner-live-retune.md
 
       - section: Operations
         icon: screwdriver-wrench
@@ -231,6 +233,8 @@ navigation:
         contents:
           - page: Observability
             path: pages/kubernetes/operations/observability.mdx
+          - page: Nsight Operator Profiling
+            path: pages/kubernetes/operations/nsight-operator-profiling.mdx
           - page: Benchmarking with AIPerf
             path: pages/kubernetes/operations/benchmarking-with-aiperf.mdx
           - page: Performance Tuning
@@ -790,7 +794,7 @@ navigation:
           - page: Structural Tag
             path: pages/use-cases/tool-calling-and-reasoning/structural-tag.md
           - page: Reasoning Parsing
-            path: pages/use-cases/tool-calling-and-reasoning/reasoning-parsing.md
+            path: pages/use-cases/tool-calling-and-reasoning/reasoning-parsing.mdx
           - page: Troubleshooting Tool Calls
             path: pages/use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md
       - section: Many-Model Serving
@@ -841,6 +845,9 @@ navigation:
             skip-slug: true
             collapsed: true
             contents:
+              - page: Kimi-K3.1-Pro
+                path: pages/recipes/model-recipes/kimi-k3-1-pro.mdx
+                slug: kimi-k3-1-pro
               - page: Kimi-K3
                 path: pages/recipes/model-recipes/kimi-k3.mdx
                 slug: kimi-k3
@@ -898,6 +905,9 @@ navigation:
               - page: Nemotron 3.5 Lightning
                 path: pages/recipes/model-recipes/nemotron-3-5-lightning.mdx
                 slug: nemotron-3-5-lightning
+              - page: Cosmos3 Nano Reasoner
+                path: pages/recipes/model-recipes/cosmos3-nano-reasoner.mdx
+                slug: cosmos3-nano-reasoner
               - page: Nemotron 3 Ultra
                 path: pages/recipes/model-recipes/nemotron-3-ultra.mdx
                 slug: nemotron-3-ultra
@@ -963,6 +973,13 @@ navigation:
               - page: MiniMax M3
                 path: pages/recipes/model-recipes/minimax-m3.mdx
                 slug: minimax-m3
+          - section: Mistral AI
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: Mistral Large 4
+                path: pages/recipes/model-recipes/mistral-large-4.mdx
+                slug: mistral-large-4
           - section: Motif Technologies
             skip-slug: true
             collapsed: true

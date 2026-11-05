@@ -13,7 +13,10 @@ use super::extra_keys::{extra_keys_to_block_mm_infos, extra_keys_to_cache_namesp
 use super::filter::{
     BlockStoredTrailingField, KvCacheEventMetadata, KvCacheEventTrailingField, KvCacheSpecKind,
 };
-use super::types::{BlockHashValue, ExtraKeyItem, KvTokenIds, Locality, RawKvEvent};
+use super::trtllm::{self, MapTokenIds};
+use super::types::{
+    BlockHashValue, ExtraKeyItem, KvTokenIds, Locality, RawKvEvent, WIDE_TOKEN_SENTINEL,
+};
 
 /// Our producers use msgspec with `tag=True` and `array_like=True`, which
 /// encodes each event as either a tagged map or a tagged tuple. To be tolerant of
@@ -55,7 +58,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut event_type: Option<String> = None;
         let mut block_hashes: Option<Vec<BlockHashValue>> = None;
         let mut parent_block_hash: Option<Option<BlockHashValue>> = None;
-        let mut token_ids: Option<KvTokenIds> = None;
+        let mut token_ids: Option<MapTokenIds> = None;
+        let mut trtllm_routing: Option<trtllm::RoutingMetadata> = None;
+        let mut mm_keys: Option<trtllm::RoutingKeys> = None;
         let mut block_size: Option<usize> = None;
         let mut medium: Option<Option<String>> = None;
         let mut lora_name: Option<Option<String>> = None;
@@ -80,6 +85,12 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 }
                 "token_ids" => {
                     token_ids = Some(map.next_value()?);
+                }
+                "mm_keys" => {
+                    mm_keys = map.next_value()?;
+                }
+                "trtllm_image_routing" => {
+                    trtllm_routing = map.next_value()?;
                 }
                 "block_size" => {
                     block_size = Some(map.next_value()?);
@@ -128,9 +139,24 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let block_hashes =
                     block_hashes.ok_or_else(|| de::Error::missing_field("block_hashes"))?;
                 let token_ids = token_ids.ok_or_else(|| de::Error::missing_field("token_ids"))?;
-                let (raw_token_ids, is_eagle) = normalize_token_ids(token_ids);
                 let block_size =
                     block_size.ok_or_else(|| de::Error::missing_field("block_size"))?;
+                let (raw_token_ids, is_eagle) = match (token_ids, trtllm_routing) {
+                    (MapTokenIds::Plain(ids), None) => normalize_token_ids(ids),
+                    (ids, Some(metadata)) => {
+                        let Some(tokens) = trtllm::token_ids(
+                            ids,
+                            metadata,
+                            mm_keys,
+                            block_size,
+                            block_hashes.len(),
+                        ) else {
+                            return Ok(RawKvEvent::Ignored);
+                        };
+                        (tokens, false)
+                    }
+                    _ => return Ok(RawKvEvent::Ignored),
+                };
                 let medium = normalize_medium(medium.unwrap_or(None));
                 let lora_name = lora_name.unwrap_or(None);
                 let extra_keys = extra_keys.unwrap_or(None);
@@ -498,14 +524,20 @@ fn normalize_medium(medium: Option<String>) -> Option<String> {
     medium.filter(|value| !value.is_empty())
 }
 
+fn narrow_token_id(token_id: u64) -> u32 {
+    u32::try_from(token_id).unwrap_or(WIDE_TOKEN_SENTINEL)
+}
+
 fn normalize_token_ids(token_ids: KvTokenIds) -> (Vec<u32>, bool) {
     match token_ids {
-        KvTokenIds::Single(tids) => (tids, false),
+        KvTokenIds::Single(tids) => (tids.into_iter().map(narrow_token_id).collect(), false),
         KvTokenIds::Bigram(tids) => {
-            let mut new_tids: Vec<u32> = tids.iter().map(|&(first, _)| first).collect();
-            if !tids.is_empty() {
-                let last_token = tids.last().map(|&(_, second)| second).unwrap();
-                new_tids.push(last_token);
+            let mut new_tids: Vec<u32> = tids
+                .iter()
+                .map(|&(first, _)| narrow_token_id(first))
+                .collect();
+            if let Some(&(_, last_token)) = tids.last() {
+                new_tids.push(narrow_token_id(last_token));
             }
             (new_tids, true)
         }

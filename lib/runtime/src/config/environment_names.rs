@@ -421,6 +421,20 @@ pub mod llm {
     /// Enable the experimental Anthropic Messages API endpoint (/v1/messages)
     pub const DYN_ENABLE_ANTHROPIC_API: &str = "DYN_ENABLE_ANTHROPIC_API";
 
+    /// Enable the experimental System One typed-decisions endpoint (/v1/systemone)
+    pub const DYN_ENABLE_SYSTEMONE_API: &str = "DYN_ENABLE_SYSTEMONE_API";
+
+    /// Maximum concurrent System One question branches (default 256, ceiling 4,096).
+    /// Increases above the default warn; values above the ceiling warn and clamp.
+    pub const DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES: &str = "DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES";
+
+    /// Maximum cumulative prompt tokens per System One request (default 65,536, ceiling 1,048,576).
+    /// Context and tokenization-work limits apply independently; increases warn, above-ceiling values clamp.
+    pub const DYN_SYSTEMONE_MAX_INPUT_TOKENS: &str = "DYN_SYSTEMONE_MAX_INPUT_TOKENS";
+    /// Total decision preflight and execution deadline (default 300 seconds, ceiling 3,600).
+    /// Increases above the default warn; values above the ceiling warn and clamp.
+    pub const DYN_SYSTEMONE_REQUEST_TIMEOUT_SECS: &str = "DYN_SYSTEMONE_REQUEST_TIMEOUT_SECS";
+
     /// Master switch for the `nvext` extension protocol on the frontend.
     /// The protocol is **enabled by default**; this variable disables it.
     /// Truthy values (`1` / `true` / `yes` / `on`, case-insensitive) cause
@@ -442,16 +456,32 @@ pub mod llm {
         "DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION";
 
     /// Master switch for the frontend's HTTP admin API surface.
-    /// The admin API is **enabled by default**; this variable disables it.
-    /// Truthy values (`1` / `true` / `yes` / `on`, case-insensitive) prevent
-    /// registration of `GET` / `POST /busy_threshold`. Inference, metrics,
-    /// models, health, and liveness routes are unaffected.
-    pub const DYN_DISABLE_FRONTEND_ADMIN_API: &str = "DYN_DISABLE_FRONTEND_ADMIN_API";
+    /// The admin API is **disabled by default**. Truthy values (`1` / `true` / `yes` /
+    /// `on`, case-insensitive) start the admin listener (see `DYN_FRONTEND_ADMIN_HOST` /
+    /// `DYN_FRONTEND_ADMIN_PORT`), which serves `/router_policy`, its busy-threshold
+    /// subresource, and the legacy `/busy_threshold` routes.
+    pub const DYN_ENABLE_FRONTEND_ADMIN_API: &str = "DYN_ENABLE_FRONTEND_ADMIN_API";
+
+    /// Host the frontend admin listener binds to. Default `127.0.0.1`.
+    pub const DYN_FRONTEND_ADMIN_HOST: &str = "DYN_FRONTEND_ADMIN_HOST";
+
+    /// Port of the frontend admin listener. Default `8002`. When the admin API is
+    /// enabled and this port cannot be bound, startup aborts.
+    pub const DYN_FRONTEND_ADMIN_PORT: &str = "DYN_FRONTEND_ADMIN_PORT";
 
     /// Strip the Claude Code billing preamble (`x-anthropic-billing-header: ...`)
     /// from the system prompt before forwarding to the target model. The preamble
     /// varies per session and per release, wasting tokens and breaking prompt caching.
     pub const DYN_STRIP_ANTHROPIC_PREAMBLE: &str = "DYN_STRIP_ANTHROPIC_PREAMBLE";
+
+    /// When truthy, refuse chat requests that carry image, video, or audio
+    /// content in any message before they are routed. For frontends serving
+    /// text-only models.
+    pub const DYN_REJECT_MEDIA: &str = "DYN_REJECT_MEDIA";
+
+    /// HTTP status (4xx or 5xx) for a request refused by `DYN_REJECT_MEDIA`.
+    /// Defaults to 415.
+    pub const DYN_REJECT_MEDIA_STATUS_CODE: &str = "DYN_REJECT_MEDIA_STATUS_CODE";
 
     /// When truthy, force usage in streaming chat and text-completion responses
     /// regardless of the request's `stream_options.include_usage` value.
@@ -915,7 +945,7 @@ pub mod response_plane {
     /// service also listens on TCP, so a frontend and worker set differently
     /// still reach each other, and the worker reports the mismatch.
     pub const DYN_VELO_RESPONSE_TRANSPORT: &str = "DYN_VELO_RESPONSE_TRANSPORT";
-    /// Maximum Velo response batching delay in milliseconds (default: 5).
+    /// Maximum Velo response batching delay in milliseconds (default: 2).
     /// Set to 0 for greedy flushing after transport admission. Full batches and
     /// lifecycle records can flush sooner. Read once when the service starts.
     pub const DYN_VELO_RESPONSE_BATCH_MS: &str = "DYN_VELO_RESPONSE_BATCH_MS";
@@ -1208,11 +1238,19 @@ mod tests {
             llm::DYN_LORA_PATH,
             llm::DYN_ENABLE_ANTHROPIC_API,
             llm::DYN_SERVING_LOAD_PUBLISH,
+            llm::DYN_ENABLE_SYSTEMONE_API,
+            llm::DYN_SYSTEMONE_MAX_INFLIGHT_BRANCHES,
+            llm::DYN_SYSTEMONE_MAX_INPUT_TOKENS,
+            llm::DYN_SYSTEMONE_REQUEST_TIMEOUT_SECS,
             llm::DYN_DISABLE_FRONTEND_NVEXT,
             llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
             llm::DYN_DISABLE_OPENAI_STRICT_SCHEMA_VALIDATION,
-            llm::DYN_DISABLE_FRONTEND_ADMIN_API,
+            llm::DYN_ENABLE_FRONTEND_ADMIN_API,
+            llm::DYN_FRONTEND_ADMIN_HOST,
+            llm::DYN_FRONTEND_ADMIN_PORT,
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
+            llm::DYN_REJECT_MEDIA,
+            llm::DYN_REJECT_MEDIA_STATUS_CODE,
             llm::DYN_ENABLE_FORCE_INCLUDE_USAGE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,

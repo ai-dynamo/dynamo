@@ -19701,9 +19701,10 @@ spec:
                     runtime image. Paths below are relative to the component spec.
                     Use extraPodSpec.initContainers[name=runtime].image when the Dynamo runtime sidecar
                     is present, otherwise extraPodSpec.mainContainer.image, or the main image in each
-                    selected role PodTemplate. DGD admission requires it when any selected runtime image has no parseable
-                    semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is
-                    not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".
+                    selected role PodTemplate. For frontend, worker, prefill, decode, planner, and epp components,
+                    DGD admission requires it when any selected runtime image has no parseable semantic-version tag;
+                    controller-generated DCDs may omit it. Untyped components and custom component types do not require it.
+                    Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".
                     It does not change the image. Setting or changing an override that resolves to version 1.5.0 or
                     later may trigger a rollout. Keep it consistent with every selected template's runtime version.
                   pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
@@ -20632,8 +20633,7 @@ spec:
                     include a non-empty image and restartPolicy: Always.
 
                     Sidecar mode supports worker, prefill, and decode components.
-                    Multinode sidecars currently support only backendFramework: sglang.
-                    Multinode support for vLLM and TensorRT-LLM is planned.
+                    Multinode sidecars support backendFramework: sglang, vllm, and trtllm.
                     Multinode sidecars require complete leader and worker roles[].podTemplate
                     definitions instead of this shared template.
                     The leader must declare a runtime init container. The worker may omit it.
@@ -37015,10 +37015,11 @@ spec:
                     including for roles without a runtime init container.
                     This field does not change container images.
 
-                    For non-LPX components, DGD admission requires this field when any runtime
-                    image tag lacks a parseable semantic version. Controller-generated DCDs may
-                    omit it. An override is also needed when the parsed tag differs from the
-                    Dynamo runtime version.
+                    For frontend, worker, prefill, decode, planner, and epp components, DGD
+                    admission requires this field when any runtime image tag lacks a parseable
+                    semantic version. Components without a type and controller-generated DCDs
+                    may omit it. An override is also needed when the parsed tag differs from
+                    the Dynamo runtime version.
 
                     The value must use canonical MAJOR.MINOR.PATCH format, for example "1.4.0",
                     and match the Dynamo version in every affected runtime container.

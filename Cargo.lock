@@ -34,9 +34,9 @@ dependencies = [
 
 [[package]]
 name = "aisimulate-core"
-version = "0.13.0-dev.202610280000000086"
+version = "0.13.0-dev.202610290000000087"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2149f65333729153bc6f89b30b2adca4cd58c7ddcc6f9ed6ce0a07cdf66f1cba"
+checksum = "eb823782e806dd74cba719906a6b828b86f415aad54c6d5016c29ff278e89319"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -2328,24 +2328,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-custom-policy-builtin"
-version = "1.7.0"
-dependencies = [
- "async-trait",
- "criterion",
- "dynamo-kv-router",
- "fastrand",
- "parking_lot",
- "rustc-hash 2.1.2",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "dynamo-custom-policy-example-catalog"
 version = "1.7.0"
 dependencies = [
@@ -2415,6 +2397,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-decisions"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a45fccc7c4e78332eca3b9d1580bed699db2dea71d0b67a6ae1232472dd6b71f"
+dependencies = [
+ "dynamo-protocols",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "dynamo-epp-sidecar"
 version = "1.7.0"
 dependencies = [
@@ -2442,10 +2436,10 @@ dependencies = [
  "axum 0.8.4",
  "bytes",
  "dashmap",
- "dynamo-custom-policy-builtin",
  "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-protocols",
+ "dynamo-router-policies",
  "dynamo-runtime",
  "futures",
  "hyper-util",
@@ -2477,43 +2471,157 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-generate-format-catalog"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.8.4",
+ "dynamo-llm",
+ "dynamo-runtime",
+ "dynamo-sglang-generate",
+ "dynamo-vllm-generate",
+ "futures",
+ "prometheus",
+ "serde_json",
+ "tokio",
+ "tower 0.5.3",
+ "uuid",
+]
+
+[[package]]
 name = "dynamo-global-common"
 version = "1.7.0"
+dependencies = [
+ "blake3",
+ "prost 0.13.5",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
+ "url",
+]
 
 [[package]]
 name = "dynamo-global-discovery-client"
 version = "1.7.0"
 dependencies = [
  "axum 0.8.4",
+ "dynamo-global-common",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
+ "tracing",
  "url",
 ]
 
 [[package]]
 name = "dynamo-global-discovery-service"
 version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "axum 0.8.4",
+ "clap",
+ "dynamo-global-common",
+ "dynamo-global-discovery-client",
+ "dynamo-http-server",
+ "dynamo-runtime",
+ "futures",
+ "k8s-openapi",
+ "kube",
+ "reqwest 0.12.28",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+]
 
 [[package]]
 name = "dynamo-global-frontend"
 version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "axum 0.8.4",
+ "clap",
+ "dynamo-global-common",
+ "dynamo-global-discovery-client",
+ "dynamo-global-router",
+ "dynamo-global-view-broadcaster",
+ "dynamo-global-view-receiver",
+ "dynamo-llm",
+ "dynamo-runtime",
+ "futures",
+ "hyper-util",
+ "parking_lot",
+ "prometheus",
+ "prost 0.13.5",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic 0.13.1",
+ "tracing",
+ "url",
+]
 
 [[package]]
 name = "dynamo-global-router"
 version = "1.7.0"
+dependencies = [
+ "dashmap",
+ "dynamo-global-common",
+ "parking_lot",
+ "url",
+]
 
 [[package]]
 name = "dynamo-global-view-broadcaster"
 version = "1.7.0"
+dependencies = [
+ "parking_lot",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
 
 [[package]]
 name = "dynamo-global-view-receiver"
 version = "1.7.0"
 dependencies = [
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "dynamo-http-server"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "axum 0.8.4",
+ "dynamo-runtime",
+ "futures",
+ "hyper-util",
+ "parking_lot",
+ "prometheus",
+ "rand 0.9.4",
+ "rcgen",
+ "rustls",
+ "serde",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tower 0.5.3",
+ "tracing",
 ]
 
 [[package]]
@@ -2611,7 +2719,10 @@ dependencies = [
  "derive_builder",
  "dialoguer",
  "dynamo-bench",
- "dynamo-custom-policy-builtin",
+ "dynamo-decisions",
+ "dynamo-global-common",
+ "dynamo-global-discovery-client",
+ "dynamo-global-view-broadcaster",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
@@ -2620,6 +2731,7 @@ dependencies = [
  "dynamo-protocols",
  "dynamo-renderer",
  "dynamo-rl",
+ "dynamo-router-policies",
  "dynamo-runtime",
  "dynamo-tokenizers",
  "dynamo-tokens",
@@ -2704,6 +2816,7 @@ dependencies = [
  "validator",
  "video-rs",
  "xxhash-rust",
+ "zmq",
 ]
 
 [[package]]
@@ -2759,8 +2872,8 @@ dependencies = [
  "blake3",
  "bytes",
  "dashmap",
- "dynamo-custom-policy-builtin",
  "dynamo-kv-router",
+ "dynamo-router-policies",
  "dynamo-tokens",
  "futures",
  "ndarray 0.16.1",
@@ -2831,9 +2944,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.7.35"
+version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "561fd41706eeccdad858e90702f736a35020d7c3761c5c6e7dbb47a83bf1a59f"
+checksum = "39a2994e0e7238971e992f71da0860165557a5a1e2318d61558190bed49e51ed"
 dependencies = [
  "anyhow",
  "dynamo-structural-tag",
@@ -2868,9 +2981,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "8.0.3"
+version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "144979b6e4a9fe44556c02ea92d17413d803b704de73e1f1f8255da9ce9dd99d"
+checksum = "a9e6a7ebe51c63049c4088131c3e8bfe5687fafb699e659fda20728b34e4dc31"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2899,6 +3012,24 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "dynamo-router-policies"
+version = "1.7.0"
+dependencies = [
+ "async-trait",
+ "criterion",
+ "dynamo-kv-router",
+ "fastrand",
+ "parking_lot",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2992,6 +3123,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-sglang-generate"
+version = "1.7.0"
+dependencies = [
+ "axum 0.8.4",
+ "base64 0.22.1",
+ "dynamo-llm",
+ "dynamo-protocols",
+ "dynamo-runtime",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-sglang-mocker"
 version = "1.7.0"
 dependencies = [
@@ -3026,6 +3172,7 @@ dependencies = [
  "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-runtime",
+ "dynamo-sglang-generate",
  "dynamo-sidecar-common",
  "futures",
  "prost 0.13.5",
@@ -3102,6 +3249,7 @@ dependencies = [
  "tokio-util",
  "tonic 0.13.1",
  "tonic 0.14.6",
+ "tonic-health 0.13.1",
  "tonic-health 0.14.6",
 ]
 
@@ -3190,6 +3338,7 @@ dependencies = [
  "async-trait",
  "clap",
  "dynamo-backend-common",
+ "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-runtime",
  "dynamo-sidecar-common",
@@ -3205,6 +3354,7 @@ dependencies = [
  "tokio-util",
  "tonic 0.13.1",
  "tonic-build 0.13.1",
+ "tonic-health 0.13.1",
  "tracing",
 ]
 
@@ -3213,6 +3363,22 @@ name = "dynamo-truthy"
 version = "1.7.0"
 dependencies = [
  "anyhow",
+]
+
+[[package]]
+name = "dynamo-vllm-generate"
+version = "1.7.0"
+dependencies = [
+ "anyhow",
+ "axum 0.8.4",
+ "base64 0.22.1",
+ "dynamo-kv-router",
+ "dynamo-llm",
+ "dynamo-protocols",
+ "dynamo-runtime",
+ "serde",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -3255,6 +3421,7 @@ dependencies = [
  "dynamo-llm",
  "dynamo-runtime",
  "dynamo-sidecar-common",
+ "dynamo-vllm-generate",
  "futures",
  "prost-types 0.14.3",
  "reqwest 0.12.28",
@@ -10776,9 +10943,9 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "velo"
-version = "0.20.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "453d58e5ca96c625d763468579fc1088e406abbb02e616714bf12433d109651f"
+checksum = "97c3940b2cf9b4a7a9ea6afd56520ee21eb46272b5442d3105274b4298404b4b"
 dependencies = [
  "anyhow",
  "async-stream",

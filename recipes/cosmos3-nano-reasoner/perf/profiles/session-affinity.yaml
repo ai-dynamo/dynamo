@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cosmos3-nano-reasoner-perf-profile
+  labels:
+    app.kubernetes.io/name: cosmos3-nano-reasoner
+    app.kubernetes.io/component: benchmark-profile
+data:
+  BENCHMARK_VARIANT: session-affinity
+  ENDPOINT: cosmos3-nano-reasoner-agg-h200-session-affinity-frontend:8000
+  SESSION_AFFINITY: "1"
