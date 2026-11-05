@@ -9865,6 +9865,7 @@ func TestGenerateComponentService_DNS1035Name(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Generate the component Service")
 			svc, err := GenerateComponentService(ComponentServiceParams{
 				ServiceName:     tt.input,
 				Namespace:       "default",
@@ -9874,6 +9875,7 @@ func TestGenerateComponentService_DNS1035Name(t *testing.T) {
 			})
 			require.NoError(t, err)
 
+			t.Log("Check that the name is a DNS-1035 label and matches ComponentServiceName")
 			assert.Empty(t, validation.IsDNS1035Label(svc.Name), "Service name %q", svc.Name)
 			assert.Equal(t, ComponentServiceName(tt.input), svc.Name)
 			if tt.want != "" {
@@ -9897,6 +9899,7 @@ func TestGenerateComponentService_DNS1035Name(t *testing.T) {
 // gives it; the referring objects keep their own names.
 func TestComponentServiceReferences_DigitLeadingName(t *testing.T) {
 	const name = "70b-llama-production"
+	t.Log("Generate the component Service for a digit-leading name")
 	svc, err := GenerateComponentService(ComponentServiceParams{
 		ServiceName:     name,
 		Namespace:       "default",
@@ -9907,6 +9910,7 @@ func TestComponentServiceReferences_DigitLeadingName(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, validation.IsDNS1035Label(svc.Name))
 
+	t.Log("Check that the Ingress and VirtualService route to that Service")
 	ingressSpec := IngressSpec{
 		Enabled:               true,
 		Host:                  "example",
@@ -9928,6 +9932,7 @@ func TestComponentServiceReferences_DigitLeadingName(t *testing.T) {
 	assert.Equal(t, name, virtualService.Name)
 	assert.Equal(t, svc.Name, virtualService.Spec.Http[0].Route[0].Destination.Host)
 
+	t.Log("Check that the EPP DestinationRule and elastic-EP leader Service use that name")
 	mesh := configv1alpha1.ServiceMeshConfiguration{
 		Provider: string(configv1alpha1.ServiceMeshProviderIstio),
 		Istio:    &configv1alpha1.IstioMeshConfiguration{},
