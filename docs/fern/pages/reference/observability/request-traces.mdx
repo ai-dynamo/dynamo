@@ -14,7 +14,7 @@ one or more sinks. For the capture and replay workflow, see
 | Variable | Default when enabled | Values | Description |
 | --- | --- | --- | --- |
 | `DYN_REQUEST_TRACE` | unset | Truthy value | Master switch. When enabled and `DYN_REQUEST_TRACE_RECORDS` is unset, emits `request_end,tool`. |
-| `DYN_REQUEST_TRACE_RECORDS` | `request_end,tool` | `request_end`, `request_payload`, `tool`, `router_selection` | Comma-separated record types. Setting the variable enables only the listed types. |
+| `DYN_REQUEST_TRACE_RECORDS` | `request_end,tool` | `request_start`, `request_end`, `request_payload`, `tool`, `router_selection` | Comma-separated record types. Setting the variable enables only the listed types. |
 | `DYN_REQUEST_TRACE_SINKS` | `file` | `file`, `stderr`, `nats`, `otel`, `s3` | Comma-separated sinks. |
 | `DYN_REQUEST_TRACE_FILE_PATH` | `/tmp/dynamo-request-trace` | Path or prefix | Literal path for `jsonl`; segment prefix for `jsonl_gz`. |
 | `DYN_REQUEST_TRACE_FILE_FORMAT` | `jsonl_gz` | `jsonl`, `jsonl_gz` | File encoding and rotation mode. |
@@ -86,9 +86,22 @@ feature. Shipped Dynamo Python wheels enable it; local source builds pass
 
 ## Record Types
 
+### `request_start`
+
+Opt-in with `DYN_REQUEST_TRACE_RECORDS=request_start,request_end`. Dynamo emits one row per eligible request when it finishes preprocessing, before it dispatches the request, so a consumer sees the prompt's KV blocks when the request arrives. The row carries `request_id`, `x_request_id`, `model`, `input_tokens`, `request_received_ms`, and `routing_hashes`:
+
+- `local_block_hashes`: one hash per full prompt block, unchained, as the KV router computes them for worker selection.
+- `sequence_hashes`: the same blocks, chained.
+
+These hashes use the request's cache salt and LoRA name, and the model's EAGLE block layout, as the router does. They are the keys of the engine's KV events. For a request with no salt and no LoRA adapter, on a model without EAGLE, `sequence_hashes` equals the first full blocks of the `request_end` row's `input_sequence_hashes`. Otherwise they differ, because `request_end` hashes with default options. Join the two rows on `request_id`.
+
+A row holds two 8-byte hashes per full block, for example 128 KiB in memory for a 131,072-token prompt with 16-token blocks. It takes one slot of the bounded trace bus, like any other row. When a sink falls behind, the bus drops rows and the sink logs how many.
+
 ### `request_end`
 
 Contains compact replay metadata and, when available, per-request timing and KV-cache metrics. Session headers add session identity, finish metadata, and tool-call metadata. Session identity does not enable sticky routing.
+
+Every row carries the request's `model`. When the client sends an `x-request-id` header, the row carries it as `x_request_id`. Dynamo assigns its own `request_id`, so `x_request_id` is the key a client uses to join rows to its own records.
 
 Requests with recognized session identity also include captured raw headers in `agent_context.agent_headers`. This map is emitted independently of `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST` and does not require `request_payload` capture. Values are unredacted and may contain arbitrary client data; metadata-only tracing is not a content-sanitization guarantee. Do not send credentials, secrets, or prompt content in agent metadata headers. See [Agent Harnesses](../../use-cases/agents/agent-harnesses.mdx#agent-headers) for the captured header families, exclusions, and size limits.
 
@@ -195,7 +208,7 @@ internal IDs while loading the original trace; it does not create an intermediat
 
 ## Supported Replay Requests
 
-Context-free replay rows must represent one model request. Dynamo skips requests with `n > 1`,
+Context-free replay rows must represent one model request. `request_start` follows the same rules. Dynamo skips requests with `n > 1`,
 `best_of > 1`, prompt embeddings, multimodal inputs, or no usable tracker and KV cache block size.
 Session context does not bypass these checks.
 

@@ -38,6 +38,8 @@ pub enum RequestTraceSchema {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RequestTraceEventType {
+    #[serde(rename = "request_start")]
+    RequestStart,
     #[serde(rename = "request_end")]
     RequestEnd,
     #[serde(rename = "tool_start")]
@@ -99,7 +101,7 @@ pub enum RequestTraceEventSource {
     Harness,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RequestTraceMetrics {
     pub request_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -134,6 +136,9 @@ pub struct RequestTraceMetrics {
     pub worker: Option<RequestTraceWorkerInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replay: Option<RequestReplayMetrics>,
+    /// Set on `request_start` rows only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_hashes: Option<RequestRoutingHashes>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finish_reason_metadata: Option<FinishReasonMetadata>,
 }
@@ -143,6 +148,21 @@ pub struct RequestReplayMetrics {
     pub trace_block_size: usize,
     pub input_length: usize,
     pub input_sequence_hashes: Vec<u64>,
+}
+
+/// The prompt's KV block hashes as the KV router computes them for worker
+/// selection: with the request's cache salt and LoRA name and the model's
+/// EAGLE block layout, so they equal the keys of the engine's KV events.
+/// Full blocks only. `replay.input_sequence_hashes` on `request_end` uses
+/// default hash options instead, so the two differ for salted, LoRA, and EAGLE
+/// requests.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RequestRoutingHashes {
+    pub block_size: usize,
+    /// One unchained hash per full block (the router's `LocalBlockHash`).
+    pub local_block_hashes: Vec<u64>,
+    /// `local_block_hashes` chained with `compute_seq_hash_for_block`.
+    pub sequence_hashes: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -359,6 +379,7 @@ mod tests {
                     input_length: 4,
                     input_sequence_hashes: vec![11, 22],
                 }),
+                routing_hashes: None,
                 finish_reason_metadata: None,
             }),
             tool: None,
