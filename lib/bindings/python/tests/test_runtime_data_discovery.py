@@ -121,6 +121,33 @@ async def test_wait_for_instance_by_runtime_data_times_out_without_match(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(10)
+@pytest.mark.parametrize("timeout_s", [-1.0, float("nan"), float("inf"), 1e300])
+async def test_wait_for_runtime_data_rejects_invalid_timeout(
+    temp_file_store, timeout_s
+):
+    resolver = _runtime()
+    try:
+        client = await resolver.endpoint(ENDPOINT_PATH).client()
+
+        with pytest.raises(ValueError, match="timeout_s is not a valid duration"):
+            await client.wait_for_instance_by_runtime_data(
+                SGLANG_WORKER_GROUP_ID_KEY,
+                "group-a",
+                timeout_s=timeout_s,
+            )
+        with pytest.raises(ValueError, match="timeout_s is not a valid duration"):
+            await client.wait_for_instances_by_runtime_data(
+                SGLANG_WORKER_GROUP_ID_KEY,
+                "group-a",
+                1,
+                timeout_s=timeout_s,
+            )
+    finally:
+        resolver.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_wait_for_instance_by_runtime_data_times_out_on_duplicate_match(
     temp_file_store,
 ):

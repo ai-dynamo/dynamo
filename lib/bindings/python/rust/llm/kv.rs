@@ -478,10 +478,40 @@ mod select_service_cli_tests {
             cli.selection_cache_ttl_secs,
             cli.selection_cache_max_entries,
             cli.selection_cache_max_bytes,
-        );
+        )
+        .unwrap();
         assert_eq!(config.ttl, std::time::Duration::from_secs(30));
         assert_eq!(config.max_entries, 100);
         assert_eq!(config.max_bytes, 1_048_576);
+    }
+
+    #[test]
+    fn selection_cache_ttl_rejects_unrepresentable_durations() {
+        for ttl in ["-1", "NaN", "inf", "1e300"] {
+            let cli = SelectServiceCli::try_parse_from([
+                "dynamo.select_service",
+                &format!("--selection-cache-ttl-secs={ttl}"),
+            ])
+            .unwrap();
+            let error =
+                selection_cache_config_from_overrides(cli.selection_cache_ttl_secs, None, None)
+                    .unwrap_err();
+            assert!(
+                error.contains("selection_cache_ttl_secs is not a valid duration"),
+                "ttl {ttl}: {error}"
+            );
+        }
+
+        for (ttl, expected) in [
+            (0.0, std::time::Duration::ZERO),
+            (0.125, std::time::Duration::from_millis(125)),
+        ] {
+            let config = selection_cache_config_from_overrides(Some(ttl), None, None).unwrap();
+            assert_eq!(config.ttl, expected);
+        }
+
+        let config = selection_cache_config_from_overrides(None, None, None).unwrap();
+        assert_eq!(config.ttl, RsSelectionCacheConfig::default().ttl);
     }
 
     #[test]
@@ -570,7 +600,8 @@ where
             cli.selection_cache_ttl_secs,
             cli.selection_cache_max_entries,
             cli.selection_cache_max_bytes,
-        ),
+        )
+        .map_err(anyhow::Error::msg)?,
     };
     let builder = config.service_builder(WorkerType::Aggregated, policy_registry);
     let rt = tokio::runtime::Runtime::new()?;
@@ -664,16 +695,19 @@ fn selection_to_pyerr(err: SelectionError) -> PyErr {
 
 /// Build a [`RsSelectionCacheConfig`] from optional overrides, falling back to
 /// the service default for each field left unset. Shared by the Python
-/// `SelectionCacheConfig` and the `dynamo.select_service` CLI.
+/// `SelectionCacheConfig` and the `dynamo.select_service` CLI. Rejects a TTL
+/// that is negative, NaN, infinite, or too large for a `Duration`.
 #[cfg(feature = "select-service")]
 fn selection_cache_config_from_overrides(
     ttl_secs: Option<f64>,
     max_entries: Option<usize>,
     max_bytes: Option<usize>,
-) -> RsSelectionCacheConfig {
+) -> Result<RsSelectionCacheConfig, String> {
     let mut config = RsSelectionCacheConfig::default();
     if let Some(ttl_secs) = ttl_secs {
-        config.ttl = std::time::Duration::from_secs_f64(ttl_secs);
+        config.ttl = Duration::try_from_secs_f64(ttl_secs).map_err(|error| {
+            format!("selection_cache_ttl_secs is not a valid duration: {error}")
+        })?;
     }
     if let Some(max_entries) = max_entries {
         config.max_entries = max_entries;
@@ -681,7 +715,7 @@ fn selection_cache_config_from_overrides(
     if let Some(max_bytes) = max_bytes {
         config.max_bytes = max_bytes;
     }
-    config
+    Ok(config)
 }
 
 /// Bounds for the in-flight selection cache. Each field defaults to the
@@ -698,10 +732,15 @@ pub(crate) struct SelectionCacheConfig {
 impl SelectionCacheConfig {
     #[new]
     #[pyo3(signature = (*, ttl_secs = None, max_entries = None, max_bytes = None))]
-    fn new(ttl_secs: Option<f64>, max_entries: Option<usize>, max_bytes: Option<usize>) -> Self {
-        Self {
-            inner: selection_cache_config_from_overrides(ttl_secs, max_entries, max_bytes),
-        }
+    fn new(
+        ttl_secs: Option<f64>,
+        max_entries: Option<usize>,
+        max_bytes: Option<usize>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            inner: selection_cache_config_from_overrides(ttl_secs, max_entries, max_bytes)
+                .map_err(PyValueError::new_err)?,
+        })
     }
 }
 
