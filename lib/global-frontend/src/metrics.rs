@@ -51,40 +51,87 @@ pub struct Metrics {
     scrape: Mutex<()>,
 }
 
-/// Where one exported affinity series reads its cumulative count.
-type Series = (&'static str, fn(&AffinityCounters) -> &AtomicU64);
+/// Where the affinity path keeps its cumulative counts.
+#[derive(Debug)]
+struct Sources {
+    stats: Arc<AffinityStats>,
+    cache: Arc<CacheStats>,
+}
 
-/// How a request's affinity work ended. `skipped` and `timeout` are the
-/// degraded path: `skipped` means the breaker was open and storage was never
-/// consulted, `timeout` that the deadline ran out first.
-const LOOKUPS: [Series; 7] = [
-    ("hit", |counters| &counters.stats.hits),
-    ("miss", |counters| &counters.stats.misses),
-    ("conflict", |counters| &counters.stats.conflicts),
-    ("error", |counters| &counters.stats.failures),
-    ("timeout", |counters| &counters.stats.timeouts),
-    ("skipped", |counters| &counters.stats.skipped),
-    ("repair", |counters| &counters.stats.repairs),
-];
+/// One exported series: its label value, and where it reads its cumulative
+/// count.
+type Series = (&'static str, fn(&Sources) -> &AtomicU64);
 
-/// Whether a lookup reached the backing store.
-const CACHE: [Series; 3] = [
-    ("hit", |counters| &counters.cache_stats.hits),
-    ("miss", |counters| &counters.cache_stats.misses),
-    ("invalidation", |counters| {
-        &counters.cache_stats.invalidations
-    }),
+/// One affinity counter family.
+struct Family {
+    suffix: &'static str,
+    help: &'static str,
+    label: &'static str,
+    series: &'static [Series],
+}
+
+const FAMILIES: [Family; 4] = [
+    Family {
+        suffix: "affinity_lookups_total",
+        help: "Session requests whose affinity lookup found a live pin among the \
+               candidates (hit) or not (miss)",
+        label: "outcome",
+        series: &[
+            ("hit", |sources| &sources.stats.hits),
+            ("miss", |sources| &sources.stats.misses),
+        ],
+    },
+    // Named after the local router's `dynamo_router_shared_cache_errors_total`.
+    // Every session request that routes without affinity counts once.
+    Family {
+        suffix: "affinity_store_errors_total",
+        help: "Session requests that routed without affinity, by why: the store \
+               failed (backend), ran out of budget (timeout), kept conflicting \
+               (conflict), or was not consulted because the breaker was open \
+               (breaker_open)",
+        label: "kind",
+        series: &[
+            ("backend", |sources| &sources.stats.failures),
+            ("timeout", |sources| &sources.stats.timeouts),
+            ("conflict", |sources| &sources.stats.conflicts),
+            ("breaker_open", |sources| &sources.stats.skipped),
+        ],
+    },
+    Family {
+        suffix: "affinity_store_writes_total",
+        help: "Conditional writes sent to the affinity store, by why: a session \
+               without a live pin (create), a session moving pools (move), a pin \
+               past half its idle window (refresh), or an undecodable record \
+               (repair)",
+        label: "reason",
+        series: &[
+            ("create", |sources| &sources.stats.creates),
+            ("move", |sources| &sources.stats.moves),
+            ("refresh", |sources| &sources.stats.refreshes),
+            ("repair", |sources| &sources.stats.repairs),
+        ],
+    },
+    Family {
+        suffix: "affinity_cache_total",
+        help: "Session affinity store reads, by whether the in-memory cache \
+               answered them, and cache entries invalidated",
+        label: "outcome",
+        series: &[
+            ("hit", |sources| &sources.cache.hits),
+            ("miss", |sources| &sources.cache.misses),
+            ("invalidation", |sources| &sources.cache.invalidations),
+        ],
+    },
 ];
 
 /// The affinity path keeps plain cumulative counters, which a scrape turns
 /// into Prometheus counters by adding what has arrived since the last one.
 #[derive(Debug)]
 struct AffinityCounters {
-    stats: Arc<AffinityStats>,
-    cache_stats: Arc<CacheStats>,
-    lookups: IntCounterVec,
-    cache: IntCounterVec,
-    /// What each series in `LOOKUPS` then `CACHE` last reported.
+    sources: Sources,
+    /// One per entry of `FAMILIES`, in order.
+    families: Vec<IntCounterVec>,
+    /// What each series, in `FAMILIES` order, last reported.
     reported: Mutex<Vec<u64>>,
 }
 
@@ -93,21 +140,45 @@ impl AffinityCounters {
     /// scrape lock, so no count is reported twice.
     fn drain(&self) {
         let mut reported = self.reported.lock().unwrap_or_else(PoisonError::into_inner);
-        let series = LOOKUPS
+        let series = FAMILIES
             .iter()
-            .map(|series| (&self.lookups, series))
-            .chain(CACHE.iter().map(|series| (&self.cache, series)));
-        for (index, (family, (outcome, count))) in series.enumerate() {
-            let current = count(self).load(Ordering::Relaxed);
+            .zip(&self.families)
+            .flat_map(|(family, counter)| {
+                family.series.iter().map(move |series| (counter, series))
+            });
+        for (index, (counter, (label, count))) in series.enumerate() {
+            let current = count(&self.sources).load(Ordering::Relaxed);
             // Saturating: these only ever grow, but a counter must never be
             // handed a negative delta.
             let arrived = current.saturating_sub(reported[index]);
             if arrived > 0 {
-                family.with_label_values(&[outcome]).inc_by(arrived);
+                counter.with_label_values(&[label]).inc_by(arrived);
                 reported[index] = current;
             }
         }
     }
+}
+
+/// The time each session request spent in affinity storage, in
+/// milliseconds, for [`AffinitySelector::with_store_timer`]. Pass it to
+/// [`Metrics::with_affinity`] to export it.
+///
+/// [`AffinitySelector::with_store_timer`]: dynamo_global_router::AffinitySelector::with_store_timer
+pub fn affinity_store_ms() -> Histogram {
+    // Named and bucketed like the local router's
+    // `dynamo_router_overhead_shared_cache_query_ms`, its own remote lookup on
+    // the request path, so the two can share a dashboard.
+    Histogram::with_opts(
+        HistogramOpts::new(
+            name("overhead_affinity_store_ms"),
+            "Time each session request spent in affinity storage (lookup, write \
+             and retry, up to --affinity-timeout-ms), in milliseconds",
+        )
+        .buckets(
+            prometheus::exponential_buckets(0.01, 3.0, 17).expect("buckets are statically valid"),
+        ),
+    )
+    .expect("metric options are statically valid")
 }
 
 impl Metrics {
@@ -199,40 +270,35 @@ impl Metrics {
         }
     }
 
-    /// Exports the affinity path's counters, including the degraded path:
-    /// requests that lost affinity to a storage error, to the deadline, or to
-    /// an open breaker, and how much of the lookup load the cache absorbed.
+    /// Exports the affinity path's metrics, including the degraded path:
+    /// requests that lost affinity to a storage error, to the deadline, to
+    /// conflicts or to an open breaker; why the store was written; how much
+    /// of the lookup load the cache absorbed; and `store_ms`, from
+    /// [`affinity_store_ms`], the time requests spent in storage.
     pub fn with_affinity(
         mut self,
         stats: Arc<AffinityStats>,
-        cache_stats: Arc<CacheStats>,
+        cache: Arc<CacheStats>,
+        store_ms: Histogram,
     ) -> Self {
-        let lookups = register(
-            &self.registry,
-            IntCounterVec::new(
-                Opts::new(
-                    name("affinity_lookups_total"),
-                    "Session affinity decisions, by how the request's affinity work ended",
-                ),
-                &["outcome"],
-            ),
-        );
-        let cache = register(
-            &self.registry,
-            IntCounterVec::new(
-                Opts::new(
-                    name("affinity_cache_total"),
-                    "Session affinity store reads, by whether the in-memory cache answered them",
-                ),
-                &["outcome"],
-            ),
-        );
+        let families = FAMILIES
+            .iter()
+            .map(|family| {
+                register(
+                    &self.registry,
+                    IntCounterVec::new(
+                        Opts::new(name(family.suffix), family.help),
+                        &[family.label],
+                    ),
+                )
+            })
+            .collect();
+        register(&self.registry, Ok(store_ms));
+        let series = FAMILIES.iter().map(|family| family.series.len()).sum();
         self.affinity = Some(AffinityCounters {
-            stats,
-            cache_stats,
-            lookups,
-            cache,
-            reported: Mutex::new(vec![0; LOOKUPS.len() + CACHE.len()]),
+            sources: Sources { stats, cache },
+            families,
+            reported: Mutex::new(vec![0; series]),
         });
         self
     }
@@ -362,5 +428,77 @@ impl ResponseMetrics {
 impl Drop for ResponseMetrics {
     fn drop(&mut self) {
         self.duration.observe(self.received.elapsed().as_secs_f64());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample<'a>(text: &'a str, series: &str) -> Option<&'a str> {
+        text.lines()
+            .find_map(|line| line.strip_prefix(series)?.strip_prefix(' '))
+    }
+
+    #[test]
+    fn affinity_counters_render_as_their_increase_since_the_last_scrape() {
+        let stats = Arc::new(AffinityStats::default());
+        let cache = Arc::new(CacheStats::default());
+        let store_ms = affinity_store_ms();
+        let metrics = Metrics::new(None, Arc::new(InFlightTracker::new())).with_affinity(
+            stats.clone(),
+            cache.clone(),
+            store_ms.clone(),
+        );
+        let pools = PoolSnapshot::new(Vec::new());
+        stats.hits.fetch_add(3, Ordering::Relaxed);
+        stats.timeouts.fetch_add(1, Ordering::Relaxed);
+        stats.skipped.fetch_add(2, Ordering::Relaxed);
+        stats.refreshes.fetch_add(1, Ordering::Relaxed);
+        cache.hits.fetch_add(5, Ordering::Relaxed);
+        store_ms.observe(0.5);
+        store_ms.observe(20.0);
+
+        let text = metrics.render(&pools).unwrap();
+        let expect = [
+            (
+                r#"dynamo_global_frontend_affinity_lookups_total{outcome="hit"}"#,
+                "3",
+            ),
+            (
+                r#"dynamo_global_frontend_affinity_store_errors_total{kind="timeout"}"#,
+                "1",
+            ),
+            (
+                r#"dynamo_global_frontend_affinity_store_errors_total{kind="breaker_open"}"#,
+                "2",
+            ),
+            (
+                r#"dynamo_global_frontend_affinity_store_writes_total{reason="refresh"}"#,
+                "1",
+            ),
+            (
+                r#"dynamo_global_frontend_affinity_cache_total{outcome="hit"}"#,
+                "5",
+            ),
+            (
+                "dynamo_global_frontend_overhead_affinity_store_ms_count",
+                "2",
+            ),
+        ];
+        for (series, value) in expect {
+            assert_eq!(sample(&text, series), Some(value), "{series}");
+        }
+
+        // A second scrape adds only what arrived since the first.
+        stats.hits.fetch_add(1, Ordering::Relaxed);
+        let text = metrics.render(&pools).unwrap();
+        assert_eq!(
+            sample(
+                &text,
+                r#"dynamo_global_frontend_affinity_lookups_total{outcome="hit"}"#
+            ),
+            Some("4")
+        );
     }
 }

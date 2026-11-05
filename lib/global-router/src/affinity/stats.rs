@@ -9,7 +9,8 @@ use std::sync::atomic::AtomicU64;
 ///
 /// These make the degraded path visible: `failures` and `timeouts` separate
 /// why affinity was lost, and `skipped` counts requests routed without
-/// consulting storage at all while the breaker was open.
+/// consulting storage at all while the breaker was open. The write counters
+/// add up to the writes sent to the store, by why each was needed.
 #[derive(Debug, Default)]
 pub struct AffinityStats {
     /// Lookups that returned a live binding.
@@ -24,7 +25,14 @@ pub struct AffinityStats {
     pub timeouts: AtomicU64,
     /// Requests routed without touching storage while the breaker was open.
     pub skipped: AtomicU64,
-    /// Records that no reader could decode and that were replaced.
+    /// Writes for a session with no live pin: a new or expired session.
+    pub creates: AtomicU64,
+    /// Writes that moved a pinned session to another pool.
+    pub moves: AtomicU64,
+    /// Writes that only pushed back the expiry of a pin past half its idle
+    /// window. A pin with more of its window left is not rewritten.
+    pub refreshes: AtomicU64,
+    /// Writes replacing a record that no reader could decode.
     pub repairs: AtomicU64,
 }
 

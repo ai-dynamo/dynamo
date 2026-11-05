@@ -13,8 +13,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use dynamo_global_common::{PoolIdDeriver, PoolKey, V1PoolIdDeriver};
 use dynamo_global_frontend::{
-    Metrics, PoolSnapshot, RelayGatedPoolCatalog, app, discover_pools, follow_relays,
-    measure_round_trips, serve, serve_relay_views,
+    Metrics, PoolSnapshot, RelayGatedPoolCatalog, affinity_store_ms, app, discover_pools,
+    follow_relays, measure_round_trips, serve, serve_relay_views,
 };
 use dynamo_global_router::{
     AffinitySelector, InFlightTracker, LeastInFlightSelector, Pool, PoolSelector, PoolSignals,
@@ -237,7 +237,7 @@ async fn main() -> Result<()> {
         .connect_timeout(Duration::from_secs(args.connect_timeout_secs))
         .build()
         .context("build the pool HTTP client")?;
-    // Only `affinity` has affinity counters to export.
+    // Only `affinity` has affinity metrics to export.
     let mut affinity_metrics = None;
     let selector: Arc<dyn PoolSelector> = match args.router_policy {
         RouterPolicy::RoundRobin => Arc::new(RoundRobinSelector::new()),
@@ -259,21 +259,28 @@ async fn main() -> Result<()> {
             let idle = Duration::from_secs(args.session_idle_secs);
             let (affinity, config, counters) =
                 args.affinity.build(idle, shutdown.child_token()).await?;
-            let selector = Arc::new(AffinitySelector::with_stats(
-                signals,
-                region,
-                args.headroom_factor,
-                affinity,
-                config,
-                counters.affinity.clone(),
-            ));
-            affinity_metrics = Some(counters);
+            let store_ms = affinity_store_ms();
+            let timer = store_ms.clone();
+            let selector = Arc::new(
+                AffinitySelector::with_stats(
+                    signals,
+                    region,
+                    args.headroom_factor,
+                    affinity,
+                    config,
+                    counters.affinity.clone(),
+                )
+                .with_store_timer(Box::new(move |elapsed| {
+                    timer.observe(elapsed.as_secs_f64() * 1000.0);
+                })),
+            );
+            affinity_metrics = Some((counters, store_ms));
             selector
         }
     };
     let mut metrics = Metrics::new(args.region.clone(), in_flight.clone());
-    if let Some(counters) = affinity_metrics {
-        metrics = metrics.with_affinity(counters.affinity, counters.cache);
+    if let Some((counters, store_ms)) = affinity_metrics {
+        metrics = metrics.with_affinity(counters.affinity, counters.cache, store_ms);
     }
     let app = app(pools, selector, in_flight, http, metrics);
     let address = format!("{}:{}", args.host, args.port);

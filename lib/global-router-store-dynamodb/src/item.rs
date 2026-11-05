@@ -120,9 +120,9 @@ mod tests {
         for field in 0..5 {
             let mut other = original.clone();
             match field {
-                0 => other.scope.push('x'),
+                0 => other.scope = format!("{}x", other.scope).into(),
                 1 => other.tenant.push('x'),
-                2 => other.policy.push('x'),
+                2 => other.policy = format!("{}x", other.policy).into(),
                 3 => other.model.push('x'),
                 _ => other.session.push('x'),
             }

@@ -2,7 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! DynamoDB accessors for affinity. Regional and MREC global tables use exactly
-//! the same implementation. Conditional writes are regional, not a global lock.
+//! the same implementation. Conditional writes are regional, not a global lock:
+//! on an MREC table, pins are soft, and last writer wins between regions. Two
+//! regions that bind one session before either write replicates both succeed,
+//! and replication keeps the later write. The tracker rewrites a pin only when
+//! it changes or needs a refresh, so the session then settles on one pool.
 
 mod item;
 

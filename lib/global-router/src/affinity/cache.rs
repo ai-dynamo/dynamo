@@ -17,11 +17,12 @@ use super::{AffinityBinding, AffinityError, AffinityKey, AffinityStore, Expected
 /// one lookup per `ttl` rather than one per request.
 ///
 /// A cached entry is what the backing store last told us, including that no
-/// record existed. It is not authority: a write still carries the expectation
-/// the entry came with, so a binding another replica changed in the meantime
-/// loses its conditional write, which invalidates the entry and sends the
-/// retry to the store. Staleness therefore costs a conflict, never a wrong
-/// pin, and the window is bounded by `ttl`.
+/// record existed. It is not authority. A session another replica has moved
+/// keeps its old pin on this replica for at most `ttl`, since keeping a pin
+/// writes nothing; soft affinity allows that, and the entry then ages out.
+/// A write still carries the expectation the entry came with, so a stale entry
+/// never overwrites a newer binding: it loses its conditional write, which
+/// invalidates the entry and sends the retry to the store.
 ///
 /// `ttl` is independent of a binding's own idle expiry: the entry holds
 /// `expires_at`, and the tracker applies it, so a cached binding that has

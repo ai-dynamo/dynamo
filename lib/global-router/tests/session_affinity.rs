@@ -208,13 +208,74 @@ async fn concurrent_creates_have_one_winner_and_stale_revisions_cannot_overwrite
             .count(),
         1
     );
+    // Moves, which are always written: once one retires the revision both
+    // read, the other cannot apply over it.
+    let north = pool("north", "qwen").id;
+    let south = pool("south", "qwen").id;
     let stale = a.lookup(&key).await.unwrap();
-    a.bind(&key, &stale, &west).await.unwrap();
+    a.bind(&key, &stale, &north).await.unwrap();
     assert_eq!(
-        b.bind(&key, &stale, &east).await.unwrap(),
+        b.bind(&key, &stale, &south).await.unwrap(),
         WriteOutcome::Conflict
     );
-    assert_eq!(a.lookup(&key).await.unwrap().pool, Some(west));
+    assert_eq!(a.lookup(&key).await.unwrap().pool, Some(north));
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+#[tokio::test]
+async fn a_pin_with_most_of_its_idle_window_left_is_not_rewritten() {
+    let store = Arc::new(InMemoryAffinityStore::default());
+    let affinity = tracker(store.clone());
+    let east = pool("east", "qwen").id;
+    // 1000 of the tracker's 1800 seconds left: more than half.
+    let now = unix_now();
+    let pinned = binding(&east, "pinned", now, now + 1000);
+    store
+        .compare_exchange(&key(), &Expected::Absent, &pinned)
+        .await
+        .unwrap();
+    let observed = affinity.lookup(&key()).await.unwrap();
+    assert_eq!(observed.expires_at, Some(now + 1000));
+    assert_eq!(
+        affinity.bind(&key(), &observed, &east).await.unwrap(),
+        WriteOutcome::Applied
+    );
+    assert_eq!(store.read(&key()).await.unwrap().unwrap(), pinned);
+
+    // Moving the session is always written, however fresh the pin.
+    let west = pool("west", "qwen").id;
+    affinity.bind(&key(), &observed, &west).await.unwrap();
+    assert_eq!(store.read(&key()).await.unwrap().unwrap().pool, west);
+}
+
+#[tokio::test]
+async fn parallel_requests_of_one_session_do_not_conflict() {
+    let store = Arc::new(InMemoryAffinityStore::default());
+    let affinity = tracker(store.clone());
+    let east = pool("east", "qwen").id;
+    let key = key();
+    let absent = affinity.lookup(&key).await.unwrap();
+    affinity.bind(&key, &absent, &east).await.unwrap();
+    let created = store.read(&key).await.unwrap().unwrap();
+    // Two turns of one session, such as parallel tool calls, read the same
+    // revision and keep the same pool: neither needs to write, so neither
+    // loses a conditional write to the other.
+    let (first, second) = tokio::join!(affinity.lookup(&key), affinity.lookup(&key));
+    let (first, second) = (first.unwrap(), second.unwrap());
+    assert_eq!(first.expected, second.expected);
+    let (first, second) = tokio::join!(
+        affinity.bind(&key, &first, &east),
+        affinity.bind(&key, &second, &east)
+    );
+    assert_eq!(first.unwrap(), WriteOutcome::Applied);
+    assert_eq!(second.unwrap(), WriteOutcome::Applied);
+    assert_eq!(store.read(&key).await.unwrap().unwrap(), created);
 }
 
 #[tokio::test]
@@ -222,10 +283,8 @@ async fn activity_refreshes_idle_expiration_and_changes_revision() {
     let store = Arc::new(InMemoryAffinityStore::default());
     let affinity = tracker(store.clone());
     let pool = pool("east", "qwen").id;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    // Past half of the tracker's 1800-second idle window.
+    let now = unix_now();
     let old = binding(&pool, "old", now - 10, now + 60);
     store
         .compare_exchange(&key(), &Expected::Absent, &old)
@@ -337,7 +396,8 @@ async fn failed_or_ambiguous_write_keeps_selected_pool_without_rollback() {
         let store = FaultStore::new(failure);
         let router = selector(store.clone(), "east", "test");
         let pools = [pool("east", "qwen"), pool("west", "qwen")];
-        let original = binding(&pools[1].id, "original", 1, u64::MAX);
+        // Due for a refresh, so keeping the pin still writes.
+        let original = binding(&pools[1].id, "original", 1, unix_now() + 60);
         store
             .inner
             .compare_exchange(&key(), &Expected::Absent, &original)
@@ -368,7 +428,7 @@ impl SessionAffinity for FixedAffinity {
     async fn lookup(&self, _: &AffinityKey) -> Result<AffinitySnapshot, AffinityError> {
         Ok(AffinitySnapshot {
             pool: Some(self.0.clone()),
-            expected: Expected::Absent,
+            ..AffinitySnapshot::default()
         })
     }
     async fn bind(
@@ -443,6 +503,7 @@ struct Flaky {
     inner: InMemoryAffinityStore,
     recovered: AtomicBool,
     reads: AtomicUsize,
+    writes: AtomicUsize,
 }
 
 impl Flaky {
@@ -451,6 +512,7 @@ impl Flaky {
             inner: InMemoryAffinityStore::default(),
             recovered: AtomicBool::new(false),
             reads: AtomicUsize::new(0),
+            writes: AtomicUsize::new(0),
         })
     }
 }
@@ -471,6 +533,7 @@ impl AffinityStore for Flaky {
         expected: &Expected,
         binding: &AffinityBinding,
     ) -> Result<WriteOutcome, AffinityError> {
+        self.writes.fetch_add(1, Ordering::Relaxed);
         self.inner.compare_exchange(key, expected, binding).await
     }
 }
@@ -572,17 +635,19 @@ async fn a_cached_store_serves_repeat_requests_without_re_reading() {
     for _ in 0..5 {
         assert_eq!(pick(&router, &pools, "qwen", Some("s")).await, pools[0].id);
     }
-    // One read on the first request; every later lookup came from memory,
-    // and each applied write refreshed the entry in place.
+    // One read and one write on the first request. Every later lookup came
+    // from memory and found the pin it would have written, so after the
+    // first request the store saw nothing at all.
     assert_eq!(store.reads.load(Ordering::Relaxed), 1);
+    assert_eq!(store.writes.load(Ordering::Relaxed), 1);
     assert_eq!(
         store.inner.read(&key()).await.unwrap().unwrap().pool,
         pools[0].id
     );
 }
 
-#[tokio::test]
-async fn a_cache_that_missed_another_replicas_write_conflicts_once_then_agrees() {
+#[tokio::test(start_paused = true)]
+async fn a_cache_that_missed_another_replicas_move_follows_it_within_the_ttl() {
     let backing = Arc::new(InMemoryAffinityStore::default());
     let cache =
         Arc::new(CachedAffinityStore::new(backing.clone(), Duration::from_secs(60), 1024).unwrap());
@@ -597,12 +662,50 @@ async fn a_cache_that_missed_another_replicas_write_conflicts_once_then_agrees()
         pick(&direct, &pools[1..], "qwen", Some("s")).await,
         pools[1].id
     );
-    // The stale entry loses its conditional write; the retry reads through
-    // and lands on the binding that actually exists.
+    // Within its TTL the cache still holds the old pin, and keeping a pin
+    // writes nothing, so this replica routes on it without touching the
+    // store...
+    assert_eq!(pick(&cached, &pools, "qwen", Some("s")).await, pools[0].id);
+    // ...until the entry ages out and the next lookup reads the move.
+    tokio::time::advance(Duration::from_secs(61)).await;
     assert_eq!(pick(&cached, &pools, "qwen", Some("s")).await, pools[1].id);
     assert_eq!(
         backing.read(&key()).await.unwrap().unwrap().pool,
         pools[1].id
+    );
+}
+
+#[tokio::test]
+async fn a_stale_cached_pin_never_overwrites_a_newer_binding() {
+    let backing = Arc::new(InMemoryAffinityStore::default());
+    let cache =
+        Arc::new(CachedAffinityStore::new(backing.clone(), Duration::from_secs(60), 1024).unwrap());
+    let cached = selector(cache.clone(), "east", "test");
+    let direct = selector(backing.clone(), "east", "test");
+    let pools = [
+        pool("east", "qwen"),
+        pool("west", "qwen"),
+        pool("north", "qwen"),
+    ];
+
+    assert_eq!(pick(&cached, &pools, "qwen", Some("s")).await, pools[0].id);
+    assert_eq!(
+        pick(&direct, &pools[1..2], "qwen", Some("s")).await,
+        pools[1].id
+    );
+    // East leaves the catalog, so the cached replica must move the session,
+    // and that write carries the stale revision. It loses, the retry reads
+    // through, finds west gone too, and writes north over the real binding.
+    assert_eq!(
+        pick(&cached, &pools[2..], "qwen", Some("s")).await,
+        pools[2].id
+    );
+    let stored = backing.read(&key()).await.unwrap().unwrap();
+    assert_eq!(stored.pool, pools[2].id);
+    // The next lookup is the entry that write left, with no store read.
+    assert_eq!(
+        pick(&cached, &pools[2..], "qwen", Some("s")).await,
+        pools[2].id
     );
 }
 
@@ -645,4 +748,30 @@ async fn a_probe_whose_client_left_does_not_wedge_the_breaker_open() {
     store.recovered.store(true, Ordering::Relaxed);
     pick(&router, pools.as_ref(), "qwen", Some("s")).await;
     assert_eq!(store.reads.load(Ordering::Relaxed), 3);
+}
+
+#[tokio::test(start_paused = true)]
+async fn only_requests_that_consult_storage_are_timed() {
+    let store = FaultStore::new(Failure::ReadHang);
+    let timed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = timed.clone();
+    let router = selector_with(store, "east", "test", |config| {
+        config.breaker = BreakerConfig {
+            failures: 1,
+            cooldown: Duration::from_secs(5),
+        };
+    })
+    .with_store_timer(Box::new(move |elapsed| {
+        observed.lock().unwrap().push(elapsed)
+    }));
+    let pools = [pool("east", "qwen")];
+    // Without a session, storage is never consulted.
+    pick(&router, &pools, "qwen", None).await;
+    assert!(timed.lock().unwrap().is_empty());
+    // A stalled lookup is timed up to the budget, and opens the breaker...
+    pick(&router, &pools, "qwen", Some("s")).await;
+    assert_eq!(*timed.lock().unwrap(), [AffinityConfig::default().timeout]);
+    // ...after which requests skip storage, untimed.
+    pick(&router, &pools, "qwen", Some("s")).await;
+    assert_eq!(timed.lock().unwrap().len(), 1);
 }

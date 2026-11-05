@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use dynamo_global_common::PoolId;
 
@@ -11,11 +13,14 @@ use dynamo_global_common::PoolId;
 /// [`tenant_id`](super::tenant_id)), so two tenants that reuse one session ID
 /// never share a binding. It is not an admission decision: the pool still
 /// authorizes the request.
+///
+/// `scope` and `policy` are fixed for a selector's lifetime, so they are
+/// shared rather than copied into every request's key.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AffinityKey {
-    pub scope: String,
+    pub scope: Arc<str>,
     pub tenant: String,
-    pub policy: String,
+    pub policy: Arc<str>,
     pub model: String,
     pub session: String,
 }

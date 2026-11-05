@@ -17,7 +17,7 @@ mod tracker;
 
 pub use cache::CachedAffinityStore;
 pub use memory::InMemoryAffinityStore;
-pub use selector::{AffinityConfig, AffinitySelector, BreakerConfig};
+pub use selector::{AffinityConfig, AffinitySelector, BreakerConfig, StoreTimer};
 pub use stats::{AffinityStats, CacheStats};
 pub use store::{
     AffinityBinding, AffinityError, AffinityKey, AffinityStore, Expected, WriteOutcome,

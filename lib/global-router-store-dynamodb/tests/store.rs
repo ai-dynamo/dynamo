@@ -222,9 +222,9 @@ async fn conditional_writes_expiration_and_schema_match_the_store_contract() {
     for field in 0..5 {
         let mut other = key.clone();
         match field {
-            0 => other.scope.push('x'),
+            0 => other.scope = format!("{}x", other.scope).into(),
             1 => other.tenant.push('x'),
-            2 => other.policy.push('x'),
+            2 => other.policy = format!("{}x", other.policy).into(),
             3 => other.model.push('x'),
             _ => other.session.push('x'),
         }

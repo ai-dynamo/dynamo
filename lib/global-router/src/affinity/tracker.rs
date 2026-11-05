@@ -18,6 +18,10 @@ use super::{AffinityBinding, AffinityError, AffinityKey, AffinityStore, Expected
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AffinitySnapshot {
     pub pool: Option<PoolId>,
+    /// When `pool`'s pin expires, in Unix seconds; `None` without a live pin.
+    /// It lets [`SessionAffinity::bind`] skip a write that would change
+    /// nothing but the expiry.
+    pub expires_at: Option<u64>,
     /// What the follow-up write must find in place to apply.
     pub expected: Expected,
 }
@@ -30,6 +34,10 @@ pub trait SessionAffinity: Send + Sync {
     async fn lookup(&self, key: &AffinityKey) -> Result<AffinitySnapshot, AffinityError>;
 
     /// Record a selection and refresh idle expiration if `observed` still holds.
+    ///
+    /// An implementation may return [`WriteOutcome::Applied`] without
+    /// writing when `observed` already pins `pool` and needs no refresh yet:
+    /// the selection is recorded either way.
     async fn bind(
         &self,
         key: &AffinityKey,
@@ -88,17 +96,18 @@ impl SessionAffinity for StoreBackedSessionAffinity {
             // forever: no revision to match, and `Absent` never matches a
             // present item. Replace it with a record this build can read.
             Err(AffinityError::InvalidRecord(reason)) => {
-                self.stats.repairs.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!(reason, "replacing an unreadable affinity record");
                 return Ok(AffinitySnapshot {
-                    pool: None,
                     expected: Expected::Unreadable,
+                    ..AffinitySnapshot::default()
                 });
             }
             Err(error) => return Err(error),
         };
+        let live = binding.expires_at > unix_now()?.as_secs();
         Ok(AffinitySnapshot {
-            pool: (binding.expires_at > unix_now()?.as_secs()).then_some(binding.pool),
+            pool: live.then_some(binding.pool),
+            expires_at: live.then_some(binding.expires_at),
             expected: Expected::Revision(binding.revision),
         })
     }
@@ -110,6 +119,24 @@ impl SessionAffinity for StoreBackedSessionAffinity {
         pool: &PoolId,
     ) -> Result<WriteOutcome, AffinityError> {
         let now = unix_now()?;
+        let counter = match (&observed.expected, &observed.pool, observed.expires_at) {
+            (Expected::Unreadable, ..) => &self.stats.repairs,
+            (_, Some(pinned), Some(expires_at)) if pinned == pool => {
+                // Rewriting a pin that already says this would cost a write
+                // per request and make parallel requests of one session
+                // conflict with each other. It is rewritten only once half
+                // its idle window has passed, which keeps an active session
+                // from expiring, so most requests only read.
+                if expires_at.saturating_sub(now.as_secs()).saturating_mul(2) > self.idle.as_secs()
+                {
+                    return Ok(WriteOutcome::Applied);
+                }
+                &self.stats.refreshes
+            }
+            (_, Some(_), _) => &self.stats.moves,
+            (_, None, _) => &self.stats.creates,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
         let deadline = now.checked_add(self.idle).ok_or_else(|| {
             AffinityError::Configuration("session idle TTL overflows the timestamp".into())
         })?;

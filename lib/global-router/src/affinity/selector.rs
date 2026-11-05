@@ -156,10 +156,18 @@ pub struct AffinitySelector {
     headroom_factor: f64,
     affinity: Arc<dyn SessionAffinity>,
     config: AffinityConfig,
+    /// `config`'s scope and policy, shared by every request's key.
+    scope: Arc<str>,
+    policy: Arc<str>,
     breaker: Breaker,
     stats: Arc<AffinityStats>,
+    store_timer: Option<StoreTimer>,
     frontends: Cursors<PoolId>,
 }
+
+/// Receives how long a request's affinity storage work took: lookup, write
+/// and retry together, up to the deadline.
+pub type StoreTimer = Box<dyn Fn(Duration) + Send + Sync>;
 
 impl AffinitySelector {
     pub fn new(
@@ -194,10 +202,21 @@ impl AffinitySelector {
             headroom_factor,
             affinity,
             breaker: Breaker::new(config.breaker),
+            scope: config.scope.as_str().into(),
+            policy: config.policy.as_str().into(),
             config,
             stats,
+            store_timer: None,
             frontends: Cursors::default(),
         }
+    }
+
+    /// Reports each request's time in affinity storage to `timer`, for a host
+    /// that exports it. Requests that skip storage, without a session or
+    /// while the breaker is open, are not timed.
+    pub fn with_store_timer(mut self, timer: StoreTimer) -> Self {
+        self.store_timer = Some(timer);
+        self
     }
 
     /// This selector's counters, for a host that exports metrics.
@@ -221,9 +240,9 @@ impl PoolSelector for AffinitySelector {
                 return target(&self.frontends, choice.pool);
             }
             let key = AffinityKey {
-                scope: self.config.scope.clone(),
+                scope: self.scope.clone(),
                 tenant: request.tenant.to_owned(),
-                policy: self.config.policy.clone(),
+                policy: self.policy.clone(),
                 model: request.model.to_owned(),
                 session: session.to_owned(),
             };
@@ -253,7 +272,12 @@ impl PoolSelector for AffinitySelector {
                 tracing::debug!("affinity updates conflicted; using the selected pool");
                 Ok(())
             };
-            match tokio::time::timeout(self.config.timeout, update).await {
+            let started = Instant::now();
+            let result = tokio::time::timeout(self.config.timeout, update).await;
+            if let Some(timer) = &self.store_timer {
+                timer(started.elapsed());
+            }
+            match result {
                 Ok(Ok(())) => {
                     if self.breaker.succeeded() {
                         tracing::info!("session affinity storage recovered");

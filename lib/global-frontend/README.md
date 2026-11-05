@@ -103,22 +103,36 @@ headroom rules already chose: no request is refused because storage is down.
 After `--affinity-breaker-failures` consecutive failures (default 5) the
 frontend stops consulting storage for `--affinity-breaker-cooldown-ms` (default
 5000), so an outage costs one deadline per cooldown rather than one per
-request; a single request then retests it. Reads are cached in this process for
-`--affinity-cache-ttl-ms` (default 1000, 0 to disable) across at most
-`--affinity-cache-entries` sessions (default 100000), so a busy session reads
-the table about once per TTL rather than once per request. A cached entry that
-another replica has since changed loses its conditional write and is re-read,
-so the cache costs a retry, never a wrong pin.
+request; a single request then retests it.
+
+A request that keeps its session's pool writes nothing. The binding is written
+when a session is new or its pin has expired, when it moves pools, when an
+undecodable row is repaired, and once the pin is past half its idle window
+(`--session-idle-secs`), which keeps an active session from expiring. So most
+turns of a conversation only read, and parallel requests of one session, such
+as concurrent tool calls, do not conflict with each other.
+
+Reads are cached in this process for `--affinity-cache-ttl-ms` (default 1000,
+0 to disable) across at most `--affinity-cache-entries` sessions (default
+100000), so a busy session reads the table about once per TTL rather than once
+per request. When another replica moves a session, this replica may keep
+routing it to the old pool until its cached entry ages out, which is at most
+the TTL. A stale entry never overwrites the newer binding: a write made from it
+loses its conditional write and is re-read.
 
 #### Table
 
 Provision the table yourself; the frontend never creates it. It needs a string
 partition key `itemHashKey`, a string sort key `sortKey`, and TTL enabled on
-`expiresAt`. On-demand capacity suits the access pattern, which is one
-`GetItem` and one `PutItem` per cache miss. A Global Table (MREC) uses exactly
-this schema: conditional writes then serialize against the contacted regional
-replica only, so two regions can briefly choose different pools for one session
-until replication converges. That is soft affinity, not a global lock.
+`expiresAt`. On-demand capacity suits the access pattern: one `GetItem` per
+cache miss, and a `PutItem` only when a binding changes or needs a refresh.
+
+A Global Table (MREC) uses exactly this schema, and its pins are soft: last
+writer wins between regions. Conditional writes serialize against the
+contacted regional replica only, so when one session reaches frontends in two
+regions before either's write has replicated, both writes apply and
+replication keeps the later one. Since a kept pin is not rewritten, the
+session then settles on that pool in both regions; it is not a global lock.
 
 ```bash
 aws dynamodb create-table --table-name dynamo-global-affinity \
@@ -236,11 +250,20 @@ named `dynamo_global_frontend_*`: requests per pool by response status,
 `no_response` when the pool sends no response, or `cancelled` when the client
 leaves before the pool's response headers arrive; requests answered without a
 pool; time to first byte and duration per pool; and requests in flight per
-pool. With `--router-policy affinity` it also serves
-`affinity_lookups_total` by `outcome` — `hit`, `miss`, `conflict`, `error`,
-`timeout`, `skipped` (the breaker was open, so storage was never consulted) and
-`repair` — and `affinity_cache_total` by whether the in-process cache answered
-the lookup. The `pool` label is the pool's
+pool. With `--router-policy affinity` it also serves:
+
+- `overhead_affinity_store_ms`, the time each session request spent in affinity
+  storage, named and bucketed like the local router's
+  `dynamo_router_overhead_shared_cache_query_ms`;
+- `affinity_lookups_total` by `outcome`: `hit` or `miss`;
+- `affinity_store_errors_total` by `kind`, counting each session request that
+  routed without affinity: `backend`, `timeout`, `conflict`, or `breaker_open`
+  (storage was not consulted);
+- `affinity_store_writes_total` by `reason`: `create`, `move`, `refresh` or
+  `repair`;
+- `affinity_cache_total` by whether the in-process cache answered a read.
+
+The `pool` label is the pool's
 `<cluster>/<namespace>/<DGD name>` and `region` its region. On requests, `local`
 says whether the pool is in `--region` (`unknown` without it), which gives the
 share of requests kept in the region. Nothing is labelled from the request
