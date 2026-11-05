@@ -397,7 +397,7 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
         .is_some_and(|bias| !bias.is_empty())
     {
         return Err(client::invalid_request(
-            "logit_bias is not represented by SGLang's native gRPC proto",
+            "logit_bias is not supported by the SGLang sidecar",
         ));
     }
     if let Some(penalty) = request.sampling_options.length_penalty
