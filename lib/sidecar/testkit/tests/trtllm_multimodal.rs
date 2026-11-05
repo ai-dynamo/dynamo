@@ -72,15 +72,23 @@ fn finished() -> pb::GenerateResponse {
     }
 }
 
-fn advertise_images(fixture: &Fixture) {
-    fixture
-        .discovery
-        .portable_multimodal
-        .store(true, Ordering::SeqCst);
-    fixture
-        .discovery
-        .advertises_image
-        .store(true, Ordering::SeqCst);
+fn advertise_media(fixture: &Fixture, modalities: &[&str]) {
+    *fixture.discovery.model_info.lock().unwrap() = Some(pb::ModelInfo {
+        model_id: "mocker-model".into(),
+        served_model_name: "mocker-model".into(),
+        max_context_length: Some(32768),
+        supports_multimodal: Some(true),
+        supports_text_input: Some(true),
+        supports_token_ids_input: Some(true),
+        extra: Some(
+            dynamo_sidecar_common::json_to_struct(
+                serde_json::json!({"trtllm_supported_modalities": modalities}),
+                "test capabilities",
+            )
+            .unwrap(),
+        ),
+        ..Default::default()
+    });
 }
 
 async fn wait_for_calls(fixture: &Fixture, count: usize) {
@@ -96,7 +104,7 @@ async fn wait_for_calls(fixture: &Fixture, count: usize) {
 async fn images_preserve_order_uuids_and_engine_expanded_usage() {
     let control = Controller::<Adapter>::default();
     let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;
-    advertise_images(&fixture);
+    advertise_media(&fixture, &["image"]);
     let engine = fixture.engine().await;
     engine.start(0).await.unwrap();
     let ctx = mock_context();
@@ -193,7 +201,7 @@ async fn formatter_regrouped_tool_media_reaches_openengine_in_rendered_order() {
 
     let control = Controller::<Adapter>::default();
     let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;
-    advertise_images(&fixture);
+    advertise_media(&fixture, &["image"]);
     let engine = fixture.engine().await;
     engine.start(0).await.unwrap();
     let ctx = mock_context();
@@ -232,23 +240,19 @@ async fn both_media_capability_signals_are_required() {
         for (portable, advertised) in [(true, false), (false, true)] {
             let control = Controller::<Adapter>::default();
             let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;
+            let mut modalities = vec![if video { "image" } else { "video" }];
+            if advertised {
+                modalities.push(if video { "video" } else { "image" });
+            }
+            advertise_media(&fixture, &modalities);
             fixture
                 .discovery
-                .portable_multimodal
-                .store(portable, Ordering::SeqCst);
-            let (target, other) = if video {
-                (
-                    &fixture.discovery.advertises_video,
-                    &fixture.discovery.advertises_image,
-                )
-            } else {
-                (
-                    &fixture.discovery.advertises_image,
-                    &fixture.discovery.advertises_video,
-                )
-            };
-            target.store(advertised, Ordering::SeqCst);
-            other.store(true, Ordering::SeqCst);
+                .model_info
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .supports_multimodal = Some(portable);
             let engine = fixture.engine().await;
             engine.start(0).await.unwrap();
             let ctx = mock_context();
@@ -278,14 +282,7 @@ async fn videos_recover_discovery_and_preserve_sources_uuids_and_usage() {
     let control = Controller::<Adapter>::default();
     let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;
     fixture.discovery.unavailable.store(true, Ordering::SeqCst);
-    fixture
-        .discovery
-        .portable_multimodal
-        .store(true, Ordering::SeqCst);
-    fixture
-        .discovery
-        .advertises_video
-        .store(true, Ordering::SeqCst);
+    advertise_media(&fixture, &["video"]);
     let mut startup = tokio::spawn(bootstrap(&fixture, Some(32768), 5));
     wait_for_calls(&fixture, 2).await;
     assert!(!startup.is_finished());
@@ -359,11 +356,7 @@ async fn startup_recovers_media_capabilities_before_registration() {
     for omit_window in [false, true] {
         let control = Controller::<Adapter>::default();
         let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;
-        advertise_images(&fixture);
-        fixture
-            .discovery
-            .advertises_video
-            .store(true, Ordering::SeqCst);
+        advertise_media(&fixture, &["image", "video"]);
         fixture
             .discovery
             .omit_context_length
@@ -508,11 +501,7 @@ async fn shutdown_cancels_retrying_and_stalled_bootstrap_discovery() {
 async fn media_window_override_is_rejected_before_dispatch() {
     let control = Controller::<Adapter>::default();
     let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;
-    advertise_images(&fixture);
-    fixture
-        .discovery
-        .advertises_video
-        .store(true, Ordering::SeqCst);
+    advertise_media(&fixture, &["image", "video"]);
     let engine = fixture.engine_with_context_length(4096);
     engine.start(0).await.unwrap();
     for (video, max_tokens) in [
@@ -534,6 +523,57 @@ async fn media_window_override_is_rejected_before_dispatch() {
         assert!(error.to_string().contains("--context-length to match"));
         assert!(handle.native_request().is_none());
     }
+    engine.cleanup().await.unwrap();
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn text_only_audio_preserves_whisper_task_prompt_with_empty_token_ids() {
+    let control = Controller::<Adapter>::default();
+    let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;
+    advertise_media(&fixture, &["audio"]);
+    fixture
+        .discovery
+        .model_info
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .supports_token_ids_input = Some(false);
+    let engine = fixture.engine().await;
+    engine.start(0).await.unwrap();
+    let uri = "data:audio/wav;base64,YXVkaW8=";
+    for prompt in [
+        "",
+        "<|startoftranscript|><|fr|><|translate|><|notimestamps|>",
+    ] {
+        let mut req = request("mocker-model", vec![], 16);
+        req.extra_args = Some(serde_json::json!({"formatted_prompt": prompt}));
+        req.multi_modal_data = Some(HashMap::from([(
+            "audio_url".into(),
+            vec![MultimodalData::RawUrl(uri.into())],
+        )]));
+        let ctx = mock_context();
+        let handle = control.request(ctx.id(), RequestPlan::default());
+        fixture.respond(ctx.id(), vec![finished()]);
+        let outputs = collect(&engine, req, GenerateContext::new(ctx, None)).await;
+        assert_eq!(
+            outputs.last().unwrap().as_ref().unwrap().finish_reason,
+            Some(FinishReason::Stop)
+        );
+        let native = handle.native_request().unwrap();
+        assert_eq!(
+            native.input,
+            Some(pb::generate_request::Input::Prompt(prompt.into()))
+        );
+        assert_eq!(native.media.len(), 1);
+        assert_eq!(native.media[0].modality, pb::Modality::Audio as i32);
+        assert_eq!(
+            native.media[0].source,
+            Some(pb::media_item::Source::DataUri(uri.into()))
+        );
+    }
+    assert_eq!(fixture.discovery.calls.load(Ordering::SeqCst), 1);
     engine.cleanup().await.unwrap();
     fixture.shutdown().await;
 }
@@ -590,11 +630,7 @@ fn remote_url_policy_is_enforced_before_engine_dispatch() {
 async fn check_remote_url_policy(allow_remote: bool) {
     let control = Controller::<Adapter>::default();
     let mut fixture = Fixture::start(control.clone(), FixtureConfig::default()).await;
-    advertise_images(&fixture);
-    fixture
-        .discovery
-        .advertises_video
-        .store(true, Ordering::SeqCst);
+    advertise_media(&fixture, &["image", "video", "audio"]);
     let engine = fixture.engine().await;
     engine.start(0).await.unwrap();
     for (key, media) in [
@@ -629,6 +665,22 @@ async fn check_remote_url_policy(allow_remote: bool) {
         (
             "video_url",
             MultimodalData::RawUrl("data:video/mp4;base64,dmlkZW8=".into()),
+        ),
+        (
+            "audio_url",
+            MultimodalData::RawUrl("http://example.com/audio.wav".into()),
+        ),
+        (
+            "audio_url",
+            MultimodalData::RawUrl("HTTPS://example.com/audio.wav".into()),
+        ),
+        (
+            "audio_url",
+            MultimodalData::Url("https://example.com/audio.wav".parse().unwrap()),
+        ),
+        (
+            "audio_url",
+            MultimodalData::RawUrl("data:audio/wav;base64,YXVkaW8=".into()),
         ),
     ] {
         let inline = matches!(&media, MultimodalData::RawUrl(url) if url.starts_with("data:"));

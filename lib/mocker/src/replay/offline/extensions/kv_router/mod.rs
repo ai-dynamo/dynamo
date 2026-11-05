@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_custom_policy_builtin::{DefaultWorkerSelector, DefaultWorkerSelectorControl};
+use dynamo_router_policies::{DefaultWorkerSelector, DefaultWorkerSelectorControl};
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -25,8 +25,8 @@ use dynamo_kv_router::protocols::{
     WorkerWithDpRank, compute_block_hash_for_seq,
 };
 use dynamo_kv_router::scheduling::{
-    OverlapAnalysis, OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot,
-    ScheduleMode, SchedulingContext, WorkerPlacement,
+    OverlapAnalysis, OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueMetadata,
+    QueueSnapshot, ScheduleMode, SchedulingContext, WorkerPlacement,
 };
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::services::selection::affinity::{
@@ -1021,22 +1021,9 @@ impl OfflineReplayRouter {
         now_ms: f64,
     ) -> Result<RouterEffects> {
         let decay_now = self.decay_now(now_ms);
-        let (class_index, snapshot) = match self
+        let class_index = self
             .profile
-            .direct_class_index(pending.policy_class.as_deref())
-        {
-            Some(class_index) => (class_index, None),
-            None => {
-                let snapshot = self.snapshot_for(&mut pending);
-                (
-                    self.profile.resolve_class_index(
-                        pending.policy_class.as_deref(),
-                        snapshot.uncached_tokens,
-                    ),
-                    Some(snapshot),
-                )
-            }
-        };
+            .resolve_class_index(pending.policy_class.as_deref())?;
         let class = self.profile.class(class_index);
         let should_queue = class.queueing_enabled()
             && (self.pending.has_backlog(class_index)
@@ -1048,7 +1035,7 @@ impl OfflineReplayRouter {
                 ));
 
         if should_queue {
-            let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&mut pending));
+            let snapshot = self.snapshot_for(&mut pending);
             let placement = pending
                 .affinity_hold
                 .as_ref()
@@ -1059,16 +1046,24 @@ impl OfflineReplayRouter {
                         .map(|rank| WorkerWithDpRank::new(target.worker_id, rank))
                 })
                 .map_or(WorkerPlacement::Any, WorkerPlacement::Exact);
+            let metadata = QueueMetadata {
+                class_index,
+                snapshot,
+                due_at: None,
+                // Replay requests carry no explicit deadline. A class budget counts from the
+                // virtual time the request reaches the scheduler, as the live router counts it
+                // from scheduler ingress, after any affinity wait.
+                class_due_at: class.slo_ttft_due_at(decay_now),
+                arrival_offset_secs: now_ms.max(0.0) / 1000.0,
+            };
             let priority_jump = pending.priority_jump;
             let strict_priority = pending.strict_priority;
             self.pending
-                .enqueue(
-                    class_index,
+                .enqueue_with_due_at(
+                    metadata,
                     self.workers_with_configs
                         .len()
                         .saturating_mul(self.dp_size as usize),
-                    snapshot,
-                    now_ms.max(0.0) / 1000.0,
                     priority_jump,
                     strict_priority,
                     placement,
@@ -1764,6 +1759,65 @@ mod tests {
         .unwrap();
         assert_eq!(policy.router.pending_count(), 0);
         assert!(policy.router.affinity_staged.is_empty());
+    }
+
+    #[test]
+    fn unknown_policy_class_fails_at_class_entry_and_releases_session_affinity() {
+        use super::KvRouterPlacement as Policy;
+        use aisimulate_core::replay::PlacementPolicy;
+        use dynamo_kv_router::scheduling::KvSchedulerError;
+        let mut policy = Policy::new_with_selector_seed(
+            &queueing_args(),
+            Some(queueing_router_config()),
+            None,
+            &topology(1, 1, false),
+            Some(0),
+        )
+        .unwrap()
+        .with_conversation_affinity(Some(Default::default()))
+        .unwrap();
+        let arrive = |policy: &mut Policy, id: u128, policy_class: Option<&str>| {
+            let mut request = request(id, id as u32);
+            request.policy_class = policy_class.map(str::to_string);
+            policy
+                .router
+                .on_request_arrival_for_session(&request, None, Some("a".into()), 0.0)
+        };
+        let is_unknown = |error: anyhow::Error| {
+            matches!(
+                error.downcast_ref::<KvSchedulerError>(),
+                Some(KvSchedulerError::UnknownPolicyClass(name)) if name == "unknown"
+            )
+        };
+
+        // Entering its class at arrival, the request fails and releases its session hold,
+        // so the next request for the session is not blocked by it.
+        assert!(is_unknown(
+            arrive(&mut policy, 1, Some("unknown")).unwrap_err()
+        ));
+        let first = arrive(&mut policy, 2, None).unwrap().admissions;
+        assert_eq!(first.len(), 1);
+        // Behind that uncommitted request it waits for the session, and fails only when it
+        // enters its class.
+        assert!(
+            arrive(&mut policy, 3, Some("unknown"))
+                .unwrap()
+                .admissions
+                .is_empty()
+        );
+        assert_eq!(policy.router.affinity_waiting.len(), 1);
+        <Policy as PlacementPolicy<DirectRequest>>::dispatch_committed(
+            &mut policy,
+            first[0].uuid,
+            0.0,
+        )
+        .unwrap();
+        assert!(is_unknown(
+            <Policy as PlacementPolicy<DirectRequest>>::advance_clock(&mut policy, 0.0)
+                .unwrap_err()
+        ));
+        assert!(policy.router.affinity_waiting.is_empty());
+        assert_eq!(policy.router.pending_count(), 0);
     }
 
     #[test]
@@ -2626,44 +2680,22 @@ mod tests {
         std::fs::write(
             &path,
             r#"
-default_policy_family: root
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
 policy_classes:
   - name: root
-    policy_family: root
-    cache_bucket: all
     quantum: 1
 models:
   replay-model:
-    default_policy_family: latency
-    uncached_isl_buckets:
-      - min_tokens: 0
-        bucket: cached
-      - min_tokens: 32
-        bucket: uncached
+    default_policy_class: latency
     policy_classes:
-      - name: latency_cached
-        policy_family: latency
-        cache_bucket: cached
+      - name: latency
         quantum: 1
         prefill_busy_threshold: 0
         request_queue_limit_per_worker: 1
-      - name: latency_uncached
-        policy_family: latency
-        cache_bucket: uncached
+      - name: interactive
         quantum: 1
         prefill_busy_threshold: 0
         request_queue_limit_per_worker: 0
-      - name: batch_cached
-        policy_family: batch
-        cache_bucket: cached
-        quantum: 4
-        prefill_busy_threshold: 1024
-      - name: batch_uncached
-        policy_family: batch
-        cache_bucket: uncached
+      - name: batch
         quantum: 4
         prefill_busy_threshold: 1024
 "#,
@@ -2678,7 +2710,7 @@ models:
         std::fs::remove_file(path).unwrap();
 
         let mut active = request(1, 1);
-        active.policy_class = Some("latency".to_string());
+        active.policy_class = Some("interactive".to_string());
         assert_eq!(
             router
                 .on_request_arrival(&active, None, 0.0)
@@ -2697,7 +2729,7 @@ models:
                 .admissions
                 .len(),
             1,
-            "the batch family should select batch_uncached and use its higher busy threshold"
+            "batch should select its own class and use its higher busy threshold"
         );
 
         let mut cached_latency = request(3, 3);
@@ -2714,76 +2746,80 @@ models:
             .unwrap();
         assert!(
             router
-                .on_request_arrival(&cached_latency, Some(cached_hashes.clone()), 0.0)
+                .on_request_arrival(&cached_latency, Some(cached_hashes), 0.0)
                 .unwrap()
                 .admissions
                 .is_empty(),
-            "the latency family should select latency_cached from observed cache state"
+            "latency should queue while the worker is busy"
         );
 
-        let mut ordinary_class_name = request(4, 4);
-        ordinary_class_name.policy_class = Some("latency_cached".to_string());
+        let mut fail_fast = request(4, 4);
+        fail_fast.policy_class = Some("interactive".to_string());
         let error = router
-            .on_request_arrival(&ordinary_class_name, None, 0.0)
+            .on_request_arrival(&fail_fast, None, 0.0)
             .unwrap_err();
         let rejection = error
             .downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
             .expect("replay should preserve the typed queue rejection");
-        assert_eq!(rejection.policy_class, "latency_uncached");
+        assert_eq!(rejection.policy_class, "interactive");
         assert_eq!(rejection.current, 0);
         assert_eq!(rejection.limit, 0);
 
         router.add_worker(1, false).unwrap();
-        let mut scaled_latency = request(5, 3);
-        scaled_latency.policy_class = Some("latency".to_string());
+        let mut uncached_latency = request(5, 5);
+        uncached_latency.policy_class = Some("latency".to_string());
         assert!(
             router
-                .on_request_arrival(&scaled_latency, Some(cached_hashes.clone()), 0.0)
+                .on_request_arrival(&uncached_latency, None, 0.0)
                 .unwrap()
                 .admissions
                 .is_empty(),
-            "a second discovered worker should raise the effective queue limit"
+            "an uncached request should join the same latency backlog under the raised limit"
         );
         assert_eq!(router.pending_count(), 2);
 
         router.remove_worker(1).unwrap();
-        let mut rejected_after_shrink = request(6, 3);
-        rejected_after_shrink.policy_class = Some("latency".to_string());
+        let mut root_class = request(6, 6);
+        root_class.policy_class = Some("root".to_string());
         let error = router
-            .on_request_arrival(&rejected_after_shrink, Some(cached_hashes), 0.0)
+            .on_request_arrival(&root_class, None, 0.0)
+            .unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<dynamo_kv_router::scheduling::KvSchedulerError>(),
+                Some(dynamo_kv_router::scheduling::KvSchedulerError::UnknownPolicyClass(name))
+                    if name == "root"
+            ),
+            "a root class name is unknown to the model profile: {error:?}"
+        );
+        assert_eq!(router.pending_count(), 2);
+
+        let error = router
+            .on_request_arrival(&request(7, 7), None, 0.0)
             .unwrap_err();
         let rejection = error
             .downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
             .expect("worker removal should retain the typed queue rejection");
+        assert_eq!(
+            rejection.policy_class, "latency",
+            "an omitted name uses the model's default class"
+        );
         assert_eq!(rejection.current, 2);
         assert_eq!(rejection.limit, 1);
         assert_eq!(router.pending_count(), 2);
     }
 
     #[test]
-    fn replay_cache_bucket_ignores_removed_worker_entries() {
+    fn replay_snapshot_ignores_removed_worker_cache() {
         let path =
             std::env::temp_dir().join(format!("dynamo-replay-policy-{}.yaml", Uuid::new_v4()));
         std::fs::write(
             &path,
             r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: cached
-  - min_tokens: 32
-    bucket: uncached
 policy_classes:
-  - name: cached
-    policy_family: standard
-    cache_bucket: cached
+  - name: standard
     quantum: 1
     prefill_busy_threshold: 0
-  - name: uncached
-    policy_family: standard
-    cache_bucket: uncached
-    quantum: 1
-    prefill_busy_threshold: 1024
 "#,
         )
         .unwrap();
@@ -2809,15 +2845,42 @@ policy_classes:
         router
             .on_request_arrival(&request(1, 1), None, 0.0)
             .unwrap();
-        let effects = router
-            .on_request_arrival(&target, Some(target_hashes), 0.0)
-            .unwrap();
-        assert_eq!(
-            effects.admissions.len(),
-            1,
-            "cache state from a removed worker must not select the cached queue"
+        assert!(
+            router
+                .on_request_arrival(&target, Some(target_hashes), 0.0)
+                .unwrap()
+                .admissions
+                .is_empty()
         );
-        assert_eq!(router.pending_count(), 0);
+        let stats = router.pending.class_stats(0);
+        assert_eq!(
+            (stats.requests, stats.raw_isl_tokens, stats.cached_tokens),
+            (1, 64, 0),
+            "cache state from a removed worker must not reach the queued snapshot"
+        );
+
+        let cached = request(3, 3);
+        let cached_hashes = ReplayRequestHashes::from_tokens(&cached.tokens, router.block_size);
+        router
+            .on_kv_events(vec![store_event(
+                0,
+                2,
+                cached_hashes.local_block_hashes[0],
+                StorageTier::Device,
+            )])
+            .unwrap();
+        assert!(
+            router
+                .on_request_arrival(&cached, Some(cached_hashes), 0.0)
+                .unwrap()
+                .admissions
+                .is_empty()
+        );
+        let stats = router.pending.class_stats(0);
+        assert_eq!(
+            (stats.requests, stats.raw_isl_tokens, stats.cached_tokens),
+            (2, 128, 64)
+        );
     }
 
     #[test]
@@ -2912,6 +2975,60 @@ policy_classes:
             .map(|request| request.uuid)
             .collect::<Vec<_>>();
         assert_eq!(pending, vec![Uuid::from_u128(3), Uuid::from_u128(2)]);
+    }
+
+    #[test]
+    fn edf_offline_queue_orders_by_virtual_due_time_without_priority_modifiers() {
+        let path = std::env::temp_dir().join(format!("dynamo-replay-edf-{}.yaml", Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            r#"
+policy_classes:
+  - name: standard
+    quantum: 64
+    slo_ttft_ms: 250
+    prefill_busy_threshold_frac: 0.5
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(path.display().to_string()),
+            ..KvRouterConfig::default()
+        };
+        let mut router = OfflineReplayRouter::new(&queueing_args(), Some(config), None, 1).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(router.profile.class(0).queue_policy, RouterQueuePolicy::Edf);
+
+        router
+            .on_request_arrival(&request(1, 1), None, 0.0)
+            .unwrap();
+        // Each class due time counts from the virtual arrival, so later arrivals keep their
+        // order; soft and strict priority do not move them ahead.
+        for (uuid, priority, strict_priority, now_ms) in
+            [(2, 0, 0, 10.0), (3, 1_000_000, 9, 20.0), (4, 0, 0, 30.0)]
+        {
+            router
+                .on_request_arrival(
+                    &request_with_priorities(uuid, uuid as u32, 64, priority, strict_priority),
+                    None,
+                    now_ms,
+                )
+                .unwrap();
+        }
+        let pending = router
+            .debug_snapshot(30.0)
+            .pending
+            .into_iter()
+            .map(|request| request.uuid.as_u128())
+            .collect::<Vec<_>>();
+        assert_eq!(pending, [2, 3, 4]);
+
+        // A passed class budget neither rejects nor delays a queued request.
+        let admitted = router
+            .on_request_completed(Uuid::from_u128(1), 10_000.0)
+            .unwrap();
+        assert_eq!(admitted_uuids(admitted), [Uuid::from_u128(2)]);
+        assert_eq!(router.pending_count(), 2);
     }
 
     #[test]
